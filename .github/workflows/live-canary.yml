@@ -5,11 +5,11 @@ on:
   # scheduled slot means also updating those guards, so keep this
   # block and the job conditions in lockstep.
   schedule:
-    # Single daily slot: every lane runs once per day at 02:00 UTC as
-    # parallel jobs in the same workflow run. One run = one red dot on
-    # failure, one notification, one place to drill into per-lane
-    # status. Job-level `if:` guards below all match this cron.
-    - cron: "0 2 * * *"
+    # Every 6 hours (00, 06, 12, 18 UTC). Every lane runs as parallel
+    # jobs in the same workflow run; one run = one red dot on failure,
+    # one notification, one place to drill into per-lane status.
+    # Job-level `if:` guards below all match this cron.
+    - cron: "0 */6 * * *"
   workflow_dispatch:
     inputs:
       lane:
@@ -31,6 +31,7 @@ on:
           - auth-channels
           - auth-live-seeded
           - auth-browser-consent
+          - workflow-canary
       scenario:
         description: "Optional scenario/test filter. Use auto for rotating persona."
         type: string
@@ -66,7 +67,7 @@ jobs:
   auth-smoke:
     name: Auth Smoke
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *') ||
+      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-smoke'))
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -98,7 +99,7 @@ jobs:
   auth-full:
     name: Auth Full
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *') ||
+      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-full'))
     runs-on: ubuntu-latest
     timeout-minutes: 75
@@ -130,7 +131,7 @@ jobs:
   auth-channels:
     name: Auth Channels
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *') ||
+      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-channels'))
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -162,7 +163,7 @@ jobs:
   auth-live-seeded:
     name: Auth Live Seeded
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *') ||
+      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-live-seeded'))
     runs-on: ubuntu-latest
     timeout-minutes: 75
@@ -252,7 +253,7 @@ jobs:
   auth-browser-consent:
     name: Auth Browser Consent
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *') ||
+      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-browser-consent'))
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -268,13 +269,17 @@ jobs:
       # masks and ship them in every step's env, which is exactly the
       # surface the reviewer flagged.
       GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
-      GITHUB_OAUTH_CLIENT_ID: ${{ secrets.GITHUB_OAUTH_CLIENT_ID }}
       AUTH_BROWSER_GOOGLE_USERNAME: ${{ secrets.AUTH_BROWSER_GOOGLE_USERNAME }}
-      AUTH_BROWSER_GITHUB_OWNER: ${{ secrets.AUTH_BROWSER_GITHUB_OWNER }}
-      AUTH_BROWSER_GITHUB_REPO: ${{ secrets.AUTH_BROWSER_GITHUB_REPO }}
-      AUTH_BROWSER_GITHUB_ISSUE_NUMBER: ${{ secrets.AUTH_BROWSER_GITHUB_ISSUE_NUMBER }}
-      AUTH_BROWSER_GITHUB_USERNAME: ${{ secrets.AUTH_BROWSER_GITHUB_USERNAME }}
       AUTH_BROWSER_NOTION_USERNAME: ${{ secrets.AUTH_BROWSER_NOTION_USERNAME }}
+      # GitHub-related secrets are intentionally NOT exported here.
+      # The browser-consent lane only drives Google + Notion (see
+      # `BROWSER_CASES` in scripts/live_canary/auth_registry.py); the
+      # github WASM tool registers as `auth_summary.method = "manual"`
+      # (PAT paste, not OAuth) so this lane has no consumer for any of
+      # AUTH_BROWSER_GITHUB_* / GITHUB_OAUTH_CLIENT_*. Re-add the
+      # secrets only when the github tool ships an OAuth flow and the
+      # entry comes back into `BROWSER_CASES`. Coverage for github
+      # lives in `SEEDED_CASES` (auth-live-seeded) instead.
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -287,7 +292,6 @@ jobs:
         shell: bash
         env:
           AUTH_BROWSER_GOOGLE_STORAGE_STATE_B64: ${{ secrets.AUTH_BROWSER_GOOGLE_STORAGE_STATE_B64 }}
-          AUTH_BROWSER_GITHUB_STORAGE_STATE_B64: ${{ secrets.AUTH_BROWSER_GITHUB_STORAGE_STATE_B64 }}
           AUTH_BROWSER_NOTION_STORAGE_STATE_B64: ${{ secrets.AUTH_BROWSER_NOTION_STORAGE_STATE_B64 }}
         run: |
           set +x
@@ -296,10 +300,6 @@ jobs:
           if [[ -n "${AUTH_BROWSER_GOOGLE_STORAGE_STATE_B64:-}" ]]; then
             printf '%s' "$AUTH_BROWSER_GOOGLE_STORAGE_STATE_B64" | base64 -d > .tmp/auth-browser-state/google.json
             echo "AUTH_BROWSER_GOOGLE_STORAGE_STATE_PATH=$PWD/.tmp/auth-browser-state/google.json" >> "$GITHUB_ENV"
-          fi
-          if [[ -n "${AUTH_BROWSER_GITHUB_STORAGE_STATE_B64:-}" ]]; then
-            printf '%s' "$AUTH_BROWSER_GITHUB_STORAGE_STATE_B64" | base64 -d > .tmp/auth-browser-state/github.json
-            echo "AUTH_BROWSER_GITHUB_STORAGE_STATE_PATH=$PWD/.tmp/auth-browser-state/github.json" >> "$GITHUB_ENV"
           fi
           if [[ -n "${AUTH_BROWSER_NOTION_STORAGE_STATE_B64:-}" ]]; then
             printf '%s' "$AUTH_BROWSER_NOTION_STORAGE_STATE_B64" | base64 -d > .tmp/auth-browser-state/notion.json
@@ -311,10 +311,12 @@ jobs:
         # Materialize step for the rationale.
         env:
           GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
-          GITHUB_OAUTH_CLIENT_SECRET: ${{ secrets.GITHUB_OAUTH_CLIENT_SECRET }}
           AUTH_BROWSER_GOOGLE_PASSWORD: ${{ secrets.AUTH_BROWSER_GOOGLE_PASSWORD }}
-          AUTH_BROWSER_GITHUB_PASSWORD: ${{ secrets.AUTH_BROWSER_GITHUB_PASSWORD }}
           AUTH_BROWSER_NOTION_PASSWORD: ${{ secrets.AUTH_BROWSER_NOTION_PASSWORD }}
+          # Github-OAuth and -password secrets removed: this lane no
+          # longer drives a GitHub OAuth flow (see env: block above for
+          # the BROWSER_CASES context). Re-add the secrets only when
+          # the github tool ships an OAuth flow.
         run: |
           set +x
           set -euo pipefail
@@ -333,9 +335,7 @@ jobs:
             echo "${name}_PATH=${path}" >> "${GITHUB_ENV}"
           }
           write_secret "GOOGLE_OAUTH_CLIENT_SECRET" "${GOOGLE_OAUTH_CLIENT_SECRET:-}"
-          write_secret "GITHUB_OAUTH_CLIENT_SECRET" "${GITHUB_OAUTH_CLIENT_SECRET:-}"
           write_secret "AUTH_BROWSER_GOOGLE_PASSWORD" "${AUTH_BROWSER_GOOGLE_PASSWORD:-}"
-          write_secret "AUTH_BROWSER_GITHUB_PASSWORD" "${AUTH_BROWSER_GITHUB_PASSWORD:-}"
           write_secret "AUTH_BROWSER_NOTION_PASSWORD" "${AUTH_BROWSER_NOTION_PASSWORD:-}"
       - name: Run browser-consent auth lane
         run: |
@@ -352,10 +352,65 @@ jobs:
           path: artifacts/live-canary/
           if-no-files-found: ignore
 
+  workflow-canary:
+    name: Workflow Canary
+    if: >
+      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
+      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'workflow-canary'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      LANE: workflow-canary
+      PROVIDER: mock
+      PLAYWRIGHT_INSTALL: skip
+      # Forwarded into run.sh's SCENARIO; translated to one or more
+      # --scenario flags on run_workflow_canary.py. Empty = full suite.
+      SCENARIO: ${{ inputs.scenario }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      # wasm32-wasip2 + cargo-component + the channels build are all
+      # required: the lane's telegram_channel_install /
+      # telegram_round_trip / routine_visibility_from_telegram /
+      # manual_trigger_from_telegram scenarios call
+      # `/api/extensions/install` for the bundled telegram WASM
+      # channel, which only succeeds when channels-src/telegram has a
+      # built telegram.wasm artifact. Other live-canary lanes that
+      # exercise WASM extensions follow the same pattern.
+      # `--channels` skips the WASM tools build (~5 tools that
+      # workflow-canary doesn't exercise) to keep the lane under
+      # ~6 min on a fresh runner.
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: live-canary-workflow-canary
+      - name: Install cargo-component
+        run: cargo install cargo-component --locked || true
+      - name: Build WASM channels
+        run: ./scripts/build-wasm-extensions.sh --channels
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Run workflow canary lane
+        run: scripts/live-canary/run.sh
+      - name: Scrub artifacts
+        if: always()
+        run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: live-canary-workflow-canary
+          path: artifacts/live-canary/
+          if-no-files-found: ignore
+
   deterministic-replay:
     name: Deterministic Replay
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *') ||
+      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
       (github.event_name == 'workflow_dispatch' &&
       (inputs.lane == 'all' || inputs.lane == 'deterministic-replay'))
     runs-on: ubuntu-latest
@@ -396,7 +451,7 @@ jobs:
   public-smoke:
     name: Public Live Smoke
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *') ||
+      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'public-smoke'))
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -457,7 +512,7 @@ jobs:
   persona-rotating:
     name: Rotating Persona Live
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *') ||
+      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'persona-rotating'))
     runs-on: ubuntu-latest
     timeout-minutes: 180
@@ -517,7 +572,7 @@ jobs:
     name: Private OAuth Live
     if: >
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'private-oauth')) ||
-      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *' && vars.LIVE_CANARY_PRIVATE_OAUTH_ENABLED == 'true')
+      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *' && vars.LIVE_CANARY_PRIVATE_OAUTH_ENABLED == 'true')
     runs-on: [self-hosted, ironclaw-live]
     timeout-minutes: 120
     env:
@@ -570,7 +625,7 @@ jobs:
   provider-matrix:
     name: Provider Matrix (${{ matrix.provider }})
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * *') ||
+      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'provider-matrix'))
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -734,3 +789,69 @@ jobs:
           name: live-canary-upgrade
           path: artifacts/live-canary/
           retention-days: 30
+
+  canary-report:
+    name: Canary Report
+    needs:
+      - auth-smoke
+      - auth-full
+      - auth-channels
+      - auth-live-seeded
+      - auth-browser-consent
+      - workflow-canary
+      - deterministic-replay
+      - public-smoke
+      - persona-rotating
+      - private-oauth
+      - provider-matrix
+      - release-public-full
+      - upgrade-canary
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Download all lane artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          # Each upstream lane uploads to `live-canary-<lane>` / `live-canary-provider-<provider>`.
+          # Merging into a single artifacts/live-canary/ tree lets notify_slack.py
+          # walk the <lane>/<provider>/<timestamp>/ layout it already expects.
+          pattern: live-canary-*
+          path: artifacts/live-canary
+          merge-multiple: true
+      - name: Generate and post Slack report
+        # Notifier exits 0 even on Slack/Haiku failure (see
+        # notify_slack.py docstring) so a flaky webhook can't fail the
+        # whole canary run. Gated on schedule + workflow_dispatch only —
+        # PR-triggered runs (if any) skip the post to keep noise out of
+        # the channel.
+        if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          CANARY_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GITHUB_SHA: ${{ github.sha }}
+          # Reuse the same PAT auth-live-canary uses for GitHub
+          # fixture access; it's already scoped for nearai/ironclaw
+          # work and avoids minting a new secret. CANARY_ISSUES_TOKEN
+          # has priority over GH_TOKEN / GITHUB_TOKEN inside the
+          # notifier (see scripts/live-canary/notify_slack.py
+          # `--github-token` precedence).
+          CANARY_ISSUES_TOKEN: ${{ secrets.AUTH_LIVE_GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          # Only auto-open issues for scheduled runs — manual
+          # workflow_dispatch tests would otherwise flood the tracker
+          # while iterating on canary changes locally.
+          CANARY_CREATE_ISSUES: ${{ github.event_name == 'schedule' && '1' || '0' }}
+        run: |
+          # The notifier is intentionally side-effect-light: it exits 0 even on
+          # failure so the canary run's overall status isn't masked by a flaky
+          # notification path.
+          python3 scripts/live-canary/notify_slack.py \
+            --artifacts-dir artifacts/live-canary

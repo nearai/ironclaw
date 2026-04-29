@@ -954,8 +954,10 @@ pub async fn settings_tools_list_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<ToolPermissionsResponse>, StatusCode> {
-    use crate::tools::ApprovalRequirement;
-    use crate::tools::permissions::{TOOL_RISK_DEFAULTS, effective_permission};
+    use crate::tools::permissions::{
+        PermissionState, TOOL_PERMISSION_LOCKED_REASON, effective_permission,
+        seeded_default_permission, tool_permission_locked,
+    };
 
     let registry = state
         .tool_registry
@@ -978,20 +980,8 @@ pub async fn settings_tools_list_handler(
             let description = tool.description().to_string();
 
             let current = effective_permission(&name, &user_overrides);
-            let default = TOOL_RISK_DEFAULTS
-                .get(name.as_str())
-                .copied()
-                .unwrap_or(crate::tools::permissions::PermissionState::AskEachTime);
-
-            let locked = matches!(
-                tool.requires_approval(&serde_json::Value::Null),
-                ApprovalRequirement::Always
-            );
-            let locked_reason = if locked {
-                Some("Always requires approval due to risk level".to_string())
-            } else {
-                None
-            };
+            let default = seeded_default_permission(&name).unwrap_or(PermissionState::AskEachTime);
+            let locked = tool_permission_locked(tool.as_ref());
 
             ToolPermissionEntry {
                 name,
@@ -999,7 +989,7 @@ pub async fn settings_tools_list_handler(
                 current_state: permission_state_to_str(current).to_string(),
                 default_state: permission_state_to_str(default).to_string(),
                 locked,
-                locked_reason,
+                locked_reason: locked.then(|| TOOL_PERMISSION_LOCKED_REASON.to_string()),
             }
         })
         .collect();
@@ -1016,9 +1006,6 @@ pub async fn settings_tools_set_handler(
     Path(name): Path<String>,
     Json(body): Json<UpdateToolPermissionRequest>,
 ) -> Result<Json<ToolPermissionEntry>, (StatusCode, axum::Json<serde_json::Value>)> {
-    use crate::tools::ApprovalRequirement;
-    use crate::tools::permissions::{PermissionState, TOOL_RISK_DEFAULTS};
-
     let registry = state.tool_registry.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         axum::Json(serde_json::json!({"error": "Tool registry unavailable"})),
@@ -1030,19 +1017,6 @@ pub async fn settings_tools_set_handler(
         axum::Json(serde_json::json!({"error": format!("Tool '{}' not found", name)})),
     ))?;
 
-    // Reject if tool is locked (ApprovalRequirement::Always).
-    if matches!(
-        tool.requires_approval(&serde_json::Value::Null),
-        ApprovalRequirement::Always
-    ) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            axum::Json(serde_json::json!({
-                "error": format!("Tool '{}' is locked and cannot have its permission changed", name)
-            })),
-        ));
-    }
-
     // Parse the requested state.
     let new_state = str_to_permission_state(&body.state).ok_or((
         StatusCode::UNPROCESSABLE_ENTITY,
@@ -1050,6 +1024,23 @@ pub async fn settings_tools_set_handler(
             serde_json::json!({"error": format!("Invalid permission state: '{}'", body.state)}),
         ),
     ))?;
+    let locked = crate::tools::permissions::tool_permission_locked(tool.as_ref());
+    if locked
+        && matches!(
+            new_state,
+            crate::tools::permissions::PermissionState::AlwaysAllow
+        )
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({
+                "error": format!(
+                    "Tool '{}' always requires approval and cannot be set to always_allow",
+                    name
+                )
+            })),
+        ));
+    }
 
     // Persist the permission override, routed through the cached settings store
     // so the agent loop sees the change immediately.
@@ -1083,19 +1074,18 @@ pub async fn settings_tools_set_handler(
             )
         })?;
 
-    // Use new_state directly — we just wrote it, no need for an extra DB round-trip.
-    let default = TOOL_RISK_DEFAULTS
-        .get(name.as_str())
-        .copied()
-        .unwrap_or(PermissionState::AskEachTime);
-
     Ok(Json(ToolPermissionEntry {
         description: tool.description().to_string(),
+        default_state: permission_state_to_str(
+            crate::tools::permissions::seeded_default_permission(&name)
+                .unwrap_or(crate::tools::permissions::PermissionState::AskEachTime),
+        )
+        .to_string(),
         name,
         current_state: permission_state_to_str(new_state).to_string(),
-        default_state: permission_state_to_str(default).to_string(),
-        locked: false,
-        locked_reason: None,
+        locked,
+        locked_reason: locked
+            .then(|| crate::tools::permissions::TOOL_PERMISSION_LOCKED_REASON.to_string()),
     }))
 }
 
@@ -2241,15 +2231,10 @@ mod tests {
         assert!(str_to_permission_state("ALWAYS_ALLOW").is_none());
     }
 
-    /// `PUT /api/settings/tools/:name` must return 400 for locked tools.
-    ///
-    /// A tool that returns `ApprovalRequirement::Always` from `requires_approval`
-    /// is locked — callers cannot override its permission state via the API.
-    /// We test this by checking the rejection path directly via the handler
-    /// function using a minimal in-memory tool registry containing a mock
-    /// "always-locked" tool.
+    /// `PUT /api/settings/tools/:name` must reject AlwaysAllow for tools whose
+    /// default approval requirement is parameter-insensitive Always.
     #[tokio::test]
-    async fn test_put_locked_tool_returns_400() {
+    async fn test_put_always_approval_tool_rejects_always_allow_override() {
         use std::sync::Arc;
 
         use crate::context::JobContext;
@@ -2287,10 +2272,9 @@ mod tests {
         let registry = Arc::new(ToolRegistry::new());
         registry.register(Arc::new(LockedTool)).await;
 
-        let state = Arc::new(GatewayState {
-            tool_registry: Some(registry),
-            ..test_gateway_state(test_secrets_store())
-        });
+        let mut state = test_gateway_state(test_secrets_store());
+        state.tool_registry = Some(registry);
+        let state = Arc::new(state);
 
         let result = settings_tools_set_handler(
             State(state),
@@ -2308,11 +2292,14 @@ mod tests {
         )
         .await;
 
-        let (status, _body) = result.unwrap_err();
-        assert_eq!(
-            status,
-            axum::http::StatusCode::BAD_REQUEST,
-            "locked tools should return 400"
+        let (status, body) = result.expect_err("locked tool should reject always_allow");
+        let body = body.0;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("cannot be set to always_allow")),
+            "unexpected error body: {body:?}"
         );
     }
 
@@ -2331,6 +2318,7 @@ mod tests {
         use axum::extract::State;
 
         struct EchoLikeTool;
+        struct LockedTool;
 
         #[async_trait::async_trait]
         impl Tool for EchoLikeTool {
@@ -2354,9 +2342,32 @@ mod tests {
                 ApprovalRequirement::Never
             }
         }
+        #[async_trait::async_trait]
+        impl Tool for LockedTool {
+            fn name(&self) -> &str {
+                "locked_test"
+            }
+            fn description(&self) -> &str {
+                "Test locked tool"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type":"object","properties":{}})
+            }
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &JobContext,
+            ) -> Result<ToolOutput, ToolError> {
+                unreachable!()
+            }
+            fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+                ApprovalRequirement::Always
+            }
+        }
 
         let registry = Arc::new(ToolRegistry::new());
         registry.register(Arc::new(EchoLikeTool)).await;
+        registry.register(Arc::new(LockedTool)).await;
 
         // Provide a file-backed temp DB so the handler can load tool permissions.
         // In-memory databases do not share state between connections in libsql,
@@ -2410,5 +2421,13 @@ mod tests {
             entry.default_state.as_str(),
             "always_allow" | "ask_each_time" | "disabled"
         ));
+
+        let locked_entry = response
+            .tools
+            .iter()
+            .find(|t| t.name == "locked_test")
+            .expect("locked_test tool should be in the list");
+        assert!(locked_entry.locked);
+        assert!(locked_entry.locked_reason.is_some());
     }
 }
