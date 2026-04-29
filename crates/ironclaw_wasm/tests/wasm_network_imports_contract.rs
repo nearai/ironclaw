@@ -48,7 +48,10 @@ fn network_import_uses_host_http_with_allowlist_policy() {
     assert_eq!(requests[0].method, NetworkMethod::Get);
     assert_eq!(requests[0].url, "https://api.example.test/v1/echo");
     assert_eq!(requests[0].resolved_ip, Some(public_ip()));
-    assert_eq!(requests[0].max_response_bytes, Some(1024));
+    assert_eq!(
+        requests[0].max_response_bytes,
+        Some(DEFAULT_WASM_HTTP_RESPONSE_BYTES)
+    );
 }
 
 #[test]
@@ -196,7 +199,7 @@ fn network_policy_enforces_request_body_egress_limit_before_client_call() {
 }
 
 #[test]
-fn network_policy_enforces_response_body_limit() {
+fn network_policy_enforces_response_body_limit_separately_from_egress() {
     let client = RecordingHttpClient::new(WasmHttpResponse {
         status: 200,
         body: r#"{"ok":true,"large":"payload"}"#.to_string(),
@@ -210,10 +213,11 @@ fn network_policy_enforces_response_body_limit() {
                 port: None,
             }],
             deny_private_ip_ranges: true,
-            max_egress_bytes: Some(4),
+            max_egress_bytes: Some(1024),
         },
         public_resolver(),
-    );
+    )
+    .with_response_body_limit(Some(4));
     let runtime = WasmRuntime::for_testing().unwrap();
     let module = runtime
         .prepare(http_spec("https://api.example.test/v1/echo"))
@@ -235,7 +239,7 @@ fn network_policy_enforces_response_body_limit() {
 }
 
 #[test]
-fn network_import_records_http_bytes_in_resource_usage() {
+fn network_import_records_only_request_bytes_as_egress_usage() {
     let client = RecordingHttpClient::new(WasmHttpResponse {
         status: 200,
         body: r#"{"ok":true}"#.to_string(),
@@ -271,11 +275,11 @@ fn network_import_records_http_bytes_in_resource_usage() {
         .unwrap();
 
     assert_eq!(result.output, json!({"ok": true}));
-    assert_eq!(result.usage.network_egress_bytes, 16);
+    assert_eq!(result.usage.network_egress_bytes, 5);
 }
 
 #[test]
-fn network_import_counts_rejected_oversized_response_bytes() {
+fn network_import_does_not_count_rejected_response_bytes_as_egress() {
     let client = RecordingHttpClient::new(WasmHttpResponse {
         status: 200,
         body: r#"{"ok":true,"large":"payload"}"#.to_string(),
@@ -289,13 +293,14 @@ fn network_import_counts_rejected_oversized_response_bytes() {
                 port: None,
             }],
             deny_private_ip_ranges: true,
-            max_egress_bytes: Some(4),
+            max_egress_bytes: Some(1024),
         },
         public_resolver(),
-    );
+    )
+    .with_response_body_limit(Some(4));
     let runtime = WasmRuntime::for_testing().unwrap();
     let module = runtime
-        .prepare(http_spec("https://api.example.test/v1/echo"))
+        .prepare(http_post_spec("https://api.example.test/v1/echo", "hello"))
         .unwrap();
     let descriptor = make_descriptor("net-demo", "net-demo.http", RuntimeKind::Wasm);
     let reservation = sample_reservation();
@@ -311,7 +316,7 @@ fn network_import_counts_rejected_oversized_response_bytes() {
         .unwrap();
 
     assert_eq!(result.output, json!({"ok": false}));
-    assert_eq!(result.usage.network_egress_bytes, 29);
+    assert_eq!(result.usage.network_egress_bytes, 5);
 }
 
 #[test]

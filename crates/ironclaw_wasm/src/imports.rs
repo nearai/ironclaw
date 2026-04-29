@@ -478,17 +478,12 @@ fn host_http_request_utf8(caller: &mut Caller<'_, RuntimeStoreData>, args: HttpI
     };
     match run_sync_host_import(timeout, move || http.request_utf8(request)) {
         Ok(response) => {
-            let response_body_bytes = response.body.len() as u64;
-            caller
-                .data_mut()
-                .record_network_bytes(request_body_bytes.saturating_add(response_body_bytes));
+            caller.data_mut().record_network_bytes(request_body_bytes);
             write_guest_bytes(caller, args.out_ptr, args.out_cap, response.body.as_bytes())
         }
         Err(HostImportCallError::Operation(error)) => {
             if error.bytes_received > 0 {
-                caller
-                    .data_mut()
-                    .record_network_bytes(request_body_bytes.saturating_add(error.bytes_received));
+                caller.data_mut().record_network_bytes(request_body_bytes);
             }
             -11
         }

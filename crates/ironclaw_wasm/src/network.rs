@@ -138,6 +138,7 @@ pub struct WasmPolicyHttpClient<C, R = SystemNetworkResolver> {
     client: C,
     policy: NetworkPolicy,
     resolver: R,
+    max_response_bytes: Option<u64>,
 }
 
 impl<C> WasmPolicyHttpClient<C, SystemNetworkResolver> {
@@ -146,6 +147,7 @@ impl<C> WasmPolicyHttpClient<C, SystemNetworkResolver> {
             client,
             policy,
             resolver: SystemNetworkResolver,
+            max_response_bytes: Some(DEFAULT_WASM_HTTP_RESPONSE_BYTES),
         }
     }
 }
@@ -156,11 +158,21 @@ impl<C, R> WasmPolicyHttpClient<C, R> {
             client,
             policy,
             resolver,
+            max_response_bytes: Some(DEFAULT_WASM_HTTP_RESPONSE_BYTES),
         }
+    }
+
+    pub fn with_response_body_limit(mut self, max_response_bytes: Option<u64>) -> Self {
+        self.max_response_bytes = max_response_bytes;
+        self
     }
 
     pub fn policy(&self) -> &NetworkPolicy {
         &self.policy
+    }
+
+    pub fn response_body_limit(&self) -> Option<u64> {
+        self.max_response_bytes
     }
 }
 
@@ -184,9 +196,9 @@ where
             ));
         }
         request.resolved_ip = Some(resolved_ip);
-        request.max_response_bytes = self.policy.max_egress_bytes;
+        request.max_response_bytes = self.max_response_bytes;
         let response = self.client.request_utf8(request)?;
-        if let Some(max) = self.policy.max_egress_bytes
+        if let Some(max) = self.max_response_bytes
             && response.body.len() as u64 > max
         {
             return Err(

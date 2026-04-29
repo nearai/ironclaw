@@ -17,6 +17,7 @@ const MAX_LOG_MESSAGE_BYTES: usize = 4 * 1024;
 const MAX_GUEST_PATH_BYTES: usize = 4 * 1024;
 const MAX_HTTP_URL_BYTES: usize = 8 * 1024;
 const MAX_HTTP_BODY_BYTES: usize = 1024 * 1024;
+pub const DEFAULT_WASM_HTTP_RESPONSE_BYTES: u64 = 1024 * 1024;
 const MAX_FS_WRITE_BYTES: usize = 1024 * 1024;
 const DEFAULT_FILESYSTEM_BRIDGE_TIMEOUT: Duration = Duration::from_secs(60);
 const HOST_IMPORT_TIMEOUT_CODE: i32 = -12;
