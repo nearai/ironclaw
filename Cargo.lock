@@ -4149,6 +4149,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_network"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ironclaw_host_api",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "ironclaw_processes"
 version = "0.1.0"
 dependencies = [
@@ -4212,6 +4222,18 @@ dependencies = [
  "rust_decimal_macros",
  "serde_json",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ironclaw_secrets"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ironclaw_host_api",
+ "secrecy",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
