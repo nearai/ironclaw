@@ -155,6 +155,7 @@ pub enum ResponseOutputItem {
         id: String,
         call_id: String,
         output: String,
+        status: &'static str,
     },
 }
 
@@ -518,6 +519,7 @@ impl ResponseAccumulator {
                         id: make_item_id(),
                         call_id,
                         output: format!("Error: {err}"),
+                        status: "completed",
                     });
                 }
                 false
@@ -528,6 +530,7 @@ impl ResponseAccumulator {
                     id: make_item_id(),
                     call_id,
                     output: preview,
+                    status: "completed",
                 });
                 false
             }
@@ -952,6 +955,7 @@ async fn streaming_worker(
                         id: make_item_id(),
                         call_id,
                         output: format!("Error: {err}"),
+                        status: "completed",
                     };
                     emit(
                         &tx,
@@ -979,6 +983,7 @@ async fn streaming_worker(
                     id: make_item_id(),
                     call_id,
                     output: preview.clone(),
+                    status: "completed",
                 };
                 emit(
                     &tx,
@@ -1228,6 +1233,7 @@ pub async fn get_response_handler(
                             id: make_item_id(),
                             call_id,
                             output: result.to_string(),
+                            status: "completed",
                         });
                     }
                 }
@@ -1246,6 +1252,7 @@ pub async fn get_response_handler(
                     id: make_item_id(),
                     call_id,
                     output: msg.content.clone(),
+                    status: "completed",
                 });
             }
             _ => {} // Skip user/system messages (they are input, not output).

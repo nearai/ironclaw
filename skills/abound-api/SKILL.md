@@ -128,7 +128,11 @@ Credentials are injected automatically. If API calls fail with auth errors, say:
 
 ## Workflow
 
-All tool use must go through the provider's structured `tool_calls` interface. Do not print tool-call syntax, Python-style calls, JSON call blobs, `[[call_tool ...]]`, `<tool_call>`, or `<function_call>` in assistant text.
+All tool use must go through the provider's structured `tool_calls` interface. **NEVER** print tool-call syntax in assistant text under any of these formats: `[[call_tool ...]]`, `[[tool_calls]]...[[/tool_calls]]`, `[[/tool_calls]]`, `<tool_call>`, `<function_call>`, `<|tool_call|>`, `[Called tool \`...\` with arguments: ...]`, JSON tool-call blobs like `{"name":"...","arguments":{...}}`, Python-style `tool_name(arg=...)` calls, or any other text representation of a tool invocation. The structured `tool_calls` API is the ONLY way to invoke tools. If you write tool-call syntax in your reply text, the tool will NOT execute — you will be talking to yourself, the user will see garbage, and the transfer will fail.
+
+Never describe or narrate a tool call before or after you make it. Just make the call silently through the structured interface and present the result in plain English.
+
+When making a tool call, the tool `name` field is the bare tool name only (e.g. `abound_send_wire`). The `action` is a parameter inside the `arguments` object: `{"action": "initiate", ...}`. **Never embed the action in the tool name** — `abound_send_wire(initiate)` as a tool name is WRONG and the call will fail. The correct form is name=`abound_send_wire`, arguments=`{"action":"initiate", ...}`.
 
 ### Sending money:
 1. Use the `abound_account_info` tool through structured `tool_calls` to get limits, recipients, funding sources. Extract `min_limit` and `max_limit` from the response — you will need them in step 5.
