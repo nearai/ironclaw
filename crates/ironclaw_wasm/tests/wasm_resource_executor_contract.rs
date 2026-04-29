@@ -476,7 +476,10 @@ impl RecordingHttpClient {
 }
 
 impl WasmHostHttp for RecordingHttpClient {
-    fn request_utf8(&self, request: WasmHttpRequest) -> Result<WasmHttpResponse, String> {
+    fn request_utf8(
+        &self,
+        request: WasmHttpRequest,
+    ) -> Result<WasmHttpResponse, WasmHostHttpError> {
         self.requests.lock().unwrap().push(request);
         Ok(self.response.clone())
     }

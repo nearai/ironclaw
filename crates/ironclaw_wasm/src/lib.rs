@@ -19,7 +19,7 @@ use std::{
     future::Future,
     net::{IpAddr, ToSocketAddrs},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, mpsc},
     time::{Duration, Instant},
 };
 use thiserror::Error;
@@ -45,6 +45,8 @@ const MAX_GUEST_PATH_BYTES: usize = 4 * 1024;
 const MAX_HTTP_URL_BYTES: usize = 8 * 1024;
 const MAX_HTTP_BODY_BYTES: usize = 1024 * 1024;
 const MAX_FS_WRITE_BYTES: usize = 1024 * 1024;
+const DEFAULT_FILESYSTEM_BRIDGE_TIMEOUT: Duration = Duration::from_secs(60);
+const HOST_IMPORT_TIMEOUT_CODE: i32 = -12;
 
 /// WASM runtime configuration for the V1 runtime lane.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,14 +166,21 @@ where
     T: Send + 'static,
     Fut: Future<Output = Result<T, FilesystemError>> + Send + 'static,
 {
-    let handle = std::thread::Builder::new()
+    let (sender, receiver) = mpsc::sync_channel(1);
+    std::thread::Builder::new()
         .name("ironclaw-wasm-fs-bridge".to_string())
-        .spawn(move || futures::executor::block_on(future))
+        .spawn(move || {
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| format!("failed to create filesystem bridge runtime: {error}"))
+                .and_then(|runtime| runtime.block_on(future).map_err(|error| error.to_string()));
+            let _ = sender.send(result);
+        })
         .map_err(|error| format!("failed to spawn filesystem bridge thread: {error}"))?;
-    handle
-        .join()
-        .map_err(|_| "filesystem bridge thread panicked".to_string())?
-        .map_err(|error| error.to_string())
+    receiver
+        .recv_timeout(DEFAULT_FILESYSTEM_BRIDGE_TIMEOUT)
+        .map_err(|_| "filesystem bridge timed out".to_string())?
 }
 
 /// Host-mediated HTTP request issued by a WASM network import.
@@ -180,6 +189,12 @@ pub struct WasmHttpRequest {
     pub method: NetworkMethod,
     pub url: String,
     pub body: String,
+    /// IP address selected by the policy layer after allowlist/private-IP checks.
+    /// Host clients must connect to this pinned address instead of resolving the
+    /// hostname again.
+    pub resolved_ip: Option<IpAddr>,
+    /// Maximum response body bytes the host client may read before failing.
+    pub max_response_bytes: Option<u64>,
 }
 
 /// Host-mediated HTTP response returned to a WASM network import.
@@ -189,14 +204,56 @@ pub struct WasmHttpResponse {
     pub body: String,
 }
 
+/// Host-mediated HTTP failure with optional byte accounting for partial reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WasmHostHttpError {
+    pub reason: String,
+    pub bytes_received: u64,
+}
+
+impl WasmHostHttpError {
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            bytes_received: 0,
+        }
+    }
+
+    pub fn with_bytes_received(mut self, bytes_received: u64) -> Self {
+        self.bytes_received = bytes_received;
+        self
+    }
+}
+
+impl std::fmt::Display for WasmHostHttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
+impl std::error::Error for WasmHostHttpError {}
+
+impl From<String> for WasmHostHttpError {
+    fn from(reason: String) -> Self {
+        Self::new(reason)
+    }
+}
+
+impl From<&str> for WasmHostHttpError {
+    fn from(reason: &str) -> Self {
+        Self::new(reason)
+    }
+}
+
 /// Synchronous host HTTP surface exposed to WASM network imports.
 ///
 /// Implementations used behind [`WasmPolicyHttpClient`] must not follow
 /// redirects transparently or bypass the validated host/port. The policy wrapper
-/// validates the URL before dispatch and hands the request to this trait only
-/// after the target is allowlisted and private-IP checks pass.
+/// validates the URL before dispatch, pins `resolved_ip`, and passes
+/// `max_response_bytes` so clients can enforce response bounds while streaming.
 pub trait WasmHostHttp: Send + Sync {
-    fn request_utf8(&self, request: WasmHttpRequest) -> Result<WasmHttpResponse, String>;
+    fn request_utf8(&self, request: WasmHttpRequest)
+    -> Result<WasmHttpResponse, WasmHostHttpError>;
 }
 
 /// Invocation-scoped host import context for WASM JSON execution.
@@ -298,19 +355,30 @@ where
     C: WasmHostHttp,
     R: WasmNetworkResolver,
 {
-    fn request_utf8(&self, request: WasmHttpRequest) -> Result<WasmHttpResponse, String> {
-        let target = network_target_for_url(&request.url)?;
-        validate_network_target(&self.policy, &target, &self.resolver)?;
+    fn request_utf8(
+        &self,
+        mut request: WasmHttpRequest,
+    ) -> Result<WasmHttpResponse, WasmHostHttpError> {
+        let target = network_target_for_url(&request.url).map_err(WasmHostHttpError::new)?;
+        let resolved_ip = validate_network_target(&self.policy, &target, &self.resolver)
+            .map_err(WasmHostHttpError::new)?;
         if let Some(max) = self.policy.max_egress_bytes
             && request.body.len() as u64 > max
         {
-            return Err("network request exceeds egress limit".to_string());
+            return Err(WasmHostHttpError::new(
+                "network request exceeds egress limit",
+            ));
         }
+        request.resolved_ip = Some(resolved_ip);
+        request.max_response_bytes = self.policy.max_egress_bytes;
         let response = self.client.request_utf8(request)?;
         if let Some(max) = self.policy.max_egress_bytes
             && response.body.len() as u64 > max
         {
-            return Err("network response exceeds body limit".to_string());
+            return Err(
+                WasmHostHttpError::new("network response exceeds body limit")
+                    .with_bytes_received(response.body.len() as u64),
+            );
         }
         Ok(response)
     }
@@ -910,6 +978,7 @@ impl WasmRuntime {
         let status = run
             .call(&mut store, (input_ptr, input_len))
             .map_err(|error| self.classify_wasmtime_error(error))?;
+        self.ensure_no_host_import_timeout(&store)?;
         self.ensure_no_memory_denial(&store)?;
         let output_ptr_value = output_ptr
             .call(&mut store, ())
@@ -982,6 +1051,7 @@ impl WasmRuntime {
         let value = func
             .call(&mut store, input)
             .map_err(|error| self.classify_wasmtime_error(error))?;
+        self.ensure_no_host_import_timeout(&store)?;
         self.ensure_no_memory_denial(&store)?;
 
         let output_bytes = value.to_string().len() as u64;
@@ -1053,7 +1123,12 @@ impl WasmRuntime {
     ) -> Result<Store<RuntimeStoreData>, WasmError> {
         let mut store = Store::new(
             &self.engine,
-            RuntimeStoreData::new(self.config.max_memory_bytes, filesystem, http),
+            RuntimeStoreData::new(
+                self.config.max_memory_bytes,
+                self.config.timeout,
+                filesystem,
+                http,
+            ),
         );
         store.limiter(|data| &mut data.limiter);
         store.epoch_deadline_trap();
@@ -1075,6 +1150,19 @@ impl WasmRuntime {
     fn ensure_no_memory_denial(&self, store: &Store<RuntimeStoreData>) -> Result<(), WasmError> {
         if let Some((used, limit)) = store.data().limiter.denied_memory_growth {
             Err(WasmError::MemoryExceeded { used, limit })
+        } else {
+            Ok(())
+        }
+    }
+
+    fn ensure_no_host_import_timeout(
+        &self,
+        store: &Store<RuntimeStoreData>,
+    ) -> Result<(), WasmError> {
+        if store.data().host_import_timed_out {
+            Err(WasmError::Timeout {
+                timeout: self.config.timeout,
+            })
         } else {
             Ok(())
         }
@@ -1123,6 +1211,8 @@ struct RuntimeStoreData {
     limiter: WasmRuntimeLimiter,
     logs: Vec<WasmLogEntry>,
     network_egress_bytes: u64,
+    host_import_timeout: Duration,
+    host_import_timed_out: bool,
     filesystem: Option<Arc<dyn WasmHostFilesystem>>,
     http: Option<Arc<dyn WasmHostHttp>>,
 }
@@ -1130,6 +1220,7 @@ struct RuntimeStoreData {
 impl RuntimeStoreData {
     fn new(
         memory_limit: u64,
+        host_import_timeout: Duration,
         filesystem: Option<Arc<dyn WasmHostFilesystem>>,
         http: Option<Arc<dyn WasmHostHttp>>,
     ) -> Self {
@@ -1137,6 +1228,8 @@ impl RuntimeStoreData {
             limiter: WasmRuntimeLimiter::new(memory_limit),
             logs: Vec::new(),
             network_egress_bytes: 0,
+            host_import_timeout,
+            host_import_timed_out: false,
             filesystem,
             http,
         }
@@ -1144,6 +1237,10 @@ impl RuntimeStoreData {
 
     fn record_network_bytes(&mut self, bytes: u64) {
         self.network_egress_bytes = self.network_egress_bytes.saturating_add(bytes);
+    }
+
+    fn record_host_import_timeout(&mut self) {
+        self.host_import_timed_out = true;
     }
 
     fn push_log(&mut self, level: WasmLogLevel, message: String) {
@@ -1379,6 +1476,49 @@ fn host_log_utf8(caller: &mut Caller<'_, RuntimeStoreData>, level: i32, ptr: i32
     0
 }
 
+enum HostImportCallError<E> {
+    Operation(E),
+    TimedOut,
+    Panicked,
+}
+
+fn run_sync_host_import<T, E, F>(
+    timeout: Duration,
+    operation: F,
+) -> Result<T, HostImportCallError<E>>
+where
+    T: Send + 'static,
+    E: Send + 'static,
+    F: FnOnce() -> Result<T, E> + Send + 'static,
+{
+    if timeout.is_zero() {
+        return operation().map_err(HostImportCallError::Operation);
+    }
+
+    let (sender, receiver) = mpsc::sync_channel(1);
+    if std::thread::Builder::new()
+        .name("ironclaw-wasm-host-import".to_string())
+        .spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation))
+                .map_err(|_| HostImportCallError::Panicked)
+                .and_then(|result| result.map_err(HostImportCallError::Operation));
+            let _ = sender.send(result);
+        })
+        .is_err()
+    {
+        return Err(HostImportCallError::Panicked);
+    }
+
+    receiver
+        .recv_timeout(timeout)
+        .map_err(|_| HostImportCallError::TimedOut)?
+}
+
+fn record_timeout_and_return_code(caller: &mut Caller<'_, RuntimeStoreData>) -> i32 {
+    caller.data_mut().record_host_import_timeout();
+    HOST_IMPORT_TIMEOUT_CODE
+}
+
 fn host_fs_read_utf8(
     caller: &mut Caller<'_, RuntimeStoreData>,
     path_ptr: i32,
@@ -1392,9 +1532,12 @@ fn host_fs_read_utf8(
     let Some(filesystem) = caller.data().filesystem.clone() else {
         return -10;
     };
-    match filesystem.read_utf8(&path) {
+    let timeout = caller.data().host_import_timeout;
+    match run_sync_host_import(timeout, move || filesystem.read_utf8(&path)) {
         Ok(contents) => write_guest_bytes(caller, out_ptr, out_cap, contents.as_bytes()),
-        Err(_) => -11,
+        Err(HostImportCallError::Operation(_)) => -11,
+        Err(HostImportCallError::TimedOut) => record_timeout_and_return_code(caller),
+        Err(HostImportCallError::Panicked) => -11,
     }
 }
 
@@ -1414,9 +1557,12 @@ fn host_fs_write_utf8(
     let Some(filesystem) = caller.data().filesystem.clone() else {
         return -10;
     };
-    match filesystem.write_utf8(&path, &contents) {
+    let timeout = caller.data().host_import_timeout;
+    match run_sync_host_import(timeout, move || filesystem.write_utf8(&path, &contents)) {
         Ok(()) => 0,
-        Err(_) => -11,
+        Err(HostImportCallError::Operation(_)) => -11,
+        Err(HostImportCallError::TimedOut) => record_timeout_and_return_code(caller),
+        Err(HostImportCallError::Panicked) => -11,
     }
 }
 
@@ -1433,9 +1579,12 @@ fn host_fs_list_utf8(
     let Some(filesystem) = caller.data().filesystem.clone() else {
         return -10;
     };
-    match filesystem.list_utf8(&path) {
+    let timeout = caller.data().host_import_timeout;
+    match run_sync_host_import(timeout, move || filesystem.list_utf8(&path)) {
         Ok(contents) => write_guest_bytes(caller, out_ptr, out_cap, contents.as_bytes()),
-        Err(_) => -11,
+        Err(HostImportCallError::Operation(_)) => -11,
+        Err(HostImportCallError::TimedOut) => record_timeout_and_return_code(caller),
+        Err(HostImportCallError::Panicked) => -11,
     }
 }
 
@@ -1450,10 +1599,13 @@ fn host_fs_stat_len(
     let Some(filesystem) = caller.data().filesystem.clone() else {
         return -10;
     };
-    filesystem
-        .stat_len(&path)
-        .map(|len| len.min(i64::MAX as u64) as i64)
-        .unwrap_or(-11)
+    let timeout = caller.data().host_import_timeout;
+    match run_sync_host_import(timeout, move || filesystem.stat_len(&path)) {
+        Ok(len) => len.min(i64::MAX as u64) as i64,
+        Err(HostImportCallError::Operation(_)) => -11,
+        Err(HostImportCallError::TimedOut) => record_timeout_and_return_code(caller) as i64,
+        Err(HostImportCallError::Panicked) => -11,
+    }
 }
 
 fn read_guest_utf8(
@@ -1534,7 +1686,15 @@ fn host_http_request_utf8(caller: &mut Caller<'_, RuntimeStoreData>, args: HttpI
         return -10;
     };
     let request_body_bytes = body.len() as u64;
-    match http.request_utf8(WasmHttpRequest { method, url, body }) {
+    let timeout = caller.data().host_import_timeout;
+    let request = WasmHttpRequest {
+        method,
+        url,
+        body,
+        resolved_ip: None,
+        max_response_bytes: None,
+    };
+    match run_sync_host_import(timeout, move || http.request_utf8(request)) {
         Ok(response) => {
             let response_body_bytes = response.body.len() as u64;
             caller
@@ -1542,7 +1702,16 @@ fn host_http_request_utf8(caller: &mut Caller<'_, RuntimeStoreData>, args: HttpI
                 .record_network_bytes(request_body_bytes.saturating_add(response_body_bytes));
             write_guest_bytes(caller, args.out_ptr, args.out_cap, response.body.as_bytes())
         }
-        Err(_) => -11,
+        Err(HostImportCallError::Operation(error)) => {
+            if error.bytes_received > 0 {
+                caller
+                    .data_mut()
+                    .record_network_bytes(request_body_bytes.saturating_add(error.bytes_received));
+            }
+            -11
+        }
+        Err(HostImportCallError::TimedOut) => record_timeout_and_return_code(caller),
+        Err(HostImportCallError::Panicked) => -11,
     }
 }
 
@@ -1581,7 +1750,7 @@ fn validate_network_target<R>(
     policy: &NetworkPolicy,
     target: &NetworkTarget,
     resolver: &R,
-) -> Result<(), String>
+) -> Result<IpAddr, String>
 where
     R: WasmNetworkResolver,
 {
@@ -1611,13 +1780,10 @@ fn validate_private_ip_policy<R>(
     policy: &NetworkPolicy,
     target: &NetworkTarget,
     resolver: &R,
-) -> Result<(), String>
+) -> Result<IpAddr, String>
 where
     R: WasmNetworkResolver,
 {
-    if !policy.deny_private_ip_ranges {
-        return Ok(());
-    }
     let resolved_ips = if let Ok(ip) = target.host.parse::<IpAddr>() {
         vec![ip]
     } else {
@@ -1627,10 +1793,14 @@ where
     if resolved_ips.is_empty() {
         return Err("network target did not resolve to any IP addresses".to_string());
     }
-    if resolved_ips.into_iter().any(is_private_or_loopback_ip) {
+    if policy.deny_private_ip_ranges && resolved_ips.iter().copied().any(is_private_or_loopback_ip)
+    {
         return Err("network target resolves to a private or loopback IP".to_string());
     }
-    Ok(())
+    resolved_ips
+        .into_iter()
+        .next()
+        .ok_or_else(|| "network target did not resolve to any IP addresses".to_string())
 }
 
 fn default_port(scheme: NetworkScheme) -> u16 {

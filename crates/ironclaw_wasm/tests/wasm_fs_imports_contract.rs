@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 use std::thread::ThreadId;
+use std::time::Duration;
 
 use async_trait::async_trait;
 
@@ -138,6 +139,47 @@ fn fs_import_rejects_oversized_path_before_filesystem_call() {
 }
 
 #[test]
+fn scoped_filesystem_bridge_supports_tokio_runtime_operations() {
+    let root = Arc::new(TokioTimerRootFilesystem);
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/project").unwrap(),
+        MountPermissions::read_only(),
+    )])
+    .unwrap();
+    let wasm_fs = WasmScopedFilesystem::new(root, mounts);
+
+    let contents = wasm_fs.read_utf8("/workspace/input.json").unwrap();
+
+    assert_eq!(contents, r#"{"ok":true}"#);
+}
+
+#[test]
+fn filesystem_host_import_timeout_traps_instead_of_returning_guest_success() {
+    let runtime = WasmRuntime::new(WasmRuntimeConfig {
+        timeout: Duration::from_millis(10),
+        epoch_tick_interval: Duration::from_millis(1),
+        ..WasmRuntimeConfig::for_testing()
+    })
+    .unwrap();
+    let module = runtime.prepare(fs_read_spec()).unwrap();
+    let descriptor = make_descriptor("fs-demo", "fs-demo.read", RuntimeKind::Wasm);
+    let reservation = sample_reservation();
+
+    let err = runtime
+        .invoke_json_with_filesystem(
+            &module,
+            &descriptor,
+            Some(&reservation),
+            CapabilityInvocation { input: json!({}) },
+            Arc::new(SlowFilesystem),
+        )
+        .unwrap_err();
+
+    assert!(matches!(err, WasmError::Timeout { .. }));
+}
+
+#[test]
 fn scoped_filesystem_bridge_polls_root_filesystem_off_calling_thread() {
     let caller_thread = std::thread::current().id();
     let root = Arc::new(ThreadRecordingRootFilesystem::default());
@@ -202,6 +244,50 @@ impl WasmHostFilesystem for RecordingFilesystem {
 
     fn stat_len(&self, _path: &str) -> Result<u64, String> {
         Ok(0)
+    }
+}
+
+struct SlowFilesystem;
+
+impl WasmHostFilesystem for SlowFilesystem {
+    fn read_utf8(&self, _path: &str) -> Result<String, String> {
+        std::thread::sleep(Duration::from_millis(100));
+        Ok(r#"{"ok":true}"#.to_string())
+    }
+
+    fn write_utf8(&self, _path: &str, _contents: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn list_utf8(&self, _path: &str) -> Result<String, String> {
+        Ok("[]".to_string())
+    }
+
+    fn stat_len(&self, _path: &str) -> Result<u64, String> {
+        Ok(0)
+    }
+}
+
+#[derive(Debug)]
+struct TokioTimerRootFilesystem;
+
+#[async_trait]
+impl RootFilesystem for TokioTimerRootFilesystem {
+    async fn read_file(&self, _path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        Ok(br#"{"ok":true}"#.to_vec())
+    }
+
+    async fn write_file(&self, path: &VirtualPath, _bytes: &[u8]) -> Result<(), FilesystemError> {
+        Err(backend_error(path, FilesystemOperation::WriteFile))
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        Err(backend_error(path, FilesystemOperation::ListDir))
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        Err(backend_error(path, FilesystemOperation::Stat))
     }
 }
 

@@ -21,6 +21,7 @@ jsonschema = { version = "0.45", default-features = false }
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 serde_json = "1"
 thiserror = "2"
+tokio = { version = "1", features = ["rt", "time"] }
 url = "2"
 wasmtime = "43.0.1"
 
@@ -28,5 +29,5 @@ wasmtime = "43.0.1"
 async-trait = "0.1"
 rust_decimal_macros = "1"
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt"] }
+tokio = { version = "1", features = ["macros", "rt", "time"] }
 wat = "1"

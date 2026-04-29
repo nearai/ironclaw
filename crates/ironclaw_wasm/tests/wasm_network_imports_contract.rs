@@ -1,5 +1,6 @@
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use ironclaw_host_api::*;
 use ironclaw_wasm::*;
@@ -46,6 +47,8 @@ fn network_import_uses_host_http_with_allowlist_policy() {
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].method, NetworkMethod::Get);
     assert_eq!(requests[0].url, "https://api.example.test/v1/echo");
+    assert_eq!(requests[0].resolved_ip, Some(public_ip()));
+    assert_eq!(requests[0].max_response_bytes, Some(1024));
 }
 
 #[test]
@@ -272,6 +275,86 @@ fn network_import_records_http_bytes_in_resource_usage() {
 }
 
 #[test]
+fn network_import_counts_rejected_oversized_response_bytes() {
+    let client = RecordingHttpClient::new(WasmHttpResponse {
+        status: 200,
+        body: r#"{"ok":true,"large":"payload"}"#.to_string(),
+    });
+    let http = WasmPolicyHttpClient::new_with_resolver(
+        client,
+        NetworkPolicy {
+            allowed_targets: vec![NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Https),
+                host_pattern: "api.example.test".to_string(),
+                port: None,
+            }],
+            deny_private_ip_ranges: true,
+            max_egress_bytes: Some(4),
+        },
+        public_resolver(),
+    );
+    let runtime = WasmRuntime::for_testing().unwrap();
+    let module = runtime
+        .prepare(http_spec("https://api.example.test/v1/echo"))
+        .unwrap();
+    let descriptor = make_descriptor("net-demo", "net-demo.http", RuntimeKind::Wasm);
+    let reservation = sample_reservation();
+
+    let result = runtime
+        .invoke_json_with_network(
+            &module,
+            &descriptor,
+            Some(&reservation),
+            CapabilityInvocation { input: json!({}) },
+            Arc::new(http),
+        )
+        .unwrap();
+
+    assert_eq!(result.output, json!({"ok": false}));
+    assert_eq!(result.usage.network_egress_bytes, 29);
+}
+
+#[test]
+fn network_host_import_timeout_traps_instead_of_returning_guest_success() {
+    let http = WasmPolicyHttpClient::new_with_resolver(
+        SlowHttpClient,
+        NetworkPolicy {
+            allowed_targets: vec![NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Https),
+                host_pattern: "api.example.test".to_string(),
+                port: None,
+            }],
+            deny_private_ip_ranges: true,
+            max_egress_bytes: Some(1024),
+        },
+        public_resolver(),
+    );
+    let runtime = WasmRuntime::new(WasmRuntimeConfig {
+        timeout: Duration::from_millis(10),
+        epoch_tick_interval: Duration::from_millis(1),
+        ..WasmRuntimeConfig::for_testing()
+    })
+    .unwrap();
+    let module = runtime
+        .prepare(http_spec("https://api.example.test/v1/echo"))
+        .unwrap();
+    let descriptor = make_descriptor("net-demo", "net-demo.http", RuntimeKind::Wasm);
+    let reservation = sample_reservation();
+
+    let err = runtime
+        .invoke_json_with_network(
+            &module,
+            &descriptor,
+            Some(&reservation),
+            CapabilityInvocation { input: json!({}) },
+            Arc::new(http),
+        )
+        .unwrap_err();
+
+    assert!(matches!(err, WasmError::Timeout { .. }));
+}
+
+#[test]
 fn network_policy_denies_hostname_resolving_to_private_ip_before_client_call() {
     let client = RecordingHttpClient::new(WasmHttpResponse {
         status: 200,
@@ -366,9 +449,27 @@ impl RecordingHttpClient {
 }
 
 impl WasmHostHttp for RecordingHttpClient {
-    fn request_utf8(&self, request: WasmHttpRequest) -> Result<WasmHttpResponse, String> {
+    fn request_utf8(
+        &self,
+        request: WasmHttpRequest,
+    ) -> Result<WasmHttpResponse, WasmHostHttpError> {
         self.requests.lock().unwrap().push(request);
         Ok(self.response.clone())
+    }
+}
+
+struct SlowHttpClient;
+
+impl WasmHostHttp for SlowHttpClient {
+    fn request_utf8(
+        &self,
+        _request: WasmHttpRequest,
+    ) -> Result<WasmHttpResponse, WasmHostHttpError> {
+        std::thread::sleep(Duration::from_millis(100));
+        Ok(WasmHttpResponse {
+            status: 200,
+            body: r#"{"ok":true}"#.to_string(),
+        })
     }
 }
 
@@ -393,6 +494,10 @@ impl WasmNetworkResolver for StaticResolver {
 
 fn public_resolver() -> StaticResolver {
     StaticResolver::new("93.184.216.34")
+}
+
+fn public_ip() -> IpAddr {
+    "93.184.216.34".parse().unwrap()
 }
 
 fn http_spec(url: &str) -> WasmModuleSpec {
