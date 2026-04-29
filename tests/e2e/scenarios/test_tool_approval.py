@@ -2,6 +2,9 @@
 
 import asyncio
 import json
+from urllib.parse import urlsplit
+
+import httpx
 
 from helpers import (
     AUTH_TOKEN,
@@ -35,6 +38,22 @@ async def _send_chat_message(base_url: str, thread_id: str, content: str) -> Non
         timeout=30,
     )
     assert response.status_code == 202, response.text
+
+
+def _page_base_url(page) -> str:
+    parsed = urlsplit(page.url)
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+async def _require_http_approval(base_url: str) -> None:
+    async with httpx.AsyncClient() as client:
+        response = await client.put(
+            f"{base_url}/api/settings/tools/http",
+            json={"state": "ask_each_time"},
+            headers={"Authorization": f"Bearer {AUTH_TOKEN}"},
+            timeout=15,
+        )
+    assert response.status_code == 200, response.text
 
 
 async def _wait_for_history(
@@ -202,10 +221,11 @@ async def test_waiting_for_approval_message_no_error_prefix(page):
     approval is pending. The backend should reject the second input with a non-error
     status that includes the pending tool context.
     """
+    await _require_http_approval(_page_base_url(page))
     assistant_messages = page.locator(SEL["message_assistant"])
     chat_input = await ensure_writable_chat_input(page)
 
-    # Trigger a real HTTP tool call that pauses for approval in the default E2E harness.
+    # Trigger a real HTTP tool call that pauses for approval in this test harness.
     await chat_input.fill("make approval post approval-required")
     await chat_input.press("Enter")
 
@@ -252,6 +272,7 @@ async def test_waiting_for_approval_message_no_error_prefix(page):
 
 async def test_chat_reply_approve_resumes_pending_tool(ironclaw_server):
     """A plain chat reply of 'approve' should resume the pending tool call."""
+    await _require_http_approval(ironclaw_server)
     thread_id = await _create_thread(ironclaw_server)
 
     await _send_chat_message(ironclaw_server, thread_id, "make approval post approval-chat")
@@ -272,6 +293,7 @@ async def test_chat_reply_approve_resumes_pending_tool(ironclaw_server):
 
 async def test_chat_reply_deny_rejects_pending_tool(ironclaw_server):
     """A plain chat reply of 'deny' should reject the pending tool call."""
+    await _require_http_approval(ironclaw_server)
     thread_id = await _create_thread(ironclaw_server)
 
     await _send_chat_message(ironclaw_server, thread_id, "make approval post approval-denied")
@@ -293,6 +315,7 @@ async def test_chat_reply_deny_rejects_pending_tool(ironclaw_server):
 
 async def test_text_approval_resolves_real_tool_call(page):
     """Typing 'yes' should resolve a real approval gate triggered by a tool call."""
+    await _require_http_approval(_page_base_url(page))
     chat_input = page.locator(SEL["chat_input"])
     await chat_input.wait_for(state="visible", timeout=5000)
 
@@ -322,6 +345,7 @@ async def test_text_approval_resolves_real_tool_call(page):
 
 async def test_slash_approve_is_thread_scoped_api(ironclaw_server):
     """Sending '/approve' in thread A must not resolve a pending gate in thread B."""
+    await _require_http_approval(ironclaw_server)
     thread_a = await _create_thread(ironclaw_server)
     thread_b = await _create_thread(ironclaw_server)
 
@@ -357,6 +381,7 @@ async def test_slash_approve_is_thread_scoped_api(ironclaw_server):
 # All tests that need the http approval gate to fire MUST run before this one.
 async def test_chat_reply_always_auto_approves_next_same_tool(ironclaw_server):
     """A plain chat reply of 'always' should auto-approve the same tool next time."""
+    await _require_http_approval(ironclaw_server)
     thread_id = await _create_thread(ironclaw_server)
 
     await _send_chat_message(ironclaw_server, thread_id, "make approval post approval-always-a")
@@ -626,6 +651,7 @@ async def test_normal_text_not_intercepted_with_approval_card(page):
 
 async def test_text_approval_resolves_real_tool_call(browser, managed_gateway_server):
     """Typing 'yes' should resolve a real approval gate triggered by a tool call."""
+    await _require_http_approval(managed_gateway_server.base_url)
     context = await browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
     try:
@@ -838,6 +864,7 @@ async def test_slash_approve_does_not_intercept_other_thread_card(page):
 async def test_slash_approve_is_thread_scoped_api(managed_gateway_server):
     """Sending '/approve' in thread A must not resolve a pending gate in thread B."""
     base_url = managed_gateway_server.base_url
+    await _require_http_approval(base_url)
     thread_a = await _create_thread(base_url)
     thread_b = await _create_thread(base_url)
 
