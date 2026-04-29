@@ -5,13 +5,15 @@
 //! execute WASM modules, start Docker containers, connect to MCP servers, resolve
 //! secrets, or reserve resources.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, HostApiError, PermissionMode,
-    ResourceProfile, RuntimeKind, TrustClass, VirtualPath,
+    CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, HostApiError, PackageId,
+    PackageIdentity, PackageSource, PermissionMode, RequestedTrustClass, ResourceProfile,
+    RuntimeKind, TrustClass, VirtualPath,
 };
+use ironclaw_trust::TrustPolicyInput;
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -110,6 +112,12 @@ pub struct ExtensionManifest {
     pub name: String,
     pub version: String,
     pub description: String,
+    /// Manifest-declared trust request. This is untrusted metadata and must
+    /// be evaluated by `ironclaw_trust` before it can affect authorization.
+    pub requested_trust: RequestedTrustClass,
+    /// Safe declarative descriptor metadata derived from [`requested_trust`].
+    /// Privileged requests remain sandboxed here; effective privileged trust
+    /// only comes from a host policy [`TrustPolicyInput`].
     pub trust: TrustClass,
     pub runtime: ExtensionRuntime,
     pub capabilities: Vec<CapabilityManifest>,
@@ -153,12 +161,15 @@ impl ExtensionManifest {
             .map(CapabilityManifest::from_raw)
             .collect::<Result<Vec<_>, _>>()?;
 
+        let trust = requested_trust_to_descriptor_trust(raw.trust);
+
         Ok(Self {
             id,
             name: raw.name,
             version: raw.version,
             description: raw.description,
-            trust: raw.trust,
+            requested_trust: raw.trust,
+            trust,
             runtime,
             capabilities,
         })
@@ -248,6 +259,48 @@ impl ExtensionPackage {
             root,
             manifest,
             capabilities,
+        })
+    }
+
+    /// Build the trust-policy identity for this package.
+    ///
+    /// `PackageId` and `ExtensionId` share the same underlying vocabulary in
+    /// V1; the conversion still goes through the validated constructor so this
+    /// crate does not rely on representation details.
+    pub fn package_identity(
+        &self,
+        source: PackageSource,
+        digest: Option<String>,
+        signer: Option<String>,
+    ) -> Result<PackageIdentity, ExtensionError> {
+        Ok(PackageIdentity::new(
+            PackageId::new(self.id.as_str().to_string())?,
+            source,
+            digest,
+            signer,
+        ))
+    }
+
+    /// Build the trust-policy input for this package.
+    ///
+    /// Requested authority is the canonical set of capability ids declared by
+    /// the package. The returned value is still untrusted input; callers must
+    /// pass it to `ironclaw_trust::TrustPolicy::evaluate` to get an effective
+    /// [`ironclaw_trust::TrustDecision`].
+    pub fn trust_policy_input(
+        &self,
+        source: PackageSource,
+        digest: Option<String>,
+        signer: Option<String>,
+    ) -> Result<TrustPolicyInput, ExtensionError> {
+        Ok(TrustPolicyInput {
+            identity: self.package_identity(source, digest, signer)?,
+            requested_trust: self.manifest.requested_trust,
+            requested_authority: self
+                .capabilities
+                .iter()
+                .map(|descriptor| descriptor.id.clone())
+                .collect::<BTreeSet<_>>(),
         })
     }
 }
@@ -395,10 +448,24 @@ struct RawManifest {
     name: String,
     version: String,
     description: String,
-    trust: TrustClass,
+    #[serde(default = "default_requested_trust")]
+    trust: RequestedTrustClass,
     runtime: RawRuntime,
     #[serde(default)]
     capabilities: Vec<RawCapability>,
+}
+
+fn default_requested_trust() -> RequestedTrustClass {
+    RequestedTrustClass::Untrusted
+}
+
+fn requested_trust_to_descriptor_trust(requested: RequestedTrustClass) -> TrustClass {
+    match requested {
+        RequestedTrustClass::ThirdParty => TrustClass::UserTrusted,
+        RequestedTrustClass::Untrusted
+        | RequestedTrustClass::FirstPartyRequested
+        | RequestedTrustClass::SystemRequested => TrustClass::Sandbox,
+    }
 }
 
 #[derive(Debug, Deserialize)]

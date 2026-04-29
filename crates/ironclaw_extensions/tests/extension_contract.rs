@@ -1,12 +1,14 @@
 use ironclaw_extensions::*;
 use ironclaw_filesystem::*;
 use ironclaw_host_api::*;
+use ironclaw_trust::TrustPolicyInput;
 use tempfile::tempdir;
 
 #[test]
 fn valid_wasm_manifest_parses_and_extracts_capability_descriptor() {
     let manifest = ExtensionManifest::parse(WASM_MANIFEST).unwrap();
     assert_eq!(manifest.id.as_str(), "echo");
+    assert_eq!(manifest.requested_trust, RequestedTrustClass::Untrusted);
     assert_eq!(manifest.trust, TrustClass::Sandbox);
     assert!(matches!(
         manifest.runtime,
@@ -28,6 +30,70 @@ fn valid_wasm_manifest_parses_and_extracts_capability_descriptor() {
     assert_eq!(descriptor.default_permission, PermissionMode::Allow);
     assert_eq!(descriptor.effects, vec![EffectKind::DispatchCapability]);
     assert_eq!(descriptor.parameters_schema["type"], "object");
+}
+
+#[test]
+fn manifest_privileged_trust_request_is_metadata_and_descriptor_stays_sandboxed() {
+    let manifest = ExtensionManifest::parse(
+        &WASM_MANIFEST.replace("trust = \"untrusted\"", "trust = \"first_party_requested\""),
+    )
+    .unwrap();
+
+    assert_eq!(
+        manifest.requested_trust,
+        RequestedTrustClass::FirstPartyRequested
+    );
+    assert_eq!(manifest.trust, TrustClass::Sandbox);
+
+    let package = ExtensionPackage::from_manifest(
+        manifest,
+        VirtualPath::new("/system/extensions/echo").unwrap(),
+    )
+    .unwrap();
+    assert_eq!(package.capabilities[0].trust_ceiling, TrustClass::Sandbox);
+}
+
+#[test]
+fn package_builds_trust_policy_input_from_requested_manifest_trust() {
+    let manifest = ExtensionManifest::parse(
+        &WASM_MANIFEST.replace("trust = \"untrusted\"", "trust = \"first_party_requested\""),
+    )
+    .unwrap();
+    let package = ExtensionPackage::from_manifest(
+        manifest,
+        VirtualPath::new("/system/extensions/echo").unwrap(),
+    )
+    .unwrap();
+
+    let input: TrustPolicyInput = package
+        .trust_policy_input(
+            PackageSource::LocalManifest {
+                path: "/system/extensions/echo/manifest.toml".to_string(),
+            },
+            Some("sha256:abc".to_string()),
+            Some("alice@example.com".to_string()),
+        )
+        .unwrap();
+
+    assert_eq!(input.identity.package_id.as_str(), "echo");
+    assert!(matches!(
+        input.identity.source,
+        PackageSource::LocalManifest { ref path } if path == "/system/extensions/echo/manifest.toml"
+    ));
+    assert_eq!(input.identity.digest.as_deref(), Some("sha256:abc"));
+    assert_eq!(input.identity.signer.as_deref(), Some("alice@example.com"));
+    assert_eq!(
+        input.requested_trust,
+        RequestedTrustClass::FirstPartyRequested
+    );
+    assert_eq!(
+        input
+            .requested_authority
+            .iter()
+            .map(|id| id.as_str().to_string())
+            .collect::<Vec<_>>(),
+        vec!["echo.say"]
+    );
 }
 
 #[test]
@@ -83,6 +149,7 @@ fn script_runtime_keeps_runner_metadata_without_execution() {
 fn mcp_runtime_keeps_transport_metadata_without_connecting() {
     let manifest = ExtensionManifest::parse(MCP_MANIFEST).unwrap();
     assert_eq!(manifest.runtime_kind(), RuntimeKind::Mcp);
+    assert_eq!(manifest.requested_trust, RequestedTrustClass::ThirdParty);
     assert_eq!(manifest.trust, TrustClass::UserTrusted);
     assert!(matches!(
         manifest.runtime,
@@ -301,7 +368,7 @@ id = "echo"
 name = "Echo"
 version = "0.1.0"
 description = "Echo demo extension"
-trust = "sandbox"
+trust = "untrusted"
 
 [runtime]
 kind = "wasm"
@@ -320,7 +387,7 @@ id = "ordered"
 name = "Ordered"
 version = "0.1.0"
 description = "Ordered capability demo extension"
-trust = "sandbox"
+trust = "untrusted"
 
 [runtime]
 kind = "wasm"
@@ -367,7 +434,7 @@ id = "project-tools"
 name = "Project Tools"
 version = "0.1.0"
 description = "Project-local CLI helpers"
-trust = "sandbox"
+trust = "untrusted"
 
 [runtime]
 kind = "script"
@@ -389,7 +456,7 @@ id = "project-tools"
 name = "Project Tools"
 version = "0.1.0"
 description = "Project-local CLI helpers"
-trust = "sandbox"
+trust = "untrusted"
 
 [runtime]
 kind = "script"
@@ -410,7 +477,7 @@ id = "github-mcp"
 name = "GitHub MCP"
 version = "0.1.0"
 description = "GitHub MCP adapter"
-trust = "user_trusted"
+trust = "third_party"
 
 [runtime]
 kind = "mcp"
@@ -451,7 +518,7 @@ id = "empty"
 name = "Empty"
 version = "0.1.0"
 description = "No capabilities"
-trust = "sandbox"
+trust = "untrusted"
 
 [runtime]
 kind = "wasm"
@@ -768,7 +835,7 @@ id = "conversation"
 name = "Conversation"
 version = "0.1.0"
 description = "Conversation service"
-trust = "sandbox"
+trust = "untrusted"
 
 [runtime]
 kind = "first_party"
@@ -787,7 +854,7 @@ id = "audit"
 name = "Audit"
 version = "0.1.0"
 description = "Audit service"
-trust = "sandbox"
+trust = "untrusted"
 
 [runtime]
 kind = "system"
@@ -806,7 +873,7 @@ id = "github-mcp"
 name = "GitHub MCP"
 version = "0.1.0"
 description = "GitHub MCP adapter"
-trust = "user_trusted"
+trust = "third_party"
 
 [runtime]
 kind = "mcp"
@@ -825,7 +892,7 @@ id = "github-mcp"
 name = "GitHub MCP"
 version = "0.1.0"
 description = "GitHub MCP adapter"
-trust = "user_trusted"
+trust = "third_party"
 
 [runtime]
 kind = "mcp"
@@ -845,7 +912,7 @@ id = "github-mcp"
 name = "GitHub MCP"
 version = "0.1.0"
 description = "GitHub MCP adapter"
-trust = "user_trusted"
+trust = "third_party"
 
 [runtime]
 kind = "mcp"
@@ -864,7 +931,7 @@ id = "github-mcp"
 name = "GitHub MCP"
 version = "0.1.0"
 description = "GitHub MCP adapter"
-trust = "user_trusted"
+trust = "third_party"
 
 [runtime]
 kind = "mcp"
@@ -884,7 +951,7 @@ id = "github-mcp"
 name = "GitHub MCP"
 version = "0.1.0"
 description = "GitHub MCP adapter"
-trust = "user_trusted"
+trust = "third_party"
 
 [runtime]
 kind = "mcp"
@@ -904,7 +971,7 @@ id = "github-mcp"
 name = "GitHub MCP"
 version = "0.1.0"
 description = "GitHub MCP adapter"
-trust = "user_trusted"
+trust = "third_party"
 
 [runtime]
 kind = "mcp"
