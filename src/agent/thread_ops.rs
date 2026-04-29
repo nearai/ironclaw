@@ -459,8 +459,22 @@ impl Agent {
             "Processing user input"
         );
 
+        // Persist user-uploaded image attachments to disk *before* augment so
+        // `format_attachment` picks up `local_path` and the persisted XML
+        // carries `project_path="..."`. This is what lets the gateway expose
+        // the file via `/api/attachments/...` after a page refresh — without
+        // it, refreshing the chat degrades every image into a file card.
+        // v2 has its own project-aware persistence in `bridge::router`; this
+        // path covers v1 (the default `ENGINE_V2=false` deployment).
+        let mut persisted_attachments = message.attachments.clone();
+        crate::channels::persist_legacy_image_attachments(
+            &message.user_id,
+            &message.id.to_string(),
+            &mut persisted_attachments,
+        )
+        .await;
         let augmented =
-            crate::agent::attachments::augment_with_attachments(content, &message.attachments);
+            crate::agent::attachments::augment_with_attachments(content, &persisted_attachments);
         let (effective_content, image_parts) = match &augmented {
             Some(result) => (result.text.as_str(), result.image_parts.clone()),
             None => (content, Vec::new()),

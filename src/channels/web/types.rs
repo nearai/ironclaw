@@ -82,9 +82,52 @@ pub struct TurnInfo {
     pub tool_calls: Vec<ToolCallInfo>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub generated_images: Vec<GeneratedImageInfo>,
+    /// User-uploaded inline attachments resolved into URLs the browser can
+    /// fetch (via `/api/attachments/...`). Populated server-side from the
+    /// persisted `<attachment project_path="...">` block; deliberately *not*
+    /// merged into `user_input` so the LLM-facing XML stays clean. Empty
+    /// when no attachments were persisted (legacy v1 message before the
+    /// persist path landed, or unsupported / failed persist).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub user_attachments: Vec<UserAttachmentInfo>,
     /// Agent's reasoning narrative for this turn.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub narrative: Option<String>,
+}
+
+/// Browser-side metadata for a user-uploaded inline attachment. Carries the
+/// HTTP URL the frontend can fetch (Bearer-auth'd) to render the image
+/// inline after a refresh. The LLM never sees this struct — it only reaches
+/// the chat UI via `HistoryResponse.turns[].user_attachments`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UserAttachmentInfo {
+    /// Browser-presentable filename (already filesystem-sanitized).
+    pub filename: String,
+    /// Canonicalized MIME type (e.g. `image/jpeg`, `application/pdf`).
+    pub mime_type: String,
+    /// Optional human-readable size label like `"3.8 MB"`. Mirrors what the
+    /// agent sees in the persisted XML's `size="..."` attribute.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_label: Option<String>,
+    /// Path-only URL (`/api/attachments/{owner}/...`) authenticated through
+    /// the regular gateway Bearer flow. Frontend fetches this and converts
+    /// to a blob URL for the `<img src>`.
+    pub url: String,
+    /// What kind of attachment this is. Today only `image` is surfaced; the
+    /// field is forward-compatible so future audio/video render paths can
+    /// branch without a wire-format break.
+    pub kind: UserAttachmentKind,
+}
+
+/// Mirror of the relevant subset of [`crate::channels::AttachmentKind`] for
+/// the web wire contract. Snake-case serde matches the codebase's
+/// `Wire-stable enums` rule (see `.claude/rules/types.md`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UserAttachmentKind {
+    Image,
+    Audio,
+    Document,
 }
 
 #[derive(Debug, Serialize)]

@@ -954,6 +954,81 @@ async fn serve_project_file(project_id: &str, path: &str) -> axum::response::Res
     }
 }
 
+/// Serve user-uploaded attachment files under
+/// `/api/attachments/{owner}/{*path}`. Files live on disk at
+/// `<HOME>/.ironclaw/attachments/<owner>/...` (set by both v1's
+/// `persist_legacy_image_attachments` and v2's `persist_project_attachments`).
+///
+/// Authorization: the URL's `<owner>` segment MUST match the authenticated
+/// user. A different user requesting the URL gets `404 Not Found` (we
+/// deliberately don't leak whether the file exists for someone else). Path
+/// traversal is rejected at the URL boundary AND verified by canonical-path
+/// containment.
+pub(crate) async fn user_attachment_handler(
+    AuthenticatedUser(user): AuthenticatedUser,
+    Path((owner_segment, path)): Path<(String, String)>,
+) -> Response {
+    let prefix = std::path::PathBuf::from(crate::channels::ATTACHMENT_PATH_PREFIX);
+    let attachments_root = crate::channels::attachment_storage_root().join(prefix);
+    serve_user_attachment(&attachments_root, &user.user_id, &owner_segment, &path).await
+}
+
+/// Test-friendly inner: tempdir-injectable so unit tests don't need to
+/// touch the real `~/.ironclaw/attachments/` tree.
+///
+/// Streaming: the file is sent via `tokio::fs::File::open` + `ReaderStream`
+/// per `.claude/rules/safety-and-sandbox.md`'s "Bounded Resources" rule —
+/// a buffered `tokio::fs::read` could OOM on a large attachment.
+pub(crate) async fn serve_user_attachment(
+    attachments_root: &std::path::Path,
+    authenticated_user_id: &str,
+    owner_segment: &str,
+    path: &str,
+) -> Response {
+    // Don't tell the requester whether the file exists for someone else;
+    // 404 is the correct response for "you can't see this".
+    if owner_segment != authenticated_user_id {
+        return (StatusCode::NOT_FOUND, "Not found").into_response();
+    }
+
+    if path.is_empty() || path.contains('\\') || path.split('/').any(|s| s == ".." || s.is_empty())
+    {
+        return (StatusCode::BAD_REQUEST, "Invalid path").into_response();
+    }
+
+    let owner_dir = attachments_root.join(owner_segment);
+    let file_path = owner_dir.join(path);
+
+    let canonical = match file_path.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return (StatusCode::NOT_FOUND, "Not found").into_response(),
+    };
+    let owner_canonical = match owner_dir.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return (StatusCode::NOT_FOUND, "Not found").into_response(),
+    };
+    if !canonical.starts_with(&owner_canonical) {
+        return (StatusCode::NOT_FOUND, "Not found").into_response();
+    }
+
+    let file = match tokio::fs::File::open(&canonical).await {
+        Ok(f) => f,
+        Err(_) => return (StatusCode::NOT_FOUND, "Not found").into_response(),
+    };
+    let stream = tokio_util::io::ReaderStream::new(file);
+    let body = axum::body::Body::from_stream(stream);
+    let mime = mime_guess::from_path(&canonical)
+        .first_or_octet_stream()
+        .to_string();
+    let mime_header = axum::http::HeaderValue::from_str(&mime)
+        .unwrap_or_else(|_| axum::http::HeaderValue::from_static("application/octet-stream"));
+    let mut response = Response::new(body);
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, mime_header);
+    response
+}
+
 // Tests for these helpers live alongside the route-level handler tests in
 // `src/channels/web/server.rs` (for now), where the full `GatewayState`
 // fixture is already in scope. They will migrate here once `server.rs` is
@@ -1422,5 +1497,122 @@ mod tests {
             cache.is_none(),
             "frontend_html_cache must remain empty in multi-tenant mode"
         );
+    }
+
+    // --- serve_user_attachment tests (#1341 follow-up) ---
+
+    use crate::channels::web::platform::static_files::serve_user_attachment;
+
+    async fn write_attachment(root: &std::path::Path, rel: &str, body: &[u8]) {
+        let p = root.join(rel);
+        if let Some(parent) = p.parent() {
+            tokio::fs::create_dir_all(parent).await.expect("mkdir");
+        }
+        tokio::fs::write(&p, body).await.expect("write");
+    }
+
+    /// Read the full body of an axum response into a Vec<u8>. Used by the
+    /// happy-path test below; small files only — production calls stream.
+    async fn body_to_bytes(resp: axum::response::Response) -> Vec<u8> {
+        use http_body_util::BodyExt;
+        resp.into_body()
+            .collect()
+            .await
+            .expect("collect body")
+            .to_bytes()
+            .to_vec()
+    }
+
+    #[tokio::test]
+    async fn serve_user_attachment_returns_file_for_owner() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let payload = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR";
+        write_attachment(dir.path(), "alice/.legacy/msg-1/photo.png", payload).await;
+
+        let resp =
+            serve_user_attachment(dir.path(), "alice", "alice", ".legacy/msg-1/photo.png").await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(ct.starts_with("image/"), "unexpected content-type: {ct}");
+        let bytes = body_to_bytes(resp).await;
+        assert_eq!(bytes, payload);
+    }
+
+    #[tokio::test]
+    async fn serve_user_attachment_404s_when_owner_segment_mismatches_user() {
+        // A different user must never see (or even confirm the existence
+        // of) someone else's attachments. We deliberately use 404 instead
+        // of 403 to avoid leaking that the path even exists.
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_attachment(dir.path(), "alice/.legacy/msg-1/photo.png", b"x").await;
+
+        let resp = serve_user_attachment(
+            dir.path(),
+            "bob",   // authenticated user
+            "alice", // URL segment
+            ".legacy/msg-1/photo.png",
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn serve_user_attachment_rejects_dotdot_segment_at_url_boundary() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_attachment(dir.path(), "alice/.legacy/msg-1/photo.png", b"x").await;
+        // Sibling directory the attacker would try to escape into.
+        write_attachment(dir.path(), "secret.txt", b"top-secret").await;
+
+        let resp = serve_user_attachment(
+            dir.path(),
+            "alice",
+            "alice",
+            ".legacy/msg-1/../../secret.txt",
+        )
+        .await;
+
+        // BAD_REQUEST stops the request at the URL boundary before the
+        // canonical-path containment check is even reached.
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn serve_user_attachment_rejects_backslash_path() {
+        // Defense in depth: `\` is treated as part of a path segment by
+        // some tooling but never legitimately appears in our generated
+        // URLs. Reject at the boundary so a Windows-style path can't
+        // confuse downstream canonicalization.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let resp = serve_user_attachment(dir.path(), "alice", "alice", ".legacy\\evil").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn serve_user_attachment_404s_for_missing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Owner directory exists; specific file doesn't.
+        tokio::fs::create_dir_all(dir.path().join("alice/.legacy/msg-1"))
+            .await
+            .expect("mkdir");
+        let resp =
+            serve_user_attachment(dir.path(), "alice", "alice", ".legacy/msg-1/missing.png").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn serve_user_attachment_404s_when_owner_dir_missing() {
+        // Brand-new user with nothing persisted yet: canonicalize on the
+        // owner_dir itself fails, and we must surface 404 (not 500).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let resp =
+            serve_user_attachment(dir.path(), "alice", "alice", ".legacy/msg-1/photo.png").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }

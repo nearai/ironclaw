@@ -1179,6 +1179,11 @@ fn turn_info_from_in_memory_turn(t: &crate::agent::session::Turn) -> TurnInfo {
                 .iter()
                 .map(|tc| (tc.tool_call_id.as_deref(), tc.result.as_ref())),
         ),
+        // In-memory turns are mid-flight: the persisted `<attachments>` XML
+        // hasn't been written yet, so we have nothing to extract URLs from.
+        // Once the turn lands in the DB and `build_turns_from_db_messages`
+        // takes over, the field gets populated from the persisted text.
+        user_attachments: Vec::new(),
         narrative: t.narrative.clone(),
     }
 }
@@ -1510,6 +1515,7 @@ mod tests {
                 rationale: None,
             }],
             generated_images: Vec::new(),
+            user_attachments: Vec::new(),
             narrative: None,
         }];
 
@@ -1575,6 +1581,7 @@ mod tests {
                 },
             ],
             generated_images: Vec::new(),
+            user_attachments: Vec::new(),
             narrative: None,
         }];
 
@@ -1611,6 +1618,7 @@ mod tests {
             completed_at: Some(started_at.clone()),
             tool_calls: Vec::new(),
             generated_images: Vec::new(),
+            user_attachments: Vec::new(),
             narrative: None,
         }];
 
@@ -1642,6 +1650,7 @@ mod tests {
             completed_at: Some(started_at.clone()),
             tool_calls: Vec::new(),
             generated_images: Vec::new(),
+            user_attachments: Vec::new(),
             narrative: None,
         }];
 
@@ -1673,6 +1682,7 @@ mod tests {
             completed_at: None,
             tool_calls: Vec::new(),
             generated_images: Vec::new(),
+            user_attachments: Vec::new(),
             narrative: None,
         }];
 
@@ -1705,6 +1715,7 @@ mod tests {
             completed_at: Some(started_at.clone()),
             tool_calls: Vec::new(),
             generated_images: Vec::new(),
+            user_attachments: Vec::new(),
             narrative: None,
         }];
 
@@ -1737,6 +1748,7 @@ mod tests {
             completed_at: Some(completed_at),
             tool_calls: Vec::new(),
             generated_images: Vec::new(),
+            user_attachments: Vec::new(),
             narrative: None,
         }];
 
