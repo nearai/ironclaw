@@ -2,7 +2,9 @@
 //!
 //! This crate stores and leases secret material behind opaque
 //! [`SecretHandle`] values. It does not decide authorization, inject secrets into
-//! runtimes, emit audit records, or expose raw values through metadata.
+//! runtimes, emit audit records, or expose raw values through metadata. Runtime
+//! injection is not enforced until a higher-level obligation-handler/runtime
+//! composition slice consumes these primitives.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -103,6 +105,10 @@ impl SecretStoreError {
 #[async_trait]
 pub trait SecretStore: Send + Sync {
     /// Stores or replaces a secret under the caller's tenant/user/project scope and returns redacted metadata.
+    ///
+    /// Intended for trusted setup, composition, migration, or storage-code paths that are already
+    /// allowed to manage secret material. This low-level primitive intentionally does not authorize
+    /// arbitrary runtime/plugin callers.
     async fn put(
         &self,
         scope: ResourceScope,

@@ -21,7 +21,7 @@ ResourceScope + SecretHandle
   -> SecretMaterial exactly once
 ```
 
-The crate owns storage mechanics and one-shot lease state. It does not decide authorization, run approval flows, inject secrets into runtime requests, contact networks, emit audit events, or execute product workflows.
+The crate owns storage mechanics and one-shot lease state. It does not decide authorization, run approval flows, inject secrets into runtime requests, contact networks, emit audit events, or execute product workflows. It only provides the lease/consume primitive; runtime injection is not enforced until an obligation-handler/runtime composition slice wires it in.
 
 ---
 
@@ -84,6 +84,8 @@ let material = secrets.consume(&scope, lease.id).await?;
 ```
 
 `metadata` and `lease` are safe to log only as metadata; they do not include secret values. `material` is the only raw-value carrier and should stay inside the narrow injection path that requested it.
+
+`SecretStore::put(...)` is for trusted setup, composition, migration, or storage-code paths that are already allowed to manage secret material. It is not a runtime/plugin API, and it intentionally does not perform authorization itself.
 
 ---
 

@@ -19,7 +19,7 @@ NetworkRequest { ResourceScope, NetworkTarget, NetworkMethod, estimated_bytes }
   -> NetworkPermit or NetworkPolicyError
 ```
 
-This crate does not perform HTTP I/O, DNS resolution, proxying, credential injection, resource reservation, audit emission, or product workflow. It is the boundary that future runtime/network adapters can call before they perform network effects.
+This crate does not perform HTTP I/O, DNS resolution, proxying, credential injection, resource reservation, audit emission, or product workflow. It is the boundary that future runtime/network adapters can call before they perform network effects. It only evaluates metadata policy; actual egress enforcement, DNS/redirect revalidation, and response limiting belong to the runtime/network execution boundary.
 
 ---
 

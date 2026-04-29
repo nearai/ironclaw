@@ -2,7 +2,9 @@
 //!
 //! This crate evaluates host API [`NetworkPolicy`] values against scoped network
 //! requests. It does not perform HTTP I/O, resolve DNS, inject secrets, reserve
-//! resources, or emit audit/events.
+//! resources, or emit audit/events. Actual egress enforcement, DNS/redirect
+//! revalidation, and response limiting belong at the runtime/network execution
+//! boundary.
 
 use std::net::IpAddr;
 
