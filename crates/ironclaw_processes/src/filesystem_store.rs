@@ -56,6 +56,14 @@ impl<'a, F> FilesystemProcessStore<'a, F>
 where
     F: RootFilesystem,
 {
+    /// Construct a filesystem-backed process store.
+    ///
+    /// **Single-instance invariant**: the `transition_lock` only serializes
+    /// `start` and `update_status` (i.e. `complete`/`fail`/`kill`) within a
+    /// single `FilesystemProcessStore` instance. Operating multiple instances
+    /// concurrently against the same on-disk root is unsupported and will
+    /// race on the JSON record files. Construct the store once and share via
+    /// `Arc` (see [`from_arc`](Self::from_arc)).
     pub fn new(filesystem: &'a F) -> Self {
         Self {
             filesystem: FilesystemHandle::Borrowed(filesystem),
@@ -63,6 +71,11 @@ where
         }
     }
 
+    /// Construct an owned (`'static`) variant from a shared filesystem handle.
+    ///
+    /// The same single-instance invariant from [`new`](Self::new) applies:
+    /// share the resulting store via `Arc` rather than constructing multiple
+    /// instances pointed at the same root.
     pub fn from_arc(filesystem: Arc<F>) -> FilesystemProcessStore<'static, F> {
         FilesystemProcessStore {
             filesystem: FilesystemHandle::Shared(filesystem),
@@ -276,6 +289,15 @@ impl<F> ProcessResultStore for FilesystemProcessResultStore<'_, F>
 where
     F: RootFilesystem,
 {
+    /// Persist a successful terminal record and its output blob.
+    ///
+    /// Writes happen in two steps (`write_output` then `write_result`); if
+    /// the second write fails, the output blob at
+    /// `process-outputs/<process_id>/output.json` is left on disk as an
+    /// orphan. Cleanup of orphaned output blobs is the caller's responsibility
+    /// (typically swept during operator-initiated reconciliation rather than
+    /// inline, since orphans are observable via missing
+    /// `process-results/<process_id>.json`).
     async fn complete(
         &self,
         scope: &ResourceScope,

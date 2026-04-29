@@ -237,6 +237,59 @@ async fn background_process_manager_stores_failure_error_result() {
 }
 
 #[tokio::test]
+async fn background_process_manager_reports_result_store_complete_failure_and_keeps_running_status()
+{
+    let store = Arc::new(InMemoryProcessStore::new());
+    let result_store = Arc::new(FailingProcessResultStore::default());
+    let captured = Arc::new(Mutex::new(Vec::<(BackgroundFailureStage, ProcessId)>::new()));
+    let handler_captured = Arc::clone(&captured);
+    let executor = Arc::new(CountingExecutor::success());
+    let manager = BackgroundProcessManager::new(store.clone(), executor)
+        .with_result_store(result_store.clone())
+        .with_error_handler(move |failure| {
+            handler_captured
+                .lock()
+                .unwrap()
+                .push((failure.stage, failure.process_id));
+        });
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+
+    manager
+        .spawn(process_start(process_id, invocation_id, scope.clone()))
+        .await
+        .unwrap();
+
+    // Wait for the spawned task to attempt the result-store write.
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        if !captured.lock().unwrap().is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "error handler was not invoked within deadline"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    let captured_failures = captured.lock().unwrap().clone();
+    assert_eq!(captured_failures.len(), 1);
+    assert_eq!(
+        captured_failures[0].0,
+        BackgroundFailureStage::ResultStoreComplete
+    );
+    assert_eq!(captured_failures[0].1, process_id);
+    assert_eq!(result_store.failures(), vec!["complete"]);
+
+    // Lifecycle status must remain Running because result-first ordering
+    // means status is not promoted when the result write fails.
+    let record = store.get(&scope, process_id).await.unwrap().unwrap();
+    assert_eq!(record.status, ProcessStatus::Running);
+}
+
+#[tokio::test]
 async fn background_process_manager_marks_process_failed_after_executor_error() {
     let store = Arc::new(InMemoryProcessStore::new());
     let executor = Arc::new(CountingExecutor::failure("runtime_dispatch"));
@@ -1904,6 +1957,61 @@ impl ProcessExecutor for CountingExecutor {
 }
 
 struct DroppingProcessResultStore;
+
+#[derive(Default)]
+struct FailingProcessResultStore {
+    failures: Mutex<Vec<&'static str>>,
+}
+
+impl FailingProcessResultStore {
+    fn failures(&self) -> Vec<&'static str> {
+        self.failures.lock().unwrap().clone()
+    }
+
+    fn record(&self, kind: &'static str) {
+        self.failures.lock().unwrap().push(kind);
+    }
+}
+
+#[async_trait]
+impl ProcessResultStore for FailingProcessResultStore {
+    async fn complete(
+        &self,
+        _scope: &ResourceScope,
+        _process_id: ProcessId,
+        _output: serde_json::Value,
+    ) -> Result<ProcessResultRecord, ProcessError> {
+        self.record("complete");
+        Err(ProcessError::ProcessResultStoreUnavailable)
+    }
+
+    async fn fail(
+        &self,
+        _scope: &ResourceScope,
+        _process_id: ProcessId,
+        _error_kind: String,
+    ) -> Result<ProcessResultRecord, ProcessError> {
+        self.record("fail");
+        Err(ProcessError::ProcessResultStoreUnavailable)
+    }
+
+    async fn kill(
+        &self,
+        _scope: &ResourceScope,
+        _process_id: ProcessId,
+    ) -> Result<ProcessResultRecord, ProcessError> {
+        self.record("kill");
+        Err(ProcessError::ProcessResultStoreUnavailable)
+    }
+
+    async fn get(
+        &self,
+        _scope: &ResourceScope,
+        _process_id: ProcessId,
+    ) -> Result<Option<ProcessResultRecord>, ProcessError> {
+        Ok(None)
+    }
+}
 
 #[async_trait]
 impl ProcessResultStore for DroppingProcessResultStore {

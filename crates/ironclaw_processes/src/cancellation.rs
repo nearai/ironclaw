@@ -54,6 +54,13 @@ impl ProcessCancellationToken {
         self.inner.cancelled.load(Ordering::SeqCst)
     }
 
+    /// Resolve when the token has been cancelled.
+    ///
+    /// The notify-then-check ordering matters: we *create* the `notified()`
+    /// future before re-checking the atomic flag, so any `notify_waiters` that
+    /// fires between the check and the `.await` is captured (rather than lost).
+    /// Spurious wakeups loop back to the flag check; we only return once the
+    /// cancelled flag is observably true.
     pub async fn cancelled(&self) {
         if self.is_cancelled() {
             return;

@@ -20,6 +20,44 @@ use ironclaw_resources::{ResourceError, ResourceGovernor};
 
 use crate::types::{ProcessError, ProcessKey, ProcessRecord, ProcessStart, ProcessStore};
 
+/// RAII guard that releases a reservation on `Drop` unless explicitly
+/// [`defuse`](Self::defuse)d. Used to ensure a panic inside
+/// [`ProcessStore::start`] does not leak the just-acquired reservation.
+struct ReservationDropGuard<G>
+where
+    G: ResourceGovernor + ?Sized,
+{
+    governor: Option<Arc<G>>,
+    reservation_id: ResourceReservationId,
+}
+
+impl<G> ReservationDropGuard<G>
+where
+    G: ResourceGovernor + ?Sized,
+{
+    fn new(governor: Arc<G>, reservation_id: ResourceReservationId) -> Self {
+        Self {
+            governor: Some(governor),
+            reservation_id,
+        }
+    }
+
+    fn defuse(mut self) {
+        self.governor.take();
+    }
+}
+
+impl<G> Drop for ReservationDropGuard<G>
+where
+    G: ResourceGovernor + ?Sized,
+{
+    fn drop(&mut self) {
+        if let Some(governor) = self.governor.take() {
+            let _ = governor.release(self.reservation_id);
+        }
+    }
+}
+
 pub struct EventingProcessStore<S>
 where
     S: ProcessStore,
@@ -268,7 +306,10 @@ where
             .governor
             .reserve(start.scope.clone(), start.estimated_resources.clone())?;
         start.resource_reservation_id = Some(reservation.id);
-        match self.inner.start(start).await {
+        let drop_guard = ReservationDropGuard::new(Arc::clone(&self.governor), reservation.id);
+        let inner_result = self.inner.start(start).await;
+        drop_guard.defuse();
+        match inner_result {
             Ok(record) if record.resource_reservation_id == Some(reservation.id) => {
                 self.record_owned_reservation(&record.scope, record.process_id, reservation.id);
                 Ok(record)

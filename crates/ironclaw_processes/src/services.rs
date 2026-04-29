@@ -7,15 +7,17 @@
 //!   spawns a detached tokio task per `spawn` and writes terminal status +
 //!   result records when the executor finishes (or panics).
 //!
-//! Any `T: ProcessStore` also satisfies [`ProcessManager`] via blanket
-//! `spawn = start` for ergonomics in tests/composition.
+//! Background-task failures (store/result-store errors during the spawned
+//! task) can be observed by attaching a
+//! [`with_error_handler`](BackgroundProcessManager::with_error_handler)
+//! callback. Without a handler, those errors are silently dropped.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::FutureExt;
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::ResourceEstimate;
+use ironclaw_host_api::{ProcessId, ResourceEstimate, ResourceScope};
 
 use crate::cancellation::ProcessCancellationRegistry;
 use crate::filesystem_store::{FilesystemProcessResultStore, FilesystemProcessStore};
@@ -23,8 +25,40 @@ use crate::host::ProcessHost;
 use crate::memory_store::{InMemoryProcessResultStore, InMemoryProcessStore};
 use crate::types::{
     ProcessError, ProcessExecutionRequest, ProcessExecutor, ProcessManager, ProcessRecord,
-    ProcessResultStore, ProcessStart, ProcessStore,
+    ProcessResultStore, ProcessStart, ProcessStatus, ProcessStore,
 };
+
+/// Stage at which a background task failed to persist state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundFailureStage {
+    /// `ProcessStore::get` failed during the post-execution status probe.
+    StoreLookup,
+    /// `ProcessStore::complete` failed when promoting to `Completed`.
+    StoreComplete,
+    /// `ProcessStore::fail` failed when promoting to `Failed`.
+    StoreFail,
+    /// `ProcessResultStore::complete` failed.
+    ResultStoreComplete,
+    /// `ProcessResultStore::fail` failed.
+    ResultStoreFail,
+}
+
+/// Failure observed inside a [`BackgroundProcessManager`] spawned task.
+///
+/// The detached task cannot return errors to the original `spawn` caller, so
+/// any failure surfaces here for an attached error handler. If no handler is
+/// configured, the error is dropped — see
+/// [`BackgroundProcessManager::with_error_handler`].
+#[derive(Debug)]
+pub struct BackgroundFailure {
+    pub scope: ResourceScope,
+    pub process_id: ProcessId,
+    pub stage: BackgroundFailureStage,
+    pub error: ProcessError,
+}
+
+/// Callback invoked for each [`BackgroundFailure`] in the spawned task.
+pub type BackgroundErrorHandler = dyn Fn(BackgroundFailure) + Send + Sync;
 
 pub struct ProcessServices<S, R>
 where
@@ -130,6 +164,7 @@ pub struct BackgroundProcessManager {
     executor: Arc<dyn ProcessExecutor + 'static>,
     cancellation_registry: Option<Arc<ProcessCancellationRegistry>>,
     result_store: Option<Arc<dyn ProcessResultStore>>,
+    error_handler: Option<Arc<BackgroundErrorHandler>>,
 }
 
 impl BackgroundProcessManager {
@@ -143,6 +178,7 @@ impl BackgroundProcessManager {
             executor,
             cancellation_registry: None,
             result_store: None,
+            error_handler: None,
         }
     }
 
@@ -161,10 +197,38 @@ impl BackgroundProcessManager {
         self.result_store = Some(store);
         self
     }
+
+    /// Attach a callback for store/result-store failures that occur inside
+    /// the spawned task. Without a handler, those failures are silently
+    /// dropped — they cannot be propagated to the original `spawn` caller
+    /// because the task is detached.
+    pub fn with_error_handler<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(BackgroundFailure) + Send + Sync + 'static,
+    {
+        self.error_handler = Some(Arc::new(handler));
+        self
+    }
 }
 
 #[async_trait]
 impl ProcessManager for BackgroundProcessManager {
+    /// Persist `Running`, then spawn a detached tokio task that drives the
+    /// executor and writes the terminal record(s).
+    ///
+    /// Write order on success/failure is **result store first, status store
+    /// second**: result records are persisted before the lifecycle status
+    /// flips to a terminal value. This makes the contract "if a process is
+    /// observed at a terminal status, its result record is already on disk"
+    /// — `ProcessHost::await_result` relies on this ordering for its
+    /// notification path.
+    ///
+    /// The spawned task is detached: if the tokio runtime is shut down or
+    /// the process exits before the executor finishes, the in-flight work
+    /// is orphaned and the record will remain stuck at `Running`. Callers
+    /// that need crash-safety should perform startup reconciliation by
+    /// listing `Running` records on launch and deciding policy (mark
+    /// failed, retry, etc.). TODO: provide a built-in reconciler.
     async fn spawn(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError> {
         let input = start.input.clone();
         let record = self.store.start(start).await?;
@@ -174,6 +238,7 @@ impl ProcessManager for BackgroundProcessManager {
         let process_id = record.process_id;
         let cancellation_registry = self.cancellation_registry.clone();
         let result_store = self.result_store.clone();
+        let error_handler = self.error_handler.clone();
         let cancellation = cancellation_registry
             .as_ref()
             .map(|registry| registry.register(&record.scope, record.process_id))
@@ -195,42 +260,99 @@ impl ProcessManager for BackgroundProcessManager {
             cancellation,
         };
         tokio::spawn(async move {
-            match std::panic::AssertUnwindSafe(executor.execute(request))
+            let report = |stage: BackgroundFailureStage, error: ProcessError| {
+                if let Some(handler) = &error_handler {
+                    handler(BackgroundFailure {
+                        scope: scope.clone(),
+                        process_id,
+                        stage,
+                        error,
+                    });
+                }
+            };
+            let outcome = std::panic::AssertUnwindSafe(executor.execute(request))
                 .catch_unwind()
-                .await
-            {
-                Ok(Ok(result)) => {
-                    if let Ok(record) = store.complete(&scope, process_id).await
-                        && let Some(result_store) = &result_store
-                    {
-                        let _ = result_store
-                            .complete(&record.scope, record.process_id, result.output)
-                            .await;
-                    }
+                .await;
+
+            // Skip writes if the process was already terminalized externally
+            // (typically by `ProcessHost::kill`). Without this guard, the
+            // result-store-first ordering below would overwrite a kill
+            // record with the executor's late-arriving result.
+            let still_running = match store.get(&scope, process_id).await {
+                Ok(Some(record)) => record.status == ProcessStatus::Running,
+                Ok(None) => false,
+                Err(error) => {
+                    report(BackgroundFailureStage::StoreLookup, error);
+                    false
                 }
-                Ok(Err(error)) => {
-                    if let Ok(record) = store.fail(&scope, process_id, error.kind).await
-                        && let Some(result_store) = &result_store
-                        && let Some(error_kind) = record.error_kind.clone()
-                    {
-                        let _ = result_store
-                            .fail(&record.scope, record.process_id, error_kind)
-                            .await;
+            };
+
+            if still_running {
+                match outcome {
+                    Ok(Ok(result)) => {
+                        let result_persisted = if let Some(result_store) = &result_store {
+                            match result_store
+                                .complete(&scope, process_id, result.output)
+                                .await
+                            {
+                                Ok(_) => true,
+                                Err(error) => {
+                                    report(BackgroundFailureStage::ResultStoreComplete, error);
+                                    false
+                                }
+                            }
+                        } else {
+                            true
+                        };
+                        if result_persisted
+                            && let Err(error) = store.complete(&scope, process_id).await
+                        {
+                            report(BackgroundFailureStage::StoreComplete, error);
+                        }
                     }
-                }
-                Err(_) => {
-                    if let Ok(record) = store
-                        .fail(&scope, process_id, "runtime_panic".to_string())
-                        .await
-                        && let Some(result_store) = &result_store
-                    {
-                        let _ = result_store
-                            .fail(
-                                &record.scope,
-                                record.process_id,
-                                "runtime_panic".to_string(),
-                            )
-                            .await;
+                    Ok(Err(error)) => {
+                        let error_kind = error.kind;
+                        let result_persisted = if let Some(result_store) = &result_store {
+                            match result_store
+                                .fail(&scope, process_id, error_kind.clone())
+                                .await
+                            {
+                                Ok(_) => true,
+                                Err(error) => {
+                                    report(BackgroundFailureStage::ResultStoreFail, error);
+                                    false
+                                }
+                            }
+                        } else {
+                            true
+                        };
+                        if result_persisted
+                            && let Err(error) = store.fail(&scope, process_id, error_kind).await
+                        {
+                            report(BackgroundFailureStage::StoreFail, error);
+                        }
+                    }
+                    Err(_) => {
+                        let panic_kind = "runtime_panic".to_string();
+                        let result_persisted = if let Some(result_store) = &result_store {
+                            match result_store
+                                .fail(&scope, process_id, panic_kind.clone())
+                                .await
+                            {
+                                Ok(_) => true,
+                                Err(error) => {
+                                    report(BackgroundFailureStage::ResultStoreFail, error);
+                                    false
+                                }
+                            }
+                        } else {
+                            true
+                        };
+                        if result_persisted
+                            && let Err(error) = store.fail(&scope, process_id, panic_kind).await
+                        {
+                            report(BackgroundFailureStage::StoreFail, error);
+                        }
                     }
                 }
             }
@@ -239,15 +361,5 @@ impl ProcessManager for BackgroundProcessManager {
             }
         });
         Ok(record)
-    }
-}
-
-#[async_trait]
-impl<T> ProcessManager for T
-where
-    T: ProcessStore + ?Sized,
-{
-    async fn spawn(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError> {
-        self.start(start).await
     }
 }
