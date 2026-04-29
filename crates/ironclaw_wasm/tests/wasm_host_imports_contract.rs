@@ -273,7 +273,7 @@ id = "host-core"
 name = "Host Core"
 version = "0.1.0"
 description = "Host core demo extension"
-trust = "sandbox"
+trust = "untrusted"
 
 [runtime]
 kind = "wasm"

@@ -502,7 +502,7 @@ id = "echo"
 name = "Echo"
 version = "0.1.0"
 description = "Echo demo extension"
-trust = "sandbox"
+trust = "untrusted"
 
 [runtime]
 kind = "wasm"

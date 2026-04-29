@@ -256,7 +256,7 @@ id = "echo"
 name = "Echo"
 version = "0.1.0"
 description = "Echo demo extension"
-trust = "sandbox"
+trust = "untrusted"
 
 [runtime]
 kind = "wasm"
@@ -275,7 +275,7 @@ id = "script-tools"
 name = "Script Tools"
 version = "0.1.0"
 description = "Script demo extension"
-trust = "sandbox"
+trust = "untrusted"
 
 [runtime]
 kind = "script"
