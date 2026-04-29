@@ -96,22 +96,25 @@ static CODEACT_POSTAMBLE_OVERRIDE: std::sync::LazyLock<Option<String>> =
 
 fn load_override_file(env_var: &str) -> Option<String> {
     let Ok(path) = std::env::var(env_var) else {
-        tracing::info!(env_var, "override disabled: env var unset");
+        // env var not set → using compiled-in default. WARN-level so the
+        // line is visible under the upstream Dockerfile's default
+        // `RUST_LOG=ironclaw=info` (which excludes ironclaw_engine).
+        tracing::warn!(env_var, "override disabled: env var unset, using compiled-in default");
         return None;
     };
     match std::fs::read_to_string(&path) {
         Ok(contents) => {
             let len = contents.len();
             if contents.trim().is_empty() {
-                tracing::warn!(env_var, path, "override file exists but is empty — ignoring");
+                tracing::error!(env_var, path, "override file exists but is empty — using compiled-in default");
                 None
             } else {
-                tracing::info!(env_var, path, len, "override loaded");
+                tracing::warn!(env_var, path, len, "override loaded");
                 Some(contents)
             }
         }
         Err(e) => {
-            tracing::warn!(env_var, path, err = %e, "override file unreadable — falling back to compiled-in default");
+            tracing::error!(env_var, path, err = %e, "override file unreadable — using compiled-in default");
             None
         }
     }

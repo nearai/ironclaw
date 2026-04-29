@@ -64,22 +64,26 @@ static ORCHESTRATOR_OVERRIDE: std::sync::LazyLock<Option<String>> =
     std::sync::LazyLock::new(|| {
         let env_var = "ORCHESTRATOR_DEFAULT_PATH";
         let Ok(path) = std::env::var(env_var) else {
-            tracing::info!(env_var, "orchestrator override disabled: env var unset");
+            // WARN-level so the line surfaces under the upstream
+            // Dockerfile's default `RUST_LOG=ironclaw=info` (which
+            // excludes ironclaw_engine info). Downstream deploys can
+            // widen the filter to silence this crate.
+            tracing::warn!(env_var, "orchestrator override disabled: env var unset, using compiled-in default");
             return None;
         };
         match std::fs::read_to_string(&path) {
             Ok(contents) => {
                 let len = contents.len();
                 if contents.trim().is_empty() {
-                    tracing::warn!(env_var, path, "orchestrator override file exists but is empty — ignoring");
+                    tracing::error!(env_var, path, "orchestrator override file exists but is empty — using compiled-in default");
                     None
                 } else {
-                    tracing::info!(env_var, path, len, "orchestrator override loaded");
+                    tracing::warn!(env_var, path, len, "orchestrator override loaded");
                     Some(contents)
                 }
             }
             Err(e) => {
-                tracing::warn!(env_var, path, err = %e, "orchestrator override file unreadable — falling back to compiled-in default");
+                tracing::error!(env_var, path, err = %e, "orchestrator override file unreadable — using compiled-in default");
                 None
             }
         }
