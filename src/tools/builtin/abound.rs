@@ -13,9 +13,7 @@ use serde_json::json;
 use crate::context::JobContext;
 use crate::secrets::SecretsStore;
 use crate::tools::registry::MissionSlot;
-use crate::tools::tool::{
-    RiskLevel, Tool, ToolDomain, ToolError, ToolOutput, require_str,
-};
+use crate::tools::tool::{RiskLevel, Tool, ToolDomain, ToolError, ToolOutput, require_str};
 
 use super::forex::{format_rate, run_transfer_analysis};
 
@@ -31,18 +29,18 @@ fn normalize_exchange_rate_response(mut result: serde_json::Value) -> serde_json
         return result;
     };
     for key in ["current_exchange_rate", "effective_exchange_rate"] {
-        if let Some(entry) = data.get_mut(key).and_then(|e| e.as_object_mut()) {
-            if let Some(value) = entry.get("value").and_then(|v| v.as_f64()) {
-                entry.insert("formatted_value".into(), json!(format_rate(value)));
-            }
+        if let Some(entry) = data.get_mut(key).and_then(|e| e.as_object_mut())
+            && let Some(value) = entry.get("value").and_then(|v| v.as_f64())
+        {
+            entry.insert("formatted_value".into(), json!(format_rate(value)));
         }
     }
     result
 }
 use super::validate_currency_code;
 
-
-pub(crate) const REMITTANCE_BASE: &str = "https://devneobank.timesclub.co/times/bank/remittance/agent";
+pub(crate) const REMITTANCE_BASE: &str =
+    "https://devneobank.timesclub.co/times/bank/remittance/agent";
 const NOTIFICATION_BASE: &str = "https://dev.timesclub.co/times/users/agent";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -55,17 +53,29 @@ fn extract_abound_error(status: u64, body: Option<&serde_json::Value>) -> String
         .and_then(|b| b.get("error"))
         .and_then(|e| e.as_object())
         .map(|e| {
-            let msg = e.get("message").and_then(|m| m.as_str()).unwrap_or("Unknown error");
+            let msg = e
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("Unknown error");
             let code = e.get("code").and_then(|c| c.as_str()).unwrap_or("");
-            if code.is_empty() { msg.to_string() } else { format!("{msg} (code: {code})") }
+            if code.is_empty() {
+                msg.to_string()
+            } else {
+                format!("{msg} (code: {code})")
+            }
         })
-        .or_else(|| body.and_then(|b| b.get("message")).and_then(|m| m.as_str()).map(String::from))
+        .or_else(|| {
+            body.and_then(|b| b.get("message"))
+                .and_then(|m| m.as_str())
+                .map(String::from)
+        })
         .or_else(|| body.and_then(|b| b.as_str()).map(String::from));
     match msg {
         Some(m) => format!("(HTTP {status}): {m}"),
         None => format!(
             "(HTTP {status}). Response: {}",
-            body.map(|b| b.to_string()).unwrap_or_else(|| "empty".into())
+            body.map(|b| b.to_string())
+                .unwrap_or_else(|| "empty".into())
         ),
     }
 }
@@ -147,11 +157,10 @@ pub(crate) async fn abound_get(
         .text()
         .await
         .map_err(|e| ToolError::ExternalService(e.to_string()))?;
-    let body: serde_json::Value =
-        serde_json::from_str(&text).unwrap_or_else(|e| {
-            tracing::debug!(body = %text, "Failed to parse Abound response as JSON: {e}");
-            serde_json::Value::String(text)
-        });
+    let body: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|e| {
+        tracing::debug!(body = %text, "Failed to parse Abound response as JSON: {e}");
+        serde_json::Value::String(text)
+    });
 
     Ok(json!({ "status": status, "body": body }))
 }
@@ -181,11 +190,10 @@ async fn abound_post(
         .text()
         .await
         .map_err(|e| ToolError::ExternalService(e.to_string()))?;
-    let body: serde_json::Value =
-        serde_json::from_str(&text).unwrap_or_else(|e| {
-            tracing::debug!(body = %text, "Failed to parse Abound response as JSON: {e}");
-            serde_json::Value::String(text)
-        });
+    let body: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|e| {
+        tracing::debug!(body = %text, "Failed to parse Abound response as JSON: {e}");
+        serde_json::Value::String(text)
+    });
 
     Ok(json!({ "status": status, "body": body }))
 }
@@ -215,11 +223,10 @@ async fn abound_post_write(
         .text()
         .await
         .map_err(|e| ToolError::ExternalService(e.to_string()))?;
-    let body: serde_json::Value =
-        serde_json::from_str(&text).unwrap_or_else(|e| {
-            tracing::debug!(body = %text, "Failed to parse Abound response as JSON: {e}");
-            serde_json::Value::String(text)
-        });
+    let body: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|e| {
+        tracing::debug!(body = %text, "Failed to parse Abound response as JSON: {e}");
+        serde_json::Value::String(text)
+    });
 
     Ok(json!({ "status": status, "body": body }))
 }
@@ -444,7 +451,9 @@ impl Tool for AboundSendWireTool {
             let amount = params
                 .get("amount")
                 .and_then(|v| v.as_f64())
-                .ok_or_else(|| ToolError::InvalidParameters("amount is required for send action".into()))?;
+                .ok_or_else(|| {
+                    ToolError::InvalidParameters("amount is required for send action".into())
+                })?;
             let beneficiary = require_str(&params, "beneficiary_ref_id")?;
             let payment_reason = require_str(&params, "payment_reason_key")?;
 
@@ -505,15 +514,23 @@ impl Tool for AboundSendWireTool {
             );
 
             let notif_result = abound_post(
-                &self.client, &*self.secrets, &ctx.user_id, &notif_url, &notif_body,
-            ).await?;
+                &self.client,
+                &*self.secrets,
+                &ctx.user_id,
+                &notif_url,
+                &notif_body,
+            )
+            .await?;
 
             tracing::debug!(
                 response = %notif_result,
                 "abound_send_wire: notification response"
             );
 
-            let status = notif_result.get("status").and_then(|v| v.as_u64()).unwrap_or(0);
+            let status = notif_result
+                .get("status")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
             if (200..300).contains(&status) {
                 return Ok(ToolOutput::text(
                     format!(
@@ -543,11 +560,15 @@ impl Tool for AboundSendWireTool {
             let target_rate = params
                 .get("target_rate")
                 .and_then(|v| v.as_f64())
-                .ok_or_else(|| ToolError::InvalidParameters("target_rate is required for wait action".into()))?;
+                .ok_or_else(|| {
+                    ToolError::InvalidParameters("target_rate is required for wait action".into())
+                })?;
             let current_rate = params
                 .get("current_rate")
                 .and_then(|v| v.as_f64())
-                .ok_or_else(|| ToolError::InvalidParameters("current_rate is required for wait action".into()))?;
+                .ok_or_else(|| {
+                    ToolError::InvalidParameters("current_rate is required for wait action".into())
+                })?;
 
             if target_rate <= 0.0 {
                 return Err(ToolError::InvalidParameters(
@@ -615,7 +636,9 @@ impl Tool for AboundSendWireTool {
                     max_concurrent: None,
                     dedup_window_secs: None,
                 };
-                let guardrail_note = if let Err(e) = mgr.update_mission(mission_id, &ctx.user_id, updates).await {
+                let guardrail_note = if let Err(e) =
+                    mgr.update_mission(mission_id, &ctx.user_id, updates).await
+                {
                     tracing::debug!("failed to update mission guardrails: {e}");
                     " (warning: 24-run guardrail could not be applied — mission may run longer than expected)"
                 } else {
@@ -646,7 +669,9 @@ impl Tool for AboundSendWireTool {
             let amount = params
                 .get("amount")
                 .and_then(|v| v.as_f64())
-                .ok_or_else(|| ToolError::InvalidParameters("amount is required for execute".into()))?;
+                .ok_or_else(|| {
+                    ToolError::InvalidParameters("amount is required for execute".into())
+                })?;
             let payment_reason_key = require_str(&params, "payment_reason_key")?;
 
             let mut missing = Vec::new();
@@ -708,14 +733,21 @@ impl Tool for AboundSendWireTool {
             });
             let url = format!("{REMITTANCE_BASE}/send-wire");
             let wire_result =
-                abound_post_write(&self.client, &*self.secrets, &ctx.user_id, &url, &wire_body).await?;
+                abound_post_write(&self.client, &*self.secrets, &ctx.user_id, &url, &wire_body)
+                    .await?;
 
-            let status = wire_result.get("status").and_then(|v| v.as_u64()).unwrap_or(0);
+            let status = wire_result
+                .get("status")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
 
             let message = if (200..300).contains(&status) {
                 format!("Wire transfer of ${amount} executed successfully.")
             } else {
-                format!("Wire transfer failed {}", extract_abound_error(status, wire_result.get("body")))
+                format!(
+                    "Wire transfer failed {}",
+                    extract_abound_error(status, wire_result.get("body"))
+                )
             };
 
             return Ok(ToolOutput::text(message, start.elapsed()));
@@ -1005,8 +1037,7 @@ impl Tool for AboundRateAlertTool {
 
         // Step 1: Fetch exchange rate
         let url = format!("{REMITTANCE_BASE}/exchange-rate?from_currency={from}&to_currency={to}");
-        let rate_response =
-            abound_get(&self.client, &*self.secrets, &ctx.user_id, &url).await?;
+        let rate_response = abound_get(&self.client, &*self.secrets, &ctx.user_id, &url).await?;
 
         // Parse rate from response: body.data.current_exchange_rate.formatted_value
         let current_rate = rate_response
@@ -1014,16 +1045,16 @@ impl Tool for AboundRateAlertTool {
             .and_then(|b| b.get("data"))
             .and_then(|d| d.get("current_exchange_rate"))
             .and_then(|r| {
-                r.get("value")
-                    .and_then(|v| v.as_f64())
-                    .or_else(|| {
-                        r.get("formatted_value")
-                            .and_then(|v| v.as_str())
-                            .and_then(|s| s.parse::<f64>().ok())
-                    })
+                r.get("value").and_then(|v| v.as_f64()).or_else(|| {
+                    r.get("formatted_value")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse::<f64>().ok())
+                })
             })
             .unwrap_or_else(|| {
-                tracing::debug!("abound_rate_alert: could not parse current_rate — unexpected response shape");
+                tracing::debug!(
+                    "abound_rate_alert: could not parse current_rate — unexpected response shape"
+                );
                 0.0
             });
 
@@ -1032,13 +1063,11 @@ impl Tool for AboundRateAlertTool {
             .and_then(|b| b.get("data"))
             .and_then(|d| d.get("effective_exchange_rate"))
             .and_then(|r| {
-                r.get("value")
-                    .and_then(|v| v.as_f64())
-                    .or_else(|| {
-                        r.get("formatted_value")
-                            .and_then(|v| v.as_str())
-                            .and_then(|s| s.parse::<f64>().ok())
-                    })
+                r.get("value").and_then(|v| v.as_f64()).or_else(|| {
+                    r.get("formatted_value")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse::<f64>().ok())
+                })
             })
             .unwrap_or(0.0);
 

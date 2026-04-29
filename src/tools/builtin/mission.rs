@@ -64,11 +64,7 @@ fn extract_notify_channels(params: &serde_json::Value, ctx: &JobContext) -> Vec<
         arr.iter()
             .filter_map(|v| v.as_str().map(String::from))
             .collect()
-    } else if let Some(ch) = ctx
-        .metadata
-        .get("notify_channel")
-        .and_then(|v| v.as_str())
-    {
+    } else if let Some(ch) = ctx.metadata.get("notify_channel").and_then(|v| v.as_str()) {
         vec![ch.to_string()]
     } else {
         vec![]
@@ -168,10 +164,7 @@ impl Tool for MissionCreateTool {
                 success_criteria: Some(criteria.to_string()),
                 ..Default::default()
             };
-            let _ = self
-                .manager
-                .update_mission(id, &ctx.user_id, updates)
-                .await;
+            let _ = self.manager.update_mission(id, &ctx.user_id, updates).await;
         }
 
         let result = json!({"mission_id": id.to_string(), "status": "created"});
@@ -395,7 +388,10 @@ impl Tool for MissionPauseTool {
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("failed to pause mission: {e}")))?;
 
-        Ok(ToolOutput::success(json!({"status": "paused"}), start.elapsed()))
+        Ok(ToolOutput::success(
+            json!({"status": "paused"}),
+            start.elapsed(),
+        ))
     }
 
     fn engine_compatibility(&self) -> EngineCompatibility {
@@ -457,7 +453,10 @@ impl Tool for MissionResumeTool {
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("failed to resume mission: {e}")))?;
 
-        Ok(ToolOutput::success(json!({"status": "resumed"}), start.elapsed()))
+        Ok(ToolOutput::success(
+            json!({"status": "resumed"}),
+            start.elapsed(),
+        ))
     }
 
     fn engine_compatibility(&self) -> EngineCompatibility {
@@ -523,7 +522,10 @@ impl Tool for MissionDeleteTool {
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("failed to delete mission: {e}")))?;
 
-        Ok(ToolOutput::success(json!({"status": "deleted"}), start.elapsed()))
+        Ok(ToolOutput::success(
+            json!({"status": "deleted"}),
+            start.elapsed(),
+        ))
     }
 
     fn engine_compatibility(&self) -> EngineCompatibility {
@@ -638,7 +640,10 @@ impl Tool for MissionUpdateTool {
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("failed to update mission: {e}")))?;
 
-        Ok(ToolOutput::success(json!({"status": "updated"}), start.elapsed()))
+        Ok(ToolOutput::success(
+            json!({"status": "updated"}),
+            start.elapsed(),
+        ))
     }
 
     fn engine_compatibility(&self) -> EngineCompatibility {

@@ -40,6 +40,7 @@ def run_pipeline(
         send_response = None
         send_call_args = {}
         send_output = None
+        send_agent_text = None
         next_input = first_input
 
         for turn in range(1, MAX_TURNS + 1):
@@ -87,6 +88,7 @@ def run_pipeline(
                         send_response = resp
                         send_call_args = c["args"]
                         send_output = c.get("output")
+                        send_agent_text = text
 
             if text and not any("abound_send_wire" in c["name"] and
                                 (c["args"].get("action") or "") == "initiate"
@@ -115,7 +117,7 @@ def run_pipeline(
         chk("action=send was called", send_response is not None, sub,
             "model did not call send after 'Send now.'")
         if send_response is not None:
-            chk("action=send tool executed", tool_output_ok(send_output), sub,
+            chk("action=send tool executed", tool_output_ok(send_output, send_agent_text), sub,
                 f"no output or tool error: {send_output!r}")
 
         if send_response and initiate_call_args:

@@ -78,17 +78,8 @@ impl LlmBackend for LlmBridgeAdapter {
                     reason: e.to_string(),
                 })?;
 
-            // Check for code blocks in the response (CodeAct/RLM pattern)
-            let llm_response = match extract_code_block(&response.content) {
-                Some(code) => LlmResponse::Code {
-                    code,
-                    content: Some(response.content),
-                },
-                None => LlmResponse::Text(response.content),
-            };
-
             return Ok(LlmOutput {
-                response: llm_response,
+                response: LlmResponse::Text(response.content),
                 usage: TokenUsage {
                     input_tokens: u64::from(response.input_tokens),
                     output_tokens: u64::from(response.output_tokens),
@@ -115,7 +106,9 @@ impl LlmBackend for LlmBridgeAdapter {
                     reason: e.to_string(),
                 })?;
 
-        // Convert response — check for code blocks (CodeAct/RLM pattern)
+        // Convert response. Temporary demo/abound hack: keep v2 on the
+        // structured tool loop only, so fenced Python/repl text is returned as
+        // plain text instead of entering nested Monty/CodeAct.
         let llm_response = if !response.tool_calls.is_empty() {
             LlmResponse::ActionCalls {
                 calls: response
@@ -131,14 +124,7 @@ impl LlmBackend for LlmBridgeAdapter {
             }
         } else {
             let text = response.content.unwrap_or_default();
-            // Detect ```repl or ```python fenced code blocks
-            match extract_code_block(&text) {
-                Some(code) => LlmResponse::Code {
-                    code,
-                    content: Some(text),
-                },
-                None => LlmResponse::Text(text),
-            }
+            LlmResponse::Text(text)
         };
 
         Ok(LlmOutput {
@@ -211,6 +197,7 @@ fn action_def_to_tool_def(action: &ActionDef) -> ToolDefinition {
 /// (if the content looks like Python). Collects ALL code blocks in the
 /// response and concatenates them (models sometimes split code across
 /// multiple blocks with explanation text between them).
+#[cfg(test)]
 fn extract_code_block(text: &str) -> Option<String> {
     let mut all_code = Vec::new();
 
@@ -291,6 +278,7 @@ fn extract_code_block(text: &str) -> Option<String> {
 /// Avoids the false positives `trimmed.contains('(')` produced for markdown
 /// links like `[text](url)` and prose like "See (docs)" — neither has an
 /// alphanumeric/underscore character directly before the `(`.
+#[cfg(test)]
 fn has_identifier_call(line: &str) -> bool {
     let bytes = line.as_bytes();
     for (i, &b) in bytes.iter().enumerate() {
@@ -304,6 +292,7 @@ fn has_identifier_call(line: &str) -> bool {
     false
 }
 
+#[cfg(test)]
 fn looks_like_python(code: &str) -> bool {
     const PY_KEYWORDS: &[&str] = &[
         "import", "from", "def", "class", "if", "for", "while", "return", "print", "FINAL", "try",
@@ -419,6 +408,50 @@ mod tests {
 
             Ok(ToolCompletionResponse {
                 content: Some("ok".to_string()),
+                tool_calls: Vec::new(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: crate::llm::FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+    }
+
+    struct FixedContentProvider {
+        content: String,
+    }
+
+    #[async_trait]
+    impl LlmProvider for FixedContentProvider {
+        fn model_name(&self) -> &str {
+            "fixed-content-provider"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _req: crate::llm::CompletionRequest,
+        ) -> Result<crate::llm::CompletionResponse, LlmError> {
+            Ok(crate::llm::CompletionResponse {
+                content: self.content.clone(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: crate::llm::FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _req: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            Ok(ToolCompletionResponse {
+                content: Some(self.content.clone()),
                 tool_calls: Vec::new(),
                 input_tokens: 1,
                 output_tokens: 1,
@@ -554,6 +587,50 @@ mod tests {
         assert_eq!(sent[2].content, "result payload");
         assert_eq!(sent[2].tool_call_id.as_deref(), Some("call_1"));
         assert_eq!(sent[2].name.as_deref(), Some("search"));
+    }
+
+    #[tokio::test]
+    async fn complete_without_tools_keeps_python_blocks_as_text() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(FixedContentProvider {
+            content: "```python\nFINAL('done')\n```".to_string(),
+        });
+        let adapter = LlmBridgeAdapter::new(provider, None);
+
+        let output = adapter
+            .complete(
+                &[ThreadMessage::user("compute this")],
+                &[],
+                &LlmCallConfig::default(),
+            )
+            .await
+            .unwrap();
+
+        match output.response {
+            LlmResponse::Text(text) => assert!(text.contains("FINAL('done')")),
+            other => panic!("expected code block to stay text, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_keeps_python_blocks_as_text_when_no_tool_calls() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(FixedContentProvider {
+            content: "```repl\nmemory_read(path='x')\n```".to_string(),
+        });
+        let adapter = LlmBridgeAdapter::new(provider, None);
+
+        let output = adapter
+            .complete(
+                &[ThreadMessage::user("read x")],
+                &[test_action("memory_read")],
+                &LlmCallConfig::default(),
+            )
+            .await
+            .unwrap();
+
+        match output.response {
+            LlmResponse::Text(text) => assert!(text.contains("memory_read")),
+            other => panic!("expected code block to stay text, got {other:?}"),
+        }
     }
 
     // ── extract_code_block tests ────────────────────────────

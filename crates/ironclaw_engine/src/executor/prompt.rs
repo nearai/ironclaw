@@ -72,11 +72,23 @@ impl PlatformInfo {
     }
 }
 
-/// The main instruction block (before tool listing).
-const CODEACT_PREAMBLE: &str = include_str!("../../prompts/codeact_preamble.md");
+/// Temporary structured-tool-only prompt for demo/abound testing.
+const STRUCTURED_TOOL_PREAMBLE: &str = r#"You are IronClaw, a personal AI assistant.
 
-/// The strategy/closing block (after tool listing).
-const CODEACT_POSTAMBLE: &str = include_str!("../../prompts/codeact_postamble.md");
+## Execution mode
+
+Use the provider's structured tool_calls interface for every action.
+Do not emit Python, repl, py, or other executable fenced code blocks.
+Do not call tools as Python functions.
+When no action is needed, answer in plain text.
+"#;
+
+const STRUCTURED_TOOL_POSTAMBLE: &str = r#"
+## Strategy
+
+Use structured tool calls when you need data, persistence, external effects, or system state.
+After tool results are available, continue with another structured tool call or return the final plain-text answer.
+"#;
 
 /// Well-known title for the CodeAct preamble overlay.
 pub const PREAMBLE_OVERLAY_TITLE: &str = "prompt:codeact_preamble";
@@ -135,14 +147,14 @@ fn build_codeact_system_prompt_inner(
     platform: Option<&PlatformInfo>,
 ) -> String {
     let mut prompt = if let Ok(custom) = std::env::var("AGENT_PREAMBLE") {
-        // Replace the default identity line but keep the rest of the CodeAct instructions.
-        let rest = CODEACT_PREAMBLE
+        // Replace the default identity line but keep the structured-tool-only instructions.
+        let rest = STRUCTURED_TOOL_PREAMBLE
             .find("\n\n")
-            .map(|i| &CODEACT_PREAMBLE[i..])
+            .map(|i| &STRUCTURED_TOOL_PREAMBLE[i..])
             .unwrap_or("");
         format!("{custom}{rest}")
     } else {
-        String::from(CODEACT_PREAMBLE)
+        String::from(STRUCTURED_TOOL_PREAMBLE)
     };
 
     // Inject platform identity and runtime metadata
@@ -158,7 +170,7 @@ fn build_codeact_system_prompt_inner(
 
     // Add tool documentation
     if !actions.is_empty() {
-        prompt.push_str("\n## Available tools (call as Python functions)\n\n");
+        prompt.push_str("\n## Available tools\n\n");
         for action in actions {
             prompt.push_str(&format!("- `{}(", action.name));
             // Extract parameter names from JSON schema
@@ -172,7 +184,7 @@ fn build_codeact_system_prompt_inner(
         }
     }
 
-    prompt.push_str(CODEACT_POSTAMBLE);
+    prompt.push_str(STRUCTURED_TOOL_POSTAMBLE);
     prompt
 }
 
@@ -209,7 +221,8 @@ mod tests {
     async fn prompt_without_store_uses_compiled_preamble() {
         let prompt =
             build_codeact_system_prompt(&[], None, ProjectId(uuid::Uuid::nil()), None).await;
-        assert!(prompt.contains("Python REPL environment"));
+        assert!(prompt.contains("structured tool_calls"));
+        assert!(prompt.contains("Do not emit Python"));
         assert!(prompt.contains("Strategy"));
         assert!(!prompt.contains("Learned Rules"));
     }

@@ -189,6 +189,7 @@ impl ConversationManager {
     /// The per-conversation `Mutex` is held for the entire operation — from
     /// the active-thread check through `save_conversation`. This eliminates
     /// the TOCTOU double-spawn window present in the old 5-phase split.
+    #[allow(clippy::too_many_arguments)]
     pub async fn handle_user_message(
         &self,
         conversation_id: ConversationId,
