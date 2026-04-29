@@ -1481,7 +1481,8 @@
   display: none;
 }
 
-.image-preview-container {
+.image-preview-container,
+.attachment-preview-container {
   position: relative;
   display: inline-block;
   flex-shrink: 0;
@@ -1493,27 +1494,169 @@
   border-radius: 6px;
   object-fit: cover;
   display: block;
+  cursor: zoom-in;
 }
 
-.image-preview-remove {
+/* Click-to-zoom affordance on the post-send and generated images, too. */
+.message-attachment-image,
+.generated-image {
+  cursor: zoom-in;
+}
+
+/* `.chat-input button` (the broad accent-pill for Send) outranks a bare
+ * `.image-preview-remove` selector — qualify with `.chat-input` so the
+ * 18×18 round overlay wins specificity, and explicitly reset the inherited
+ * padding / radius / hover-transform / font-weight that would otherwise
+ * stretch the × into a green pill. */
+.chat-input .image-preview-remove {
   position: absolute;
-  top: -6px;
+  top: -4px;
   right: -6px;
   width: 18px;
   height: 18px;
+  padding: 0;
   border-radius: 50%;
   background: var(--danger);
   color: var(--text-on-danger);
   border: none;
   font-size: 12px;
-  line-height: 18px;
+  font-weight: normal;
+  line-height: 1;
   text-align: center;
   cursor: pointer;
-  padding: 0;
+  align-self: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: filter 0.15s;
 }
 
-.image-preview-remove:hover {
-  filter: brightness(1.2);
+.chat-input .image-preview-remove:hover:not(:disabled) {
+  background: var(--danger);
+  filter: brightness(1.15);
+  transform: none;
+}
+
+.chat-input .image-preview-remove:active {
+  transform: none;
+}
+
+/* Non-image attachment card in the staging strip: generic file icon on the
+ * left, filename + size on the right, X button overlapping the top-right
+ * (anchored by the shared .attachment-preview-container `position: relative`). */
+.attachment-preview-container.attachment-preview-file {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 8px 12px 8px 8px;
+  min-height: 60px;
+  max-width: 240px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+}
+
+.attachment-preview-file-icon {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.attachment-preview-file-icon svg {
+  width: 100%;
+  height: 100%;
+  margin-right: 2px;
+}
+
+.attachment-preview-file-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.attachment-preview-file-name {
+  font-size: 13px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.attachment-preview-file-size {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+/* Post-send message bubble file card: same icon + name + meta layout as the
+ * staging preview, just without the X button. The strip wrapping the cards
+ * comes from .message-attachments. */
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.message-attachment-file {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 8px 12px 8px 8px;
+  min-height: 56px;
+  max-width: 280px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+}
+
+.message-attachment-file-icon {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.message-attachment-file-icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+.message-attachment-file-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.message-attachment-file-name {
+  font-size: 13px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.message-attachment-file-meta {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+.message-attachment-image {
+  max-width: 200px;
+  max-height: 200px;
+  border-radius: 6px;
+  object-fit: cover;
+  display: block;
 }
 
 .message-images {
@@ -1551,5 +1694,28 @@
   color: var(--text-secondary);
   font-size: 13px;
   line-height: 1.4;
+}
+
+/* Image lightbox: click any clickable image to zoom; click backdrop or
+ * press ESC to close. Lazily created in chat.js `showImageLightbox`. */
+.image-lightbox-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  cursor: zoom-out;
+  animation: modalFadeIn 0.15s ease;
+}
+
+.image-lightbox-image {
+  max-width: 90vw;
+  max-height: 90vh;
+  object-fit: contain;
+  border-radius: 4px;
+  cursor: default;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
 }
 

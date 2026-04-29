@@ -94,9 +94,8 @@ const JOB_EVENTS_CAP = 500;
 const JOB_EVENTS_MAX_JOBS = 50;
 const MAX_DOM_MESSAGES = 200;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
-let stagedImages = [];
-// Non-image attachments staged for the next /api/chat/send submission.
-// Shape matches SendMessageRequest::attachments: { mime_type, filename, data_base64 }.
+// Files staged for the next /api/chat/send submission. Shape matches
+// SendMessageRequest::attachments: { mime_type, filename, data_base64 }.
 let stagedAttachments = [];
 // FileReader promises that have not yet resolved. sendMessage awaits this
 // array before composing the body so an Enter-press during file decode still

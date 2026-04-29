@@ -1279,4 +1279,196 @@ mod tests {
         let incoming = web_attachments_to_incoming(&attachments).expect("valid ADTS should pass");
         assert_eq!(incoming[0].mime_type, "audio/aac");
     }
+
+    // --- Tests covering issue #1341: non-image attachments end-to-end. ---
+
+    #[test]
+    fn inline_attachments_classify_pdf_as_document_and_keep_filename() {
+        use base64::Engine;
+
+        let attachments = vec![AttachmentData {
+            mime_type: "application/pdf".to_string(),
+            filename: Some("invoice-Q1.pdf".to_string()),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(b"%PDF-1.7\n%binary"),
+        }];
+
+        let incoming =
+            inline_attachments_to_incoming(&[], &attachments).expect("valid pdf should pass");
+
+        assert_eq!(incoming.len(), 1);
+        assert_eq!(incoming[0].kind, crate::channels::AttachmentKind::Document);
+        assert_eq!(incoming[0].mime_type, "application/pdf");
+        // Original filename preserved, no auto-generated "attachment-N" name.
+        assert_eq!(incoming[0].filename.as_deref(), Some("invoice-Q1.pdf"));
+    }
+
+    #[test]
+    fn inline_attachments_classify_audio_as_audio() {
+        use base64::Engine;
+
+        let attachments = vec![AttachmentData {
+            mime_type: "audio/mpeg".to_string(),
+            filename: Some("voicenote.mp3".to_string()),
+            // ID3 header is sufficient to satisfy the magic-byte check.
+            data_base64: base64::engine::general_purpose::STANDARD.encode(b"ID3\x03\x00\x00\x00"),
+        }];
+
+        let incoming = inline_attachments_to_incoming(&[], &attachments).expect("valid mp3");
+
+        assert_eq!(incoming[0].kind, crate::channels::AttachmentKind::Audio);
+        assert_eq!(incoming[0].filename.as_deref(), Some("voicenote.mp3"));
+    }
+
+    #[test]
+    fn inline_attachments_mix_legacy_images_and_new_attachments() {
+        use base64::Engine;
+
+        let images = vec![ImageData {
+            media_type: "image/png".to_string(),
+            data: base64::engine::general_purpose::STANDARD
+                .encode([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]),
+        }];
+        let attachments = vec![AttachmentData {
+            mime_type: "application/pdf".to_string(),
+            filename: Some("notes.pdf".to_string()),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(b"%PDF-1.7\n"),
+        }];
+
+        let incoming = inline_attachments_to_incoming(&images, &attachments)
+            .expect("legacy image + new attachment should both pass");
+
+        // attachments come first (web_attachments_to_incoming), then images.
+        assert_eq!(incoming.len(), 2);
+        assert_eq!(incoming[0].mime_type, "application/pdf");
+        assert_eq!(incoming[0].filename.as_deref(), Some("notes.pdf"));
+        assert_eq!(incoming[1].mime_type, "image/png");
+        assert_eq!(incoming[1].kind, crate::channels::AttachmentKind::Image);
+    }
+
+    #[test]
+    fn inline_attachments_reject_when_per_file_budget_exceeded() {
+        use base64::Engine;
+
+        let mut payload = b"%PDF-1.7\n".to_vec();
+        payload.resize(MAX_INLINE_ATTACHMENT_BYTES + 1, 0);
+        let attachments = vec![AttachmentData {
+            mime_type: "application/pdf".to_string(),
+            filename: Some("huge.pdf".to_string()),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(&payload),
+        }];
+
+        let err = inline_attachments_to_incoming(&[], &attachments).unwrap_err();
+        assert!(
+            err.contains("exceeds") && err.contains("per-file limit"),
+            "expected per-file budget error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn inline_attachments_reject_when_total_budget_exceeded() {
+        use base64::Engine;
+
+        // Each file must be under the per-file cap so the per-file check
+        // doesn't fire first; the sum must exceed the per-message cap.
+        let per_file_size = MAX_INLINE_ATTACHMENT_BYTES;
+        let file_count = (MAX_INLINE_TOTAL_ATTACHMENT_BYTES / per_file_size) + 1;
+        assert!(file_count <= MAX_INLINE_ATTACHMENTS, "test setup invariant");
+
+        let mut payload = b"%PDF-1.7\n".to_vec();
+        payload.resize(per_file_size, 0);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&payload);
+
+        let attachments: Vec<AttachmentData> = (0..file_count)
+            .map(|i| AttachmentData {
+                mime_type: "application/pdf".to_string(),
+                filename: Some(format!("file-{i}.pdf")),
+                data_base64: encoded.clone(),
+            })
+            .collect();
+
+        let err = inline_attachments_to_incoming(&[], &attachments).unwrap_err();
+        assert!(
+            err.contains("Total attachment size"),
+            "expected total budget error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn inline_attachments_reject_when_count_exceeded() {
+        use base64::Engine;
+
+        let pdf = base64::engine::general_purpose::STANDARD.encode(b"%PDF-1.7\n");
+        let attachments: Vec<AttachmentData> = (0..MAX_INLINE_ATTACHMENTS + 1)
+            .map(|i| AttachmentData {
+                mime_type: "application/pdf".to_string(),
+                filename: Some(format!("doc-{i}.pdf")),
+                data_base64: pdf.clone(),
+            })
+            .collect();
+
+        let err = inline_attachments_to_incoming(&[], &attachments).unwrap_err();
+        assert!(
+            err.contains("Too many attachments"),
+            "expected file-count error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn inline_attachments_reject_executable_mime_types() {
+        use base64::Engine;
+
+        // Active-content / executable MIME types must never be accepted —
+        // even with a benign body, the allow-list rejects them upfront.
+        for mime in [
+            "text/html",
+            "application/javascript",
+            "application/x-msdownload",
+            "image/svg+xml",
+        ] {
+            let attachments = vec![AttachmentData {
+                mime_type: mime.to_string(),
+                filename: Some("payload".to_string()),
+                data_base64: base64::engine::general_purpose::STANDARD.encode(b"<harmless/>"),
+            }];
+
+            let err = inline_attachments_to_incoming(&[], &attachments).unwrap_err();
+            assert!(
+                err.contains("Unsupported"),
+                "expected reject for {mime}, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn inline_attachments_synthesize_filename_when_missing() {
+        use base64::Engine;
+
+        // No filename supplied: helper must synthesize one with the right
+        // extension rather than falling back to .bin.
+        let attachments = vec![AttachmentData {
+            mime_type: "application/pdf".to_string(),
+            filename: None,
+            data_base64: base64::engine::general_purpose::STANDARD.encode(b"%PDF-1.7\n"),
+        }];
+
+        let incoming = inline_attachments_to_incoming(&[], &attachments).expect("valid pdf");
+
+        assert_eq!(incoming[0].filename.as_deref(), Some("attachment-0.pdf"));
+    }
+
+    #[test]
+    fn inline_attachments_blank_filename_treated_as_missing() {
+        use base64::Engine;
+
+        // A whitespace-only filename should not bypass the synthesis path.
+        let attachments = vec![AttachmentData {
+            mime_type: "application/pdf".to_string(),
+            filename: Some("   ".to_string()),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(b"%PDF-1.7\n"),
+        }];
+
+        let incoming = inline_attachments_to_incoming(&[], &attachments).expect("valid pdf");
+
+        assert_eq!(incoming[0].filename.as_deref(), Some("attachment-0.pdf"));
+    }
 }

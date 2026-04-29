@@ -81,7 +81,7 @@ async function sendMessage() {
   }
   if (_sendCooldown) return;
   const content = input.value.trim();
-  if (!content && stagedImages.length === 0 && stagedAttachments.length === 0) return;
+  if (!content && stagedAttachments.length === 0) return;
 
   // Intercept approval keywords when an unresolved approval card is pending.
   // Find the most recent unresolved card for the current thread (resolved cards
@@ -115,10 +115,9 @@ async function sendMessage() {
     }
   }
 
-  // Snapshot attached images + attachments before the body block clears them,
-  // so the optimistic display, pending entry, and retry handler all see the
-  // same view the user pressed Enter on.
-  const attachedImageDataUrls = stagedImages.map(img => img.dataUrl);
+  // Snapshot attachments before the body block clears them, so the optimistic
+  // display, pending entry, and retry handler all see the same view the user
+  // pressed Enter on.
   const pendingAttachmentsForDisplay = stagedAttachments.map(att => ({
     kind: att.kind || (att.mime_type && att.mime_type.startsWith('image/') ? 'image' : 'document'),
     filename: att.filename || 'attachment',
@@ -128,7 +127,7 @@ async function sendMessage() {
     preview_text: '',
   }));
   const displayContent = content
-    || (pendingAttachmentsForDisplay.length > 0 ? '(files attached)' : '(images attached)');
+    || (pendingAttachmentsForDisplay.length > 0 ? '(files attached)' : '');
   const pendingCopyTextParts = [];
   if (displayContent) pendingCopyTextParts.push(displayContent);
   pendingAttachmentsForDisplay.forEach((att) => {
@@ -144,9 +143,6 @@ async function sendMessage() {
     attachments: pendingAttachmentsForDisplay,
     copyText: pendingCopyText,
   });
-  if (attachedImageDataUrls.length > 0) {
-    appendImagesToMessage(userMsg, attachedImageDataUrls);
-  }
   pruneOldMessages();
   if (currentThreadId) {
     activeWorkStore.updateThread(currentThreadId, {
@@ -170,17 +166,11 @@ async function sendMessage() {
       content: displayContent,
       copyText: pendingCopyText,
       attachments: pendingAttachmentsForDisplay.map((att) => ({ ...att })),
-      images: attachedImageDataUrls,
       timestamp: Date.now(),
     });
   }
 
   const body = { content, thread_id: currentThreadId || undefined, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone };
-  if (stagedImages.length > 0) {
-    body.images = stagedImages.map(img => ({ media_type: img.media_type, data: img.data }));
-    stagedImages = [];
-    renderImagePreviews();
-  }
   // Clone attachments so the retry handler can restore them if send fails
   // without getting mutated by subsequent stagedAttachments clears.
   const pendingAttachments = stagedAttachments.map(att => ({ ...att }));
@@ -235,8 +225,7 @@ async function sendMessage() {
         e.preventDefault();
         if (userMsg.parentNode) userMsg.parentNode.removeChild(userMsg);
         // Restore the attachments we just cleared so the retry carries the
-        // same payload the failed send attempted. `stagedImages` is kept
-        // separately by the existing preview machinery.
+        // same payload the failed send attempted.
         if (pendingAttachments.length > 0) {
           stagedAttachments = pendingAttachments.map(att => ({ ...att }));
           if (typeof renderAttachmentPreviews === 'function') {
@@ -260,62 +249,6 @@ function enableChatInput() {
     input.placeholder = I18n.t('chat.inputPlaceholder');
   }
   if (btn) btn.disabled = false;
-}
-
-// --- Image Upload ---
-
-function renderImagePreviews() {
-  const strip = document.getElementById('image-preview-strip');
-  strip.innerHTML = '';
-  stagedImages.forEach((img, idx) => {
-    const container = document.createElement('div');
-    container.className = 'image-preview-container';
-
-    const preview = document.createElement('img');
-    preview.className = 'image-preview';
-    preview.src = img.dataUrl;
-    preview.alt = 'Attached image';
-
-    const removeBtn = document.createElement('button');
-    removeBtn.className = 'image-preview-remove';
-    removeBtn.textContent = '\u00d7';
-    removeBtn.addEventListener('click', () => {
-      stagedImages.splice(idx, 1);
-      renderImagePreviews();
-    });
-
-    container.appendChild(preview);
-    container.appendChild(removeBtn);
-    strip.appendChild(container);
-  });
-}
-
-const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB per image
-const MAX_STAGED_IMAGES = 5;
-
-function handleImageFiles(files) {
-  Array.from(files).forEach(file => {
-    if (!file.type.startsWith('image/')) return;
-    if (file.size > MAX_IMAGE_SIZE_BYTES) {
-      alert(I18n.t('chat.imageTooBig', { name: file.name, size: (file.size / 1024 / 1024).toFixed(1) }));
-      return;
-    }
-    if (stagedImages.length >= MAX_STAGED_IMAGES) {
-      alert(I18n.t('chat.maxImages', { n: MAX_STAGED_IMAGES }));
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = function(e) {
-      const dataUrl = e.target.result;
-      const commaIdx = dataUrl.indexOf(',');
-      const meta = dataUrl.substring(0, commaIdx); // e.g. "data:image/png;base64"
-      const base64 = dataUrl.substring(commaIdx + 1);
-      const mediaType = meta.replace('data:', '').replace(';base64', '');
-      stagedImages.push({ media_type: mediaType, data: base64, dataUrl: dataUrl });
-      renderImagePreviews();
-    };
-    reader.readAsDataURL(file);
-  });
 }
 
 // The click/change/paste wiring for #attach-btn + #image-file-input lives in
@@ -620,19 +553,68 @@ function formatAttachmentSize(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function appendAttachmentFileCard(container, itemClassName, nameClassName, metaClassName, filename, metaText) {
+// Lucide-style SVG icons. Audio gets a music note; everything else falls
+// back to the generic file glyph. Video isn't supported by the backend
+// allowlist, so it's rejected at `handleAttachmentFiles` and never reaches
+// the icon picker.
+function attachmentIconSvg(mimeType) {
+  const mt = (mimeType || '').toLowerCase();
+  if (mt.startsWith('audio/')) {
+    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>';
+  }
+  return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
+}
+
+// Short, recognizable type label. Prefer the file extension because users
+// know "DOCX"/"MP3" instinctively; fall back to a MIME-derived category
+// when the filename is missing or extensionless.
+function attachmentTypeLabel(filename, mimeType) {
+  if (filename) {
+    const dot = filename.lastIndexOf('.');
+    if (dot > -1 && dot < filename.length - 1) {
+      const ext = filename.slice(dot + 1).toUpperCase();
+      // Sanity-cap extension length so an oddly-named file like
+      // "report.final-version-with-comments" doesn't blow out the label.
+      if (ext.length > 0 && ext.length <= 5) return ext;
+    }
+  }
+  const mt = (mimeType || '').toLowerCase();
+  if (mt === 'application/pdf') return 'PDF';
+  if (mt.startsWith('image/')) return 'Image';
+  if (mt.startsWith('audio/')) return 'Audio';
+  if (mt.startsWith('text/')) return 'Text';
+  return 'File';
+}
+
+// Compose `type • size` for the meta line, dropping either piece if missing.
+function attachmentMetaText(filename, mimeType, sizeLabel) {
+  return [attachmentTypeLabel(filename, mimeType), sizeLabel || '']
+    .filter(Boolean)
+    .join(' • ');
+}
+
+function appendAttachmentFileCard(container, itemClassName, nameClassName, metaClassName, filename, metaText, mimeType) {
   const item = document.createElement('div');
   item.className = itemClassName;
+  // Mirror the staging preview: icon on the left, name + meta on the right.
+  const iconEl = document.createElement('div');
+  iconEl.className = `${nameClassName.replace('-name', '-icon')}`;
+  iconEl.innerHTML = attachmentIconSvg(mimeType);
+  item.appendChild(iconEl);
+  const metaWrap = document.createElement('div');
+  metaWrap.className = `${nameClassName.replace('-name', '-body')}`;
   const nameEl = document.createElement('div');
   nameEl.className = nameClassName;
   nameEl.textContent = filename || 'attachment';
-  item.appendChild(nameEl);
+  nameEl.title = filename || '';
+  metaWrap.appendChild(nameEl);
   if (metaText) {
     const metaEl = document.createElement('div');
     metaEl.className = metaClassName;
     metaEl.textContent = metaText;
-    item.appendChild(metaEl);
+    metaWrap.appendChild(metaEl);
   }
+  item.appendChild(metaWrap);
   container.appendChild(item);
 }
 
@@ -654,18 +636,24 @@ function renderAttachmentPreviews() {
       container.classList.add('attachment-preview-file');
       const icon = document.createElement('div');
       icon.className = 'attachment-preview-file-icon';
-      icon.textContent = (att.filename || 'FILE').split('.').pop().toUpperCase().slice(0, 4);
+      // Audio/video get type-specific glyphs so the user can read the card
+      // at a glance; everything else falls back to the generic file icon.
+      icon.innerHTML = attachmentIconSvg(att.mime_type);
       container.appendChild(icon);
       const meta = document.createElement('div');
       meta.className = 'attachment-preview-file-meta';
       const nameEl = document.createElement('div');
       nameEl.className = 'attachment-preview-file-name';
       nameEl.textContent = att.filename || 'Attached file';
+      nameEl.title = att.filename || '';
       meta.appendChild(nameEl);
-      const typeEl = document.createElement('div');
-      typeEl.className = 'attachment-preview-file-type';
-      typeEl.textContent = att.mime_type;
-      meta.appendChild(typeEl);
+      const metaText = attachmentMetaText(att.filename, att.mime_type, att.size_label);
+      if (metaText) {
+        const sizeEl = document.createElement('div');
+        sizeEl.className = 'attachment-preview-file-size';
+        sizeEl.textContent = metaText;
+        meta.appendChild(sizeEl);
+      }
       container.appendChild(meta);
     }
 
@@ -682,7 +670,7 @@ function renderAttachmentPreviews() {
   });
 }
 
-const MAX_ATTACHMENT_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB per attachment
+const MAX_ATTACHMENT_SIZE_BYTES = 7 * 1024 * 1024; // 7 MB per attachment (matches MAX_INLINE_ATTACHMENT_BYTES)
 const MAX_TOTAL_ATTACHMENT_BYTES = 10 * 1024 * 1024; // 10 MB decoded per message
 const MAX_STAGED_ATTACHMENTS = 5;
 
@@ -691,6 +679,14 @@ function handleAttachmentFiles(files) {
   let projectedTotalBytes = stagedAttachments.reduce((sum, att) => sum + (att.size_bytes || 0), 0) + pendingAttachmentBytes;
   Array.from(files).forEach(file => {
     const mimeType = inferAttachmentMimeType(file);
+    // Backend allowlist (src/channels/web/util.rs `is_allowed_attachment_mime`)
+    // doesn't include video/*. Reject at the boundary so the user gets a clear
+    // alert instead of a server-side rejection after upload.
+    if ((file.type || '').toLowerCase().startsWith('video/')
+        || mimeType.toLowerCase().startsWith('video/')) {
+      alert(I18n.t('chat.videoNotSupported', { name: file.name }));
+      return;
+    }
     if (file.size > MAX_ATTACHMENT_SIZE_BYTES) {
       alert(I18n.t('chat.fileTooBig', { name: file.name, size: (file.size / 1024 / 1024).toFixed(1) }));
       return;
@@ -858,14 +854,72 @@ function renderMessageAttachments(container, attachments) {
       strip.appendChild(image);
       return;
     }
+    // Match the staging preview: type-aware icon + filename + (type • size).
     appendAttachmentFileCard(
       strip,
       'message-attachment-file',
       'message-attachment-file-name',
       'message-attachment-file-meta',
       att.filename || 'attachment',
-      [att.mime_type, att.size_label].filter(Boolean).join(' • ')
+      attachmentMetaText(att.filename, att.mime_type, att.size_label),
+      att.mime_type
     );
   });
   container.appendChild(strip);
 }
+
+// --- Image lightbox ---
+
+// Lazy-create a fullscreen overlay showing the clicked image at its natural
+// size (capped to viewport). Click the backdrop or press ESC to close.
+function showImageLightbox(src, alt) {
+  // Remove any existing lightbox so rapid clicks don't stack overlays.
+  const existing = document.getElementById('image-lightbox');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'image-lightbox';
+  overlay.className = 'image-lightbox-overlay';
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-modal', 'true');
+  overlay.setAttribute('aria-label', 'Image preview');
+  overlay.tabIndex = -1;
+
+  const img = document.createElement('img');
+  img.className = 'image-lightbox-image';
+  img.src = src;
+  if (alt) img.alt = alt;
+  overlay.appendChild(img);
+
+  const close = () => {
+    overlay.remove();
+    document.removeEventListener('keydown', onKey);
+  };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+
+  // Close only when the backdrop itself is clicked, never the image.
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) close();
+  });
+  document.addEventListener('keydown', onKey);
+
+  document.body.appendChild(overlay);
+  overlay.focus();
+}
+
+// Delegate click handling to document.body so dynamically-added images
+// (history rerenders, generated images, staging strip) are picked up
+// without rebinding listeners.
+(function wireImageLightbox() {
+  document.addEventListener('click', (e) => {
+    const target = e.target;
+    if (!(target instanceof HTMLImageElement)) return;
+    if (target.classList.contains('image-preview')
+        || target.classList.contains('message-attachment-image')
+        || target.classList.contains('generated-image')) {
+      if (e.defaultPrevented) return;
+      e.preventDefault();
+      showImageLightbox(target.src, target.alt || '');
+    }
+  });
+})();
