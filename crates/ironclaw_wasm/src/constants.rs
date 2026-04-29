@@ -1,0 +1,24 @@
+const DEFAULT_FUEL: u64 = 500_000;
+const DEFAULT_OUTPUT_BYTES: u64 = 1024 * 1024;
+const DEFAULT_MEMORY_BYTES: u64 = 10 * 1024 * 1024;
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(500);
+const CACHE_ABI_VERSION: &str = "json-v1";
+const CORE_IMPORT_MODULE: &str = "host";
+const CORE_LOG_IMPORT: &str = "log_utf8";
+const CORE_TIME_IMPORT: &str = "time_unix_ms";
+const FS_READ_IMPORT: &str = "fs_read_utf8";
+const FS_WRITE_IMPORT: &str = "fs_write_utf8";
+const FS_LIST_IMPORT: &str = "fs_list_utf8";
+const FS_STAT_LEN_IMPORT: &str = "fs_stat_len";
+const HTTP_REQUEST_IMPORT: &str = "http_request_utf8";
+const MAX_LOG_ENTRIES: usize = 1_000;
+const MAX_LOG_MESSAGE_BYTES: usize = 4 * 1024;
+const MAX_GUEST_PATH_BYTES: usize = 4 * 1024;
+const MAX_HTTP_URL_BYTES: usize = 8 * 1024;
+const MAX_HTTP_BODY_BYTES: usize = 1024 * 1024;
+const MAX_FS_WRITE_BYTES: usize = 1024 * 1024;
+const DEFAULT_FILESYSTEM_BRIDGE_TIMEOUT: Duration = Duration::from_secs(60);
+const HOST_IMPORT_TIMEOUT_CODE: i32 = -12;
+const MAX_CONCURRENT_HOST_IMPORT_THREADS: usize = 64;
+
