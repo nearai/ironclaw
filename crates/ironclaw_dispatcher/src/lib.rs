@@ -354,15 +354,15 @@ where
     }
 }
 
-fn dispatch_error_kind(error: &DispatchError) -> String {
+fn dispatch_error_kind(error: &DispatchError) -> &'static str {
     match error {
-        DispatchError::UnknownCapability { .. } => "unknown_capability".to_string(),
-        DispatchError::UnknownProvider { .. } => "unknown_provider".to_string(),
-        DispatchError::RuntimeMismatch { .. } => "runtime_mismatch".to_string(),
-        DispatchError::MissingRuntimeBackend { .. } => "missing_runtime_backend".to_string(),
-        DispatchError::UnsupportedRuntime { .. } => "unsupported_runtime".to_string(),
+        DispatchError::UnknownCapability { .. } => "unknown_capability",
+        DispatchError::UnknownProvider { .. } => "unknown_provider",
+        DispatchError::RuntimeMismatch { .. } => "runtime_mismatch",
+        DispatchError::MissingRuntimeBackend { .. } => "missing_runtime_backend",
+        DispatchError::UnsupportedRuntime { .. } => "unsupported_runtime",
         DispatchError::Mcp { kind }
         | DispatchError::Script { kind }
-        | DispatchError::Wasm { kind } => kind.as_str().to_string(),
+        | DispatchError::Wasm { kind } => kind.event_kind(),
     }
 }

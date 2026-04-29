@@ -155,6 +155,50 @@ async fn dispatcher_preserves_original_error_when_failure_event_sink_fails() {
 }
 
 #[tokio::test]
+async fn dispatcher_emits_redacted_runtime_error_kind_for_adapter_failure() {
+    let fs = filesystem_with_echo_extensions();
+    let registry =
+        ExtensionDiscovery::discover(&fs, &VirtualPath::new("/system/extensions").unwrap())
+            .await
+            .unwrap();
+    let governor = InMemoryResourceGovernor::new();
+    let script_adapter =
+        FailingRuntimeAdapter::new(RuntimeKind::Script, RuntimeDispatchErrorKind::ExitFailure);
+    let events = InMemoryEventSink::new();
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
+        .with_runtime_adapter(RuntimeKind::Script, &script_adapter)
+        .with_event_sink(&events);
+
+    let err = dispatcher
+        .dispatch_json(CapabilityDispatchRequest {
+            capability_id: CapabilityId::new("echo-script.say").unwrap(),
+            scope: sample_scope(),
+            estimate: ResourceEstimate {
+                concurrency_slots: Some(1),
+                process_count: Some(1),
+                ..ResourceEstimate::default()
+            },
+            mounts: None,
+            resource_reservation: None,
+            input: json!({"message": "adapter fails"}),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        DispatchError::Script {
+            kind: RuntimeDispatchErrorKind::ExitFailure
+        }
+    ));
+
+    let recorded = events.events();
+    assert_eq!(recorded.len(), 3);
+    assert_eq!(recorded[2].kind, RuntimeEventKind::DispatchFailed);
+    assert_eq!(recorded[2].error_kind.as_deref(), Some("exit_failure"));
+}
+
+#[tokio::test]
 async fn dispatcher_emits_events_for_mcp_success() {
     let fs = filesystem_with_echo_extensions();
     let mut registry = ExtensionRegistry::new();
@@ -310,6 +354,28 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for StaticAdapter
             request.estimate,
             self.output.clone(),
         )
+    }
+}
+
+#[derive(Clone)]
+struct FailingRuntimeAdapter {
+    runtime: RuntimeKind,
+    kind: RuntimeDispatchErrorKind,
+}
+
+impl FailingRuntimeAdapter {
+    fn new(runtime: RuntimeKind, kind: RuntimeDispatchErrorKind) -> Self {
+        Self { runtime, kind }
+    }
+}
+
+#[async_trait]
+impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for FailingRuntimeAdapter {
+    async fn dispatch_json(
+        &self,
+        _request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+    ) -> Result<RuntimeAdapterResult, DispatchError> {
+        Err(dispatch_error_for_runtime(self.runtime, self.kind))
     }
 }
 

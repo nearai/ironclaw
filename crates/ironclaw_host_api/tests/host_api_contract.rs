@@ -102,6 +102,78 @@ fn local_default_resource_scope_uses_default_agent_and_bootstrap_project() {
 }
 
 #[test]
+fn runtime_dispatch_error_kinds_have_safe_event_tokens() {
+    for (kind, token) in [
+        (RuntimeDispatchErrorKind::Backend, "backend"),
+        (RuntimeDispatchErrorKind::Client, "client"),
+        (RuntimeDispatchErrorKind::Executor, "executor"),
+        (RuntimeDispatchErrorKind::ExitFailure, "exit_failure"),
+        (
+            RuntimeDispatchErrorKind::ExtensionRuntimeMismatch,
+            "extension.runtime_mismatch",
+        ),
+        (
+            RuntimeDispatchErrorKind::FilesystemDenied,
+            "filesystem_denied",
+        ),
+        (RuntimeDispatchErrorKind::Guest, "guest"),
+        (RuntimeDispatchErrorKind::InputEncode, "input_encode"),
+        (RuntimeDispatchErrorKind::InvalidResult, "invalid_result"),
+        (RuntimeDispatchErrorKind::Manifest, "manifest"),
+        (RuntimeDispatchErrorKind::Memory, "memory"),
+        (RuntimeDispatchErrorKind::MethodMissing, "method_missing"),
+        (RuntimeDispatchErrorKind::NetworkDenied, "network_denied"),
+        (RuntimeDispatchErrorKind::OutputDecode, "output_decode"),
+        (RuntimeDispatchErrorKind::OutputTooLarge, "output_too_large"),
+        (RuntimeDispatchErrorKind::Resource, "resource"),
+        (
+            RuntimeDispatchErrorKind::UndeclaredCapability,
+            "undeclared_capability",
+        ),
+        (
+            RuntimeDispatchErrorKind::UnsupportedRunner,
+            "unsupported_runner",
+        ),
+        (RuntimeDispatchErrorKind::Unknown, "unknown"),
+    ] {
+        assert_eq!(kind.event_kind(), token);
+        assert_safe_runtime_event_token(token);
+    }
+}
+
+fn assert_safe_runtime_event_token(token: &str) {
+    assert!(!token.is_empty(), "runtime event token must not be empty");
+    assert!(
+        token.len() <= 64,
+        "{token:?} must fit runtime event sanitizer length"
+    );
+    assert!(
+        token.as_bytes()[0].is_ascii_lowercase(),
+        "{token:?} must start with lowercase ASCII"
+    );
+    assert!(
+        token.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'.' | b':')
+        }),
+        "{token:?} must stay compatible with runtime event sanitization"
+    );
+    for segment in token.split(['.', ':']) {
+        assert!(
+            !segment.is_empty(),
+            "{token:?} must not have empty segments"
+        );
+        assert!(
+            segment.len() <= 24,
+            "{token:?} segment {segment:?} must fit runtime event sanitizer segment length"
+        );
+        assert!(
+            segment.as_bytes()[0].is_ascii_lowercase(),
+            "{token:?} segment {segment:?} must start with lowercase ASCII"
+        );
+    }
+}
+
+#[test]
 fn local_default_execution_context_keeps_scope_fields_aligned() {
     let mounts = MountView::new(vec![MountGrant::new(
         MountAlias::new("/workspace").unwrap(),
