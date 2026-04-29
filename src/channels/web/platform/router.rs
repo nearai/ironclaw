@@ -62,7 +62,7 @@ use crate::channels::web::platform::static_files::{
     debug_init_handler, debug_panel_css_handler, debug_panel_js_handler, favicon_handler,
     health_handler, i18n_app_handler, i18n_en_handler, i18n_index_handler, i18n_ko_handler,
     i18n_zh_handler, index_handler, js_handler, project_file_handler, project_index_handler,
-    project_redirect_handler, theme_css_handler, theme_init_handler,
+    project_redirect_handler, theme_css_handler, theme_init_handler, user_attachment_handler,
 };
 
 // Feature slices under `features/<slice>/`. As of ironclaw#2599 stage 4d,
@@ -479,6 +479,13 @@ pub async fn start_server(
         .route("/projects/{project_id}", get(project_redirect_handler))
         .route("/projects/{project_id}/", get(project_index_handler))
         .route("/projects/{project_id}/{*path}", get(project_file_handler))
+        // User-uploaded attachment serving — same auth layer. The handler
+        // double-checks that the URL's `{owner}` segment matches the
+        // authenticated user, so a request for someone else's file 404s.
+        .route(
+            "/api/attachments/{owner}/{*path}",
+            get(user_attachment_handler),
+        )
         .route_layer(middleware::from_fn_with_state(
             auth_state.clone(),
             auth_middleware,

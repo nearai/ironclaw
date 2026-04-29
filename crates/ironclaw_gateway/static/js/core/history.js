@@ -90,7 +90,16 @@ function loadHistory(before) {
             pendingQueue.shift();
           }
           if (!renderedPending) {
-            addMessage('user', turn.user_input);
+            // Server-provided URLs for user-uploaded attachments (set when
+            // the persist path landed before this message was sent). The
+            // chat surface merges these into the parsed-XML attachment list
+            // by filename so refreshed images render inline instead of
+            // degrading to file cards.
+            addMessage('user', turn.user_input, {
+              userAttachments: Array.isArray(turn.user_attachments)
+                ? turn.user_attachments
+                : [],
+            });
           }
         }
         if (turn.tool_calls && turn.tool_calls.length > 0) {
@@ -274,6 +283,26 @@ function createMessageElement(role, content, options) {
       contentEl.textContent = parsed.text;
       parsedAttachments = parsed.attachments;
       copyText = opts.copyText || parsed.copyText;
+      // Merge server-provided URLs from `turn.user_attachments` into the
+      // parsed-XML list, matched by filename. The XML carries metadata only;
+      // the URL is what lets `renderMessageAttachments` fetch the image
+      // bytes back as a blob after refresh.
+      if (Array.isArray(opts.userAttachments) && opts.userAttachments.length > 0) {
+        const byFilename = new Map();
+        opts.userAttachments.forEach((u) => {
+          if (u && u.filename && u.url) {
+            if (!byFilename.has(u.filename)) byFilename.set(u.filename, []);
+            byFilename.get(u.filename).push(u.url);
+          }
+        });
+        parsedAttachments.forEach((att) => {
+          if (att.kind !== 'image' || att.url) return;
+          const queue = byFilename.get(att.filename || '');
+          if (queue && queue.length > 0) {
+            att.url = queue.shift();
+          }
+        });
+      }
     } else {
       contentEl.textContent = content;
     }

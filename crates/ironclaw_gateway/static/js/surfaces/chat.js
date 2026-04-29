@@ -675,6 +675,78 @@ const MAX_ATTACHMENT_SIZE_BYTES = 7 * 1024 * 1024; // 7 MB per attachment (match
 const MAX_TOTAL_ATTACHMENT_BYTES = 10 * 1024 * 1024; // 10 MB decoded per message
 const MAX_STAGED_ATTACHMENTS = 5;
 
+// JPEG compression knobs for client-side resize before upload. PNG/GIF/WebP
+// are left untouched so transparency and animation survive intact.
+const IMAGE_COMPRESS_MAX_DIM = 1600;
+const IMAGE_COMPRESS_QUALITY = 0.88;
+
+// Re-encode a JPEG data URL to fit within IMAGE_COMPRESS_MAX_DIM. Returns
+// `null` to signal "no change" — if the source decode fails, the image is
+// already small enough, the canvas API is unavailable, or any other reason
+// to fall back to the original. The caller treats that null as "use the
+// untouched data URL".
+function compressJpegForUpload(dataUrl, mimeType) {
+  if (mimeType !== 'image/jpeg' && mimeType !== 'image/jpg') {
+    return Promise.resolve(null);
+  }
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        if (img.naturalWidth <= IMAGE_COMPRESS_MAX_DIM
+            && img.naturalHeight <= IMAGE_COMPRESS_MAX_DIM) {
+          resolve(null);
+          return;
+        }
+        const ratio = Math.min(
+          IMAGE_COMPRESS_MAX_DIM / img.naturalWidth,
+          IMAGE_COMPRESS_MAX_DIM / img.naturalHeight,
+          1,
+        );
+        const w = Math.max(1, Math.round(img.naturalWidth * ratio));
+        const h = Math.max(1, Math.round(img.naturalHeight * ratio));
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) { resolve(null); return; }
+        ctx.drawImage(img, 0, 0, w, h);
+        const compressed = canvas.toDataURL('image/jpeg', IMAGE_COMPRESS_QUALITY);
+        // If the canvas roundtrip somehow produced a larger payload (highly
+        // compressed sources can do this), keep the original.
+        if (compressed.length >= dataUrl.length) {
+          resolve(null);
+          return;
+        }
+        resolve({ dataUrl: compressed, mimeType: 'image/jpeg' });
+      } catch (_) {
+        resolve(null);
+      }
+    };
+    img.onerror = () => resolve(null);
+    img.src = dataUrl;
+  });
+}
+
+// Replace the filename's extension with `.jpg` so the persisted file matches
+// the post-compression bytes. Falls back to a synthesized name when the
+// caller didn't supply one.
+function withJpegExtension(filename) {
+  if (!filename) return 'image.jpg';
+  const dot = filename.lastIndexOf('.');
+  return dot > 0 ? filename.slice(0, dot) + '.jpg' : filename + '.jpg';
+}
+
+// Approximate decoded bytes from a base64 data URL without re-decoding.
+function dataUrlDecodedBytes(dataUrl) {
+  const commaIdx = dataUrl.indexOf(',');
+  if (commaIdx === -1) return dataUrl.length;
+  // base64 expands by 4/3; padding accounts for at most 2 trailing '=' bytes.
+  const b64Len = dataUrl.length - commaIdx - 1;
+  const padding = (dataUrl.endsWith('==')) ? 2 : (dataUrl.endsWith('=') ? 1 : 0);
+  return Math.max(0, Math.floor(b64Len * 3 / 4) - padding);
+}
+
 function handleAttachmentFiles(files) {
   let projectedCount = stagedAttachments.length + pendingAttachmentCount;
   let projectedTotalBytes = stagedAttachments.reduce((sum, att) => sum + (att.size_bytes || 0), 0) + pendingAttachmentBytes;
@@ -720,20 +792,32 @@ function handleAttachmentFiles(files) {
       const dataUrl = e.target.result;
       const commaIdx = dataUrl.indexOf(',');
       const meta = dataUrl.substring(0, commaIdx);
-      const base64 = dataUrl.substring(commaIdx + 1);
       const parsedType = meta.replace('data:', '').replace(';base64', '');
       const mediaType = (!parsedType || parsedType === 'application/octet-stream') ? mimeType : parsedType;
-      stagedAttachments.push({
-        kind: mediaType.startsWith('image/') ? 'image' : 'document',
-        mime_type: mediaType,
-        filename: file.name || null,
-        data_base64: base64,
-        preview_url: mediaType.startsWith('image/') ? dataUrl : null,
-        size_bytes: file.size,
-        size_label: formatAttachmentSize(file.size),
+      // JPEGs over IMAGE_COMPRESS_MAX_DIM get re-encoded client-side so the
+      // upload payload (and downstream LLM context) stays bounded. PNG / GIF
+      // / WebP are left intact to preserve transparency or animation.
+      compressJpegForUpload(dataUrl, mediaType).then((compressed) => {
+        const finalDataUrl = compressed ? compressed.dataUrl : dataUrl;
+        const finalMime = compressed ? compressed.mimeType : mediaType;
+        const finalCommaIdx = finalDataUrl.indexOf(',');
+        const finalBase64 = finalDataUrl.substring(finalCommaIdx + 1);
+        const finalSize = compressed ? dataUrlDecodedBytes(finalDataUrl) : file.size;
+        const finalFilename = compressed
+          ? withJpegExtension(file.name)
+          : (file.name || null);
+        stagedAttachments.push({
+          kind: finalMime.startsWith('image/') ? 'image' : 'document',
+          mime_type: finalMime,
+          filename: finalFilename,
+          data_base64: finalBase64,
+          preview_url: finalMime.startsWith('image/') ? finalDataUrl : null,
+          size_bytes: finalSize,
+          size_label: formatAttachmentSize(finalSize),
+        });
+        renderAttachmentPreviews();
+        finalizeRead();
       });
-      renderAttachmentPreviews();
-      finalizeRead();
     };
     reader.onerror = function() {
       alert(I18n.t('error.unknown'));
@@ -842,6 +926,20 @@ function parseUserMessageContent(content) {
   return { text, attachments, copyText: copyParts.join('\n') };
 }
 
+// Fetch a Bearer-protected resource and convert it to a blob URL the
+// browser can hand to `<img src>`. The Authorization header keeps the
+// token out of the URL (vs. `?token=` query auth, which leaks via logs
+// and Referer per src/channels/web/platform/auth.rs).
+function fetchAttachmentAsBlobUrl(url) {
+  const opts = oidcProxyAuth ? {} : { headers: { 'Authorization': 'Bearer ' + token } };
+  return fetch(url, opts).then((resp) => {
+    if (!resp.ok) {
+      throw new Error('attachment fetch ' + resp.status);
+    }
+    return resp.blob();
+  }).then((blob) => URL.createObjectURL(blob));
+}
+
 function renderMessageAttachments(container, attachments) {
   if (!attachments || attachments.length === 0) return;
   const strip = document.createElement('div');
@@ -853,6 +951,40 @@ function renderMessageAttachments(container, attachments) {
       image.src = att.preview_url;
       image.alt = att.filename || 'Attached image';
       strip.appendChild(image);
+      return;
+    }
+    if (att.kind === 'image' && att.url) {
+      // Server-side persistence path: fetch the bytes via the
+      // /api/attachments/... route (Bearer-auth'd) and render inline.
+      // Fall back to a file card if the fetch fails so the user still
+      // sees what was attached.
+      const image = document.createElement('img');
+      image.className = 'message-attachment-image';
+      image.alt = att.filename || 'Attached image';
+      strip.appendChild(image);
+      fetchAttachmentAsBlobUrl(att.url)
+        .then((blobUrl) => { image.src = blobUrl; })
+        .catch(() => {
+          // Fetch failed (404, network, auth) — replace the empty <img>
+          // with the file-card fallback so the bubble doesn't show a
+          // broken image icon.
+          if (image.parentNode === strip) {
+            strip.removeChild(image);
+          }
+          appendAttachmentFileCard(
+            strip,
+            {
+              item: 'message-attachment-file',
+              icon: 'message-attachment-file-icon',
+              body: 'message-attachment-file-body',
+              name: 'message-attachment-file-name',
+              meta: 'message-attachment-file-meta',
+            },
+            att.filename || 'attachment',
+            attachmentMetaText(att.filename, att.mime_type, att.size_label),
+            att.mime_type
+          );
+        });
       return;
     }
     // Match the staging preview: type-aware icon + filename + (type • size).

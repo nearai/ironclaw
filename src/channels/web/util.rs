@@ -2,10 +2,12 @@
 
 use crate::channels::IncomingMessage;
 use crate::channels::web::types::{
-    AttachmentData, GeneratedImageInfo, ImageData, ToolCallInfo, TurnInfo,
+    AttachmentData, GeneratedImageInfo, ImageData, ToolCallInfo, TurnInfo, UserAttachmentInfo,
+    UserAttachmentKind,
 };
 use crate::channels::{
-    MAX_INLINE_ATTACHMENT_BYTES, MAX_INLINE_ATTACHMENTS, MAX_INLINE_TOTAL_ATTACHMENT_BYTES,
+    ATTACHMENT_PATH_PREFIX, MAX_INLINE_ATTACHMENT_BYTES, MAX_INLINE_ATTACHMENTS,
+    MAX_INLINE_TOTAL_ATTACHMENT_BYTES,
 };
 use crate::generated_images::GeneratedImageSentinel;
 
@@ -501,6 +503,131 @@ pub fn tool_result_preview(result: Option<&serde_json::Value>) -> Option<String>
     tool_result_for_display(result)
 }
 
+/// Convert a persisted `local_path` like
+/// `.ironclaw/attachments/<owner>/<rest>` into a browser-fetchable URL
+/// `/api/attachments/<owner>/<rest>`. Returns `None` if the path doesn't
+/// match the expected prefix (e.g. an old message persisted before the
+/// route landed, or some other future layout).
+fn project_path_to_attachment_url(project_path: &str) -> Option<String> {
+    let prefix = format!("{ATTACHMENT_PATH_PREFIX}/");
+    let suffix = project_path.strip_prefix(&prefix)?;
+    Some(format!("/api/attachments/{suffix}"))
+}
+
+/// Map an `<attachment type="...">` value to the wire-stable
+/// `UserAttachmentKind`. Unknown types fall back to `Document` so the
+/// frontend still renders a file card rather than dropping the entry.
+fn parse_user_attachment_kind(type_attr: &str) -> UserAttachmentKind {
+    match type_attr {
+        "image" => UserAttachmentKind::Image,
+        "audio" => UserAttachmentKind::Audio,
+        _ => UserAttachmentKind::Document,
+    }
+}
+
+/// XML-attribute decoder mirroring the frontend's `decodeXmlText` so a
+/// filename like `Q&A.pdf` round-trips correctly through the persisted
+/// XML's `&amp;` encoding. Order matters: `&amp;` must come last so we
+/// don't double-decode `&amp;lt;` → `&lt;` → `<`.
+fn decode_xml_attr(value: &str) -> String {
+    value
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
+/// Extract user-uploaded attachments from a persisted user_input string.
+///
+/// The agent's `format_attachment` writes each upload as
+/// `<attachment index="N" type="..." filename="..." mime="..."
+/// project_path="..." size="...">…</attachment>` inside an
+/// `<attachments>…</attachments>` block appended to the user's text. This
+/// function parses that block server-side so the chat UI can render images
+/// after a refresh without ever exposing the raw XML to the browser.
+///
+/// Only entries whose `project_path` resolves to a usable
+/// `/api/attachments/...` URL are surfaced — entries from before the
+/// persist path landed (no `project_path`) or with a path the route
+/// can't serve are skipped, and the frontend falls back to its file
+/// card rendering for those.
+pub fn extract_user_attachments(user_input: &str) -> Vec<UserAttachmentInfo> {
+    static BLOCK_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static ITEM_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static ATTR_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+
+    let block_re = BLOCK_RE.get_or_init(|| {
+        // Anchored to end-of-string + tolerates trailing whitespace, mirroring
+        // the JS parser in `parseUserMessageContent`.
+        regex::Regex::new(r"(?s)<attachments>(.*?)</attachments>\s*$")
+            .expect("static regex compiles")
+    });
+    let item_re = ITEM_RE.get_or_init(|| {
+        regex::Regex::new(r"(?s)<attachment\b([^>]*)>(.*?)</attachment>")
+            .expect("static regex compiles")
+    });
+    let attr_re = ATTR_RE
+        .get_or_init(|| regex::Regex::new(r#"(\w+)="([^"]*)""#).expect("static regex compiles"));
+
+    let Some(caps) = block_re.captures(user_input) else {
+        return Vec::new();
+    };
+    let block = match caps.get(1) {
+        Some(m) => m.as_str(),
+        None => return Vec::new(),
+    };
+
+    let mut out = Vec::new();
+    for item in item_re.captures_iter(block) {
+        let raw_attrs = match item.get(1) {
+            Some(m) => m.as_str(),
+            None => continue,
+        };
+        let mut filename: Option<String> = None;
+        let mut mime: Option<String> = None;
+        let mut project_path: Option<String> = None;
+        let mut size_label: Option<String> = None;
+        let mut type_attr: Option<String> = None;
+        for attr in attr_re.captures_iter(raw_attrs) {
+            let name = match attr.get(1) {
+                Some(m) => m.as_str(),
+                None => continue,
+            };
+            let value = attr
+                .get(2)
+                .map(|m| decode_xml_attr(m.as_str()))
+                .unwrap_or_default();
+            match name {
+                "filename" => filename = Some(value),
+                "mime" => mime = Some(value),
+                "project_path" => project_path = Some(value),
+                "size" => size_label = Some(value),
+                "type" => type_attr = Some(value),
+                _ => {}
+            }
+        }
+
+        let Some(project_path) = project_path else {
+            // No persisted path → no URL we can hand the browser.
+            continue;
+        };
+        let Some(url) = project_path_to_attachment_url(&project_path) else {
+            // Path didn't match our serving prefix — skip rather than emit a
+            // broken URL.
+            continue;
+        };
+        out.push(UserAttachmentInfo {
+            filename: filename.unwrap_or_else(|| "attachment".to_string()),
+            mime_type: mime.unwrap_or_default(),
+            size_label,
+            url,
+            kind: parse_user_attachment_kind(type_attr.as_deref().unwrap_or("")),
+        });
+    }
+    out
+}
+
 /// Build TurnInfo pairs from flat DB messages (user/tool_calls/assistant triples).
 ///
 /// Handles three message patterns:
@@ -516,6 +643,7 @@ pub fn build_turns_from_db_messages(
 
     while let Some(msg) = iter.next() {
         if msg.role == "user" {
+            let user_attachments = extract_user_attachments(&msg.content);
             let mut turn = TurnInfo {
                 turn_number,
                 user_message_id: Some(msg.id),
@@ -526,6 +654,7 @@ pub fn build_turns_from_db_messages(
                 completed_at: None,
                 tool_calls: Vec::new(),
                 generated_images: Vec::new(),
+                user_attachments,
                 narrative: None,
             };
 
@@ -617,6 +746,7 @@ pub fn build_turns_from_db_messages(
                 completed_at: Some(msg.created_at.to_rfc3339()),
                 tool_calls: Vec::new(),
                 generated_images: Vec::new(),
+                user_attachments: Vec::new(),
                 narrative: None,
             });
             turn_number += 1;
@@ -1109,6 +1239,7 @@ mod tests {
                     data_url: Some(oversized_data_url.clone()),
                     path: None,
                 }],
+                user_attachments: Vec::new(),
                 narrative: None,
             },
             TurnInfo {
@@ -1132,6 +1263,7 @@ mod tests {
                         path: None,
                     },
                 ],
+                user_attachments: Vec::new(),
                 narrative: None,
             },
         ];
@@ -1470,5 +1602,119 @@ mod tests {
         let incoming = inline_attachments_to_incoming(&[], &attachments).expect("valid pdf");
 
         assert_eq!(incoming[0].filename.as_deref(), Some("attachment-0.pdf"));
+    }
+
+    // --- extract_user_attachments tests (#1341 follow-up: image-survives-refresh) ---
+
+    fn user_input_with_image(filename: &str, project_path: &str, size: &str) -> String {
+        format!(
+            "我也有一只猫咪\n\n<attachments>\n<attachment index=\"1\" type=\"image\" filename=\"{filename}\" mime=\"image/png\" project_path=\"{project_path}\" size=\"{size}\">\n[Image attached]\n</attachment>\n</attachments>"
+        )
+    }
+
+    #[test]
+    fn extract_user_attachments_builds_url_from_project_path() {
+        let user_input = user_input_with_image(
+            "photo.png",
+            ".ironclaw/attachments/alice/.legacy/msg-1/photo.png",
+            "1.6 MB",
+        );
+
+        let atts = extract_user_attachments(&user_input);
+
+        assert_eq!(atts.len(), 1);
+        assert_eq!(atts[0].filename, "photo.png");
+        assert_eq!(atts[0].mime_type, "image/png");
+        assert_eq!(atts[0].size_label.as_deref(), Some("1.6 MB"));
+        assert_eq!(atts[0].kind, UserAttachmentKind::Image);
+        // The on-disk prefix is stripped; the URL maps onto the
+        // /api/attachments/<owner>/<rest> route that serves both v1 and v2.
+        assert_eq!(
+            atts[0].url,
+            "/api/attachments/alice/.legacy/msg-1/photo.png"
+        );
+    }
+
+    #[test]
+    fn extract_user_attachments_skips_attachments_without_project_path() {
+        // Pre-persist messages (or messages from a path that doesn't persist
+        // to disk) lack `project_path`. Surfacing them with no URL would
+        // give the frontend a "click to fetch" entry that always 404s, so
+        // the parser drops them and the UI falls back to its file card.
+        let user_input = "look here\n\n<attachments>\n<attachment index=\"1\" type=\"image\" filename=\"orphan.png\" mime=\"image/png\" size=\"1 KB\">\n[Image attached]\n</attachment>\n</attachments>";
+
+        let atts = extract_user_attachments(user_input);
+
+        assert!(atts.is_empty(), "unexpected entries: {atts:?}");
+    }
+
+    #[test]
+    fn extract_user_attachments_skips_paths_outside_serving_root() {
+        // A persisted path that doesn't begin with `.ironclaw/attachments/`
+        // can't be served by `/api/attachments/...`, so the parser drops
+        // it rather than emitting a broken URL.
+        let user_input =
+            user_input_with_image("rogue.png", "/some/external/cache/rogue.png", "1 KB");
+
+        let atts = extract_user_attachments(&user_input);
+
+        assert!(atts.is_empty(), "unexpected entries: {atts:?}");
+    }
+
+    #[test]
+    fn extract_user_attachments_decodes_xml_attribute_entities() {
+        // Filename like `Q&A 1.png` is escaped as `Q&amp;A 1.png` in the
+        // XML attribute; the parser must round-trip the entity decode so
+        // the URL and frontend filename match the original upload.
+        let user_input = "msg\n\n<attachments>\n<attachment index=\"1\" type=\"image\" filename=\"Q&amp;A 1.png\" mime=\"image/png\" project_path=\".ironclaw/attachments/alice/.legacy/m/Q&amp;A 1.png\" size=\"1 KB\">\n[Image attached]\n</attachment>\n</attachments>";
+
+        let atts = extract_user_attachments(user_input);
+
+        assert_eq!(atts.len(), 1);
+        assert_eq!(atts[0].filename, "Q&A 1.png");
+        assert_eq!(atts[0].url, "/api/attachments/alice/.legacy/m/Q&A 1.png");
+    }
+
+    #[test]
+    fn extract_user_attachments_classifies_kind_from_type_attribute() {
+        // The wire-stable `kind` is what lets the frontend pick its render
+        // path. Non-image kinds must come through as their snake_case
+        // serde value, not as `Document` swallow-all.
+        let cases = [
+            ("image", UserAttachmentKind::Image),
+            ("audio", UserAttachmentKind::Audio),
+            ("document", UserAttachmentKind::Document),
+            // Unknown/future types fall through to Document so the user
+            // still sees a file card instead of nothing.
+            ("hologram", UserAttachmentKind::Document),
+        ];
+        for (type_attr, expected) in cases {
+            let user_input = format!(
+                "msg\n\n<attachments>\n<attachment index=\"1\" type=\"{type_attr}\" filename=\"f.bin\" mime=\"application/octet-stream\" project_path=\".ironclaw/attachments/u/.legacy/m/f.bin\" size=\"1 KB\">\nbody\n</attachment>\n</attachments>"
+            );
+            let atts = extract_user_attachments(&user_input);
+            assert_eq!(atts.len(), 1, "missing entry for type={type_attr}");
+            assert_eq!(atts[0].kind, expected, "wrong kind for type={type_attr}");
+        }
+    }
+
+    #[test]
+    fn extract_user_attachments_parses_multiple_entries_in_order() {
+        let user_input = "msg\n\n<attachments>\n<attachment index=\"1\" type=\"image\" filename=\"a.png\" mime=\"image/png\" project_path=\".ironclaw/attachments/u/.legacy/m/a.png\" size=\"1 KB\">\nbody\n</attachment>\n<attachment index=\"2\" type=\"image\" filename=\"b.png\" mime=\"image/png\" project_path=\".ironclaw/attachments/u/.legacy/m/b.png\" size=\"2 KB\">\nbody\n</attachment>\n</attachments>";
+
+        let atts = extract_user_attachments(user_input);
+
+        assert_eq!(atts.len(), 2);
+        assert_eq!(atts[0].filename, "a.png");
+        assert_eq!(atts[1].filename, "b.png");
+    }
+
+    #[test]
+    fn extract_user_attachments_returns_empty_when_no_block() {
+        // User text that just happens to mention attachments must not
+        // be parsed as an attachment block.
+        let user_input = "I'm looking for the <attachments> section in your code.";
+        let atts = extract_user_attachments(user_input);
+        assert!(atts.is_empty(), "false-positive parse: {atts:?}");
     }
 }
