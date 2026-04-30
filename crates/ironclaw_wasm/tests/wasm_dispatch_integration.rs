@@ -1,4 +1,10 @@
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use async_trait::async_trait;
 use ironclaw_dispatcher::{
@@ -9,7 +15,10 @@ use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRuntime}
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_resources::*;
-use ironclaw_wasm::{PreparedWitTool, WitToolHost, WitToolRequest, WitToolRuntime};
+use ironclaw_wasm::{
+    PreparedWitTool, RecordingWasmHostHttp, WasmHttpResponse, WitToolHost, WitToolRequest,
+    WitToolRuntime,
+};
 use serde_json::{Value, json};
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
 use wit_parser::Resolve;
@@ -21,8 +30,9 @@ async fn wasm_lane_loads_component_from_root_filesystem_and_uses_fresh_instances
     let registry = Arc::new(registry_with_package(WASM_MANIFEST));
     let governor = Arc::new(governor_with_default_limit(sample_account()));
     let events = InMemoryEventSink::new();
+    let adapter = Arc::new(WasmRuntimeAdapter::new());
     let dispatcher = RuntimeDispatcher::from_arcs(registry, Arc::new(fs), Arc::clone(&governor))
-        .with_runtime_adapter_arc(RuntimeKind::Wasm, Arc::new(WasmRuntimeAdapter::new()))
+        .with_runtime_adapter_arc(RuntimeKind::Wasm, Arc::clone(&adapter))
         .with_event_sink_arc(Arc::new(events.clone()));
 
     let first = dispatcher
@@ -43,6 +53,11 @@ async fn wasm_lane_loads_component_from_root_filesystem_and_uses_fresh_instances
     );
     assert_eq!(first.receipt.status, ReservationStatus::Reconciled);
     assert_eq!(second.receipt.status, ReservationStatus::Reconciled);
+    assert_eq!(
+        adapter.prepare_count(),
+        1,
+        "dispatcher smoke should reuse one prepared component while proving fresh execution instances"
+    );
     assert_eq!(
         governor.reserved_for(&sample_account()),
         ResourceTally::default()
@@ -104,16 +119,85 @@ async fn wasm_lane_guest_trap_releases_reservation_and_preserves_dispatch_failur
     assert_eq!(recorded[2].error_kind.as_deref(), Some("guest"));
 }
 
+#[tokio::test]
+async fn wasm_lane_execution_failure_reconciles_preserved_usage_from_runtime() {
+    let component = tool_component(&trap_after_http_wat());
+    let fs = filesystem_with_wasm_component("wasm-smoke", "wasm/http-trap.wasm", &component).await;
+    let registry = Arc::new(registry_with_package(WASM_HTTP_TRAP_MANIFEST));
+    let governor = Arc::new(governor_with_default_limit(sample_account()));
+    let events = InMemoryEventSink::new();
+    let http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 200,
+        headers_json: "{}".to_string(),
+        body: Vec::new(),
+    }));
+    let adapter = Arc::new(WasmRuntimeAdapter::with_host(
+        WitToolHost::deny_all().with_http(Arc::clone(&http)),
+    ));
+    let dispatcher = RuntimeDispatcher::from_arcs(registry, Arc::new(fs), Arc::clone(&governor))
+        .with_runtime_adapter_arc(RuntimeKind::Wasm, adapter)
+        .with_event_sink_arc(Arc::new(events.clone()));
+
+    let err = dispatcher
+        .dispatch_json(dispatch_request(
+            "wasm-smoke.httptrap",
+            json!({"call":"http"}),
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        DispatchError::Wasm {
+            kind: RuntimeDispatchErrorKind::Guest
+        }
+    ));
+    assert_eq!(http.requests().unwrap().len(), 1);
+    assert_eq!(
+        governor.reserved_for(&sample_account()),
+        ResourceTally::default()
+    );
+    assert_eq!(
+        governor.usage_for(&sample_account()).network_egress_bytes,
+        5,
+        "request-body egress preserved by WasmError::ExecutionFailed must be reconciled"
+    );
+    assert_event_kinds(
+        &events,
+        &[
+            RuntimeEventKind::DispatchRequested,
+            RuntimeEventKind::RuntimeSelected,
+            RuntimeEventKind::DispatchFailed,
+        ],
+    );
+    let recorded = events.events();
+    assert_eq!(recorded[2].error_kind.as_deref(), Some("guest"));
+}
+
 struct WasmRuntimeAdapter {
     runtime: WitToolRuntime,
+    host: WitToolHost,
+    prepared: Mutex<HashMap<String, Arc<PreparedWitTool>>>,
+    prepare_count: AtomicUsize,
 }
 
 impl WasmRuntimeAdapter {
     fn new() -> Self {
+        Self::with_host(WitToolHost::deny_all())
+    }
+
+    fn with_host(host: WitToolHost) -> Self {
         Self {
             runtime: WitToolRuntime::new(ironclaw_wasm::WitToolRuntimeConfig::for_testing())
                 .unwrap(),
+            host,
+            prepared: Mutex::new(HashMap::new()),
+            prepare_count: AtomicUsize::new(0),
         }
+    }
+
+    fn prepare_count(&self) -> usize {
+        self.prepare_count.load(Ordering::SeqCst)
     }
 }
 
@@ -139,6 +223,15 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for WasmRuntimeAd
                 });
             }
         };
+        let cache_key = format!(
+            "{}:{}",
+            request.capability_id.as_str(),
+            module_path.as_str()
+        );
+        if let Some(prepared) = self.prepared.lock().unwrap().get(&cache_key).cloned() {
+            return execute_prepared_wasm(&self.runtime, &prepared, self.host.clone(), request);
+        }
+
         let wasm_bytes = request
             .filesystem
             .read_file(&module_path)
@@ -146,19 +239,31 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for WasmRuntimeAd
             .map_err(|_| DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::FilesystemDenied,
             })?;
-        let prepared = self
-            .runtime
-            .prepare(request.capability_id.as_str(), &wasm_bytes)
-            .map_err(|error| DispatchError::Wasm {
-                kind: wasm_error_kind(&error),
-            })?;
-        execute_prepared_wasm(&self.runtime, &prepared, request)
+        let prepared = Arc::new(
+            self.runtime
+                .prepare(request.capability_id.as_str(), &wasm_bytes)
+                .map_err(|error| DispatchError::Wasm {
+                    kind: wasm_error_kind(&error),
+                })?,
+        );
+        let prepared = {
+            let mut prepared_cache = self.prepared.lock().unwrap();
+            if let Some(existing) = prepared_cache.get(&cache_key).cloned() {
+                existing
+            } else {
+                self.prepare_count.fetch_add(1, Ordering::SeqCst);
+                prepared_cache.insert(cache_key, Arc::clone(&prepared));
+                prepared
+            }
+        };
+        execute_prepared_wasm(&self.runtime, &prepared, self.host.clone(), request)
     }
 }
 
 fn execute_prepared_wasm(
     runtime: &WitToolRuntime,
     prepared: &PreparedWitTool,
+    host: WitToolHost,
     request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
 ) -> Result<RuntimeAdapterResult, DispatchError> {
     let input_json = serde_json::to_string(&request.input).map_err(|_| DispatchError::Wasm {
@@ -173,14 +278,19 @@ fn execute_prepared_wasm(
                 kind: RuntimeDispatchErrorKind::Resource,
             })?,
     };
-    let execution = match runtime.execute(
-        prepared,
-        WitToolHost::deny_all(),
-        WitToolRequest::new(input_json),
-    ) {
+    let execution = match runtime.execute(prepared, host, WitToolRequest::new(input_json)) {
         Ok(execution) => execution,
         Err(error) => {
-            release_wasm_reservation(request.governor, reservation.id);
+            if let Some(usage) = preserved_wasm_error_usage(&error) {
+                if request.governor.reconcile(reservation.id, usage).is_err() {
+                    release_wasm_reservation(request.governor, reservation.id);
+                    return Err(DispatchError::Wasm {
+                        kind: RuntimeDispatchErrorKind::Resource,
+                    });
+                }
+            } else {
+                release_wasm_reservation(request.governor, reservation.id);
+            }
             return Err(DispatchError::Wasm {
                 kind: wasm_error_kind(&error),
             });
@@ -232,6 +342,25 @@ fn release_wasm_reservation(
     reservation_id: ResourceReservationId,
 ) {
     let _ = governor.release(reservation_id);
+}
+
+fn preserved_wasm_error_usage(error: &ironclaw_wasm::WasmError) -> Option<ResourceUsage> {
+    if let ironclaw_wasm::WasmError::ExecutionFailed { usage, .. } = error
+        && has_accountable_effects(usage)
+    {
+        Some(usage.clone())
+    } else {
+        None
+    }
+}
+
+fn has_accountable_effects(usage: &ResourceUsage) -> bool {
+    usage.usd != Default::default()
+        || usage.input_tokens > 0
+        || usage.output_tokens > 0
+        || usage.output_bytes > 0
+        || usage.network_egress_bytes > 0
+        || usage.process_count > 0
 }
 
 fn registry_with_package(manifest: &str) -> ironclaw_extensions::ExtensionRegistry {
@@ -412,6 +541,101 @@ const COUNTER_TOOL_WAT: &str = r#"
 )
 "#;
 
+const HTTP_TOOL_WAT: &str = r#"
+(module
+  (type (;0;) (func (param i32 i32 i32)))
+  (type (;1;) (func (result i64)))
+  (type (;2;) (func (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)))
+  (type (;3;) (func (param i32 i32 i32 i32 i32)))
+  (type (;4;) (func (param i32 i32) (result i32)))
+  (import "near:agent/host@0.3.0" "log" (func $log (type 0)))
+  (import "near:agent/host@0.3.0" "now-millis" (func $now (type 1)))
+  (import "near:agent/host@0.3.0" "workspace-read" (func $workspace_read (type 0)))
+  (import "near:agent/host@0.3.0" "http-request" (func $http_request (type 2)))
+  (import "near:agent/host@0.3.0" "tool-invoke" (func $tool_invoke (type 3)))
+  (import "near:agent/host@0.3.0" "secret-exists" (func $secret_exists (type 4)))
+  (memory (export "memory") 1)
+  (global $heap (mut i32) (i32.const 4096))
+  (data (i32.const 128) "POST")
+  (data (i32.const 160) "https://example.test/api")
+  (data (i32.const 224) "{}")
+  (data (i32.const 256) "hello")
+  (data (i32.const 1024) "{\22type\22:\22object\22}")
+  (data (i32.const 2048) "fixture description")
+  (data (i32.const 3072) "1")
+  (func $schema (result i32)
+    i32.const 16
+    i32.const 1024
+    i32.store
+    i32.const 20
+    i32.const 17
+    i32.store
+    i32.const 16)
+  (func $description (result i32)
+    i32.const 32
+    i32.const 2048
+    i32.store
+    i32.const 36
+    i32.const 19
+    i32.store
+    i32.const 32)
+  (func $execute (param i32 i32 i32 i32 i32) (result i32)
+    i32.const 128
+    i32.const 4
+    i32.const 160
+    i32.const 24
+    i32.const 224
+    i32.const 2
+    i32.const 1
+    i32.const 256
+    i32.const 5
+    i32.const 0
+    i32.const 0
+    i32.const 512
+    call $http_request
+
+    i32.const 48
+    i32.const 1
+    i32.store
+    i32.const 52
+    i32.const 3072
+    i32.store
+    i32.const 56
+    i32.const 1
+    i32.store
+    i32.const 60
+    i32.const 0
+    i32.store
+    i32.const 48)
+  (func $post (param i32))
+  (func $realloc (param $old i32) (param $old_align i32) (param $new_size i32) (param $new_align i32) (result i32)
+    (local $ret i32)
+    global.get $heap
+    local.set $ret
+    global.get $heap
+    local.get $new_size
+    i32.add
+    global.set $heap
+    local.get $ret)
+  (func $_initialize)
+  (export "near:agent/tool@0.3.0#execute" (func $execute))
+  (export "cabi_post_near:agent/tool@0.3.0#execute" (func $post))
+  (export "near:agent/tool@0.3.0#schema" (func $schema))
+  (export "cabi_post_near:agent/tool@0.3.0#schema" (func $post))
+  (export "near:agent/tool@0.3.0#description" (func $description))
+  (export "cabi_post_near:agent/tool@0.3.0#description" (func $post))
+  (export "cabi_realloc" (func $realloc))
+  (export "_initialize" (func $_initialize))
+)
+"#;
+
+fn trap_after_http_wat() -> String {
+    HTTP_TOOL_WAT.replace(
+        "i32.const 48\n    i32.const 1\n    i32.store",
+        "unreachable\n\n    i32.const 48\n    i32.const 1\n    i32.store",
+    )
+}
+
 const TRAP_TOOL_WAT: &str = r#"
 (module
   (memory (export "memory") 1)
@@ -484,6 +708,25 @@ module = "wasm/trap.wasm"
 id = "wasm-smoke.trap"
 description = "Trap through WASM"
 effects = ["dispatch_capability"]
+default_permission = "allow"
+parameters_schema = { type = "object" }
+"#;
+
+const WASM_HTTP_TRAP_MANIFEST: &str = r#"
+id = "wasm-smoke"
+name = "WASM HTTP Trap"
+version = "0.1.0"
+description = "WASM runtime lane HTTP trap extension"
+trust = "untrusted"
+
+[runtime]
+kind = "wasm"
+module = "wasm/http-trap.wasm"
+
+[[capabilities]]
+id = "wasm-smoke.httptrap"
+description = "Trap after host HTTP through WASM"
+effects = ["dispatch_capability", "network"]
 default_permission = "allow"
 parameters_schema = { type = "object" }
 "#;

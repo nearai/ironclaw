@@ -44,10 +44,8 @@ async fn script_lane_dispatches_manifest_command_and_reconciles_through_dispatch
     assert_eq!(requests[0].image.as_deref(), Some("alpine:latest"));
     assert_eq!(requests[0].command, "script-echo");
     assert_eq!(requests[0].args, vec!["--json".to_string()]);
-    assert_eq!(
-        requests[0].stdin_json,
-        r#"{"command":"ignored","message":"hello"}"#
-    );
+    let stdin_json: serde_json::Value = serde_json::from_str(&requests[0].stdin_json).unwrap();
+    assert_eq!(stdin_json, json!({"message":"hello", "command":"ignored"}));
 
     assert_event_kinds(
         &events,
