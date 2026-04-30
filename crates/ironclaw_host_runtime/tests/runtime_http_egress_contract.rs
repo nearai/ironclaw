@@ -411,6 +411,43 @@ fn host_http_egress_blocks_runtime_supplied_credential_query_before_network() {
 }
 
 #[test]
+fn host_http_egress_blocks_percent_encoded_credential_values_before_network() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let service = HostHttpEgressService::new(network, InMemorySecretStore::new());
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope: sample_scope(),
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1/run?data=AKIA%49OSFODNN7EXAMPLE".to_string(),
+            headers: vec![],
+            body: Vec::new(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+        })
+        .expect_err("percent-encoded credential values should fail before network dispatch");
+
+    assert!(matches!(
+        error,
+        ironclaw_host_api::RuntimeHttpEgressError::Request { .. }
+    ));
+    assert!(!error.to_string().contains("AKIAIOSFODNN7EXAMPLE"));
+    assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+#[test]
 fn host_http_egress_blocks_runtime_supplied_auth_like_headers_before_network() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
