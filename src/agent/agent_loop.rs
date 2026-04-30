@@ -33,6 +33,9 @@ use crate::workspace::Workspace;
 use ironclaw_safety::SafetyLayer;
 use ironclaw_skills::SkillRegistry;
 
+const TRACE_QUEUE_WORKER_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+const TRACE_QUEUE_WORKER_FLUSH_LIMIT: usize = 25;
+
 /// Outcome of [`Agent::handle_message`] — drives the run-loop's response/Done dispatch.
 ///
 /// Distinguishes "no response, turn is over" from "no response, turn is paused"
@@ -130,6 +133,134 @@ fn trimmed_option(value: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+async fn trace_queue_worker_scopes(
+    owner_id: &str,
+    store: Option<Arc<dyn Database>>,
+) -> Vec<String> {
+    let mut scopes = vec![owner_id.to_string()];
+    if let Some(store) = store {
+        match store.list_users(Some("active")).await {
+            Ok(users) => scopes.extend(users.into_iter().map(|user| user.id)),
+            Err(error) => {
+                tracing::debug!(%error, "Trace Commons queue worker failed to list active users");
+            }
+        }
+    }
+    scopes.sort();
+    scopes.dedup();
+    scopes
+}
+
+fn spawn_trace_queue_flush_worker(
+    owner_id: String,
+    store: Option<Arc<dyn Database>>,
+    channels: Arc<ChannelManager>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(TRACE_QUEUE_WORKER_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+
+        loop {
+            interval.tick().await;
+            let scopes = trace_queue_worker_scopes(&owner_id, store.clone()).await;
+            let delivery_scopes = scopes.clone();
+            let trace_host = crate::trace_client::TraceClientHost;
+            let _report = match trace_host
+                .flush_queue_worker_tick(scopes, TRACE_QUEUE_WORKER_FLUSH_LIMIT)
+                .await
+            {
+                Ok(report) => report,
+                Err(error) => {
+                    tracing::debug!(%error, "Trace Commons queue worker tick failed");
+                    for scope in delivery_scopes {
+                        deliver_trace_credit_notice_outbox_for_scope(&scope, &channels).await;
+                    }
+                    continue;
+                }
+            };
+
+            for scope in delivery_scopes {
+                deliver_trace_credit_notice_outbox_for_scope(&scope, &channels).await;
+            }
+        }
+    })
+}
+
+async fn deliver_trace_credit_notice_outbox_for_scope(scope: &str, channels: &Arc<ChannelManager>) {
+    let trace_host = crate::trace_client::TraceClientHost;
+    let trace_scope = crate::trace_client::TraceClientScope::raw(scope);
+    let pending = match trace_host.pending_credit_notice_outbox_items(&trace_scope) {
+        Ok(pending) => pending,
+        Err(error) => {
+            tracing::debug!(
+                %error,
+                scope_ref = %crate::trace_contribution::local_pseudonymous_contributor_id(scope),
+                "Trace Commons queue worker failed to read credit notice outbox"
+            );
+            return;
+        }
+    };
+    for item in pending {
+        let response = OutgoingResponse::text(item.message.clone());
+        let results = channels.broadcast_all(scope, response).await;
+        let success_channel = results
+            .iter()
+            .find_map(|(channel, result)| result.is_ok().then(|| channel.clone()));
+        if let Some(channel) = success_channel {
+            if let Err(error) = trace_host.record_credit_notice_delivery_success(
+                &trace_scope,
+                &item.fingerprint,
+                &channel,
+            ) {
+                tracing::debug!(
+                    %channel,
+                    %error,
+                    "Trace Commons queue worker failed to record credit notice delivery"
+                );
+            }
+            continue;
+        }
+
+        if results.is_empty() {
+            if let Err(error) = trace_host.record_credit_notice_delivery_failure(
+                &trace_scope,
+                &item.fingerprint,
+                "none",
+                "no channels registered for credit notice delivery",
+            ) {
+                tracing::debug!(
+                    %error,
+                    "Trace Commons queue worker failed to record empty credit notice delivery"
+                );
+            }
+            continue;
+        }
+
+        for (channel, result) in results {
+            if let Err(error) = result {
+                tracing::debug!(
+                    %channel,
+                    %error,
+                    "Trace Commons queue worker failed to deliver credit notice"
+                );
+                if let Err(record_error) = trace_host.record_credit_notice_delivery_failure(
+                    &trace_scope,
+                    &item.fingerprint,
+                    &channel,
+                    &error.to_string(),
+                ) {
+                    tracing::debug!(
+                        %channel,
+                        %record_error,
+                        "Trace Commons queue worker failed to record credit notice delivery failure"
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn resolve_owner_scope_notification_user(
@@ -873,6 +1004,12 @@ impl Agent {
             }
         });
 
+        let trace_queue_worker_handle = spawn_trace_queue_flush_worker(
+            self.owner_id().to_string(),
+            self.deps.store.clone(),
+            self.channels.clone(),
+        );
+
         // Spawn heartbeat if enabled
         let heartbeat_handle = if let Some(ref hb_config) = self.heartbeat_config {
             if hb_config.enabled {
@@ -1294,6 +1431,7 @@ impl Agent {
         tracing::debug!("Agent shutting down...");
         repair_handle.abort();
         pruning_handle.abort();
+        trace_queue_worker_handle.abort();
         if let Some(handle) = heartbeat_handle {
             handle.abort();
         }

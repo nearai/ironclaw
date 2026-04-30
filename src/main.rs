@@ -17,7 +17,7 @@ use ironclaw::{
     },
     cli::{
         Cli, Command, run_mcp_command, run_pairing_command, run_profile_command,
-        run_service_command, run_status_command, run_tool_command,
+        run_service_command, run_status_command, run_tool_command, run_traces_command,
     },
     config::Config,
     hooks::bootstrap_hooks,
@@ -207,6 +207,10 @@ async fn async_main() -> anyhow::Result<()> {
             init_cli_tracing();
             return ironclaw::cli::run_models_command(models_cmd.clone(), cli.config.as_deref())
                 .await;
+        }
+        Some(Command::Traces(traces_cmd)) => {
+            init_cli_tracing();
+            return run_traces_command(*traces_cmd.clone()).await;
         }
         Some(Command::Doctor) => {
             init_cli_tracing();

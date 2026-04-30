@@ -129,6 +129,7 @@ Repair results: `Success`, `Retry`, `Failed`, `ManualRequired`. `Retry` does NOT
 - `cheap_llm` in `AgentDeps` is used for heartbeat and other lightweight tasks. Falls back to main `llm` if `None`. Use `agent.cheap_llm()` accessor, not `deps.cheap_llm` directly.
 - `CostGuard.check_allowed()` must be called **before** LLM calls; `record_llm_call()` must be called **after**. Both calls are separate — the guard does not auto-record.
 - `BeforeInbound` and `BeforeOutbound` hooks run for every user message and agent response respectively. Hooks can modify content or reject. Hook errors are logged but **fail-open** (processing continues).
+- Autonomous Trace Commons capture, queue flushing, and credit-notice delivery route through `crate::trace_client::TraceClientHost`. Keep local redaction/queue/status mechanics behind that host facade when changing runtime trace behavior.
 
 ## Complete Submission Command Reference
 
