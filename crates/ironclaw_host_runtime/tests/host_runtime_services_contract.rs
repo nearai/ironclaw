@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, thread, time::Duration};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -26,7 +26,10 @@ use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptRuntime, ScriptRuntimeConfig,
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
-use ironclaw_wasm::{RecordingWasmHostHttp, WasmHttpResponse, WitToolHost, WitToolRuntimeConfig};
+use ironclaw_wasm::{
+    RecordingWasmHostHttp, WasmHostError, WasmHostHttp, WasmHttpRequest, WasmHttpResponse,
+    WitToolHost, WitToolRuntimeConfig,
+};
 use serde_json::json;
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
 use wit_parser::Resolve;
@@ -291,6 +294,48 @@ async fn host_runtime_services_wasm_invalid_output_reconciles_usage_after_host_e
     );
 }
 
+#[tokio::test]
+async fn host_runtime_services_wasm_guest_error_reconciles_wall_clock_after_host_effect() {
+    let wat = http_without_body_then_guest_error_wat();
+    let runtime = wasm_runtime_for_component_with_slow_zero_body_http(
+        WASM_WALL_CLOCK_FAILURE_MANIFEST,
+        "wasm-accounting.wall_clock_failure",
+        "wasm/wall-clock-failure.wasm",
+        &wat,
+    )
+    .await;
+
+    let error = runtime
+        .dispatcher
+        .dispatch_json(wasm_dispatch_request(
+            runtime.capability_id,
+            json!({"call": "wall-clock-failure"}),
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        DispatchError::Wasm {
+            kind: RuntimeDispatchErrorKind::Guest
+        }
+    ));
+    assert_eq!(runtime.http.requests().unwrap().len(), 1);
+    let usage = runtime.governor.usage_for(&sample_account());
+    assert!(
+        usage.wall_clock_ms > 0,
+        "wall-clock usage must be reconciled even when a failed guest has no byte/token/process usage"
+    );
+    assert_eq!(usage.network_egress_bytes, 0);
+    assert_eq!(
+        runtime
+            .governor
+            .reserved_for(&sample_account())
+            .network_egress_bytes,
+        0
+    );
+}
+
 struct EchoScriptBackend;
 
 impl ScriptBackend for EchoScriptBackend {
@@ -417,6 +462,50 @@ struct WasmRuntimeFixture {
     capability_id: CapabilityId,
 }
 
+struct WasmWallClockRuntimeFixture {
+    dispatcher: Arc<dyn CapabilityDispatcher>,
+    governor: Arc<InMemoryResourceGovernor>,
+    http: Arc<SlowZeroBodyWasmHostHttp>,
+    capability_id: CapabilityId,
+}
+
+#[derive(Debug)]
+struct SlowZeroBodyWasmHostHttp {
+    requests: std::sync::Mutex<Vec<WasmHttpRequest>>,
+    delay: Duration,
+}
+
+impl SlowZeroBodyWasmHostHttp {
+    fn new(delay: Duration) -> Self {
+        Self {
+            requests: std::sync::Mutex::new(Vec::new()),
+            delay,
+        }
+    }
+
+    fn requests(&self) -> Result<Vec<WasmHttpRequest>, WasmHostError> {
+        self.requests
+            .lock()
+            .map(|requests| requests.clone())
+            .map_err(|_| WasmHostError::Failed("slow HTTP request log is poisoned".into()))
+    }
+}
+
+impl WasmHostHttp for SlowZeroBodyWasmHostHttp {
+    fn request(&self, request: WasmHttpRequest) -> Result<WasmHttpResponse, WasmHostError> {
+        self.requests
+            .lock()
+            .map_err(|_| WasmHostError::Failed("slow HTTP request log is poisoned".into()))?
+            .push(request);
+        thread::sleep(self.delay);
+        Ok(WasmHttpResponse {
+            status: 204,
+            headers_json: "{}".to_string(),
+            body: Vec::new(),
+        })
+    }
+}
+
 async fn wasm_runtime_for_component(
     manifest: &str,
     capability: &str,
@@ -451,6 +540,43 @@ async fn wasm_runtime_for_component(
     .unwrap();
 
     WasmRuntimeFixture {
+        dispatcher: services.runtime_dispatcher_arc(),
+        governor,
+        http,
+        capability_id: CapabilityId::new(capability).unwrap(),
+    }
+}
+
+async fn wasm_runtime_for_component_with_slow_zero_body_http(
+    manifest: &str,
+    capability: &str,
+    module_path: &str,
+    wat: &str,
+) -> WasmWallClockRuntimeFixture {
+    let parsed_manifest = ExtensionManifest::parse(manifest).unwrap();
+    let component = tool_component(wat);
+    let filesystem = Arc::new(
+        filesystem_with_wasm_component(parsed_manifest.id.as_str(), module_path, &component).await,
+    );
+    let governor = Arc::new(governor_with_default_limit(sample_account()));
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
+        Arc::new(GrantAuthorizer::new());
+    let http = Arc::new(SlowZeroBodyWasmHostHttp::new(Duration::from_millis(25)));
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(manifest)),
+        filesystem,
+        Arc::clone(&governor),
+        authorizer,
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .try_with_wasm_runtime(
+        WitToolRuntimeConfig::for_testing(),
+        WitToolHost::deny_all().with_http(Arc::clone(&http)),
+    )
+    .unwrap();
+
+    WasmWallClockRuntimeFixture {
         dispatcher: services.runtime_dispatcher_arc(),
         governor,
         http,
@@ -560,6 +686,13 @@ fn http_then_invalid_output_wat() -> String {
         )
 }
 
+fn http_without_body_then_guest_error_wat() -> String {
+    http_then_guest_error_wat().replace(
+        "i32.const 1\n    i32.const 256\n    i32.const 5",
+        "i32.const 0\n    i32.const 0\n    i32.const 0",
+    )
+}
+
 const SCRIPT_MANIFEST: &str = r#"
 id = "script"
 name = "Script Echo"
@@ -653,6 +786,25 @@ module = "wasm/invalid-output.wasm"
 [[capabilities]]
 id = "wasm-accounting.invalid_output"
 description = "Call host HTTP then return invalid output"
+effects = ["dispatch_capability", "network"]
+default_permission = "allow"
+parameters_schema = { type = "object" }
+"#;
+
+const WASM_WALL_CLOCK_FAILURE_MANIFEST: &str = r#"
+id = "wasm-accounting"
+name = "WASM Accounting Wall Clock Failure"
+version = "0.1.0"
+description = "WASM accounting extension"
+trust = "untrusted"
+
+[runtime]
+kind = "wasm"
+module = "wasm/wall-clock-failure.wasm"
+
+[[capabilities]]
+id = "wasm-accounting.wall_clock_failure"
+description = "Spend wall-clock time through host HTTP then return a guest error"
 effects = ["dispatch_capability", "network"]
 default_permission = "allow"
 parameters_schema = { type = "object" }

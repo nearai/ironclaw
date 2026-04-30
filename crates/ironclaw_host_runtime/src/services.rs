@@ -728,6 +728,7 @@ fn has_accountable_effects(usage: &ResourceUsage) -> bool {
     usage.usd != Default::default()
         || usage.input_tokens > 0
         || usage.output_tokens > 0
+        || usage.wall_clock_ms > 0
         || usage.output_bytes > 0
         || usage.network_egress_bytes > 0
         || usage.process_count > 0
