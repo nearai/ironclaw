@@ -13,7 +13,8 @@ use ironclaw_host_runtime::{
     RuntimeStatusRequest, RuntimeWorkId, SurfaceKind, VisibleCapabilityRequest,
 };
 use ironclaw_processes::{
-    InMemoryProcessStore, ProcessCancellationRegistry, ProcessStart, ProcessStatus, ProcessStore,
+    InMemoryProcessResultStore, InMemoryProcessStore, ProcessCancellationRegistry,
+    ProcessResultStore, ProcessStart, ProcessStatus, ProcessStore,
 };
 use ironclaw_run_state::{
     InMemoryApprovalRequestStore, InMemoryRunStateStore, RunRecord, RunStart, RunStateError,
@@ -645,6 +646,99 @@ async fn default_runtime_status_includes_running_processes_from_process_store() 
     );
     assert_eq!(status.active_work[0].capability_id, Some(capability_id()));
     assert_eq!(status.active_work[0].runtime, Some(RuntimeKind::Wasm));
+}
+
+#[tokio::test]
+async fn default_runtime_cancel_writes_killed_process_result_record() {
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
+    let process_store = Arc::new(InMemoryProcessStore::new());
+    let result_store = Arc::new(InMemoryProcessResultStore::new());
+    let cancellation_registry = Arc::new(ProcessCancellationRegistry::new());
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher,
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_process_store(process_store.clone())
+    .with_process_result_store(result_store.clone())
+    .with_process_cancellation_registry(cancellation_registry.clone());
+
+    let context = execution_context_with_dispatch_grant();
+    let process_id = ProcessId::new();
+    process_store
+        .start(process_start(&context, process_id))
+        .await
+        .unwrap();
+    cancellation_registry.register(&context.resource_scope, process_id);
+
+    let outcome = runtime
+        .cancel_work(CancelRuntimeWorkRequest::new(
+            context.resource_scope.clone(),
+            context.correlation_id,
+            CancelReason::TurnCancelled,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.cancelled, vec![RuntimeWorkId::Process(process_id)]);
+    let result = result_store
+        .get(&context.resource_scope, process_id)
+        .await
+        .unwrap()
+        .expect("killed process result should be persisted");
+    assert_eq!(result.status, ProcessStatus::Killed);
+    assert_eq!(result.output, None);
+    assert_eq!(result.output_ref, None);
+    assert_eq!(result.error_kind, None);
+}
+
+#[tokio::test]
+async fn default_runtime_status_does_not_duplicate_process_backed_invocations() {
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let process_store = Arc::new(InMemoryProcessStore::new());
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher,
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_run_state(run_state.clone())
+    .with_process_store(process_store.clone());
+
+    let context = execution_context_with_dispatch_grant();
+    let process_id = ProcessId::new();
+    run_state
+        .start(RunStart {
+            invocation_id: context.invocation_id,
+            capability_id: capability_id(),
+            scope: context.resource_scope.clone(),
+        })
+        .await
+        .unwrap();
+    process_store
+        .start(process_start(&context, process_id))
+        .await
+        .unwrap();
+
+    let status = runtime
+        .runtime_status(RuntimeStatusRequest::new(
+            context.resource_scope,
+            context.correlation_id,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(status.active_work.len(), 1);
+    assert_eq!(
+        status.active_work[0].work_id,
+        RuntimeWorkId::Process(process_id)
+    );
 }
 
 #[tokio::test]

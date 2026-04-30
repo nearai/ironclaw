@@ -23,8 +23,8 @@ use ironclaw_host_api::{
     ApprovalRequestId, CapabilityDispatcher, CapabilityId, InvocationId, ResourceScope, RuntimeKind,
 };
 use ironclaw_processes::{
-    ProcessCancellationRegistry, ProcessError, ProcessHost, ProcessManager, ProcessStatus,
-    ProcessStore,
+    ProcessCancellationRegistry, ProcessError, ProcessHost, ProcessManager, ProcessResultStore,
+    ProcessStatus, ProcessStore,
 };
 use ironclaw_run_state::{ApprovalRequestStore, RunStateError, RunStateStore, RunStatus};
 
@@ -47,6 +47,7 @@ pub struct DefaultHostRuntime {
     capability_leases: Option<Arc<dyn CapabilityLeaseStore>>,
     process_manager: Option<Arc<dyn ProcessManager>>,
     process_store: Option<Arc<dyn ProcessStore>>,
+    process_result_store: Option<Arc<dyn ProcessResultStore>>,
     process_cancellation_registry: Option<Arc<ProcessCancellationRegistry>>,
     runtime_health: Option<Arc<dyn RuntimeBackendHealth>>,
     surface_version: CapabilitySurfaceVersion,
@@ -78,6 +79,7 @@ impl DefaultHostRuntime {
             capability_leases: None,
             process_manager: None,
             process_store: None,
+            process_result_store: None,
             process_cancellation_registry: None,
             runtime_health: None,
             surface_version,
@@ -117,6 +119,15 @@ impl DefaultHostRuntime {
     /// Attaches the process store used for status and cancellation fanout.
     pub fn with_process_store(mut self, process_store: Arc<dyn ProcessStore>) -> Self {
         self.process_store = Some(process_store);
+        self
+    }
+
+    /// Attaches the process result store used to persist cancellation results.
+    pub fn with_process_result_store(
+        mut self,
+        process_result_store: Arc<dyn ProcessResultStore>,
+    ) -> Self {
+        self.process_result_store = Some(process_result_store);
         self
     }
 
@@ -253,7 +264,15 @@ impl HostRuntime for DefaultHostRuntime {
                 process_invocations.push(record.invocation_id);
                 let work_id = RuntimeWorkId::Process(record.process_id);
                 match process_host.kill(&request.scope, record.process_id).await {
-                    Ok(_) => outcome.cancelled.push(work_id),
+                    Ok(record) => {
+                        if let Some(result_store) = &self.process_result_store {
+                            result_store
+                                .kill(&record.scope, record.process_id)
+                                .await
+                                .map_err(unavailable_from_process_error)?;
+                        }
+                        outcome.cancelled.push(work_id);
+                    }
                     Err(ProcessError::InvalidTransition { .. }) => {
                         outcome.already_terminal.push(work_id);
                     }
@@ -320,16 +339,28 @@ impl HostRuntime for DefaultHostRuntime {
                 .records_for_scope(&request.scope)
                 .await
                 .map_err(unavailable_from_process_error)?;
+            let mut process_invocations = Vec::new();
             active_work.extend(
                 records
                     .into_iter()
                     .filter(|record| record.status == ProcessStatus::Running)
-                    .map(|record| RuntimeWorkSummary {
-                        work_id: RuntimeWorkId::Process(record.process_id),
-                        capability_id: Some(record.capability_id),
-                        runtime: Some(record.runtime),
+                    .map(|record| {
+                        process_invocations.push(record.invocation_id);
+                        RuntimeWorkSummary {
+                            work_id: RuntimeWorkId::Process(record.process_id),
+                            capability_id: Some(record.capability_id),
+                            runtime: Some(record.runtime),
+                        }
                     }),
             );
+            if !process_invocations.is_empty() {
+                active_work.retain(|summary| match &summary.work_id {
+                    RuntimeWorkId::Invocation(invocation_id) => {
+                        !process_invocations.contains(invocation_id)
+                    }
+                    RuntimeWorkId::Process(_) | RuntimeWorkId::Gate(_) => true,
+                });
+            }
         }
 
         Ok(HostRuntimeStatus { active_work })
