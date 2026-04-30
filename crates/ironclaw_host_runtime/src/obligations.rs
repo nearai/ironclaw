@@ -436,7 +436,14 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
         // reservation downstream. Resource reservations are immediately
         // released because no downstream dispatcher/process can reconcile them
         // on this path. CapabilityHost uses `prepare`/`complete`/`abort`
-        // directly instead.
+        // directly instead. Post-dispatch obligations fail closed here because
+        // this path has no dispatch result to redact, limit, or audit.
+        let post_dispatch = post_dispatch_obligations(request.obligations);
+        if !post_dispatch.is_empty() {
+            return Err(CapabilityObligationError::Unsupported {
+                obligations: post_dispatch,
+            });
+        }
         let outcome = self
             .prepare(CapabilityObligationRequest {
                 phase: request.phase,
@@ -508,26 +515,11 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
         &self,
         request: CapabilityObligationAbortRequest<'_>,
     ) -> Result<(), CapabilityObligationError> {
-        if request
-            .obligations
-            .iter()
-            .any(|obligation| matches!(obligation, Obligation::ApplyNetworkPolicy { .. }))
-            && let Some(store) = &self.network_policies
-        {
-            let _ = store.take(&request.context.resource_scope, request.capability_id);
-        }
-
-        if let Some(store) = &self.secret_injections {
-            for handle in secret_injection_obligations(request.obligations) {
-                let _ = store
-                    .take(
-                        &request.context.resource_scope,
-                        request.capability_id,
-                        &handle,
-                    )
-                    .map_err(|_| secret_obligation_failed())?;
-            }
-        }
+        self.discard_staged_handoffs(
+            &request.context.resource_scope,
+            request.capability_id,
+            request.obligations,
+        )?;
 
         if let Some(reservation) = &request.outcome.resource_reservation {
             let Some(governor) = &self.resource_governor else {
@@ -569,6 +561,12 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
             }
         }
 
+        self.discard_staged_handoffs(
+            &request.context.resource_scope,
+            request.capability_id,
+            request.obligations,
+        )?;
+
         if request
             .obligations
             .iter()
@@ -579,6 +577,48 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
 
         Ok(dispatch)
     }
+}
+
+impl BuiltinObligationHandler {
+    fn discard_staged_handoffs(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        obligations: &[Obligation],
+    ) -> Result<(), CapabilityObligationError> {
+        if obligations
+            .iter()
+            .any(|obligation| matches!(obligation, Obligation::ApplyNetworkPolicy { .. }))
+            && let Some(store) = &self.network_policies
+        {
+            let _ = store.take(scope, capability_id);
+        }
+
+        if let Some(store) = &self.secret_injections {
+            for handle in secret_injection_obligations(obligations) {
+                let _ = store
+                    .take(scope, capability_id, &handle)
+                    .map_err(|_| secret_obligation_failed())?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn post_dispatch_obligations(obligations: &[Obligation]) -> Vec<Obligation> {
+    obligations
+        .iter()
+        .filter(|obligation| {
+            matches!(
+                obligation,
+                Obligation::AuditAfter
+                    | Obligation::RedactOutput
+                    | Obligation::EnforceOutputLimit { .. }
+            )
+        })
+        .cloned()
+        .collect()
 }
 
 fn unsupported_obligations(

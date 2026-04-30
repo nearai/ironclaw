@@ -63,6 +63,31 @@ async fn builtin_obligation_handler_emits_metadata_only_audit_before() {
 }
 
 #[tokio::test]
+async fn builtin_obligation_handler_satisfy_fails_closed_on_post_dispatch_obligations() {
+    let handler = BuiltinObligationHandler::new();
+    let context = execution_context(CapabilitySet::default());
+    let capability_id = capability_id();
+    let estimate = ResourceEstimate::default();
+    let obligations = vec![Obligation::RedactOutput];
+
+    let err = handler
+        .satisfy(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityObligationError::Unsupported { obligations } if obligations == vec![Obligation::RedactOutput]
+    ));
+}
+
+#[tokio::test]
 async fn builtin_obligation_handler_enforces_output_limit_after_dispatch() {
     let handler = BuiltinObligationHandler::new();
     let context = execution_context(CapabilitySet::default());
@@ -75,16 +100,6 @@ async fn builtin_obligation_handler_enforces_output_limit_after_dispatch() {
         json!({"message": "this output is too large"}),
     );
 
-    handler
-        .satisfy(CapabilityObligationRequest {
-            phase: CapabilityObligationPhase::Invoke,
-            context: &context,
-            capability_id: &capability_id,
-            estimate: &estimate,
-            obligations: &obligations,
-        })
-        .await
-        .unwrap();
     let err = handler
         .complete_dispatch(CapabilityObligationCompletionRequest {
             phase: CapabilityObligationPhase::Invoke,
@@ -119,16 +134,6 @@ async fn builtin_obligation_handler_redacts_output_after_dispatch() {
         json!({"authorization": leaked}),
     );
 
-    handler
-        .satisfy(CapabilityObligationRequest {
-            phase: CapabilityObligationPhase::Invoke,
-            context: &context,
-            capability_id: &capability_id,
-            estimate: &estimate,
-            obligations: &obligations,
-        })
-        .await
-        .unwrap();
     let completed = handler
         .complete_dispatch(CapabilityObligationCompletionRequest {
             phase: CapabilityObligationPhase::Invoke,
@@ -407,6 +412,97 @@ async fn builtin_obligation_handler_removes_staged_secret_on_abort() {
         .await
         .unwrap();
 
+    assert!(
+        injection_store
+            .take(&context.resource_scope, &capability_id, &handle)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn builtin_obligation_handler_cleans_unused_staged_handoffs_after_dispatch_completion() {
+    let policy_store = Arc::new(NetworkObligationPolicyStore::new());
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let injection_store = Arc::new(RuntimeSecretInjectionStore::new());
+    let handler = BuiltinObligationHandler::new()
+        .with_network_policy_store(policy_store.clone())
+        .with_secret_store(secret_store.clone())
+        .with_secret_injection_store(injection_store.clone());
+    let context = execution_context(CapabilitySet::default());
+    let capability_id = capability_id();
+    let estimate = ResourceEstimate::default();
+    let handle = SecretHandle::new("api_token").unwrap();
+    secret_store
+        .put(
+            context.resource_scope.clone(),
+            handle.clone(),
+            SecretMaterial::from("runtime-secret"),
+        )
+        .await
+        .unwrap();
+    let policy = allowed_network_policy();
+    let obligations = vec![
+        Obligation::ApplyNetworkPolicy {
+            policy: policy.clone(),
+        },
+        Obligation::InjectSecretOnce {
+            handle: handle.clone(),
+        },
+    ];
+
+    handler
+        .prepare(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+        })
+        .await
+        .unwrap();
+    assert!(
+        policy_store
+            .take(&context.resource_scope, &capability_id)
+            .is_some()
+    );
+    assert!(
+        injection_store
+            .take(&context.resource_scope, &capability_id, &handle)
+            .unwrap()
+            .is_some()
+    );
+    policy_store.insert(&context.resource_scope, &capability_id, policy);
+    injection_store
+        .insert(
+            &context.resource_scope,
+            &capability_id,
+            &handle,
+            SecretMaterial::from("runtime-secret"),
+        )
+        .unwrap();
+
+    handler
+        .complete_dispatch(CapabilityObligationCompletionRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+            dispatch: &sample_dispatch(
+                &context.resource_scope,
+                &capability_id,
+                json!({"ok": true}),
+            ),
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        policy_store
+            .take(&context.resource_scope, &capability_id)
+            .is_none()
+    );
     assert!(
         injection_store
             .take(&context.resource_scope, &capability_id, &handle)
