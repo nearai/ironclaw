@@ -950,8 +950,16 @@ fn is_sensitive_response_header(name: &str) -> bool {
         "authorization",
         "www-authenticate",
         "set-cookie",
+        "cookie",
         "x-api-key",
+        "api-key",
         "x-auth-token",
+        "x-token",
+        "x-access-token",
+        "x-session-token",
+        "x-csrf-token",
+        "x-secret",
+        "x-api-secret",
         "proxy-authenticate",
         "proxy-authorization",
     ];
@@ -984,14 +992,41 @@ fn redact(mut text: String, values: &[String]) -> String {
 }
 
 fn redaction_values_for_secret(value: &str) -> Vec<String> {
-    let mut values = vec![value.to_string()];
+    let mut values = Vec::new();
+    push_redaction_value(&mut values, value.to_string());
     let encoded = url::form_urlencoded::byte_serialize(value.as_bytes()).collect::<String>();
-    if encoded != value {
-        values.push(encoded.clone());
-    }
+    push_redaction_value(&mut values, encoded.clone());
+    push_redaction_value(&mut values, lowercase_percent_escapes(&encoded));
     let plus_encoded = encoded.replace("%20", "+");
-    if plus_encoded != encoded && plus_encoded != value {
-        values.push(plus_encoded);
-    }
+    push_redaction_value(&mut values, plus_encoded.clone());
+    push_redaction_value(&mut values, lowercase_percent_escapes(&plus_encoded));
     values
+}
+
+fn push_redaction_value(values: &mut Vec<String>, value: String) {
+    if !value.is_empty() && !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
+}
+
+fn lowercase_percent_escapes(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut output = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && bytes[index + 1].is_ascii_hexdigit()
+            && bytes[index + 2].is_ascii_hexdigit()
+        {
+            output.push('%');
+            output.push((bytes[index + 1] as char).to_ascii_lowercase());
+            output.push((bytes[index + 2] as char).to_ascii_lowercase());
+            index += 3;
+            continue;
+        }
+        output.push(bytes[index] as char);
+        index += 1;
+    }
+    output
 }

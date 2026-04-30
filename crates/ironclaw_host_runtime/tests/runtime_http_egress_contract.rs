@@ -260,6 +260,107 @@ fn host_http_egress_redacts_injected_credentials_from_runtime_visible_response()
 }
 
 #[test]
+fn host_http_egress_redacts_lowercase_percent_encoded_secret_echoes() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![(
+            "x-echo".to_string(),
+            "secret+with%2fslash%2bplus%3f".to_string(),
+        )],
+        body: b"upstream echoed secret+with%2fslash%2bplus%3f".to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 45,
+            resolved_ip: None,
+        },
+    });
+    let secrets = InMemorySecretStore::new();
+    let scope = sample_scope();
+    let handle = SecretHandle::new("api-token").unwrap();
+    block_on_test(secrets.put(
+        scope.clone(),
+        handle.clone(),
+        SecretMaterial::from("secret with/slash+plus?"),
+    ))
+    .unwrap();
+    let service = HostHttpEgressService::new(network, secrets);
+
+    let response = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope,
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle,
+                target: RuntimeCredentialTarget::QueryParam {
+                    name: "token".to_string(),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+        })
+        .expect("lowercase percent-encoded echoed credentials should be redacted");
+
+    assert!(response.redaction_applied);
+    assert_eq!(
+        response.headers,
+        vec![("x-echo".to_string(), "[REDACTED]".to_string())]
+    );
+    assert_eq!(response.body, b"upstream echoed [REDACTED]".to_vec());
+}
+
+#[test]
+fn host_http_egress_strips_all_sensitive_response_headers() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![
+            ("api-key".to_string(), "short-manual-key".to_string()),
+            ("x-token".to_string(), "short-manual-key".to_string()),
+            ("x-access-token".to_string(), "short-manual-key".to_string()),
+            (
+                "x-session-token".to_string(),
+                "short-manual-key".to_string(),
+            ),
+            ("x-csrf-token".to_string(), "short-manual-key".to_string()),
+            ("x-secret".to_string(), "short-manual-key".to_string()),
+            ("x-api-secret".to_string(), "short-manual-key".to_string()),
+            ("x-public".to_string(), "ok".to_string()),
+        ],
+        body: b"{}".to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 2,
+            resolved_ip: None,
+        },
+    });
+    let service = HostHttpEgressService::new(network, InMemorySecretStore::new());
+
+    let response = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope: sample_scope(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+        })
+        .expect("sensitive response headers should be stripped before runtime visibility");
+
+    assert!(response.redaction_applied);
+    assert_eq!(
+        response.headers,
+        vec![("x-public".to_string(), "ok".to_string())]
+    );
+}
+
+#[test]
 fn host_http_egress_blocks_credential_shaped_response_body() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
