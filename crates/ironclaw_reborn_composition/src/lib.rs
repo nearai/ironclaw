@@ -673,11 +673,14 @@ pub async fn build_reborn_production_services(
     factories::auth::build(&input, &mut services)?;
     factories::extensions::build(&input, &mut services)?;
 
-    // Substrate gates: required production services that are not yet merged.
-    // Each call returns Ok(()) under LocalDev/MigrationDryRun (the dev/test
-    // profiles tolerate partial graphs by design) and
-    // SubstrateNotImplemented under Production. Once the corresponding crate
-    // lands, the factory module replaces the gate with a real builder.
+    // Substrate gates: required production services that are not yet
+    // merged. Each call returns `Ok(())` under `LocalDev` (the dev/test
+    // profile tolerates partial graphs by design) and
+    // `SubstrateNotImplemented` under any profile that requires the
+    // full graph — `Production` for live traffic, `MigrationDryRun` so
+    // a dry run validates the production-ready shape rather than a
+    // dev-leaning one. Once the corresponding crate lands, the factory
+    // module replaces the gate with a real builder.
     factories::capabilities::build(&input, &mut services)?;
     factories::processes::build(&input, &mut services)?;
     factories::dispatcher::build(&input, &mut services)?;
@@ -910,10 +913,32 @@ mod tests {
         let err = build_reborn_production_services(input(RebornProfile::MigrationDryRun))
             .await
             .expect_err("dry run must fail closed when substrate is missing");
-        assert!(matches!(
-            err,
-            RebornBuildError::SubstrateNotImplemented { .. }
-        ));
+        // Sharper guarantee than just matching `SubstrateNotImplemented`:
+        // a dry run must fail on the *first durable-backend gate* (the
+        // factories that wire in-memory backends for `LocalDev` only),
+        // proving the dry-run profile actually traverses
+        // `requires_full_graph()` — not on a substrate-crate gate that
+        // would also fire under `LocalDev` if the crate were missing.
+        // The factories run in the order declared in
+        // `build_reborn_production_services`; the first durable-backend
+        // gate is `events::build` returning `durable_event_backend`.
+        match err {
+            RebornBuildError::SubstrateNotImplemented { service } => {
+                assert!(
+                    [
+                        "durable_event_backend",
+                        "durable_run_state_backend",
+                        "durable_secret_store",
+                        "durable_network_policy_backend",
+                        "durable_process_store",
+                    ]
+                    .contains(&service),
+                    "dry run must fail on a durable-backend gate, not a \
+                     substrate-crate gate; got '{service}'"
+                );
+            }
+            other => panic!("expected SubstrateNotImplemented, got {other:?}"),
+        }
     }
 
     #[test]

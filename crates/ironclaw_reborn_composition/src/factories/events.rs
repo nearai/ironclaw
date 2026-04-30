@@ -24,13 +24,17 @@ pub(crate) fn build(
     services.event_log = Some(event_log);
     services.audit_log = Some(audit_log);
 
-    if input.profile == crate::RebornProfile::Production {
-        // The in-memory backend is fine for LocalDev / MigrationDryRun, but
-        // Production requires a durable Postgres/libSQL-backed log. The
-        // factory for that log lives in a follow-up PR — issue #3022
-        // (open as of 2026-04-29; no implementing PR in flight)
-        // gates the cutover and will replace this gate with a real
-        // builder when it lands.
+    if input.profile.requires_full_graph() {
+        // The in-memory backend is fine for LocalDev only. Production
+        // and MigrationDryRun both require a durable Postgres/libSQL-
+        // backed log so a dry run validates the *production-ready*
+        // graph rather than a dev-leaning one — see
+        // `RebornProfile::requires_full_graph` and the
+        // `migration_dry_run_fails_closed_like_production` test in
+        // lib.rs. The factory for that log lives in a follow-up PR —
+        // issue #3022 (open as of 2026-04-29; no implementing PR in
+        // flight) gates the cutover and will replace this gate with a
+        // real builder when it lands.
         return Err(RebornBuildError::SubstrateNotImplemented {
             service: "durable_event_backend",
         });

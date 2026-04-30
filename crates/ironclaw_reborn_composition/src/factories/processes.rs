@@ -10,11 +10,12 @@
 //!
 //! Filesystem-backed `ProcessStore` / `ProcessResultStore` exist in
 //! `ironclaw_processes` and can be wired through [`RebornProductionServices::filesystem_root`]
-//! once typed settings select the backend. Until then, every profile
-//! gets the in-memory pair and `Production` returns
+//! once typed settings select the backend. Until then every profile
+//! gets the in-memory pair, and any profile that requires the full
+//! graph (Production *or* MigrationDryRun) returns
 //! [`crate::RebornBuildError::SubstrateNotImplemented`] with service
-//! `durable_process_store` so a production build cannot accidentally
-//! run on volatile state.
+//! `durable_process_store` so a production build — or a dry run
+//! validating one — cannot accidentally run on volatile state.
 //!
 //! [`RebornProcessServices`]: crate::RebornProcessServices
 //! [`RebornProductionServices::filesystem_root`]: crate::RebornProductionServices
@@ -38,7 +39,7 @@ pub(crate) fn build(
     };
     services.process_services = Some(Arc::new(bundle));
 
-    if input.profile == crate::RebornProfile::Production {
+    if input.profile.requires_full_graph() {
         return Err(RebornBuildError::SubstrateNotImplemented {
             service: "durable_process_store",
         });

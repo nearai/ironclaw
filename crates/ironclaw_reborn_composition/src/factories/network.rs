@@ -11,11 +11,13 @@
 //! A live `NetworkPolicyStore` (per-scope policy persistence with
 //! PG/libSQL backends) lands with the second composition phase
 //! (`reborn.network.policy_backend` from issue #3026's config-model
-//! section). Until then `Production` returns
+//! section). Until then any profile that requires the full graph
+//! (Production *or* MigrationDryRun) returns
 //! [`crate::RebornBuildError::SubstrateNotImplemented`] with service
-//! `durable_network_policy_backend` because a deny-all default is not a
-//! cutover-ready policy — the operator must configure allowed targets
-//! before live traffic can flow.
+//! `durable_network_policy_backend` because a deny-all default is not
+//! a cutover-ready policy — the operator must configure allowed
+//! targets before live traffic can flow, and a dry run must catch the
+//! misconfiguration rather than silently boot.
 
 use std::sync::Arc;
 
@@ -31,7 +33,7 @@ pub(crate) fn build(
     let enforcer = Arc::new(StaticNetworkPolicyEnforcer::new(NetworkPolicy::default()));
     services.network_enforcer = Some(enforcer);
 
-    if input.profile == crate::RebornProfile::Production {
+    if input.profile.requires_full_graph() {
         return Err(RebornBuildError::SubstrateNotImplemented {
             service: "durable_network_policy_backend",
         });
