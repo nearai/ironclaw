@@ -99,6 +99,7 @@ async fn adapter_normalizes_ingress_and_does_not_let_metadata_override_scope() {
                 mime_type: Some("text/plain".to_string()),
                 filename: Some("notes.txt".to_string()),
                 size_bytes: Some(24),
+                data: b"hello attachment".to_vec(),
                 storage_ref: Some("workspace://uploads/upload-1".to_string()),
                 source_url: None,
                 metadata: TransportMetadata::new(),
@@ -134,6 +135,10 @@ async fn adapter_normalizes_ingress_and_does_not_let_metadata_override_scope() {
         submitted.message.attachments[0].storage_ref.as_deref(),
         Some("workspace://uploads/upload-1")
     );
+    assert_eq!(
+        submitted.message.attachments[0].data,
+        b"hello attachment".to_vec()
+    );
 }
 
 struct RecordingAdapter {
@@ -147,6 +152,55 @@ impl RecordingAdapter {
             id: adapter_id(id),
             delivered: Mutex::new(Vec::new()),
         }
+    }
+}
+
+struct StartResultAdapter {
+    id: TransportAdapterId,
+    fail_start: bool,
+    started_count: Mutex<usize>,
+}
+
+impl StartResultAdapter {
+    fn new(id: &str, fail_start: bool) -> Self {
+        Self {
+            id: adapter_id(id),
+            fail_start,
+            started_count: Mutex::new(0),
+        }
+    }
+
+    async fn started_count(&self) -> usize {
+        *self.started_count.lock().await
+    }
+}
+
+#[async_trait]
+impl TransportAdapter for StartResultAdapter {
+    fn adapter_id(&self) -> &TransportAdapterId {
+        &self.id
+    }
+
+    async fn start(&self, _sink: Arc<dyn TransportIngressSink>) -> Result<(), TransportError> {
+        *self.started_count.lock().await += 1;
+        if self.fail_start {
+            return Err(TransportError::new(
+                TransportErrorKind::StartupFailed,
+                format!("{} unavailable", self.id),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn deliver(
+        &self,
+        _egress: TransportEgress,
+    ) -> Result<TransportDeliveryAck, TransportError> {
+        unreachable!("start-result adapter is not used for delivery in this test")
+    }
+
+    async fn health_check(&self) -> Result<TransportHealth, TransportError> {
+        Ok(TransportHealth::healthy())
     }
 }
 
@@ -174,6 +228,41 @@ impl TransportAdapter for RecordingAdapter {
     async fn health_check(&self) -> Result<TransportHealth, TransportError> {
         Ok(TransportHealth::healthy())
     }
+}
+
+#[tokio::test]
+async fn registry_start_all_keeps_starting_after_adapter_failures() {
+    let failing = Arc::new(StartResultAdapter::new("failing", true));
+    let healthy = Arc::new(StartResultAdapter::new("healthy", false));
+    let registry = TransportRegistry::new();
+    registry
+        .register(failing.clone())
+        .expect("register failing");
+    registry
+        .register(healthy.clone())
+        .expect("register healthy");
+
+    registry
+        .start_all(Arc::new(RecordingSink::default()))
+        .await
+        .expect("one healthy adapter should allow startup to continue");
+
+    assert_eq!(failing.started_count().await, 1);
+    assert_eq!(healthy.started_count().await, 1);
+}
+
+#[tokio::test]
+async fn registry_start_all_errors_when_no_adapter_starts() {
+    let failing = Arc::new(StartResultAdapter::new("failing", true));
+    let registry = TransportRegistry::new();
+    registry.register(failing).expect("register failing");
+
+    let error = registry
+        .start_all(Arc::new(RecordingSink::default()))
+        .await
+        .expect_err("all failed adapters should fail startup");
+
+    assert_eq!(error.kind(), TransportErrorKind::StartupFailed);
 }
 
 #[tokio::test]

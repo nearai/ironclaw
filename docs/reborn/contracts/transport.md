@@ -35,8 +35,9 @@ egress back through `TransportRegistry` to a named `TransportAdapter`.
 - Typed route fields are authoritative. Transport metadata is supplemental and
   must not override `ResourceScope`, `TransportThreadId`, adapter id, or route
   fields.
-- Attachment payload bytes are outside this contract. `TransportAttachment`
-  carries descriptors and references only.
+- `TransportAttachment` may carry inline bytes that the adapter has already
+  accepted and size-limited; otherwise payloads stay out of band behind
+  `storage_ref` or `source_url` descriptors.
 - Unknown adapter delivery fails closed with `adapter_not_found`.
 - Duplicate adapter registration fails with `adapter_already_exists`.
 - Transport errors expose stable kinds and redacted reasons only.

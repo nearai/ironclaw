@@ -217,7 +217,7 @@ pub enum AttachmentKind {
     Other,
 }
 
-/// Descriptor for attachment content already staged outside the adapter contract.
+/// Descriptor for attachment content, with optional inline bytes for legacy paths.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransportAttachment {
     pub id: String,
@@ -225,6 +225,12 @@ pub struct TransportAttachment {
     pub mime_type: Option<String>,
     pub filename: Option<String>,
     pub size_bytes: Option<u64>,
+    /// Inline payload bytes already accepted and size-limited by the adapter.
+    ///
+    /// Empty when the payload is staged out of band and referenced by
+    /// `storage_ref` or `source_url`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub data: Vec<u8>,
     pub storage_ref: Option<String>,
     pub source_url: Option<String>,
     #[serde(default, skip_serializing_if = "TransportMetadata::is_empty")]
@@ -461,9 +467,40 @@ impl TransportRegistry {
         &self,
         sink: Arc<dyn TransportIngressSink>,
     ) -> Result<(), TransportError> {
-        let adapters = self.snapshot_adapters()?;
-        for adapter in adapters {
-            adapter.start(sink.clone()).await?;
+        let entries = self.snapshot_entries()?;
+        if entries.is_empty() {
+            return Err(TransportError::new(
+                TransportErrorKind::StartupFailed,
+                "no transport adapters registered",
+            ));
+        }
+
+        let mut started = 0usize;
+        let mut first_error = None;
+        for (adapter_id, adapter) in entries {
+            match adapter.start(sink.clone()).await {
+                Ok(()) => started += 1,
+                Err(error) => {
+                    first_error.get_or_insert_with(|| {
+                        TransportError::new(
+                            error.kind(),
+                            format!(
+                                "transport adapter '{adapter_id}' failed to start: {}",
+                                error.safe_reason()
+                            ),
+                        )
+                    });
+                }
+            }
+        }
+
+        if started == 0 {
+            return Err(first_error.unwrap_or_else(|| {
+                TransportError::new(
+                    TransportErrorKind::StartupFailed,
+                    "no transport adapters started successfully",
+                )
+            }));
         }
         Ok(())
     }

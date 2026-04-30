@@ -226,7 +226,8 @@ pub fn transport_ingress_to_incoming_message(
         );
     }
 
-    let message_id = Uuid::parse_str(&transport_message_id).unwrap_or_else(|_| Uuid::new_v4());
+    let message_id = Uuid::parse_str(&transport_message_id)
+        .unwrap_or_else(|_| Uuid::new_v5(&Uuid::NAMESPACE_OID, transport_message_id.as_bytes()));
     let sender_id = metadata
         .get("sender_id")
         .and_then(Value::as_str)
@@ -298,7 +299,7 @@ fn incoming_attachment_from_transport(attachment: &TransportAttachment) -> Incom
             .get("extracted_text")
             .and_then(Value::as_str)
             .map(ToString::to_string),
-        data: Vec::new(),
+        data: attachment.data.clone(),
         duration_secs: attachment
             .metadata
             .get("duration_secs")
@@ -353,8 +354,11 @@ mod tests {
     };
     use serde_json::json;
     use tokio::sync::mpsc;
+    use uuid::Uuid;
 
-    use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse};
+    use crate::channels::{
+        AttachmentKind, ChannelManager, IncomingAttachment, IncomingMessage, OutgoingResponse,
+    };
     use crate::reborn::transport::{RebornTransportRuntime, start_legacy_agent_transport_source};
     use crate::testing::StubChannel;
 
@@ -476,7 +480,20 @@ mod tests {
         assert_eq!(adapter_ids[0].as_str(), "gateway");
 
         let message = IncomingMessage::new("gateway", "alice", "hello over reborn")
-            .with_metadata(json!({"channel_id": "chat-1"}));
+            .with_metadata(json!({"channel_id": "chat-1"}))
+            .with_attachments(vec![IncomingAttachment {
+                id: "upload-1".to_string(),
+                kind: AttachmentKind::Document,
+                mime_type: "text/plain".to_string(),
+                filename: Some("notes.txt".to_string()),
+                size_bytes: Some(12),
+                source_url: None,
+                storage_key: None,
+                local_path: None,
+                extracted_text: None,
+                data: b"hello reborn".to_vec(),
+                duration_secs: None,
+            }]);
         sender.send(message).await.expect("send message");
 
         let injected = source
@@ -489,6 +506,8 @@ mod tests {
         assert_eq!(injected.content, "hello over reborn");
         assert_eq!(injected.conversation_scope(), None);
         assert_eq!(injected.routing_target().as_deref(), Some("chat-1"));
+        assert_eq!(injected.attachments.len(), 1);
+        assert_eq!(injected.attachments[0].data, b"hello reborn".to_vec());
         assert_eq!(
             injected.metadata.get("transport_adapter_id"),
             Some(&json!("gateway"))
@@ -556,6 +575,10 @@ mod tests {
             .expect("ingress submitted");
 
         let message = rx.recv().await.expect("message injected");
+        assert_eq!(
+            message.id,
+            Uuid::new_v5(&Uuid::NAMESPACE_OID, b"external-message-1")
+        );
         assert_eq!(message.channel, "gateway");
         assert_eq!(message.user_id, "alice");
         assert_eq!(message.sender_id, "alice-transport");
@@ -585,6 +608,7 @@ mod tests {
                     mime_type: Some("image/png".to_string()),
                     filename: Some("diagram.png".to_string()),
                     size_bytes: Some(123),
+                    data: b"png bytes".to_vec(),
                     storage_ref: Some("attachments/att-1".to_string()),
                     source_url: Some("https://example.invalid/file.png".to_string()),
                     metadata: [("local_path".to_string(), json!("tmp/diagram.png"))]
@@ -610,6 +634,34 @@ mod tests {
         assert_eq!(attachment.size_bytes, Some(123));
         assert_eq!(attachment.storage_key.as_deref(), Some("attachments/att-1"));
         assert_eq!(attachment.local_path.as_deref(), Some("tmp/diagram.png"));
-        assert!(attachment.data.is_empty());
+        assert_eq!(attachment.data, b"png bytes".to_vec());
+    }
+
+    #[test]
+    fn non_uuid_transport_message_ids_map_to_deterministic_legacy_ids() {
+        let ingress = TransportIngress {
+            message_id: TransportMessageId::new("external-message-1").expect("message id"),
+            route: route("gateway", "alice"),
+            message: ironclaw_transport::TransportMessage {
+                text: "retryable".to_string(),
+                attachments: Vec::new(),
+            },
+            sender_display_name: None,
+            timezone: None,
+            received_at: Utc::now(),
+            metadata: Default::default(),
+        };
+
+        let first =
+            crate::reborn::transport::transport_ingress_to_incoming_message(ingress.clone())
+                .expect("first converted");
+        let second = crate::reborn::transport::transport_ingress_to_incoming_message(ingress)
+            .expect("second converted");
+
+        assert_eq!(first.id, second.id);
+        assert_eq!(
+            first.id,
+            Uuid::new_v5(&Uuid::NAMESPACE_OID, b"external-message-1")
+        );
     }
 }

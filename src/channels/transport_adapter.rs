@@ -945,6 +945,7 @@ fn transport_attachment_from_response_path(index: usize, path: String) -> Transp
         mime_type: None,
         filename,
         size_bytes: None,
+        data: Vec::new(),
         storage_ref: Some(path),
         source_url: None,
         metadata: TransportMetadata::new(),
@@ -970,6 +971,7 @@ fn transport_attachment_from_channel(attachment: &IncomingAttachment) -> Transpo
         mime_type: Some(attachment.mime_type.clone()),
         filename: attachment.filename.clone(),
         size_bytes: attachment.size_bytes,
+        data: attachment.data.clone(),
         storage_ref: attachment
             .storage_key
             .clone()
@@ -1306,7 +1308,7 @@ mod tests {
                 storage_key: Some("workspace://uploads/upload-1".to_string()),
                 local_path: None,
                 extracted_text: Some("hello".to_string()),
-                data: b"raw bytes stay out of transport".to_vec(),
+                data: b"raw bytes survive transport".to_vec(),
                 duration_secs: None,
             }]);
 
@@ -1331,6 +1333,10 @@ mod tests {
         assert_eq!(
             ingress.message.attachments[0].storage_ref.as_deref(),
             Some("workspace://uploads/upload-1")
+        );
+        assert_eq!(
+            ingress.message.attachments[0].data,
+            b"raw bytes survive transport".to_vec()
         );
     }
 
