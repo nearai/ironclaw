@@ -520,7 +520,7 @@ id = "echo-wasm"
 name = "Echo WASM"
 version = "0.1.0"
 description = "Echo WASM demo extension"
-trust = "sandbox"
+trust = "untrusted"
 
 [runtime]
 kind = "wasm"
@@ -539,7 +539,7 @@ id = "github-mcp"
 name = "GitHub MCP"
 version = "0.1.0"
 description = "GitHub MCP adapter"
-trust = "sandbox"
+trust = "untrusted"
 
 [runtime]
 kind = "mcp"
@@ -560,7 +560,7 @@ id = "echo-script"
 name = "Echo Script"
 version = "0.1.0"
 description = "Echo Script demo extension"
-trust = "sandbox"
+trust = "untrusted"
 
 [runtime]
 kind = "script"
