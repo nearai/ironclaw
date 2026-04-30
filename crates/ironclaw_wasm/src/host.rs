@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use ironclaw_host_api::{
     NetworkMethod, NetworkPolicy, ResourceScope, RuntimeCredentialInjection, RuntimeHttpEgress,
     RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeKind,
+    is_sensitive_runtime_response_header,
 };
 use serde_json::{Map, Value};
 
@@ -94,8 +95,8 @@ impl WasmHostHttp for RecordingWasmHostHttp {
 /// Thin adapter from the WASM WIT HTTP import to the shared Reborn runtime
 /// egress service.
 ///
-/// Host composition supplies scope, network policy, and any approved credential
-/// injection plan. The WASM guest supplies only native request fields; this
+/// Host composition supplies scope, network policy, and a request-scoped
+/// credential provider. The WASM guest supplies only native request fields; this
 /// adapter does not create HTTP clients, resolve DNS, apply ad-hoc network
 /// policy, or inject credentials itself.
 #[derive(Debug, Clone)]
@@ -103,8 +104,36 @@ pub struct WasmRuntimeHttpAdapter<E> {
     egress: E,
     scope: ResourceScope,
     network_policy: NetworkPolicy,
-    credential_injections: Vec<RuntimeCredentialInjection>,
+    credential_provider: Arc<dyn WasmRuntimeCredentialProvider>,
     response_body_limit: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WasmRuntimeCredentialRequest {
+    pub scope: ResourceScope,
+    pub method: NetworkMethod,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub network_policy: NetworkPolicy,
+}
+
+pub trait WasmRuntimeCredentialProvider: Send + Sync + std::fmt::Debug {
+    fn credential_injections(
+        &self,
+        request: &WasmRuntimeCredentialRequest,
+    ) -> Result<Vec<RuntimeCredentialInjection>, WasmHostError>;
+}
+
+#[derive(Debug, Default)]
+pub struct EmptyWasmRuntimeCredentials;
+
+impl WasmRuntimeCredentialProvider for EmptyWasmRuntimeCredentials {
+    fn credential_injections(
+        &self,
+        _request: &WasmRuntimeCredentialRequest,
+    ) -> Result<Vec<RuntimeCredentialInjection>, WasmHostError> {
+        Ok(Vec::new())
+    }
 }
 
 impl<E> WasmRuntimeHttpAdapter<E>
@@ -116,16 +145,16 @@ where
             egress,
             scope,
             network_policy,
-            credential_injections: Vec::new(),
+            credential_provider: Arc::new(EmptyWasmRuntimeCredentials),
             response_body_limit: None,
         }
     }
 
-    pub fn with_credential_injections(
+    pub fn with_credential_provider(
         mut self,
-        credential_injections: Vec<RuntimeCredentialInjection>,
+        credential_provider: Arc<dyn WasmRuntimeCredentialProvider>,
     ) -> Self {
-        self.credential_injections = credential_injections;
+        self.credential_provider = credential_provider;
         self
     }
 
@@ -143,6 +172,15 @@ where
         let method = wasm_network_method(&request.method)?;
         let headers = decode_wasm_headers(&request.headers_json)?;
         let body = request.body.unwrap_or_default();
+        let credential_injections =
+            self.credential_provider
+                .credential_injections(&WasmRuntimeCredentialRequest {
+                    scope: self.scope.clone(),
+                    method,
+                    url: request.url.clone(),
+                    headers: headers.clone(),
+                    network_policy: self.network_policy.clone(),
+                })?;
 
         let response = self
             .egress
@@ -154,8 +192,9 @@ where
                 headers,
                 body,
                 network_policy: self.network_policy.clone(),
-                credential_injections: self.credential_injections.clone(),
+                credential_injections,
                 response_body_limit: self.response_body_limit,
+                timeout_ms: request.timeout_ms,
             })
             .map_err(wasm_http_error)?;
 
@@ -206,26 +245,13 @@ fn decode_wasm_headers(headers_json: &str) -> Result<Vec<(String, String)>, Wasm
 fn encode_wasm_headers(headers: Vec<(String, String)>) -> Result<String, WasmHostError> {
     let mut encoded = Map::new();
     for (name, value) in headers {
-        if sensitive_response_header(&name) {
+        if is_sensitive_runtime_response_header(&name) {
             continue;
         }
         encoded.insert(name, Value::String(value));
     }
     serde_json::to_string(&encoded)
         .map_err(|_| WasmHostError::Failed("failed to encode WASM HTTP headers".to_string()))
-}
-
-fn sensitive_response_header(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "authorization"
-            | "www-authenticate"
-            | "set-cookie"
-            | "x-api-key"
-            | "x-auth-token"
-            | "proxy-authenticate"
-            | "proxy-authorization"
-    )
 }
 
 fn wasm_http_error(error: RuntimeHttpEgressError) -> WasmHostError {

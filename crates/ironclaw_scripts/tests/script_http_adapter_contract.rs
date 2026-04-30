@@ -30,6 +30,7 @@ fn script_host_http_adapter_uses_shared_runtime_egress() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            timeout_ms: None,
         })
         .expect("script host-mediated HTTP should succeed");
 
@@ -68,6 +69,7 @@ fn script_host_http_adapter_returns_sanitized_shared_egress_errors() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            timeout_ms: None,
         })
         .expect_err("network denial should surface as a sanitized adapter error");
 

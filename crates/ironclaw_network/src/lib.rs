@@ -51,6 +51,7 @@ pub struct NetworkHttpRequest {
     pub body: Vec<u8>,
     pub policy: NetworkPolicy,
     pub response_body_limit: Option<u64>,
+    pub timeout_ms: Option<u32>,
 }
 
 /// Transport request after policy, URL, DNS, and private-IP checks succeed.
@@ -62,6 +63,7 @@ pub struct NetworkTransportRequest {
     pub body: Vec<u8>,
     pub resolved_ips: Vec<IpAddr>,
     pub response_body_limit: Option<u64>,
+    pub timeout_ms: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -279,6 +281,7 @@ where
             body: request.body,
             resolved_ips,
             response_body_limit: request.response_body_limit,
+            timeout_ms: request.timeout_ms,
         };
         let mut response = self.transport.execute(transport_request)?;
         response.usage.request_bytes = response.usage.request_bytes.max(request_body_bytes);
@@ -412,7 +415,7 @@ impl NetworkHttpTransport for ReqwestNetworkTransport {
                 host,
                 port,
                 resolved_addrs,
-                timeout: self.timeout,
+                timeout: effective_request_timeout(request.timeout_ms, self.timeout),
             },
             request_bytes,
         )?;
@@ -778,6 +781,12 @@ fn effective_response_body_limit(requested: Option<u64>) -> u64 {
     requested
         .unwrap_or(DEFAULT_RESPONSE_BODY_LIMIT)
         .min(MAX_RESPONSE_BODY_LIMIT)
+}
+
+fn effective_request_timeout(requested_ms: Option<u32>, default: Duration) -> Duration {
+    requested_ms
+        .map(|timeout_ms| Duration::from_millis(u64::from(timeout_ms.max(1))))
+        .unwrap_or(default)
 }
 
 fn reject_caller_host_header(headers: &[(String, String)]) -> Result<(), NetworkHttpError> {

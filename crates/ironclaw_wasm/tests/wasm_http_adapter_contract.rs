@@ -6,7 +6,10 @@ use ironclaw_host_api::{
     RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind,
     SecretHandle, TenantId, UserId,
 };
-use ironclaw_wasm::{WasmHostError, WasmHostHttp, WasmHttpRequest, WasmRuntimeHttpAdapter};
+use ironclaw_wasm::{
+    WasmHostError, WasmHostHttp, WasmHttpRequest, WasmRuntimeCredentialProvider,
+    WasmRuntimeCredentialRequest, WasmRuntimeHttpAdapter,
+};
 use serde_json::{Value, json};
 
 #[test]
@@ -60,6 +63,7 @@ fn wasm_runtime_http_adapter_uses_shared_runtime_egress() {
     assert_eq!(requests[0].network_policy, policy);
     assert!(requests[0].credential_injections.is_empty());
     assert_eq!(requests[0].response_body_limit, Some(4096));
+    assert_eq!(requests[0].timeout_ms, Some(1234));
 }
 
 #[test]
@@ -75,6 +79,14 @@ fn wasm_runtime_http_adapter_strips_sensitive_response_headers() {
                 "set-cookie".to_string(),
                 "session=sk-test-secret".to_string(),
             ),
+            ("cookie".to_string(), "session=sk-test-secret".to_string()),
+            ("api-key".to_string(), "sk-test-secret".to_string()),
+            ("x-token".to_string(), "sk-test-secret".to_string()),
+            ("x-access-token".to_string(), "sk-test-secret".to_string()),
+            ("x-session-token".to_string(), "sk-test-secret".to_string()),
+            ("x-csrf-token".to_string(), "sk-test-secret".to_string()),
+            ("x-secret".to_string(), "sk-test-secret".to_string()),
+            ("x-api-secret".to_string(), "sk-test-secret".to_string()),
             ("x-public".to_string(), "ok".to_string()),
         ],
         body: b"ok".to_vec(),
@@ -99,10 +111,12 @@ fn wasm_runtime_http_adapter_strips_sensitive_response_headers() {
     assert!(!response.headers_json.contains("sk-test-secret"));
     assert!(!response.headers_json.contains("authorization"));
     assert!(!response.headers_json.contains("set-cookie"));
+    assert!(!response.headers_json.contains("api-key"));
+    assert!(!response.headers_json.contains("x-token"));
 }
 
 #[test]
-fn wasm_runtime_http_adapter_forwards_host_approved_credential_injections() {
+fn wasm_runtime_http_adapter_resolves_credentials_per_request_destination() {
     let egress = RecordingRuntimeEgress::ok(RuntimeHttpEgressResponse {
         status: 200,
         headers: vec![],
@@ -111,17 +125,13 @@ fn wasm_runtime_http_adapter_forwards_host_approved_credential_injections() {
         response_bytes: 2,
         redaction_applied: true,
     });
-    let injection = RuntimeCredentialInjection {
-        handle: SecretHandle::new("api-token").unwrap(),
-        target: RuntimeCredentialTarget::Header {
-            name: "authorization".to_string(),
-            prefix: Some("Bearer ".to_string()),
-        },
-        required: true,
-    };
+    let injection = sample_injection();
     let adapter =
         WasmRuntimeHttpAdapter::new(Arc::new(egress.clone()), sample_scope(), sample_policy())
-            .with_credential_injections(vec![injection.clone()]);
+            .with_credential_provider(Arc::new(DestinationCredentialProvider {
+                approved_url: "https://wasm-api.example.test/run".to_string(),
+                injection: injection.clone(),
+            }));
 
     adapter
         .request(WasmHttpRequest {
@@ -136,6 +146,41 @@ fn wasm_runtime_http_adapter_forwards_host_approved_credential_injections() {
     let requests = egress.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].credential_injections, vec![injection]);
+}
+
+#[test]
+fn wasm_runtime_http_adapter_does_not_reuse_credentials_for_other_destinations() {
+    let egress = RecordingRuntimeEgress::ok(RuntimeHttpEgressResponse {
+        status: 200,
+        headers: vec![],
+        body: b"ok".to_vec(),
+        request_bytes: 0,
+        response_bytes: 2,
+        redaction_applied: true,
+    });
+    let adapter = WasmRuntimeHttpAdapter::new(
+        Arc::new(egress.clone()),
+        sample_scope(),
+        multi_target_policy(),
+    )
+    .with_credential_provider(Arc::new(DestinationCredentialProvider {
+        approved_url: "https://wasm-api.example.test/run".to_string(),
+        injection: sample_injection(),
+    }));
+
+    adapter
+        .request(WasmHttpRequest {
+            method: "GET".to_string(),
+            url: "https://other-api.example.test/run".to_string(),
+            headers_json: "{}".to_string(),
+            body: None,
+            timeout_ms: Some(1000),
+        })
+        .unwrap();
+
+    let requests = egress.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].credential_injections.is_empty());
 }
 
 #[test]
@@ -320,6 +365,36 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
     }
 }
 
+#[derive(Debug)]
+struct DestinationCredentialProvider {
+    approved_url: String,
+    injection: RuntimeCredentialInjection,
+}
+
+impl WasmRuntimeCredentialProvider for DestinationCredentialProvider {
+    fn credential_injections(
+        &self,
+        request: &WasmRuntimeCredentialRequest,
+    ) -> Result<Vec<RuntimeCredentialInjection>, WasmHostError> {
+        if request.url == self.approved_url {
+            Ok(vec![self.injection.clone()])
+        } else {
+            Ok(Vec::new())
+        }
+    }
+}
+
+fn sample_injection() -> RuntimeCredentialInjection {
+    RuntimeCredentialInjection {
+        handle: SecretHandle::new("api-token").unwrap(),
+        target: RuntimeCredentialTarget::Header {
+            name: "authorization".to_string(),
+            prefix: Some("Bearer ".to_string()),
+        },
+        required: true,
+    }
+}
+
 fn sample_scope() -> ResourceScope {
     ResourceScope {
         tenant_id: TenantId::new("tenant1").unwrap(),
@@ -339,6 +414,25 @@ fn sample_policy() -> NetworkPolicy {
             host_pattern: "wasm-api.example.test".to_string(),
             port: None,
         }],
+        deny_private_ip_ranges: true,
+        max_egress_bytes: Some(4096),
+    }
+}
+
+fn multi_target_policy() -> NetworkPolicy {
+    NetworkPolicy {
+        allowed_targets: vec![
+            NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Https),
+                host_pattern: "wasm-api.example.test".to_string(),
+                port: None,
+            },
+            NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Https),
+                host_pattern: "other-api.example.test".to_string(),
+                port: None,
+            },
+        ],
         deny_private_ip_ranges: true,
         max_egress_bytes: Some(4096),
     }

@@ -28,6 +28,9 @@ pub struct RuntimeHttpEgressRequest {
     /// shape before this request reaches [`RuntimeHttpEgress`].
     pub credential_injections: Vec<RuntimeCredentialInjection>,
     pub response_body_limit: Option<u64>,
+    /// Host-call timeout in milliseconds, already capped by the invoking
+    /// runtime to its remaining execution deadline when applicable.
+    pub timeout_ms: Option<u32>,
 }
 
 /// One host-approved credential injection.
@@ -107,6 +110,49 @@ impl RuntimeHttpEgressError {
             | Self::Response { response_bytes, .. } => *response_bytes,
         }
     }
+}
+
+pub fn is_sensitive_runtime_request_header(name: &str) -> bool {
+    const SENSITIVE_REQUEST_HEADERS: &[&str] = &[
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "x-api-key",
+        "api-key",
+        "x-auth-token",
+        "x-token",
+        "x-access-token",
+        "x-session-token",
+        "x-csrf-token",
+        "x-secret",
+        "x-api-secret",
+    ];
+    SENSITIVE_REQUEST_HEADERS
+        .iter()
+        .any(|header| name.trim().eq_ignore_ascii_case(header))
+}
+
+pub fn is_sensitive_runtime_response_header(name: &str) -> bool {
+    const SENSITIVE_RESPONSE_HEADERS: &[&str] = &[
+        "authorization",
+        "www-authenticate",
+        "set-cookie",
+        "cookie",
+        "x-api-key",
+        "api-key",
+        "x-auth-token",
+        "x-token",
+        "x-access-token",
+        "x-session-token",
+        "x-csrf-token",
+        "x-secret",
+        "x-api-secret",
+        "proxy-authenticate",
+        "proxy-authorization",
+    ];
+    SENSITIVE_RESPONSE_HEADERS
+        .iter()
+        .any(|header| name.trim().eq_ignore_ascii_case(header))
 }
 
 pub trait RuntimeHttpEgress: Send + Sync {

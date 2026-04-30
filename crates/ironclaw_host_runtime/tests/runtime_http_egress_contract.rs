@@ -53,6 +53,7 @@ fn host_http_egress_injects_leased_credentials_and_redacts_errors() {
                 required: true,
             }],
             response_body_limit: Some(4096),
+            timeout_ms: None,
         })
         .expect_err("network error should be sanitized");
 
@@ -107,6 +108,7 @@ fn host_http_egress_requires_available_required_credentials_before_network() {
                 required: true,
             }],
             response_body_limit: Some(4096),
+            timeout_ms: None,
         })
         .expect_err("missing required credentials should fail before network dispatch");
 
@@ -149,6 +151,7 @@ fn host_http_egress_injects_and_redacts_url_encoded_query_credentials() {
                 required: true,
             }],
             response_body_limit: Some(4096),
+            timeout_ms: None,
         })
         .expect_err("network error should be sanitized");
 
@@ -162,6 +165,41 @@ fn host_http_egress_injects_and_redacts_url_encoded_query_credentials() {
         requests[0].url,
         "https://api.example.test/v1/run?token=secret+with%2Fslash%2Bplus%3F"
     );
+}
+
+#[test]
+fn host_http_egress_forwards_timeout_to_network() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{\"ok\":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let service = HostHttpEgressService::new(network, InMemorySecretStore::new());
+
+    service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Wasm,
+            scope: sample_scope(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            timeout_ms: Some(250),
+        })
+        .expect("network response should be returned");
+
+    let requests = network_recorder.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].timeout_ms, Some(250));
 }
 
 #[test]
@@ -190,6 +228,7 @@ fn host_http_egress_preserves_request_and_response_byte_accounting() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            timeout_ms: None,
         })
         .expect("network response should be returned");
 
@@ -248,6 +287,7 @@ fn host_http_egress_redacts_injected_credentials_from_runtime_visible_response()
                 required: true,
             }],
             response_body_limit: Some(4096),
+            timeout_ms: None,
         })
         .expect("sanitized response should be returned");
 
@@ -302,6 +342,7 @@ fn host_http_egress_redacts_lowercase_percent_encoded_secret_echoes() {
                 required: true,
             }],
             response_body_limit: Some(4096),
+            timeout_ms: None,
         })
         .expect("lowercase percent-encoded echoed credentials should be redacted");
 
@@ -350,6 +391,7 @@ fn host_http_egress_strips_all_sensitive_response_headers() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            timeout_ms: None,
         })
         .expect("sensitive response headers should be stripped before runtime visibility");
 
@@ -385,6 +427,7 @@ fn host_http_egress_blocks_credential_shaped_response_body() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            timeout_ms: None,
         })
         .expect_err("credential-shaped response bodies should not reach runtimes");
 
@@ -423,6 +466,7 @@ fn host_http_egress_blocks_credential_shaped_runtime_request_before_network() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            timeout_ms: None,
         })
         .expect_err("credential-shaped runtime requests should fail before network dispatch");
 
@@ -463,6 +507,7 @@ fn host_http_egress_blocks_runtime_supplied_sensitive_headers_before_network() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            timeout_ms: None,
         })
         .expect_err("runtime-supplied sensitive headers should fail before network dispatch");
 
@@ -500,6 +545,7 @@ fn host_http_egress_blocks_runtime_supplied_credential_query_before_network() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            timeout_ms: None,
         })
         .expect_err("runtime-supplied credential query params should fail before network dispatch");
 
@@ -537,6 +583,7 @@ fn host_http_egress_blocks_percent_encoded_credential_values_before_network() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            timeout_ms: None,
         })
         .expect_err("percent-encoded credential values should fail before network dispatch");
 
@@ -574,6 +621,7 @@ fn host_http_egress_blocks_runtime_supplied_auth_like_headers_before_network() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            timeout_ms: None,
         })
         .expect_err("runtime-supplied auth-like headers should fail before network dispatch");
 
@@ -631,6 +679,7 @@ fn host_http_egress_runs_async_secret_store_futures_with_tokio_context() {
                 required: true,
             }],
             response_body_limit: Some(4096),
+            timeout_ms: None,
         })
         .expect("host egress should poll async secret stores inside a Tokio context");
 
@@ -669,6 +718,7 @@ fn host_http_egress_maps_network_errors_to_stable_runtime_reasons() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            timeout_ms: None,
         })
         .expect_err("network errors should surface as stable sanitized variants");
 

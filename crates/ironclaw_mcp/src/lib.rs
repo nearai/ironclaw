@@ -131,6 +131,7 @@ pub struct McpHostHttpRequest {
     pub network_policy: ironclaw_host_api::NetworkPolicy,
     pub credential_injections: Vec<ironclaw_host_api::RuntimeCredentialInjection>,
     pub response_body_limit: Option<u64>,
+    pub timeout_ms: Option<u32>,
 }
 
 pub type McpHostHttpResponse = RuntimeHttpEgressResponse;
@@ -169,6 +170,7 @@ where
                 network_policy: request.network_policy,
                 credential_injections: request.credential_injections,
                 response_body_limit: request.response_body_limit,
+                timeout_ms: request.timeout_ms,
             })
             .map_err(mcp_http_error)
     }

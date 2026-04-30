@@ -30,7 +30,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_api::{
     RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-    RuntimeHttpEgressResponse,
+    RuntimeHttpEgressResponse, is_sensitive_runtime_request_header,
+    is_sensitive_runtime_response_header,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse,
@@ -640,6 +641,7 @@ where
                 body: request.body,
                 policy: request.network_policy,
                 response_body_limit: request.response_body_limit,
+                timeout_ms: request.timeout_ms,
             })
             .map_err(runtime_network_error)?;
         let credentials_injected = !redaction_values.is_empty();
@@ -752,7 +754,7 @@ fn validate_runtime_request(
     if let Some((name, _)) = request
         .headers
         .iter()
-        .find(|(name, _)| is_sensitive_request_header(name))
+        .find(|(name, _)| is_sensitive_runtime_request_header(name))
     {
         return Err(RuntimeHttpEgressError::Request {
             reason: format!("sensitive_header_denied:{name}"),
@@ -884,7 +886,7 @@ fn sanitize_runtime_response(
     let detector = LeakDetector::new();
 
     for (name, value) in headers {
-        if is_sensitive_response_header(&name) {
+        if is_sensitive_runtime_response_header(&name) {
             redaction_applied = true;
             continue;
         }
@@ -938,49 +940,6 @@ fn sanitize_runtime_response(
         },
         redaction_applied,
     ))
-}
-
-fn is_sensitive_request_header(name: &str) -> bool {
-    const SENSITIVE_REQUEST_HEADERS: &[&str] = &[
-        "authorization",
-        "proxy-authorization",
-        "cookie",
-        "x-api-key",
-        "api-key",
-        "x-auth-token",
-        "x-token",
-        "x-access-token",
-        "x-session-token",
-        "x-csrf-token",
-        "x-secret",
-        "x-api-secret",
-    ];
-    SENSITIVE_REQUEST_HEADERS
-        .iter()
-        .any(|header| name.trim().eq_ignore_ascii_case(header))
-}
-
-fn is_sensitive_response_header(name: &str) -> bool {
-    const SENSITIVE_RESPONSE_HEADERS: &[&str] = &[
-        "authorization",
-        "www-authenticate",
-        "set-cookie",
-        "cookie",
-        "x-api-key",
-        "api-key",
-        "x-auth-token",
-        "x-token",
-        "x-access-token",
-        "x-session-token",
-        "x-csrf-token",
-        "x-secret",
-        "x-api-secret",
-        "proxy-authenticate",
-        "proxy-authorization",
-    ];
-    SENSITIVE_RESPONSE_HEADERS
-        .iter()
-        .any(|header| name.trim().eq_ignore_ascii_case(header))
 }
 
 fn runtime_response(
