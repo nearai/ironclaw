@@ -2,7 +2,7 @@ name: Claude Code Review
 
 on:
   pull_request:
-    types: [labeled]
+    types: [opened, synchronize, ready_for_review]
 
 permissions:
   contents: read
@@ -17,7 +17,12 @@ concurrency:
 jobs:
   review:
     name: Claude Code Review
-    if: contains(github.event.pull_request.labels.*.name, 'staging-promotion')
+    # Forked pull_request runs do not receive repository secrets.
+    if: >
+      !github.event.pull_request.draft &&
+      !github.event.pull_request.head.repo.fork &&
+      github.event.pull_request.user.login != 'release-plz[bot]' &&
+      github.event.pull_request.user.login != 'ironclaw-ci[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -83,9 +88,9 @@ jobs:
                in hot paths.
 
             4. Consolidate all agent findings and post exactly one comment on
-               THIS promotion PR (#${{ github.event.pull_request.number }})
+               THIS PR (#${{ github.event.pull_request.number }})
                using `gh pr comment ${{ github.event.pull_request.number }}`.
-               Do NOT comment on the original source PRs — only on this promotion PR.
+               Do NOT comment on any related or stacked PRs — only on this PR.
                If no issues were found, post "No issues found." instead:
 
             ### Code review
