@@ -1,6 +1,7 @@
 //! Filesystem-backed process and process-result stores.
 //!
-//! Records are stored as JSON under `tenants/<tenant>/users/<user>[/agents/<agent>]/`,
+//! Records are stored as JSON under the exact resource-owner path
+//! `tenants/<tenant>/users/<user>[/agents/<agent>][/projects/<project>][/missions/<mission>][/threads/<thread>]/`,
 //! split into:
 //!
 //! - `processes/<process_id>.json` — lifecycle records ([`FilesystemProcessStore`])
@@ -405,7 +406,7 @@ fn process_record_path(
 }
 
 fn process_records_root(scope: &ResourceScope) -> Result<VirtualPath, ProcessError> {
-    VirtualPath::new(format!("{}/processes", tenant_user_root(scope))).map_err(invalid_path)
+    VirtualPath::new(format!("{}/processes", resource_owner_root(scope))).map_err(invalid_path)
 }
 
 fn process_result_path(
@@ -420,7 +421,8 @@ fn process_result_path(
 }
 
 fn process_results_root(scope: &ResourceScope) -> Result<VirtualPath, ProcessError> {
-    VirtualPath::new(format!("{}/process-results", tenant_user_root(scope))).map_err(invalid_path)
+    VirtualPath::new(format!("{}/process-results", resource_owner_root(scope)))
+        .map_err(invalid_path)
 }
 
 fn process_output_path(
@@ -440,21 +442,30 @@ fn process_outputs_root(
 ) -> Result<VirtualPath, ProcessError> {
     VirtualPath::new(format!(
         "{}/process-outputs/{process_id}",
-        tenant_user_root(scope)
+        resource_owner_root(scope)
     ))
     .map_err(invalid_path)
 }
 
-fn tenant_user_root(scope: &ResourceScope) -> String {
-    let base = format!(
+fn resource_owner_root(scope: &ResourceScope) -> String {
+    let mut base = format!(
         "/engine/tenants/{}/users/{}",
         scope.tenant_id.as_str(),
         scope.user_id.as_str()
     );
-    match &scope.agent_id {
-        Some(agent_id) => format!("{base}/agents/{}", agent_id.as_str()),
-        None => base,
+    if let Some(agent_id) = &scope.agent_id {
+        base = format!("{base}/agents/{}", agent_id.as_str());
     }
+    if let Some(project_id) = &scope.project_id {
+        base = format!("{base}/projects/{}", project_id.as_str());
+    }
+    if let Some(mission_id) = &scope.mission_id {
+        base = format!("{base}/missions/{}", mission_id.as_str());
+    }
+    if let Some(thread_id) = &scope.thread_id {
+        base = format!("{base}/threads/{}", thread_id.as_str());
+    }
+    base
 }
 
 fn ensure_process_record_matches(

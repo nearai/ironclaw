@@ -45,7 +45,7 @@ async fn in_memory_process_store_starts_capability_process_record() {
 }
 
 #[tokio::test]
-async fn in_memory_process_store_rejects_duplicate_process_id_in_same_tenant_user() {
+async fn in_memory_process_store_rejects_duplicate_process_id_in_same_resource_scope() {
     let store = InMemoryProcessStore::new();
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
@@ -71,13 +71,14 @@ async fn in_memory_process_store_rejects_duplicate_process_id_in_same_tenant_use
 }
 
 #[tokio::test]
-async fn process_store_hides_records_from_other_tenants_and_users() {
+async fn process_store_hides_records_from_other_resource_scopes() {
     let store = InMemoryProcessStore::new();
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
     let tenant_a = sample_scope(invocation_id, "tenant1", "user1");
     let tenant_b = sample_scope(invocation_id, "tenant2", "user1");
     let user_b = sample_scope(invocation_id, "tenant1", "user2");
+    let project_b = sample_scope_with_project(invocation_id, "tenant1", "user1", "project2");
     store
         .start(process_start(process_id, invocation_id, tenant_a.clone()))
         .await
@@ -85,13 +86,22 @@ async fn process_store_hides_records_from_other_tenants_and_users() {
 
     assert!(store.get(&tenant_b, process_id).await.unwrap().is_none());
     assert!(store.get(&user_b, process_id).await.unwrap().is_none());
+    assert!(store.get(&project_b, process_id).await.unwrap().is_none());
     assert_eq!(
         store.records_for_scope(&tenant_b).await.unwrap(),
         Vec::new()
     );
     assert_eq!(store.records_for_scope(&user_b).await.unwrap(), Vec::new());
+    assert_eq!(
+        store.records_for_scope(&project_b).await.unwrap(),
+        Vec::new()
+    );
     assert!(matches!(
         store.kill(&tenant_b, process_id).await.unwrap_err(),
+        ProcessError::UnknownProcess { .. }
+    ));
+    assert!(matches!(
+        store.kill(&project_b, process_id).await.unwrap_err(),
         ProcessError::UnknownProcess { .. }
     ));
 }
@@ -117,12 +127,19 @@ async fn process_store_hides_records_from_other_agents() {
 }
 
 #[tokio::test]
-async fn process_result_store_hides_records_from_other_agents() {
+async fn process_result_store_hides_records_from_other_resource_scopes() {
     let store = InMemoryProcessResultStore::new();
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
     let agent_a = sample_scope_with_agent(invocation_id, "tenant1", "user1", Some("agent-a"));
     let agent_b = sample_scope_with_agent(invocation_id, "tenant1", "user1", Some("agent-b"));
+    let project_b = sample_scope_with_agent_and_project(
+        invocation_id,
+        "tenant1",
+        "user1",
+        Some("agent-a"),
+        "project2",
+    );
 
     store
         .complete(&agent_a, process_id, serde_json::json!({"ok": true}))
@@ -131,6 +148,14 @@ async fn process_result_store_hides_records_from_other_agents() {
 
     assert!(store.get(&agent_b, process_id).await.unwrap().is_none());
     assert!(store.output(&agent_b, process_id).await.unwrap().is_none());
+    assert!(store.get(&project_b, process_id).await.unwrap().is_none());
+    assert!(
+        store
+            .output(&project_b, process_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -1195,7 +1220,7 @@ async fn process_host_await_result_waits_for_background_success() {
 }
 
 #[tokio::test]
-async fn process_result_lookup_is_tenant_user_scoped() {
+async fn process_result_lookup_is_resource_scope_scoped() {
     let store = Arc::new(InMemoryProcessStore::new());
     let result_store = Arc::new(InMemoryProcessResultStore::new());
     let manager =
@@ -1206,6 +1231,7 @@ async fn process_result_lookup_is_tenant_user_scoped() {
     let owner_scope = sample_scope(invocation_id, "tenant1", "user1");
     let other_tenant = sample_scope(invocation_id, "tenant2", "user1");
     let other_user = sample_scope(invocation_id, "tenant1", "user2");
+    let other_project = sample_scope_with_project(invocation_id, "tenant1", "user1", "project2");
     let host = ProcessHost::new(store.as_ref()).with_result_store(result_store.clone());
 
     manager
@@ -1242,16 +1268,23 @@ async fn process_result_lookup_is_tenant_user_scoped() {
             .unwrap()
             .is_none()
     );
+    assert!(
+        host.result(&other_project, process_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
-async fn filesystem_process_result_store_persists_under_tenant_user_scope() {
+async fn filesystem_process_result_store_persists_under_resource_scope() {
     let fs = engine_filesystem();
     let store = FilesystemProcessResultStore::new(&fs);
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
     let other_scope = sample_scope(invocation_id, "tenant2", "user1");
+    let other_project = sample_scope_with_project(invocation_id, "tenant1", "user1", "project2");
 
     store
         .complete(&scope, process_id, serde_json::json!({"ok": true}))
@@ -1269,9 +1302,8 @@ async fn filesystem_process_result_store_persists_under_tenant_user_scope() {
         reloaded.output_ref,
         Some(
             VirtualPath::new(format!(
-                "/engine/tenants/{}/users/{}/process-outputs/{}/output.json",
-                scope.tenant_id.as_str(),
-                scope.user_id.as_str(),
+                "{}/process-outputs/{}/output.json",
+                stored_process_owner_root(&scope),
                 process_id
             ))
             .unwrap()
@@ -1294,6 +1326,20 @@ async fn filesystem_process_result_store_persists_under_tenant_user_scope() {
     assert!(
         FilesystemProcessResultStore::new(&fs)
             .output(&other_scope, process_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        FilesystemProcessResultStore::new(&fs)
+            .get(&other_project, process_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        FilesystemProcessResultStore::new(&fs)
+            .output(&other_project, process_id)
             .await
             .unwrap()
             .is_none()
@@ -1412,7 +1458,7 @@ async fn filesystem_process_result_store_rejects_unexpected_output_refs() {
 }
 
 #[tokio::test]
-async fn filesystem_process_store_persists_under_tenant_user_engine_processes() {
+async fn filesystem_process_store_persists_under_resource_scope_engine_processes() {
     let fs = engine_filesystem();
     let store = FilesystemProcessStore::new(&fs);
     let invocation_id = InvocationId::new();
@@ -2193,29 +2239,47 @@ fn process_estimate() -> ResourceEstimate {
 
 fn stored_process_record_path(scope: &ResourceScope, process_id: ProcessId) -> VirtualPath {
     VirtualPath::new(format!(
-        "/engine/tenants/{}/users/{}/processes/{process_id}.json",
-        scope.tenant_id.as_str(),
-        scope.user_id.as_str()
+        "{}/processes/{process_id}.json",
+        stored_process_owner_root(scope)
     ))
     .unwrap()
 }
 
 fn stored_process_result_path(scope: &ResourceScope, process_id: ProcessId) -> VirtualPath {
     VirtualPath::new(format!(
-        "/engine/tenants/{}/users/{}/process-results/{process_id}.json",
-        scope.tenant_id.as_str(),
-        scope.user_id.as_str()
+        "{}/process-results/{process_id}.json",
+        stored_process_owner_root(scope)
     ))
     .unwrap()
 }
 
 fn stored_process_output_path(scope: &ResourceScope, process_id: ProcessId) -> VirtualPath {
     VirtualPath::new(format!(
-        "/engine/tenants/{}/users/{}/process-outputs/{process_id}/output.json",
-        scope.tenant_id.as_str(),
-        scope.user_id.as_str()
+        "{}/process-outputs/{process_id}/output.json",
+        stored_process_owner_root(scope)
     ))
     .unwrap()
+}
+
+fn stored_process_owner_root(scope: &ResourceScope) -> String {
+    let mut base = format!(
+        "/engine/tenants/{}/users/{}",
+        scope.tenant_id.as_str(),
+        scope.user_id.as_str()
+    );
+    if let Some(agent_id) = &scope.agent_id {
+        base = format!("{base}/agents/{}", agent_id.as_str());
+    }
+    if let Some(project_id) = &scope.project_id {
+        base = format!("{base}/projects/{}", project_id.as_str());
+    }
+    if let Some(mission_id) = &scope.mission_id {
+        base = format!("{base}/missions/{}", mission_id.as_str());
+    }
+    if let Some(thread_id) = &scope.thread_id {
+        base = format!("{base}/threads/{}", thread_id.as_str());
+    }
+    base
 }
 
 fn engine_filesystem() -> LocalFilesystem {
@@ -2237,6 +2301,27 @@ fn sample_scope_with_agent(
 ) -> ResourceScope {
     let mut scope = sample_scope(invocation_id, tenant, user);
     scope.agent_id = agent.map(|id| AgentId::new(id).unwrap());
+    scope
+}
+
+fn sample_scope_with_project(
+    invocation_id: InvocationId,
+    tenant: &str,
+    user: &str,
+    project: &str,
+) -> ResourceScope {
+    sample_scope_with_agent_and_project(invocation_id, tenant, user, None, project)
+}
+
+fn sample_scope_with_agent_and_project(
+    invocation_id: InvocationId,
+    tenant: &str,
+    user: &str,
+    agent: Option<&str>,
+    project: &str,
+) -> ResourceScope {
+    let mut scope = sample_scope_with_agent(invocation_id, tenant, user, agent);
+    scope.project_id = Some(ProjectId::new(project).unwrap());
     scope
 }
 

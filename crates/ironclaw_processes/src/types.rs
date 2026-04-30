@@ -7,9 +7,9 @@
 use async_trait::async_trait;
 use ironclaw_filesystem::FilesystemError;
 use ironclaw_host_api::{
-    AgentId, CapabilityId, CapabilitySet, ExtensionId, HostApiError, InvocationId, MountView,
-    ProcessId, ResourceEstimate, ResourceReservationId, ResourceScope, RuntimeKind, TenantId,
-    UserId, VirtualPath,
+    AgentId, CapabilityId, CapabilitySet, ExtensionId, HostApiError, InvocationId, MissionId,
+    MountView, ProcessId, ProjectId, ResourceEstimate, ResourceReservationId, ResourceScope,
+    RuntimeKind, TenantId, ThreadId, UserId, VirtualPath,
 };
 use ironclaw_resources::ResourceError;
 use serde::{Deserialize, Serialize};
@@ -306,7 +306,7 @@ pub trait ProcessStore: Send + Sync {
         process_id: ProcessId,
     ) -> Result<Option<ProcessRecord>, ProcessError>;
 
-    /// Lists process lifecycle records visible to the tenant/user/agent scope only.
+    /// Lists process lifecycle records visible to the exact resource-owner scope only.
     async fn records_for_scope(
         &self,
         scope: &ResourceScope,
@@ -318,6 +318,9 @@ pub(crate) struct ProcessKey {
     tenant_id: TenantId,
     user_id: UserId,
     agent_id: Option<AgentId>,
+    project_id: Option<ProjectId>,
+    mission_id: Option<MissionId>,
+    thread_id: Option<ThreadId>,
     process_id: ProcessId,
 }
 
@@ -327,6 +330,9 @@ impl ProcessKey {
             tenant_id: scope.tenant_id.clone(),
             user_id: scope.user_id.clone(),
             agent_id: scope.agent_id.clone(),
+            project_id: scope.project_id.clone(),
+            mission_id: scope.mission_id.clone(),
+            thread_id: scope.thread_id.clone(),
             process_id,
         }
     }
@@ -351,6 +357,9 @@ pub(crate) fn same_scope_owner(left: &ResourceScope, right: &ResourceScope) -> b
     left.tenant_id == right.tenant_id
         && left.user_id == right.user_id
         && left.agent_id == right.agent_id
+        && left.project_id == right.project_id
+        && left.mission_id == right.mission_id
+        && left.thread_id == right.thread_id
 }
 
 #[cfg(test)]

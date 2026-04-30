@@ -109,7 +109,7 @@ async fn capability_host_spawn_runs_background_process_through_process_host() {
 }
 
 #[tokio::test]
-async fn capability_spawn_process_host_hides_cross_user_status_and_output() {
+async fn capability_spawn_process_host_hides_cross_scope_status_and_output() {
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
     let process_services = ProcessServices::in_memory();
@@ -125,7 +125,9 @@ async fn capability_spawn_process_host_hides_cross_user_status_and_output() {
         grants: vec![spawn_grant()],
     });
     let scope = context.resource_scope.clone();
-    let wrong_scope = scope_for_user_with_invocation("other-user", context.invocation_id);
+    let wrong_user_scope = scope_for_user_with_invocation("other-user", context.invocation_id);
+    let wrong_project_scope =
+        scope_with_project_mission_thread(&scope, "other-project", "other-mission", "other-thread");
 
     let spawned = host
         .spawn_json(CapabilitySpawnRequest {
@@ -140,27 +142,8 @@ async fn capability_spawn_process_host_hides_cross_user_status_and_output() {
     let process_id = spawned.process.process_id;
     process_host.await_result(&scope, process_id).await.unwrap();
 
-    assert!(
-        process_host
-            .status(&wrong_scope, process_id)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        process_host
-            .result(&wrong_scope, process_id)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        process_host
-            .output(&wrong_scope, process_id)
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert_process_hidden(&process_host, &wrong_user_scope, process_id).await;
+    assert_process_hidden(&process_host, &wrong_project_scope, process_id).await;
     assert_eq!(
         process_host.output(&scope, process_id).await.unwrap(),
         Some(json!({"process":"done"}))
@@ -330,4 +313,45 @@ fn scoped_mounts() -> MountView {
 
 fn scope_for_user_with_invocation(user: &str, invocation_id: InvocationId) -> ResourceScope {
     ResourceScope::local_default(UserId::new(user).unwrap(), invocation_id).unwrap()
+}
+
+fn scope_with_project_mission_thread(
+    scope: &ResourceScope,
+    project: &str,
+    mission: &str,
+    thread: &str,
+) -> ResourceScope {
+    let mut scope = scope.clone();
+    scope.project_id = Some(ProjectId::new(project).unwrap());
+    scope.mission_id = Some(MissionId::new(mission).unwrap());
+    scope.thread_id = Some(ThreadId::new(thread).unwrap());
+    scope
+}
+
+async fn assert_process_hidden(
+    process_host: &ProcessHost<'_>,
+    scope: &ResourceScope,
+    process_id: ProcessId,
+) {
+    assert!(
+        process_host
+            .status(scope, process_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        process_host
+            .result(scope, process_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        process_host
+            .output(scope, process_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
