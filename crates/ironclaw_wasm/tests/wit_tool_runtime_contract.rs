@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use ironclaw_wasm::{
-    DenyWasmHostHttp, RecordingWasmHostHttp, WasmHostHttp, WasmHttpRequest, WasmHttpResponse,
-    WitToolHost, WitToolRequest, WitToolRuntime, WitToolRuntimeConfig,
+    DenyWasmHostHttp, RecordingWasmHostHttp, WasmError, WasmHostHttp, WasmHttpRequest,
+    WasmHttpResponse, WitToolHost, WitToolRequest, WitToolRuntime, WitToolRuntimeConfig,
 };
 use serde_json::json;
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
@@ -210,6 +210,75 @@ fn prepares_metadata_from_wit_tool_component() {
     assert_eq!(prepared.name(), "counter");
     assert_eq!(prepared.description(), "fixture description");
     assert_eq!(prepared.schema(), &json!({ "type": "object" }));
+}
+
+#[test]
+fn malformed_component_bytes_are_rejected_as_compilation_failure() {
+    let runtime = WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap();
+
+    let error = runtime
+        .prepare("malformed", b"not a wasm component")
+        .unwrap_err();
+
+    assert!(
+        matches!(error, WasmError::CompilationFailed(_)),
+        "unexpected error: {error:?}"
+    );
+}
+
+#[test]
+fn core_wasm_module_bytes_are_rejected_as_compilation_failure() {
+    let runtime = WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap();
+    let core_module = wat::parse_str("(module)").unwrap();
+
+    let error = runtime.prepare("core-module", &core_module).unwrap_err();
+
+    assert!(
+        matches!(error, WasmError::CompilationFailed(_)),
+        "unexpected error: {error:?}"
+    );
+}
+
+#[test]
+fn unsupported_component_without_tool_exports_is_rejected_at_instantiation() {
+    let runtime = WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap();
+    let component_without_tool_exports = wat::parse_str("(component)").unwrap();
+
+    let error = runtime
+        .prepare("unsupported", &component_without_tool_exports)
+        .unwrap_err();
+
+    assert!(
+        matches!(error, WasmError::InstantiationFailed(_)),
+        "unexpected error: {error:?}"
+    );
+}
+
+#[test]
+fn schema_export_must_return_json_object() {
+    let runtime = WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap();
+    let invalid_schema_wat = COUNTER_TOOL_WAT
+        .replace(
+            r#"(data (i32.const 1024) "{\22type\22:\22object\22}")"#,
+            r#"(data (i32.const 1024) "[1]")"#,
+        )
+        .replace(
+            "i32.const 17\n    i32.store\n    i32.const 16)\n  (func $description",
+            "i32.const 3\n    i32.store\n    i32.const 16)\n  (func $description",
+        );
+    assert_ne!(
+        invalid_schema_wat, COUNTER_TOOL_WAT,
+        "invalid schema WAT mutation should match the fixture"
+    );
+
+    let error = runtime
+        .prepare("invalid-schema", &tool_component(&invalid_schema_wat))
+        .unwrap_err();
+
+    assert!(
+        matches!(error, WasmError::InvalidSchema(_)),
+        "unexpected error: {error:?}"
+    );
 }
 
 #[test]
