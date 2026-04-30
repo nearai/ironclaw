@@ -213,7 +213,7 @@ pub struct ReasoningContext {
     /// support per-request model overrides (e.g. NearAI).
     pub model_override: Option<String>,
     /// Per-request temperature override from the caller (e.g. Responses API
-    /// `temperature` field). When set, overrides the 0.7 default baked into
+    /// `temperature` field). When set, overrides the 0.1 default baked into
     /// `respond_with_tools`. Ignored by providers that don't support it.
     pub temperature_override: Option<f32>,
 }
@@ -736,7 +736,7 @@ Respond in JSON format:
         if !effective_tools.is_empty() {
             let mut request = ToolCompletionRequest::new(messages, effective_tools)
                 .with_max_tokens(4096)
-                .with_temperature(context.temperature_override.unwrap_or(0.7))
+                .with_temperature(context.temperature_override.unwrap_or(0.1))
                 .with_tool_choice("auto");
             request.metadata = context.metadata.clone();
             if let Some(ref model) = context.model_override {
@@ -853,7 +853,7 @@ Respond in JSON format:
             // No tools, use simple completion
             let mut request = CompletionRequest::new(messages)
                 .with_max_tokens(4096)
-                .with_temperature(context.temperature_override.unwrap_or(0.7));
+                .with_temperature(context.temperature_override.unwrap_or(0.1));
             request.metadata = context.metadata.clone();
             if let Some(ref model) = context.model_override {
                 request.model = Some(model.clone());

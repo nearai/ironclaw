@@ -532,13 +532,7 @@ impl Tool for AboundSendWireTool {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
             if (200..300).contains(&status) {
-                return Ok(ToolOutput::text(
-                    format!(
-                        "Notification sent for wire transfer of ${amount}. \
-                         Waiting for your approval on the remote client."
-                    ),
-                    start.elapsed(),
-                ));
+                return Ok(ToolOutput::text("Notification sent", start.elapsed()));
             } else {
                 let err_info = extract_abound_error(status, notif_result.get("body"));
                 tracing::debug!(
