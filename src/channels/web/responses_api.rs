@@ -563,7 +563,14 @@ impl ResponseAccumulator {
                 ));
                 true
             }
-            // Ignore events we don't map (Thinking, Status, etc.).
+            // The agent emits `Status("Done")` to close the turn when the
+            // response is suppressed (silent-success, hook-blocked, etc.).
+            // Without this arm, the accumulator never marks the turn complete
+            // and the Responses API client hangs until its server-side timeout
+            // fires (~120s) and reports `status=failed` — for what was actually
+            // a successful no-content reply.
+            AppEvent::Status { message, .. } if message == "Done" => true,
+            // Ignore events we don't map (Thinking, other Status, etc.).
             _ => false,
         }
     }
@@ -1059,10 +1066,15 @@ async fn streaming_worker(
         }
 
         // Terminal events.
-        let is_terminal = matches!(
-            &event,
-            AppEvent::Response { .. } | AppEvent::Error { .. } | AppEvent::ApprovalNeeded { .. }
-        );
+        // `Status("Done")` is the agent's signal that a suppressed-empty turn
+        // has finished — treat it as terminal so streaming clients don't hang.
+        let is_terminal = match &event {
+            AppEvent::Response { .. }
+            | AppEvent::Error { .. }
+            | AppEvent::ApprovalNeeded { .. } => true,
+            AppEvent::Status { message, .. } if message == "Done" => true,
+            _ => false,
+        };
 
         if is_terminal {
             if let AppEvent::Response { content, .. } = &event {
