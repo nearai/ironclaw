@@ -484,9 +484,8 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Default user ID for extension operations (single-user mode).
     let ext_user_id = config.owner_id.clone();
-    let settings_persistence_available = components.db.is_some();
     let persisted_active_channels: Vec<String> =
-        if settings_persistence_available && let Some(ref ext_mgr) = components.extension_manager {
+        if let Some(ref ext_mgr) = components.extension_manager {
             ext_mgr
                 .load_startup_active_channels(
                     &ext_user_id,
@@ -494,14 +493,16 @@ async fn async_main() -> anyhow::Result<()> {
                 )
                 .await
         } else {
-            config.channels.configured_wasm_channels.clone()
+            normalize_persisted_wasm_channel_names(&config.channels.configured_wasm_channels)
+                .into_iter()
+                .collect()
         };
     let persisted_active_wasm_channels: std::collections::HashSet<String> =
-        if settings_persistence_available && let Some(ref ext_mgr) = components.extension_manager {
+        if let Some(ref ext_mgr) = components.extension_manager {
             persisted_active_wasm_channel_names(ext_mgr, &ext_user_id, &persisted_active_channels)
                 .await
         } else {
-            std::collections::HashSet::new()
+            normalize_persisted_wasm_channel_names(&persisted_active_channels)
         };
 
     let channels = ChannelManager::new();
@@ -692,7 +693,7 @@ async fn async_main() -> anyhow::Result<()> {
             components.extension_manager.as_ref(),
             components.db.as_ref(),
             &channel_names,
-            settings_persistence_available.then_some(&persisted_active_wasm_channels),
+            Some(&persisted_active_wasm_channels),
             Arc::clone(&components.ownership_cache),
         )
         .await;
