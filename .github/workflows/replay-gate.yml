@@ -2,9 +2,9 @@ name: Replay Snapshot Gate
 
 # Runs `cargo insta test --check` over the committed replay fixtures so any
 # change to engine dispatch, agent loop, or tool execution has to come with
-# an accepted snapshot diff. The path-filtered PR workflow stays advisory;
-# `test.yml` calls this workflow directly when replay becomes part of the
-# protected `Run Tests` roll-up.
+# an accepted snapshot diff. `test.yml` calls this workflow directly through
+# `workflow_call` when replay becomes part of the protected `Run Tests`
+# roll-up, and `push: main` keeps the replay cache warm between those runs.
 #
 # Cache strategy: GitHub Actions enforces a 10 GB per-repo cache quota, and
 # the repo routinely sits close to that ceiling, so PR-scoped caches get
