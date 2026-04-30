@@ -172,15 +172,16 @@ where
         let method = wasm_network_method(&request.method)?;
         let headers = decode_wasm_headers(&request.headers_json)?;
         let body = request.body.unwrap_or_default();
-        let credential_injections =
-            self.credential_provider
-                .credential_injections(&WasmRuntimeCredentialRequest {
-                    scope: self.scope.clone(),
-                    method,
-                    url: request.url.clone(),
-                    headers: headers.clone(),
-                    network_policy: self.network_policy.clone(),
-                })?;
+        let credential_injections = self
+            .credential_provider
+            .credential_injections(&WasmRuntimeCredentialRequest {
+                scope: self.scope.clone(),
+                method,
+                url: request.url.clone(),
+                headers: headers.clone(),
+                network_policy: self.network_policy.clone(),
+            })
+            .map_err(wasm_credential_provider_error)?;
 
         let response = self
             .egress
@@ -248,7 +249,17 @@ fn encode_wasm_headers(headers: Vec<(String, String)>) -> Result<String, WasmHos
         if is_sensitive_runtime_response_header(&name) {
             continue;
         }
-        encoded.insert(name, Value::String(value));
+        if let Some(existing_name) = encoded
+            .keys()
+            .find(|existing| existing.eq_ignore_ascii_case(&name))
+            .cloned()
+            && let Some(Value::String(existing_value)) = encoded.get_mut(&existing_name)
+        {
+            existing_value.push_str(", ");
+            existing_value.push_str(&value);
+        } else {
+            encoded.insert(name, Value::String(value));
+        }
     }
     serde_json::to_string(&encoded)
         .map_err(|_| WasmHostError::Failed("failed to encode WASM HTTP headers".to_string()))
@@ -271,12 +282,11 @@ fn wasm_http_error(error: RuntimeHttpEgressError) -> WasmHostError {
 }
 
 fn wasm_http_error_reason(error: &RuntimeHttpEgressError) -> &'static str {
-    match error {
-        RuntimeHttpEgressError::Credential { .. } => "credential_unavailable",
-        RuntimeHttpEgressError::Request { .. } => "request_denied",
-        RuntimeHttpEgressError::Network { .. } => "network_error",
-        RuntimeHttpEgressError::Response { .. } => "response_error",
-    }
+    error.stable_runtime_reason()
+}
+
+fn wasm_credential_provider_error(_error: WasmHostError) -> WasmHostError {
+    WasmHostError::Unavailable("credential_unavailable".to_string())
 }
 
 pub trait WasmHostWorkspace: Send + Sync {

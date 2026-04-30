@@ -178,7 +178,7 @@ where
 
 fn mcp_http_error(error: RuntimeHttpEgressError) -> McpHostHttpError {
     McpHostHttpError::Egress {
-        reason: error.to_string(),
+        reason: error.stable_runtime_reason().to_string(),
     }
 }
 

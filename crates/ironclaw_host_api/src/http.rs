@@ -110,6 +110,16 @@ impl RuntimeHttpEgressError {
             | Self::Response { response_bytes, .. } => *response_bytes,
         }
     }
+
+    /// Stable reason token safe to expose to runtime/plugin callers.
+    pub fn stable_runtime_reason(&self) -> &'static str {
+        match self {
+            Self::Credential { .. } => "credential_unavailable",
+            Self::Request { .. } => "request_denied",
+            Self::Network { .. } => "network_error",
+            Self::Response { .. } => "response_error",
+        }
+    }
 }
 
 pub fn is_sensitive_runtime_request_header(name: &str) -> bool {

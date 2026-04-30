@@ -208,7 +208,7 @@ where
 
 fn script_http_error(error: RuntimeHttpEgressError) -> ScriptHostHttpError {
     ScriptHostHttpError::Egress {
-        reason: error.to_string(),
+        reason: error.stable_runtime_reason().to_string(),
     }
 }
 

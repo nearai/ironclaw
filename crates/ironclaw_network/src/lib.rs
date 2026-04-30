@@ -785,7 +785,7 @@ fn effective_response_body_limit(requested: Option<u64>) -> u64 {
 
 fn effective_request_timeout(requested_ms: Option<u32>, default: Duration) -> Duration {
     requested_ms
-        .map(|timeout_ms| Duration::from_millis(u64::from(timeout_ms.max(1))))
+        .map(|timeout_ms| Duration::from_millis(u64::from(timeout_ms.max(1))).min(default))
         .unwrap_or(default)
 }
 
@@ -854,6 +854,26 @@ fn reqwest_method(method: NetworkMethod) -> reqwest::Method {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effective_request_timeout_clamps_requested_timeout_to_transport_default() {
+        assert_eq!(
+            effective_request_timeout(Some(60_000), Duration::from_secs(30)),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            effective_request_timeout(Some(250), Duration::from_secs(30)),
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            effective_request_timeout(Some(0), Duration::from_secs(30)),
+            Duration::from_millis(1)
+        );
+        assert_eq!(
+            effective_request_timeout(None, Duration::from_secs(30)),
+            Duration::from_secs(30)
+        );
+    }
 
     #[test]
     fn reqwest_transport_caches_clients_by_resolution_key() {

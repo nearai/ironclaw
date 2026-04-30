@@ -116,6 +116,48 @@ fn wasm_runtime_http_adapter_strips_sensitive_response_headers() {
 }
 
 #[test]
+fn wasm_runtime_http_adapter_combines_duplicate_response_headers() {
+    let egress = RecordingRuntimeEgress::ok(RuntimeHttpEgressResponse {
+        status: 200,
+        headers: vec![
+            (
+                "link".to_string(),
+                "<https://a.example>; rel=preload".to_string(),
+            ),
+            (
+                "Link".to_string(),
+                "<https://b.example>; rel=preload".to_string(),
+            ),
+            ("x-public".to_string(), "ok".to_string()),
+        ],
+        body: b"ok".to_vec(),
+        request_bytes: 0,
+        response_bytes: 2,
+        redaction_applied: false,
+    });
+    let adapter = WasmRuntimeHttpAdapter::new(Arc::new(egress), sample_scope(), sample_policy());
+
+    let response = adapter
+        .request(WasmHttpRequest {
+            method: "GET".to_string(),
+            url: "https://wasm-api.example.test/run".to_string(),
+            headers_json: "{}".to_string(),
+            body: None,
+            timeout_ms: Some(1000),
+        })
+        .expect("response headers should encode for WASM");
+
+    let headers = serde_json::from_str::<Value>(&response.headers_json).unwrap();
+    assert_eq!(
+        headers,
+        json!({
+            "link": "<https://a.example>; rel=preload, <https://b.example>; rel=preload",
+            "x-public": "ok",
+        })
+    );
+}
+
+#[test]
 fn wasm_runtime_http_adapter_resolves_credentials_per_request_destination() {
     let egress = RecordingRuntimeEgress::ok(RuntimeHttpEgressResponse {
         status: 200,
@@ -333,6 +375,39 @@ fn wasm_runtime_http_adapter_marks_post_send_shared_egress_errors_for_accounting
     assert!(!rendered.contains("sk-test-secret"));
 }
 
+#[test]
+fn wasm_runtime_http_adapter_redacts_credential_provider_errors() {
+    let adapter = WasmRuntimeHttpAdapter::new(
+        Arc::new(RecordingRuntimeEgress::ok(RuntimeHttpEgressResponse {
+            status: 200,
+            headers: vec![],
+            body: b"ok".to_vec(),
+            request_bytes: 0,
+            response_bytes: 2,
+            redaction_applied: false,
+        })),
+        sample_scope(),
+        sample_policy(),
+    )
+    .with_credential_provider(Arc::new(FailingCredentialProvider));
+
+    let error = adapter
+        .request(WasmHttpRequest {
+            method: "GET".to_string(),
+            url: "https://wasm-api.example.test/run".to_string(),
+            headers_json: "{}".to_string(),
+            body: None,
+            timeout_ms: Some(1000),
+        })
+        .expect_err("credential provider errors should be sanitized before WASM visibility");
+
+    let rendered = error.to_string();
+    assert!(matches!(error, WasmHostError::Unavailable(_)));
+    assert!(rendered.contains("credential_unavailable"));
+    assert!(!rendered.contains("gmail-token"));
+    assert!(!rendered.contains("sk-test-secret"));
+}
+
 #[derive(Clone)]
 struct RecordingRuntimeEgress {
     response: Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError>,
@@ -381,6 +456,20 @@ impl WasmRuntimeCredentialProvider for DestinationCredentialProvider {
         } else {
             Ok(Vec::new())
         }
+    }
+}
+
+#[derive(Debug)]
+struct FailingCredentialProvider;
+
+impl WasmRuntimeCredentialProvider for FailingCredentialProvider {
+    fn credential_injections(
+        &self,
+        _request: &WasmRuntimeCredentialRequest,
+    ) -> Result<Vec<RuntimeCredentialInjection>, WasmHostError> {
+        Err(WasmHostError::Unavailable(
+            "gmail-token unavailable: sk-test-secret".to_string(),
+        ))
     }
 }
 

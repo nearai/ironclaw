@@ -53,7 +53,7 @@ fn script_host_http_adapter_uses_shared_runtime_egress() {
 fn script_host_http_adapter_returns_sanitized_shared_egress_errors() {
     let adapter = ScriptRuntimeHttpAdapter::new(Arc::new(RecordingRuntimeEgress::err(
         RuntimeHttpEgressError::Network {
-            reason: "network request denied by policy".to_string(),
+            reason: "network request denied by policy for sk-test-secret".to_string(),
             request_bytes: 0,
             response_bytes: 0,
         },
@@ -74,9 +74,9 @@ fn script_host_http_adapter_returns_sanitized_shared_egress_errors() {
         .expect_err("network denial should surface as a sanitized adapter error");
 
     let rendered = error.to_string();
-    assert!(rendered.contains("network request denied by policy"));
-    assert!(!rendered.contains("secret"));
-    assert!(!rendered.contains("token"));
+    assert!(rendered.contains("network_error"));
+    assert!(!rendered.contains("sk-test-secret"));
+    assert!(!rendered.contains("network request denied by policy"));
 }
 
 #[derive(Clone)]
