@@ -1,7 +1,7 @@
 # Reborn Storage Catalog and Placement Plan
 
-**Status:** Implementation planning note  
-**Date:** 2026-04-25  
+**Status:** Implementation planning note
+**Date:** 2026-04-25
 **Related contracts:** `contracts/filesystem.md`, `contracts/secrets.md`, `contracts/processes.md`, `contracts/events-projections.md`
 
 ---

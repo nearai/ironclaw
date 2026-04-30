@@ -133,6 +133,36 @@ async fn libsql_memory_repository_lists_none_project_documents_under_top_level_p
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
+async fn libsql_memory_repository_rejects_file_directory_prefix_conflicts() {
+    let (db, _dir) = libsql_db().await;
+    let repository = LibSqlMemoryDocumentRepository::new(db);
+    repository.run_migrations().await.unwrap();
+    let file = MemoryDocumentPath::new("tenant-a", "alice", None, "notes").unwrap();
+    let child = MemoryDocumentPath::new("tenant-a", "alice", None, "notes/a.md").unwrap();
+
+    repository
+        .write_document(&file, b"plain file")
+        .await
+        .unwrap();
+    let err = repository
+        .write_document(&child, b"child")
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("existing file ancestor"));
+
+    let (db, _dir) = libsql_db().await;
+    let repository = LibSqlMemoryDocumentRepository::new(db);
+    repository.run_migrations().await.unwrap();
+    repository.write_document(&child, b"child").await.unwrap();
+    let err = repository
+        .write_document(&file, b"plain file")
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("existing directory"));
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
 async fn libsql_memory_repository_upserts_duplicate_document_paths() {
     let (db, _dir) = libsql_db().await;
     let repository = LibSqlMemoryDocumentRepository::new(db.clone());

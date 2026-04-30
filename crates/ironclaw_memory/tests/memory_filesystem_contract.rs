@@ -5,6 +5,29 @@ use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::VirtualPath;
 use ironclaw_memory::*;
 
+#[test]
+fn memory_scope_rejects_segments_that_cannot_round_trip_or_collide_in_owner_keys() {
+    assert!(MemoryDocumentScope::new("tenant:admin", "alice", None).is_err());
+    assert!(MemoryDocumentScope::new(".", "alice", None).is_err());
+    assert!(MemoryDocumentScope::new("tenant-a", "..", None).is_err());
+}
+
+#[tokio::test]
+async fn in_memory_repository_rejects_file_directory_prefix_conflicts() {
+    let repo = InMemoryMemoryDocumentRepository::new();
+    let file = MemoryDocumentPath::new("tenant-a", "alice", None, "notes").unwrap();
+    let child = MemoryDocumentPath::new("tenant-a", "alice", None, "notes/a.md").unwrap();
+
+    repo.write_document(&file, b"plain file").await.unwrap();
+    let err = repo.write_document(&child, b"child").await.unwrap_err();
+    assert!(err.to_string().contains("existing file ancestor"));
+
+    let repo = InMemoryMemoryDocumentRepository::new();
+    repo.write_document(&child, b"child").await.unwrap();
+    let err = repo.write_document(&file, b"plain file").await.unwrap_err();
+    assert!(err.to_string().contains("existing directory"));
+}
+
 #[tokio::test]
 async fn memory_filesystem_maps_virtual_paths_to_repository_keys() {
     let repo = Arc::new(InMemoryMemoryDocumentRepository::new());

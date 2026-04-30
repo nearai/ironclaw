@@ -255,6 +255,12 @@ impl MemoryDocumentRepository for InMemoryMemoryDocumentRepository {
                 "memory document repository lock poisoned",
             )
         })?;
+        let existing = documents
+            .keys()
+            .filter(|document| document.scope() == path.scope())
+            .cloned()
+            .collect::<Vec<_>>();
+        ensure_document_path_does_not_conflict(path, &existing, FilesystemOperation::WriteFile)?;
         documents.insert(path.clone(), bytes.to_vec());
         Ok(())
     }
@@ -336,35 +342,7 @@ impl MemoryDocumentFilesystem {
         path: &MemoryDocumentPath,
     ) -> Result<(), FilesystemError> {
         let documents = self.list_for_scope(path.scope()).await?;
-        let relative_path = path.relative_path();
-        let descendant_prefix = format!("{relative_path}/");
-        if documents
-            .iter()
-            .any(|document| document.relative_path().starts_with(&descendant_prefix))
-        {
-            return Err(memory_error(
-                path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
-                FilesystemOperation::WriteFile,
-                "memory document path conflicts with an existing directory",
-            ));
-        }
-
-        let segments: Vec<&str> = relative_path.split('/').collect();
-        for end in 1..segments.len() {
-            let ancestor = segments[..end].join("/");
-            if documents
-                .iter()
-                .any(|document| document.relative_path() == ancestor)
-            {
-                return Err(memory_error(
-                    path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
-                    FilesystemOperation::WriteFile,
-                    "memory document path conflicts with an existing file ancestor",
-                ));
-            }
-        }
-
-        Ok(())
+        ensure_document_path_does_not_conflict(path, &documents, FilesystemOperation::WriteFile)
     }
 }
 
@@ -501,6 +479,37 @@ impl LibSqlMemoryDocumentRepository {
 }
 
 #[cfg(feature = "libsql")]
+async fn libsql_list_documents_for_scope(
+    conn: &libsql::Connection,
+    scope: &MemoryDocumentScope,
+    virtual_path: &VirtualPath,
+    operation: FilesystemOperation,
+) -> Result<Vec<MemoryDocumentPath>, FilesystemError> {
+    let owner_key = scoped_memory_owner_key(scope);
+    let mut documents = Vec::new();
+    let mut rows = conn
+        .query(
+            "SELECT path FROM memory_documents WHERE user_id = ?1 AND agent_id IS NULL ORDER BY path",
+            libsql::params![owner_key],
+        )
+        .await
+        .map_err(|error| memory_error(virtual_path.clone(), operation, error.to_string()))?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| memory_error(virtual_path.clone(), operation, error.to_string()))?
+    {
+        let db_path: String = row
+            .get(0)
+            .map_err(|error| memory_error(virtual_path.clone(), operation, error.to_string()))?;
+        if let Some(memory_path) = memory_document_from_db_path(scope, &db_path) {
+            documents.push(memory_path);
+        }
+    }
+    Ok(documents)
+}
+
+#[cfg(feature = "libsql")]
 #[async_trait]
 impl MemoryDocumentRepository for LibSqlMemoryDocumentRepository {
     async fn read_document(
@@ -556,32 +565,73 @@ impl MemoryDocumentRepository for LibSqlMemoryDocumentRepository {
         let conn = self
             .connect(virtual_path.clone(), FilesystemOperation::WriteFile)
             .await?;
-        let owner_key = scoped_memory_owner_key(path.scope());
-        let db_path = db_path_for_memory_document(path);
-        conn.execute(
-            r#"
-            INSERT INTO memory_documents (id, user_id, agent_id, path, content, metadata)
-            VALUES (?1, ?2, NULL, ?3, ?4, '{}')
-            ON CONFLICT(user_id, path) WHERE agent_id IS NULL DO UPDATE SET
-                content = excluded.content,
-                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-            "#,
-            libsql::params![
-                uuid::Uuid::new_v4().to_string(),
-                owner_key,
-                db_path,
-                content
-            ],
-        )
-        .await
-        .map_err(|error| {
+        conn.execute("BEGIN IMMEDIATE", ()).await.map_err(|error| {
             memory_error(
-                virtual_path,
+                virtual_path.clone(),
                 FilesystemOperation::WriteFile,
                 error.to_string(),
             )
         })?;
-        Ok(())
+
+        let result = async {
+            let documents = libsql_list_documents_for_scope(
+                &conn,
+                path.scope(),
+                &virtual_path,
+                FilesystemOperation::WriteFile,
+            )
+            .await?;
+            ensure_document_path_does_not_conflict(
+                path,
+                &documents,
+                FilesystemOperation::WriteFile,
+            )?;
+
+            let owner_key = scoped_memory_owner_key(path.scope());
+            let db_path = db_path_for_memory_document(path);
+            conn.execute(
+                r#"
+                INSERT INTO memory_documents (id, user_id, agent_id, path, content, metadata)
+                VALUES (?1, ?2, NULL, ?3, ?4, '{}')
+                ON CONFLICT(user_id, path) WHERE agent_id IS NULL DO UPDATE SET
+                    content = excluded.content,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                "#,
+                libsql::params![
+                    uuid::Uuid::new_v4().to_string(),
+                    owner_key,
+                    db_path,
+                    content
+                ],
+            )
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::WriteFile,
+                    error.to_string(),
+                )
+            })?;
+            Ok(())
+        }
+        .await;
+
+        match result {
+            Ok(()) => {
+                conn.execute("COMMIT", ()).await.map_err(|error| {
+                    memory_error(
+                        virtual_path,
+                        FilesystemOperation::WriteFile,
+                        error.to_string(),
+                    )
+                })?;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                Err(error)
+            }
+        }
     }
 
     async fn list_documents(
@@ -594,34 +644,8 @@ impl MemoryDocumentRepository for LibSqlMemoryDocumentRepository {
         let conn = self
             .connect(virtual_path.clone(), FilesystemOperation::ListDir)
             .await?;
-        let owner_key = scoped_memory_owner_key(scope);
-        let mut documents = Vec::new();
-        let mut rows = conn
-            .query(
-                "SELECT path FROM memory_documents WHERE user_id = ?1 AND agent_id IS NULL ORDER BY path",
-                libsql::params![owner_key],
-            )
+        libsql_list_documents_for_scope(&conn, scope, &virtual_path, FilesystemOperation::ListDir)
             .await
-            .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::ListDir, error.to_string()))?;
-        while let Some(row) = rows.next().await.map_err(|error| {
-            memory_error(
-                virtual_path.clone(),
-                FilesystemOperation::ListDir,
-                error.to_string(),
-            )
-        })? {
-            let db_path: String = row.get(0).map_err(|error| {
-                memory_error(
-                    virtual_path.clone(),
-                    FilesystemOperation::ListDir,
-                    error.to_string(),
-                )
-            })?;
-            if let Some(memory_path) = memory_document_from_db_path(scope, &db_path) {
-                documents.push(memory_path);
-            }
-        }
-        Ok(documents)
     }
 }
 
@@ -686,6 +710,34 @@ impl PostgresMemoryDocumentRepository {
 }
 
 #[cfg(feature = "postgres")]
+async fn postgres_list_documents_for_scope<C>(
+    client: &C,
+    scope: &MemoryDocumentScope,
+    virtual_path: &VirtualPath,
+    operation: FilesystemOperation,
+) -> Result<Vec<MemoryDocumentPath>, FilesystemError>
+where
+    C: deadpool_postgres::GenericClient + Sync,
+{
+    let owner_key = scoped_memory_owner_key(scope);
+    let rows = client
+        .query(
+            "SELECT path FROM memory_documents WHERE user_id = $1 AND agent_id IS NULL ORDER BY path",
+            &[&owner_key],
+        )
+        .await
+        .map_err(|error| memory_error(virtual_path.clone(), operation, error.to_string()))?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            let db_path: String = row.get("path");
+            memory_document_from_db_path(scope, &db_path)
+        })
+        .collect())
+}
+
+#[cfg(feature = "postgres")]
 #[async_trait]
 impl MemoryDocumentRepository for PostgresMemoryDocumentRepository {
     async fn read_document(
@@ -724,30 +776,61 @@ impl MemoryDocumentRepository for PostgresMemoryDocumentRepository {
             )
         })?;
         let virtual_path = path.virtual_path().unwrap_or_else(|_| valid_memory_path());
-        let client = self
+        let mut client = self
             .client(virtual_path.clone(), FilesystemOperation::WriteFile)
             .await?;
-        let owner_key = scoped_memory_owner_key(path.scope());
-        let db_path = db_path_for_memory_document(path);
-        client
-            .execute(
-                r#"
-                INSERT INTO memory_documents (user_id, agent_id, path, content, metadata)
-                VALUES ($1, NULL, $2, $3, '{}'::jsonb)
-                ON CONFLICT (user_id, path) WHERE agent_id IS NULL DO UPDATE SET
-                    content = EXCLUDED.content,
-                    updated_at = NOW()
-                "#,
-                &[&owner_key, &db_path, &content],
+        let tx = client.transaction().await.map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::WriteFile,
+                error.to_string(),
             )
+        })?;
+        tx.batch_execute("LOCK TABLE memory_documents IN SHARE ROW EXCLUSIVE MODE")
             .await
             .map_err(|error| {
                 memory_error(
-                    virtual_path,
+                    virtual_path.clone(),
                     FilesystemOperation::WriteFile,
                     error.to_string(),
                 )
             })?;
+        let documents = postgres_list_documents_for_scope(
+            &tx,
+            path.scope(),
+            &virtual_path,
+            FilesystemOperation::WriteFile,
+        )
+        .await?;
+        ensure_document_path_does_not_conflict(path, &documents, FilesystemOperation::WriteFile)?;
+
+        let owner_key = scoped_memory_owner_key(path.scope());
+        let db_path = db_path_for_memory_document(path);
+        tx.execute(
+            r#"
+            INSERT INTO memory_documents (user_id, agent_id, path, content, metadata)
+            VALUES ($1, NULL, $2, $3, '{}'::jsonb)
+            ON CONFLICT (user_id, path) WHERE agent_id IS NULL DO UPDATE SET
+                content = EXCLUDED.content,
+                updated_at = NOW()
+            "#,
+            &[&owner_key, &db_path, &content],
+        )
+        .await
+        .map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::WriteFile,
+                error.to_string(),
+            )
+        })?;
+        tx.commit().await.map_err(|error| {
+            memory_error(
+                virtual_path,
+                FilesystemOperation::WriteFile,
+                error.to_string(),
+            )
+        })?;
         Ok(())
     }
 
@@ -761,22 +844,13 @@ impl MemoryDocumentRepository for PostgresMemoryDocumentRepository {
         let client = self
             .client(virtual_path.clone(), FilesystemOperation::ListDir)
             .await?;
-        let owner_key = scoped_memory_owner_key(scope);
-        let rows = client
-            .query(
-                "SELECT path FROM memory_documents WHERE user_id = $1 AND agent_id IS NULL ORDER BY path",
-                &[&owner_key],
-            )
-            .await
-            .map_err(|error| memory_error(virtual_path, FilesystemOperation::ListDir, error.to_string()))?;
-
-        Ok(rows
-            .into_iter()
-            .filter_map(|row| {
-                let db_path: String = row.get("path");
-                memory_document_from_db_path(scope, &db_path)
-            })
-            .collect())
+        postgres_list_documents_for_scope(
+            &client,
+            scope,
+            &virtual_path,
+            FilesystemOperation::ListDir,
+        )
+        .await
     }
 }
 
@@ -826,6 +900,42 @@ fn memory_document_from_db_path(
             scope: scope.clone(),
             relative_path,
         })
+}
+
+fn ensure_document_path_does_not_conflict(
+    path: &MemoryDocumentPath,
+    documents: &[MemoryDocumentPath],
+    operation: FilesystemOperation,
+) -> Result<(), FilesystemError> {
+    let relative_path = path.relative_path();
+    let descendant_prefix = format!("{relative_path}/");
+    if documents
+        .iter()
+        .any(|document| document.relative_path().starts_with(&descendant_prefix))
+    {
+        return Err(memory_error(
+            path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+            operation,
+            "memory document path conflicts with an existing directory",
+        ));
+    }
+
+    let segments: Vec<&str> = relative_path.split('/').collect();
+    for end in 1..segments.len() {
+        let ancestor = segments[..end].join("/");
+        if documents
+            .iter()
+            .any(|document| document.relative_path() == ancestor)
+        {
+            return Err(memory_error(
+                path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+                operation,
+                "memory document path conflicts with an existing file ancestor",
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn memory_direct_children(
@@ -892,6 +1002,20 @@ fn validated_memory_segment(kind: &'static str, value: String) -> Result<String,
             kind,
             value,
             reason: "segment must not be empty".to_string(),
+        });
+    }
+    if value == "." || value == ".." {
+        return Err(HostApiError::InvalidId {
+            kind,
+            value,
+            reason: "dot segments are not allowed".to_string(),
+        });
+    }
+    if value.contains(':') {
+        return Err(HostApiError::InvalidId {
+            kind,
+            value,
+            reason: "colon is reserved for memory owner key encoding".to_string(),
         });
     }
     if value.contains('/')

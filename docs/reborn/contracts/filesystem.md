@@ -1,7 +1,7 @@
 # Reborn Filesystem Contract
 
-**Status:** Draft implementation contract  
-**Date:** 2026-04-24  
+**Status:** Draft implementation contract
+**Date:** 2026-04-24
 **Depends on:** `docs/reborn/contracts/host-api.md`, `crates/ironclaw_host_api`
 
 ---
