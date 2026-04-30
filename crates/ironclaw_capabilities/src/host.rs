@@ -13,7 +13,8 @@ use tracing::warn;
 use crate::helpers::{
     approval_not_approved_error_kind, capability_lease_error_kind,
     claim_error_may_be_concurrent_resume, complete_run_after_side_effect, ensure_no_obligations,
-    fail_run, fail_run_if_configured, matching_approval_lease, resume_context_mismatch_kind,
+    fail_run_if_configured, matching_approval_lease, resume_context_mismatch_kind,
+    run_state_error_kind, validate_approval_request_matches_invocation,
 };
 use crate::{
     CapabilityInvocationError, CapabilityInvocationRequest, CapabilityInvocationResult,
@@ -184,6 +185,22 @@ where
             Decision::RequireApproval {
                 request: mut approval,
             } => {
+                if let Err(error) = validate_approval_request_matches_invocation(
+                    &approval,
+                    &request.context,
+                    &request.capability_id,
+                    &request.estimate,
+                ) {
+                    fail_run_if_configured(
+                        self.run_state,
+                        &scope,
+                        invocation_id,
+                        "ApprovalRequestMismatch",
+                    )
+                    .await;
+                    return Err(error);
+                }
+
                 if let Some(existing) = &approval.invocation_fingerprint {
                     if existing != &invocation_fingerprint {
                         fail_run_if_configured(
@@ -203,21 +220,9 @@ where
 
                 match (self.run_state, self.approval_requests) {
                     (Some(run_state), Some(approval_requests)) => {
-                        if let Err(error) = run_state
-                            .block_approval(&scope, invocation_id, approval.clone())
-                            .await
-                        {
-                            fail_run_if_configured(
-                                Some(run_state),
-                                &scope,
-                                invocation_id,
-                                "ApprovalBlock",
-                            )
-                            .await;
-                            return Err(CapabilityInvocationError::from(error));
-                        }
+                        let approval_id = approval.id;
                         if let Err(error) = approval_requests
-                            .save_pending(scope.clone(), approval)
+                            .save_pending(scope.clone(), approval.clone())
                             .await
                         {
                             fail_run_if_configured(
@@ -225,6 +230,29 @@ where
                                 &scope,
                                 invocation_id,
                                 "ApprovalStore",
+                            )
+                            .await;
+                            return Err(CapabilityInvocationError::from(error));
+                        }
+                        if let Err(error) = run_state
+                            .block_approval(&scope, invocation_id, approval)
+                            .await
+                        {
+                            if let Err(discard_error) =
+                                approval_requests.discard_pending(&scope, approval_id).await
+                            {
+                                warn!(
+                                    approval_request_id = %approval_id,
+                                    invocation_id = %invocation_id,
+                                    transition_error_kind = run_state_error_kind(&discard_error),
+                                    "approval rollback failed after run-state block transition failed",
+                                );
+                            }
+                            fail_run_if_configured(
+                                Some(run_state),
+                                &scope,
+                                invocation_id,
+                                "ApprovalBlock",
                             )
                             .await;
                             return Err(CapabilityInvocationError::from(error));
@@ -353,7 +381,13 @@ where
         let approval_request_mismatch =
             run_record.approval_request_id != Some(request.approval_request_id);
         if capability_mismatch || approval_request_mismatch {
-            fail_run(run_state, &scope, invocation_id, "ResumeContextMismatch").await?;
+            fail_run_if_configured(
+                Some(run_state),
+                &scope,
+                invocation_id,
+                "ResumeContextMismatch",
+            )
+            .await;
             return Err(CapabilityInvocationError::ResumeContextMismatch {
                 capability: request.capability_id,
                 kind: resume_context_mismatch_kind(capability_mismatch, approval_request_mismatch),
@@ -367,33 +401,36 @@ where
                 request_id: request.approval_request_id,
             })?;
         if approval.status != ApprovalStatus::Approved {
-            fail_run(
-                run_state,
-                &scope,
-                invocation_id,
-                approval_not_approved_error_kind(approval.status),
-            )
-            .await?;
+            if approval.status != ApprovalStatus::Pending {
+                fail_run_if_configured(
+                    Some(run_state),
+                    &scope,
+                    invocation_id,
+                    approval_not_approved_error_kind(approval.status),
+                )
+                .await;
+            }
             return Err(CapabilityInvocationError::ApprovalNotApproved {
                 capability: request.capability_id,
                 status: approval.status,
             });
         }
         if approval.request.invocation_fingerprint.as_ref() != Some(&invocation_fingerprint) {
-            fail_run(
-                run_state,
+            fail_run_if_configured(
+                Some(run_state),
                 &scope,
                 invocation_id,
                 "InvocationFingerprintMismatch",
             )
-            .await?;
+            .await;
             return Err(CapabilityInvocationError::ApprovalFingerprintMismatch {
                 capability: request.capability_id,
             });
         }
 
         let Some(descriptor) = self.registry.get_capability(&request.capability_id) else {
-            fail_run(run_state, &scope, invocation_id, "UnknownCapability").await?;
+            fail_run_if_configured(Some(run_state), &scope, invocation_id, "UnknownCapability")
+                .await;
             return Err(CapabilityInvocationError::UnknownCapability {
                 capability: request.capability_id,
             });
@@ -407,7 +444,13 @@ where
         )
         .await
         else {
-            fail_run(run_state, &scope, invocation_id, "ApprovalLeaseMissing").await?;
+            fail_run_if_configured(
+                Some(run_state),
+                &scope,
+                invocation_id,
+                "ApprovalLeaseMissing",
+            )
+            .await;
             return Err(CapabilityInvocationError::ApprovalLeaseMissing {
                 capability: request.capability_id,
             });
@@ -427,25 +470,37 @@ where
         {
             Decision::Allow { obligations } => {
                 if let Err(error) = ensure_no_obligations(&capability_id, obligations.into_vec()) {
-                    fail_run(run_state, &scope, invocation_id, "UnsupportedObligations").await?;
+                    fail_run_if_configured(
+                        Some(run_state),
+                        &scope,
+                        invocation_id,
+                        "UnsupportedObligations",
+                    )
+                    .await;
                     return Err(error);
                 }
             }
             Decision::Deny { reason } => {
-                fail_run(run_state, &scope, invocation_id, "AuthorizationDenied").await?;
+                fail_run_if_configured(
+                    Some(run_state),
+                    &scope,
+                    invocation_id,
+                    "AuthorizationDenied",
+                )
+                .await;
                 return Err(CapabilityInvocationError::AuthorizationDenied {
                     capability: request.capability_id,
                     reason,
                 });
             }
             Decision::RequireApproval { .. } => {
-                fail_run(
-                    run_state,
+                fail_run_if_configured(
+                    Some(run_state),
                     &scope,
                     invocation_id,
                     "AuthorizationRequiresApproval",
                 )
-                .await?;
+                .await;
                 return Err(CapabilityInvocationError::AuthorizationRequiresApproval {
                     capability: request.capability_id,
                 });
@@ -467,7 +522,13 @@ where
                         "approval lease claim lost to a concurrent resume; leaving run state unchanged",
                     );
                 } else {
-                    fail_run(run_state, &scope, invocation_id, "ApprovalLeaseClaim").await?;
+                    fail_run_if_configured(
+                        Some(run_state),
+                        &scope,
+                        invocation_id,
+                        "ApprovalLeaseClaim",
+                    )
+                    .await;
                 }
                 return Err(CapabilityInvocationError::Lease(Box::new(error)));
             }
@@ -487,7 +548,7 @@ where
         {
             Ok(dispatch) => dispatch,
             Err(error) => {
-                fail_run(run_state, &scope, invocation_id, "Dispatch").await?;
+                fail_run_if_configured(Some(run_state), &scope, invocation_id, "Dispatch").await;
                 return Err(CapabilityInvocationError::from(error));
             }
         };

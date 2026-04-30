@@ -342,6 +342,39 @@ async fn filesystem_approval_request_store_persists_pending_requests_under_tenan
 }
 
 #[tokio::test]
+async fn in_memory_approval_request_store_discards_pending_request() {
+    let store = InMemoryApprovalRequestStore::new();
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let approval = approval_request(invocation_id);
+    let request_id = approval.id;
+
+    let saved = store.save_pending(scope.clone(), approval).await.unwrap();
+    let discarded = store.discard_pending(&scope, request_id).await.unwrap();
+
+    assert_eq!(discarded, saved);
+    assert!(store.get(&scope, request_id).await.unwrap().is_none());
+    assert_eq!(store.records_for_scope(&scope).await.unwrap(), Vec::new());
+}
+
+#[tokio::test]
+async fn filesystem_approval_request_store_discards_pending_request() {
+    let fs = engine_filesystem();
+    let store = FilesystemApprovalRequestStore::new(&fs);
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let approval = approval_request(invocation_id);
+    let request_id = approval.id;
+
+    let saved = store.save_pending(scope.clone(), approval).await.unwrap();
+    let discarded = store.discard_pending(&scope, request_id).await.unwrap();
+
+    assert_eq!(discarded, saved);
+    assert!(store.get(&scope, request_id).await.unwrap().is_none());
+    assert_eq!(store.records_for_scope(&scope).await.unwrap(), Vec::new());
+}
+
+#[tokio::test]
 async fn in_memory_approval_store_allows_same_request_id_in_different_tenants() {
     let store = InMemoryApprovalRequestStore::new();
     let invocation_id = InvocationId::new();

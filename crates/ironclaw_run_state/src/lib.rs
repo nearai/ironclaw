@@ -230,6 +230,19 @@ pub trait ApprovalRequestStore: Send + Sync {
         request_id: ApprovalRequestId,
     ) -> Result<ApprovalRecord, RunStateError>;
 
+    /// Discards a still-pending approval request during rollback before it becomes user-actionable.
+    ///
+    /// Stores that can delete pending records should override this method. The default is a
+    /// fail-closed tombstone fallback that marks the record denied rather than leaving a
+    /// user-actionable pending approval behind.
+    async fn discard_pending(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.deny(scope, request_id).await
+    }
+
     /// Lists approval records visible to the exact resource-owner scope only.
     async fn records_for_scope(
         &self,
@@ -455,6 +468,27 @@ impl ApprovalRequestStore for InMemoryApprovalRequestStore {
         request_id: ApprovalRequestId,
     ) -> Result<ApprovalRecord, RunStateError> {
         self.update_status(scope, request_id, ApprovalStatus::Denied)
+    }
+
+    async fn discard_pending(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        let mut records = self.records_guard();
+        let key = ApprovalKey::new(scope, request_id);
+        let record = records
+            .get(&key)
+            .ok_or(RunStateError::UnknownApprovalRequest { request_id })?;
+        if record.status != ApprovalStatus::Pending {
+            return Err(RunStateError::ApprovalNotPending {
+                request_id,
+                status: record.status,
+            });
+        }
+        records
+            .remove(&key)
+            .ok_or(RunStateError::UnknownApprovalRequest { request_id })
     }
 
     async fn records_for_scope(
@@ -749,6 +783,27 @@ where
     ) -> Result<ApprovalRecord, RunStateError> {
         self.update_status(scope, request_id, ApprovalStatus::Denied)
             .await
+    }
+
+    async fn discard_pending(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        let _guard = self.lock.lock().await;
+        let record = self
+            .get(scope, request_id)
+            .await?
+            .ok_or(RunStateError::UnknownApprovalRequest { request_id })?;
+        if record.status != ApprovalStatus::Pending {
+            return Err(RunStateError::ApprovalNotPending {
+                request_id,
+                status: record.status,
+            });
+        }
+        let path = approval_record_path(scope, request_id)?;
+        self.filesystem.delete(&path).await?;
+        Ok(record)
     }
 
     async fn records_for_scope(

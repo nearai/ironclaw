@@ -2,7 +2,8 @@ use ironclaw_authorization::{
     CapabilityLease, CapabilityLeaseError, CapabilityLeaseStatus, CapabilityLeaseStore,
 };
 use ironclaw_host_api::{
-    CapabilityId, ExecutionContext, InvocationFingerprint, InvocationId, Obligation, ResourceScope,
+    Action, ApprovalRequest, CapabilityId, ExecutionContext, InvocationFingerprint, InvocationId,
+    Obligation, Principal, ResourceEstimate, ResourceScope,
 };
 use ironclaw_run_state::{ApprovalStatus, RunStateError, RunStateStore};
 use tracing::warn;
@@ -21,6 +22,36 @@ pub(crate) fn ensure_no_obligations(
             obligations,
         })
     }
+}
+
+pub(crate) fn validate_approval_request_matches_invocation(
+    approval: &ApprovalRequest,
+    context: &ExecutionContext,
+    capability_id: &CapabilityId,
+    estimate: &ResourceEstimate,
+) -> Result<(), CapabilityInvocationError> {
+    match approval.action.as_ref() {
+        Action::Dispatch {
+            capability,
+            estimated_resources,
+        } if capability == capability_id && estimated_resources == estimate => {}
+        _ => {
+            return Err(CapabilityInvocationError::ApprovalRequestMismatch {
+                capability: capability_id.clone(),
+                field: "action",
+            });
+        }
+    }
+
+    let expected_requester = Principal::Extension(context.extension_id.clone());
+    if approval.requested_by != expected_requester {
+        return Err(CapabilityInvocationError::ApprovalRequestMismatch {
+            capability: capability_id.clone(),
+            field: "requested_by",
+        });
+    }
+
+    Ok(())
 }
 
 pub(crate) async fn matching_approval_lease(
@@ -106,7 +137,7 @@ pub(crate) fn resume_context_mismatch_kind(
         (true, true) => ResumeContextMismatchKind::CapabilityAndApprovalRequestId,
         (true, false) => ResumeContextMismatchKind::CapabilityId,
         (false, true) => ResumeContextMismatchKind::ApprovalRequestId,
-        (false, false) => ResumeContextMismatchKind::ApprovalRequestId,
+        (false, false) => unreachable!("resume context mismatch kind called without mismatch"),
     }
 }
 

@@ -33,6 +33,11 @@ pub enum CapabilityInvocationError {
         capability: CapabilityId,
         source: HostApiError,
     },
+    #[error("capability {capability} approval request does not match invocation: {field}")]
+    ApprovalRequestMismatch {
+        capability: CapabilityId,
+        field: &'static str,
+    },
     #[error("capability {capability} approval fingerprint mismatch")]
     ApprovalFingerprintMismatch { capability: CapabilityId },
     #[error("capability {capability} approval is not approved: {status:?}")]

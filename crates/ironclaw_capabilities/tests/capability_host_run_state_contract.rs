@@ -62,6 +62,186 @@ async fn capability_host_blocks_for_approval_without_dispatch() {
 }
 
 #[tokio::test]
+async fn capability_host_leaves_run_blocked_when_resume_is_attempted_before_approval_resolves() {
+    let registry = registry_with_echo_capability();
+    let dispatcher = RecordingDispatcher::default();
+    let run_state = InMemoryRunStateStore::new();
+    let approval_requests = InMemoryApprovalRequestStore::new();
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests);
+    let context = execution_context(CapabilitySet::default());
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "not approved yet"});
+
+    block_host
+        .invoke_json(CapabilityInvocationRequest {
+            context: context.clone(),
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+    let approval_id = run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .approval_request_id
+        .unwrap();
+
+    let resume_authorizer = GrantAuthorizer::new();
+    let resume_host = CapabilityHost::new(&registry, &dispatcher, &resume_authorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases);
+    let err = resume_host
+        .resume_json(CapabilityResumeRequest {
+            context,
+            approval_request_id: approval_id,
+            capability_id: capability_id(),
+            estimate,
+            input,
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityInvocationError::ApprovalNotApproved {
+            status: ApprovalStatus::Pending,
+            ..
+        }
+    ));
+    assert!(!dispatcher.has_request());
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(run.status, RunStatus::BlockedApproval);
+    assert_eq!(run.approval_request_id, Some(approval_id));
+    assert_eq!(run.error_kind, None);
+}
+
+#[tokio::test]
+async fn capability_host_rejects_authorizer_approval_with_mismatched_action_capability() {
+    assert_mismatched_approval_request_rejected(ApprovalRequestMismatch::Capability, "action")
+        .await;
+}
+
+#[tokio::test]
+async fn capability_host_rejects_authorizer_approval_with_mismatched_action_estimate() {
+    assert_mismatched_approval_request_rejected(ApprovalRequestMismatch::Estimate, "action").await;
+}
+
+#[tokio::test]
+async fn capability_host_rejects_authorizer_approval_with_mismatched_requested_by() {
+    assert_mismatched_approval_request_rejected(
+        ApprovalRequestMismatch::RequestedBy,
+        "requested_by",
+    )
+    .await;
+}
+
+async fn assert_mismatched_approval_request_rejected(
+    mismatch: ApprovalRequestMismatch,
+    expected_field: &'static str,
+) {
+    let registry = registry_with_echo_capability();
+    let dispatcher = RecordingDispatcher::default();
+    let run_state = InMemoryRunStateStore::new();
+    let approval_requests = InMemoryApprovalRequestStore::new();
+    let authorizer = MismatchedApprovalRequestAuthorizer { mismatch };
+    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests);
+    let context = execution_context(CapabilitySet::default());
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+
+    let err = host
+        .invoke_json(CapabilityInvocationRequest {
+            context,
+            capability_id: capability_id(),
+            estimate: ResourceEstimate::default(),
+            input: json!({"message": "needs approval"}),
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+
+    match err {
+        CapabilityInvocationError::ApprovalRequestMismatch { field, .. } => {
+            assert_eq!(field, expected_field);
+        }
+        other => panic!("expected ApprovalRequestMismatch, got {other:?}"),
+    }
+    assert!(!dispatcher.has_request());
+    assert!(
+        approval_requests
+            .records_for_scope(&scope)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(run.status, RunStatus::Failed);
+    assert_eq!(run.error_kind.as_deref(), Some("ApprovalRequestMismatch"));
+}
+
+#[tokio::test]
+async fn capability_host_does_not_point_run_at_approval_before_approval_is_persisted() {
+    let registry = registry_with_echo_capability();
+    let dispatcher = RecordingDispatcher::default();
+    let run_state = InMemoryRunStateStore::new();
+    let approval_requests = HangingSaveApprovalRequestStore::new();
+    let host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests);
+    let context = execution_context(CapabilitySet::default());
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+
+    let invocation = host.invoke_json(CapabilityInvocationRequest {
+        context,
+        capability_id: capability_id(),
+        estimate: ResourceEstimate::default(),
+        input: json!({"message": "needs approval"}),
+        trust_decision: trust_decision(),
+    });
+    tokio::pin!(invocation);
+
+    tokio::select! {
+        result = &mut invocation => panic!("invoke completed before approval persistence was observed: {result:?}"),
+        () = approval_requests.wait_for_save_started() => {}
+    }
+
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(run.status, RunStatus::Running);
+    assert_eq!(run.approval_request_id, None);
+    assert!(
+        approval_requests
+            .records_for_scope(&scope)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    approval_requests.release_save();
+    let err = invocation.await.unwrap_err();
+    assert!(matches!(
+        err,
+        CapabilityInvocationError::AuthorizationRequiresApproval { .. }
+    ));
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(run.status, RunStatus::BlockedApproval);
+    assert!(run.approval_request_id.is_some());
+}
+
+#[tokio::test]
 async fn capability_host_marks_run_failed_when_obligations_are_unsupported() {
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
@@ -120,6 +300,67 @@ async fn capability_host_returns_business_error_when_run_state_fail_transition_f
             ..
         }
     ));
+    assert!(!dispatcher.has_request());
+}
+
+#[tokio::test]
+async fn capability_host_returns_resume_business_error_when_run_state_fail_transition_fails() {
+    let registry = registry_with_echo_capability();
+    let dispatcher = RecordingDispatcher::default();
+    let run_state = FailOnFailRunStateStore::new();
+    let approval_requests = InMemoryApprovalRequestStore::new();
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests);
+    let context = execution_context(CapabilitySet::default());
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "needs approval"});
+
+    block_host
+        .invoke_json(CapabilityInvocationRequest {
+            context: context.clone(),
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+    let approval_id = run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .approval_request_id
+        .unwrap();
+
+    let resume_authorizer = GrantAuthorizer::new();
+    let resume_host = CapabilityHost::new(&registry, &dispatcher, &resume_authorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases);
+    let err = resume_host
+        .resume_json(CapabilityResumeRequest {
+            context,
+            approval_request_id: approval_id,
+            capability_id: CapabilityId::new("echo.other").unwrap(),
+            estimate,
+            input,
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+
+    match err {
+        CapabilityInvocationError::ResumeContextMismatch { capability, kind } => {
+            assert_eq!(capability, CapabilityId::new("echo.other").unwrap());
+            assert_eq!(kind, ResumeContextMismatchKind::CapabilityId);
+        }
+        other => panic!("expected ResumeContextMismatch, got {other:?}"),
+    }
     assert!(!dispatcher.has_request());
 }
 
@@ -809,6 +1050,131 @@ async fn capability_host_rejects_resume_with_mutated_input_before_lease_claim_or
     assert!(!dispatcher.has_request());
     let active = leases.get(&scope, lease.grant.id).await.unwrap();
     assert_eq!(active.status, CapabilityLeaseStatus::Active);
+}
+
+#[derive(Clone, Copy)]
+enum ApprovalRequestMismatch {
+    Capability,
+    Estimate,
+    RequestedBy,
+}
+
+struct MismatchedApprovalRequestAuthorizer {
+    mismatch: ApprovalRequestMismatch,
+}
+
+#[async_trait]
+impl TrustAwareCapabilityDispatchAuthorizer for MismatchedApprovalRequestAuthorizer {
+    async fn authorize_dispatch_with_trust(
+        &self,
+        context: &ExecutionContext,
+        _descriptor: &CapabilityDescriptor,
+        estimate: &ResourceEstimate,
+        _trust_decision: &ironclaw_trust::TrustDecision,
+    ) -> Decision {
+        let mut capability = capability_id();
+        let mut estimated_resources = estimate.clone();
+        let mut requested_by = Principal::Extension(context.extension_id.clone());
+        match self.mismatch {
+            ApprovalRequestMismatch::Capability => {
+                capability = CapabilityId::new("echo.other").unwrap();
+            }
+            ApprovalRequestMismatch::Estimate => {
+                estimated_resources.output_bytes = Some(1);
+            }
+            ApprovalRequestMismatch::RequestedBy => {
+                requested_by = Principal::User(context.user_id.clone());
+            }
+        }
+
+        Decision::RequireApproval {
+            request: ApprovalRequest {
+                id: ApprovalRequestId::new(),
+                correlation_id: context.correlation_id,
+                requested_by,
+                action: Box::new(Action::Dispatch {
+                    capability,
+                    estimated_resources,
+                }),
+                invocation_fingerprint: None,
+                reason: "approval required".to_string(),
+                reusable_scope: None,
+            },
+        }
+    }
+}
+
+struct HangingSaveApprovalRequestStore {
+    inner: InMemoryApprovalRequestStore,
+    save_started: std::sync::atomic::AtomicBool,
+    save_started_notify: tokio::sync::Notify,
+    release_save: tokio::sync::Notify,
+}
+
+impl HangingSaveApprovalRequestStore {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryApprovalRequestStore::new(),
+            save_started: std::sync::atomic::AtomicBool::new(false),
+            save_started_notify: tokio::sync::Notify::new(),
+            release_save: tokio::sync::Notify::new(),
+        }
+    }
+
+    async fn wait_for_save_started(&self) {
+        while !self.save_started.load(Ordering::SeqCst) {
+            self.save_started_notify.notified().await;
+        }
+    }
+
+    fn release_save(&self) {
+        self.release_save.notify_waiters();
+    }
+}
+
+#[async_trait]
+impl ApprovalRequestStore for HangingSaveApprovalRequestStore {
+    async fn save_pending(
+        &self,
+        scope: ResourceScope,
+        request: ApprovalRequest,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.save_started.store(true, Ordering::SeqCst);
+        self.save_started_notify.notify_waiters();
+        self.release_save.notified().await;
+        self.inner.save_pending(scope, request).await
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<Option<ApprovalRecord>, RunStateError> {
+        self.inner.get(scope, request_id).await
+    }
+
+    async fn approve(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.inner.approve(scope, request_id).await
+    }
+
+    async fn deny(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.inner.deny(scope, request_id).await
+    }
+
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<ApprovalRecord>, RunStateError> {
+        self.inner.records_for_scope(scope).await
+    }
 }
 
 struct FailCompleteRunStateStore {
