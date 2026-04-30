@@ -427,6 +427,10 @@ async fn async_main() -> anyhow::Result<()> {
     .build_all()
     .await?;
 
+    // Capture the Reborn readiness snapshot before `components.config`
+    // moves out below — the snapshot is `Copy` so this is cheap.
+    let reborn_readiness = components.reborn_readiness();
+
     let config = components.config;
 
     // ── Tunnel setup ───────────────────────────────────────────────────
@@ -856,6 +860,10 @@ async fn async_main() -> anyhow::Result<()> {
         gw = gw.with_log_broadcaster(Arc::clone(&log_broadcaster));
         gw = gw.with_log_level_handle(Arc::clone(&log_level_handle));
         gw = gw.with_tool_registry(Arc::clone(&components.tools));
+        // Snapshot the Reborn readiness so `/api/reborn/readiness`
+        // serves the actual mode/profile/slots from the composition
+        // root (issue #3026 acceptance criterion #14).
+        gw = gw.with_reborn_readiness(reborn_readiness);
         if let Some(ref db) = components.db {
             let dispatcher = Arc::new(ironclaw::tools::dispatch::ToolDispatcher::new(
                 Arc::clone(&components.tools),

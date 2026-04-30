@@ -1,0 +1,38 @@
+[package]
+name = "ironclaw_reborn_composition"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# IronClaw Reborn production composition root.
+#
+# Module-owned factories that build the Reborn host/service graph from typed
+# configuration. Called by `src/app.rs::AppBuilder` only when an explicit
+# Reborn profile is selected. The default `RebornProfile::Disabled` makes
+# this crate a no-op so the legacy startup path remains unchanged until the
+# final cutover decision flips it.
+
+[dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+ironclaw_approvals = { path = "../ironclaw_approvals" }
+ironclaw_authorization = { path = "../ironclaw_authorization" }
+ironclaw_events = { path = "../ironclaw_events" }
+ironclaw_extensions = { path = "../ironclaw_extensions" }
+ironclaw_filesystem = { path = "../ironclaw_filesystem" }
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_network = { path = "../ironclaw_network" }
+ironclaw_processes = { path = "../ironclaw_processes" }
+ironclaw_resources = { path = "../ironclaw_resources" }
+ironclaw_run_state = { path = "../ironclaw_run_state" }
+ironclaw_secrets = { path = "../ironclaw_secrets" }
+ironclaw_trust = { path = "../ironclaw_trust" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt", "sync"] }

@@ -859,6 +859,30 @@ pub(crate) async fn health_handler() -> Json<HealthResponse> {
     })
 }
 
+/// `GET /api/reborn/readiness` — operator-visible readiness summary for
+/// the Reborn composition root.
+///
+/// Issue #3026 acceptance criterion #14 ("health/readiness diagnostics
+/// expose mode/profile/backend readiness without leaking credentials or
+/// raw host paths"). The body is a typed
+/// [`ironclaw_reborn_composition::RebornReadiness`] value: profile,
+/// state (`disabled` / `dev-only` / `production-ready`), and per-slot
+/// wired/unwired booleans.
+///
+/// Redaction-safe by construction — every field is a typed enum or
+/// boolean, and the unit tests in
+/// `crates/ironclaw_reborn_composition/src/lib.rs` lock the contract
+/// in. Safe to expose to an unauthenticated `/api/health`-class
+/// endpoint; the route is registered alongside `/api/health` in
+/// `platform/router.rs`.
+pub(crate) async fn reborn_readiness_handler(
+    axum::extract::State(state): axum::extract::State<
+        std::sync::Arc<crate::channels::web::GatewayState>,
+    >,
+) -> Json<ironclaw_reborn_composition::RebornReadiness> {
+    Json(state.reborn_readiness)
+}
+
 // --- Project files (authenticated) ---
 
 /// Redirect `/projects/{id}` to `/projects/{id}/` so relative paths in

@@ -578,6 +578,7 @@ fn gateway_state_has_multi_tenant_fields() {
         oauth_sweep_shutdown: None,
         frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         tool_dispatcher: None,
+        reborn_readiness: ironclaw_reborn_composition::RebornReadiness::disabled(),
     };
 
     assert_eq!(state.owner_id, "fallback");
@@ -671,6 +672,7 @@ async fn start_owner_scoped_sender_server() -> (
         oauth_sweep_shutdown: None,
         frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         tool_dispatcher: None,
+        reborn_readiness: ironclaw_reborn_composition::RebornReadiness::disabled(),
     });
 
     let auth = MultiAuthState::multi(tokens).into();
@@ -753,6 +755,68 @@ async fn full_server_health_is_public() {
         .unwrap();
 
     assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn full_server_reborn_readiness_is_public_and_redaction_safe() {
+    // Issue #3026 acceptance criterion #14 — readiness diagnostics
+    // expose mode/profile/backend without leaking credentials or raw
+    // host paths. Caller-level test (per `.claude/rules/testing.md`):
+    // drive the actual HTTP route, not just the handler.
+    let (addr, _state) = start_multi_user_server().await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{}/api/reborn/readiness", addr))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+
+    // Default test-server build has no Reborn handle attached, so the
+    // readiness sentinel reports `disabled` everywhere. The wire shape
+    // is what the dashboard parses — assert on it directly.
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(parsed["profile"], "disabled");
+    assert_eq!(parsed["state"], "disabled");
+    let slots = &parsed["slots"];
+    for slot in [
+        "resource_governor",
+        "authorization",
+        "capability_lease_store",
+        "run_state_store",
+        "approval_request_store",
+        "event_log",
+        "audit_log",
+        "filesystem_root",
+        "extension_registry",
+        "trust_policy",
+        "secret_store",
+        "network_enforcer",
+        "process_services",
+    ] {
+        assert_eq!(slots[slot], false, "slot {slot} must report unwired");
+    }
+
+    // Redaction-safe contract: no credential-shaped strings or host
+    // paths in the body. The schema only carries typed enums and
+    // booleans; if any of these appear, something added a leaky
+    // field.
+    for forbidden in [
+        "api_key=",
+        "password=",
+        "Bearer ",
+        "postgres://",
+        "/Users/",
+        "/home/",
+    ] {
+        assert!(
+            !body.contains(forbidden),
+            "readiness body leaked '{forbidden}': {body}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1153,6 +1217,7 @@ async fn start_multi_user_server_with_db() -> (
         oauth_sweep_shutdown: None,
         frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         tool_dispatcher: None,
+        reborn_readiness: ironclaw_reborn_composition::RebornReadiness::disabled(),
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();

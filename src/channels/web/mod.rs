@@ -196,6 +196,7 @@ impl GatewayChannel {
             oauth_sweep_shutdown: None,
             frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
             tool_dispatcher: None,
+            reborn_readiness: ironclaw_reborn_composition::RebornReadiness::disabled(),
         });
 
         Self {
@@ -262,6 +263,7 @@ impl GatewayChannel {
             // just because a `with_*` builder added a new subsystem.
             frontend_html_cache: Arc::clone(&self.state.frontend_html_cache),
             tool_dispatcher: self.state.tool_dispatcher.clone(),
+            reborn_readiness: self.state.reborn_readiness,
         };
         mutate(&mut new_state);
         new_state.auth_manager = build_gateway_auth_manager(&new_state);
@@ -325,6 +327,20 @@ impl GatewayChannel {
         dispatcher: Arc<crate::tools::dispatch::ToolDispatcher>,
     ) -> Self {
         self.rebuild_state(|s| s.tool_dispatcher = Some(dispatcher));
+        self
+    }
+
+    /// Inject the Reborn composition readiness snapshot.
+    ///
+    /// Called by `AppBuilder` after `build_reborn_production_services`
+    /// so `/api/reborn/readiness` reports the actual mode/profile/slots
+    /// rather than the default disabled placeholder. Snapshots are
+    /// cheap (`RebornReadiness: Copy`) so no `Arc` plumbing is needed.
+    pub fn with_reborn_readiness(
+        mut self,
+        readiness: ironclaw_reborn_composition::RebornReadiness,
+    ) -> Self {
+        self.rebuild_state(|s| s.reborn_readiness = readiness);
         self
     }
 

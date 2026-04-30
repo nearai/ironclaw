@@ -263,6 +263,59 @@ pub struct Settings {
     #[serde(default)]
     pub tool_permissions:
         std::collections::HashMap<String, crate::tools::permissions::PermissionState>,
+
+    /// Reborn composition settings.
+    ///
+    /// Bootstrap-only knobs for the typed Reborn composition root. Both
+    /// fields are `Option` so "unset" is distinguishable from "set to the
+    /// default", which matches the env > DB precedence in
+    /// [`crate::config::reborn::RebornConfig::resolve_with_settings`].
+    /// See `src/config/reborn.rs` and issue #3026.
+    #[serde(default)]
+    pub reborn: RebornSettings,
+}
+
+/// Reborn composition root configuration as it lives in the typed settings
+/// store.
+///
+/// Backend-selection settings (`reborn.events.backend`,
+/// `reborn.memory.backend`, etc.) land in this struct as the corresponding
+/// substrate crates merge. Today only the bootstrap toggle is here so the
+/// composition crate can be flipped on for a deployment without redeploying
+/// the binary with new env vars.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RebornSettings {
+    /// Explicit composition switch. `None` defers to env (`REBORN_ENABLED`).
+    /// `Some(true)` enables Reborn; `Some(false)` forces it off even if env
+    /// would have enabled it.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+
+    /// Profile name (`disabled` / `local-dev` / `production` /
+    /// `migration-dry-run`). `None` defers to env (`REBORN_PROFILE`).
+    /// Validated against [`crate::config::reborn::RebornProfile`] at
+    /// resolve time — an invalid value here is a startup error, not a
+    /// silent coerce.
+    #[serde(default)]
+    pub profile: Option<String>,
+
+    /// Legacy compatibility bridge mode (`off` / `read-only` /
+    /// `migrate`). `None` defers to env (`REBORN_LEGACY_BRIDGE_MODE`).
+    /// Validated against
+    /// [`ironclaw_reborn_composition::LegacyBridgeMode`] at resolve time.
+    /// Bridge mode does not carry secret material — see
+    /// `crates/ironclaw_reborn_composition/src/legacy.rs` for the
+    /// contract.
+    #[serde(default)]
+    pub legacy_bridge_mode: Option<String>,
+
+    /// Operator acknowledgement for running the permissive `migrate`
+    /// bridge under `production`. `None` defers to env
+    /// (`REBORN_PRODUCTION_MIGRATION_ACK`). Default behaviour is to
+    /// reject production + migrate without this flag — see the
+    /// composition root's bridge guard.
+    #[serde(default)]
+    pub production_migration_ack: Option<bool>,
 }
 
 /// Source for the secrets master key.
