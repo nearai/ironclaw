@@ -1316,8 +1316,13 @@ impl Agent {
         }
         self.scheduler.stop_all().await;
         if let Some(runtime) = reborn_transport_runtime {
+            // Order matters: shut adapters down (which aborts their pump
+            // tasks and calls Channel::shutdown) BEFORE clearing the egress
+            // registry. If we cleared the registry first and the runtime
+            // shutdown later errored, adapter background tasks would leak.
+            let shutdown_result = runtime.shutdown().await;
             self.channels.clear_transport_egress_registry().await;
-            runtime.shutdown().await?;
+            shutdown_result?;
         } else {
             self.channels.shutdown_all().await?;
         }
