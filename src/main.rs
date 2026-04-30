@@ -490,11 +490,11 @@ async fn async_main() -> anyhow::Result<()> {
             ext_mgr
                 .load_startup_active_channels(
                     &ext_user_id,
-                    config.channels.wasm_channels.clone(),
+                    config.channels.configured_wasm_channels.clone(),
                 )
                 .await
         } else {
-            config.channels.wasm_channels.clone()
+            config.channels.configured_wasm_channels.clone()
         };
     let persisted_active_wasm_channels: std::collections::HashSet<String> =
         if settings_persistence_available && let Some(ref ext_mgr) = components.extension_manager {
