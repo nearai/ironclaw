@@ -69,9 +69,9 @@ async fn libsql_memory_repository_maps_agent_scope_to_agent_id_column() {
     let db_path: String = row.get(2).unwrap();
     let content: String = row.get(3).unwrap();
 
-    assert_eq!(user_id, "tenant:tenant-a:user:alice");
+    assert_eq!(user_id, "tenant:tenant-a:user:alice:project:project-1");
     assert_eq!(agent_id.as_deref(), Some("agent-1"));
-    assert_eq!(db_path, "projects/project-1/notes/a.md");
+    assert_eq!(db_path, "notes/a.md");
     assert_eq!(content, "agent db backed note");
 }
 
@@ -199,6 +199,96 @@ async fn libsql_memory_repository_isolates_tenant_user_and_project_scopes() {
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
+async fn libsql_memory_repository_lists_none_project_documents_under_top_level_projects_directory()
+{
+    let (db, _dir) = libsql_db().await;
+    let repository = LibSqlMemoryDocumentRepository::new(db);
+    repository.run_migrations().await.unwrap();
+
+    let path =
+        MemoryDocumentPath::new("tenant-a", "alice", None, "projects/local-note.md").unwrap();
+    repository
+        .write_document(&path, b"top-level projects note")
+        .await
+        .unwrap();
+
+    let visible = repository
+        .list_documents(&MemoryDocumentScope::new("tenant-a", "alice", None).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].project_id(), None);
+    assert_eq!(visible[0].relative_path(), "projects/local-note.md");
+    assert_eq!(
+        repository
+            .read_document(&visible[0])
+            .await
+            .unwrap()
+            .unwrap(),
+        b"top-level projects note"
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_memory_repository_rejects_file_directory_prefix_conflicts() {
+    let (db, _dir) = libsql_db().await;
+    let repository = LibSqlMemoryDocumentRepository::new(db);
+    repository.run_migrations().await.unwrap();
+
+    let file = MemoryDocumentPath::new("tenant-a", "alice", None, "notes").unwrap();
+    let child = MemoryDocumentPath::new("tenant-a", "alice", None, "notes/a.md").unwrap();
+
+    repository
+        .write_document(&file, b"plain file")
+        .await
+        .unwrap();
+    let err = repository
+        .write_document(&child, b"child")
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("existing file ancestor"));
+
+    let (db, _dir) = libsql_db().await;
+    let repository = LibSqlMemoryDocumentRepository::new(db);
+    repository.run_migrations().await.unwrap();
+    repository.write_document(&child, b"child").await.unwrap();
+    let err = repository
+        .write_document(&file, b"plain file")
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("existing directory"));
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_memory_repository_upserts_duplicate_document_paths() {
+    let (db, _dir) = libsql_db().await;
+    let repository = LibSqlMemoryDocumentRepository::new(db.clone());
+    repository.run_migrations().await.unwrap();
+
+    let path = MemoryDocumentPath::new("tenant-a", "alice", None, "notes/a.md").unwrap();
+    repository.write_document(&path, b"first").await.unwrap();
+    repository.write_document(&path, b"second").await.unwrap();
+
+    let conn = db.connect().unwrap();
+    let mut rows = conn
+        .query("SELECT path, content FROM memory_documents", ())
+        .await
+        .unwrap();
+    let row = rows
+        .next()
+        .await
+        .unwrap()
+        .expect("single memory document row");
+    assert_eq!(row.get::<String>(0).unwrap(), "notes/a.md");
+    assert_eq!(row.get::<String>(1).unwrap(), "second");
+    assert!(rows.next().await.unwrap().is_none());
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
 async fn libsql_memory_document_filesystem_reads_and_writes_through_db_repository() {
     let (db, _dir) = libsql_db().await;
     let repository = std::sync::Arc::new(LibSqlMemoryDocumentRepository::new(db));
@@ -322,7 +412,7 @@ async fn libsql_memory_document_filesystem_versions_previous_content_and_replace
     );
     assert_eq!(
         version.get::<Option<String>>(2).unwrap().as_deref(),
-        Some("tenant:tenant-a:user:alice")
+        Some("tenant:tenant-a:user:alice:project:_none")
     );
 
     let mut chunk_rows = conn
@@ -671,9 +761,9 @@ async fn libsql_memory_repository_stores_text_in_existing_memory_documents_shape
     let db_path: String = row.get(2).unwrap();
     let content: String = row.get(3).unwrap();
 
-    assert_eq!(user_id, "tenant:tenant-a:user:alice");
+    assert_eq!(user_id, "tenant:tenant-a:user:alice:project:project-1");
     assert_eq!(agent_id, None);
-    assert_eq!(db_path, "projects/project-1/notes/a.md");
+    assert_eq!(db_path, "notes/a.md");
     assert_eq!(content, "db backed note");
 }
 

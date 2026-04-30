@@ -1,7 +1,7 @@
 # Reborn Storage Catalog and Placement Plan
 
-**Status:** Implementation planning note  
-**Date:** 2026-04-25  
+**Status:** Implementation planning note
+**Date:** 2026-04-25
 **Related contracts:** `contracts/filesystem.md`, `contracts/secrets.md`, `contracts/processes.md`, `contracts/events-projections.md`
 
 ---
@@ -152,11 +152,11 @@ The memory filesystem backend adapts the existing workspace model into Reborn in
 Canonical path shape:
 
 ```text
-/memory/tenants/{tenant_id}/users/{user_id}/projects/{project_id-or-_none}/SOUL.md
-/memory/tenants/{tenant_id}/users/{user_id}/projects/{project_id-or-_none}/MEMORY.md
-/memory/tenants/{tenant_id}/users/{user_id}/projects/{project_id-or-_none}/AGENTS.md
-/memory/tenants/{tenant_id}/users/{user_id}/projects/{project_id-or-_none}/USER.md
-/memory/tenants/{tenant_id}/users/{user_id}/projects/{project_id-or-_none}/notes/*.md
+/memory/tenants/{tenant_id}/users/{user_id}/agents/{agent_id-or-_none}/projects/{project_id-or-_none}/SOUL.md
+/memory/tenants/{tenant_id}/users/{user_id}/agents/{agent_id-or-_none}/projects/{project_id-or-_none}/MEMORY.md
+/memory/tenants/{tenant_id}/users/{user_id}/agents/{agent_id-or-_none}/projects/{project_id-or-_none}/AGENTS.md
+/memory/tenants/{tenant_id}/users/{user_id}/agents/{agent_id-or-_none}/projects/{project_id-or-_none}/USER.md
+/memory/tenants/{tenant_id}/users/{user_id}/agents/{agent_id-or-_none}/projects/{project_id-or-_none}/notes/*.md
 ```
 
 Implemented first seam in `ironclaw_memory`:
@@ -197,7 +197,7 @@ memory_chunks_fts          # libSQL FTS5 side table/triggers
 memory_document_versions
 ```
 
-The adapter stores scoped owner identity in the `user_id` column and maps project-scoped documents under `projects/{project_id}/...` so the backend remains compatible with the current document table model. The first memory-owned indexer now ports the existing word-overlap chunking, `sha256:{hex}` version hash format, `DocumentMetadata` shallow merge behavior, nearest ancestor `.config` inheritance, `skip_indexing`, `skip_versioning`, JSON Schema validation, embedding-provider seam, embedded chunk writes, libSQL FTS5 query escaping/search, PostgreSQL FTS query shape, and rank-fused full-text/vector search APIs. Multi-scope search, production provider credential/network wiring, and richer provider-specific result metadata remain later memory service work.
+The adapter stores tenant/user/project scope in the `user_id` owner key, stores agent scope in `agent_id`, and keeps `path` as the user-visible relative document path. That preserves top-level user paths such as `projects/foo.md` while keeping project scope isolated by owner identity instead of SQL `LIKE` prefixes. The first memory-owned indexer now ports the existing word-overlap chunking, `sha256:{hex}` version hash format, `DocumentMetadata` shallow merge behavior, nearest ancestor `.config` inheritance, `skip_indexing`, `skip_versioning`, JSON Schema validation, embedding-provider seam, embedded chunk writes, libSQL FTS5 query escaping/search, PostgreSQL FTS query shape, and rank-fused full-text/vector search APIs. Multi-scope search, production provider credential/network wiring, and richer provider-specific result metadata remain later memory service work.
 
 `MemoryBackendFilesystemAdapter` exposes any declared file-document backend as a `RootFilesystem`, but checks `MemoryBackendCapabilities` before calling the backend so unsupported behavior fails closed without plugin side effects. Plugins receive `MemoryContext` after the host has parsed tenant/user/project scope; they do not grant themselves broader authority.
 
