@@ -139,31 +139,47 @@ def run_pipeline_replay(
                 log.append(line)
 
             for c in calls:
-                if "abound_send_wire" in c["name"]:
-                    action = c["args"].get("action") or c["name"].split("(")[-1].rstrip(")")
-                    if action == "initiate":
-                        try:
-                            result = json.loads(c.get("output") or text)
-                            if result.get("phase") == "confirmation_required":
-                                initiate_seen = True
-                                initiate_call_args = c["args"]
-                                note("  initiate: confirmation_required", sub)
-                            else:
-                                note(f"  initiate rejected: {text[:200]}", sub)
-                        except Exception:
-                            note(f"  initiate parse failed: {text[:200]}", sub)
-                    if action == "send":
-                        send_response = resp
-                        send_call_args = c["args"]
-                        send_output = c.get("output")
-                        send_agent_text = text
-                    if action == "execute":
-                        execute_seen = True
-                        note(f"  execute called (skipped send!): {json.dumps(c['args'])}", sub)
+                if "abound_send_wire" not in c["name"]:
+                    continue
+                action = c["args"].get("action") or ""
+                if not action:
+                    _, _, suffix = c["name"].partition("(")
+                    if suffix.endswith(")"):
+                        action = suffix[:-1]
+                output = c.get("output") or ""
 
-            if text and not any("abound_send_wire" in c["name"] and
-                                (c["args"].get("action") or "") == "initiate"
-                                for c in calls):
+                # Detect initiate success from output JSON — works even when
+                # FunctionCall.arguments is empty (Responses API bug on success).
+                if not initiate_seen and output and not output.startswith("Error:"):
+                    try:
+                        result = json.loads(output)
+                        if result.get("phase") == "confirmation_required":
+                            initiate_seen = True
+                            initiate_call_args = c["args"]
+                            note("  initiate: confirmation_required", sub)
+                    except Exception:
+                        pass
+
+                # Log initiate failures clearly instead of falling back to markdown.
+                if action == "initiate":
+                    if output.startswith("Error:"):
+                        note(f"  initiate error: {output[:200]}", sub)
+                    elif not output:
+                        if not initiate_seen:
+                            initiate_seen = True
+                            initiate_call_args = c["args"]
+                        note("  initiate: called (output not captured)", sub)
+
+                if action == "send":
+                    send_response = resp
+                    send_call_args = c["args"]
+                    send_output = c.get("output")
+                    send_agent_text = text
+                if action == "execute":
+                    execute_seen = True
+                    note(f"  execute called (skipped send!): {json.dumps(c['args'])}", sub)
+
+            if text:
                 note(f"  agent text: {text[:300]}", sub)
 
             chk(f"turn {turn} completed", resp.status == "completed", sub, f"status={resp.status}")

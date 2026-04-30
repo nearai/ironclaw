@@ -57,7 +57,8 @@ MASSIVE_API_KEY = os.environ.get("MASSIVE_API_KEY", "")
 N = int(os.environ.get("N", "3"))
 RUNS_PER_THREAD = int(os.environ.get("RUNS_PER_THREAD", "4"))
 SCENARIO = os.environ.get("SCENARIO", "replay_guided").lower()
-TEMPERATURE = None if os.environ.get("NO_TEMPERATURE") else 1.5
+_temp_env = os.environ.get("TEMPERATURE")
+TEMPERATURE = None if os.environ.get("NO_TEMPERATURE") else (float(_temp_env) if _temp_env else 1.5)
 
 if SCENARIO not in ("choice_set", "specific", "replay", "replay_guided", "all"):
     print(f"FATAL: SCENARIO must be choice_set, specific, replay, replay_guided, or all — got {SCENARIO!r}")

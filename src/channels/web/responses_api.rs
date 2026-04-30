@@ -155,6 +155,7 @@ pub enum ResponseOutputItem {
         id: String,
         call_id: String,
         output: String,
+        status: &'static str,
     },
 }
 
@@ -477,9 +478,9 @@ impl ResponseAccumulator {
                 }
                 true // turn complete
             }
-            AppEvent::ToolStarted { name, .. } => {
+            AppEvent::ToolStarted { name, call_id, .. } => {
                 // Emit function_call placeholder — arguments filled on ToolCompleted.
-                let call_id = format!("call_{}", Uuid::new_v4().simple());
+                let call_id = call_id.unwrap_or_else(|| format!("call_{}", Uuid::new_v4().simple()));
                 self.output.push(ResponseOutputItem::FunctionCall {
                     id: make_item_id(),
                     call_id,
@@ -493,41 +494,42 @@ impl ResponseAccumulator {
                 success,
                 error,
                 parameters,
+                call_id,
                 ..
             } => {
                 // Try to attach arguments to the matching FunctionCall.
-                if let Some(args) = parameters {
-                    for item in self.output.iter_mut().rev() {
-                        if let ResponseOutputItem::FunctionCall {
-                            name: n,
-                            arguments: a,
-                            ..
-                        } = item
-                            && *n == name
-                            && a.is_empty()
-                        {
-                            *a = args;
-                            break;
-                        }
-                    }
+                if let Some(args) = parameters
+                    && let Some(idx) =
+                        self.find_function_call_index(&name, call_id.as_deref(), true)
+                    && let Some(ResponseOutputItem::FunctionCall { arguments, .. }) =
+                        self.output.get_mut(idx)
+                {
+                    *arguments = args;
                 }
                 // On failure, record a FunctionCallOutput with the error.
                 if !success && let Some(err) = error {
-                    let call_id = self.last_call_id_for(&name);
+                    let resolved = self.resolve_call_id(&name, call_id.as_deref());
                     self.output.push(ResponseOutputItem::FunctionCallOutput {
                         id: make_item_id(),
-                        call_id,
+                        call_id: resolved,
                         output: format!("Error: {err}"),
+                        status: "completed",
                     });
                 }
                 false
             }
-            AppEvent::ToolResult { name, preview, .. } => {
-                let call_id = self.last_call_id_for(&name);
+            AppEvent::ToolResult {
+                name,
+                preview,
+                call_id,
+                ..
+            } => {
+                let resolved = self.resolve_call_id(&name, call_id.as_deref());
                 self.output.push(ResponseOutputItem::FunctionCallOutput {
                     id: make_item_id(),
-                    call_id,
+                    call_id: resolved,
                     output: preview,
+                    status: "completed",
                 });
                 false
             }
@@ -578,6 +580,50 @@ impl ResponseAccumulator {
                 _ => None,
             })
             .unwrap_or_default()
+    }
+
+    /// Find the index of a `FunctionCall` matching by call_id (preferred) or name.
+    /// If `require_empty_args` is true, only matches FunctionCalls with empty
+    /// arguments (used when filling in arguments from ToolCompleted).
+    fn find_function_call_index(
+        &self,
+        name: &str,
+        call_id: Option<&str>,
+        require_empty_args: bool,
+    ) -> Option<usize> {
+        self.output
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(idx, item)| match item {
+                ResponseOutputItem::FunctionCall {
+                    call_id: cid,
+                    name: n,
+                    arguments,
+                    ..
+                } => {
+                    let id_match = match call_id {
+                        Some(target) => cid == target,
+                        None => n == name,
+                    };
+                    let args_ok = !require_empty_args || arguments.is_empty();
+                    if id_match && args_ok {
+                        Some(idx)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            })
+    }
+
+    /// Resolve a call_id for a `FunctionCallOutput` — prefer the explicit
+    /// call_id from the event, fall back to name-based reverse lookup.
+    fn resolve_call_id(&self, name: &str, call_id: Option<&str>) -> String {
+        if let Some(id) = call_id {
+            return id.to_string();
+        }
+        self.last_call_id_for(name)
     }
 
     fn finish(self) -> ResponseObject {
@@ -890,12 +936,14 @@ async fn streaming_worker(
                 );
                 acc.text_chunks.push(content.clone());
             }
-            AppEvent::ToolStarted { name, .. } => {
+            AppEvent::ToolStarted { name, call_id, .. } => {
                 let idx = acc.output.len();
-                let call_id = format!("call_{}", Uuid::new_v4().simple());
+                let resolved_call_id = call_id
+                    .clone()
+                    .unwrap_or_else(|| format!("call_{}", Uuid::new_v4().simple()));
                 let item = ResponseOutputItem::FunctionCall {
                     id: make_item_id(),
-                    call_id,
+                    call_id: resolved_call_id,
                     name: name.clone(),
                     arguments: String::new(),
                 };
@@ -915,21 +963,16 @@ async fn streaming_worker(
                 success,
                 error,
                 parameters,
+                call_id,
                 ..
             } => {
                 if let Some(args) = parameters {
-                    for item in acc.output.iter_mut().rev() {
-                        if let ResponseOutputItem::FunctionCall {
-                            name: n,
-                            arguments: a,
-                            ..
-                        } = item
-                            && *n == *name
-                            && a.is_empty()
-                        {
-                            *a = args.clone();
-                            break;
-                        }
+                    if let Some(idx) =
+                        acc.find_function_call_index(name, call_id.as_deref(), true)
+                        && let Some(ResponseOutputItem::FunctionCall { arguments, .. }) =
+                            acc.output.get_mut(idx)
+                    {
+                        *arguments = args.clone();
                     }
                 }
                 if let Some(idx) = current_tool_index.take()
@@ -946,12 +989,13 @@ async fn streaming_worker(
                 }
                 // On failure, emit a FunctionCallOutput with the error.
                 if !*success && let Some(err) = error {
-                    let call_id = acc.last_call_id_for(name);
+                    let resolved = acc.resolve_call_id(name, call_id.as_deref());
                     let idx = acc.output.len();
                     let item = ResponseOutputItem::FunctionCallOutput {
                         id: make_item_id(),
-                        call_id,
+                        call_id: resolved,
                         output: format!("Error: {err}"),
+                        status: "completed",
                     };
                     emit(
                         &tx,
@@ -972,13 +1016,19 @@ async fn streaming_worker(
                     acc.output.push(item);
                 }
             }
-            AppEvent::ToolResult { name, preview, .. } => {
-                let call_id = acc.last_call_id_for(name);
+            AppEvent::ToolResult {
+                name,
+                preview,
+                call_id,
+                ..
+            } => {
+                let resolved = acc.resolve_call_id(name, call_id.as_deref());
                 let idx = acc.output.len();
                 let item = ResponseOutputItem::FunctionCallOutput {
                     id: make_item_id(),
-                    call_id,
+                    call_id: resolved,
                     output: preview.clone(),
+                    status: "completed",
                 };
                 emit(
                     &tx,
@@ -1228,6 +1278,7 @@ pub async fn get_response_handler(
                             id: make_item_id(),
                             call_id,
                             output: result.to_string(),
+                            status: "completed",
                         });
                     }
                 }
@@ -1246,6 +1297,7 @@ pub async fn get_response_handler(
                     id: make_item_id(),
                     call_id,
                     output: msg.content.clone(),
+                    status: "completed",
                 });
             }
             _ => {} // Skip user/system messages (they are input, not output).
@@ -1417,11 +1469,13 @@ mod tests {
         assert!(!acc.process(AppEvent::ToolStarted {
             name: "memory_search".to_string(),
             detail: None,
+            call_id: None,
             thread_id: Some("t".to_string()),
         }));
         assert!(!acc.process(AppEvent::ToolResult {
             name: "memory_search".to_string(),
             preview: "found 3 results".to_string(),
+            call_id: None,
             thread_id: Some("t".to_string()),
         }));
         assert!(acc.process(AppEvent::Response {

@@ -331,6 +331,7 @@ async fn test_ws_multiple_events_in_sequence() {
     state.sse.broadcast(AppEvent::ToolStarted {
         name: "shell".to_string(),
         detail: None,
+        call_id: None,
         thread_id: None,
     });
     state.sse.broadcast(AppEvent::ToolCompleted {
@@ -338,6 +339,7 @@ async fn test_ws_multiple_events_in_sequence() {
         success: true,
         error: None,
         parameters: None,
+        call_id: None,
         thread_id: None,
     });
     state.sse.broadcast(AppEvent::Response {
