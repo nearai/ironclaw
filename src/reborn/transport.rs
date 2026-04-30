@@ -59,8 +59,44 @@ impl RebornTransportRuntime {
     }
 
     /// Start every registered adapter against the provided kernel ingress sink.
+    /// Fails if no adapter started; otherwise returns Ok and logs per-adapter
+    /// failures so a single sick adapter cannot quietly take down the rest.
     pub async fn start(&self, sink: Arc<dyn TransportIngressSink>) -> Result<(), TransportError> {
-        self.registry.start_all(sink).await
+        let reports = self.registry.start_all(sink).await?;
+        let mut started = 0usize;
+        let mut first_error: Option<TransportError> = None;
+        for report in reports {
+            match report.result {
+                Ok(()) => started += 1,
+                Err(error) => {
+                    tracing::warn!(
+                        adapter = %report.adapter_id,
+                        kind = %error.kind(),
+                        reason = error.safe_reason(),
+                        "transport adapter failed to start"
+                    );
+                    if first_error.is_none() {
+                        first_error = Some(TransportError::new(
+                            error.kind(),
+                            format!(
+                                "transport adapter '{}' failed to start: {}",
+                                report.adapter_id,
+                                error.safe_reason()
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        if started == 0 {
+            return Err(first_error.unwrap_or_else(|| {
+                TransportError::new(
+                    ironclaw_transport::TransportErrorKind::StartupFailed,
+                    "no transport adapters started successfully",
+                )
+            }));
+        }
+        Ok(())
     }
 
     /// Deliver egress through the adapter named by its typed route.
@@ -80,11 +116,21 @@ impl RebornTransportRuntime {
         self.registry.deliver(&adapter_id, egress).await
     }
 
-    /// Health-check all registered adapters.
+    /// Health-check all registered adapters. Returns the success-only map for
+    /// back-compat. To inspect per-adapter failures use
+    /// [`Self::health_check_reports`].
     pub async fn health_check_all(
         &self,
     ) -> Result<std::collections::BTreeMap<TransportAdapterId, TransportHealth>, TransportError>
     {
+        let reports = self.registry.health_check_all().await?;
+        Ok(ironclaw_transport::TransportAdapterHealthReport::into_map_lossy(reports))
+    }
+
+    /// Per-adapter health reports including failures.
+    pub async fn health_check_reports(
+        &self,
+    ) -> Result<Vec<ironclaw_transport::TransportAdapterHealthReport>, TransportError> {
         self.registry.health_check_all().await
     }
 
@@ -226,13 +272,22 @@ pub fn transport_ingress_to_incoming_message(
         );
     }
 
-    let message_id = Uuid::parse_str(&transport_message_id)
-        .unwrap_or_else(|_| Uuid::new_v5(&Uuid::NAMESPACE_OID, transport_message_id.as_bytes()));
-    let sender_id = metadata
-        .get("sender_id")
-        .and_then(Value::as_str)
-        .map(ToString::to_string)
-        .or_else(|| ingress.route.recipient.clone())
+    let message_id = Uuid::parse_str(&transport_message_id).unwrap_or_else(|_| {
+        let mut seed = Vec::with_capacity(
+            ingress.route.adapter_id.as_str().len() + 1 + transport_message_id.len(),
+        );
+        seed.extend_from_slice(ingress.route.adapter_id.as_str().as_bytes());
+        seed.push(0u8);
+        seed.extend_from_slice(transport_message_id.as_bytes());
+        Uuid::new_v5(&Uuid::NAMESPACE_OID, &seed)
+    });
+    // Sender identity is route-derived only. Adapters are untrusted; never
+    // honor a sender_id supplied via ingress metadata, which would let a
+    // remote peer impersonate other users.
+    let sender_id = ingress
+        .route
+        .recipient
+        .clone()
         .unwrap_or_else(|| ingress.route.scope.user_id.as_str().to_string());
 
     let mut message = IncomingMessage {
@@ -289,16 +344,12 @@ fn incoming_attachment_from_transport(attachment: &TransportAttachment) -> Incom
         size_bytes: attachment.size_bytes,
         source_url: attachment.source_url.clone(),
         storage_key: attachment.storage_ref.clone(),
-        local_path: attachment
-            .metadata
-            .get("local_path")
-            .and_then(Value::as_str)
-            .map(ToString::to_string),
-        extracted_text: attachment
-            .metadata
-            .get("extracted_text")
-            .and_then(Value::as_str)
-            .map(ToString::to_string),
+        // Reject adapter-supplied filesystem hints. local_path/extracted_text
+        // are host-trust-only fields populated by attachment processors after
+        // the host validates content; honoring them from untrusted transport
+        // metadata would let an adapter point IronClaw at arbitrary host paths.
+        local_path: None,
+        extracted_text: None,
         data: attachment.data.clone(),
         duration_secs: attachment
             .metadata
@@ -315,6 +366,11 @@ fn ingress_metadata_value(ingress: &TransportMetadata, route: &TransportMetadata
             .iter()
             .map(|(key, value)| (key.clone(), value.clone())),
     );
+    // Refuse to forward the internal legacy-status sentinel from external
+    // ingress metadata into IncomingMessage. The host owns this key; an
+    // adapter populating it would smuggle a synthetic StatusUpdate into the
+    // agent's view of inbound chat metadata.
+    merged.remove(crate::channels::transport_adapter::LEGACY_STATUS_METADATA_KEY);
     Value::Object(merged.into_iter().collect::<Map<_, _>>())
 }
 
@@ -575,13 +631,23 @@ mod tests {
             .expect("ingress submitted");
 
         let message = rx.recv().await.expect("message injected");
+        let mut expected_seed = Vec::new();
+        expected_seed.extend_from_slice(b"gateway");
+        expected_seed.push(0u8);
+        expected_seed.extend_from_slice(b"external-message-1");
         assert_eq!(
             message.id,
-            Uuid::new_v5(&Uuid::NAMESPACE_OID, b"external-message-1")
+            Uuid::new_v5(&Uuid::NAMESPACE_OID, &expected_seed)
         );
         assert_eq!(message.channel, "gateway");
         assert_eq!(message.user_id, "alice");
-        assert_eq!(message.sender_id, "alice-transport");
+        // sender_id must come from the route (recipient or scope.user_id),
+        // not from attacker-controlled ingress metadata.
+        assert_eq!(message.sender_id, "chat-1");
+        assert_ne!(
+            message.sender_id, "alice-transport",
+            "sender_id metadata from untrusted adapter must not be honored"
+        );
         assert_eq!(message.user_name.as_deref(), Some("Alice"));
         assert_eq!(message.content, "hello legacy agent");
         assert_eq!(message.timezone.as_deref(), Some("America/Los_Angeles"));
@@ -592,6 +658,54 @@ mod tests {
         );
         assert_eq!(message.metadata.get("channel"), Some(&json!("evil")));
         assert_eq!(message.metadata.get("user_id"), Some(&json!("mallory")));
+    }
+
+    #[tokio::test]
+    async fn ingress_metadata_cannot_spoof_sender_or_filesystem_paths() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let sink = crate::reborn::transport::LegacyAgentTransportSink::new(tx);
+        let ingress = TransportIngress {
+            message_id: TransportMessageId::new("hostile-1").expect("message id"),
+            route: route("gateway", "alice"),
+            message: ironclaw_transport::TransportMessage {
+                text: "payload".to_string(),
+                attachments: vec![ironclaw_transport::TransportAttachment {
+                    id: "att-evil".to_string(),
+                    kind: ironclaw_transport::AttachmentKind::Image,
+                    mime_type: Some("image/png".to_string()),
+                    filename: Some("diagram.png".to_string()),
+                    size_bytes: Some(1),
+                    data: b"x".to_vec(),
+                    storage_ref: None,
+                    source_url: None,
+                    metadata: [
+                        ("local_path".to_string(), json!("/etc/passwd")),
+                        ("extracted_text".to_string(), json!("injected text")),
+                    ]
+                    .into_iter()
+                    .collect(),
+                }],
+            },
+            sender_display_name: None,
+            timezone: None,
+            received_at: Utc::now(),
+            metadata: [
+                ("sender_id".to_string(), json!("impersonated")),
+                ("transport_user_id".to_string(), json!("impersonated")),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        sink.submit_ingress(ingress)
+            .await
+            .expect("ingress submitted");
+        let message = rx.recv().await.expect("message injected");
+        assert_ne!(message.sender_id, "impersonated");
+        assert_eq!(message.sender_id, "chat-1");
+        assert_eq!(message.user_id, "alice");
+        assert!(message.attachments[0].local_path.is_none());
+        assert!(message.attachments[0].extracted_text.is_none());
     }
 
     #[test]
@@ -633,7 +747,9 @@ mod tests {
         assert_eq!(attachment.filename.as_deref(), Some("diagram.png"));
         assert_eq!(attachment.size_bytes, Some(123));
         assert_eq!(attachment.storage_key.as_deref(), Some("attachments/att-1"));
-        assert_eq!(attachment.local_path.as_deref(), Some("tmp/diagram.png"));
+        // local_path / extracted_text from adapter metadata are no longer
+        // trusted; the host populates them after attachment processing.
+        assert!(attachment.local_path.is_none());
         assert_eq!(attachment.data, b"png bytes".to_vec());
     }
 
@@ -659,9 +775,35 @@ mod tests {
             .expect("second converted");
 
         assert_eq!(first.id, second.id);
-        assert_eq!(
-            first.id,
-            Uuid::new_v5(&Uuid::NAMESPACE_OID, b"external-message-1")
+        let mut expected_seed = Vec::new();
+        expected_seed.extend_from_slice(b"gateway");
+        expected_seed.push(0u8);
+        expected_seed.extend_from_slice(b"external-message-1");
+        assert_eq!(first.id, Uuid::new_v5(&Uuid::NAMESPACE_OID, &expected_seed));
+    }
+
+    #[test]
+    fn same_external_id_on_different_adapters_yields_distinct_ids() {
+        let mk = |adapter: &str| TransportIngress {
+            message_id: TransportMessageId::new("same-id").expect("message id"),
+            route: route(adapter, "alice"),
+            message: ironclaw_transport::TransportMessage {
+                text: "x".to_string(),
+                attachments: Vec::new(),
+            },
+            sender_display_name: None,
+            timezone: None,
+            received_at: Utc::now(),
+            metadata: Default::default(),
+        };
+
+        let a = crate::reborn::transport::transport_ingress_to_incoming_message(mk("gateway"))
+            .expect("a");
+        let b = crate::reborn::transport::transport_ingress_to_incoming_message(mk("telegram"))
+            .expect("b");
+        assert_ne!(
+            a.id, b.id,
+            "same external id on different adapters must not collide"
         );
     }
 }
