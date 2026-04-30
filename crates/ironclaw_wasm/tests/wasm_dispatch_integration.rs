@@ -174,6 +174,154 @@ async fn wasm_lane_execution_failure_reconciles_preserved_usage_from_runtime() {
     assert_eq!(recorded[2].error_kind.as_deref(), Some("guest"));
 }
 
+#[tokio::test]
+async fn wasm_lane_missing_module_file_returns_sanitized_filesystem_error() {
+    let fs = mounted_empty_extension_root();
+    let registry = Arc::new(registry_with_package(WASM_MANIFEST));
+    let governor = Arc::new(governor_with_default_limit(sample_account()));
+    let events = InMemoryEventSink::new();
+    let adapter = Arc::new(WasmRuntimeAdapter::new());
+    let dispatcher = RuntimeDispatcher::from_arcs(registry, Arc::new(fs), Arc::clone(&governor))
+        .with_runtime_adapter_arc(RuntimeKind::Wasm, Arc::clone(&adapter))
+        .with_event_sink_arc(Arc::new(events.clone()));
+
+    let err = dispatcher
+        .dispatch_json(dispatch_request(
+            "wasm-smoke.count",
+            json!({"call": "missing"}),
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        DispatchError::Wasm {
+            kind: RuntimeDispatchErrorKind::FilesystemDenied
+        }
+    ));
+    assert_eq!(adapter.prepare_count(), 0);
+    assert_eq!(
+        governor.reserved_for(&sample_account()),
+        ResourceTally::default()
+    );
+    assert_eq!(
+        governor.usage_for(&sample_account()),
+        ResourceTally::default()
+    );
+    assert_event_kinds(
+        &events,
+        &[
+            RuntimeEventKind::DispatchRequested,
+            RuntimeEventKind::RuntimeSelected,
+            RuntimeEventKind::DispatchFailed,
+        ],
+    );
+    let recorded = events.events();
+    assert_eq!(recorded[2].error_kind.as_deref(), Some("filesystem_denied"));
+}
+
+#[tokio::test]
+async fn wasm_lane_malformed_module_returns_sanitized_manifest_error() {
+    let fs = filesystem_with_wasm_component("wasm-smoke", "wasm/counter.wasm", b"not wasm").await;
+    let registry = Arc::new(registry_with_package(WASM_MANIFEST));
+    let governor = Arc::new(governor_with_default_limit(sample_account()));
+    let events = InMemoryEventSink::new();
+    let dispatcher = RuntimeDispatcher::from_arcs(registry, Arc::new(fs), Arc::clone(&governor))
+        .with_runtime_adapter_arc(RuntimeKind::Wasm, Arc::new(WasmRuntimeAdapter::new()))
+        .with_event_sink_arc(Arc::new(events.clone()));
+
+    let err = dispatcher
+        .dispatch_json(dispatch_request(
+            "wasm-smoke.count",
+            json!({"call": "malformed"}),
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        DispatchError::Wasm {
+            kind: RuntimeDispatchErrorKind::Manifest
+        }
+    ));
+    assert_eq!(
+        governor.reserved_for(&sample_account()),
+        ResourceTally::default()
+    );
+    assert_eq!(
+        governor.usage_for(&sample_account()),
+        ResourceTally::default()
+    );
+    assert_event_kinds(
+        &events,
+        &[
+            RuntimeEventKind::DispatchRequested,
+            RuntimeEventKind::RuntimeSelected,
+            RuntimeEventKind::DispatchFailed,
+        ],
+    );
+    let recorded = events.events();
+    assert_eq!(recorded[2].error_kind.as_deref(), Some("manifest"));
+}
+
+#[tokio::test]
+async fn wasm_lane_invalid_output_json_returns_sanitized_output_error() {
+    let invalid_output_wat = COUNTER_TOOL_WAT
+        .replace(
+            r#"(data (i32.const 3072) "1")"#,
+            r#"(data (i32.const 3072) "not-json")"#,
+        )
+        .replace(
+            "i32.const 56\n    i32.const 1\n    i32.store",
+            "i32.const 56\n    i32.const 8\n    i32.store",
+        );
+    assert_ne!(
+        invalid_output_wat, COUNTER_TOOL_WAT,
+        "invalid output WAT mutation should match the fixture"
+    );
+    let component = tool_component(&invalid_output_wat);
+    let fs = filesystem_with_wasm_component("wasm-smoke", "wasm/counter.wasm", &component).await;
+    let registry = Arc::new(registry_with_package(WASM_MANIFEST));
+    let governor = Arc::new(governor_with_default_limit(sample_account()));
+    let events = InMemoryEventSink::new();
+    let dispatcher = RuntimeDispatcher::from_arcs(registry, Arc::new(fs), Arc::clone(&governor))
+        .with_runtime_adapter_arc(RuntimeKind::Wasm, Arc::new(WasmRuntimeAdapter::new()))
+        .with_event_sink_arc(Arc::new(events.clone()));
+
+    let err = dispatcher
+        .dispatch_json(dispatch_request(
+            "wasm-smoke.count",
+            json!({"call": "invalid-output"}),
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        DispatchError::Wasm {
+            kind: RuntimeDispatchErrorKind::OutputDecode
+        }
+    ));
+    assert_eq!(
+        governor.reserved_for(&sample_account()),
+        ResourceTally::default()
+    );
+    assert_eq!(
+        governor.usage_for(&sample_account()),
+        ResourceTally::default()
+    );
+    assert_event_kinds(
+        &events,
+        &[
+            RuntimeEventKind::DispatchRequested,
+            RuntimeEventKind::RuntimeSelected,
+            RuntimeEventKind::DispatchFailed,
+        ],
+    );
+    let recorded = events.events();
+    assert_eq!(recorded[2].error_kind.as_deref(), Some("output_decode"));
+}
+
 struct WasmRuntimeAdapter {
     runtime: WitToolRuntime,
     host: WitToolHost,
