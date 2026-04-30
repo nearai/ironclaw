@@ -5,7 +5,7 @@
 //! backend cataloging, and backend routing.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{
@@ -188,7 +188,17 @@ pub struct DocumentMetadata {
 
 impl DocumentMetadata {
     pub fn from_value(value: &serde_json::Value) -> Self {
-        serde_json::from_value(value.clone()).unwrap_or_default()
+        match serde_json::from_value(value.clone()) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    raw = %value,
+                    "failed to deserialize DocumentMetadata; falling back to defaults"
+                );
+                Self::default()
+            }
+        }
     }
 
     pub fn to_value(&self) -> serde_json::Value {
@@ -1115,6 +1125,26 @@ where
             request = request.with_query_embedding(embedding);
         }
 
+        // Fail-fast on caller-supplied embeddings whose dimension disagrees with the
+        // configured provider, instead of silently producing no/wrong results downstream
+        // (libsql cosine_similarity skips mismatched chunks; postgres pgvector errors
+        // opaquely).
+        if let (Some(provider), Some(embedding)) =
+            (&self.embedding_provider, request.query_embedding())
+        {
+            let expected = provider.dimension();
+            let actual = embedding.len();
+            if expected != actual {
+                return Err(memory_backend_unsupported(
+                    context.scope(),
+                    FilesystemOperation::ReadFile,
+                    format!(
+                        "query embedding dimension {actual} does not match configured provider dimension {expected}"
+                    ),
+                ));
+            }
+        }
+
         self.repository
             .search_documents(context.scope(), &request)
             .await
@@ -1269,7 +1299,7 @@ async fn build_chunk_writes(
     let expected_dimension = provider.dimension();
     chunk_texts
         .into_iter()
-        .zip(embeddings.into_iter())
+        .zip(embeddings)
         .map(|(content, embedding)| {
             validate_embedding_dimension(expected_dimension, embedding.len()).map_err(|error| {
                 embedding_filesystem_error(
@@ -1402,15 +1432,15 @@ fn fuse_memory_search_results(
             vector_rank: result.vector_rank,
         })
         .collect::<Vec<_>>();
+    if request.min_score() > 0.0 {
+        fused.retain(|result| result.score >= request.min_score());
+    }
     if let Some(max_score) = fused.iter().map(|result| result.score).reduce(f32::max)
         && max_score > 0.0
     {
         for result in &mut fused {
             result.score /= max_score;
         }
-    }
-    if request.min_score() > 0.0 {
-        fused.retain(|result| result.score >= request.min_score());
     }
     fused.sort_by(|left, right| {
         right
@@ -1866,12 +1896,84 @@ impl MemoryDocumentRepository for LibSqlMemoryDocumentRepository {
         let owner_key = scoped_memory_owner_key(path.scope());
         let agent_id = scoped_memory_agent_id(path.scope());
         let db_path = db_path_for_memory_document(path);
-        let existing = {
-            let mut rows = conn
-                .query(
-                    "SELECT id, content FROM memory_documents WHERE user_id = ?1 AND ((?2 IS NULL AND agent_id IS NULL) OR agent_id = ?2) AND path = ?3",
-                    libsql::params![owner_key.as_str(), agent_id, db_path.as_str()],
+
+        conn.execute("BEGIN IMMEDIATE", libsql::params![])
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::WriteFile,
+                    error.to_string(),
                 )
+            })?;
+
+        let result: Result<(), FilesystemError> = async {
+            let existing = {
+                let mut rows = conn
+                    .query(
+                        "SELECT id, content FROM memory_documents WHERE user_id = ?1 AND ((?2 IS NULL AND agent_id IS NULL) OR agent_id = ?2) AND path = ?3",
+                        libsql::params![owner_key.as_str(), agent_id, db_path.as_str()],
+                    )
+                    .await
+                    .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string()))?;
+                rows.next()
+                    .await
+                    .map_err(|error| {
+                        memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string())
+                    })?
+                    .map(|row| {
+                        let id: String = row.get(0)?;
+                        let previous_content: String = row.get(1)?;
+                        Ok::<_, libsql::Error>((id, previous_content))
+                    })
+                    .transpose()
+                    .map_err(|error| {
+                        memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string())
+                    })?
+            };
+
+            if let Some((document_id, previous_content)) = existing {
+                if previous_content != content && !previous_content.is_empty() {
+                    libsql_save_document_version(
+                        &conn,
+                        &virtual_path,
+                        &document_id,
+                        &previous_content,
+                        Some(owner_key.as_str()),
+                    )
+                    .await?;
+                }
+                conn.execute(
+                    "UPDATE memory_documents SET content = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1",
+                    libsql::params![document_id, content],
+                )
+                .await
+                .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string()))?;
+            } else {
+                conn.execute(
+                    r#"
+                INSERT INTO memory_documents (id, user_id, agent_id, path, content, metadata)
+                VALUES (?1, ?2, ?3, ?4, ?5, '{}')
+                "#,
+                    libsql::params![
+                        uuid::Uuid::new_v4().to_string(),
+                        owner_key.as_str(),
+                        agent_id,
+                        db_path.as_str(),
+                        content,
+                    ],
+                )
+                .await
+                .map_err(|error| {
+                    memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string())
+                })?;
+            }
+            Ok(())
+        }
+        .await;
+
+        if result.is_ok() {
+            conn.execute("COMMIT", libsql::params![])
                 .await
                 .map_err(|error| {
                     memory_error(
@@ -1880,71 +1982,10 @@ impl MemoryDocumentRepository for LibSqlMemoryDocumentRepository {
                         error.to_string(),
                     )
                 })?;
-            rows.next()
-                .await
-                .map_err(|error| {
-                    memory_error(
-                        virtual_path.clone(),
-                        FilesystemOperation::WriteFile,
-                        error.to_string(),
-                    )
-                })?
-                .map(|row| {
-                    let id: String = row.get(0)?;
-                    let previous_content: String = row.get(1)?;
-                    Ok::<_, libsql::Error>((id, previous_content))
-                })
-                .transpose()
-                .map_err(|error| {
-                    memory_error(
-                        virtual_path.clone(),
-                        FilesystemOperation::WriteFile,
-                        error.to_string(),
-                    )
-                })?
-        };
-
-        if let Some((document_id, previous_content)) = existing {
-            if previous_content != content && !previous_content.is_empty() {
-                let _ = libsql_save_document_version(
-                    &conn,
-                    &virtual_path,
-                    &document_id,
-                    &previous_content,
-                    Some(owner_key.as_str()),
-                )
-                .await;
-            }
-            conn.execute(
-                "UPDATE memory_documents SET content = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1",
-                libsql::params![document_id, content],
-            )
-            .await
-            .map_err(|error| memory_error(virtual_path, FilesystemOperation::WriteFile, error.to_string()))?;
         } else {
-            conn.execute(
-                r#"
-                INSERT INTO memory_documents (id, user_id, agent_id, path, content, metadata)
-                VALUES (?1, ?2, ?3, ?4, ?5, '{}')
-                "#,
-                libsql::params![
-                    uuid::Uuid::new_v4().to_string(),
-                    owner_key,
-                    agent_id,
-                    db_path,
-                    content
-                ],
-            )
-            .await
-            .map_err(|error| {
-                memory_error(
-                    virtual_path,
-                    FilesystemOperation::WriteFile,
-                    error.to_string(),
-                )
-            })?;
+            let _ = conn.execute("ROLLBACK", libsql::params![]).await;
         }
-        Ok(())
+        result
     }
 
     async fn write_document_with_options(
@@ -1967,82 +2008,99 @@ impl MemoryDocumentRepository for LibSqlMemoryDocumentRepository {
         let owner_key = scoped_memory_owner_key(path.scope());
         let agent_id = scoped_memory_agent_id(path.scope());
         let db_path = db_path_for_memory_document(path);
-        let existing = {
-            let mut rows = conn
-                .query(
-                    "SELECT id, content FROM memory_documents WHERE user_id = ?1 AND ((?2 IS NULL AND agent_id IS NULL) OR agent_id = ?2) AND path = ?3",
-                    libsql::params![owner_key.as_str(), agent_id, db_path.as_str()],
-                )
-                .await
-                .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string()))?;
-            rows.next()
-                .await
-                .map_err(|error| {
-                    memory_error(
-                        virtual_path.clone(),
-                        FilesystemOperation::WriteFile,
-                        error.to_string(),
-                    )
-                })?
-                .map(|row| {
-                    let id: String = row.get(0)?;
-                    let previous_content: String = row.get(1)?;
-                    Ok::<_, libsql::Error>((id, previous_content))
-                })
-                .transpose()
-                .map_err(|error| {
-                    memory_error(
-                        virtual_path.clone(),
-                        FilesystemOperation::WriteFile,
-                        error.to_string(),
-                    )
-                })?
-        };
 
-        if let Some((document_id, previous_content)) = existing {
-            if options.metadata.skip_versioning != Some(true)
-                && previous_content != content
-                && !previous_content.is_empty()
-            {
-                let _ = libsql_save_document_version(
-                    &conn,
-                    &virtual_path,
-                    &document_id,
-                    &previous_content,
-                    options.changed_by.as_deref(),
-                )
-                .await;
-            }
-            conn.execute(
-                "UPDATE memory_documents SET content = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1",
-                libsql::params![document_id, content],
-            )
-            .await
-            .map_err(|error| memory_error(virtual_path, FilesystemOperation::WriteFile, error.to_string()))?;
-        } else {
-            conn.execute(
-                r#"
-                INSERT INTO memory_documents (id, user_id, agent_id, path, content, metadata)
-                VALUES (?1, ?2, ?3, ?4, ?5, '{}')
-                "#,
-                libsql::params![
-                    uuid::Uuid::new_v4().to_string(),
-                    owner_key,
-                    agent_id,
-                    db_path,
-                    content
-                ],
-            )
+        conn.execute("BEGIN IMMEDIATE", libsql::params![])
             .await
             .map_err(|error| {
                 memory_error(
-                    virtual_path,
+                    virtual_path.clone(),
                     FilesystemOperation::WriteFile,
                     error.to_string(),
                 )
             })?;
+
+        let result: Result<(), FilesystemError> = async {
+            let existing = {
+                let mut rows = conn
+                    .query(
+                        "SELECT id, content FROM memory_documents WHERE user_id = ?1 AND ((?2 IS NULL AND agent_id IS NULL) OR agent_id = ?2) AND path = ?3",
+                        libsql::params![owner_key.as_str(), agent_id, db_path.as_str()],
+                    )
+                    .await
+                    .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string()))?;
+                rows.next()
+                    .await
+                    .map_err(|error| {
+                        memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string())
+                    })?
+                    .map(|row| {
+                        let id: String = row.get(0)?;
+                        let previous_content: String = row.get(1)?;
+                        Ok::<_, libsql::Error>((id, previous_content))
+                    })
+                    .transpose()
+                    .map_err(|error| {
+                        memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string())
+                    })?
+            };
+
+            if let Some((document_id, previous_content)) = existing {
+                if options.metadata.skip_versioning != Some(true)
+                    && previous_content != content
+                    && !previous_content.is_empty()
+                {
+                    libsql_save_document_version(
+                        &conn,
+                        &virtual_path,
+                        &document_id,
+                        &previous_content,
+                        options.changed_by.as_deref(),
+                    )
+                    .await?;
+                }
+                conn.execute(
+                    "UPDATE memory_documents SET content = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1",
+                    libsql::params![document_id, content],
+                )
+                .await
+                .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string()))?;
+            } else {
+                conn.execute(
+                    r#"
+                INSERT INTO memory_documents (id, user_id, agent_id, path, content, metadata)
+                VALUES (?1, ?2, ?3, ?4, ?5, '{}')
+                "#,
+                    libsql::params![
+                        uuid::Uuid::new_v4().to_string(),
+                        owner_key.as_str(),
+                        agent_id,
+                        db_path.as_str(),
+                        content,
+                    ],
+                )
+                .await
+                .map_err(|error| {
+                    memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string())
+                })?;
+            }
+            Ok(())
         }
-        Ok(())
+        .await;
+
+        if result.is_ok() {
+            conn.execute("COMMIT", libsql::params![])
+                .await
+                .map_err(|error| {
+                    memory_error(
+                        virtual_path.clone(),
+                        FilesystemOperation::WriteFile,
+                        error.to_string(),
+                    )
+                })?;
+        } else {
+            let _ = conn.execute("ROLLBACK", libsql::params![]).await;
+        }
+        result
     }
 
     async fn read_document_metadata(
@@ -2600,6 +2658,7 @@ async fn libsql_document_id_and_content(
 }
 
 #[cfg(feature = "libsql")]
+// Caller must hold an active transaction on `conn` (e.g. via `BEGIN IMMEDIATE`).
 async fn libsql_save_document_version(
     conn: &libsql::Connection,
     virtual_path: &VirtualPath,
@@ -2607,56 +2666,16 @@ async fn libsql_save_document_version(
     content: &str,
     changed_by: Option<&str>,
 ) -> Result<i32, FilesystemError> {
-    conn.execute("BEGIN IMMEDIATE", libsql::params![])
-        .await
-        .map_err(|error| {
-            memory_error(
-                virtual_path.clone(),
-                FilesystemOperation::WriteFile,
-                error.to_string(),
+    let next_version = {
+        let mut rows = conn
+            .query(
+                "SELECT COALESCE(MAX(version), 0) + 1 FROM memory_document_versions WHERE document_id = ?1",
+                libsql::params![document_id],
             )
-        })?;
-    let result = async {
-        let next_version = {
-            let mut rows = conn
-                .query(
-                    "SELECT COALESCE(MAX(version), 0) + 1 FROM memory_document_versions WHERE document_id = ?1",
-                    libsql::params![document_id],
-                )
-                .await
-                .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string()))?;
-            let row = rows
-                .next()
-                .await
-                .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string()))?
-                .ok_or_else(|| memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, "missing version row"))?;
-            row.get::<i64>(0)
-                .map(|version| version as i32)
-                .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string()))?
-        };
-        conn.execute(
-            r#"
-            INSERT INTO memory_document_versions
-                (id, document_id, version, content, content_hash, changed_by)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-            "#,
-            libsql::params![
-                uuid::Uuid::new_v4().to_string(),
-                document_id,
-                next_version as i64,
-                content,
-                content_sha256(content),
-                changed_by,
-            ],
-        )
-        .await
-        .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string()))?;
-        Ok::<i32, FilesystemError>(next_version)
-    }
-    .await;
-
-    if result.is_ok() {
-        conn.execute("COMMIT", libsql::params![])
+            .await
+            .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string()))?;
+        let row = rows
+            .next()
             .await
             .map_err(|error| {
                 memory_error(
@@ -2664,11 +2683,48 @@ async fn libsql_save_document_version(
                     FilesystemOperation::WriteFile,
                     error.to_string(),
                 )
+            })?
+            .ok_or_else(|| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::WriteFile,
+                    "missing version row",
+                )
             })?;
-    } else {
-        let _ = conn.execute("ROLLBACK", libsql::params![]).await;
-    }
-    result
+        row.get::<i64>(0)
+            .map(|version| version as i32)
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::WriteFile,
+                    error.to_string(),
+                )
+            })?
+    };
+    conn.execute(
+        r#"
+            INSERT INTO memory_document_versions
+                (id, document_id, version, content, content_hash, changed_by)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+        libsql::params![
+            uuid::Uuid::new_v4().to_string(),
+            document_id,
+            next_version as i64,
+            content,
+            content_sha256(content),
+            changed_by,
+        ],
+    )
+    .await
+    .map_err(|error| {
+        memory_error(
+            virtual_path.clone(),
+            FilesystemOperation::WriteFile,
+            error.to_string(),
+        )
+    })?;
+    Ok(next_version)
 }
 
 #[cfg(feature = "libsql")]
@@ -2840,15 +2896,22 @@ impl MemoryDocumentRepository for PostgresMemoryDocumentRepository {
             )
         })?;
         let virtual_path = path.virtual_path().unwrap_or_else(|_| valid_memory_path());
-        let client = self
+        let mut client = self
             .client(virtual_path.clone(), FilesystemOperation::WriteFile)
             .await?;
         let owner_key = scoped_memory_owner_key(path.scope());
         let agent_id = scoped_memory_agent_id(path.scope());
         let db_path = db_path_for_memory_document(path);
-        let existing = client
+        let txn = client.transaction().await.map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::WriteFile,
+                error.to_string(),
+            )
+        })?;
+        let existing = txn
             .query_opt(
-                "SELECT id, content FROM memory_documents WHERE user_id = $1 AND agent_id IS NOT DISTINCT FROM $2 AND path = $3",
+                "SELECT id, content FROM memory_documents WHERE user_id = $1 AND agent_id IS NOT DISTINCT FROM $2 AND path = $3 FOR UPDATE",
                 &[&owner_key, &agent_id, &db_path],
             )
             .await
@@ -2857,46 +2920,51 @@ impl MemoryDocumentRepository for PostgresMemoryDocumentRepository {
             let document_id: uuid::Uuid = row.get("id");
             let previous_content: String = row.get("content");
             if previous_content != content && !previous_content.is_empty() {
-                let _ = postgres_save_document_version(
-                    &client,
+                postgres_save_document_version(
+                    &txn,
                     &virtual_path,
                     document_id,
                     &previous_content,
                     Some(owner_key.as_str()),
                 )
-                .await;
+                .await?;
             }
-            client
-                .execute(
-                    "UPDATE memory_documents SET content = $2, updated_at = NOW() WHERE id = $1",
-                    &[&document_id, &content],
+            txn.execute(
+                "UPDATE memory_documents SET content = $2, updated_at = NOW() WHERE id = $1",
+                &[&document_id, &content],
+            )
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::WriteFile,
+                    error.to_string(),
                 )
-                .await
-                .map_err(|error| {
-                    memory_error(
-                        virtual_path,
-                        FilesystemOperation::WriteFile,
-                        error.to_string(),
-                    )
-                })?;
+            })?;
         } else {
-            client
-                .execute(
-                    r#"
+            txn.execute(
+                r#"
                     INSERT INTO memory_documents (user_id, agent_id, path, content, metadata)
                     VALUES ($1, $2, $3, $4, '{}'::jsonb)
                     "#,
-                    &[&owner_key, &agent_id, &db_path, &content],
+                &[&owner_key, &agent_id, &db_path, &content],
+            )
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::WriteFile,
+                    error.to_string(),
                 )
-                .await
-                .map_err(|error| {
-                    memory_error(
-                        virtual_path,
-                        FilesystemOperation::WriteFile,
-                        error.to_string(),
-                    )
-                })?;
+            })?;
         }
+        txn.commit().await.map_err(|error| {
+            memory_error(
+                virtual_path,
+                FilesystemOperation::WriteFile,
+                error.to_string(),
+            )
+        })?;
         Ok(())
     }
 
@@ -2914,15 +2982,22 @@ impl MemoryDocumentRepository for PostgresMemoryDocumentRepository {
             )
         })?;
         let virtual_path = path.virtual_path().unwrap_or_else(|_| valid_memory_path());
-        let client = self
+        let mut client = self
             .client(virtual_path.clone(), FilesystemOperation::WriteFile)
             .await?;
         let owner_key = scoped_memory_owner_key(path.scope());
         let agent_id = scoped_memory_agent_id(path.scope());
         let db_path = db_path_for_memory_document(path);
-        let existing = client
+        let txn = client.transaction().await.map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::WriteFile,
+                error.to_string(),
+            )
+        })?;
+        let existing = txn
             .query_opt(
-                "SELECT id, content FROM memory_documents WHERE user_id = $1 AND agent_id IS NOT DISTINCT FROM $2 AND path = $3",
+                "SELECT id, content FROM memory_documents WHERE user_id = $1 AND agent_id IS NOT DISTINCT FROM $2 AND path = $3 FOR UPDATE",
                 &[&owner_key, &agent_id, &db_path],
             )
             .await
@@ -2934,46 +3009,51 @@ impl MemoryDocumentRepository for PostgresMemoryDocumentRepository {
                 && previous_content != content
                 && !previous_content.is_empty()
             {
-                let _ = postgres_save_document_version(
-                    &client,
+                postgres_save_document_version(
+                    &txn,
                     &virtual_path,
                     document_id,
                     &previous_content,
                     options.changed_by.as_deref(),
                 )
-                .await;
+                .await?;
             }
-            client
-                .execute(
-                    "UPDATE memory_documents SET content = $2, updated_at = NOW() WHERE id = $1",
-                    &[&document_id, &content],
+            txn.execute(
+                "UPDATE memory_documents SET content = $2, updated_at = NOW() WHERE id = $1",
+                &[&document_id, &content],
+            )
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::WriteFile,
+                    error.to_string(),
                 )
-                .await
-                .map_err(|error| {
-                    memory_error(
-                        virtual_path,
-                        FilesystemOperation::WriteFile,
-                        error.to_string(),
-                    )
-                })?;
+            })?;
         } else {
-            client
-                .execute(
-                    r#"
+            txn.execute(
+                r#"
                     INSERT INTO memory_documents (user_id, agent_id, path, content, metadata)
                     VALUES ($1, $2, $3, $4, '{}'::jsonb)
                     "#,
-                    &[&owner_key, &agent_id, &db_path, &content],
+                &[&owner_key, &agent_id, &db_path, &content],
+            )
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::WriteFile,
+                    error.to_string(),
                 )
-                .await
-                .map_err(|error| {
-                    memory_error(
-                        virtual_path,
-                        FilesystemOperation::WriteFile,
-                        error.to_string(),
-                    )
-                })?;
+            })?;
         }
+        txn.commit().await.map_err(|error| {
+            memory_error(
+                virtual_path,
+                FilesystemOperation::WriteFile,
+                error.to_string(),
+            )
+        })?;
         Ok(())
     }
 
@@ -3363,26 +3443,13 @@ impl MemoryDocumentIndexRepository for PostgresMemoryDocumentRepository {
 }
 
 #[cfg(feature = "postgres")]
-async fn postgres_save_document_version(
-    client: &deadpool_postgres::Object,
+async fn postgres_save_document_version<C: deadpool_postgres::GenericClient + Sync>(
+    client: &C,
     virtual_path: &VirtualPath,
     document_id: uuid::Uuid,
     content: &str,
     changed_by: Option<&str>,
 ) -> Result<i32, FilesystemError> {
-    client
-        .execute(
-            "SELECT 1 FROM memory_documents WHERE id = $1 FOR UPDATE",
-            &[&document_id],
-        )
-        .await
-        .map_err(|error| {
-            memory_error(
-                virtual_path.clone(),
-                FilesystemOperation::WriteFile,
-                error.to_string(),
-            )
-        })?;
     let row = client
         .query_one(
             "SELECT COALESCE(MAX(version), 0) + 1 AS next_version FROM memory_document_versions WHERE document_id = $1",
@@ -3637,7 +3704,7 @@ fn validated_memory_relative_path(value: String) -> Result<String, HostApiError>
 fn memory_backend_unsupported(
     scope: &MemoryDocumentScope,
     operation: FilesystemOperation,
-    reason: &'static str,
+    reason: impl Into<String>,
 ) -> FilesystemError {
     memory_error(
         scope
@@ -3665,5 +3732,11 @@ fn memory_error(
 }
 
 fn valid_memory_path() -> VirtualPath {
-    VirtualPath::new("/memory").unwrap_or_else(|_| unreachable!("literal virtual path is valid"))
+    static MEMORY_PATH: OnceLock<VirtualPath> = OnceLock::new();
+    // safety: `/memory` is a registered VIRTUAL_ROOT in ironclaw_host_api::path.
+    // If construction fails, host_api's VIRTUAL_ROOTS list is out of sync with
+    // this crate at build time, which is a build-system invariant violation.
+    MEMORY_PATH
+        .get_or_init(|| VirtualPath::new("/memory").expect("/memory is a registered VIRTUAL_ROOT"))
+        .clone()
 }
