@@ -487,9 +487,14 @@ async fn async_main() -> anyhow::Result<()> {
     let settings_persistence_available = components.db.is_some();
     let persisted_active_channels: Vec<String> =
         if settings_persistence_available && let Some(ref ext_mgr) = components.extension_manager {
-            ext_mgr.load_persisted_active_channels(&ext_user_id).await
+            ext_mgr
+                .load_startup_active_channels(
+                    &ext_user_id,
+                    config.channels.wasm_channels.clone(),
+                )
+                .await
         } else {
-            Vec::new()
+            config.channels.wasm_channels.clone()
         };
     let persisted_active_wasm_channels: std::collections::HashSet<String> =
         if settings_persistence_available && let Some(ref ext_mgr) = components.extension_manager {
