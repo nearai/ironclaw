@@ -18,7 +18,8 @@ pub use error::{WasmError, WasmHostError};
 pub use host::{
     DenyWasmHostHttp, DenyWasmHostSecrets, DenyWasmHostTools, DenyWasmHostWorkspace,
     RecordingWasmHostHttp, SystemWasmHostClock, WasmHostClock, WasmHostHttp, WasmHostSecrets,
-    WasmHostTools, WasmHostWorkspace, WasmHttpRequest, WasmHttpResponse, WitToolHost,
+    WasmHostTools, WasmHostWorkspace, WasmHttpRequest, WasmHttpResponse, WasmRuntimeHttpAdapter,
+    WitToolHost,
 };
 pub use runtime::WitToolRuntime;
 pub use types::{PreparedWitTool, WasmLogLevel, WasmLogRecord, WitToolExecution, WitToolRequest};
