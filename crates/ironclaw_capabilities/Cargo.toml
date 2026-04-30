@@ -19,4 +19,8 @@ tracing = "0.1"
 [dev-dependencies]
 chrono = "0.4"
 ironclaw_approvals = { path = "../ironclaw_approvals" }
+ironclaw_dispatcher = { path = "../ironclaw_dispatcher" }
+ironclaw_events = { path = "../ironclaw_events" }
+ironclaw_filesystem = { path = "../ironclaw_filesystem" }
+ironclaw_resources = { path = "../ironclaw_resources" }
 tokio = { version = "1", features = ["macros", "rt"] }
