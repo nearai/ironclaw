@@ -4184,10 +4184,14 @@ dependencies = [
  "ironclaw_wasm",
  "secrecy",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "url",
+ "wat",
+ "wit-component 0.245.1",
+ "wit-parser 0.245.1",
 ]
 
 [[package]]

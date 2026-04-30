@@ -7,7 +7,7 @@ use ironclaw_authorization::{
 };
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry};
-use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CancelReason, CancelRuntimeWorkRequest, CapabilitySurfaceVersion, HostRuntime,
@@ -18,14 +18,18 @@ use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutionResult, McpExecuto
 use ironclaw_processes::{
     ProcessResultStore, ProcessServices, ProcessStart, ProcessStatus, ProcessStore,
 };
-use ironclaw_resources::{InMemoryResourceGovernor, ResourceGovernor};
+use ironclaw_resources::{
+    InMemoryResourceGovernor, ResourceAccount, ResourceGovernor, ResourceLimits,
+};
 use ironclaw_run_state::{InMemoryApprovalRequestStore, InMemoryRunStateStore};
 use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptRuntime, ScriptRuntimeConfig,
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
-use ironclaw_wasm::{WitToolHost, WitToolRuntimeConfig};
+use ironclaw_wasm::{RecordingWasmHostHttp, WasmHttpResponse, WitToolHost, WitToolRuntimeConfig};
 use serde_json::json;
+use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
+use wit_parser::Resolve;
 
 #[tokio::test]
 async fn host_runtime_services_builds_dispatcher_runtime_and_health_from_registered_adapters() {
@@ -199,6 +203,94 @@ async fn host_runtime_services_cancel_and_status_share_process_result_and_cancel
     assert_eq!(result.status, ProcessStatus::Killed);
 }
 
+#[tokio::test]
+async fn host_runtime_services_wasm_guest_error_reconciles_usage_after_host_effect() {
+    let wat = http_then_guest_error_wat();
+    let runtime = wasm_runtime_for_component(
+        WASM_GUEST_ERROR_MANIFEST,
+        "wasm-accounting.guest_error",
+        "wasm/guest-error.wasm",
+        &wat,
+    )
+    .await;
+
+    let error = runtime
+        .dispatcher
+        .dispatch_json(wasm_dispatch_request(
+            runtime.capability_id,
+            json!({"call": "guest-error"}),
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        DispatchError::Wasm {
+            kind: RuntimeDispatchErrorKind::Guest
+        }
+    ));
+    assert_eq!(runtime.http.requests().unwrap().len(), 1);
+    assert_eq!(
+        runtime
+            .governor
+            .usage_for(&sample_account())
+            .network_egress_bytes,
+        5,
+        "host-mediated HTTP request bytes must be reconciled even when the guest returns an error response"
+    );
+    assert_eq!(
+        runtime
+            .governor
+            .reserved_for(&sample_account())
+            .network_egress_bytes,
+        0
+    );
+}
+
+#[tokio::test]
+async fn host_runtime_services_wasm_invalid_output_reconciles_usage_after_host_effect() {
+    let wat = http_then_invalid_output_wat();
+    let runtime = wasm_runtime_for_component(
+        WASM_INVALID_OUTPUT_MANIFEST,
+        "wasm-accounting.invalid_output",
+        "wasm/invalid-output.wasm",
+        &wat,
+    )
+    .await;
+
+    let error = runtime
+        .dispatcher
+        .dispatch_json(wasm_dispatch_request(
+            runtime.capability_id,
+            json!({"call": "invalid-output"}),
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        DispatchError::Wasm {
+            kind: RuntimeDispatchErrorKind::OutputDecode
+        }
+    ));
+    assert_eq!(runtime.http.requests().unwrap().len(), 1);
+    assert_eq!(
+        runtime
+            .governor
+            .usage_for(&sample_account())
+            .network_egress_bytes,
+        5,
+        "host-mediated HTTP request bytes must be reconciled even when the guest returns malformed output"
+    );
+    assert_eq!(
+        runtime
+            .governor
+            .reserved_for(&sample_account())
+            .network_egress_bytes,
+        0
+    );
+}
+
 struct EchoScriptBackend;
 
 impl ScriptBackend for EchoScriptBackend {
@@ -318,6 +410,156 @@ fn script_capability_id() -> CapabilityId {
     CapabilityId::new("script.echo").unwrap()
 }
 
+struct WasmRuntimeFixture {
+    dispatcher: Arc<dyn CapabilityDispatcher>,
+    governor: Arc<InMemoryResourceGovernor>,
+    http: Arc<RecordingWasmHostHttp>,
+    capability_id: CapabilityId,
+}
+
+async fn wasm_runtime_for_component(
+    manifest: &str,
+    capability: &str,
+    module_path: &str,
+    wat: &str,
+) -> WasmRuntimeFixture {
+    let parsed_manifest = ExtensionManifest::parse(manifest).unwrap();
+    let component = tool_component(wat);
+    let filesystem = Arc::new(
+        filesystem_with_wasm_component(parsed_manifest.id.as_str(), module_path, &component).await,
+    );
+    let governor = Arc::new(governor_with_default_limit(sample_account()));
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
+        Arc::new(GrantAuthorizer::new());
+    let http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 200,
+        headers_json: "{}".to_string(),
+        body: Vec::new(),
+    }));
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(manifest)),
+        filesystem,
+        Arc::clone(&governor),
+        authorizer,
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .try_with_wasm_runtime(
+        WitToolRuntimeConfig::for_testing(),
+        WitToolHost::deny_all().with_http(Arc::clone(&http)),
+    )
+    .unwrap();
+
+    WasmRuntimeFixture {
+        dispatcher: services.runtime_dispatcher_arc(),
+        governor,
+        http,
+        capability_id: CapabilityId::new(capability).unwrap(),
+    }
+}
+
+async fn filesystem_with_wasm_component(
+    extension_id: &str,
+    module_path: &str,
+    wasm_bytes: &[u8],
+) -> LocalFilesystem {
+    let fs = mounted_empty_extension_root();
+    let path =
+        VirtualPath::new(format!("/system/extensions/{extension_id}/{module_path}")).unwrap();
+    fs.write_file(&path, wasm_bytes).await.unwrap();
+    fs
+}
+
+fn mounted_empty_extension_root() -> LocalFilesystem {
+    let storage = tempfile::tempdir().unwrap().keep();
+    let mut fs = LocalFilesystem::new();
+    fs.mount_local(
+        VirtualPath::new("/system/extensions").unwrap(),
+        HostPath::from_path_buf(storage),
+    )
+    .unwrap();
+    fs
+}
+
+fn governor_with_default_limit(account: ResourceAccount) -> InMemoryResourceGovernor {
+    let governor = InMemoryResourceGovernor::new();
+    governor.set_limit(
+        account,
+        ResourceLimits {
+            max_concurrency_slots: Some(10),
+            max_network_egress_bytes: Some(10_000),
+            max_output_bytes: Some(100_000),
+            ..ResourceLimits::default()
+        },
+    );
+    governor
+}
+
+fn wasm_dispatch_request(
+    capability_id: CapabilityId,
+    input: serde_json::Value,
+) -> CapabilityDispatchRequest {
+    CapabilityDispatchRequest {
+        capability_id,
+        scope: sample_scope(InvocationId::new()),
+        estimate: wasm_http_estimate(),
+        mounts: None,
+        resource_reservation: None,
+        input,
+    }
+}
+
+fn wasm_http_estimate() -> ResourceEstimate {
+    ResourceEstimate {
+        concurrency_slots: Some(1),
+        network_egress_bytes: Some(10),
+        output_bytes: Some(10_000),
+        ..ResourceEstimate::default()
+    }
+}
+
+fn sample_account() -> ResourceAccount {
+    ResourceAccount::tenant(TenantId::new("tenant-a").unwrap())
+}
+
+fn tool_component(wat_src: &str) -> Vec<u8> {
+    let mut module = wat::parse_str(wat_src).unwrap();
+    let mut resolve = Resolve::default();
+    let package = resolve
+        .push_str("tool.wit", include_str!("../../../wit/tool.wit"))
+        .unwrap();
+    let world = resolve
+        .select_world(&[package], Some("sandboxed-tool"))
+        .unwrap();
+
+    embed_component_metadata(&mut module, &resolve, world, StringEncoding::UTF8).unwrap();
+
+    let mut encoder = ComponentEncoder::default()
+        .module(&module)
+        .unwrap()
+        .validate(true);
+    encoder.encode().unwrap()
+}
+
+fn http_then_guest_error_wat() -> String {
+    HTTP_TOOL_WAT.replace(
+        "i32.const 48\n    i32.const 1\n    i32.store\n    i32.const 52\n    i32.const 3072\n    i32.store\n    i32.const 56\n    i32.const 1\n    i32.store\n    i32.const 60\n    i32.const 0\n    i32.store\n    i32.const 48",
+        "i32.const 48\n    i32.const 0\n    i32.store\n    i32.const 52\n    i32.const 0\n    i32.store\n    i32.const 56\n    i32.const 0\n    i32.store\n    i32.const 60\n    i32.const 1\n    i32.store\n    i32.const 64\n    i32.const 3072\n    i32.store\n    i32.const 68\n    i32.const 11\n    i32.store\n    i32.const 48",
+    )
+}
+
+fn http_then_invalid_output_wat() -> String {
+    HTTP_TOOL_WAT
+        .replace(
+            r#"(data (i32.const 3072) "1")"#,
+            r#"(data (i32.const 3072) "not-json")"#,
+        )
+        .replace(
+            "i32.const 56\n    i32.const 1\n    i32.store",
+            "i32.const 56\n    i32.const 8\n    i32.store",
+        )
+}
+
 const SCRIPT_MANIFEST: &str = r#"
 id = "script"
 name = "Script Echo"
@@ -376,4 +618,130 @@ description = "Count through WASM"
 effects = ["dispatch_capability"]
 default_permission = "allow"
 parameters_schema = { type = "object" }
+"#;
+
+const WASM_GUEST_ERROR_MANIFEST: &str = r#"
+id = "wasm-accounting"
+name = "WASM Accounting Guest Error"
+version = "0.1.0"
+description = "WASM accounting extension"
+trust = "untrusted"
+
+[runtime]
+kind = "wasm"
+module = "wasm/guest-error.wasm"
+
+[[capabilities]]
+id = "wasm-accounting.guest_error"
+description = "Call host HTTP then return guest error"
+effects = ["dispatch_capability", "network"]
+default_permission = "allow"
+parameters_schema = { type = "object" }
+"#;
+
+const WASM_INVALID_OUTPUT_MANIFEST: &str = r#"
+id = "wasm-accounting"
+name = "WASM Accounting Invalid Output"
+version = "0.1.0"
+description = "WASM accounting extension"
+trust = "untrusted"
+
+[runtime]
+kind = "wasm"
+module = "wasm/invalid-output.wasm"
+
+[[capabilities]]
+id = "wasm-accounting.invalid_output"
+description = "Call host HTTP then return invalid output"
+effects = ["dispatch_capability", "network"]
+default_permission = "allow"
+parameters_schema = { type = "object" }
+"#;
+
+const HTTP_TOOL_WAT: &str = r#"
+(module
+  (type (;0;) (func (param i32 i32 i32)))
+  (type (;1;) (func (result i64)))
+  (type (;2;) (func (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)))
+  (type (;3;) (func (param i32 i32 i32 i32 i32)))
+  (type (;4;) (func (param i32 i32) (result i32)))
+  (import "near:agent/host@0.3.0" "log" (func $log (type 0)))
+  (import "near:agent/host@0.3.0" "now-millis" (func $now (type 1)))
+  (import "near:agent/host@0.3.0" "workspace-read" (func $workspace_read (type 0)))
+  (import "near:agent/host@0.3.0" "http-request" (func $http_request (type 2)))
+  (import "near:agent/host@0.3.0" "tool-invoke" (func $tool_invoke (type 3)))
+  (import "near:agent/host@0.3.0" "secret-exists" (func $secret_exists (type 4)))
+  (memory (export "memory") 1)
+  (global $heap (mut i32) (i32.const 4096))
+  (data (i32.const 128) "POST")
+  (data (i32.const 160) "https://example.test/api")
+  (data (i32.const 224) "{}")
+  (data (i32.const 256) "hello")
+  (data (i32.const 1024) "{\22type\22:\22object\22}")
+  (data (i32.const 2048) "fixture description")
+  (data (i32.const 3072) "1")
+  (func $schema (result i32)
+    i32.const 16
+    i32.const 1024
+    i32.store
+    i32.const 20
+    i32.const 17
+    i32.store
+    i32.const 16)
+  (func $description (result i32)
+    i32.const 32
+    i32.const 2048
+    i32.store
+    i32.const 36
+    i32.const 19
+    i32.store
+    i32.const 32)
+  (func $execute (param i32 i32 i32 i32 i32) (result i32)
+    i32.const 128
+    i32.const 4
+    i32.const 160
+    i32.const 24
+    i32.const 224
+    i32.const 2
+    i32.const 1
+    i32.const 256
+    i32.const 5
+    i32.const 0
+    i32.const 0
+    i32.const 512
+    call $http_request
+
+    i32.const 48
+    i32.const 1
+    i32.store
+    i32.const 52
+    i32.const 3072
+    i32.store
+    i32.const 56
+    i32.const 1
+    i32.store
+    i32.const 60
+    i32.const 0
+    i32.store
+    i32.const 48)
+  (func $post (param i32))
+  (func $realloc (param $old i32) (param $old_align i32) (param $new_size i32) (param $new_align i32) (result i32)
+    (local $ret i32)
+    global.get $heap
+    local.set $ret
+    global.get $heap
+    local.get $new_size
+    i32.add
+    global.set $heap
+    local.get $ret)
+  (func $_initialize)
+  (export "near:agent/tool@0.3.0#execute" (func $execute))
+  (export "cabi_post_near:agent/tool@0.3.0#execute" (func $post))
+  (export "near:agent/tool@0.3.0#schema" (func $schema))
+  (export "cabi_post_near:agent/tool@0.3.0#schema" (func $post))
+  (export "near:agent/tool@0.3.0#description" (func $description))
+  (export "cabi_post_near:agent/tool@0.3.0#description" (func $post))
+  (export "cabi_realloc" (func $realloc))
+  (export "_initialize" (func $_initialize))
+)
 "#;

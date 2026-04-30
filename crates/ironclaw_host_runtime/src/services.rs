@@ -622,12 +622,7 @@ where
         Ok(execution) => execution,
         Err(error) => {
             if let Some(usage) = preserved_wasm_error_usage(&error) {
-                if request.governor.reconcile(reservation.id, usage).is_err() {
-                    release_wasm_reservation(request.governor, reservation.id);
-                    return Err(DispatchError::Wasm {
-                        kind: RuntimeDispatchErrorKind::Resource,
-                    });
-                }
+                account_or_release_failed_wasm_execution(request.governor, reservation.id, &usage)?;
             } else {
                 release_wasm_reservation(request.governor, reservation.id);
             }
@@ -637,13 +632,21 @@ where
         }
     };
     if execution.error.is_some() {
-        release_wasm_reservation(request.governor, reservation.id);
+        account_or_release_failed_wasm_execution(
+            request.governor,
+            reservation.id,
+            &execution.usage,
+        )?;
         return Err(DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Guest,
         });
     }
     let Some(output_json) = execution.output_json else {
-        release_wasm_reservation(request.governor, reservation.id);
+        account_or_release_failed_wasm_execution(
+            request.governor,
+            reservation.id,
+            &execution.usage,
+        )?;
         return Err(DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::InvalidResult,
         });
@@ -651,7 +654,11 @@ where
     let output = match serde_json::from_str(&output_json) {
         Ok(output) => output,
         Err(_) => {
-            release_wasm_reservation(request.governor, reservation.id);
+            account_or_release_failed_wasm_execution(
+                request.governor,
+                reservation.id,
+                &execution.usage,
+            )?;
             return Err(DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::OutputDecode,
             });
@@ -675,6 +682,29 @@ where
         usage: execution.usage,
         receipt,
     })
+}
+
+fn account_or_release_failed_wasm_execution<G>(
+    governor: &G,
+    reservation_id: ResourceReservationId,
+    usage: &ResourceUsage,
+) -> Result<(), DispatchError>
+where
+    G: ResourceGovernor + ?Sized,
+{
+    if !has_accountable_effects(usage) {
+        release_wasm_reservation(governor, reservation_id);
+        return Ok(());
+    }
+
+    if governor.reconcile(reservation_id, usage.clone()).is_err() {
+        release_wasm_reservation(governor, reservation_id);
+        return Err(DispatchError::Wasm {
+            kind: RuntimeDispatchErrorKind::Resource,
+        });
+    }
+
+    Ok(())
 }
 
 fn release_wasm_reservation<G>(governor: &G, reservation_id: ResourceReservationId)

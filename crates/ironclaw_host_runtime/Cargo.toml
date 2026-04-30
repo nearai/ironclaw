@@ -33,4 +33,8 @@ tracing = "0.1"
 url = "2"
 
 [dev-dependencies]
+tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "time"] }
+wat = "1.245.1"
+wit-component = "0.245.1"
+wit-parser = "0.245.1"
