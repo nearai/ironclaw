@@ -1,5 +1,5 @@
 //! Live integration test that exercises end-to-end reasoning capture for Anthropic Claude:
-//! Claude Sonnet 4.6 (Anthropic direct) → rig-core anthropic provider → llm_reasoning
+//! Claude Sonnet 4.6 (claude-sonnet-4-6, Anthropic direct) → rig-core anthropic provider → llm_reasoning
 //! extractor (`^claude` rule, matches `type: "thinking"` content blocks) →
 //! CompletionResponse.reasoning.
 //!
@@ -30,7 +30,7 @@ async fn sonnet_reasoning_lands_in_completion_response() {
         .build()
         .expect("build anthropic client");
     let model_name = std::env::var("ANTHROPIC_MODEL")
-        .unwrap_or_else(|_| "claude-sonnet-4-5-20250929".to_string());
+        .unwrap_or_else(|_| "claude-sonnet-4-6".to_string());
     let model = client.completion_model(&model_name);
     let adapter = RigAdapter::new(model, &model_name);
 
