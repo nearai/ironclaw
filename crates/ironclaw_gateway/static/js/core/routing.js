@@ -51,8 +51,16 @@ function parseHash() {
   };
 }
 
+function shouldHideRoutinesTab() {
+  // The Routines tab belongs to engine v1. When v2 is on, hide it — UNLESS
+  // the user has existing v1 routines from a pre-v2 install. Without this
+  // affordance, an upgrade silently strips access to data the API still
+  // serves (#2982).
+  return engineV2Enabled && !userHasLegacyRoutines;
+}
+
 function normalizeTabForEngineMode(tab) {
-  if (engineV2Enabled && tab === 'routines') {
+  if (shouldHideRoutinesTab() && tab === 'routines') {
     return 'missions';
   }
   return tab;
@@ -61,13 +69,14 @@ function normalizeTabForEngineMode(tab) {
 function applyEngineModeUi() {
   var routinesTab = document.querySelector('.tab-bar [data-tab-role="routines"]');
   var routinesPanel = document.getElementById('tab-routines');
+  var hideRoutines = shouldHideRoutinesTab();
   if (routinesTab) {
-    routinesTab.style.display = engineV2Enabled ? 'none' : '';
+    routinesTab.style.display = hideRoutines ? 'none' : '';
   }
-  if (routinesPanel && engineV2Enabled && currentTab !== 'routines') {
+  if (routinesPanel && hideRoutines && currentTab !== 'routines') {
     routinesPanel.classList.remove('active');
   }
-  if (engineV2Enabled && currentTab === 'routines') {
+  if (hideRoutines && currentTab === 'routines') {
     switchTab('missions');
   }
 }
@@ -104,7 +113,7 @@ function restoreFromHash() {
         openJobDetail(state.detail);
         break;
       case 'routines':
-        if (engineV2Enabled) {
+        if (shouldHideRoutinesTab()) {
           switchTab('missions');
         } else {
           openRoutineDetail(state.detail);

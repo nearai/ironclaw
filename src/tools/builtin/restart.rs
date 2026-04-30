@@ -165,13 +165,60 @@ impl Tool for RestartTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
 
-    /// Helper to simulate Docker environment for testing
-    fn enable_docker_env() {
-        unsafe {
-            std::env::set_var("IRONCLAW_IN_DOCKER", "true");
-            // Keep restart tests from terminating the shared lib-test process.
-            std::env::set_var("IRONCLAW_DISABLE_RESTART", "true");
+    struct EnvLockGuard {
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EnvLockGuard {
+        fn new() -> Self {
+            Self {
+                _guard: crate::config::helpers::lock_env(),
+            }
+        }
+    }
+
+    struct DockerEnvGuard {
+        _lock: EnvLockGuard,
+        original_in_docker: Option<OsString>,
+        original_disable_restart: Option<OsString>,
+    }
+
+    impl DockerEnvGuard {
+        fn enable() -> Self {
+            let lock = EnvLockGuard::new();
+            let original_in_docker = std::env::var_os("IRONCLAW_IN_DOCKER");
+            let original_disable_restart = std::env::var_os("IRONCLAW_DISABLE_RESTART");
+            // SAFETY: Tests serialize env access with lock_env().
+            unsafe {
+                std::env::set_var("IRONCLAW_IN_DOCKER", "true");
+                // Keep restart tests from terminating the shared lib-test process.
+                std::env::set_var("IRONCLAW_DISABLE_RESTART", "true");
+            }
+            Self {
+                _lock: lock,
+                original_in_docker,
+                original_disable_restart,
+            }
+        }
+    }
+
+    impl Drop for DockerEnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: Tests serialize env access with lock_env().
+            unsafe {
+                if let Some(ref value) = self.original_in_docker {
+                    std::env::set_var("IRONCLAW_IN_DOCKER", value);
+                } else {
+                    std::env::remove_var("IRONCLAW_IN_DOCKER");
+                }
+                if let Some(ref value) = self.original_disable_restart {
+                    std::env::set_var("IRONCLAW_DISABLE_RESTART", value);
+                } else {
+                    std::env::remove_var("IRONCLAW_DISABLE_RESTART");
+                }
+            }
         }
     }
 
@@ -212,9 +259,9 @@ mod tests {
         assert!(!tool.requires_sanitization());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_restart_tool_delay_parameter_validation() {
-        enable_docker_env();
+        let _docker_env = DockerEnvGuard::enable();
         let tool = RestartTool;
         let ctx = crate::context::JobContext::new("test", "test restart");
 
@@ -235,9 +282,9 @@ mod tests {
         assert!(text.contains("Restarting in 2 second(s)"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_restart_tool_delay_clamping() {
-        enable_docker_env();
+        let _docker_env = DockerEnvGuard::enable();
         let tool = RestartTool;
         let ctx = crate::context::JobContext::new("test", "test restart");
 
@@ -289,9 +336,9 @@ mod tests {
         assert!(delay_schema.get("description").is_some());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_restart_tool_boundary_values() {
-        enable_docker_env();
+        let _docker_env = DockerEnvGuard::enable();
         let tool = RestartTool;
         let ctx = crate::context::JobContext::new("test", "test restart");
 
@@ -323,9 +370,9 @@ mod tests {
         assert!(text.contains("Restarting in 15 second(s)"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_restart_tool_invalid_parameter_types() {
-        enable_docker_env();
+        let _docker_env = DockerEnvGuard::enable();
         let tool = RestartTool;
         let ctx = crate::context::JobContext::new("test", "test restart");
 
@@ -357,9 +404,9 @@ mod tests {
         assert!(text.contains("Restarting in 2 second(s)"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_restart_tool_output_structure() {
-        enable_docker_env();
+        let _docker_env = DockerEnvGuard::enable();
         let tool = RestartTool;
         let ctx = crate::context::JobContext::new("test", "test restart");
 
@@ -377,9 +424,9 @@ mod tests {
         assert!(output.raw.is_none()); // No raw output stored
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_restart_tool_extra_parameters_ignored() {
-        enable_docker_env();
+        let _docker_env = DockerEnvGuard::enable();
         let tool = RestartTool;
         let ctx = crate::context::JobContext::new("test", "test restart");
 
@@ -401,9 +448,9 @@ mod tests {
         assert!(text.contains("Restarting in 5 second(s)"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_restart_tool_negative_numbers() {
-        enable_docker_env();
+        let _docker_env = DockerEnvGuard::enable();
         let tool = RestartTool;
         let ctx = crate::context::JobContext::new("test", "test restart");
 
@@ -418,9 +465,9 @@ mod tests {
         assert!(text.contains("Restarting in 2 second(s)"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_restart_tool_very_large_numbers() {
-        enable_docker_env();
+        let _docker_env = DockerEnvGuard::enable();
         let tool = RestartTool;
         let ctx = crate::context::JobContext::new("test", "test restart");
 
@@ -434,9 +481,9 @@ mod tests {
         assert!(text.contains("Restarting in 30 second(s)"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_restart_tool_empty_object() {
-        enable_docker_env();
+        let _docker_env = DockerEnvGuard::enable();
         let tool = RestartTool;
         let ctx = crate::context::JobContext::new("test", "test restart");
 
@@ -467,6 +514,7 @@ mod tests {
 
     #[test]
     fn test_restart_tool_requires_docker_environment() {
+        let _env_lock = crate::config::helpers::lock_env();
         // Test that restart is rejected when not in Docker (IRONCLAW_IN_DOCKER not set or false)
         // Uses sync test to avoid async/env var ordering issues with test parallelization.
         let in_docker = std::env::var("IRONCLAW_IN_DOCKER")

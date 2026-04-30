@@ -3,6 +3,12 @@
 //! A capability bundles actions (tools), knowledge (skills), and policies
 //! (hooks) into a single installable/activatable unit. Capabilities are
 //! granted to threads via leases.
+//!
+//! Model-facing surfacing is intentionally split:
+//! - `ActionInventory` contains callable actions for the current step
+//! - `CapabilitySummary` contains background/contextual capability metadata,
+//!   including blocked integrations that belong in `Activatable Integrations`
+//!   rather than on the normal callable surface
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -121,7 +127,7 @@ pub enum EffectType {
 // ── Action definition ───────────────────────────────────────
 
 /// Definition of a single action within a capability.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ActionDef {
     /// Action name (e.g. "create_issue", "web_fetch").
     pub name: String,
@@ -133,6 +139,117 @@ pub struct ActionDef {
     pub effects: Vec<EffectType>,
     /// Whether this action requires user approval before execution.
     pub requires_approval: bool,
+    /// How this action should be surfaced to the model.
+    #[serde(default)]
+    pub model_tool_surface: ModelToolSurface,
+    /// Optional discovery metadata used by `tool_info` and prompt guidance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery: Option<ActionDiscoveryMetadata>,
+}
+
+/// Whether an action should be emitted as a provider-native tool definition or
+/// only shown through compact prompt metadata with on-demand `tool_info`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelToolSurface {
+    /// Emit the full callable schema to the provider-native tool array.
+    #[default]
+    FullSchema,
+    /// Keep the action callable in-step, but surface it compactly in prompt
+    /// metadata and rely on `tool_info(..., detail="schema")` for parameters.
+    CompactToolInfo,
+}
+
+/// Model-visible action inventory for a single execution step.
+///
+/// `inline` actions are callable now. `discoverable` actions are not callable
+/// yet, but remain available to `tool_info` for step-scoped discovery (for
+/// example blocked actions under `Activatable Integrations`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ActionInventory {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inline: Vec<ActionDef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub discoverable: Vec<ActionDef>,
+}
+
+/// Curated discovery guidance for a callable action.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ActionDiscoverySummary {
+    /// Parameters that are always required.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub always_required: Vec<String>,
+    /// Conditional requirements or cross-field invariants.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditional_requirements: Vec<String>,
+    /// Additional notes for correct tool selection/use.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+    /// Optional structured examples.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub examples: Vec<serde_json::Value>,
+}
+
+/// Optional discovery metadata layered on top of an executable action.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActionDiscoveryMetadata {
+    /// Canonical discovery name shown to the model.
+    pub name: String,
+    /// Optional curated discovery guidance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<ActionDiscoverySummary>,
+    /// Optional discovery schema when it differs from the callable schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_override: Option<serde_json::Value>,
+}
+
+impl ActionDef {
+    /// Whether this action should be emitted as a provider-native tool
+    /// definition with its full schema.
+    pub fn emits_full_schema_tool(&self) -> bool {
+        matches!(self.model_tool_surface, ModelToolSurface::FullSchema)
+    }
+
+    /// Canonical discovery name for this action.
+    pub fn discovery_name(&self) -> &str {
+        self.discovery
+            .as_ref()
+            .map(|metadata| metadata.name.as_str())
+            .unwrap_or(self.name.as_str())
+    }
+
+    /// Discovery schema, defaulting to the callable schema.
+    pub fn discovery_schema(&self) -> &serde_json::Value {
+        self.discovery
+            .as_ref()
+            .and_then(|metadata| metadata.schema_override.as_ref())
+            .unwrap_or(&self.parameters_schema)
+    }
+
+    /// Curated discovery summary, when one exists.
+    pub fn discovery_summary(&self) -> Option<&ActionDiscoverySummary> {
+        self.discovery
+            .as_ref()
+            .and_then(|metadata| metadata.summary.as_ref())
+    }
+
+    /// Checks whether the given name resolves to this action.
+    pub fn matches_name(&self, name: &str) -> bool {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        let discovery_name = self.discovery_name();
+        if self.name == trimmed || discovery_name == trimmed {
+            return true;
+        }
+        if trimmed.contains('-') || self.name.contains('-') || discovery_name.contains('-') {
+            let normalized = trimmed.replace('-', "_");
+            return normalized == self.name.replace('-', "_")
+                || normalized == discovery_name.replace('-', "_");
+        }
+        false
+    }
 }
 
 /// Canonical model-visible status for capability background surfacing.
@@ -161,6 +278,9 @@ pub enum CapabilityStatus {
 }
 
 /// High-level category for capability background summaries.
+///
+/// This is used for contextual capability rendering and activatable
+/// integration rendering, not for normal callable action inventory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapabilitySummaryKind {
@@ -172,7 +292,13 @@ pub enum CapabilitySummaryKind {
     Runtime,
 }
 
-/// Background summary for a non-callable or indirectly-callable capability.
+/// Background summary for a contextual or activatable capability.
+///
+/// Ready callable actions stay in `ActionInventory`. `CapabilitySummary`
+/// covers:
+/// - runtime/contextual information that should stay in background prompt/UI
+/// - blocked managed integrations that are shown separately and enabled via
+///   `tool_activate(name=...)`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilitySummary {
     /// Stable capability identifier (for example `telegram` or `slack`).
@@ -187,6 +313,13 @@ pub struct CapabilitySummary {
     /// Optional human-readable description.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Optional preview of actions unlocked by enabling this capability.
+    ///
+    /// This is primarily for activatable integrations so the model can see
+    /// what becomes callable after enablement without dumping every action
+    /// into the default callable surface.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub action_preview: Vec<String>,
     /// Optional routing guidance such as `Usable through message`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_hint: Option<String>,
@@ -419,6 +552,60 @@ mod tests {
     }
 
     #[test]
+    fn action_def_matches_exact_and_hyphenated_names() {
+        let action = ActionDef {
+            name: "mission_create".to_string(),
+            description: "Create mission".to_string(),
+            parameters_schema: json!({"type": "object"}),
+            effects: vec![],
+            requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
+            discovery: None,
+        };
+
+        assert!(action.matches_name("mission_create"));
+        assert!(action.matches_name("mission-create"));
+        assert!(!action.matches_name("mission_resume"));
+        assert!(!action.matches_name(" "));
+    }
+
+    #[test]
+    fn action_def_matches_discovery_aliases() {
+        let action = ActionDef {
+            name: "mission_create".to_string(),
+            description: "Create mission".to_string(),
+            parameters_schema: json!({"type": "object"}),
+            effects: vec![],
+            requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
+            discovery: Some(ActionDiscoveryMetadata {
+                name: "mission-create".to_string(),
+                summary: None,
+                schema_override: None,
+            }),
+        };
+
+        assert!(action.matches_name("mission-create"));
+        assert!(action.matches_name("mission_create"));
+    }
+
+    #[test]
+    fn action_def_matches_hyphenated_canonical_names_from_underscore_input() {
+        let action = ActionDef {
+            name: "mission-create".to_string(),
+            description: "Create mission".to_string(),
+            parameters_schema: json!({"type": "object"}),
+            effects: vec![],
+            requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
+            discovery: None,
+        };
+
+        assert!(action.matches_name("mission_create"));
+        assert!(action.matches_name("mission-create"));
+    }
+
+    #[test]
     fn capability_status_serializes_as_snake_case() {
         let cases = [
             (CapabilityStatus::Ready, json!("ready")),
@@ -482,6 +669,7 @@ mod tests {
             kind: CapabilitySummaryKind::Channel,
             status: CapabilityStatus::ReadyScoped,
             description: Some("Telegram messaging".to_string()),
+            action_preview: vec!["telegram_send".to_string()],
             routing_hint: Some("Usable through message".to_string()),
         };
 
@@ -491,6 +679,7 @@ mod tests {
         assert_eq!(json["kind"], "channel");
         assert_eq!(json["status"], "ready_scoped");
         assert_eq!(json["description"], "Telegram messaging");
+        assert_eq!(json["action_preview"], serde_json::json!(["telegram_send"]));
         assert_eq!(json["routing_hint"], "Usable through message");
 
         let parsed: CapabilitySummary = serde_json::from_value(json).unwrap();
@@ -505,6 +694,7 @@ mod tests {
             kind: CapabilitySummaryKind::Provider,
             status: CapabilityStatus::NeedsAuth,
             description: None,
+            action_preview: Vec::new(),
             routing_hint: None,
         };
 
@@ -514,6 +704,7 @@ mod tests {
         assert_eq!(json["status"], "needs_auth");
         assert!(json.get("display_name").is_none());
         assert!(json.get("description").is_none());
+        assert!(json.get("action_preview").is_none());
         assert!(json.get("routing_hint").is_none());
 
         let parsed: CapabilitySummary = serde_json::from_value(serde_json::json!({

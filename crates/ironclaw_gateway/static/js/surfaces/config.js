@@ -248,20 +248,20 @@ function setActiveProvider(id) {
     if (provider) openProviderConfigDialog(provider);
     return;
   }
-  const modelUpdate = () => defaultModel
-    ? apiFetchVoid('/api/settings/selected_model', { method: 'PUT', body: { value: defaultModel } })
-    : apiFetchVoid('/api/settings/selected_model', { method: 'DELETE' });
-  apiFetchVoid('/api/settings/llm_backend', { method: 'PUT', body: { value: id } })
-    .then(() => modelUpdate())
+  // Write backend + model atomically. Two sequential PUTs would hot-reload
+  // the chain between them with the new backend but the previous model
+  // (selected_model wins over provider defaults), leaving a mixed state
+  // if the second request fails. Import writes the set and reloads once.
+  apiFetchVoid('/api/settings/import', {
+    method: 'POST',
+    body: { settings: { llm_backend: id, selected_model: defaultModel } },
+  })
     .then(() => {
       _activeLlmBackend = id;
       _selectedModel = defaultModel || '';
       renderProviders();
       loadInferenceSettings();
       scrollToProviders();
-      document.getElementById('config-restart-notice').style.display = 'flex';
-      var llmNotice = document.getElementById('llm-restart-notice');
-      if (llmNotice) llmNotice.style.display = 'flex';
       showToast(I18n.t('config.providerActivated', { name: id }));
     })
     .catch((e) => showToast(I18n.t('error.unknown') + ': ' + e.message, 'error'));
@@ -484,11 +484,6 @@ document.getElementById('save-provider-btn').addEventListener('click', () => {
         if (isActive) loadInferenceSettings();
         resetProviderForm();
         scrollToProviders();
-        if (isActive) {
-          document.getElementById('config-restart-notice').style.display = 'flex';
-          var llmNotice = document.getElementById('llm-restart-notice');
-          if (llmNotice) llmNotice.style.display = 'flex';
-        }
         showToast(I18n.t('config.providerConfigured', { name: id }));
       })
       .catch((e) => {
@@ -539,11 +534,6 @@ document.getElementById('save-provider-btn').addEventListener('click', () => {
       if (isActive) loadInferenceSettings();
       resetProviderForm();
       scrollToProviders();
-      if (isActive) {
-        document.getElementById('config-restart-notice').style.display = 'flex';
-        var llmNotice = document.getElementById('llm-restart-notice');
-        if (llmNotice) llmNotice.style.display = 'flex';
-      }
       showToast(I18n.t('config.providerUpdated', { name }));
     }).catch((e) => {
       _customProviders[idx] = original;

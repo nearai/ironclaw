@@ -1196,7 +1196,49 @@ fn truncate_for_error(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
     use tempfile::TempDir;
+
+    struct EnvLockGuard {
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EnvLockGuard {
+        fn new() -> Self {
+            Self {
+                _guard: crate::config::helpers::lock_env(),
+            }
+        }
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var_os(key);
+            // SAFETY: Tests serialize env access with lock_env().
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: Tests serialize env access with lock_env().
+            unsafe {
+                if let Some(ref value) = self.original {
+                    std::env::set_var(self.key, value);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
 
     async fn execute_shell(
         tool: &ShellTool,
@@ -1619,10 +1661,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_env_scrubbing_hides_secrets() {
+        let _env_lock = EnvLockGuard::new();
         // Set a fake secret in the current process environment.
-        // SAFETY: test-only, single-threaded tokio runtime, no concurrent env access.
         let secret_var = "IRONCLAW_TEST_SECRET_KEY";
-        unsafe { std::env::set_var(secret_var, "super_secret_value_12345") };
+        let _secret_guard = EnvVarGuard::set(secret_var, "super_secret_value_12345");
 
         let tool = ShellTool::new();
         let ctx = JobContext::default();
@@ -1650,10 +1692,6 @@ mod tests {
             output.contains("PATH="),
             "PATH should be forwarded to child processes"
         );
-
-        // Clean up
-        // SAFETY: test-only, single-threaded tokio runtime.
-        unsafe { std::env::remove_var(secret_var) };
     }
 
     #[tokio::test]
@@ -1682,6 +1720,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_env_scrubbing_common_secret_patterns() {
+        let _env_lock = EnvLockGuard::new();
         // Simulate common secret env vars that agents/tools might set
         let secrets = [
             ("OPENAI_API_KEY", "sk-test-fake-key-123"),
@@ -1690,10 +1729,10 @@ mod tests {
             ("DATABASE_URL", "postgres://user:pass@localhost/db"),
         ];
 
-        // SAFETY: test-only, single-threaded tokio runtime, no concurrent env access.
-        for (name, value) in &secrets {
-            unsafe { std::env::set_var(name, value) };
-        }
+        let _secret_guards: Vec<_> = secrets
+            .iter()
+            .map(|(name, value)| EnvVarGuard::set(name, value))
+            .collect();
 
         let tool = ShellTool::new();
         let ctx = JobContext::default();
@@ -1710,12 +1749,6 @@ mod tests {
                 !output.contains(value),
                 "{name} value leaked through env scrubbing!"
             );
-        }
-
-        // Clean up
-        // SAFETY: test-only, single-threaded tokio runtime.
-        for (name, _) in &secrets {
-            unsafe { std::env::remove_var(name) };
         }
     }
 
@@ -1819,15 +1852,16 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_env_scrubbing_custom_var_hidden() {
+        let _env_lock = EnvLockGuard::new();
         // Verify that arbitrary env vars from the parent process
         // are NOT visible to child commands (end-to-end, not just unit).
         let tool = ShellTool::new();
         let ctx = JobContext::default();
 
         // Set a fake secret in the parent process env
-        unsafe { std::env::set_var("IRONCLAW_QA_TEST_SECRET", "supersecret123") };
+        let _secret_guard = EnvVarGuard::set("IRONCLAW_QA_TEST_SECRET", "supersecret123");
 
         let result = tool
             .execute(serde_json::json!({"command": "env"}), &ctx)
@@ -1843,9 +1877,6 @@ mod tests {
             !output.contains("supersecret123"),
             "secret value must not appear in child env output"
         );
-
-        // Clean up
-        unsafe { std::env::remove_var("IRONCLAW_QA_TEST_SECRET") };
     }
 
     #[tokio::test]

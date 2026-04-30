@@ -79,10 +79,35 @@ async def _stop_process(proc, sig=signal.SIGINT, timeout=5):
     await _drain_pipes()
 
 
+async def _drain_stream_to_file(stream, path):
+    """Drain an asyncio subprocess stream to a file in a background task.
+
+    Without an active drainer, ``asyncio.create_subprocess_exec(stdout=PIPE,
+    stderr=PIPE)`` deadlocks under sustained log output: the kernel pipe
+    buffer fills (64 KiB on Linux, 16-64 KiB on macOS depending on tuning)
+    and the child blocks on its next stdout/stderr write. For ironclaw
+    with ``RUST_LOG=ironclaw=info`` and an SSE-driven test that pumps
+    requests, that translates into the gateway freezing mid-request and
+    SSE events never arriving — exactly the failure mode of
+    test_wasm_tool_first_chat_auth_attempt_emits_auth_url. Mirrors the
+    sync threading.Thread version in scripts/live_canary/common.py.
+    """
+    try:
+        with open(path, "ab", buffering=0) as fh:
+            while True:
+                chunk = await stream.readline()
+                if not chunk:
+                    return
+                fh.write(chunk)
+    except Exception:
+        pass
+
+
 async def _start_mock_google_api():
     from aiohttp import web
 
     received_tokens: list[str] = []
+    received_requests: list[str] = []
     messages = [
         {
             "id": "msg-1",
@@ -109,7 +134,11 @@ async def _start_mock_google_api():
         received_tokens.append(token)
         return token
 
+    def _record_request(request: web.Request) -> None:
+        received_requests.append(f"{request.method} {request.path}")
+
     async def handle_drive_files(request: web.Request) -> web.Response:
+        _record_request(request)
         if _authorized(request) is None:
             return web.json_response({"error": "missing_auth"}, status=401)
         return web.json_response(
@@ -122,9 +151,11 @@ async def _start_mock_google_api():
         )
 
     async def handle_userinfo(request: web.Request) -> web.Response:
+        _record_request(request)
         return web.json_response({"email": "matrix@example.com", "name": "Matrix User"})
 
     async def handle_gmail_messages(request: web.Request) -> web.Response:
+        _record_request(request)
         if _authorized(request) is None:
             return web.json_response({"error": "missing_auth"}, status=401)
         return web.json_response(
@@ -138,6 +169,7 @@ async def _start_mock_google_api():
         )
 
     async def handle_gmail_message(request: web.Request) -> web.Response:
+        _record_request(request)
         if _authorized(request) is None:
             return web.json_response({"error": "missing_auth"}, status=401)
         message_id = request.match_info["message_id"]
@@ -149,6 +181,9 @@ async def _start_mock_google_api():
     async def handle_received_tokens(request: web.Request) -> web.Response:
         return web.json_response({"tokens": received_tokens})
 
+    async def handle_received_requests(request: web.Request) -> web.Response:
+        return web.json_response({"requests": received_requests})
+
     app = web.Application()
     app.router.add_get("/drive/v3/files", handle_drive_files)
     app.router.add_get("/oauth2/v1/userinfo", handle_userinfo)
@@ -156,6 +191,7 @@ async def _start_mock_google_api():
     app.router.add_get("/gmail/v1/users/me/messages", handle_gmail_messages)
     app.router.add_get("/gmail/v1/users/me/messages/{message_id}", handle_gmail_message)
     app.router.add_get("/__mock/received-tokens", handle_received_tokens)
+    app.router.add_get("/__mock/received-requests", handle_received_requests)
 
     runner = web.AppRunner(app)
     await runner.setup()
@@ -247,6 +283,26 @@ async def _seed_mock_llm_api_url(mock_llm_server: str, mock_api_url: str) -> Non
     response.raise_for_status()
 
 
+async def _pin_mock_llm_settings(base_url: str, mock_llm_server: str) -> None:
+    headers = {"Authorization": f"Bearer {AUTH_TOKEN}"}
+    writes = [
+        ("llm_backend", "openai_compatible"),
+        ("openai_compatible_base_url", mock_llm_server),
+        ("selected_model", "mock-model"),
+    ]
+    async with httpx.AsyncClient() as client:
+        for key, value in writes:
+            response = await client.put(
+                f"{base_url}/api/settings/{key}",
+                headers=headers,
+                json={"value": value},
+                timeout=15,
+            )
+            assert response.status_code in (200, 201, 204), (
+                f"failed to pin {key}: {response.status_code} {response.text[:300]}"
+            )
+
+
 async def _start_auth_matrix_server(
     ironclaw_binary: str,
     mock_llm_server: str,
@@ -312,6 +368,7 @@ async def _start_auth_matrix_server(
             "CLI_ENABLED": "false",
             "LLM_BACKEND": "openai_compatible",
             "LLM_BASE_URL": mock_llm_server,
+            "LLM_API_KEY": "mock-api-key",
             "LLM_MODEL": "mock-model",
             "DATABASE_BACKEND": "libsql",
             "LIBSQL_PATH": db_path,
@@ -336,6 +393,11 @@ async def _start_auth_matrix_server(
                 f"gmail.googleapis.com={mock_api_url},"
                 f"www.googleapis.com={mock_api_url}"
             ),
+            # Allow RUST_LOG passthrough from the test runner — the auth
+            # matrix fixture historically built its env from scratch
+            # which made it impossible to crank up logging from the
+            # outside. Forwarded here so debug runs work.
+            "RUST_LOG": os.environ.get("RUST_LOG", "ironclaw=info"),
         }
         _forward_coverage_env(env)
 
@@ -348,9 +410,24 @@ async def _start_auth_matrix_server(
             env=env,
         )
 
+        # Drain stdout/stderr to a temp log file so the kernel pipe buffer
+        # never fills. Without this, ironclaw's RUST_LOG=info output
+        # eventually blocks on stdout writes and the SSE event loop
+        # freezes mid-request. See _drain_stream_to_file's docstring.
+        # Log path lives outside home_dir so it survives tmpdir cleanup
+        # and can be inspected post-test for debugging.
+        log_path = os.environ.get(
+            "IRONCLAW_AUTH_MATRIX_LOG", "/tmp/ironclaw-auth-matrix-gateway.log"
+        )
+        drain_tasks = [
+            asyncio.create_task(_drain_stream_to_file(proc.stdout, log_path)),
+            asyncio.create_task(_drain_stream_to_file(proc.stderr, log_path)),
+        ]
+
         base_url = f"http://127.0.0.1:{gateway_port}"
         try:
             await wait_for_ready(f"{base_url}/api/health", timeout=60)
+            await _pin_mock_llm_settings(base_url, mock_llm_server)
             await _seed_mock_llm_api_url(mock_llm_server, mock_api_url)
             return {
                 "base_url": base_url,
@@ -364,6 +441,8 @@ async def _start_auth_matrix_server(
                 "tools_dir": tools_dir,
                 "channels_dir": channels_dir,
                 "proc": proc,
+                "drain_tasks": drain_tasks,
+                "log_path": log_path,
                 "tmpdirs": tmpdirs,
             }
         except Exception:
@@ -388,6 +467,15 @@ async def _shutdown_auth_matrix_server(server: dict, *, cleanup: bool = True) ->
         await _stop_process(proc, sig=signal.SIGINT, timeout=10)
         if proc.returncode is None:
             await _stop_process(proc, timeout=2)
+    # Cancel the stdout/stderr drainer tasks once the process is dead;
+    # they'll naturally exit on their next readline() returning empty,
+    # but cancelling guarantees no leaked tasks across test boundaries.
+    for task in server.get("drain_tasks", []):
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
     if cleanup:
         for tmpdir in server["tmpdirs"]:
             tmpdir.cleanup()
@@ -458,6 +546,7 @@ async def _start_auth_matrix_repl(
             "CLI_MODE": "repl",
             "LLM_BACKEND": "openai_compatible",
             "LLM_BASE_URL": mock_llm_server,
+            "LLM_API_KEY": "mock-api-key",
             "LLM_MODEL": "mock-model",
             "DATABASE_BACKEND": "libsql",
             "LIBSQL_PATH": os.path.join(db_tmpdir.name, "auth-matrix-repl.db"),
@@ -953,6 +1042,16 @@ async def _wait_for_mock_google_tokens(mock_api_url: str, *, timeout: float = 30
     raise AssertionError("Timed out waiting for Gmail HTTP execution against the mock API")
 
 
+async def _get_mock_google_requests(mock_api_url: str) -> list[str]:
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"{mock_api_url}/__mock/received-requests",
+            timeout=15,
+        )
+    response.raise_for_status()
+    return response.json().get("requests", [])
+
+
 async def _wait_for_mock_llm_request_contains(
     mock_llm_url: str, needle: str, *, timeout: float = 30.0
 ) -> dict:
@@ -1087,7 +1186,7 @@ async def _get_mock_mcp_state(mock_base_url: str) -> dict:
 async def _wait_for_refresh_request(
     mock_base_url: str,
     *,
-    timeout: float = 20.0,
+    timeout: float = 120.0,
 ) -> dict:
     for _ in range(int(timeout * 2)):
         state = await _get_mock_oauth_state(mock_base_url)
@@ -1356,7 +1455,7 @@ async def test_wasm_tool_first_chat_auth_attempt_emits_auth_url(auth_matrix_serv
     thread_id = await _create_thread(server["base_url"])
 
     event_type, payload, auth_url = await _wait_for_auth_event(
-        server["base_url"], thread_id, timeout=60
+        server["base_url"], thread_id, timeout=90
     )
 
     assert auth_url, payload
@@ -1367,7 +1466,7 @@ async def test_wasm_tool_first_chat_auth_attempt_emits_auth_url(auth_matrix_serv
         auth = payload["resume_kind"]["Authentication"]
         assert auth.get("credential_name") in {"gmail", "google_oauth_token"}, payload
 
-    history = await _wait_for_auth_prompt(server["base_url"], thread_id, timeout=60)
+    history = await _wait_for_auth_prompt(server["base_url"], thread_id, timeout=90)
     all_text = " ".join(turn.get("response") or "" for turn in history.get("turns", []))
     pending = history.get("pending_gate")
     assert (
@@ -1454,12 +1553,14 @@ async def test_mcp_same_server_multi_user_via_browser(browser, auth_matrix_serve
         owner_result = await send_chat_and_wait_for_terminal_message(
             owner_page,
             "check mock mcp search",
-            timeout=60000,
+            timeout=300000,
+            expected_text_contains="Mock MCP search result",
         )
         member_result = await send_chat_and_wait_for_terminal_message(
             member_page,
             "check mock mcp search",
-            timeout=60000,
+            timeout=300000,
+            expected_text_contains="Mock MCP search result",
         )
         assert owner_result["role"] == "assistant", owner_result
         assert member_result["role"] == "assistant", member_result
@@ -1555,6 +1656,7 @@ async def test_settings_first_gmail_auth_then_chat_runs(
     await _wait_for_extension(server["base_url"], "gmail")
     card = await _wait_for_auth_card(page)
     assert await card.get_attribute("data-extension-name") in {"gmail", "google_oauth_token"}
+    assert await _get_mock_google_requests(server["mock_api_url"]) == []
     auth_url = await _auth_oauth_url_from_card(page)
     assert auth_url, "Expected auth card to expose an OAuth URL"
     response = await _complete_callback(server["base_url"], auth_url, code="mock_auth_code")
@@ -1567,10 +1669,11 @@ async def test_settings_first_gmail_auth_then_chat_runs(
     await chat_input.press("Enter")
 
     thread_id = await _current_thread_id(page)
-    tokens = await _wait_for_mock_google_tokens(server["mock_api_url"], timeout=60.0)
+    await _wait_for_tool_call(server["base_url"], thread_id, "gmail", timeout=120.0)
+    tokens = await _wait_for_mock_google_tokens(server["mock_api_url"], timeout=120.0)
     assert tokens, "expected Gmail to hit the mock Google API after settings-first auth"
     history = await _wait_for_response_contains(
-        server["base_url"], thread_id, "Quarterly update", timeout=60.0
+        server["base_url"], thread_id, "Quarterly update", timeout=120.0
     )
     assert history.get("pending_gate") is None, history
     assert "Quarterly update" in " ".join(
