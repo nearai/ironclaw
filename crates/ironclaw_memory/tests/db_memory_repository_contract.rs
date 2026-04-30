@@ -104,6 +104,66 @@ async fn libsql_memory_document_filesystem_reads_and_writes_through_db_repositor
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
+async fn libsql_memory_repository_lists_none_project_documents_under_top_level_projects_directory()
+{
+    let (db, _dir) = libsql_db().await;
+    let repository = std::sync::Arc::new(LibSqlMemoryDocumentRepository::new(db));
+    repository.run_migrations().await.unwrap();
+    let filesystem = MemoryDocumentFilesystem::new(repository);
+    let document = VirtualPath::new(
+        "/memory/tenants/tenant-a/users/alice/projects/_none/projects/alpha/notes.md",
+    )
+    .unwrap();
+
+    filesystem
+        .write_file(&document, b"unscoped project note")
+        .await
+        .unwrap();
+
+    let entries = filesystem
+        .list_dir(&VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/_none").unwrap())
+        .await
+        .unwrap();
+    assert!(entries.iter().any(|entry| entry.name == "projects"));
+    assert_eq!(
+        filesystem.read_file(&document).await.unwrap(),
+        b"unscoped project note"
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_memory_repository_upserts_duplicate_document_paths() {
+    let (db, _dir) = libsql_db().await;
+    let repository = LibSqlMemoryDocumentRepository::new(db.clone());
+    repository.run_migrations().await.unwrap();
+
+    let path = MemoryDocumentPath::new("tenant-a", "alice", None, "MEMORY.md").unwrap();
+    let (first, second) = tokio::join!(
+        repository.write_document(&path, b"first"),
+        repository.write_document(&path, b"second")
+    );
+    first.unwrap();
+    second.unwrap();
+
+    let conn = db.connect().unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*), content FROM memory_documents WHERE user_id = ?1 AND path = ?2 GROUP BY content",
+            libsql::params!["tenant:tenant-a:user:alice:project:_none", "MEMORY.md"],
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().expect("one memory document row");
+    let count: i64 = row.get(0).unwrap();
+    let content: String = row.get(1).unwrap();
+    assert_eq!(count, 1);
+    assert!(content == "first" || content == "second");
+    assert!(rows.next().await.unwrap().is_none());
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
 async fn libsql_memory_repository_stores_text_in_existing_memory_documents_shape() {
     let (db, _dir) = libsql_db().await;
     let repository = LibSqlMemoryDocumentRepository::new(db.clone());
@@ -130,9 +190,9 @@ async fn libsql_memory_repository_stores_text_in_existing_memory_documents_shape
     let db_path: String = row.get(2).unwrap();
     let content: String = row.get(3).unwrap();
 
-    assert_eq!(user_id, "tenant:tenant-a:user:alice");
+    assert_eq!(user_id, "tenant:tenant-a:user:alice:project:project-1");
     assert_eq!(agent_id, None);
-    assert_eq!(db_path, "projects/project-1/notes/a.md");
+    assert_eq!(db_path, "notes/a.md");
     assert_eq!(content, "db backed note");
 }
 

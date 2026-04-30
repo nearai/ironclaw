@@ -172,9 +172,9 @@ LibSqlMemoryDocumentRepository
 PostgresMemoryDocumentRepository
 ```
 
-`ironclaw_filesystem` remains generic. `ironclaw_memory` owns memory-specific path grammar, scope parsing, repository delegation, directory inference, and write-after-persist index hook invocation.
+`ironclaw_filesystem` remains generic. `ironclaw_memory` owns memory-specific path grammar, scope parsing, repository delegation, directory inference, and best-effort write-after-persist index hook invocation.
 
-The PostgreSQL/libSQL repository adapters map file-shaped memory documents into the existing `memory_documents` table shape. The adapter stores scoped owner identity in the `user_id` column and maps project-scoped documents under `projects/{project_id}/...` so the backend remains compatible with the current document table model.
+The PostgreSQL/libSQL repository adapters map file-shaped memory documents into the existing `memory_documents` table shape. The adapter stores scoped owner identity, including the project id or `_none` sentinel, in the `user_id` column and keeps `path` as the user-visible relative document path. This avoids reserving ordinary top-level paths such as `projects/...` inside no-project memory scopes while staying compatible with the current document table shape.
 
 The current repository adapters intentionally touch only document rows:
 
@@ -190,7 +190,7 @@ memory_document_versions
 embedding/search index tables
 ```
 
-`RootFilesystem::read_file` and `write_file` expose file-shaped documents; the memory service/repository owns indexing, embedding, metadata inheritance, versioning, and search.
+`RootFilesystem::read_file` and `write_file` expose file-shaped documents; the memory service/repository owns indexing, embedding, metadata inheritance, versioning, and search. Repository writes are the source of truth; index refresh failures leave derived state stale but do not roll back or report the committed write as failed.
 
 ---
 

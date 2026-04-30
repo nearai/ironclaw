@@ -330,6 +330,42 @@ impl MemoryDocumentFilesystem {
     ) -> Result<Vec<MemoryDocumentPath>, FilesystemError> {
         self.repository.list_documents(scope).await
     }
+
+    async fn ensure_write_path_does_not_conflict(
+        &self,
+        path: &MemoryDocumentPath,
+    ) -> Result<(), FilesystemError> {
+        let documents = self.list_for_scope(path.scope()).await?;
+        let relative_path = path.relative_path();
+        let descendant_prefix = format!("{relative_path}/");
+        if documents
+            .iter()
+            .any(|document| document.relative_path().starts_with(&descendant_prefix))
+        {
+            return Err(memory_error(
+                path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+                FilesystemOperation::WriteFile,
+                "memory document path conflicts with an existing directory",
+            ));
+        }
+
+        let segments: Vec<&str> = relative_path.split('/').collect();
+        for end in 1..segments.len() {
+            let ancestor = segments[..end].join("/");
+            if documents
+                .iter()
+                .any(|document| document.relative_path() == ancestor)
+            {
+                return Err(memory_error(
+                    path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+                    FilesystemOperation::WriteFile,
+                    "memory document path conflicts with an existing file ancestor",
+                ));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -344,11 +380,16 @@ impl RootFilesystem for MemoryDocumentFilesystem {
 
     async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
         let document_path = self.parse_file_path(path, FilesystemOperation::WriteFile)?;
+        self.ensure_write_path_does_not_conflict(&document_path)
+            .await?;
         self.repository
             .write_document(&document_path, bytes)
             .await?;
         if let Some(indexer) = &self.indexer {
-            indexer.reindex_document(&document_path).await?;
+            // The repository is the source of truth. Indexing is derived state,
+            // so an index refresh failure must not make a committed write look
+            // like it failed to the filesystem caller.
+            let _ = indexer.reindex_document(&document_path).await;
         }
         Ok(())
     }
@@ -517,53 +558,29 @@ impl MemoryDocumentRepository for LibSqlMemoryDocumentRepository {
             .await?;
         let owner_key = scoped_memory_owner_key(path.scope());
         let db_path = db_path_for_memory_document(path);
-        let mut rows = conn
-            .query(
-                "SELECT id FROM memory_documents WHERE user_id = ?1 AND agent_id IS NULL AND path = ?2",
-                libsql::params![owner_key.as_str(), db_path.as_str()],
+        conn.execute(
+            r#"
+            INSERT INTO memory_documents (id, user_id, agent_id, path, content, metadata)
+            VALUES (?1, ?2, NULL, ?3, ?4, '{}')
+            ON CONFLICT(user_id, path) WHERE agent_id IS NULL DO UPDATE SET
+                content = excluded.content,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            "#,
+            libsql::params![
+                uuid::Uuid::new_v4().to_string(),
+                owner_key,
+                db_path,
+                content
+            ],
+        )
+        .await
+        .map_err(|error| {
+            memory_error(
+                virtual_path,
+                FilesystemOperation::WriteFile,
+                error.to_string(),
             )
-            .await
-            .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string()))?;
-        if rows
-            .next()
-            .await
-            .map_err(|error| {
-                memory_error(
-                    virtual_path.clone(),
-                    FilesystemOperation::WriteFile,
-                    error.to_string(),
-                )
-            })?
-            .is_some()
-        {
-            conn.execute(
-                "UPDATE memory_documents SET content = ?3, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE user_id = ?1 AND agent_id IS NULL AND path = ?2",
-                libsql::params![owner_key, db_path, content],
-            )
-            .await
-            .map_err(|error| memory_error(virtual_path, FilesystemOperation::WriteFile, error.to_string()))?;
-        } else {
-            conn.execute(
-                r#"
-                INSERT INTO memory_documents (id, user_id, agent_id, path, content, metadata)
-                VALUES (?1, ?2, NULL, ?3, ?4, '{}')
-                "#,
-                libsql::params![
-                    uuid::Uuid::new_v4().to_string(),
-                    owner_key,
-                    db_path,
-                    content
-                ],
-            )
-            .await
-            .map_err(|error| {
-                memory_error(
-                    virtual_path,
-                    FilesystemOperation::WriteFile,
-                    error.to_string(),
-                )
-            })?;
-        }
+        })?;
         Ok(())
     }
 
@@ -579,58 +596,29 @@ impl MemoryDocumentRepository for LibSqlMemoryDocumentRepository {
             .await?;
         let owner_key = scoped_memory_owner_key(scope);
         let mut documents = Vec::new();
-        if let Some(project_id) = scope.project_id() {
-            let prefix = format!("projects/{project_id}/");
-            let mut rows = conn
-                .query(
-                    "SELECT path FROM memory_documents WHERE user_id = ?1 AND agent_id IS NULL AND path LIKE ?2 ORDER BY path",
-                    libsql::params![owner_key, format!("{prefix}%")],
-                )
-                .await
-                .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::ListDir, error.to_string()))?;
-            while let Some(row) = rows.next().await.map_err(|error| {
+        let mut rows = conn
+            .query(
+                "SELECT path FROM memory_documents WHERE user_id = ?1 AND agent_id IS NULL ORDER BY path",
+                libsql::params![owner_key],
+            )
+            .await
+            .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::ListDir, error.to_string()))?;
+        while let Some(row) = rows.next().await.map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::ListDir,
+                error.to_string(),
+            )
+        })? {
+            let db_path: String = row.get(0).map_err(|error| {
                 memory_error(
                     virtual_path.clone(),
                     FilesystemOperation::ListDir,
                     error.to_string(),
                 )
-            })? {
-                let db_path: String = row.get(0).map_err(|error| {
-                    memory_error(
-                        virtual_path.clone(),
-                        FilesystemOperation::ListDir,
-                        error.to_string(),
-                    )
-                })?;
-                if let Some(memory_path) = memory_document_from_db_path(scope, &db_path) {
-                    documents.push(memory_path);
-                }
-            }
-        } else {
-            let mut rows = conn
-                .query(
-                    "SELECT path FROM memory_documents WHERE user_id = ?1 AND agent_id IS NULL AND path NOT LIKE 'projects/%' ORDER BY path",
-                    libsql::params![owner_key],
-                )
-                .await
-                .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::ListDir, error.to_string()))?;
-            while let Some(row) = rows.next().await.map_err(|error| {
-                memory_error(
-                    virtual_path.clone(),
-                    FilesystemOperation::ListDir,
-                    error.to_string(),
-                )
-            })? {
-                let db_path: String = row.get(0).map_err(|error| {
-                    memory_error(
-                        virtual_path.clone(),
-                        FilesystemOperation::ListDir,
-                        error.to_string(),
-                    )
-                })?;
-                if let Some(memory_path) = memory_document_from_db_path(scope, &db_path) {
-                    documents.push(memory_path);
-                }
+            })?;
+            if let Some(memory_path) = memory_document_from_db_path(scope, &db_path) {
+                documents.push(memory_path);
             }
         }
         Ok(documents)
@@ -651,6 +639,9 @@ CREATE TABLE IF NOT EXISTS memory_documents (
 );
 CREATE INDEX IF NOT EXISTS idx_memory_documents_user ON memory_documents(user_id);
 CREATE INDEX IF NOT EXISTS idx_memory_documents_path ON memory_documents(user_id, path);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_documents_reborn_document
+    ON memory_documents(user_id, path)
+    WHERE agent_id IS NULL;
 "#;
 
 /// PostgreSQL repository adapter for the existing `memory_documents` table shape.
@@ -738,31 +729,25 @@ impl MemoryDocumentRepository for PostgresMemoryDocumentRepository {
             .await?;
         let owner_key = scoped_memory_owner_key(path.scope());
         let db_path = db_path_for_memory_document(path);
-        let updated = client
+        client
             .execute(
-                "UPDATE memory_documents SET content = $3, updated_at = NOW() WHERE user_id = $1 AND agent_id IS NULL AND path = $2",
+                r#"
+                INSERT INTO memory_documents (user_id, agent_id, path, content, metadata)
+                VALUES ($1, NULL, $2, $3, '{}'::jsonb)
+                ON CONFLICT (user_id, path) WHERE agent_id IS NULL DO UPDATE SET
+                    content = EXCLUDED.content,
+                    updated_at = NOW()
+                "#,
                 &[&owner_key, &db_path, &content],
             )
             .await
-            .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string()))?;
-        if updated == 0 {
-            client
-                .execute(
-                    r#"
-                    INSERT INTO memory_documents (user_id, agent_id, path, content, metadata)
-                    VALUES ($1, NULL, $2, $3, '{}'::jsonb)
-                    "#,
-                    &[&owner_key, &db_path, &content],
+            .map_err(|error| {
+                memory_error(
+                    virtual_path,
+                    FilesystemOperation::WriteFile,
+                    error.to_string(),
                 )
-                .await
-                .map_err(|error| {
-                    memory_error(
-                        virtual_path,
-                        FilesystemOperation::WriteFile,
-                        error.to_string(),
-                    )
-                })?;
-        }
+            })?;
         Ok(())
     }
 
@@ -777,23 +762,13 @@ impl MemoryDocumentRepository for PostgresMemoryDocumentRepository {
             .client(virtual_path.clone(), FilesystemOperation::ListDir)
             .await?;
         let owner_key = scoped_memory_owner_key(scope);
-        let rows = if let Some(project_id) = scope.project_id() {
-            let prefix = format!("projects/{project_id}/");
-            client
-                .query(
-                    "SELECT path FROM memory_documents WHERE user_id = $1 AND agent_id IS NULL AND path LIKE $2 ORDER BY path",
-                    &[&owner_key, &format!("{prefix}%")],
-                )
-                .await
-        } else {
-            client
-                .query(
-                    "SELECT path FROM memory_documents WHERE user_id = $1 AND agent_id IS NULL AND path NOT LIKE 'projects/%' ORDER BY path",
-                    &[&owner_key],
-                )
-                .await
-        }
-        .map_err(|error| memory_error(virtual_path, FilesystemOperation::ListDir, error.to_string()))?;
+        let rows = client
+            .query(
+                "SELECT path FROM memory_documents WHERE user_id = $1 AND agent_id IS NULL ORDER BY path",
+                &[&owner_key],
+            )
+            .await
+            .map_err(|error| memory_error(virtual_path, FilesystemOperation::ListDir, error.to_string()))?;
 
         Ok(rows
             .into_iter()
@@ -820,19 +795,24 @@ CREATE TABLE IF NOT EXISTS memory_documents (
 );
 CREATE INDEX IF NOT EXISTS idx_memory_documents_user ON memory_documents(user_id);
 CREATE INDEX IF NOT EXISTS idx_memory_documents_path ON memory_documents(user_id, path);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_documents_reborn_document
+    ON memory_documents(user_id, path)
+    WHERE agent_id IS NULL;
 "#;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn scoped_memory_owner_key(scope: &MemoryDocumentScope) -> String {
-    format!("tenant:{}:user:{}", scope.tenant_id(), scope.user_id())
+    format!(
+        "tenant:{}:user:{}:project:{}",
+        scope.tenant_id(),
+        scope.user_id(),
+        scope.project_id().unwrap_or("_none")
+    )
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn db_path_for_memory_document(path: &MemoryDocumentPath) -> String {
-    match path.project_id() {
-        Some(project_id) => format!("projects/{project_id}/{}", path.relative_path()),
-        None => path.relative_path().to_string(),
-    }
+    path.relative_path().to_string()
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -840,12 +820,7 @@ fn memory_document_from_db_path(
     scope: &MemoryDocumentScope,
     db_path: &str,
 ) -> Option<MemoryDocumentPath> {
-    let relative_path = match scope.project_id() {
-        Some(project_id) => db_path.strip_prefix(&format!("projects/{project_id}/"))?,
-        None if db_path.starts_with("projects/") => return None,
-        None => db_path,
-    };
-    validated_memory_relative_path(relative_path.to_string())
+    validated_memory_relative_path(db_path.to_string())
         .ok()
         .map(|relative_path| MemoryDocumentPath {
             scope: scope.clone(),

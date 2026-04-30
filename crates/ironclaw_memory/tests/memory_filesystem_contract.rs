@@ -226,6 +226,47 @@ async fn memory_filesystem_invokes_indexer_after_writes() {
 }
 
 #[tokio::test]
+async fn memory_filesystem_rejects_file_directory_prefix_conflicts() {
+    let repo = Arc::new(InMemoryMemoryDocumentRepository::new());
+    let fs = MemoryDocumentFilesystem::new(repo);
+    let file_path =
+        VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/_none/notes").unwrap();
+    let child_path =
+        VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/_none/notes/a.md").unwrap();
+
+    fs.write_file(&file_path, b"plain file").await.unwrap();
+    let err = fs.write_file(&child_path, b"child").await.unwrap_err();
+    assert!(matches!(err, FilesystemError::Backend { .. }));
+    assert!(err.to_string().contains("existing file ancestor"));
+
+    let repo = Arc::new(InMemoryMemoryDocumentRepository::new());
+    let fs = MemoryDocumentFilesystem::new(repo);
+    fs.write_file(&child_path, b"child").await.unwrap();
+    let err = fs.write_file(&file_path, b"plain file").await.unwrap_err();
+    assert!(matches!(err, FilesystemError::Backend { .. }));
+    assert!(err.to_string().contains("existing directory"));
+}
+
+#[tokio::test]
+async fn memory_filesystem_reports_success_when_best_effort_indexer_fails_after_persist() {
+    let repo = Arc::new(InMemoryMemoryDocumentRepository::new());
+    let indexer = Arc::new(FailingIndexer);
+    let fs = MemoryDocumentFilesystem::new(repo.clone()).with_indexer(indexer);
+    let path =
+        VirtualPath::new("/memory/tenants/tenant-a/users/alice/projects/_none/MEMORY.md").unwrap();
+    let key = MemoryDocumentPath::new("tenant-a", "alice", None, "MEMORY.md").unwrap();
+
+    fs.write_file(&path, b"persisted despite derived index failure")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        repo.read_document(&key).await.unwrap().unwrap(),
+        b"persisted despite derived index failure"
+    );
+}
+
+#[tokio::test]
 async fn memory_filesystem_rejects_non_document_memory_paths() {
     let repo = Arc::new(InMemoryMemoryDocumentRepository::new());
     let fs = MemoryDocumentFilesystem::new(repo);
@@ -251,5 +292,25 @@ impl MemoryDocumentIndexer for RecordingIndexer {
     async fn reindex_document(&self, path: &MemoryDocumentPath) -> Result<(), FilesystemError> {
         self.paths.lock().unwrap().push(path.clone());
         Ok(())
+    }
+}
+
+struct FailingIndexer;
+
+#[async_trait]
+impl MemoryDocumentIndexer for FailingIndexer {
+    async fn reindex_document(&self, path: &MemoryDocumentPath) -> Result<(), FilesystemError> {
+        Err(FilesystemError::Backend {
+            path: VirtualPath::new(format!(
+                "/memory/tenants/{}/users/{}/projects/{}/{}",
+                path.tenant_id(),
+                path.user_id(),
+                path.project_id().unwrap_or("_none"),
+                path.relative_path()
+            ))
+            .unwrap(),
+            operation: ironclaw_filesystem::FilesystemOperation::WriteFile,
+            reason: "index unavailable".to_string(),
+        })
     }
 }
