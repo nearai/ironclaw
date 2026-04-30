@@ -28,7 +28,6 @@ use ironclaw_host_api::{
     ApprovalRequestId, CapabilityDescriptor, CapabilityId, CorrelationId, ExecutionContext,
     ProcessId, ResourceEstimate, ResourceScope, ResourceUsage, RuntimeKind, SecretHandle,
 };
-use ironclaw_trust::TrustDecision;
 use ironclaw_host_api::{
     RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
     RuntimeHttpEgressResponse,
@@ -38,6 +37,7 @@ use ironclaw_network::{
 };
 use ironclaw_safety::{LeakDetector, params_contain_manual_credentials};
 use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStoreError};
+use ironclaw_trust::TrustDecision;
 use secrecy::ExposeSecret;
 use serde_json::Value;
 use std::fmt;

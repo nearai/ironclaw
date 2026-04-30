@@ -33,16 +33,20 @@ async fn mcp_lane_dispatches_manifest_transport_and_reconciles_through_dispatche
     assert_eq!(result.runtime, RuntimeKind::Mcp);
     assert_eq!(result.output, json!({"items":["issue-1"]}));
     assert_eq!(result.receipt.status, ReservationStatus::Reconciled);
-    assert_eq!(result.usage.process_count, 1);
+    assert_eq!(result.usage.process_count, 0);
     assert_eq!(result.usage.wall_clock_ms, 9);
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
     assert!(governor.usage_for(&account).output_bytes > 0);
 
     let requests = client.requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].transport, "stdio");
-    assert_eq!(requests[0].command.as_deref(), Some("github-mcp"));
-    assert_eq!(requests[0].args, vec!["--stdio".to_string()]);
+    assert_eq!(requests[0].transport, "http");
+    assert_eq!(
+        requests[0].url.as_deref(),
+        Some("https://mcp.example.test/rpc")
+    );
+    assert_eq!(requests[0].command, None);
+    assert!(requests[0].args.is_empty());
     assert_eq!(requests[0].input, json!({"query":"ironclaw"}));
 
     assert_event_kinds(
@@ -205,6 +209,10 @@ impl RecordingMcpClient {
 
 #[async_trait]
 impl McpClient for RecordingMcpClient {
+    fn uses_host_mediated_http_egress(&self) -> bool {
+        true
+    }
+
     async fn call_tool(&self, request: McpClientRequest) -> Result<McpClientOutput, String> {
         self.requests.lock().unwrap().push(request);
         self.output.clone()
@@ -316,6 +324,8 @@ fn mcp_error_kind(error: &McpError) -> RuntimeDispatchErrorKind {
         McpError::Resource(_) => RuntimeDispatchErrorKind::Resource,
         McpError::Client { .. } => RuntimeDispatchErrorKind::Client,
         McpError::UnsupportedTransport { .. } => RuntimeDispatchErrorKind::UnsupportedRunner,
+        McpError::HostHttpEgressRequired { .. } => RuntimeDispatchErrorKind::NetworkDenied,
+        McpError::ExternalStdioTransportUnsupported => RuntimeDispatchErrorKind::UnsupportedRunner,
         McpError::ExtensionRuntimeMismatch { .. } => {
             RuntimeDispatchErrorKind::ExtensionRuntimeMismatch
         }
@@ -335,9 +345,8 @@ trust = "third_party"
 
 [runtime]
 kind = "mcp"
-transport = "stdio"
-command = "github-mcp"
-args = ["--stdio"]
+transport = "http"
+url = "https://mcp.example.test/rpc"
 
 [[capabilities]]
 id = "github-mcp.search"
