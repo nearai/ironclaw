@@ -407,6 +407,35 @@ pub trait TransportAdapter: Send + Sync {
     }
 }
 
+/// Per-adapter result from [`TransportRegistry::start_all`]. Callers decide
+/// whether to treat partial failure as fatal.
+#[derive(Debug)]
+pub struct TransportAdapterStartReport {
+    pub adapter_id: TransportAdapterId,
+    pub result: Result<(), TransportError>,
+}
+
+/// Per-adapter result from [`TransportRegistry::health_check_all`]. Always
+/// reports every registered adapter — a failing adapter never short-circuits
+/// the rest of the registry.
+#[derive(Debug)]
+pub struct TransportAdapterHealthReport {
+    pub adapter_id: TransportAdapterId,
+    pub result: Result<TransportHealth, TransportError>,
+}
+
+impl TransportAdapterHealthReport {
+    /// Materialize the report into the previous map shape for callers that
+    /// only need success entries. Failed adapters are omitted; inspect the
+    /// reports directly to surface them.
+    pub fn into_map_lossy(reports: Vec<Self>) -> BTreeMap<TransportAdapterId, TransportHealth> {
+        reports
+            .into_iter()
+            .filter_map(|report| report.result.ok().map(|h| (report.adapter_id, h)))
+            .collect()
+    }
+}
+
 /// Registry for named transport adapters.
 #[derive(Default)]
 pub struct TransportRegistry {
@@ -463,10 +492,14 @@ impl TransportRegistry {
         Ok(adapters.remove(adapter_id))
     }
 
+    /// Start every registered adapter. Returns one [`TransportAdapterStartReport`]
+    /// per adapter so callers can decide their own partial-success policy. The
+    /// registry no longer hides N-1 errors when one adapter happens to start
+    /// successfully.
     pub async fn start_all(
         &self,
         sink: Arc<dyn TransportIngressSink>,
-    ) -> Result<(), TransportError> {
+    ) -> Result<Vec<TransportAdapterStartReport>, TransportError> {
         let entries = self.snapshot_entries()?;
         if entries.is_empty() {
             return Err(TransportError::new(
@@ -475,34 +508,12 @@ impl TransportRegistry {
             ));
         }
 
-        let mut started = 0usize;
-        let mut first_error = None;
+        let mut reports = Vec::with_capacity(entries.len());
         for (adapter_id, adapter) in entries {
-            match adapter.start(sink.clone()).await {
-                Ok(()) => started += 1,
-                Err(error) => {
-                    first_error.get_or_insert_with(|| {
-                        TransportError::new(
-                            error.kind(),
-                            format!(
-                                "transport adapter '{adapter_id}' failed to start: {}",
-                                error.safe_reason()
-                            ),
-                        )
-                    });
-                }
-            }
+            let result = adapter.start(sink.clone()).await;
+            reports.push(TransportAdapterStartReport { adapter_id, result });
         }
-
-        if started == 0 {
-            return Err(first_error.unwrap_or_else(|| {
-                TransportError::new(
-                    TransportErrorKind::StartupFailed,
-                    "no transport adapters started successfully",
-                )
-            }));
-        }
-        Ok(())
+        Ok(reports)
     }
 
     pub async fn deliver(
@@ -522,23 +533,46 @@ impl TransportRegistry {
         adapter.deliver(egress).await
     }
 
+    /// Health-check every registered adapter. Always visits every adapter and
+    /// returns one [`TransportAdapterHealthReport`] entry per adapter; one
+    /// failing adapter does not short-circuit the others.
     pub async fn health_check_all(
         &self,
-    ) -> Result<BTreeMap<TransportAdapterId, TransportHealth>, TransportError> {
+    ) -> Result<Vec<TransportAdapterHealthReport>, TransportError> {
         let entries = self.snapshot_entries()?;
-        let mut results = BTreeMap::new();
+        let mut reports = Vec::with_capacity(entries.len());
         for (adapter_id, adapter) in entries {
-            results.insert(adapter_id, adapter.health_check().await?);
+            let result = adapter.health_check().await;
+            reports.push(TransportAdapterHealthReport { adapter_id, result });
         }
-        Ok(results)
+        Ok(reports)
     }
 
+    /// Shut down every registered adapter best-effort. The first error is
+    /// retained for the caller, but later adapters are still shut down so a
+    /// flaky adapter cannot leak background tasks for the rest of the registry.
+    /// Per-adapter failures are not logged here — the contract crate is
+    /// dependency-light by design; callers in the host crate emit telemetry.
     pub async fn shutdown_all(&self) -> Result<(), TransportError> {
-        let adapters = self.snapshot_adapters()?;
-        for adapter in adapters {
-            adapter.shutdown().await?;
+        let entries = self.snapshot_entries()?;
+        let mut first_error: Option<TransportError> = None;
+        for (adapter_id, adapter) in entries {
+            if let Err(error) = adapter.shutdown().await
+                && first_error.is_none()
+            {
+                first_error = Some(TransportError::new(
+                    error.kind(),
+                    format!(
+                        "transport adapter '{adapter_id}' failed to shutdown: {}",
+                        error.safe_reason()
+                    ),
+                ));
+            }
         }
-        Ok(())
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     pub fn adapter_ids(&self) -> Result<Vec<TransportAdapterId>, TransportError> {
@@ -567,16 +601,6 @@ impl TransportRegistry {
                 format!("transport adapter '{adapter_id}' is not registered"),
             )
         })
-    }
-
-    fn snapshot_adapters(&self) -> Result<Vec<Arc<dyn TransportAdapter>>, TransportError> {
-        let adapters = self.adapters.read().map_err(|_| {
-            TransportError::new(
-                TransportErrorKind::Internal,
-                "transport registry lock poisoned",
-            )
-        })?;
-        Ok(adapters.values().cloned().collect())
     }
 
     fn snapshot_entries(&self) -> Result<Vec<RegisteredAdapter>, TransportError> {
@@ -637,13 +661,19 @@ impl fmt::Display for TransportErrorKind {
 pub struct TransportError {
     kind: TransportErrorKind,
     reason: String,
+    /// Original, pre-redaction reason. Local-only, never serialized over the
+    /// transport boundary; available only via `debug_reason()` to host code
+    /// that already has process-local trust to read sensitive context.
+    raw_reason: String,
 }
 
 impl TransportError {
     pub fn new(kind: TransportErrorKind, reason: impl Into<String>) -> Self {
+        let raw = reason.into();
         Self {
             kind,
-            reason: sanitize_reason(reason.into()),
+            reason: sanitize_reason(&raw),
+            raw_reason: raw,
         }
     }
 
@@ -651,12 +681,23 @@ impl TransportError {
         self.kind
     }
 
+    /// Sanitized reason safe to surface across the transport boundary, in
+    /// telemetry, and to remote peers. Always free of credentials, paths, and
+    /// process-local context.
     pub fn safe_reason(&self) -> &str {
         &self.reason
     }
+
+    /// Pre-redaction reason for in-process debugging only. Must NEVER be
+    /// included in serialized output, returned to remote peers, or logged at
+    /// `info`/`warn` level on shared infrastructure. Use `safe_reason()` for
+    /// anything that crosses a trust boundary.
+    pub fn debug_reason(&self) -> &str {
+        &self.raw_reason
+    }
 }
 
-fn sanitize_reason(reason: String) -> String {
+fn sanitize_reason(reason: &str) -> String {
     let trimmed = reason.trim();
     if trimmed.is_empty() {
         return "unspecified".to_string();
@@ -667,14 +708,32 @@ fn sanitize_reason(reason: String) -> String {
         "authorization",
         "bearer ",
         "password",
+        "passphrase",
         "secret",
         "token",
         "api_key",
         "apikey",
+        "api-key",
+        "x-api-key",
         "sk-",
+        "sk_live_",
+        "sk_test_",
+        "pk_live_",
+        "pk_test_",
+        "ssh-rsa",
+        "ssh-ed25519",
+        "begin private",
+        "begin rsa",
+        "private_key",
+        "-----begin",
+        "aws_access_key_id",
+        "aws_secret",
         "/users/",
+        "/home/",
         "\\users\\",
         ".ironclaw",
+        ".ssh/",
+        ".aws/",
     ];
     if sensitive_markers
         .iter()

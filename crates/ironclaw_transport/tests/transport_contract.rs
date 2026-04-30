@@ -242,26 +242,41 @@ async fn registry_start_all_keeps_starting_after_adapter_failures() {
         .register(healthy.clone())
         .expect("register healthy");
 
-    registry
+    let reports = registry
         .start_all(Arc::new(RecordingSink::default()))
         .await
-        .expect("one healthy adapter should allow startup to continue");
+        .expect("start_all should not fail at the registry level");
+    assert_eq!(reports.len(), 2);
+    let failed: Vec<_> = reports.iter().filter(|r| r.result.is_err()).collect();
+    let succeeded: Vec<_> = reports.iter().filter(|r| r.result.is_ok()).collect();
+    assert_eq!(failed.len(), 1, "one adapter should report failure");
+    assert_eq!(succeeded.len(), 1, "one adapter should report success");
 
     assert_eq!(failing.started_count().await, 1);
     assert_eq!(healthy.started_count().await, 1);
 }
 
 #[tokio::test]
-async fn registry_start_all_errors_when_no_adapter_starts() {
+async fn registry_start_all_reports_per_adapter_failures() {
     let failing = Arc::new(StartResultAdapter::new("failing", true));
     let registry = TransportRegistry::new();
     registry.register(failing).expect("register failing");
 
+    let reports = registry
+        .start_all(Arc::new(RecordingSink::default()))
+        .await
+        .expect("start_all should report per-adapter results, not aggregate-error");
+    assert_eq!(reports.len(), 1);
+    assert!(reports[0].result.is_err());
+}
+
+#[tokio::test]
+async fn registry_start_all_errors_when_no_adapters_registered() {
+    let registry = TransportRegistry::new();
     let error = registry
         .start_all(Arc::new(RecordingSink::default()))
         .await
-        .expect_err("all failed adapters should fail startup");
-
+        .expect_err("empty registry must error");
     assert_eq!(error.kind(), TransportErrorKind::StartupFailed);
 }
 
@@ -403,4 +418,121 @@ fn transport_errors_are_stable_and_redacted() {
     assert!(display.contains("delivery_failed"));
     assert!(!display.contains("sk-test-secret"));
     assert!(!display.contains("/Users/alice"));
+}
+
+/// Adapter whose health and shutdown selectively fail; used to exercise the
+/// best-effort policy in [`TransportRegistry::health_check_all`] and
+/// [`TransportRegistry::shutdown_all`].
+struct FlakyAdapter {
+    id: TransportAdapterId,
+    fail_health: bool,
+    fail_shutdown: bool,
+    shutdown_count: Mutex<usize>,
+}
+
+impl FlakyAdapter {
+    fn new(id: &str, fail_health: bool, fail_shutdown: bool) -> Self {
+        Self {
+            id: adapter_id(id),
+            fail_health,
+            fail_shutdown,
+            shutdown_count: Mutex::new(0),
+        }
+    }
+
+    async fn shutdown_count(&self) -> usize {
+        *self.shutdown_count.lock().await
+    }
+}
+
+#[async_trait]
+impl TransportAdapter for FlakyAdapter {
+    fn adapter_id(&self) -> &TransportAdapterId {
+        &self.id
+    }
+
+    async fn start(&self, _sink: Arc<dyn TransportIngressSink>) -> Result<(), TransportError> {
+        Ok(())
+    }
+
+    async fn deliver(
+        &self,
+        _egress: TransportEgress,
+    ) -> Result<TransportDeliveryAck, TransportError> {
+        unreachable!("flaky adapter is not used for delivery")
+    }
+
+    async fn health_check(&self) -> Result<TransportHealth, TransportError> {
+        if self.fail_health {
+            return Err(TransportError::new(
+                TransportErrorKind::Unavailable,
+                format!("{} unhealthy", self.id),
+            ));
+        }
+        Ok(TransportHealth::healthy())
+    }
+
+    async fn shutdown(&self) -> Result<(), TransportError> {
+        *self.shutdown_count.lock().await += 1;
+        if self.fail_shutdown {
+            return Err(TransportError::new(
+                TransportErrorKind::Internal,
+                format!("{} shutdown failed", self.id),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn registry_health_check_reports_per_adapter_and_does_not_short_circuit() {
+    let healthy = Arc::new(FlakyAdapter::new("healthy", false, false));
+    let unhealthy = Arc::new(FlakyAdapter::new("unhealthy", true, false));
+    let registry = TransportRegistry::new();
+    registry.register(healthy).expect("register healthy");
+    registry.register(unhealthy).expect("register unhealthy");
+
+    let reports = registry
+        .health_check_all()
+        .await
+        .expect("registry-level error not expected");
+    assert_eq!(reports.len(), 2);
+    let healthy_ids: Vec<_> = reports
+        .iter()
+        .filter(|r| r.result.is_ok())
+        .map(|r| r.adapter_id.as_str().to_string())
+        .collect();
+    let unhealthy_ids: Vec<_> = reports
+        .iter()
+        .filter(|r| r.result.is_err())
+        .map(|r| r.adapter_id.as_str().to_string())
+        .collect();
+    assert_eq!(healthy_ids, vec!["healthy".to_string()]);
+    assert_eq!(unhealthy_ids, vec!["unhealthy".to_string()]);
+}
+
+#[tokio::test]
+async fn registry_shutdown_visits_all_adapters_even_when_one_fails() {
+    let bad = Arc::new(FlakyAdapter::new("bad", false, true));
+    let good = Arc::new(FlakyAdapter::new("good", false, false));
+    let registry = TransportRegistry::new();
+    registry.register(bad.clone()).expect("register bad");
+    registry.register(good.clone()).expect("register good");
+
+    let result = registry.shutdown_all().await;
+    assert!(result.is_err(), "first failure must surface");
+    assert_eq!(bad.shutdown_count().await, 1);
+    assert_eq!(
+        good.shutdown_count().await,
+        1,
+        "good adapter must still be shut down even though earlier adapter failed"
+    );
+}
+
+#[tokio::test]
+async fn validate_public_id_rejects_path_traversal_and_spaces() {
+    assert!(TransportAdapterId::new("../etc/passwd").is_err());
+    assert!(TransportAdapterId::new("has space").is_err());
+    assert!(TransportAdapterId::new("").is_err());
+    assert!(TransportAdapterId::new("valid-id_123").is_ok());
 }
