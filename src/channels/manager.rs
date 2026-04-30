@@ -17,14 +17,22 @@ use crate::channels::transport_adapter::{
 use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use crate::error::ChannelError;
 
+/// Bound a transport registry and the ingress sink it dispatches into. The
+/// pair is updated atomically so a hot-add never observes one half of the
+/// composition without the other.
+#[derive(Clone)]
+struct TransportComposition {
+    registry: Arc<TransportRegistry>,
+    sink: Option<Arc<dyn TransportIngressSink>>,
+}
+
 /// Manages multiple input channels and merges their message streams.
 ///
 /// Includes an injection channel so background tasks (e.g., job monitors) can
 /// push messages into the agent loop without being a full `Channel` impl.
 pub struct ChannelManager {
     channels: Arc<RwLock<HashMap<String, Arc<dyn Channel>>>>,
-    transport_egress_registry: RwLock<Option<Arc<TransportRegistry>>>,
-    transport_ingress_sink: RwLock<Option<Arc<dyn TransportIngressSink>>>,
+    transport_composition: RwLock<Option<TransportComposition>>,
     inject_tx: mpsc::Sender<IncomingMessage>,
     /// Taken once in `start_all()` and merged into the stream.
     inject_rx: tokio::sync::Mutex<Option<mpsc::Receiver<IncomingMessage>>>,
@@ -36,8 +44,7 @@ impl ChannelManager {
         let (inject_tx, inject_rx) = mpsc::channel(64);
         Self {
             channels: Arc::new(RwLock::new(HashMap::new())),
-            transport_egress_registry: RwLock::new(None),
-            transport_ingress_sink: RwLock::new(None),
+            transport_composition: RwLock::new(None),
             inject_tx,
             inject_rx: tokio::sync::Mutex::new(Some(inject_rx)),
         }
@@ -81,18 +88,21 @@ impl ChannelManager {
 
         let channel: Arc<dyn Channel> = Arc::from(channel);
 
-        if let Some(registry) = self.transport_egress_registry().await {
+        // Snapshot the composition once: registry and sink are stored together,
+        // so a concurrent update cannot leave us with a registry but no sink.
+        if let Some(composition) = self.transport_composition_snapshot().await {
             let adapter = Arc::new(
                 ChannelTransportAdapter::new(Arc::clone(&channel))
                     .map_err(|error| transport_error_to_channel_error(&name, error))?,
             );
-            registry
+            composition
+                .registry
                 .replace(adapter.clone() as Arc<dyn TransportAdapter>)
                 .map_err(|error| transport_error_to_channel_error(&name, error))?;
 
-            if let Some(sink) = self.transport_ingress_sink().await {
+            if let Some(sink) = composition.sink {
                 if let Err(error) = adapter.start(sink).await {
-                    let _ = registry.unregister(adapter.adapter_id());
+                    let _ = composition.registry.unregister(adapter.adapter_id());
                     return Err(transport_error_to_channel_error(&name, error));
                 }
 
@@ -100,6 +110,10 @@ impl ChannelManager {
                 self.channels.write().await.insert(name.clone(), channel);
                 return Ok(());
             }
+            // Composition exists but has no sink yet (transport runtime not
+            // fully wired). Fall through to the legacy injection path so the
+            // channel still receives messages instead of being silently
+            // dropped on hot-add.
         }
 
         let stream = channel.start().await?;
@@ -185,33 +199,43 @@ impl ChannelManager {
     }
 
     /// Route future response/status egress through a Reborn transport registry.
+    /// The composition starts with no sink; pair it with [`Self::set_transport_runtime`]
+    /// to start hot-added channels.
     pub async fn set_transport_egress_registry(&self, registry: Arc<TransportRegistry>) {
-        *self.transport_egress_registry.write().await = Some(registry);
+        *self.transport_composition.write().await = Some(TransportComposition {
+            registry,
+            sink: None,
+        });
     }
 
     /// Route future egress through a Reborn registry and start hot-added
-    /// channels against the same ingress sink.
+    /// channels against the same ingress sink. Atomic with respect to readers.
     pub async fn set_transport_runtime(
         &self,
         registry: Arc<TransportRegistry>,
         sink: Arc<dyn TransportIngressSink>,
     ) {
-        *self.transport_egress_registry.write().await = Some(registry);
-        *self.transport_ingress_sink.write().await = Some(sink);
+        *self.transport_composition.write().await = Some(TransportComposition {
+            registry,
+            sink: Some(sink),
+        });
     }
 
     /// Clear Reborn transport egress routing and return to direct channel calls.
     pub async fn clear_transport_egress_registry(&self) {
-        *self.transport_egress_registry.write().await = None;
-        *self.transport_ingress_sink.write().await = None;
+        *self.transport_composition.write().await = None;
+    }
+
+    async fn transport_composition_snapshot(&self) -> Option<TransportComposition> {
+        self.transport_composition.read().await.clone()
     }
 
     async fn transport_egress_registry(&self) -> Option<Arc<TransportRegistry>> {
-        self.transport_egress_registry.read().await.clone()
-    }
-
-    async fn transport_ingress_sink(&self) -> Option<Arc<dyn TransportIngressSink>> {
-        self.transport_ingress_sink.read().await.clone()
+        self.transport_composition
+            .read()
+            .await
+            .as_ref()
+            .map(|c| Arc::clone(&c.registry))
     }
 
     /// Send a response to a specific channel.
@@ -282,13 +306,21 @@ impl ChannelManager {
 
     /// Broadcast a message to a specific user on a specific channel.
     ///
-    /// Used for proactive notifications like heartbeat alerts.
+    /// Used for proactive notifications like heartbeat alerts. Routes through
+    /// the Reborn transport registry when active so that broadcasts honor the
+    /// same egress policy as `respond`/`send_status` and do not silently
+    /// bypass the registry.
     pub async fn broadcast(
         &self,
         channel_name: &str,
         user_id: &str,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
+        if let Some(registry) = self.transport_egress_registry().await {
+            return self
+                .broadcast_via_registry(&registry, channel_name, user_id, response)
+                .await;
+        }
         let channels = self.channels.read().await;
         if let Some(channel) = channels.get(channel_name) {
             channel.broadcast(user_id, response).await
@@ -302,21 +334,59 @@ impl ChannelManager {
 
     /// Broadcast a message to all channels.
     ///
-    /// Sends to the specified user on every registered channel.
+    /// Sends to the specified user on every registered channel. Routes through
+    /// the Reborn transport registry when active.
     pub async fn broadcast_all(
         &self,
         user_id: &str,
         response: OutgoingResponse,
     ) -> Vec<(String, Result<(), ChannelError>)> {
+        let registry = self.transport_egress_registry().await;
+        let channel_names: Vec<String> = {
+            let channels = self.channels.read().await;
+            channels.keys().cloned().collect()
+        };
+        let mut results = Vec::with_capacity(channel_names.len());
+        if let Some(registry) = registry {
+            for name in channel_names {
+                let result = self
+                    .broadcast_via_registry(&registry, &name, user_id, response.clone())
+                    .await;
+                results.push((name, result));
+            }
+            return results;
+        }
         let channels = self.channels.read().await;
-        let mut results = Vec::new();
-
         for (name, channel) in channels.iter() {
             let result = channel.broadcast(user_id, response.clone()).await;
             results.push((name.clone(), result));
         }
 
         results
+    }
+
+    async fn broadcast_via_registry(
+        &self,
+        registry: &TransportRegistry,
+        channel_name: &str,
+        user_id: &str,
+        response: OutgoingResponse,
+    ) -> Result<(), ChannelError> {
+        // Synthesize a minimal IncomingMessage so we can reuse the
+        // outgoing-response → transport-reply mapping. The synthetic message
+        // carries the broadcast user as both user_id and sender_id; downstream
+        // adapters route by `route.scope.user_id` and `route.recipient`.
+        let synthetic = IncomingMessage::new(channel_name, user_id, String::new())
+            .with_sender_id(user_id.to_string());
+        let reply = transport_reply_from_channel_response(&synthetic, response)
+            .map_err(|error| transport_error_to_channel_error(channel_name, error))?;
+        let adapter_id = TransportAdapterId::new(channel_name)
+            .map_err(|error| transport_error_to_channel_error(channel_name, error))?;
+        registry
+            .deliver(&adapter_id, TransportEgress::Reply(reply))
+            .await
+            .map(|_| ())
+            .map_err(|error| transport_error_to_channel_error(channel_name, error))
     }
 
     /// Check health of all channels.
@@ -574,10 +644,37 @@ mod tests {
             .send_status(
                 "missing",
                 StatusUpdate::Thinking("still best effort".to_string()),
-                &serde_json::Value::Null,
+                &json!({"transport_user_id": "alice"}),
             )
             .await
             .expect("missing status should be ignored");
+    }
+
+    #[tokio::test]
+    async fn test_send_status_with_transport_registry_fails_closed_without_user_id() {
+        // Without an identifiable user, status egress must fail closed instead
+        // of routing to a synthetic "default" user that bridges tenants.
+        let manager = ChannelManager::new();
+        manager
+            .set_transport_egress_registry(Arc::new(TransportRegistry::new()))
+            .await;
+
+        let result = manager
+            .send_status(
+                "missing",
+                StatusUpdate::Thinking("no user metadata".to_string()),
+                &serde_json::Value::Null,
+            )
+            .await;
+        match result {
+            Err(ChannelError::SendFailed { reason, .. }) => {
+                assert!(
+                    reason.contains("missing user identity"),
+                    "expected fail-closed reason, got: {reason}"
+                );
+            }
+            other => panic!("expected SendFailed, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -597,10 +694,13 @@ mod tests {
             .send_status(
                 "gateway",
                 StatusUpdate::Thinking("url target is not a user id".to_string()),
-                &json!({"target": "https://example.com/hook"}),
+                &json!({
+                    "target": "https://example.com/hook",
+                    "transport_user_id": "alice",
+                }),
             )
             .await
-            .expect("status should route with default scope");
+            .expect("status should route with explicit user id");
 
         let captured = statuses.lock().expect("poisoned");
         assert_eq!(captured.len(), 1);
