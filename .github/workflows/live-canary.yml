@@ -50,7 +50,6 @@ on:
 
 permissions:
   contents: read
-  issues: write
 
 concurrency:
   group: live-canary-${{ github.event_name }}-${{ inputs.lane || github.event.schedule }}
@@ -493,21 +492,6 @@ jobs:
           name: live-canary-public-smoke
           path: artifacts/live-canary/
           retention-days: 14
-      - name: Open failure issue
-        if: failure() && github.event_name == 'schedule'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-        run: |
-          {
-            echo "Live canary lane \`public-smoke\` failed."
-            echo
-            echo "- Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-            echo "- Commit: ${GITHUB_SHA}"
-            echo "- Lane: public-smoke"
-            echo "- Provider: anthropic"
-          } > /tmp/live-canary-issue.md
-          gh issue create --repo "${REPO}" --title "Live canary failed: public-smoke" --body-file /tmp/live-canary-issue.md
 
   persona-rotating:
     name: Rotating Persona Live
@@ -552,21 +536,6 @@ jobs:
           name: live-canary-persona-rotating
           path: artifacts/live-canary/
           retention-days: 14
-      - name: Open failure issue
-        if: failure() && github.event_name == 'schedule'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-        run: |
-          {
-            echo "Live canary lane \`persona-rotating\` failed."
-            echo
-            echo "- Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-            echo "- Commit: ${GITHUB_SHA}"
-            echo "- Lane: persona-rotating"
-            echo "- Provider: anthropic"
-          } > /tmp/live-canary-issue.md
-          gh issue create --repo "${REPO}" --title "Live canary failed: persona-rotating" --body-file /tmp/live-canary-issue.md
 
   private-oauth:
     name: Private OAuth Live
@@ -607,20 +576,6 @@ jobs:
             artifacts/live-canary/**/trace-fixture-status.txt
             artifacts/live-canary/**/scrub-matches.txt
           retention-days: 7
-      - name: Open failure issue
-        if: failure() && github.event_name == 'schedule'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-        run: |
-          {
-            echo "Live canary lane \`private-oauth\` failed on the dedicated runner."
-            echo
-            echo "- Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-            echo "- Commit: ${GITHUB_SHA}"
-            echo "- Lane: private-oauth"
-          } > /tmp/live-canary-issue.md
-          gh issue create --repo "${REPO}" --title "Live canary failed: private-oauth" --body-file /tmp/live-canary-issue.md
 
   provider-matrix:
     name: Provider Matrix (${{ matrix.provider }})
@@ -692,22 +647,6 @@ jobs:
           name: live-canary-provider-${{ matrix.provider }}
           path: artifacts/live-canary/
           retention-days: 14
-      - name: Open failure issue
-        if: failure() && github.event_name == 'schedule'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PROVIDER: ${{ matrix.provider }}
-        run: |
-          {
-            echo "Live canary provider lane failed."
-            echo
-            echo "- Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-            echo "- Commit: ${GITHUB_SHA}"
-            echo "- Lane: provider-matrix"
-            echo "- Provider: ${PROVIDER}"
-          } > /tmp/live-canary-issue.md
-          gh issue create --repo "${REPO}" --title "Live canary failed: provider-matrix ${PROVIDER}" --body-file /tmp/live-canary-issue.md
 
   release-public-full:
     name: Release Public Full Live
@@ -837,18 +776,8 @@ jobs:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           CANARY_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           GITHUB_SHA: ${{ github.sha }}
-          # Reuse the same PAT auth-live-canary uses for GitHub
-          # fixture access; it's already scoped for nearai/ironclaw
-          # work and avoids minting a new secret. CANARY_ISSUES_TOKEN
-          # has priority over GH_TOKEN / GITHUB_TOKEN inside the
-          # notifier (see scripts/live-canary/notify_slack.py
-          # `--github-token` precedence).
-          CANARY_ISSUES_TOKEN: ${{ secrets.AUTH_LIVE_GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          # Only auto-open issues for scheduled runs — manual
-          # workflow_dispatch tests would otherwise flood the tracker
-          # while iterating on canary changes locally.
-          CANARY_CREATE_ISSUES: ${{ github.event_name == 'schedule' && '1' || '0' }}
+          CANARY_CREATE_ISSUES: "0"
         run: |
           # The notifier is intentionally side-effect-light: it exits 0 even on
           # failure so the canary run's overall status isn't masked by a flaky
