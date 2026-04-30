@@ -147,7 +147,12 @@ function loadHistory(before) {
             }
             pendingQueue.shift();
           } else {
-            addMessage('user', data.in_progress.user_input);
+            addMessage('user', data.in_progress.user_input, {
+              userMessageId: data.in_progress.user_message_id || null,
+              userAttachments: Array.isArray(data.in_progress.user_attachments)
+                ? data.in_progress.user_attachments
+                : [],
+            });
           }
         }
         showActivityThinking(ActivityEntry.t('activity.processing', 'Processing...'));

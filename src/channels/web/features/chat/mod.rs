@@ -1058,11 +1058,17 @@ fn turn_info_from_in_memory_turn(t: &crate::agent::session::Turn) -> TurnInfo {
                 .iter()
                 .map(|tc| (tc.tool_call_id.as_deref(), tc.result.as_ref())),
         ),
-        // In-memory turns are mid-flight: the persisted `<attachments>` XML
-        // hasn't been written yet, so we have nothing to extract URLs from.
-        // Once the turn lands in the DB and `build_turns_from_db_messages`
-        // takes over, the field gets populated from the persisted text.
-        user_attachments: Vec::new(),
+        // `Turn.user_input` is the *augmented* text: `thread.start_turn`
+        // (in `agent::thread_ops::process_user_input`) is called with
+        // `effective_content`, which already carries the `<attachments>`
+        // XML produced by `augment_with_attachments`. So in-memory turns
+        // have everything we need to surface server-side URLs — extract
+        // them the same way `build_turns_from_db_messages` does for the
+        // DB-persisted path. Without this, refreshing while the session
+        // is still in memory (the common case) returns no URLs and the
+        // chat falls back to file-card render even though the bytes
+        // are on disk.
+        user_attachments: crate::channels::web::util::extract_user_attachments(&t.user_input),
         narrative: t.narrative.clone(),
     }
 }
@@ -1081,6 +1087,10 @@ fn in_progress_from_thread(thread: &crate::agent::session::Thread) -> Option<InP
         state: "Processing".to_string(),
         user_input: turn.user_input.clone(),
         started_at: turn.started_at.to_rfc3339(),
+        // Same parse as `turn_info_from_in_memory_turn` — `Turn.user_input`
+        // already carries the augmented `<attachments>` block that
+        // `format_attachment` produced in `process_user_input`.
+        user_attachments: crate::channels::web::util::extract_user_attachments(&turn.user_input),
     })
 }
 
@@ -1230,6 +1240,7 @@ fn summary_live_state(summary: &crate::history::ConversationSummary) -> Option<S
         state: "Processing".to_string(),
         user_input: String::new(),
         started_at: started_at.to_string(),
+        user_attachments: Vec::new(),
     }))
     .then(|| live_state.clone())
 }
@@ -1362,6 +1373,68 @@ mod tests {
         );
     }
 
+    /// Regression for #1341 follow-up — `Turn.user_input` already carries
+    /// the augmented `<attachments>` block (set by `start_turn(effective_content)`
+    /// in `process_user_input`), so the in-memory path MUST surface the
+    /// same `user_attachments` URLs as the DB path. Earlier this returned
+    /// `Vec::new()` based on a wrong assumption that in-memory turns hadn't
+    /// run augmentation yet, which made every refresh-while-still-in-memory
+    /// degrade images to file cards.
+    #[test]
+    fn test_in_memory_turn_info_extracts_user_attachments_from_augmented_input() {
+        // Match what `format_attachment` writes for a v1-persisted image
+        // (project_path under `.ironclaw/attachments/<owner>/.legacy/...`).
+        let augmented = "look at this\n\n<attachments>\n\
+            <attachment index=\"1\" type=\"image\" filename=\"cat.png\" \
+            mime=\"image/png\" \
+            project_path=\".ironclaw/attachments/alice/.legacy/msg-1/cat.png\" \
+            size=\"1.6 MB\">\n[Image attached]\n</attachment>\n</attachments>";
+
+        let mut thread = crate::agent::session::Thread::new(Uuid::new_v4(), Some("gateway"));
+        thread.start_turn(augmented);
+
+        let info = turn_info_from_in_memory_turn(&thread.turns[0]);
+
+        assert_eq!(
+            info.user_attachments.len(),
+            1,
+            "in-memory turn should expose URLs the same way the DB path does",
+        );
+        assert_eq!(info.user_attachments[0].filename, "cat.png");
+        assert_eq!(
+            info.user_attachments[0].url, "/api/attachments/alice/.legacy/msg-1/cat.png",
+            "URL must map to the /api/attachments/ route the gateway serves",
+        );
+    }
+
+    /// Same regression on the `data.in_progress` shoulder of the response
+    /// shape — the frontend's in-progress fallback path renders this when
+    /// `turns[]` doesn't include the in-flight turn. Without these URLs
+    /// the file-card fallback fires.
+    #[test]
+    fn test_in_progress_from_thread_extracts_user_attachments() {
+        let augmented = "msg\n\n<attachments>\n\
+            <attachment index=\"1\" type=\"image\" filename=\"cat.png\" \
+            mime=\"image/png\" \
+            project_path=\".ironclaw/attachments/alice/.legacy/msg-1/cat.png\" \
+            size=\"1 KB\">\n[Image attached]\n</attachment>\n</attachments>";
+
+        let mut thread = crate::agent::session::Thread::new(Uuid::new_v4(), Some("gateway"));
+        thread.start_turn(augmented);
+        // `in_progress_from_thread` only returns Some when both the thread
+        // and the latest turn are in `Processing` state. `start_turn`
+        // already sets the turn to Processing; mark the thread to match.
+        thread.state = crate::agent::session::ThreadState::Processing;
+
+        let info = in_progress_from_thread(&thread).expect("processing → in_progress");
+
+        assert_eq!(info.user_attachments.len(), 1);
+        assert_eq!(
+            info.user_attachments[0].url,
+            "/api/attachments/alice/.legacy/msg-1/cat.png",
+        );
+    }
+
     /// Regression for #1993 — after a 502 mid-turn the response text can
     /// be persisted but the claimed tool call never completes. On chat
     /// reopen, naive rehydration dropped the in-progress flag and showed
@@ -1406,6 +1479,7 @@ mod tests {
                 state: "Processing".to_string(),
                 user_input: "send 'hi' to telegram".to_string(),
                 started_at,
+                user_attachments: Vec::new(),
             }),
         );
 
@@ -1472,6 +1546,7 @@ mod tests {
                 state: "Processing".to_string(),
                 user_input: "send 'hi' to telegram".to_string(),
                 started_at,
+                user_attachments: Vec::new(),
             }),
         );
 
@@ -1509,6 +1584,7 @@ mod tests {
                 state: "Processing".to_string(),
                 user_input: "What is 2+2?".to_string(),
                 started_at,
+                user_attachments: Vec::new(),
             }),
         );
 
@@ -1541,6 +1617,7 @@ mod tests {
                 state: "Processing".to_string(),
                 user_input: "What is 2+2?".to_string(),
                 started_at,
+                user_attachments: Vec::new(),
             }),
         );
 
@@ -1575,6 +1652,7 @@ mod tests {
                 started_at: (chrono::Utc::now()
                     - chrono::Duration::minutes(IN_PROGRESS_STALE_AFTER_MINUTES + 1))
                 .to_rfc3339(),
+                user_attachments: Vec::new(),
             }),
         );
 
@@ -1606,6 +1684,7 @@ mod tests {
                 state: "Processing".to_string(),
                 user_input: "Question".to_string(),
                 started_at,
+                user_attachments: Vec::new(),
             }),
         );
 
@@ -1639,6 +1718,7 @@ mod tests {
                 state: "Processing".to_string(),
                 user_input: "Legacy question".to_string(),
                 started_at: in_progress_started_at,
+                user_attachments: Vec::new(),
             }),
         );
 

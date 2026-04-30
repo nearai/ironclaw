@@ -201,6 +201,13 @@ pub struct InProgressInfo {
     pub state: String,
     pub user_input: String,
     pub started_at: String,
+    /// Same shape and meaning as `TurnInfo.user_attachments` — server-side
+    /// URLs for inline images so the chat surface can render them after
+    /// refresh even when the in-flight turn is rendered via the
+    /// `data.in_progress` fallback path (i.e. when it didn't land in
+    /// `turns[]`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub user_attachments: Vec<UserAttachmentInfo>,
 }
 
 // --- Approval ---

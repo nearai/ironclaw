@@ -675,26 +675,66 @@ const MAX_ATTACHMENT_SIZE_BYTES = 7 * 1024 * 1024; // 7 MB per attachment (match
 const MAX_TOTAL_ATTACHMENT_BYTES = 10 * 1024 * 1024; // 10 MB decoded per message
 const MAX_STAGED_ATTACHMENTS = 5;
 
-// JPEG compression knobs for client-side resize before upload. PNG/GIF/WebP
-// are left untouched so transparency and animation survive intact.
+// Image compression knobs for client-side resize before upload. The
+// pipeline:
+//   - Anything beyond IMAGE_COMPRESS_MAX_DIM gets resized via canvas.
+//   - JPEGs always re-encode to JPEG (no alpha to worry about).
+//   - PNGs sample the alpha channel of the resized canvas: if any pixel
+//     is non-opaque, we keep PNG to preserve transparency; if every
+//     pixel is opaque (typical for screenshots / phone-camera saves),
+//     we re-encode to JPEG to save 80%+ on the wire.
+//   - GIF / WebP / other bitmap MIMEs follow the same rule.
+// If the result is larger than the original (already-tight source PNG
+// of an icon, etc.), we fall back to the original and skip compression.
 const IMAGE_COMPRESS_MAX_DIM = 1600;
 const IMAGE_COMPRESS_QUALITY = 0.88;
+// MIME types we know how to round-trip through canvas. SVG and BMP and
+// other vector / unusual formats would lose fidelity; let them upload
+// as-is.
+const IMAGE_COMPRESS_RECODE_MIMES = new Set([
+  'image/jpeg', 'image/jpg', 'image/png', 'image/webp',
+]);
 
-// Re-encode a JPEG data URL to fit within IMAGE_COMPRESS_MAX_DIM. Returns
-// `null` to signal "no change" — if the source decode fails, the image is
-// already small enough, the canvas API is unavailable, or any other reason
-// to fall back to the original. The caller treats that null as "use the
-// untouched data URL".
-function compressJpegForUpload(dataUrl, mimeType) {
-  if (mimeType !== 'image/jpeg' && mimeType !== 'image/jpg') {
+// Sample the alpha channel of `canvas` to decide whether the image has
+// any transparent pixels. Returns `true` on the first non-opaque pixel
+// (early-out). Falls open (returns `true`) if `getImageData` throws
+// because of canvas tainting — better to keep PNG than silently drop
+// transparency.
+function canvasHasTransparency(canvas) {
+  try {
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return true;
+    const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    for (let i = 3; i < data.length; i += 4) {
+      if (data[i] < 255) return true;
+    }
+    return false;
+  } catch (_) {
+    return true;
+  }
+}
+
+// Re-encode an image data URL through canvas, downscaling to fit within
+// IMAGE_COMPRESS_MAX_DIM and choosing PNG vs JPEG output based on whether
+// the source has any transparent pixels. Returns `null` to signal "no
+// change" — caller falls back to the untouched original.
+function compressImageForUpload(dataUrl, mimeType) {
+  const lowerMime = (mimeType || '').toLowerCase();
+  if (!IMAGE_COMPRESS_RECODE_MIMES.has(lowerMime)) {
     return Promise.resolve(null);
   }
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => {
       try {
-        if (img.naturalWidth <= IMAGE_COMPRESS_MAX_DIM
-            && img.naturalHeight <= IMAGE_COMPRESS_MAX_DIM) {
+        const oversized = img.naturalWidth > IMAGE_COMPRESS_MAX_DIM
+          || img.naturalHeight > IMAGE_COMPRESS_MAX_DIM;
+        // For JPEGs: skip when both dimensions already fit — re-encoding
+        // would only lose quality. For PNGs: still pass through canvas
+        // when in-bounds *if* MIME translation could shrink it (an
+        // opaque PNG → JPEG re-encode is a big win even at native size).
+        const isOpaqueOrigin = lowerMime === 'image/jpeg' || lowerMime === 'image/jpg';
+        if (!oversized && isOpaqueOrigin) {
           resolve(null);
           return;
         }
@@ -711,14 +751,25 @@ function compressJpegForUpload(dataUrl, mimeType) {
         const ctx = canvas.getContext('2d');
         if (!ctx) { resolve(null); return; }
         ctx.drawImage(img, 0, 0, w, h);
-        const compressed = canvas.toDataURL('image/jpeg', IMAGE_COMPRESS_QUALITY);
-        // If the canvas roundtrip somehow produced a larger payload (highly
-        // compressed sources can do this), keep the original.
+        // Pick output MIME based on actual transparency, not source MIME.
+        // A PNG with no alpha pixels (the common screenshot case) gets
+        // a JPEG re-encode; a true alpha-using PNG keeps PNG.
+        let outMime = 'image/jpeg';
+        if (lowerMime === 'image/png' || lowerMime === 'image/webp') {
+          if (canvasHasTransparency(canvas)) {
+            outMime = 'image/png';
+          }
+        }
+        const compressed = outMime === 'image/png'
+          ? canvas.toDataURL('image/png')
+          : canvas.toDataURL('image/jpeg', IMAGE_COMPRESS_QUALITY);
+        // Bail if the re-encode is larger than the original (highly
+        // optimized source PNGs of icons can land here).
         if (compressed.length >= dataUrl.length) {
           resolve(null);
           return;
         }
-        resolve({ dataUrl: compressed, mimeType: 'image/jpeg' });
+        resolve({ dataUrl: compressed, mimeType: outMime });
       } catch (_) {
         resolve(null);
       }
@@ -728,13 +779,14 @@ function compressJpegForUpload(dataUrl, mimeType) {
   });
 }
 
-// Replace the filename's extension with `.jpg` so the persisted file matches
-// the post-compression bytes. Falls back to a synthesized name when the
-// caller didn't supply one.
-function withJpegExtension(filename) {
-  if (!filename) return 'image.jpg';
+// Replace the filename's extension to match the post-compression bytes.
+// `image/png` → `.png`, anything else (the common case after re-encode)
+// → `.jpg`.
+function withCompressedExtension(filename, outputMime) {
+  const ext = outputMime === 'image/png' ? '.png' : '.jpg';
+  if (!filename) return `image${ext}`;
   const dot = filename.lastIndexOf('.');
-  return dot > 0 ? filename.slice(0, dot) + '.jpg' : filename + '.jpg';
+  return dot > 0 ? filename.slice(0, dot) + ext : filename + ext;
 }
 
 // Approximate decoded bytes from a base64 data URL without re-decoding.
@@ -794,17 +846,18 @@ function handleAttachmentFiles(files) {
       const meta = dataUrl.substring(0, commaIdx);
       const parsedType = meta.replace('data:', '').replace(';base64', '');
       const mediaType = (!parsedType || parsedType === 'application/octet-stream') ? mimeType : parsedType;
-      // JPEGs over IMAGE_COMPRESS_MAX_DIM get re-encoded client-side so the
-      // upload payload (and downstream LLM context) stays bounded. PNG / GIF
-      // / WebP are left intact to preserve transparency or animation.
-      compressJpegForUpload(dataUrl, mediaType).then((compressed) => {
+      // Recode bitmap images client-side: oversized images get downscaled,
+      // and opaque PNGs get re-encoded as JPEG to drop ~80% of bytes
+      // (`compressImageForUpload` samples the alpha channel before
+      // committing to JPEG so true transparent PNGs keep PNG output).
+      compressImageForUpload(dataUrl, mediaType).then((compressed) => {
         const finalDataUrl = compressed ? compressed.dataUrl : dataUrl;
         const finalMime = compressed ? compressed.mimeType : mediaType;
         const finalCommaIdx = finalDataUrl.indexOf(',');
         const finalBase64 = finalDataUrl.substring(finalCommaIdx + 1);
         const finalSize = compressed ? dataUrlDecodedBytes(finalDataUrl) : file.size;
         const finalFilename = compressed
-          ? withJpegExtension(file.name)
+          ? withCompressedExtension(file.name, finalMime)
           : (file.name || null);
         stagedAttachments.push({
           kind: finalMime.startsWith('image/') ? 'image' : 'document',
