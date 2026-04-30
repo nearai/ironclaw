@@ -1,8 +1,7 @@
 use ironclaw_authorization::{CapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_host_api::{
-    CapabilityDispatchRequest, CapabilityDispatcher, Decision, DenyReason, InvocationFingerprint,
-    ProcessId,
+    CapabilityDispatchRequest, CapabilityDispatcher, Decision, DenyReason, ProcessId,
 };
 use ironclaw_processes::{ProcessManager, ProcessStart};
 use ironclaw_run_state::{
@@ -11,10 +10,11 @@ use ironclaw_run_state::{
 use tracing::warn;
 
 use crate::helpers::{
-    approval_not_approved_error_kind, capability_lease_error_kind,
+    CapabilityActionKind, approval_not_approved_error_kind, capability_lease_error_kind,
     claim_error_may_be_concurrent_resume, complete_run_after_side_effect, ensure_no_obligations,
-    fail_run_if_configured, matching_approval_lease, resume_context_mismatch_kind,
-    run_state_error_kind, validate_approval_request_matches_invocation,
+    fail_run_if_configured, invocation_fingerprint_for_kind, matching_approval_lease,
+    resume_context_mismatch_kind, run_state_error_kind,
+    validate_approval_request_matches_invocation,
 };
 use crate::{
     CapabilityInvocationError, CapabilityInvocationRequest, CapabilityInvocationResult,
@@ -116,7 +116,8 @@ where
             });
         }
 
-        let invocation_fingerprint = InvocationFingerprint::for_dispatch(
+        let invocation_fingerprint = invocation_fingerprint_for_kind(
+            CapabilityActionKind::Dispatch,
             &scope,
             &request.capability_id,
             &request.estimate,
@@ -190,6 +191,7 @@ where
                     &request.context,
                     &request.capability_id,
                     &request.estimate,
+                    CapabilityActionKind::Dispatch,
                 ) {
                     fail_run_if_configured(
                         self.run_state,
@@ -356,7 +358,8 @@ where
             });
         }
 
-        let invocation_fingerprint = InvocationFingerprint::for_dispatch(
+        let invocation_fingerprint = invocation_fingerprint_for_kind(
+            CapabilityActionKind::Dispatch,
             &scope,
             &request.capability_id,
             &request.estimate,
@@ -414,6 +417,22 @@ where
                 capability: request.capability_id,
                 status: approval.status,
             });
+        }
+        if let Err(error) = validate_approval_request_matches_invocation(
+            &approval.request,
+            &request.context,
+            &request.capability_id,
+            &request.estimate,
+            CapabilityActionKind::Dispatch,
+        ) {
+            fail_run_if_configured(
+                Some(run_state),
+                &scope,
+                invocation_id,
+                "ApprovalRequestMismatch",
+            )
+            .await;
+            return Err(error);
         }
         if approval.request.invocation_fingerprint.as_ref() != Some(&invocation_fingerprint) {
             fail_run_if_configured(
@@ -549,7 +568,21 @@ where
             Ok(dispatch) => dispatch,
             Err(error) => {
                 fail_run_if_configured(Some(run_state), &scope, invocation_id, "Dispatch").await;
-                return Err(CapabilityInvocationError::from(error));
+                let invocation_error = CapabilityInvocationError::from(error);
+                if let Err(revoke_error) = capability_leases
+                    .revoke(&scope, claimed_lease.grant.id)
+                    .await
+                {
+                    warn!(
+                        lease_id = %claimed_lease.grant.id,
+                        invocation_id = %invocation_id,
+                        capability_id = %capability_id,
+                        dispatch_error = %invocation_error,
+                        revoke_error_kind = capability_lease_error_kind(&revoke_error),
+                        "capability lease revoke failed after dispatch failure; lease may remain claimed",
+                    );
+                }
+                return Err(invocation_error);
             }
         };
 
@@ -577,6 +610,296 @@ where
         Ok(CapabilityInvocationResult { dispatch })
     }
 
+    pub async fn resume_spawn_json(
+        &self,
+        request: CapabilityResumeRequest,
+    ) -> Result<CapabilitySpawnResult, CapabilityInvocationError> {
+        let process_manager = self.process_manager.ok_or_else(|| {
+            CapabilityInvocationError::ProcessManagerMissing {
+                capability: request.capability_id.clone(),
+            }
+        })?;
+        let run_state =
+            self.run_state
+                .ok_or_else(|| CapabilityInvocationError::ResumeStoreMissing {
+                    capability: request.capability_id.clone(),
+                    store: "run_state",
+                })?;
+        let approval_requests = self.approval_requests.ok_or_else(|| {
+            CapabilityInvocationError::ResumeStoreMissing {
+                capability: request.capability_id.clone(),
+                store: "approval_requests",
+            }
+        })?;
+        let capability_leases = self.capability_leases.ok_or_else(|| {
+            CapabilityInvocationError::ResumeStoreMissing {
+                capability: request.capability_id.clone(),
+                store: "capability_leases",
+            }
+        })?;
+
+        let invocation_id = request.context.invocation_id;
+        let capability_id = request.capability_id.clone();
+        let scope = request.context.resource_scope.clone();
+        if request.context.validate().is_err() {
+            return Err(CapabilityInvocationError::AuthorizationDenied {
+                capability: request.capability_id,
+                reason: DenyReason::InternalInvariantViolation,
+            });
+        }
+
+        let invocation_fingerprint = invocation_fingerprint_for_kind(
+            CapabilityActionKind::Spawn,
+            &scope,
+            &request.capability_id,
+            &request.estimate,
+            &request.input,
+        )
+        .map_err(|source| CapabilityInvocationError::InvocationFingerprint {
+            capability: request.capability_id.clone(),
+            source,
+        })?;
+
+        let run_record = run_state
+            .get(&scope, invocation_id)
+            .await?
+            .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
+        if run_record.status != RunStatus::BlockedApproval {
+            return Err(CapabilityInvocationError::ResumeNotBlocked {
+                capability: request.capability_id,
+                status: run_record.status,
+            });
+        }
+        let capability_mismatch = run_record.capability_id != request.capability_id;
+        let approval_request_mismatch =
+            run_record.approval_request_id != Some(request.approval_request_id);
+        if capability_mismatch || approval_request_mismatch {
+            fail_run_if_configured(
+                Some(run_state),
+                &scope,
+                invocation_id,
+                "ResumeContextMismatch",
+            )
+            .await;
+            return Err(CapabilityInvocationError::ResumeContextMismatch {
+                capability: request.capability_id,
+                kind: resume_context_mismatch_kind(capability_mismatch, approval_request_mismatch),
+            });
+        }
+
+        let approval = approval_requests
+            .get(&scope, request.approval_request_id)
+            .await?
+            .ok_or(RunStateError::UnknownApprovalRequest {
+                request_id: request.approval_request_id,
+            })?;
+        if approval.status != ApprovalStatus::Approved {
+            if approval.status != ApprovalStatus::Pending {
+                fail_run_if_configured(
+                    Some(run_state),
+                    &scope,
+                    invocation_id,
+                    approval_not_approved_error_kind(approval.status),
+                )
+                .await;
+            }
+            return Err(CapabilityInvocationError::ApprovalNotApproved {
+                capability: request.capability_id,
+                status: approval.status,
+            });
+        }
+        if let Err(error) = validate_approval_request_matches_invocation(
+            &approval.request,
+            &request.context,
+            &request.capability_id,
+            &request.estimate,
+            CapabilityActionKind::Spawn,
+        ) {
+            fail_run_if_configured(
+                Some(run_state),
+                &scope,
+                invocation_id,
+                "ApprovalRequestMismatch",
+            )
+            .await;
+            return Err(error);
+        }
+        if approval.request.invocation_fingerprint.as_ref() != Some(&invocation_fingerprint) {
+            fail_run_if_configured(
+                Some(run_state),
+                &scope,
+                invocation_id,
+                "InvocationFingerprintMismatch",
+            )
+            .await;
+            return Err(CapabilityInvocationError::ApprovalFingerprintMismatch {
+                capability: request.capability_id,
+            });
+        }
+
+        let Some(descriptor) = self.registry.get_capability(&request.capability_id) else {
+            fail_run_if_configured(Some(run_state), &scope, invocation_id, "UnknownCapability")
+                .await;
+            return Err(CapabilityInvocationError::UnknownCapability {
+                capability: request.capability_id,
+            });
+        };
+
+        let Some(lease) = matching_approval_lease(
+            capability_leases,
+            &request.context,
+            &request.capability_id,
+            &invocation_fingerprint,
+        )
+        .await
+        else {
+            fail_run_if_configured(
+                Some(run_state),
+                &scope,
+                invocation_id,
+                "ApprovalLeaseMissing",
+            )
+            .await;
+            return Err(CapabilityInvocationError::ApprovalLeaseMissing {
+                capability: request.capability_id,
+            });
+        };
+        let mut authorized_context = request.context.clone();
+        authorized_context.grants.grants.push(lease.grant.clone());
+
+        match self
+            .authorizer
+            .authorize_spawn_with_trust(
+                &authorized_context,
+                descriptor,
+                &request.estimate,
+                &request.trust_decision,
+            )
+            .await
+        {
+            Decision::Allow { obligations } => {
+                if let Err(error) = ensure_no_obligations(&capability_id, obligations.into_vec()) {
+                    fail_run_if_configured(
+                        Some(run_state),
+                        &scope,
+                        invocation_id,
+                        "UnsupportedObligations",
+                    )
+                    .await;
+                    return Err(error);
+                }
+            }
+            Decision::Deny { reason } => {
+                fail_run_if_configured(
+                    Some(run_state),
+                    &scope,
+                    invocation_id,
+                    "AuthorizationDenied",
+                )
+                .await;
+                return Err(CapabilityInvocationError::AuthorizationDenied {
+                    capability: request.capability_id,
+                    reason,
+                });
+            }
+            Decision::RequireApproval { .. } => {
+                fail_run_if_configured(
+                    Some(run_state),
+                    &scope,
+                    invocation_id,
+                    "AuthorizationRequiresApproval",
+                )
+                .await;
+                return Err(CapabilityInvocationError::AuthorizationRequiresApproval {
+                    capability: request.capability_id,
+                });
+            }
+        }
+
+        let claimed_lease = match capability_leases
+            .claim(&scope, lease.grant.id, &invocation_fingerprint)
+            .await
+        {
+            Ok(lease) => lease,
+            Err(error) => {
+                if claim_error_may_be_concurrent_resume(&error) {
+                    warn!(
+                        lease_id = %lease.grant.id,
+                        invocation_id = %invocation_id,
+                        capability_id = %capability_id,
+                        error_kind = capability_lease_error_kind(&error),
+                        "spawn approval lease claim lost to a concurrent resume; leaving run state unchanged",
+                    );
+                } else {
+                    fail_run_if_configured(
+                        Some(run_state),
+                        &scope,
+                        invocation_id,
+                        "ApprovalLeaseClaim",
+                    )
+                    .await;
+                }
+                return Err(CapabilityInvocationError::Lease(Box::new(error)));
+            }
+        };
+
+        let process = match process_manager
+            .spawn(ProcessStart {
+                process_id: ProcessId::new(),
+                parent_process_id: authorized_context.process_id,
+                invocation_id,
+                scope: scope.clone(),
+                extension_id: descriptor.provider.clone(),
+                capability_id: request.capability_id,
+                runtime: descriptor.runtime,
+                grants: authorized_context.grants,
+                mounts: authorized_context.mounts,
+                estimated_resources: request.estimate,
+                resource_reservation_id: None,
+                input: request.input,
+            })
+            .await
+        {
+            Ok(process) => process,
+            Err(error) => {
+                fail_run_if_configured(Some(run_state), &scope, invocation_id, "ProcessSpawn")
+                    .await;
+                let invocation_error = CapabilityInvocationError::from(error);
+                if let Err(revoke_error) = capability_leases
+                    .revoke(&scope, claimed_lease.grant.id)
+                    .await
+                {
+                    warn!(
+                        lease_id = %claimed_lease.grant.id,
+                        invocation_id = %invocation_id,
+                        capability_id = %capability_id,
+                        process_error = %invocation_error,
+                        revoke_error_kind = capability_lease_error_kind(&revoke_error),
+                        "capability lease revoke failed after process spawn failure; lease may remain claimed",
+                    );
+                }
+                return Err(invocation_error);
+            }
+        };
+
+        if let Err(error) = capability_leases
+            .consume(&scope, claimed_lease.grant.id)
+            .await
+        {
+            warn!(
+                lease_id = %claimed_lease.grant.id,
+                invocation_id = %invocation_id,
+                capability_id = %capability_id,
+                error_kind = capability_lease_error_kind(&error),
+                "capability lease consume failed after successful process spawn; lease left in claimed state",
+            );
+        }
+
+        complete_run_after_side_effect(run_state, &scope, invocation_id, &capability_id, "spawn")
+            .await;
+        Ok(CapabilitySpawnResult { process })
+    }
+
     pub async fn spawn_json(
         &self,
         request: CapabilitySpawnRequest,
@@ -595,6 +918,18 @@ where
                 reason: DenyReason::InternalInvariantViolation,
             });
         }
+
+        let invocation_fingerprint = invocation_fingerprint_for_kind(
+            CapabilityActionKind::Spawn,
+            &scope,
+            &request.capability_id,
+            &request.estimate,
+            &request.input,
+        )
+        .map_err(|source| CapabilityInvocationError::InvocationFingerprint {
+            capability: request.capability_id.clone(),
+            source,
+        })?;
 
         if let Some(run_state) = self.run_state {
             run_state
@@ -651,14 +986,109 @@ where
                     reason,
                 });
             }
-            Decision::RequireApproval { .. } => {
-                fail_run_if_configured(
-                    self.run_state,
-                    &scope,
-                    invocation_id,
-                    "AuthorizationRequiresApproval",
-                )
-                .await;
+            Decision::RequireApproval {
+                request: mut approval,
+            } => {
+                if let Err(error) = validate_approval_request_matches_invocation(
+                    &approval,
+                    &request.context,
+                    &request.capability_id,
+                    &request.estimate,
+                    CapabilityActionKind::Spawn,
+                ) {
+                    fail_run_if_configured(
+                        self.run_state,
+                        &scope,
+                        invocation_id,
+                        "ApprovalRequestMismatch",
+                    )
+                    .await;
+                    return Err(error);
+                }
+
+                if let Some(existing) = &approval.invocation_fingerprint {
+                    if existing != &invocation_fingerprint {
+                        fail_run_if_configured(
+                            self.run_state,
+                            &scope,
+                            invocation_id,
+                            "InvocationFingerprintMismatch",
+                        )
+                        .await;
+                        return Err(CapabilityInvocationError::ApprovalFingerprintMismatch {
+                            capability: request.capability_id,
+                        });
+                    }
+                } else {
+                    approval.invocation_fingerprint = Some(invocation_fingerprint);
+                }
+
+                match (self.run_state, self.approval_requests) {
+                    (Some(run_state), Some(approval_requests)) => {
+                        let approval_id = approval.id;
+                        if let Err(error) = approval_requests
+                            .save_pending(scope.clone(), approval.clone())
+                            .await
+                        {
+                            fail_run_if_configured(
+                                Some(run_state),
+                                &scope,
+                                invocation_id,
+                                "ApprovalStore",
+                            )
+                            .await;
+                            return Err(CapabilityInvocationError::from(error));
+                        }
+                        if let Err(error) = run_state
+                            .block_approval(&scope, invocation_id, approval)
+                            .await
+                        {
+                            if let Err(discard_error) =
+                                approval_requests.discard_pending(&scope, approval_id).await
+                            {
+                                warn!(
+                                    approval_request_id = %approval_id,
+                                    invocation_id = %invocation_id,
+                                    transition_error_kind = run_state_error_kind(&discard_error),
+                                    "approval rollback failed after spawn run-state block transition failed",
+                                );
+                            }
+                            fail_run_if_configured(
+                                Some(run_state),
+                                &scope,
+                                invocation_id,
+                                "ApprovalBlock",
+                            )
+                            .await;
+                            return Err(CapabilityInvocationError::from(error));
+                        }
+                    }
+                    (Some(run_state), None) => {
+                        fail_run_if_configured(
+                            Some(run_state),
+                            &scope,
+                            invocation_id,
+                            "ApprovalStoreMissing",
+                        )
+                        .await;
+                        return Err(CapabilityInvocationError::ApprovalStoreMissing {
+                            capability: request.capability_id,
+                            store: "approval_requests",
+                        });
+                    }
+                    (None, Some(_)) => {
+                        return Err(CapabilityInvocationError::ApprovalStoreMissing {
+                            capability: request.capability_id,
+                            store: "run_state",
+                        });
+                    }
+                    (None, None) => {
+                        return Err(CapabilityInvocationError::ApprovalStoreMissing {
+                            capability: request.capability_id,
+                            store: "run_state and approval_requests",
+                        });
+                    }
+                }
                 return Err(CapabilityInvocationError::AuthorizationRequiresApproval {
                     capability: request.capability_id,
                 });

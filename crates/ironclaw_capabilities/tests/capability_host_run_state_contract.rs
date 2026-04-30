@@ -146,6 +146,15 @@ async fn capability_host_rejects_authorizer_approval_with_mismatched_requested_b
     .await;
 }
 
+#[tokio::test]
+async fn capability_host_rejects_authorizer_approval_with_mismatched_correlation_id() {
+    assert_mismatched_approval_request_rejected(
+        ApprovalRequestMismatch::CorrelationId,
+        "correlation_id",
+    )
+    .await;
+}
+
 async fn assert_mismatched_approval_request_rejected(
     mismatch: ApprovalRequestMismatch,
     expected_field: &'static str,
@@ -684,6 +693,85 @@ async fn capability_host_denies_resume_when_trust_ceiling_omits_capability_effec
 }
 
 #[tokio::test]
+async fn capability_host_revokes_claimed_lease_when_dispatch_fails_after_resume() {
+    let registry = registry_with_echo_capability();
+    let dispatcher = FailingDispatcher;
+    let run_state = InMemoryRunStateStore::new();
+    let approval_requests = InMemoryApprovalRequestStore::new();
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let block_dispatcher = RecordingDispatcher::default();
+    let block_host = CapabilityHost::new(&registry, &block_dispatcher, &ApprovalAuthorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests);
+    let context = execution_context(CapabilitySet::default());
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "approved but dispatch fails"});
+
+    block_host
+        .invoke_json(CapabilityInvocationRequest {
+            context: context.clone(),
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+    let approval_id = run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .approval_request_id
+        .unwrap();
+    let lease = ApprovalResolver::new(&approval_requests, &leases)
+        .approve_dispatch(
+            &scope,
+            approval_id,
+            LeaseApproval {
+                issued_by: Principal::HostRuntime,
+                allowed_effects: vec![EffectKind::DispatchCapability],
+                mounts: MountView::default(),
+                network: NetworkPolicy::default(),
+                secrets: Vec::new(),
+                resource_ceiling: None,
+                expires_at: None,
+                max_invocations: Some(1),
+            },
+        )
+        .await
+        .unwrap();
+
+    let resume_authorizer = GrantAuthorizer::new();
+    let resume_host = CapabilityHost::new(&registry, &dispatcher, &resume_authorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases);
+    let err = resume_host
+        .resume_json(CapabilityResumeRequest {
+            context,
+            approval_request_id: approval_id,
+            capability_id: capability_id(),
+            estimate,
+            input,
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityInvocationError::Dispatch { ref kind } if kind == "Backend"
+    ));
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(run.status, RunStatus::Failed);
+    let revoked = leases.get(&scope, lease.grant.id).await.unwrap();
+    assert_eq!(revoked.status, CapabilityLeaseStatus::Revoked);
+}
+
+#[tokio::test]
 async fn capability_host_returns_dispatch_result_when_lease_consume_fails_after_dispatch() {
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
@@ -1057,6 +1145,21 @@ enum ApprovalRequestMismatch {
     Capability,
     Estimate,
     RequestedBy,
+    CorrelationId,
+}
+
+struct FailingDispatcher;
+
+#[async_trait]
+impl CapabilityDispatcher for FailingDispatcher {
+    async fn dispatch_json(
+        &self,
+        _request: CapabilityDispatchRequest,
+    ) -> Result<CapabilityDispatchResult, DispatchError> {
+        Err(DispatchError::Wasm {
+            kind: RuntimeDispatchErrorKind::Backend,
+        })
+    }
 }
 
 struct MismatchedApprovalRequestAuthorizer {
@@ -1075,6 +1178,7 @@ impl TrustAwareCapabilityDispatchAuthorizer for MismatchedApprovalRequestAuthori
         let mut capability = capability_id();
         let mut estimated_resources = estimate.clone();
         let mut requested_by = Principal::Extension(context.extension_id.clone());
+        let mut correlation_id = context.correlation_id;
         match self.mismatch {
             ApprovalRequestMismatch::Capability => {
                 capability = CapabilityId::new("echo.other").unwrap();
@@ -1085,12 +1189,15 @@ impl TrustAwareCapabilityDispatchAuthorizer for MismatchedApprovalRequestAuthori
             ApprovalRequestMismatch::RequestedBy => {
                 requested_by = Principal::User(context.user_id.clone());
             }
+            ApprovalRequestMismatch::CorrelationId => {
+                correlation_id = CorrelationId::new();
+            }
         }
 
         Decision::RequireApproval {
             request: ApprovalRequest {
                 id: ApprovalRequestId::new(),
-                correlation_id: context.correlation_id,
+                correlation_id,
                 requested_by,
                 action: Box::new(Action::Dispatch {
                     capability,

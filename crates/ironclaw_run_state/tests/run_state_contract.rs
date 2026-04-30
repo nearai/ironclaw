@@ -1,4 +1,9 @@
-use ironclaw_filesystem::LocalFilesystem;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use async_trait::async_trait;
+use ironclaw_filesystem::{
+    DirEntry, FileStat, FilesystemError, FilesystemOperation, LocalFilesystem, RootFilesystem,
+};
 use ironclaw_host_api::*;
 use ironclaw_run_state::*;
 
@@ -342,6 +347,22 @@ async fn filesystem_approval_request_store_persists_pending_requests_under_tenan
 }
 
 #[tokio::test]
+async fn filesystem_approval_request_listing_ignores_records_deleted_after_list() {
+    let fs = DisappearingApprovalReadFilesystem::new(engine_filesystem());
+    let store = FilesystemApprovalRequestStore::new(&fs);
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let approval = approval_request(invocation_id);
+
+    store.save_pending(scope.clone(), approval).await.unwrap();
+    fs.fail_next_approval_read();
+
+    let records = store.records_for_scope(&scope).await.unwrap();
+
+    assert_eq!(records, Vec::new());
+}
+
+#[tokio::test]
 async fn in_memory_approval_request_store_discards_pending_request() {
     let store = InMemoryApprovalRequestStore::new();
     let invocation_id = InvocationId::new();
@@ -674,6 +695,64 @@ async fn filesystem_approval_request_store_isolates_records_by_project_scope() {
         Vec::new()
     );
     assert_eq!(store.records_for_scope(&project_a).await.unwrap().len(), 1);
+}
+
+struct DisappearingApprovalReadFilesystem {
+    inner: LocalFilesystem,
+    fail_next_approval_read: AtomicBool,
+}
+
+impl DisappearingApprovalReadFilesystem {
+    fn new(inner: LocalFilesystem) -> Self {
+        Self {
+            inner,
+            fail_next_approval_read: AtomicBool::new(false),
+        }
+    }
+
+    fn fail_next_approval_read(&self) {
+        self.fail_next_approval_read.store(true, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for DisappearingApprovalReadFilesystem {
+    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+        if path.as_str().contains("/approvals/")
+            && path.as_str().ends_with(".json")
+            && self.fail_next_approval_read.swap(false, Ordering::SeqCst)
+        {
+            return Err(FilesystemError::NotFound {
+                path: path.clone(),
+                operation: FilesystemOperation::ReadFile,
+            });
+        }
+        self.inner.read_file(path).await
+    }
+
+    async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
+        self.inner.write_file(path, bytes).await
+    }
+
+    async fn append_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
+        self.inner.append_file(path, bytes).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+
+    async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.create_dir_all(path).await
+    }
 }
 
 fn engine_filesystem() -> LocalFilesystem {

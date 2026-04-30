@@ -661,7 +661,11 @@ where
         let mut records = Vec::new();
         for entry in entries {
             if entry.name.ends_with(".json") {
-                let bytes = self.filesystem.read_file(&entry.path).await?;
+                let bytes = match self.filesystem.read_file(&entry.path).await {
+                    Ok(bytes) => bytes,
+                    Err(error) if is_not_found(&error) => continue,
+                    Err(error) => return Err(error.into()),
+                };
                 let record = deserialize::<RunRecord>(&bytes)?;
                 if same_scope_owner(&record.scope, scope) {
                     records.push(record);
@@ -819,7 +823,11 @@ where
         let mut records = Vec::new();
         for entry in entries {
             if entry.name.ends_with(".json") {
-                let bytes = self.filesystem.read_file(&entry.path).await?;
+                let bytes = match self.filesystem.read_file(&entry.path).await {
+                    Ok(bytes) => bytes,
+                    Err(error) if is_not_found(&error) => continue,
+                    Err(error) => return Err(error.into()),
+                };
                 let record = deserialize::<ApprovalRecord>(&bytes)?;
                 if same_scope_owner(&record.scope, scope) {
                     records.push(record);

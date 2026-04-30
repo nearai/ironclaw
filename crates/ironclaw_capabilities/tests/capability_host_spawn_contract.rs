@@ -1,6 +1,7 @@
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use ironclaw_approvals::*;
 use ironclaw_authorization::*;
 use ironclaw_capabilities::*;
 use ironclaw_host_api::*;
@@ -10,6 +11,147 @@ use serde_json::json;
 
 mod support;
 use support::*;
+
+#[tokio::test]
+async fn capability_host_blocks_spawn_for_approval_without_starting_process() {
+    let registry = registry_with_echo_capability();
+    let dispatcher = RecordingDispatcher::default();
+    let process_manager = RecordingProcessManager::default();
+    let run_state = InMemoryRunStateStore::new();
+    let approval_requests = InMemoryApprovalRequestStore::new();
+    let host = CapabilityHost::new(&registry, &dispatcher, &SpawnApprovalAuthorizer)
+        .with_process_manager(&process_manager)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests);
+    let context = execution_context(CapabilitySet::default());
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "background approval"});
+
+    let err = host
+        .spawn_json(CapabilitySpawnRequest {
+            context,
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityInvocationError::AuthorizationRequiresApproval { .. }
+    ));
+    assert!(!dispatcher.has_request());
+    assert!(!process_manager.has_start());
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(run.status, RunStatus::BlockedApproval);
+    let approval_id = run.approval_request_id.unwrap();
+    let approval = approval_requests
+        .get(&scope, approval_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(approval.status, ApprovalStatus::Pending);
+    assert_eq!(
+        approval.request.invocation_fingerprint,
+        Some(
+            InvocationFingerprint::for_spawn(&scope, &capability_id(), &estimate, &input).unwrap()
+        )
+    );
+}
+
+#[tokio::test]
+async fn capability_host_resumes_approved_spawn_and_consumes_matching_lease() {
+    let registry = registry_with_echo_capability();
+    let dispatcher = RecordingDispatcher::default();
+    let process_manager = RecordingProcessManager::default();
+    let run_state = InMemoryRunStateStore::new();
+    let approval_requests = InMemoryApprovalRequestStore::new();
+    let leases = InMemoryCapabilityLeaseStore::new();
+    let block_host = CapabilityHost::new(&registry, &dispatcher, &SpawnApprovalAuthorizer)
+        .with_process_manager(&process_manager)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests);
+    let context = execution_context(CapabilitySet::default());
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "approved background"});
+
+    block_host
+        .spawn_json(CapabilitySpawnRequest {
+            context: context.clone(),
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+    let approval_id = run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .approval_request_id
+        .unwrap();
+    let lease = ApprovalResolver::new(&approval_requests, &leases)
+        .approve_spawn(
+            &scope,
+            approval_id,
+            LeaseApproval {
+                issued_by: Principal::HostRuntime,
+                allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::SpawnProcess],
+                mounts: MountView::default(),
+                network: NetworkPolicy::default(),
+                secrets: Vec::new(),
+                resource_ceiling: None,
+                expires_at: None,
+                max_invocations: Some(1),
+            },
+        )
+        .await
+        .unwrap();
+
+    let resume_authorizer = GrantAuthorizer::new();
+    let resume_host = CapabilityHost::new(&registry, &dispatcher, &resume_authorizer)
+        .with_process_manager(&process_manager)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases);
+    let result = resume_host
+        .resume_spawn_json(CapabilityResumeRequest {
+            context: context.clone(),
+            approval_request_id: approval_id,
+            capability_id: capability_id(),
+            estimate,
+            input,
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap();
+
+    assert!(!dispatcher.has_request());
+    let start = process_manager.take_start();
+    assert_eq!(start.scope, context.resource_scope);
+    assert_eq!(start.capability_id, capability_id());
+    assert!(
+        start
+            .grants
+            .grants
+            .iter()
+            .any(|grant| grant.id == lease.grant.id),
+        "resumed spawned process must inherit the approved lease grant"
+    );
+    assert_eq!(result.process.process_id, start.process_id);
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(run.status, RunStatus::Completed);
+    let consumed = leases.get(&scope, lease.grant.id).await.unwrap();
+    assert_eq!(consumed.status, CapabilityLeaseStatus::Consumed);
+}
 
 #[tokio::test]
 async fn capability_host_denies_spawn_when_trust_ceiling_omits_spawn_effect() {
@@ -227,6 +369,46 @@ impl ProcessManager for RecordingProcessManager {
             resource_reservation_id: start.resource_reservation_id,
             error_kind: None,
         })
+    }
+}
+
+struct SpawnApprovalAuthorizer;
+
+#[async_trait]
+impl TrustAwareCapabilityDispatchAuthorizer for SpawnApprovalAuthorizer {
+    async fn authorize_dispatch_with_trust(
+        &self,
+        _context: &ExecutionContext,
+        _descriptor: &CapabilityDescriptor,
+        _estimate: &ResourceEstimate,
+        _trust_decision: &ironclaw_trust::TrustDecision,
+    ) -> Decision {
+        Decision::Deny {
+            reason: DenyReason::MissingGrant,
+        }
+    }
+
+    async fn authorize_spawn_with_trust(
+        &self,
+        context: &ExecutionContext,
+        _descriptor: &CapabilityDescriptor,
+        estimate: &ResourceEstimate,
+        _trust_decision: &ironclaw_trust::TrustDecision,
+    ) -> Decision {
+        Decision::RequireApproval {
+            request: ApprovalRequest {
+                id: ApprovalRequestId::new(),
+                correlation_id: context.correlation_id,
+                requested_by: Principal::Extension(context.extension_id.clone()),
+                action: Box::new(Action::SpawnCapability {
+                    capability: capability_id(),
+                    estimated_resources: estimate.clone(),
+                }),
+                invocation_fingerprint: None,
+                reason: "spawn approval required".to_string(),
+                reusable_scope: None,
+            },
+        }
     }
 }
 

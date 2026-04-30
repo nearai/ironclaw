@@ -24,23 +24,65 @@ pub(crate) fn ensure_no_obligations(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CapabilityActionKind {
+    Dispatch,
+    Spawn,
+}
+
+pub(crate) fn invocation_fingerprint_for_kind(
+    kind: CapabilityActionKind,
+    scope: &ResourceScope,
+    capability_id: &CapabilityId,
+    estimate: &ResourceEstimate,
+    input: &serde_json::Value,
+) -> Result<InvocationFingerprint, ironclaw_host_api::HostApiError> {
+    match kind {
+        CapabilityActionKind::Dispatch => {
+            InvocationFingerprint::for_dispatch(scope, capability_id, estimate, input)
+        }
+        CapabilityActionKind::Spawn => {
+            InvocationFingerprint::for_spawn(scope, capability_id, estimate, input)
+        }
+    }
+}
+
 pub(crate) fn validate_approval_request_matches_invocation(
     approval: &ApprovalRequest,
     context: &ExecutionContext,
     capability_id: &CapabilityId,
     estimate: &ResourceEstimate,
+    expected_action: CapabilityActionKind,
 ) -> Result<(), CapabilityInvocationError> {
-    match approval.action.as_ref() {
-        Action::Dispatch {
-            capability,
-            estimated_resources,
-        } if capability == capability_id && estimated_resources == estimate => {}
-        _ => {
-            return Err(CapabilityInvocationError::ApprovalRequestMismatch {
-                capability: capability_id.clone(),
-                field: "action",
-            });
-        }
+    let action_matches = match (expected_action, approval.action.as_ref()) {
+        (
+            CapabilityActionKind::Dispatch,
+            Action::Dispatch {
+                capability,
+                estimated_resources,
+            },
+        )
+        | (
+            CapabilityActionKind::Spawn,
+            Action::SpawnCapability {
+                capability,
+                estimated_resources,
+            },
+        ) => capability == capability_id && estimated_resources == estimate,
+        _ => false,
+    };
+    if !action_matches {
+        return Err(CapabilityInvocationError::ApprovalRequestMismatch {
+            capability: capability_id.clone(),
+            field: "action",
+        });
+    }
+
+    if approval.correlation_id != context.correlation_id {
+        return Err(CapabilityInvocationError::ApprovalRequestMismatch {
+            capability: capability_id.clone(),
+            field: "correlation_id",
+        });
     }
 
     let expected_requester = Principal::Extension(context.extension_id.clone());
