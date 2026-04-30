@@ -124,7 +124,7 @@ mod libsql_phase5 {
                 SELECT v.content, v.content_hash, v.changed_by
                 FROM memory_document_versions v
                 JOIN memory_documents d ON d.id = v.document_id
-                WHERE d.path = 'notes/versioned.md'
+                WHERE d.user_id = 'tenant:tenant-a:user:alice:project:project-1' AND d.agent_id = 'agent-a' AND d.path = 'notes/versioned.md'
                 "#,
                 (),
             )
