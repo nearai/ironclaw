@@ -16,8 +16,10 @@ Supported built-in behavior:
 - `InjectSecretOnce`: verifies the secret exists, leases and consumes it exactly once, then stages material in `RuntimeSecretInjectionStore` for one runtime take.
 - `UseScopedMounts`: accepts only mount views that are subsets of the execution context mount view and returns the narrowed view to the capability host.
 - `ReserveResources`: reserves the exact requested reservation id through a configured `ResourceGovernor` and returns the reservation for dispatch/process handoff.
-- `RedactOutput`: sanitizes dispatch output before publication.
+- `RedactOutput`: sanitizes dispatch output string values and object keys before publication, failing closed if redacted keys collide.
 - `EnforceOutputLimit`: fails before publication if serialized output exceeds the limit.
+
+`EnforceResourceCeiling` is intentionally fail-closed in this slice until an explicit runtime/sandbox ceiling handoff exists. `EnforceOutputLimit` covers the output-byte part of a resource ceiling today; other ceiling fields must not be silently accepted.
 
 ## Isolation rules
 

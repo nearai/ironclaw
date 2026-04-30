@@ -599,10 +599,10 @@ fn obligation_supported_before_dispatch(
     match obligation {
         Obligation::AuditBefore
         | Obligation::ApplyNetworkPolicy { .. }
-        | Obligation::EnforceResourceCeiling { .. }
         | Obligation::InjectSecretOnce { .. }
         | Obligation::ReserveResources { .. }
         | Obligation::UseScopedMounts { .. } => true,
+        Obligation::EnforceResourceCeiling { .. } => false,
         Obligation::AuditAfter
         | Obligation::RedactOutput
         | Obligation::EnforceOutputLimit { .. } => {
@@ -629,10 +629,10 @@ fn obligation_supported_after_dispatch(
     match obligation {
         Obligation::AuditBefore
         | Obligation::ApplyNetworkPolicy { .. }
-        | Obligation::EnforceResourceCeiling { .. }
         | Obligation::InjectSecretOnce { .. }
         | Obligation::ReserveResources { .. }
         | Obligation::UseScopedMounts { .. } => true,
+        Obligation::EnforceResourceCeiling { .. } => false,
         Obligation::AuditAfter
         | Obligation::RedactOutput
         | Obligation::EnforceOutputLimit { .. } => {
@@ -736,22 +736,33 @@ fn redact_output(
     output: serde_json::Value,
 ) -> Result<serde_json::Value, CapabilityObligationError> {
     match output {
-        serde_json::Value::String(value) => LeakDetector::new()
-            .scan_and_clean(&value)
-            .map(serde_json::Value::String)
-            .map_err(|_| output_obligation_failed()),
+        serde_json::Value::String(value) => {
+            redact_output_string(value).map(serde_json::Value::String)
+        }
         serde_json::Value::Array(values) => values
             .into_iter()
             .map(redact_output)
             .collect::<Result<Vec<_>, _>>()
             .map(serde_json::Value::Array),
-        serde_json::Value::Object(entries) => entries
-            .into_iter()
-            .map(|(key, value)| redact_output(value).map(|value| (key, value)))
-            .collect::<Result<serde_json::Map<_, _>, _>>()
-            .map(serde_json::Value::Object),
+        serde_json::Value::Object(entries) => {
+            let mut redacted = serde_json::Map::with_capacity(entries.len());
+            for (key, value) in entries {
+                let key = redact_output_string(key)?;
+                let value = redact_output(value)?;
+                if redacted.insert(key, value).is_some() {
+                    return Err(output_obligation_failed());
+                }
+            }
+            Ok(serde_json::Value::Object(redacted))
+        }
         value => Ok(value),
     }
+}
+
+fn redact_output_string(value: String) -> Result<String, CapabilityObligationError> {
+    LeakDetector::new()
+        .scan_and_clean(&value)
+        .map_err(|_| output_obligation_failed())
 }
 
 fn audit_before_record(request: &CapabilityObligationRequest<'_>) -> AuditEnvelope {

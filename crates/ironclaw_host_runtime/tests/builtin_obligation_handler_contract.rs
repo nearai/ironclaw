@@ -13,7 +13,7 @@ use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime,
     NetworkObligationPolicyStore, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeSecretInjectionStore,
+    RuntimeFailureKind, RuntimeSecretInjectionStore,
 };
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
 use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
@@ -144,6 +144,74 @@ async fn builtin_obligation_handler_redacts_output_after_dispatch() {
     let serialized = serde_json::to_string(&completed.output).unwrap();
     assert!(serialized.contains("[REDACTED]"));
     assert!(!serialized.contains(leaked));
+}
+
+#[tokio::test]
+async fn builtin_obligation_handler_redacts_secret_like_object_keys() {
+    let handler = BuiltinObligationHandler::new();
+    let context = execution_context(CapabilitySet::default());
+    let capability_id = capability_id();
+    let estimate = ResourceEstimate::default();
+    let obligations = vec![Obligation::RedactOutput];
+    let leaked = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let dispatch = sample_dispatch(
+        &context.resource_scope,
+        &capability_id,
+        json!({ leaked: "value" }),
+    );
+
+    let completed = handler
+        .complete_dispatch(CapabilityObligationCompletionRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+            dispatch: &dispatch,
+        })
+        .await
+        .unwrap();
+
+    let serialized = serde_json::to_string(&completed.output).unwrap();
+    assert!(serialized.contains("[REDACTED]"));
+    assert!(!serialized.contains(leaked));
+}
+
+#[tokio::test]
+async fn builtin_obligation_handler_fails_closed_when_redacted_object_keys_collide() {
+    let handler = BuiltinObligationHandler::new();
+    let context = execution_context(CapabilitySet::default());
+    let capability_id = capability_id();
+    let estimate = ResourceEstimate::default();
+    let obligations = vec![Obligation::RedactOutput];
+    let leaked = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let dispatch = sample_dispatch(
+        &context.resource_scope,
+        &capability_id,
+        json!({
+            leaked: "secret-key",
+            "[REDACTED].aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": "existing",
+        }),
+    );
+
+    let err = handler
+        .complete_dispatch(CapabilityObligationCompletionRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+            dispatch: &dispatch,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityObligationError::Failed {
+            kind: CapabilityObligationFailureKind::Output
+        }
+    ));
 }
 
 #[tokio::test]
@@ -431,6 +499,43 @@ async fn builtin_obligation_handler_reserves_requested_resources_and_releases_on
 }
 
 #[tokio::test]
+async fn default_host_runtime_fails_closed_on_resource_ceiling_until_handoff_exists() {
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(PanicDispatcher);
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
+        Arc::new(ObligatingAuthorizer::new(vec![
+            Obligation::EnforceResourceCeiling {
+                ceiling: resource_ceiling(),
+            },
+        ]));
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher,
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_builtin_obligation_handler();
+
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            execution_context(CapabilitySet::default()),
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "must not dispatch"}),
+            trust_decision(),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Failed(failure) => {
+            assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+        }
+        other => panic!("expected failed outcome, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn default_host_runtime_installs_configured_obligation_handler() {
     let registry = Arc::new(registry_with_echo_capability());
     let dispatcher = Arc::new(RecordingDispatcher);
@@ -491,6 +596,18 @@ impl TrustAwareCapabilityDispatchAuthorizer for ObligatingAuthorizer {
 #[derive(Default)]
 struct RecordingDispatcher;
 
+struct PanicDispatcher;
+
+#[async_trait]
+impl CapabilityDispatcher for PanicDispatcher {
+    async fn dispatch_json(
+        &self,
+        _request: CapabilityDispatchRequest,
+    ) -> Result<CapabilityDispatchResult, DispatchError> {
+        panic!("dispatcher must not be called for unsupported resource-ceiling obligations")
+    }
+}
+
 #[async_trait]
 impl CapabilityDispatcher for RecordingDispatcher {
     async fn dispatch_json(
@@ -546,6 +663,17 @@ fn mount_view(alias: &str, target: &str, permissions: MountPermissions) -> Mount
         permissions,
     )])
     .unwrap()
+}
+
+fn resource_ceiling() -> ResourceCeiling {
+    ResourceCeiling {
+        max_usd: None,
+        max_input_tokens: None,
+        max_output_tokens: None,
+        max_wall_clock_ms: Some(1),
+        max_output_bytes: None,
+        sandbox: None,
+    }
 }
 
 fn allowed_network_policy() -> NetworkPolicy {
