@@ -686,13 +686,29 @@ impl EffectBridgeAdapter {
         params: &serde_json::Value,
         context: &ThreadExecutionContext,
     ) -> Option<Result<ActionResult, EngineError>> {
+        let mgr = self.mission_manager.read().await.as_ref().cloned()?;
+
         // Translate routine_* aliases to mission_* before dispatching. The
         // routine schema is richer (kind/schedule/pattern/source/event_type/
         // filters/execution/delivery/advanced) than mission_*; the translator
         // collapses it into mission fields plus a follow-up update for the
         // non-execution guardrails (cooldown, max_concurrent, dedup_window,
         // notify_user, context_paths, description).
-        let routine_alias = routine_to_mission_alias(action_name, params);
+        let mut routine_alias = routine_to_mission_alias(action_name, params);
+
+        // v1 addressed routines by display name (`UNIQUE (user_id, name)` in
+        // the routines table), resolving name → UUID inside each tool via
+        // `get_routine_by_name`. v2 missions use UUID addressing, so routine
+        // aliases must bridge the two conventions before dispatch — otherwise
+        // `routine_delete(name="Daily Check")` arrives at `mission_complete`
+        // as `{"name":"Daily Check"}` and fails UUID parsing.
+        // Surface name-lookup errors; Ok covers both resolved and no-op cases.
+        if let Some(alias) = routine_alias.as_mut()
+            && let Err(e) = resolve_mission_identity(alias, &mgr, context).await
+        {
+            return Some(Err(e));
+        }
+
         let (effective_action, effective_params, post_create_update) =
             if let Some(alias) = routine_alias.as_ref() {
                 (
@@ -706,8 +722,33 @@ impl EffectBridgeAdapter {
         let action_name = effective_action;
         let params = effective_params.as_ref();
 
-        let mgr = self.mission_manager.read().await;
-        let mgr = mgr.as_ref()?;
+        // Accept id, mission_id, or positional — fail loudly on empty
+        fn resolve_mission_id(
+            params: &serde_json::Value,
+            action: &str,
+        ) -> Result<ironclaw_engine::MissionId, EngineError> {
+            let id_str = params
+                .get("id")
+                .or_else(|| params.get("mission_id"))
+                .or_else(|| params.get("_args").and_then(|a| a.get(0)))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| EngineError::Effect {
+                    reason: format!(
+                        "{action} requires a mission id — pass `id=<uuid>` \
+                         (also accepts `mission_id` or positional)"
+                    ),
+                })?;
+            uuid::Uuid::parse_str(id_str)
+                .map(ironclaw_engine::MissionId)
+                .map_err(|e| EngineError::Effect {
+                    reason: format!(
+                        "invalid mission id {id_str:?}: {e}. Expected a UUID \
+                         (8-4-4-4-12 hex digits); call `mission_list()` to look \
+                         up the id of an existing mission."
+                    ),
+                })
+        }
 
         let result = match action_name {
             "mission_create" => {
@@ -914,17 +955,7 @@ impl EffectBridgeAdapter {
                 Err(e) => Err(e),
             },
             "mission_get" => {
-                let id_str = params
-                    .get("id")
-                    .or_else(|| params.get("name"))
-                    .or_else(|| params.get("_args").and_then(|a| a.get(0)))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let id = uuid::Uuid::parse_str(id_str)
-                    .map(ironclaw_engine::MissionId)
-                    .map_err(|e| EngineError::Effect {
-                        reason: format!("invalid mission id: {e}"),
-                    });
+                let id = resolve_mission_id(params, "mission_get");
                 match id {
                     Ok(id) => match mgr.get_mission(id).await {
                         Ok(Some(mission)) => {
@@ -932,7 +963,7 @@ impl EffectBridgeAdapter {
                             // retrieve its details (mirrors fire/pause/resume).
                             if mission.user_id != context.user_id {
                                 return Some(Err(EngineError::Effect {
-                                    reason: format!("mission {id_str} belongs to another user"),
+                                    reason: format!("mission {id} belongs to another user"),
                                 }));
                             }
                             // Load recent threads (last 5) to show results
@@ -975,94 +1006,48 @@ impl EffectBridgeAdapter {
                             }))
                         }
                         Ok(None) => Err(EngineError::Effect {
-                            reason: format!("mission not found: {id_str}"),
+                            reason: format!("mission not found: {id}"),
                         }),
                         Err(e) => Err(e),
                     },
                     Err(e) => Err(e),
                 }
             }
-            "mission_fire" => {
-                let id_str = params
-                    .get("id")
-                    .or_else(|| params.get("_args").and_then(|a| a.get(0)))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let id = uuid::Uuid::parse_str(id_str)
-                    .map(ironclaw_engine::MissionId)
-                    .map_err(|e| EngineError::Effect {
-                        reason: format!("invalid mission id: {e}"),
-                    });
-                match id {
-                    Ok(id) => match mgr.fire_mission(id, &context.user_id, None).await {
-                        Ok(Some(tid)) => {
-                            Ok(serde_json::json!({"thread_id": tid.to_string(), "status": "fired"}))
-                        }
-                        Ok(None) => Ok(
-                            serde_json::json!({"status": "not_fired", "reason": "mission is terminal or budget exhausted"}),
-                        ),
-                        Err(e) => Err(e),
-                    },
-                    Err(e) => Err(e),
-                }
-            }
-            "mission_pause" | "mission_resume" => {
-                let id_str = params
-                    .get("id")
-                    .or_else(|| params.get("_args").and_then(|a| a.get(0)))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let id = uuid::Uuid::parse_str(id_str)
-                    .map(ironclaw_engine::MissionId)
-                    .map_err(|e| EngineError::Effect {
-                        reason: format!("invalid mission id: {e}"),
-                    });
-                match id {
-                    Ok(id) => {
-                        let res = if action_name == "mission_pause" {
-                            mgr.pause_mission(id, &context.user_id).await
-                        } else {
-                            mgr.resume_mission(id, &context.user_id).await
-                        };
-                        match res {
-                            Ok(()) => Ok(serde_json::json!({"status": "ok"})),
-                            Err(e) => Err(e),
-                        }
+            "mission_fire" => match resolve_mission_id(params, "mission_fire") {
+                Ok(id) => match mgr.fire_mission(id, &context.user_id, None).await {
+                    Ok(Some(tid)) => {
+                        Ok(serde_json::json!({"thread_id": tid.to_string(), "status": "fired"}))
                     }
+                    Ok(None) => Ok(
+                        serde_json::json!({"status": "not_fired", "reason": "mission is terminal or budget exhausted"}),
+                    ),
                     Err(e) => Err(e),
-                }
-            }
-            "mission_complete" => {
-                let id_str = params
-                    .get("id")
-                    .or_else(|| params.get("name")) // routine_delete uses "name" param
-                    .or_else(|| params.get("_args").and_then(|a| a.get(0)))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let id = uuid::Uuid::parse_str(id_str)
-                    .map(ironclaw_engine::MissionId)
-                    .map_err(|e| EngineError::Effect {
-                        reason: format!("invalid mission id: {e}"),
-                    });
-                match id {
-                    Ok(id) => match mgr.complete_mission(id).await {
-                        Ok(()) => Ok(serde_json::json!({"status": "completed"})),
+                },
+                Err(e) => Err(e),
+            },
+            "mission_pause" | "mission_resume" => match resolve_mission_id(params, action_name) {
+                Ok(id) => {
+                    let res = if action_name == "mission_pause" {
+                        mgr.pause_mission(id, &context.user_id).await
+                    } else {
+                        mgr.resume_mission(id, &context.user_id).await
+                    };
+                    match res {
+                        Ok(()) => Ok(serde_json::json!({"status": "ok"})),
                         Err(e) => Err(e),
-                    },
-                    Err(e) => Err(e),
+                    }
                 }
-            }
+                Err(e) => Err(e),
+            },
+            "mission_complete" => match resolve_mission_id(params, "mission_complete") {
+                Ok(id) => match mgr.complete_mission(id, &context.user_id).await {
+                    Ok(()) => Ok(serde_json::json!({"status": "completed"})),
+                    Err(e) => Err(e),
+                },
+                Err(e) => Err(e),
+            },
             "mission_update" => {
-                let id_str = params
-                    .get("id")
-                    .or_else(|| params.get("_args").and_then(|a| a.get(0)))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let id = uuid::Uuid::parse_str(id_str)
-                    .map(ironclaw_engine::MissionId)
-                    .map_err(|e| EngineError::Effect {
-                        reason: format!("invalid mission id: {e}"),
-                    });
+                let id = resolve_mission_id(params, "mission_update");
                 match id {
                     Ok(id) => {
                         let mut updates = ironclaw_engine::MissionUpdate::default();
@@ -2177,6 +2162,74 @@ struct RoutineMissionAlias {
     mission_action: &'static str,
     mission_params: serde_json::Value,
     post_create_update: Option<ironclaw_engine::MissionUpdate>,
+}
+
+/// Translate a routine alias's `name` lookup key into a mission `id`.
+/// v1 routine tools did this via `get_routine_by_name` internally; v2
+/// aliases forward `name` unchanged, so without this call
+/// `routine_delete(name="Daily Check")` fails UUID parsing downstream.
+async fn resolve_mission_identity(
+    alias: &mut RoutineMissionAlias,
+    mgr: &ironclaw_engine::MissionManager,
+    context: &ThreadExecutionContext,
+) -> Result<(), EngineError> {
+    // Skip actions that don't take an id — `name` means something else there.
+    if matches!(alias.mission_action, "mission_create" | "mission_list") {
+        return Ok(());
+    }
+
+    let Some(obj) = alias.mission_params.as_object_mut() else {
+        return Ok(());
+    };
+    // An empty-string or null `id` is the LLM filling a schema slot it has no
+    // value for — not an affirmative id claim. Treat those as absent so name
+    // resolution can run; a non-empty garbage id stays and gets surfaced as
+    // "invalid mission id" by resolve_mission_id downstream.
+    let has_id_claim = obj
+        .get("id")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty());
+    if has_id_claim {
+        return Ok(());
+    }
+    obj.remove("id");
+    let Some(name) = obj.get("name").and_then(|v| v.as_str()).map(str::to_string) else {
+        return Ok(());
+    };
+
+    let missions = mgr
+        .list_missions(context.project_id, &context.user_id)
+        .await?;
+    // Prefer the caller's own mission over a same-named shared mission.
+    // v1 `get_routine_by_name` was scoped to the owner (UNIQUE(user_id,
+    // name)); widening the alias resolver to own+shared would turn a
+    // legacy `routine_delete(name=...)` into an ambiguity error whenever
+    // a shared mission happens to share the name.
+    let (owned, shared): (Vec<_>, Vec<_>) = missions
+        .iter()
+        .filter(|m| m.name == name)
+        .partition(|m| m.user_id == context.user_id);
+    let tier = if !owned.is_empty() { owned } else { shared };
+    let Some(mission) = tier.first() else {
+        return Err(EngineError::Effect {
+            reason: format!(
+                "no mission named {name:?}; call `mission_list()` to see available missions"
+            ),
+        });
+    };
+    if tier.len() > 1 {
+        return Err(EngineError::Effect {
+            reason: format!(
+                "multiple missions are named {name:?}; use `id` instead or call `mission_list()` to disambiguate"
+            ),
+        });
+    }
+
+    obj.insert(
+        "id".into(),
+        serde_json::Value::String(mission.id.to_string()),
+    );
+    Ok(())
 }
 
 /// Translate a `routine_*` action call into mission_* parameters. Returns
@@ -7510,6 +7563,401 @@ Use this skill to set up a Pika meeting.
         assert!(
             uuid::Uuid::parse_str(thread_id).is_ok(),
             "thread_id must be a valid UUID, got {thread_id:?}",
+        );
+    }
+
+    /// Regression: every id-consuming mission_* action must reject a
+    /// missing `id` param with an actionable message, not a raw
+    /// "invalid length: expected 32, found 0" UUID error. A confusing
+    /// error here wastes an LLM iteration on a wrong kwarg name.
+    #[tokio::test]
+    async fn mission_actions_reject_missing_id_with_actionable_error() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("missing1"));
+
+        for action in [
+            "mission_get",
+            "mission_fire",
+            "mission_pause",
+            "mission_resume",
+            "mission_complete",
+            "mission_update",
+        ] {
+            let result = adapter
+                .execute_action(action, serde_json::json!({}), &lease(), &ctx)
+                .await
+                .expect("missing id must surface as is_error=true, not Err");
+
+            assert!(
+                result.is_error,
+                "{action} with no id should be an error, got: {}",
+                result.output
+            );
+            let err = result
+                .output
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            assert!(
+                err.contains(action) && err.contains("requires a mission id"),
+                "{action} error should name the action and say it requires a mission id, got: {err}"
+            );
+        }
+    }
+
+    /// Regression: a non-UUID id param must surface the offending value
+    /// in the error so the LLM can see what it sent (e.g. the mission
+    /// name instead of its UUID), not just a generic parse failure.
+    #[tokio::test]
+    async fn mission_fire_rejects_non_uuid_id_with_offending_value_in_error() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("bad1"));
+
+        let result = adapter
+            .execute_action(
+                "mission_fire",
+                serde_json::json!({"id": "daily-check"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("invalid id must surface as is_error=true, not Err");
+
+        assert!(result.is_error, "got: {}", result.output);
+        let err = result
+            .output
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(
+            err.contains("invalid mission id") && err.contains("daily-check"),
+            "error should quote the offending id value, got: {err}"
+        );
+    }
+
+    /// Regression: `routine_delete(name="X")` must actually complete the
+    /// mission named "X". v1 routine tools resolved name→UUID internally
+    /// via `get_routine_by_name`; v2 aliases forward `name` unchanged, so
+    /// without name-resolution at the alias boundary the call fails with
+    /// "invalid mission id". Drives the full alias → resolve_identity →
+    /// mission_complete path.
+    #[tokio::test]
+    async fn routine_delete_by_name_completes_aliased_mission() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("rd1"));
+
+        // Create a mission with a known display name.
+        let create = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "Daily Check",
+                    "goal": "review things",
+                    "cadence": "manual"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("create should succeed");
+        assert!(!create.is_error, "create failed: {}", create.output);
+
+        // routine_delete(name="Daily Check") → alias → mission_complete.
+        let delete = adapter
+            .execute_action(
+                "routine_delete",
+                serde_json::json!({"name": "Daily Check"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("routine_delete should resolve and complete");
+
+        assert!(
+            !delete.is_error,
+            "routine_delete(name=...) must succeed via alias, got: {}",
+            delete.output
+        );
+        assert_eq!(
+            delete.output.get("status").and_then(|v| v.as_str()),
+            Some("completed"),
+            "alias should complete the mission, got: {}",
+            delete.output
+        );
+    }
+
+    /// Regression: `routine_delete(name="unknown")` must surface a clear
+    /// "no mission named ..." error, not a UUID parse failure. Error path
+    /// returns `Err(EngineError)` — the outer dispatcher renders it to the
+    /// LLM as an action-error result.
+    #[tokio::test]
+    async fn routine_delete_by_unknown_name_surfaces_clear_error() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("rd2"));
+
+        let result = adapter
+            .execute_action(
+                "routine_delete",
+                serde_json::json!({"name": "ghost routine"}),
+                &lease(),
+                &ctx,
+            )
+            .await;
+
+        let err = result.expect_err("unknown name should bubble up as Err");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no mission named") && msg.contains("ghost routine"),
+            "error should name the missing routine, got: {msg}"
+        );
+    }
+
+    // Regression: an empty-string or null `id` is the LLM filling a schema
+    // slot, not an id claim. resolve_mission_identity must treat it as
+    // absent so name resolution still runs.
+    #[tokio::test]
+    async fn routine_delete_with_empty_id_resolves_by_name() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("rd3"));
+
+        for (mission_name, empty_id) in [
+            ("Empty Id Check", serde_json::json!("")),
+            ("Null Id Check", serde_json::json!(null)),
+        ] {
+            let create = adapter
+                .execute_action(
+                    "mission_create",
+                    serde_json::json!({
+                        "name": mission_name,
+                        "goal": "review things",
+                        "cadence": "manual"
+                    }),
+                    &lease(),
+                    &ctx,
+                )
+                .await
+                .expect("create should succeed");
+            assert!(!create.is_error, "create failed: {}", create.output);
+
+            let delete = adapter
+                .execute_action(
+                    "routine_delete",
+                    serde_json::json!({"id": empty_id, "name": mission_name}),
+                    &lease(),
+                    &ctx,
+                )
+                .await
+                .expect("routine_delete should resolve by name when id is empty/null");
+
+            assert!(
+                !delete.is_error,
+                "empty id={empty_id} must not block name resolution, got: {}",
+                delete.output
+            );
+            assert_eq!(
+                delete.output.get("status").and_then(|v| v.as_str()),
+                Some("completed"),
+                "expected completion via name resolution for id={empty_id}, got: {}",
+                delete.output
+            );
+        }
+    }
+
+    /// Regression: when a user-owned mission and a shared mission have the
+    /// same display name, `routine_*` name resolution must target the
+    /// owned one — not raise an "ambiguous" error. v1's routine store had
+    /// UNIQUE(user_id, name) so `routine_delete(name=...)` was
+    /// deterministic for the caller's own routines; the v2 alias
+    /// resolver must preserve that scoping by preferring owned over shared.
+    #[tokio::test]
+    async fn routine_alias_prefers_owned_over_shared_same_name() {
+        use ironclaw_engine::types::mission::MissionCadence;
+
+        let (adapter, _store, _dyn_store) =
+            make_adapter_with_missions_and_store(Arc::new(ToolRegistry::new())).await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("rs1"));
+
+        // Owned mission (user = "test_user") via the public dispatch path.
+        let create = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "Daily Check",
+                    "goal": "owned goal",
+                    "cadence": "manual"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("owned create should succeed");
+        assert!(!create.is_error, "owned create failed: {}", create.output);
+        let owned_id = create
+            .output
+            .get("mission_id")
+            .and_then(|v| v.as_str())
+            .expect("owned mission id")
+            .to_string();
+
+        // Shared mission under the same project, seeded through the manager
+        // so it lands with `user_id = "system"` (shared owner).
+        let mgr = adapter
+            .mission_manager()
+            .await
+            .expect("mission manager must be wired");
+        let shared_id = mgr
+            .create_mission(
+                ctx.project_id,
+                "system",
+                "Daily Check",
+                "shared goal",
+                MissionCadence::Manual,
+                Vec::new(),
+            )
+            .await
+            .expect("shared create should succeed");
+        assert_ne!(
+            shared_id.to_string(),
+            owned_id,
+            "owned and shared must be distinct ids"
+        );
+
+        // routine_history(name=...) must resolve to the owned mission.
+        let history = adapter
+            .execute_action(
+                "routine_history",
+                serde_json::json!({"name": "Daily Check"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("routine_history should resolve by name, not error on ambiguity");
+        assert!(
+            !history.is_error,
+            "routine_history must not raise ambiguity across own/shared, got: {}",
+            history.output
+        );
+        assert_eq!(
+            history.output.get("id").and_then(|v| v.as_str()),
+            Some(owned_id.as_str()),
+            "routine_history must target the owned mission, got: {}",
+            history.output
+        );
+
+        // routine_delete(name=...) must complete the owned mission only.
+        let delete = adapter
+            .execute_action(
+                "routine_delete",
+                serde_json::json!({"name": "Daily Check"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("routine_delete should resolve by name, not error on ambiguity");
+        assert!(
+            !delete.is_error,
+            "routine_delete must not raise ambiguity across own/shared, got: {}",
+            delete.output
+        );
+        assert_eq!(
+            delete.output.get("status").and_then(|v| v.as_str()),
+            Some("completed"),
+            "expected owned completion, got: {}",
+            delete.output
+        );
+
+        // Shared mission must still be active — never touched by the alias.
+        let shared_after = mgr
+            .get_mission(shared_id)
+            .await
+            .expect("load shared mission")
+            .expect("shared mission must still exist");
+        assert_eq!(
+            shared_after.status,
+            ironclaw_engine::types::mission::MissionStatus::Active,
+            "shared mission must not be affected by routine_delete on owned"
+        );
+    }
+
+    /// Regression: `mission_update` has a real `name` param (the new
+    /// display name). When the caller forgets `id` and supplies only
+    /// `name`, we must NOT parse `name` as a UUID alias — that produces
+    /// a misleading "invalid mission id 'new name'" error. The helper
+    /// must surface the canonical "requires a mission id" message.
+    #[tokio::test]
+    async fn mission_update_without_id_does_not_treat_name_as_id_alias() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("upd1"));
+
+        let result = adapter
+            .execute_action(
+                "mission_update",
+                serde_json::json!({"name": "renamed mission"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("missing id must surface as is_error=true, not Err");
+
+        assert!(result.is_error, "got: {}", result.output);
+        let err = result
+            .output
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(
+            err.contains("requires a mission id"),
+            "error must say id is required, not quote the new name value; got: {err}"
+        );
+        assert!(
+            !err.contains("renamed mission"),
+            "error must NOT quote the `name` param (it's not an id alias); got: {err}"
+        );
+    }
+
+    /// `mission_fire` must accept the `mission_id` kwarg alias the LLM
+    /// sometimes picks when it can't see the canonical schema.
+    #[tokio::test]
+    async fn mission_fire_accepts_mission_id_kwarg_alias() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("alias1"));
+
+        let create = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "alias-fireable",
+                    "goal": "test alias",
+                    "cadence": "manual"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("create should succeed");
+        let mission_id = create
+            .output
+            .get("mission_id")
+            .and_then(|v| v.as_str())
+            .expect("mission_id present")
+            .to_string();
+
+        let fire = adapter
+            .execute_action(
+                "mission_fire",
+                serde_json::json!({"mission_id": mission_id}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("fire with mission_id kwarg should succeed");
+
+        assert!(!fire.is_error, "fire failed: {}", fire.output);
+        assert_eq!(
+            fire.output.get("status").and_then(|v| v.as_str()),
+            Some("fired"),
+            "mission_id kwarg should route through, got: {}",
+            fire.output
         );
     }
 
