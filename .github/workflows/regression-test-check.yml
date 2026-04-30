@@ -127,7 +127,7 @@ jobs:
           # --- 4. Look for test changes ---
 
           # Fast path: new test attributes or test modules in added lines.
-          if git diff "${BASE_REF}...${HEAD_REF}" -U0 -- '*.rs' | grep -qE '^\+.*(#\[test\]|#\[tokio::test\]|#\[cfg\(test\)\]|mod tests)'; then
+          if git diff "${BASE_REF}...${HEAD_REF}" -U0 -- '*.rs' | grep -E '^\+.*(#\[test\]|#\[tokio::test\]|#\[cfg\(test\)\]|mod tests)' >/dev/null; then
             echo "Test changes found in .rs files."
             exit 0
           fi
@@ -135,7 +135,7 @@ jobs:
           # Whole-function context: detect edits inside existing test functions.
           # Uses -W (whole function) which works when git recognises function boundaries.
           if git diff "${BASE_REF}...${HEAD_REF}" -W -- '*.rs' | awk '
-            /^@@/           { if (has_test && has_add) { found=1; exit } has_test=0; has_add=0 }
+            /^@@/           { if (has_test && has_add) found=1; has_test=0; has_add=0 }
             /^ .*#\[test\]/ || /^ .*#\[tokio::test\]/ || /^ .*#\[cfg\(test\)\]/ || /^ .*mod tests/ { has_test=1 }
             /^\+.*#\[test\]/ || /^\+.*#\[tokio::test\]/ || /^\+.*#\[cfg\(test\)\]/ || /^\+.*mod tests/ { has_test=1 }
             /^\+[^+]/       { has_add=1 }
