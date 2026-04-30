@@ -1,6 +1,8 @@
 use ironclaw_authorization::CapabilityLeaseError;
 use ironclaw_host_api::{CapabilityId, DenyReason, DispatchError, HostApiError, Obligation};
 use ironclaw_processes::ProcessError;
+
+use crate::CapabilityObligationFailureKind;
 use ironclaw_run_state::{ApprovalStatus, RunStateError, RunStatus};
 use thiserror::Error;
 
@@ -25,6 +27,11 @@ pub enum CapabilityInvocationError {
     UnsupportedObligations {
         capability: CapabilityId,
         obligations: Vec<Obligation>,
+    },
+    #[error("capability {capability} obligation handling failed: {kind}")]
+    ObligationFailed {
+        capability: CapabilityId,
+        kind: CapabilityObligationFailureKind,
     },
     #[error("capability {capability} invocation requires approval")]
     AuthorizationRequiresApproval { capability: CapabilityId },

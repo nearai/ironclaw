@@ -43,8 +43,13 @@ use serde_json::Value;
 use std::fmt;
 use thiserror::Error;
 
+mod obligations;
 mod production;
 
+pub use obligations::{
+    BuiltinObligationHandler, NetworkObligationPolicyStore, RuntimeSecretInjectionStore,
+    RuntimeSecretInjectionStoreError,
+};
 pub use production::DefaultHostRuntime;
 
 /// Stable, validated idempotency key supplied by upper turn/loop services.

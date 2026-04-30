@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use ironclaw_authorization::{CapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_capabilities::{
     CapabilityHost, CapabilityInvocationError, CapabilityInvocationRequest,
-    CapabilityInvocationResult,
+    CapabilityInvocationResult, CapabilityObligationHandler,
 };
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_host_api::{
@@ -29,9 +29,9 @@ use ironclaw_processes::{
 use ironclaw_run_state::{ApprovalRequestStore, RunStateError, RunStateStore, RunStatus};
 
 use crate::{
-    CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfaceVersion, HostRuntime,
-    HostRuntimeError, HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalGate,
-    RuntimeBackendHealth, RuntimeBlockedReason, RuntimeCapabilityCompleted,
+    BuiltinObligationHandler, CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest,
+    CapabilitySurfaceVersion, HostRuntime, HostRuntimeError, HostRuntimeHealth, HostRuntimeStatus,
+    RuntimeApprovalGate, RuntimeBackendHealth, RuntimeBlockedReason, RuntimeCapabilityCompleted,
     RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
     RuntimeFailureKind, RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary,
     VisibleCapabilityRequest, VisibleCapabilitySurface,
@@ -50,6 +50,7 @@ pub struct DefaultHostRuntime {
     process_result_store: Option<Arc<dyn ProcessResultStore>>,
     process_cancellation_registry: Option<Arc<ProcessCancellationRegistry>>,
     runtime_health: Option<Arc<dyn RuntimeBackendHealth>>,
+    obligation_handler: Option<Arc<dyn CapabilityObligationHandler>>,
     surface_version: CapabilitySurfaceVersion,
 }
 
@@ -82,6 +83,7 @@ impl DefaultHostRuntime {
             process_result_store: None,
             process_cancellation_registry: None,
             runtime_health: None,
+            obligation_handler: None,
             surface_version,
         }
     }
@@ -146,6 +148,33 @@ impl DefaultHostRuntime {
         self.runtime_health = Some(health);
         self
     }
+
+    /// Attaches a host-provided obligation handler.
+    pub fn with_obligation_handler<T>(mut self, handler: Arc<T>) -> Self
+    where
+        T: CapabilityObligationHandler + 'static,
+    {
+        let handler: Arc<dyn CapabilityObligationHandler> = handler;
+        self.obligation_handler = Some(handler);
+        self
+    }
+
+    /// Attaches an already-erased host-provided obligation handler.
+    pub fn with_obligation_handler_dyn(
+        mut self,
+        handler: Arc<dyn CapabilityObligationHandler>,
+    ) -> Self {
+        self.obligation_handler = Some(handler);
+        self
+    }
+
+    /// Installs the default built-in obligation handler with no optional backing
+    /// stores. Obligations requiring audit/network/secret/resource backing still
+    /// fail closed until the caller supplies a fully configured handler through
+    /// [`Self::with_obligation_handler`] or [`Self::with_obligation_handler_dyn`].
+    pub fn with_builtin_obligation_handler(self) -> Self {
+        self.with_obligation_handler(Arc::new(BuiltinObligationHandler::new()))
+    }
 }
 
 #[async_trait]
@@ -188,6 +217,9 @@ impl HostRuntime for DefaultHostRuntime {
         }
         if let Some(process_manager) = &self.process_manager {
             host = host.with_process_manager(process_manager.as_ref());
+        }
+        if let Some(obligation_handler) = &self.obligation_handler {
+            host = host.with_obligation_handler(obligation_handler.as_ref());
         }
 
         let invocation = CapabilityInvocationRequest {
@@ -571,6 +603,7 @@ fn sanitized_failure_message(error: &CapabilityInvocationError) -> Option<String
         UnknownCapability { .. }
         | AuthorizationDenied { .. }
         | UnsupportedObligations { .. }
+        | ObligationFailed { .. }
         | AuthorizationRequiresApproval { .. }
         | ApprovalRequestMismatch { .. }
         | ApprovalFingerprintMismatch { .. }
@@ -603,6 +636,26 @@ pub(crate) fn failure_kind_from(error: &CapabilityInvocationError) -> RuntimeFai
         | CapabilityInvocationError::ResumeContextMismatch { .. } => {
             RuntimeFailureKind::Authorization
         }
+        CapabilityInvocationError::ObligationFailed { kind, .. } => match kind {
+            ironclaw_capabilities::CapabilityObligationFailureKind::Audit => {
+                RuntimeFailureKind::Backend
+            }
+            ironclaw_capabilities::CapabilityObligationFailureKind::Mount => {
+                RuntimeFailureKind::Authorization
+            }
+            ironclaw_capabilities::CapabilityObligationFailureKind::Network => {
+                RuntimeFailureKind::Network
+            }
+            ironclaw_capabilities::CapabilityObligationFailureKind::Output => {
+                RuntimeFailureKind::OutputTooLarge
+            }
+            ironclaw_capabilities::CapabilityObligationFailureKind::Resource => {
+                RuntimeFailureKind::Resource
+            }
+            ironclaw_capabilities::CapabilityObligationFailureKind::Secret => {
+                RuntimeFailureKind::Authorization
+            }
+        },
         CapabilityInvocationError::InvocationFingerprint { .. } => RuntimeFailureKind::InvalidInput,
         CapabilityInvocationError::ApprovalStoreMissing { .. }
         | CapabilityInvocationError::ResumeStoreMissing { .. }

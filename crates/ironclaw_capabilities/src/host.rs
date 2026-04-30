@@ -1,7 +1,8 @@
 use ironclaw_authorization::{CapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_host_api::{
-    CapabilityDispatchRequest, CapabilityDispatcher, Decision, DenyReason, ProcessId,
+    CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher, Decision,
+    DenyReason, ExecutionContext, Obligation, ProcessId, ResourceEstimate,
 };
 use ironclaw_processes::{ProcessManager, ProcessStart};
 use ironclaw_run_state::{
@@ -11,14 +12,17 @@ use tracing::warn;
 
 use crate::helpers::{
     CapabilityActionKind, approval_not_approved_error_kind, capability_lease_error_kind,
-    claim_error_may_be_concurrent_resume, complete_run_after_side_effect, ensure_no_obligations,
-    fail_run_if_configured, invocation_fingerprint_for_kind, matching_approval_lease,
-    resume_context_mismatch_kind, run_state_error_kind,
-    validate_approval_request_matches_invocation,
+    claim_error_may_be_concurrent_resume, complete_run_after_side_effect, fail_run_if_configured,
+    invocation_fingerprint_for_kind, matching_approval_lease, resume_context_mismatch_kind,
+    run_state_error_kind, validate_approval_request_matches_invocation,
 };
+use crate::obligations::post_dispatch_obligations;
 use crate::{
     CapabilityInvocationError, CapabilityInvocationRequest, CapabilityInvocationResult,
-    CapabilityResumeRequest, CapabilitySpawnRequest, CapabilitySpawnResult,
+    CapabilityObligationAbortRequest, CapabilityObligationCompletionRequest,
+    CapabilityObligationError, CapabilityObligationHandler, CapabilityObligationOutcome,
+    CapabilityObligationPhase, CapabilityObligationRequest, CapabilityResumeRequest,
+    CapabilitySpawnRequest, CapabilitySpawnResult,
 };
 
 pub struct CapabilityHost<'a, D>
@@ -32,6 +36,7 @@ where
     approval_requests: Option<&'a dyn ApprovalRequestStore>,
     capability_leases: Option<&'a dyn CapabilityLeaseStore>,
     process_manager: Option<&'a dyn ProcessManager>,
+    obligation_handler: Option<&'a dyn CapabilityObligationHandler>,
 }
 
 impl<'a, D> CapabilityHost<'a, D>
@@ -51,6 +56,7 @@ where
             approval_requests: None,
             capability_leases: None,
             process_manager: None,
+            obligation_handler: None,
         }
     }
 
@@ -102,6 +108,14 @@ where
         self
     }
 
+    /// Attaches the obligation handler that satisfies allow-decision
+    /// obligations before/after side effects. Without a handler, non-empty
+    /// obligations fail closed.
+    pub fn with_obligation_handler(mut self, handler: &'a dyn CapabilityObligationHandler) -> Self {
+        self.obligation_handler = Some(handler);
+        self
+    }
+
     pub async fn invoke_json(
         &self,
         request: CapabilityInvocationRequest,
@@ -146,6 +160,8 @@ where
             });
         };
 
+        let obligations;
+        let obligation_outcome;
         match self
             .authorizer
             .authorize_dispatch_with_trust(
@@ -156,18 +172,34 @@ where
             )
             .await
         {
-            Decision::Allow { obligations } => {
-                if let Err(error) =
-                    ensure_no_obligations(&request.capability_id, obligations.into_vec())
-                {
-                    fail_run_if_configured(
-                        self.run_state,
-                        &scope,
-                        invocation_id,
-                        "UnsupportedObligations",
+            Decision::Allow {
+                obligations: allowed_obligations,
+            } => {
+                let allowed_obligations = allowed_obligations.into_vec();
+                match self
+                    .prepare_obligations(
+                        CapabilityObligationPhase::Invoke,
+                        &request.context,
+                        &request.capability_id,
+                        &request.estimate,
+                        allowed_obligations.clone(),
                     )
-                    .await;
-                    return Err(error);
+                    .await
+                {
+                    Ok(outcome) => {
+                        obligations = allowed_obligations;
+                        obligation_outcome = outcome;
+                    }
+                    Err(error) => {
+                        fail_run_if_configured(
+                            self.run_state,
+                            &scope,
+                            invocation_id,
+                            obligation_invocation_error_kind(&error),
+                        )
+                        .await;
+                        return Err(error);
+                    }
                 }
             }
             Decision::Deny { reason } => {
@@ -295,19 +327,62 @@ where
         let dispatch = match self
             .dispatcher
             .dispatch_json(CapabilityDispatchRequest {
-                capability_id: request.capability_id,
+                capability_id: request.capability_id.clone(),
                 scope: scope.clone(),
-                estimate: request.estimate,
-                mounts: None,
-                resource_reservation: None,
+                estimate: request.estimate.clone(),
+                mounts: obligation_outcome.mounts.clone(),
+                resource_reservation: obligation_outcome.resource_reservation.clone(),
                 input: request.input,
             })
             .await
         {
             Ok(dispatch) => dispatch,
             Err(error) => {
+                self.abort_obligations(
+                    CapabilityObligationPhase::Invoke,
+                    &request.context,
+                    &request.capability_id,
+                    &request.estimate,
+                    obligations.as_slice(),
+                    &obligation_outcome,
+                )
+                .await;
                 fail_run_if_configured(self.run_state, &scope, invocation_id, "Dispatch").await;
                 return Err(CapabilityInvocationError::from(error));
+            }
+        };
+
+        let dispatch = match self
+            .complete_dispatch_obligations(
+                CapabilityObligationPhase::Invoke,
+                &request.context,
+                &request.capability_id,
+                &request.estimate,
+                obligations.as_slice(),
+                &dispatch,
+            )
+            .await
+        {
+            Ok(dispatch) => dispatch,
+            Err(error) => {
+                let cleanup_outcome = CapabilityObligationOutcome::default();
+                self.abort_obligations(
+                    CapabilityObligationPhase::Invoke,
+                    &request.context,
+                    &request.capability_id,
+                    &request.estimate,
+                    obligations.as_slice(),
+                    &cleanup_outcome,
+                )
+                .await;
+                fail_run_if_configured(
+                    self.run_state,
+                    &scope,
+                    invocation_id,
+                    obligation_invocation_error_kind(&error),
+                )
+                .await;
+                return Err(error);
             }
         };
 
@@ -477,7 +552,7 @@ where
         let mut authorized_context = request.context.clone();
         authorized_context.grants.grants.push(lease.grant.clone());
 
-        match self
+        let obligations = match self
             .authorizer
             .authorize_dispatch_with_trust(
                 &authorized_context,
@@ -487,18 +562,9 @@ where
             )
             .await
         {
-            Decision::Allow { obligations } => {
-                if let Err(error) = ensure_no_obligations(&capability_id, obligations.into_vec()) {
-                    fail_run_if_configured(
-                        Some(run_state),
-                        &scope,
-                        invocation_id,
-                        "UnsupportedObligations",
-                    )
-                    .await;
-                    return Err(error);
-                }
-            }
+            Decision::Allow {
+                obligations: allowed_obligations,
+            } => allowed_obligations.into_vec(),
             Decision::Deny { reason } => {
                 fail_run_if_configured(
                     Some(run_state),
@@ -524,7 +590,7 @@ where
                     capability: request.capability_id,
                 });
             }
-        }
+        };
 
         let claimed_lease = match capability_leases
             .claim(&scope, lease.grant.id, &invocation_fingerprint)
@@ -553,20 +619,65 @@ where
             }
         };
 
+        let obligation_outcome = match self
+            .prepare_obligations(
+                CapabilityObligationPhase::Resume,
+                &authorized_context,
+                &request.capability_id,
+                &request.estimate,
+                obligations.clone(),
+            )
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                fail_run_if_configured(
+                    Some(run_state),
+                    &scope,
+                    invocation_id,
+                    obligation_invocation_error_kind(&error),
+                )
+                .await;
+                if let Err(revoke_error) = capability_leases
+                    .revoke(&scope, claimed_lease.grant.id)
+                    .await
+                {
+                    warn!(
+                        lease_id = %claimed_lease.grant.id,
+                        invocation_id = %invocation_id,
+                        capability_id = %capability_id,
+                        obligation_error = %error,
+                        revoke_error_kind = capability_lease_error_kind(&revoke_error),
+                        "capability lease revoke failed after obligation failure; lease may remain claimed",
+                    );
+                }
+                return Err(error);
+            }
+        };
+
         let dispatch = match self
             .dispatcher
             .dispatch_json(CapabilityDispatchRequest {
-                capability_id: request.capability_id,
+                capability_id: request.capability_id.clone(),
                 scope: scope.clone(),
-                estimate: request.estimate,
-                mounts: None,
-                resource_reservation: None,
+                estimate: request.estimate.clone(),
+                mounts: obligation_outcome.mounts.clone(),
+                resource_reservation: obligation_outcome.resource_reservation.clone(),
                 input: request.input,
             })
             .await
         {
             Ok(dispatch) => dispatch,
             Err(error) => {
+                self.abort_obligations(
+                    CapabilityObligationPhase::Resume,
+                    &authorized_context,
+                    &request.capability_id,
+                    &request.estimate,
+                    obligations.as_slice(),
+                    &obligation_outcome,
+                )
+                .await;
                 fail_run_if_configured(Some(run_state), &scope, invocation_id, "Dispatch").await;
                 let invocation_error = CapabilityInvocationError::from(error);
                 if let Err(revoke_error) = capability_leases
@@ -583,6 +694,53 @@ where
                     );
                 }
                 return Err(invocation_error);
+            }
+        };
+
+        let dispatch = match self
+            .complete_dispatch_obligations(
+                CapabilityObligationPhase::Resume,
+                &authorized_context,
+                &request.capability_id,
+                &request.estimate,
+                obligations.as_slice(),
+                &dispatch,
+            )
+            .await
+        {
+            Ok(dispatch) => dispatch,
+            Err(error) => {
+                let cleanup_outcome = CapabilityObligationOutcome::default();
+                self.abort_obligations(
+                    CapabilityObligationPhase::Resume,
+                    &authorized_context,
+                    &request.capability_id,
+                    &request.estimate,
+                    obligations.as_slice(),
+                    &cleanup_outcome,
+                )
+                .await;
+                fail_run_if_configured(
+                    Some(run_state),
+                    &scope,
+                    invocation_id,
+                    obligation_invocation_error_kind(&error),
+                )
+                .await;
+                if let Err(revoke_error) = capability_leases
+                    .revoke(&scope, claimed_lease.grant.id)
+                    .await
+                {
+                    warn!(
+                        lease_id = %claimed_lease.grant.id,
+                        invocation_id = %invocation_id,
+                        capability_id = %capability_id,
+                        obligation_error = %error,
+                        revoke_error_kind = capability_lease_error_kind(&revoke_error),
+                        "capability lease revoke failed after completion obligation failure; lease may remain claimed",
+                    );
+                }
+                return Err(error);
             }
         };
 
@@ -767,7 +925,7 @@ where
         let mut authorized_context = request.context.clone();
         authorized_context.grants.grants.push(lease.grant.clone());
 
-        match self
+        let obligations = match self
             .authorizer
             .authorize_spawn_with_trust(
                 &authorized_context,
@@ -777,18 +935,9 @@ where
             )
             .await
         {
-            Decision::Allow { obligations } => {
-                if let Err(error) = ensure_no_obligations(&capability_id, obligations.into_vec()) {
-                    fail_run_if_configured(
-                        Some(run_state),
-                        &scope,
-                        invocation_id,
-                        "UnsupportedObligations",
-                    )
-                    .await;
-                    return Err(error);
-                }
-            }
+            Decision::Allow {
+                obligations: allowed_obligations,
+            } => allowed_obligations.into_vec(),
             Decision::Deny { reason } => {
                 fail_run_if_configured(
                     Some(run_state),
@@ -814,7 +963,7 @@ where
                     capability: request.capability_id,
                 });
             }
-        }
+        };
 
         let claimed_lease = match capability_leases
             .claim(&scope, lease.grant.id, &invocation_fingerprint)
@@ -843,6 +992,50 @@ where
             }
         };
 
+        let obligation_outcome = match self
+            .prepare_obligations(
+                CapabilityObligationPhase::Spawn,
+                &authorized_context,
+                &request.capability_id,
+                &request.estimate,
+                obligations.clone(),
+            )
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                fail_run_if_configured(
+                    Some(run_state),
+                    &scope,
+                    invocation_id,
+                    obligation_invocation_error_kind(&error),
+                )
+                .await;
+                if let Err(revoke_error) = capability_leases
+                    .revoke(&scope, claimed_lease.grant.id)
+                    .await
+                {
+                    warn!(
+                        lease_id = %claimed_lease.grant.id,
+                        invocation_id = %invocation_id,
+                        capability_id = %capability_id,
+                        obligation_error = %error,
+                        revoke_error_kind = capability_lease_error_kind(&revoke_error),
+                        "capability lease revoke failed after spawn obligation failure; lease may remain claimed",
+                    );
+                }
+                return Err(error);
+            }
+        };
+        let effective_mounts = obligation_outcome
+            .mounts
+            .clone()
+            .unwrap_or_else(|| authorized_context.mounts.clone());
+        let resource_reservation_id = obligation_outcome
+            .resource_reservation
+            .as_ref()
+            .map(|reservation| reservation.id);
+
         let process = match process_manager
             .spawn(ProcessStart {
                 process_id: ProcessId::new(),
@@ -850,18 +1043,27 @@ where
                 invocation_id,
                 scope: scope.clone(),
                 extension_id: descriptor.provider.clone(),
-                capability_id: request.capability_id,
+                capability_id: request.capability_id.clone(),
                 runtime: descriptor.runtime,
-                grants: authorized_context.grants,
-                mounts: authorized_context.mounts,
-                estimated_resources: request.estimate,
-                resource_reservation_id: None,
+                grants: authorized_context.grants.clone(),
+                mounts: effective_mounts,
+                estimated_resources: request.estimate.clone(),
+                resource_reservation_id,
                 input: request.input,
             })
             .await
         {
             Ok(process) => process,
             Err(error) => {
+                self.abort_obligations(
+                    CapabilityObligationPhase::Spawn,
+                    &authorized_context,
+                    &request.capability_id,
+                    &request.estimate,
+                    obligations.as_slice(),
+                    &obligation_outcome,
+                )
+                .await;
                 fail_run_if_configured(Some(run_state), &scope, invocation_id, "ProcessSpawn")
                     .await;
                 let invocation_error = CapabilityInvocationError::from(error);
@@ -949,6 +1151,8 @@ where
             });
         };
 
+        let obligations;
+        let obligation_outcome;
         match self
             .authorizer
             .authorize_spawn_with_trust(
@@ -959,18 +1163,34 @@ where
             )
             .await
         {
-            Decision::Allow { obligations } => {
-                if let Err(error) =
-                    ensure_no_obligations(&request.capability_id, obligations.into_vec())
-                {
-                    fail_run_if_configured(
-                        self.run_state,
-                        &scope,
-                        invocation_id,
-                        "UnsupportedObligations",
+            Decision::Allow {
+                obligations: allowed_obligations,
+            } => {
+                let allowed_obligations = allowed_obligations.into_vec();
+                match self
+                    .prepare_obligations(
+                        CapabilityObligationPhase::Spawn,
+                        &request.context,
+                        &request.capability_id,
+                        &request.estimate,
+                        allowed_obligations.clone(),
                     )
-                    .await;
-                    return Err(error);
+                    .await
+                {
+                    Ok(outcome) => {
+                        obligations = allowed_obligations;
+                        obligation_outcome = outcome;
+                    }
+                    Err(error) => {
+                        fail_run_if_configured(
+                            self.run_state,
+                            &scope,
+                            invocation_id,
+                            obligation_invocation_error_kind(&error),
+                        )
+                        .await;
+                        return Err(error);
+                    }
                 }
             }
             Decision::Deny { reason } => {
@@ -1095,6 +1315,15 @@ where
             }
         }
 
+        let effective_mounts = obligation_outcome
+            .mounts
+            .clone()
+            .unwrap_or_else(|| request.context.mounts.clone());
+        let resource_reservation_id = obligation_outcome
+            .resource_reservation
+            .as_ref()
+            .map(|reservation| reservation.id);
+
         let process = match process_manager
             .spawn(ProcessStart {
                 process_id: ProcessId::new(),
@@ -1102,18 +1331,27 @@ where
                 invocation_id,
                 scope: scope.clone(),
                 extension_id: descriptor.provider.clone(),
-                capability_id: request.capability_id,
+                capability_id: request.capability_id.clone(),
                 runtime: descriptor.runtime,
-                grants: request.context.grants,
-                mounts: request.context.mounts,
-                estimated_resources: request.estimate,
-                resource_reservation_id: None,
+                grants: request.context.grants.clone(),
+                mounts: effective_mounts,
+                estimated_resources: request.estimate.clone(),
+                resource_reservation_id,
                 input: request.input,
             })
             .await
         {
             Ok(process) => process,
             Err(error) => {
+                self.abort_obligations(
+                    CapabilityObligationPhase::Spawn,
+                    &request.context,
+                    &request.capability_id,
+                    &request.estimate,
+                    obligations.as_slice(),
+                    &obligation_outcome,
+                )
+                .await;
                 fail_run_if_configured(self.run_state, &scope, invocation_id, "ProcessSpawn").await;
                 return Err(CapabilityInvocationError::from(error));
             }
@@ -1131,5 +1369,138 @@ where
         }
 
         Ok(CapabilitySpawnResult { process })
+    }
+
+    async fn prepare_obligations(
+        &self,
+        phase: CapabilityObligationPhase,
+        context: &ExecutionContext,
+        capability_id: &ironclaw_host_api::CapabilityId,
+        estimate: &ResourceEstimate,
+        obligations: Vec<Obligation>,
+    ) -> Result<CapabilityObligationOutcome, CapabilityInvocationError> {
+        if obligations.is_empty() {
+            return Ok(CapabilityObligationOutcome::default());
+        }
+        if matches!(phase, CapabilityObligationPhase::Spawn) {
+            let unsupported = post_dispatch_obligations(&obligations);
+            if !unsupported.is_empty() {
+                return Err(CapabilityInvocationError::UnsupportedObligations {
+                    capability: capability_id.clone(),
+                    obligations: unsupported,
+                });
+            }
+        }
+        let Some(handler) = self.obligation_handler else {
+            return Err(CapabilityInvocationError::UnsupportedObligations {
+                capability: capability_id.clone(),
+                obligations,
+            });
+        };
+        handler
+            .prepare(CapabilityObligationRequest {
+                phase,
+                context,
+                capability_id,
+                estimate,
+                obligations: obligations.as_slice(),
+            })
+            .await
+            .map_err(|error| obligation_error_to_invocation(capability_id, error))
+    }
+
+    async fn complete_dispatch_obligations(
+        &self,
+        phase: CapabilityObligationPhase,
+        context: &ExecutionContext,
+        capability_id: &ironclaw_host_api::CapabilityId,
+        estimate: &ResourceEstimate,
+        obligations: &[Obligation],
+        dispatch: &CapabilityDispatchResult,
+    ) -> Result<CapabilityDispatchResult, CapabilityInvocationError> {
+        if obligations.is_empty() {
+            return Ok(dispatch.clone());
+        }
+        let Some(handler) = self.obligation_handler else {
+            let unsupported = post_dispatch_obligations(obligations);
+            if unsupported.is_empty() {
+                return Ok(dispatch.clone());
+            }
+            return Err(CapabilityInvocationError::UnsupportedObligations {
+                capability: capability_id.clone(),
+                obligations: unsupported,
+            });
+        };
+        handler
+            .complete_dispatch(CapabilityObligationCompletionRequest {
+                phase,
+                context,
+                capability_id,
+                estimate,
+                obligations,
+                dispatch,
+            })
+            .await
+            .map_err(|error| obligation_error_to_invocation(capability_id, error))
+    }
+
+    async fn abort_obligations(
+        &self,
+        phase: CapabilityObligationPhase,
+        context: &ExecutionContext,
+        capability_id: &ironclaw_host_api::CapabilityId,
+        estimate: &ResourceEstimate,
+        obligations: &[Obligation],
+        outcome: &CapabilityObligationOutcome,
+    ) {
+        if obligations.is_empty() {
+            return;
+        }
+        let Some(handler) = self.obligation_handler else {
+            return;
+        };
+        if let Err(error) = handler
+            .abort(CapabilityObligationAbortRequest {
+                phase,
+                context,
+                capability_id,
+                estimate,
+                obligations,
+                outcome,
+            })
+            .await
+        {
+            warn!(
+                capability_id = %capability_id,
+                error = %error,
+                "obligation abort failed after downstream side-effect failure",
+            );
+        }
+    }
+}
+
+fn obligation_error_to_invocation(
+    capability_id: &ironclaw_host_api::CapabilityId,
+    error: CapabilityObligationError,
+) -> CapabilityInvocationError {
+    match error {
+        CapabilityObligationError::Unsupported { obligations } => {
+            CapabilityInvocationError::UnsupportedObligations {
+                capability: capability_id.clone(),
+                obligations,
+            }
+        }
+        CapabilityObligationError::Failed { kind } => CapabilityInvocationError::ObligationFailed {
+            capability: capability_id.clone(),
+            kind,
+        },
+    }
+}
+
+fn obligation_invocation_error_kind(error: &CapabilityInvocationError) -> &'static str {
+    match error {
+        CapabilityInvocationError::UnsupportedObligations { .. } => "UnsupportedObligations",
+        CapabilityInvocationError::ObligationFailed { .. } => "ObligationFailed",
+        _ => "Obligation",
     }
 }

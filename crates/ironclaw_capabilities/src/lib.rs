@@ -7,10 +7,16 @@
 mod error;
 mod helpers;
 mod host;
+mod obligations;
 mod requests;
 
 pub use error::{CapabilityInvocationError, ResumeContextMismatchKind};
 pub use host::CapabilityHost;
+pub use obligations::{
+    CapabilityObligationAbortRequest, CapabilityObligationCompletionRequest,
+    CapabilityObligationError, CapabilityObligationFailureKind, CapabilityObligationHandler,
+    CapabilityObligationOutcome, CapabilityObligationPhase, CapabilityObligationRequest,
+};
 pub use requests::{
     CapabilityInvocationRequest, CapabilityInvocationResult, CapabilityResumeRequest,
     CapabilitySpawnRequest, CapabilitySpawnResult,

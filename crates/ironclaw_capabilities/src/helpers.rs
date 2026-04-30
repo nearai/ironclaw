@@ -3,26 +3,12 @@ use ironclaw_authorization::{
 };
 use ironclaw_host_api::{
     Action, ApprovalRequest, CapabilityId, ExecutionContext, InvocationFingerprint, InvocationId,
-    Obligation, Principal, ResourceEstimate, ResourceScope,
+    Principal, ResourceEstimate, ResourceScope,
 };
 use ironclaw_run_state::{ApprovalStatus, RunStateError, RunStateStore};
 use tracing::warn;
 
 use crate::{CapabilityInvocationError, ResumeContextMismatchKind};
-
-pub(crate) fn ensure_no_obligations(
-    capability: &CapabilityId,
-    obligations: Vec<Obligation>,
-) -> Result<(), CapabilityInvocationError> {
-    if obligations.is_empty() {
-        Ok(())
-    } else {
-        Err(CapabilityInvocationError::UnsupportedObligations {
-            capability: capability.clone(),
-            obligations,
-        })
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CapabilityActionKind {

@@ -48,8 +48,8 @@ Ownership remains:
 host_api       -> opaque SecretHandle and Action::UseSecret shapes
 secrets        -> scoped storage, metadata, and one-shot leases
 authorization  -> whether a caller may use a SecretHandle
-capabilities   -> caller-facing workflow; currently fails closed on InjectSecretOnce obligations
-host_runtime   -> shared runtime HTTP egress composition that leases, injects, and redacts secrets for host-mediated requests
+capabilities   -> caller-facing workflow; fails closed on InjectSecretOnce unless an obligation handler is configured
+host_runtime   -> built-in obligation handler leases/stages one-shot secret material and shared runtime HTTP egress injects/redacts secrets for host-mediated requests
 runtimes        -> consume injected values only after host-side authorization and lease handling
 ```
 

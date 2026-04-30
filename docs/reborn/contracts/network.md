@@ -64,8 +64,8 @@ Ownership remains:
 host_api       -> NetworkPolicy, NetworkTarget, NetworkMethod shapes
 network        -> scoped policy evaluation, DNS/private-IP checks, bounded HTTP transport
 authorization  -> whether a caller has a grant with network authority
-capabilities   -> caller-facing workflow; currently fails closed on ApplyNetworkPolicy obligations
-host_runtime   -> shared runtime HTTP egress composition with secrets and runtime adapters
+capabilities   -> caller-facing workflow; fails closed on ApplyNetworkPolicy unless an obligation handler is configured
+host_runtime   -> built-in obligation handler validates/stages scoped network policy and shared runtime HTTP egress enforces policy
 runtimes        -> translate native HTTP calls into host-mediated egress requests
 ```
 
