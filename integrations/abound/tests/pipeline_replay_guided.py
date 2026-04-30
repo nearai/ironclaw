@@ -150,10 +150,13 @@ def run_pipeline_replay_guided(
 
                 # Log initiate failures clearly instead of falling back to markdown.
                 if action == "initiate":
-                    if not output:
-                        note("  initiate: output not captured", sub)
-                    elif output.startswith("Error:"):
+                    if output.startswith("Error:"):
                         note(f"  initiate error: {output[:200]}", sub)
+                    elif not output:
+                        if not initiate_seen:
+                            initiate_seen = True
+                            initiate_call_args = c["args"]
+                        note("  initiate: called (output not captured)", sub)
 
                 if action == "send":
                     send_response = resp

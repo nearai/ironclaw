@@ -61,6 +61,8 @@ pub enum AppEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
     #[serde(rename = "tool_completed")]
@@ -72,12 +74,16 @@ pub enum AppEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         parameters: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
     #[serde(rename = "tool_result")]
     ToolResult {
         name: String,
         preview: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },

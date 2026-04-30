@@ -46,3 +46,5 @@ engine_trace_*.json
 # tests
 *test.sh
 *local.sh
+
+*.log
