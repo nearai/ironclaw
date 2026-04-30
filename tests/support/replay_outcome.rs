@@ -364,6 +364,7 @@ fn event_kind_name(kind: &ironclaw_engine::EventKind) -> &'static str {
         EventKind::CodeExecutionFailed { .. } => "CodeExecutionFailed",
         EventKind::CodeExecuted { .. } => "CodeExecuted",
         EventKind::OrchestratorRollback { .. } => "OrchestratorRollback",
+        EventKind::LlmReasoning { .. } => "LlmReasoning",
         EventKind::Unknown => "Unknown",
     }
 }

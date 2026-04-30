@@ -4695,6 +4695,11 @@ fn thread_event_to_app_events(
             })
             .into_iter()
             .collect(),
+        EventKind::LlmReasoning { content, model } => vec![AppEvent::LlmReasoning {
+            content: content.clone(),
+            model: model.clone(),
+            thread_id: Some(thread_id.into()),
+        }],
         EventKind::StateChanged { from, to, reason } => {
             vec![AppEvent::ThreadStateChanged {
                 thread_id: thread_id.into(),
@@ -5969,6 +5974,7 @@ pub(crate) mod test_support {
                 Ok(ironclaw_engine::LlmOutput {
                     response: ironclaw_engine::LlmResponse::Text("done".into()),
                     usage: ironclaw_engine::TokenUsage::default(),
+                    reasoning: None,
                 })
             }
             fn model_name(&self) -> &str {
@@ -6666,6 +6672,7 @@ mod tests {
                     finish_reason: crate::llm::FinishReason::Stop,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
+                    reasoning: None,
                 })
             }
 
@@ -6681,6 +6688,7 @@ mod tests {
                     finish_reason: crate::llm::FinishReason::Stop,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
+                    reasoning: None,
                 })
             }
         }
@@ -8073,6 +8081,7 @@ mod tests {
                 Ok(ironclaw_engine::LlmOutput {
                     response: ironclaw_engine::LlmResponse::Text("done".into()),
                     usage: ironclaw_engine::TokenUsage::default(),
+                    reasoning: None,
                 })
             }
             fn model_name(&self) -> &str {
@@ -8497,6 +8506,7 @@ mod tests {
                         "missing-pairing".into()
                     }),
                     usage: ironclaw_engine::TokenUsage::default(),
+                    reasoning: None,
                 })
             }
 
@@ -8650,6 +8660,7 @@ mod tests {
                         "snapshot-missing".into()
                     }),
                     usage: ironclaw_engine::TokenUsage::default(),
+                    reasoning: None,
                 })
             }
 
@@ -9323,6 +9334,7 @@ mod tests {
             Ok(ironclaw_engine::LlmOutput {
                 response: ironclaw_engine::LlmResponse::Text(self.text.clone()),
                 usage: ironclaw_engine::TokenUsage::default(),
+                reasoning: None,
             })
         }
 
@@ -9891,6 +9903,7 @@ mod tests {
                 Ok(ironclaw_engine::LlmOutput {
                     response: ironclaw_engine::LlmResponse::Text("ok".into()),
                     usage: ironclaw_engine::TokenUsage::default(),
+                    reasoning: None,
                 })
             }
             fn model_name(&self) -> &str {

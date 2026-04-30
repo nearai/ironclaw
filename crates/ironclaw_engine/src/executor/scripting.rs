@@ -2140,6 +2140,7 @@ mod tests {
             Ok(crate::traits::llm::LlmOutput {
                 response: crate::types::step::LlmResponse::Text("stub".into()),
                 usage: crate::types::step::TokenUsage::default(),
+                reasoning: None,
             })
         }
     }
@@ -3148,6 +3149,7 @@ except Exception as e:
                     config.model.as_deref().unwrap_or("default")
                 )),
                 usage: crate::types::step::TokenUsage::default(),
+                reasoning: None,
             })
         }
     }

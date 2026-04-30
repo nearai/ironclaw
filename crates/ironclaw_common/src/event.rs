@@ -433,6 +433,21 @@ pub enum AppEvent {
         decisions: Vec<ToolDecisionDto>,
     },
 
+    /// Native reasoning channel emitted by the underlying LLM
+    /// (Anthropic extended thinking, GLM/DeepSeek/Grok/Qwen/Kimi
+    /// `reasoning_content`, OpenAI o-series reasoning summaries).
+    /// Provider-agnostic: the extractor that produced this content
+    /// is configured in `llm_reasoning_extractors.json`. Distinct
+    /// from `ReasoningUpdate` (the agent's narrative about tool
+    /// choice) and `Thinking` (UX status spinner).
+    #[serde(rename = "llm_reasoning")]
+    LlmReasoning {
+        content: String,
+        model: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+
     /// Full (non-truncated) tool output (verbose/debug mode only).
     #[serde(rename = "tool_result_full")]
     ToolResultFull {
@@ -722,6 +737,7 @@ impl AppEvent {
             Self::ExtensionStatus { .. } => "extension_status",
             Self::ReasoningUpdate { .. } => "reasoning_update",
             Self::JobReasoning { .. } => "job_reasoning",
+            Self::LlmReasoning { .. } => "llm_reasoning",
             Self::ToolResultFull { .. } => "tool_result_full",
             Self::TurnMetrics { .. } => "turn_metrics",
             Self::ThreadStateChanged { .. } => "thread_state_changed",
@@ -898,6 +914,11 @@ mod tests {
                 job_id: String::new(),
                 narrative: String::new(),
                 decisions: vec![],
+            },
+            AppEvent::LlmReasoning {
+                content: String::new(),
+                model: String::new(),
+                thread_id: None,
             },
             AppEvent::ToolResultFull {
                 name: String::new(),

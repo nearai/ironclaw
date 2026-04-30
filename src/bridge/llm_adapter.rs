@@ -162,6 +162,7 @@ impl LlmBackend for LlmBridgeAdapter {
                         response.cache_creation_input_tokens,
                     ),
                 },
+                reasoning: response.reasoning,
             });
         }
 
@@ -257,6 +258,7 @@ impl LlmBackend for LlmBridgeAdapter {
                     response.cache_creation_input_tokens,
                 ),
             },
+            reasoning: response.reasoning,
         })
     }
 
@@ -662,6 +664,7 @@ mod tests {
                 finish_reason: crate::llm::FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
 
@@ -685,6 +688,7 @@ mod tests {
                 finish_reason: crate::llm::FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
     }
@@ -851,6 +855,7 @@ mod tests {
                 finish_reason: crate::llm::FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
     }
@@ -975,6 +980,7 @@ mod tests {
                 finish_reason: crate::llm::FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
 
@@ -1582,6 +1588,7 @@ And also check the token price:\n\
                 finish_reason: crate::llm::FinishReason::ToolUse,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
     }
@@ -1672,6 +1679,7 @@ And also check the token price:\n\
                 finish_reason: crate::llm::FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
         async fn complete_with_tools(
@@ -1686,6 +1694,7 @@ And also check the token price:\n\
                 finish_reason: crate::llm::FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
     }
@@ -1761,6 +1770,7 @@ And also check the token price:\n\
                     finish_reason: crate::llm::FinishReason::Stop,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
+                    reasoning: None,
                 })
             }
             async fn complete_with_tools(
@@ -1820,6 +1830,7 @@ And also check the token price:\n\
                     finish_reason: crate::llm::FinishReason::Stop,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
+                    reasoning: None,
                 })
             }
             async fn complete_with_tools(
@@ -1890,6 +1901,7 @@ And also check the token price:\n\
                     finish_reason: crate::llm::FinishReason::Stop,
                     cache_read_input_tokens: 2_000,
                     cache_creation_input_tokens: 1_000,
+                    reasoning: None,
                 })
             }
             async fn complete_with_tools(

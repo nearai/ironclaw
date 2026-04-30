@@ -264,6 +264,15 @@ required-features = ["libsql", "integration"]
 name = "html_to_markdown"
 required-features = ["html-to-markdown"]
 
+# Temporary fork of rig-core 0.30 that adds `reasoning_content` to the
+# OpenAI-compatible `Message::Assistant` variant. Without this, serde
+# silently drops the field during deserialization for every provider
+# that goes through rig's openai code path (GLM, DeepSeek, Grok, Qwen,
+# Kimi, OpenRouter, Together, Fireworks). Remove once upstream merges
+# https://github.com/0xPlaygrounds/rig/pull/<TBD>.
+[patch.crates-io]
+rig-core = { git = "https://github.com/failsafesecurity/rig.git", branch = "ironclaw-reasoning" }
+
 [profile.release]
 strip = true          # Remove debug symbols from release binaries
 

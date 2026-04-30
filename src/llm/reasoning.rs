@@ -3398,6 +3398,7 @@ That's my plan."#;
                     finish_reason: FinishReason::Stop,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
+                    reasoning: None,
                 })
             }
         }
@@ -3749,6 +3750,7 @@ That's my plan."#;
                 finish_reason: self.finish_reason,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
     }

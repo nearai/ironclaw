@@ -262,6 +262,7 @@ impl LlmProvider for GithubCopilotProvider {
                 .unwrap_or(0),
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            reasoning: None,
         })
     }
 
@@ -348,6 +349,7 @@ impl LlmProvider for GithubCopilotProvider {
                 .unwrap_or(0),
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            reasoning: None,
         })
     }
 

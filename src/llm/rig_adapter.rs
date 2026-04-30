@@ -418,6 +418,15 @@ fn extract_cache_creation<T: Serialize>(raw: &T) -> u32 {
         .unwrap_or(0)
 }
 
+/// Extract the model's native reasoning channel (chain-of-thought) from a
+/// provider response. The per-provider knowledge lives in
+/// `llm_reasoning_extractors.json`; this just serializes the typed response
+/// to a generic JSON value and delegates.
+fn extract_reasoning_from_raw<T: Serialize>(model: &str, raw: &T) -> Option<String> {
+    let value = serde_json::to_value(raw).ok()?;
+    crate::llm::llm_reasoning::extract_reasoning(model, &value)
+}
+
 /// Build a rig-core CompletionRequest from our internal types.
 ///
 /// When `cache_retention` is not `None`, injects a top-level `cache_control`
@@ -558,6 +567,8 @@ where
 
         let (text, _tool_calls, finish) = extract_response(&response.choice, &response.usage);
 
+        let reasoning = extract_reasoning_from_raw(&self.model_name, &response.raw_response);
+
         let resp = CompletionResponse {
             content: text.unwrap_or_default(),
             input_tokens: saturate_u32(response.usage.input_tokens),
@@ -565,6 +576,7 @@ where
             finish_reason: finish,
             cache_read_input_tokens: saturate_u32(response.usage.cached_input_tokens),
             cache_creation_input_tokens: extract_cache_creation(&response.raw_response),
+            reasoning,
         };
 
         if resp.cache_read_input_tokens > 0 {
@@ -630,6 +642,8 @@ where
             }
         }
 
+        let reasoning = extract_reasoning_from_raw(&self.model_name, &response.raw_response);
+
         let resp = ToolCompletionResponse {
             content: text,
             tool_calls,
@@ -638,6 +652,7 @@ where
             finish_reason: finish,
             cache_read_input_tokens: saturate_u32(response.usage.cached_input_tokens),
             cache_creation_input_tokens: extract_cache_creation(&response.raw_response),
+            reasoning,
         };
 
         if resp.cache_read_input_tokens > 0 {

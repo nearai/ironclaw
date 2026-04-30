@@ -414,6 +414,7 @@ mod tests {
                     finish_reason: FinishReason::Stop,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
+                    reasoning: None,
                 }))),
                 tool_complete_result: Mutex::new(Some(Ok(ToolCompletionResponse {
                     content: Some(content.to_string()),
@@ -423,6 +424,7 @@ mod tests {
                     finish_reason: FinishReason::Stop,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
+                    reasoning: None,
                 }))),
             }
         }
@@ -806,6 +808,7 @@ mod tests {
                 finish_reason: FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
 
@@ -833,6 +836,7 @@ mod tests {
                 finish_reason: FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
 

@@ -62,6 +62,7 @@ impl LlmBackend for ScriptedLlm {
             Ok(LlmOutput {
                 response: LlmResponse::Text("done".into()),
                 usage: TokenUsage::default(),
+                reasoning: None,
             })
         } else {
             Ok(queue.remove(0))
@@ -109,6 +110,7 @@ impl LlmBackend for ActionCapturingScriptedLlm {
             Ok(LlmOutput {
                 response: LlmResponse::Text("done".into()),
                 usage: TokenUsage::default(),
+                reasoning: None,
             })
         } else {
             Ok(queue.remove(0))
@@ -895,6 +897,7 @@ async fn gate_paused_transitions_thread_to_waiting() {
             content: None,
         },
         usage: TokenUsage::default(),
+        reasoning: None,
     }]);
 
     let store = TestStore::new();
@@ -963,6 +966,7 @@ async fn gate_paused_authentication_carries_credential_name() {
             content: None,
         },
         usage: TokenUsage::default(),
+        reasoning: None,
     }]);
 
     let store = TestStore::new();
@@ -1026,10 +1030,12 @@ async fn gate_paused_thread_resumes_to_completion() {
                 content: None,
             },
             usage: TokenUsage::default(),
+            reasoning: None,
         },
         LlmOutput {
             response: LlmResponse::Text("done".into()),
             usage: TokenUsage::default(),
+            reasoning: None,
         },
     ]);
 
@@ -1106,10 +1112,12 @@ async fn tool_info_does_not_gate_callable_tool_into_next_llm_callable_set() {
                 content: None,
             },
             usage: TokenUsage::default(),
+            reasoning: None,
         },
         LlmOutput {
             response: LlmResponse::Text("done".into()),
             usage: TokenUsage::default(),
+            reasoning: None,
         },
     ]);
 
@@ -1186,10 +1194,12 @@ async fn approval_resolution_executes_pending_call_directly() {
                 content: None,
             },
             usage: TokenUsage::default(),
+            reasoning: None,
         },
         LlmOutput {
             response: LlmResponse::Text("done".into()),
             usage: TokenUsage::default(),
+            reasoning: None,
         },
     ]);
 
@@ -1329,6 +1339,7 @@ async fn auth_resolution_retries_same_pending_action_without_second_pause() {
                 content: None,
             },
             usage: TokenUsage::default(),
+            reasoning: None,
         },
         LlmOutput {
             response: LlmResponse::ActionCalls {
@@ -1340,10 +1351,12 @@ async fn auth_resolution_retries_same_pending_action_without_second_pause() {
                 content: None,
             },
             usage: TokenUsage::default(),
+            reasoning: None,
         },
         LlmOutput {
             response: LlmResponse::Text("done".into()),
             usage: TokenUsage::default(),
+            reasoning: None,
         },
     ]);
 
@@ -1457,10 +1470,12 @@ async fn approval_chains_directly_into_auth_for_install_flow() {
                 content: None,
             },
             usage: TokenUsage::default(),
+            reasoning: None,
         },
         LlmOutput {
             response: LlmResponse::Text("notion connected".into()),
             usage: TokenUsage::default(),
+            reasoning: None,
         },
     ]);
 
@@ -1585,6 +1600,7 @@ async fn install_auth_resume_followed_by_aliased_tool_call_completes_without_han
                 content: None,
             },
             usage: TokenUsage::default(),
+            reasoning: None,
         },
         LlmOutput {
             response: LlmResponse::ActionCalls {
@@ -1596,10 +1612,12 @@ async fn install_auth_resume_followed_by_aliased_tool_call_completes_without_han
                 content: None,
             },
             usage: TokenUsage::default(),
+            reasoning: None,
         },
         LlmOutput {
             response: LlmResponse::Text("done".into()),
             usage: TokenUsage::default(),
+            reasoning: None,
         },
     ]);
 
@@ -2323,6 +2341,7 @@ async fn auto_approve_mode_skips_approval_for_standard_tools() {
             content: None,
         },
         usage: TokenUsage::default(),
+        reasoning: None,
     }]);
 
     let store = TestStore::new();
@@ -2420,6 +2439,7 @@ async fn gate_resume_with_execution_obligation() {
                 content: None,
             },
             usage: TokenUsage::default(),
+            reasoning: None,
         },
         // Phase 2 after resume: http succeeds (approved), then LLM returns text
         // refusal. The orchestrator should detect "run the echo tool" intent from
@@ -2427,6 +2447,7 @@ async fn gate_resume_with_execution_obligation() {
         LlmOutput {
             response: LlmResponse::Text("I cannot execute tools from this reply path.".into()),
             usage: TokenUsage::default(),
+            reasoning: None,
         },
         // After obligation nudge: echo tool call
         LlmOutput {
@@ -2439,11 +2460,13 @@ async fn gate_resume_with_execution_obligation() {
                 content: None,
             },
             usage: TokenUsage::default(),
+            reasoning: None,
         },
         // Final text
         LlmOutput {
             response: LlmResponse::Text("Echo returned: obligation resume test".into()),
             usage: TokenUsage::default(),
+            reasoning: None,
         },
     ]);
 
