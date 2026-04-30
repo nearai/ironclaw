@@ -62,7 +62,7 @@ use crate::channels::web::platform::static_files::{
     debug_init_handler, debug_panel_css_handler, debug_panel_js_handler, favicon_handler,
     health_handler, i18n_app_handler, i18n_en_handler, i18n_index_handler, i18n_ko_handler,
     i18n_zh_handler, index_handler, js_handler, project_file_handler, project_index_handler,
-    project_redirect_handler, theme_css_handler, theme_init_handler,
+    project_redirect_handler, reborn_readiness_handler, theme_css_handler, theme_init_handler,
 };
 
 // Feature slices under `features/<slice>/`. As of ironclaw#2599 stage 4d,
@@ -124,6 +124,7 @@ pub async fn start_server(
     // Public routes (no auth)
     let public = Router::new()
         .route("/api/health", get(health_handler))
+        .route("/api/reborn/readiness", get(reborn_readiness_handler))
         .route("/oauth/callback", get(oauth_callback_handler))
         .route(
             "/oauth/slack/callback",

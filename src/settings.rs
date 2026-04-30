@@ -298,6 +298,24 @@ pub struct RebornSettings {
     /// silent coerce.
     #[serde(default)]
     pub profile: Option<String>,
+
+    /// Legacy compatibility bridge mode (`off` / `read-only` /
+    /// `migrate`). `None` defers to env (`REBORN_LEGACY_BRIDGE_MODE`).
+    /// Validated against
+    /// [`ironclaw_reborn_composition::LegacyBridgeMode`] at resolve time.
+    /// Bridge mode does not carry secret material — see
+    /// `crates/ironclaw_reborn_composition/src/legacy.rs` for the
+    /// contract.
+    #[serde(default)]
+    pub legacy_bridge_mode: Option<String>,
+
+    /// Operator acknowledgement for running the permissive `migrate`
+    /// bridge under `production`. `None` defers to env
+    /// (`REBORN_PRODUCTION_MIGRATION_ACK`). Default behaviour is to
+    /// reject production + migrate without this flag — see the
+    /// composition root's bridge guard.
+    #[serde(default)]
+    pub production_migration_ack: Option<bool>,
 }
 
 /// Source for the secrets master key.

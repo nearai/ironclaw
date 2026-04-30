@@ -1427,12 +1427,15 @@ async fn build_reborn_services(
     tracing::info!(
         profile = %config.reborn.profile,
         owner_id = %config.owner_id,
+        legacy_bridge_mode = %config.reborn.legacy_bridge_mode,
         "Reborn composition active; building service graph"
     );
 
     let services = build_reborn_production_services(RebornBuildInput {
         profile: config.reborn.profile,
         owner_id: config.owner_id.clone(),
+        legacy_bridge_mode: config.reborn.legacy_bridge_mode,
+        production_migration_ack: config.reborn.production_migration_ack,
     })
     .await
     .map_err(|err| {
@@ -1698,7 +1701,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     mod reborn_branch {
         use super::super::build_reborn_services;
-        use crate::config::{Config, RebornConfig, RebornProfile};
+        use crate::config::{Config, LegacyBridgeMode, RebornConfig, RebornProfile};
 
         fn config_with_profile(profile: RebornProfile) -> Config {
             // `Config::for_testing` is the only test-only constructor that
@@ -1710,6 +1713,8 @@ mod tests {
             cfg.reborn = RebornConfig {
                 enabled: profile != RebornProfile::Disabled,
                 profile,
+                legacy_bridge_mode: LegacyBridgeMode::Off,
+                production_migration_ack: false,
             };
             cfg
         }
@@ -1758,6 +1763,81 @@ mod tests {
                 !rendered.contains("/Users/"),
                 "production diagnostic leaked a host path: {rendered}"
             );
+        }
+
+        /// Acceptance test #4 — config-layer precedence end-to-end.
+        ///
+        /// Drives the full binary-side resolution path: bootstrap env
+        /// baseline → DB-backed `Settings` overlay →
+        /// `RebornConfig::resolve_with_settings` → `build_reborn_services`.
+        /// The assertion observes that the resolved profile and bridge
+        /// mode propagate from settings into the composition input, not
+        /// just into `Config`. Per `.claude/rules/testing.md`, this is
+        /// the caller-level variant of the precedence tests in
+        /// `src/config/reborn.rs`.
+        #[tokio::test]
+        async fn config_precedence_propagates_through_to_composition() {
+            use crate::settings::{RebornSettings, Settings};
+
+            // Settings overlay: explicit production attempt with bridge
+            // off and no migration ack. The composition root will fail
+            // closed because of missing substrate, but the failure path
+            // should observe the correct (resolved) profile in the
+            // tracing span — the build error is what we capture.
+            let settings = Settings {
+                reborn: RebornSettings {
+                    enabled: Some(true),
+                    profile: Some("production".to_string()),
+                    legacy_bridge_mode: Some("off".to_string()),
+                    production_migration_ack: Some(false),
+                },
+                ..Settings::default()
+            };
+            let resolved = RebornConfig::resolve_with_settings(&settings)
+                .expect("settings overlay must resolve to a valid config");
+            assert_eq!(resolved.profile, RebornProfile::Production);
+            assert_eq!(resolved.legacy_bridge_mode, LegacyBridgeMode::Off);
+            assert!(!resolved.production_migration_ack);
+
+            let tmp = std::env::temp_dir().join("ironclaw-reborn-precedence");
+            let mut cfg = Config::for_testing(tmp.clone(), tmp.clone(), tmp);
+            cfg.reborn = resolved;
+
+            let err = build_reborn_services(&cfg)
+                .await
+                .expect_err("production must fail closed");
+            // The bridge guard would have rejected before the substrate
+            // gate fired, so confirm the failure shape is the substrate
+            // gate (i.e. the bridge precedence path resolved cleanly).
+            assert!(
+                err.to_string().contains("reborn composition failed"),
+                "bridge precedence path must reach the substrate gate; got {err}"
+            );
+        }
+
+        /// Acceptance test #7 (partial — handle-pairing side) — the
+        /// approval resolver and the future `CapabilityHost` will share
+        /// the same approval/lease/audit stores. With the resolver
+        /// itself not yet bound to the composition root, what we can
+        /// assert today is the structural precondition: the
+        /// `LocalDev` graph satisfies the `validate()` rules that
+        /// pair `run_state ↔ approval` and `auth ↔ lease` together.
+        /// When the resolver lands, this test extends to drive an
+        /// `ApprovalResolver::resolve` against the wired stores.
+        #[tokio::test]
+        async fn approval_handle_pairing_holds_for_local_dev() {
+            let cfg = config_with_profile(RebornProfile::LocalDev);
+            let services = build_reborn_services(&cfg)
+                .await
+                .expect("local-dev must succeed");
+
+            // Both pairs must be wired together — the validate() rules
+            // would have rejected an asymmetric build before reaching
+            // here, so observing both `Some` is the contract.
+            assert!(services.run_state_store.is_some());
+            assert!(services.approval_request_store.is_some());
+            assert!(services.authorization.is_some());
+            assert!(services.capability_lease_store.is_some());
         }
     }
 

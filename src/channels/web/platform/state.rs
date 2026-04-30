@@ -464,6 +464,19 @@ pub struct GatewayState {
     /// Channel-agnostic tool dispatcher for routing handler operations through
     /// the tool pipeline with audit trail.
     pub tool_dispatcher: Option<Arc<crate::tools::dispatch::ToolDispatcher>>,
+    /// Reborn composition readiness snapshot.
+    ///
+    /// Populated from `AppComponents::reborn_readiness()` at startup and
+    /// served verbatim by `/api/reborn/readiness`. The snapshot is taken
+    /// once because [`RebornReadiness`] is a typed `Copy` value and the
+    /// per-slot wired/unwired flags do not change after the composition
+    /// root finishes building. Defaults to
+    /// [`RebornReadiness::disabled`] for test harnesses and gateways
+    /// constructed without an attached `AppBuilder`.
+    ///
+    /// [`RebornReadiness`]: ironclaw_reborn_composition::RebornReadiness
+    /// [`RebornReadiness::disabled`]: ironclaw_reborn_composition::RebornReadiness::disabled
+    pub reborn_readiness: ironclaw_reborn_composition::RebornReadiness,
 }
 
 /// Cached result of `build_frontend_html()`, keyed by a cheap workspace

@@ -12,7 +12,7 @@ use crate::config::helpers::{optional_env, parse_bool_env};
 use crate::error::ConfigError;
 use crate::settings::Settings;
 
-pub use ironclaw_reborn_composition::RebornProfile;
+pub use ironclaw_reborn_composition::{LegacyBridgeMode, RebornProfile};
 
 /// Bootstrap configuration for the Reborn composition root.
 ///
@@ -30,6 +30,17 @@ pub struct RebornConfig {
     /// Profile selecting which composition branch runs. Default:
     /// [`RebornProfile::Disabled`].
     pub profile: RebornProfile,
+    /// Legacy compatibility bridge mode. Default
+    /// [`LegacyBridgeMode::Off`] — Reborn services do not access legacy
+    /// schemas unless the operator names a non-Off mode. See
+    /// `crates/ironclaw_reborn_composition/src/legacy.rs` for the contract.
+    pub legacy_bridge_mode: LegacyBridgeMode,
+    /// Operator acknowledgement that a production deployment may run with
+    /// the permissive [`LegacyBridgeMode::Migrate`] bridge. Default
+    /// `false`. The composition root rejects production + migrate without
+    /// this flag to prevent a stale config from silently inheriting
+    /// cross-schema writes.
+    pub production_migration_ack: bool,
 }
 
 impl Default for RebornConfig {
@@ -37,6 +48,8 @@ impl Default for RebornConfig {
         Self {
             enabled: false,
             profile: RebornProfile::Disabled,
+            legacy_bridge_mode: LegacyBridgeMode::Off,
+            production_migration_ack: false,
         }
     }
 }
@@ -88,7 +101,31 @@ impl RebornConfig {
             profile
         };
 
-        Ok(Self { enabled, profile })
+        // Legacy bridge mode: separate env knob. Default `Off` so a fresh
+        // deployment cannot accidentally accept cross-schema reads from
+        // legacy state. Validation that a non-Off bridge requires an
+        // active profile lives in the composition root, not here — the
+        // operator may legitimately pre-stage `REBORN_LEGACY_BRIDGE_MODE`
+        // before flipping `REBORN_ENABLED=true`.
+        let legacy_bridge_mode = match optional_env("REBORN_LEGACY_BRIDGE_MODE")? {
+            None => LegacyBridgeMode::Off,
+            Some(raw) => {
+                raw.parse::<LegacyBridgeMode>()
+                    .map_err(|err| ConfigError::InvalidValue {
+                        key: "REBORN_LEGACY_BRIDGE_MODE".to_string(),
+                        message: err.to_string(),
+                    })?
+            }
+        };
+
+        let production_migration_ack = parse_bool_env("REBORN_PRODUCTION_MIGRATION_ACK", false)?;
+
+        Ok(Self {
+            enabled,
+            profile,
+            legacy_bridge_mode,
+            production_migration_ack,
+        })
     }
 
     /// True when the operator has selected an explicit non-disabled
@@ -139,6 +176,24 @@ impl RebornConfig {
             }
         }
 
+        // Legacy bridge mode + production-migration ack: same precedence
+        // (DB overlay over env), same fail-closed rule when the DB
+        // overlay names an unknown variant.
+        if let Some(mode_str) = settings.reborn.legacy_bridge_mode.as_deref() {
+            let trimmed = mode_str.trim();
+            if !trimmed.is_empty() {
+                cfg.legacy_bridge_mode = trimmed.parse::<LegacyBridgeMode>().map_err(|err| {
+                    ConfigError::InvalidValue {
+                        key: "settings.reborn.legacy_bridge_mode".to_string(),
+                        message: err.to_string(),
+                    }
+                })?;
+            }
+        }
+        if let Some(ack) = settings.reborn.production_migration_ack {
+            cfg.production_migration_ack = ack;
+        }
+
         // Step 3: re-apply the cross-validation invariants. If a DB
         // overlay produced an inconsistent state (e.g. enabled=false but
         // profile=production via the settings table), fail closed the same
@@ -174,12 +229,16 @@ mod tests {
         unsafe {
             std::env::remove_var("REBORN_ENABLED");
             std::env::remove_var("REBORN_PROFILE");
+            std::env::remove_var("REBORN_LEGACY_BRIDGE_MODE");
+            std::env::remove_var("REBORN_PRODUCTION_MIGRATION_ACK");
         }
         let result = f();
         // SAFETY: under ENV_MUTEX, no concurrent env access.
         unsafe {
             std::env::remove_var("REBORN_ENABLED");
             std::env::remove_var("REBORN_PROFILE");
+            std::env::remove_var("REBORN_LEGACY_BRIDGE_MODE");
+            std::env::remove_var("REBORN_PRODUCTION_MIGRATION_ACK");
         }
         result
     }
@@ -309,6 +368,7 @@ mod tests {
             let settings = settings_with(RebornSettings {
                 enabled: Some(true),
                 profile: Some("migration-dry-run".to_string()),
+                ..RebornSettings::default()
             });
             let cfg =
                 RebornConfig::resolve_with_settings(&settings).expect("DB overlay must resolve");
@@ -330,6 +390,7 @@ mod tests {
             let settings = settings_with(RebornSettings {
                 enabled: Some(false),
                 profile: None,
+                ..RebornSettings::default()
             });
             let cfg = RebornConfig::resolve_with_settings(&settings)
                 .expect("DB-forced disable must resolve cleanly");
@@ -344,6 +405,7 @@ mod tests {
             let settings = settings_with(RebornSettings {
                 enabled: Some(true),
                 profile: Some("staging".to_string()),
+                ..RebornSettings::default()
             });
             let err = RebornConfig::resolve_with_settings(&settings)
                 .expect_err("invalid DB profile must fail closed");
@@ -366,6 +428,7 @@ mod tests {
             let settings = settings_with(RebornSettings {
                 enabled: Some(false),
                 profile: Some("production".to_string()),
+                ..RebornSettings::default()
             });
             let err = RebornConfig::resolve_with_settings(&settings)
                 .expect_err("inconsistent DB combo must fail closed");
@@ -405,6 +468,7 @@ mod tests {
             reborn: RebornSettings {
                 enabled: Some(true),
                 profile: Some("local-dev".to_string()),
+                ..RebornSettings::default()
             },
             ..Settings::default()
         };
@@ -433,6 +497,8 @@ mod tests {
         assert_eq!(settings.reborn, RebornSettings::default());
         assert!(settings.reborn.enabled.is_none());
         assert!(settings.reborn.profile.is_none());
+        assert!(settings.reborn.legacy_bridge_mode.is_none());
+        assert!(settings.reborn.production_migration_ack.is_none());
     }
 
     #[test]
@@ -447,6 +513,7 @@ mod tests {
             reborn: RebornSettings {
                 enabled: Some(true),
                 profile: Some("local-dev".to_string()),
+                ..RebornSettings::default()
             },
             ..Settings::default()
         };
@@ -470,6 +537,8 @@ mod tests {
         let settings = RebornSettings {
             enabled: Some(true),
             profile: Some("production".to_string()),
+            legacy_bridge_mode: Some("read-only".to_string()),
+            production_migration_ack: Some(false),
         };
         let rendered = serde_json::to_string(&settings).unwrap();
         let lc = rendered.to_ascii_lowercase();
@@ -498,10 +567,92 @@ mod tests {
         let cfg = RebornConfig {
             enabled: true,
             profile: RebornProfile::LocalDev,
+            legacy_bridge_mode: LegacyBridgeMode::Off,
+            production_migration_ack: false,
         };
         let rendered = format!("{cfg:?}");
         assert!(!rendered.to_lowercase().contains("api_key"));
         assert!(!rendered.to_lowercase().contains("secret"));
         assert!(!rendered.contains("postgres://"));
+    }
+
+    // ── Legacy bridge mode (issue #3026 "Legacy compatibility") ──────────
+
+    #[test]
+    fn default_bridge_mode_is_off() {
+        with_clean_env(|| {
+            let cfg = RebornConfig::resolve().expect("default must resolve");
+            assert_eq!(cfg.legacy_bridge_mode, LegacyBridgeMode::Off);
+            assert!(!cfg.production_migration_ack);
+        });
+    }
+
+    #[test]
+    fn env_resolves_bridge_mode() {
+        with_clean_env(|| {
+            // SAFETY: under ENV_MUTEX in with_clean_env.
+            unsafe {
+                std::env::set_var("REBORN_LEGACY_BRIDGE_MODE", "read-only");
+            }
+            let cfg = RebornConfig::resolve().expect("must resolve");
+            assert_eq!(cfg.legacy_bridge_mode, LegacyBridgeMode::ReadOnly);
+        });
+    }
+
+    #[test]
+    fn invalid_bridge_mode_in_env_is_rejected() {
+        with_clean_env(|| {
+            // SAFETY: under ENV_MUTEX in with_clean_env.
+            unsafe {
+                std::env::set_var("REBORN_LEGACY_BRIDGE_MODE", "forced");
+            }
+            let err = RebornConfig::resolve().expect_err("invalid mode must fail");
+            match err {
+                ConfigError::InvalidValue { key, .. } => {
+                    assert_eq!(key, "REBORN_LEGACY_BRIDGE_MODE");
+                }
+                other => panic!("expected InvalidValue, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn settings_overlay_overrides_env_for_bridge_mode() {
+        with_clean_env(|| {
+            // SAFETY: under ENV_MUTEX in with_clean_env.
+            unsafe {
+                std::env::set_var("REBORN_LEGACY_BRIDGE_MODE", "off");
+            }
+            let settings = settings_with(RebornSettings {
+                enabled: None,
+                profile: None,
+                legacy_bridge_mode: Some("migrate".to_string()),
+                production_migration_ack: Some(true),
+            });
+            let cfg =
+                RebornConfig::resolve_with_settings(&settings).expect("DB overlay must resolve");
+            assert_eq!(cfg.legacy_bridge_mode, LegacyBridgeMode::Migrate);
+            assert!(cfg.production_migration_ack);
+        });
+    }
+
+    #[test]
+    fn settings_overlay_rejects_invalid_bridge_mode() {
+        with_clean_env(|| {
+            let settings = settings_with(RebornSettings {
+                enabled: None,
+                profile: None,
+                legacy_bridge_mode: Some("anything-goes".to_string()),
+                production_migration_ack: None,
+            });
+            let err = RebornConfig::resolve_with_settings(&settings)
+                .expect_err("invalid DB bridge mode must fail closed");
+            match err {
+                ConfigError::InvalidValue { key, .. } => {
+                    assert_eq!(key, "settings.reborn.legacy_bridge_mode");
+                }
+                other => panic!("expected InvalidValue, got {other:?}"),
+            }
+        });
     }
 }

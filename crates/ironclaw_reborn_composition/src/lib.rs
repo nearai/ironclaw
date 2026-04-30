@@ -50,12 +50,15 @@ use ironclaw_filesystem::FilesystemError;
 use ironclaw_host_api::HostApiError;
 use ironclaw_resources::ResourceError;
 use ironclaw_run_state::RunStateError;
+use ironclaw_trust::TrustError;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub mod factories;
+mod legacy;
 mod profile;
 
+pub use legacy::{LegacyBridgeMode, LegacyBridgeModeParseError};
 pub use profile::{RebornProfile, RebornProfileParseError};
 
 /// Inputs required to build a Reborn production service graph.
@@ -71,6 +74,18 @@ pub struct RebornBuildInput {
     /// Owner/admin scope used when reading typed settings. Mirrors
     /// `Config::owner_id`.
     pub owner_id: String,
+    /// Compatibility bridge to the legacy `src/` schemas. Default
+    /// [`LegacyBridgeMode::Off`] — substrate factories whose data lives in
+    /// legacy schemas read this to decide whether they may surface or
+    /// backfill that state. Production with [`LegacyBridgeMode::Migrate`]
+    /// is rejected at validation time unless
+    /// [`RebornBuildInput::production_migration_ack`] is set.
+    pub legacy_bridge_mode: LegacyBridgeMode,
+    /// Operator acknowledgement that a production deployment may run with a
+    /// permissive [`LegacyBridgeMode::Migrate`] bridge. The default is
+    /// `false` — Production + Migrate fails closed unless this is flipped
+    /// on by the operator for a defined migration window.
+    pub production_migration_ack: bool,
 }
 
 /// Output of [`build_reborn_production_services`].
@@ -112,6 +127,85 @@ pub struct RebornProductionServices {
     pub filesystem_root: Option<Arc<dyn ironclaw_filesystem::RootFilesystem>>,
     /// Extension registry contracts (`ironclaw_extensions`).
     pub extension_registry: Option<Arc<ironclaw_extensions::ExtensionRegistry>>,
+    /// Trust-class policy engine (`ironclaw_trust`).
+    ///
+    /// The engine evaluates a manifest's `RequestedTrustClass` against the
+    /// configured `PolicySource` chain and produces a [`TrustDecision`]
+    /// the authorization, approval, dispatcher, and extension factories
+    /// consume. Composition currently wires
+    /// [`ironclaw_trust::HostTrustPolicy::empty()`] under every non-Disabled
+    /// profile — an empty chain returns the default Sandbox/UserTrusted
+    /// decision, which is the safe fail-closed answer until typed config
+    /// selects bundled / admin / signed sources.
+    ///
+    /// [`TrustDecision`]: ironclaw_trust::TrustDecision
+    pub trust_policy: Option<Arc<dyn ironclaw_trust::TrustPolicy>>,
+    /// Typed secret store (`ironclaw_secrets`).
+    ///
+    /// Holds material for credential injection. Settings carry only
+    /// `SecretLeaseId` references; resolution to material happens through
+    /// this store at the secrets boundary. Today the wired backend is the
+    /// in-memory reference impl; durable backends (filesystem-encrypted,
+    /// PG/libSQL-backed) replace it as substrate factories land.
+    pub secret_store: Option<Arc<dyn ironclaw_secrets::SecretStore>>,
+    /// Network policy enforcer (`ironclaw_network`).
+    ///
+    /// Authorizes outbound HTTP/network requests against a typed
+    /// [`NetworkPolicy`] from `ironclaw_host_api`. Today the wired
+    /// enforcer is built from a default deny-all policy; typed overlay
+    /// from settings lands when the second composition phase ships.
+    ///
+    /// [`NetworkPolicy`]: ironclaw_host_api::NetworkPolicy
+    pub network_enforcer: Option<Arc<dyn ironclaw_network::NetworkPolicyEnforcer>>,
+    /// Process services bundle (`ironclaw_processes`).
+    ///
+    /// Carries the cancellation registry, the in-memory process and
+    /// result stores, and the `ProcessHost` they share. Composition
+    /// currently builds [`ProcessServices::in_memory`] under every
+    /// non-Disabled profile; filesystem-backed presets replace it once
+    /// the run-state filesystem store gains an `Arc`-friendly
+    /// constructor.
+    ///
+    /// Held as `Option<Arc<RebornProcessServices>>` so the cross-handle
+    /// coupling rule (issue #3026 acceptance test #6 — capability host
+    /// and process host share the same store) has a single shared owner
+    /// to point at.
+    ///
+    /// [`ProcessServices::in_memory`]: ironclaw_processes::ProcessServices::in_memory
+    pub process_services: Option<Arc<RebornProcessServices>>,
+}
+
+/// Bundle of `ironclaw_processes` services that composition wires under
+/// every non-Disabled profile.
+///
+/// The substrate's `ProcessServices` type is generic over the store and
+/// result-store types it carries; `ProcessHost` borrows from a store and
+/// thus carries a lifetime parameter. This wrapper pins the in-memory
+/// variant and stores the components as `Arc`s so callers can reach the
+/// cancellation registry and the underlying stores without naming
+/// generic parameters at every site, and rebuild a `ProcessHost`
+/// on-demand via [`RebornProcessServices::host`].
+///
+/// The cross-handle coupling rule (issue #3026 acceptance test #6 —
+/// capability host and process host share the same store) is satisfied
+/// because every consumer reads from the same `Arc<…>` field on this
+/// struct rather than constructing its own store.
+pub struct RebornProcessServices {
+    pub cancellation: Arc<ironclaw_processes::ProcessCancellationRegistry>,
+    pub store: Arc<ironclaw_processes::InMemoryProcessStore>,
+    pub result_store: Arc<ironclaw_processes::InMemoryProcessResultStore>,
+}
+
+impl RebornProcessServices {
+    /// Build a `ProcessHost` borrowing from the shared store. Consumers
+    /// should not stash the returned `ProcessHost` past the lifetime of
+    /// `&self` — the host is `'_` by design so each call reflects the
+    /// current store state.
+    pub fn host(&self) -> ironclaw_processes::ProcessHost<'_> {
+        ironclaw_processes::ProcessHost::new(self.store.as_ref())
+            .with_cancellation_registry(Arc::clone(&self.cancellation))
+            .with_result_store(Arc::clone(&self.result_store))
+    }
 }
 
 impl std::fmt::Debug for RebornProductionServices {
@@ -145,6 +239,10 @@ impl std::fmt::Debug for RebornProductionServices {
                 "extension_registry",
                 &wired(self.extension_registry.is_some()),
             )
+            .field("trust_policy", &wired(self.trust_policy.is_some()))
+            .field("secret_store", &wired(self.secret_store.is_some()))
+            .field("network_enforcer", &wired(self.network_enforcer.is_some()))
+            .field("process_services", &wired(self.process_services.is_some()))
             .finish()
     }
 }
@@ -205,6 +303,10 @@ impl RebornProductionServices {
                 audit_log: self.audit_log.is_some(),
                 filesystem_root: self.filesystem_root.is_some(),
                 extension_registry: self.extension_registry.is_some(),
+                trust_policy: self.trust_policy.is_some(),
+                secret_store: self.secret_store.is_some(),
+                network_enforcer: self.network_enforcer.is_some(),
+                process_services: self.process_services.is_some(),
             },
         }
     }
@@ -255,7 +357,11 @@ impl RebornProductionServices {
                 || self.event_log.is_some()
                 || self.audit_log.is_some()
                 || self.filesystem_root.is_some()
-                || self.extension_registry.is_some();
+                || self.extension_registry.is_some()
+                || self.trust_policy.is_some()
+                || self.secret_store.is_some()
+                || self.network_enforcer.is_some()
+                || self.process_services.is_some();
             if any_wired {
                 return Err(RebornBuildError::InvalidConfig {
                     reason: "disabled profile produced a non-empty service graph".to_string(),
@@ -300,6 +406,32 @@ impl RebornProductionServices {
             });
         }
 
+        // Rule 6: extension registry requires trust policy. Manifests
+        // declare a `RequestedTrustClass` but the *effective* class comes
+        // from the host policy engine. Wiring extensions without trust
+        // would let manifest fields drive authorization, which is the
+        // exact bug `ironclaw_trust` exists to prevent.
+        if self.extension_registry.is_some() && self.trust_policy.is_none() {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: "extension_registry requires trust_policy \
+                         (effective trust class is host-controlled, not manifest-declared)"
+                    .to_string(),
+            });
+        }
+
+        // Rule 7: process services and resource governor are coupled —
+        // process spawning is a resource-bearing operation and the
+        // governor is the ledger every spawn debits against. A
+        // process_services slot without a governor would let processes
+        // spawn unbounded.
+        if self.process_services.is_some() && self.resource_governor.is_none() {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: "process_services requires resource_governor \
+                         (process spawning is a resource-bearing operation)"
+                    .to_string(),
+            });
+        }
+
         Ok(())
     }
 }
@@ -310,10 +442,11 @@ impl RebornProductionServices {
 /// profile behavior" section. `Degraded` is intentionally absent today —
 /// once durable backends exist, a partial-but-running production graph
 /// will surface as a fourth variant rather than overloading these.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RebornReadinessState {
     /// Reborn composition is off. Legacy startup path is authoritative.
+    #[default]
     Disabled,
     /// Reborn composition is up but the profile is explicitly local/dev/
     /// test. Must never be reported as production-ready.
@@ -343,6 +476,10 @@ pub struct RebornSlotReadiness {
     pub audit_log: bool,
     pub filesystem_root: bool,
     pub extension_registry: bool,
+    pub trust_policy: bool,
+    pub secret_store: bool,
+    pub network_enforcer: bool,
+    pub process_services: bool,
 }
 
 /// Operator-visible readiness summary for the Reborn composition graph.
@@ -351,11 +488,40 @@ pub struct RebornSlotReadiness {
 /// the HTTP `/health` / status-CLI handler. Redaction-safe by
 /// construction: every field is a typed value that cannot carry secret
 /// material.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornReadiness {
     pub profile: RebornProfile,
     pub state: RebornReadinessState,
     pub slots: RebornSlotReadiness,
+}
+
+impl RebornReadiness {
+    /// Sentinel rendered by `/api/reborn/readiness` when the gateway has
+    /// no Reborn handle attached (e.g. in test harnesses that boot the
+    /// gateway without `AppBuilder`). Equivalent to
+    /// `RebornProductionServices::disabled().readiness()` but available
+    /// without constructing the service struct.
+    pub const fn disabled() -> Self {
+        Self {
+            profile: RebornProfile::Disabled,
+            state: RebornReadinessState::Disabled,
+            slots: RebornSlotReadiness {
+                resource_governor: false,
+                authorization: false,
+                capability_lease_store: false,
+                run_state_store: false,
+                approval_request_store: false,
+                event_log: false,
+                audit_log: false,
+                filesystem_root: false,
+                extension_registry: false,
+                trust_policy: false,
+                secret_store: false,
+                network_enforcer: false,
+                process_services: false,
+            },
+        }
+    }
 }
 
 /// Failures from [`build_reborn_production_services`].
@@ -411,6 +577,9 @@ pub enum RebornBuildError {
 
     #[error(transparent)]
     Approval(#[from] ApprovalResolutionError),
+
+    #[error(transparent)]
+    Trust(#[from] TrustError),
 }
 
 /// Build the Reborn production service graph for the given input.
@@ -435,12 +604,47 @@ pub async fn build_reborn_production_services(
     input: RebornBuildInput,
 ) -> Result<RebornProductionServices, RebornBuildError> {
     if input.profile == RebornProfile::Disabled {
+        // Disabled is total — bridge mode cannot be active because nothing
+        // in this graph runs to use it. A non-Off bridge under Disabled is
+        // a misconfiguration: the operator likely meant to flip the
+        // profile too. Fail closed rather than silently dropping the
+        // bridge, mirroring the `enabled=false + profile=production`
+        // rejection in `RebornConfig::resolve_with_settings`.
+        if input.legacy_bridge_mode.is_enabled() {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: format!(
+                    "legacy_bridge_mode={} cannot run under profile=disabled \
+                     (the bridge has no Reborn services to reach legacy state from)",
+                    input.legacy_bridge_mode
+                ),
+            });
+        }
         return Ok(RebornProductionServices::disabled());
+    }
+
+    // Production-side bridge guard. Migrate is permissive enough to write
+    // through legacy schemas, so an operator must explicitly acknowledge
+    // it under Production. Without the ack, fail closed before any
+    // factory runs — the equivalent of the env-side cross-validation in
+    // `RebornConfig::resolve_with_settings`.
+    if input.profile == RebornProfile::Production
+        && input.legacy_bridge_mode.requires_explicit_production_ack()
+        && !input.production_migration_ack
+    {
+        return Err(RebornBuildError::InvalidConfig {
+            reason: format!(
+                "legacy_bridge_mode={} under profile=production requires explicit \
+                 operator acknowledgement (set production_migration_ack=true to \
+                 enter a migration window)",
+                input.legacy_bridge_mode
+            ),
+        });
     }
 
     tracing::info!(
         profile = %input.profile,
         owner_id = %input.owner_id,
+        legacy_bridge_mode = %input.legacy_bridge_mode,
         "Building Reborn production service graph"
     );
 
@@ -489,6 +693,17 @@ mod tests {
         RebornBuildInput {
             profile,
             owner_id: "test-owner".to_string(),
+            legacy_bridge_mode: LegacyBridgeMode::Off,
+            production_migration_ack: false,
+        }
+    }
+
+    fn input_with_bridge(profile: RebornProfile, mode: LegacyBridgeMode) -> RebornBuildInput {
+        RebornBuildInput {
+            profile,
+            owner_id: "test-owner".to_string(),
+            legacy_bridge_mode: mode,
+            production_migration_ack: false,
         }
     }
 
@@ -527,6 +742,16 @@ mod tests {
             services.extension_registry.is_some(),
             "extension registry merged"
         );
+        assert!(services.trust_policy.is_some(), "trust policy merged");
+        assert!(services.secret_store.is_some(), "secret store merged");
+        assert!(
+            services.network_enforcer.is_some(),
+            "network enforcer merged"
+        );
+        assert!(
+            services.process_services.is_some(),
+            "process services merged"
+        );
         assert!(services.is_dev_only());
     }
 
@@ -545,15 +770,17 @@ mod tests {
                 // not silently break this test.
                 assert!(
                     [
+                        // In-memory-only substrates that gate Production
+                        // until durable backends ship.
                         "durable_event_backend",
                         "durable_run_state_backend",
+                        "durable_secret_store",
+                        "durable_network_policy_backend",
+                        "durable_process_store",
+                        // Substrate crates that have not yet merged.
                         "ironclaw_capabilities",
-                        "ironclaw_processes",
                         "ironclaw_dispatcher",
-                        "ironclaw_secrets",
-                        "ironclaw_network",
                         "ironclaw_memory",
-                        "trust_class_policy",
                         "turn_coordinator",
                         "agent_loop_host",
                         "prompt_write_safety_policy",
@@ -564,6 +791,99 @@ mod tests {
             }
             other => panic!("expected SubstrateNotImplemented, got {other:?}"),
         }
+    }
+
+    // ── Legacy bridge mode (issue #3026 "Legacy compatibility") ──────────
+
+    #[tokio::test]
+    async fn disabled_with_active_bridge_is_rejected() {
+        // Bridge mode requires Reborn services to read from, so a non-Off
+        // bridge under Disabled is a misconfiguration. Fail closed
+        // rather than silently dropping the bridge.
+        let err = build_reborn_production_services(input_with_bridge(
+            RebornProfile::Disabled,
+            LegacyBridgeMode::ReadOnly,
+        ))
+        .await
+        .expect_err("disabled + active bridge must fail");
+        match err {
+            RebornBuildError::InvalidConfig { reason } => {
+                assert!(reason.contains("read-only"));
+                assert!(reason.contains("disabled"));
+            }
+            other => panic!("expected InvalidConfig, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn local_dev_tolerates_active_bridge() {
+        // Dev profiles are intentionally permissive: an operator might
+        // run with `read-only` to surface legacy data while validating
+        // the new graph. Build must succeed.
+        let services = build_reborn_production_services(input_with_bridge(
+            RebornProfile::LocalDev,
+            LegacyBridgeMode::ReadOnly,
+        ))
+        .await
+        .expect("local-dev tolerates non-Off bridge");
+        assert_eq!(services.profile, RebornProfile::LocalDev);
+    }
+
+    #[tokio::test]
+    async fn production_migrate_without_ack_is_rejected() {
+        // Migrate is the permissive bridge variant. Production must not
+        // enter it without an explicit operator acknowledgement so a
+        // stale config cannot inherit cross-schema writes. The fact
+        // that Production also gates on missing substrate is unrelated
+        // — the bridge guard runs first and fails the build before any
+        // substrate factory runs.
+        let mut input = input_with_bridge(RebornProfile::Production, LegacyBridgeMode::Migrate);
+        input.production_migration_ack = false;
+        let err = build_reborn_production_services(input)
+            .await
+            .expect_err("production + migrate without ack must fail");
+        match err {
+            RebornBuildError::InvalidConfig { reason } => {
+                assert!(reason.contains("migrate"));
+                assert!(reason.contains("production_migration_ack"));
+            }
+            other => panic!("expected InvalidConfig, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn production_migrate_with_ack_passes_bridge_guard() {
+        // With the ack present, the bridge guard does not fire — but
+        // Production still trips the substrate gates because the
+        // remaining services aren't merged. Either result proves the
+        // bridge guard ran cleanly.
+        let mut input = input_with_bridge(RebornProfile::Production, LegacyBridgeMode::Migrate);
+        input.production_migration_ack = true;
+        let err = build_reborn_production_services(input)
+            .await
+            .expect_err("substrate gate must still fire");
+        // Confirm the failure is the substrate gate, not the bridge guard.
+        assert!(matches!(
+            err,
+            RebornBuildError::SubstrateNotImplemented { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn production_read_only_bridge_passes_guard() {
+        // ReadOnly does not require the operator ack — it cannot write
+        // legacy state. The build then trips the substrate gate; the
+        // bridge guard itself is silent.
+        let err = build_reborn_production_services(input_with_bridge(
+            RebornProfile::Production,
+            LegacyBridgeMode::ReadOnly,
+        ))
+        .await
+        .expect_err("substrate gate fires after the bridge guard");
+        assert!(matches!(
+            err,
+            RebornBuildError::SubstrateNotImplemented { .. }
+        ));
     }
 
     #[tokio::test]
@@ -618,6 +938,18 @@ mod tests {
             audit_log: Some(Arc::new(ironclaw_events::InMemoryDurableAuditLog::new())),
             filesystem_root: Some(Arc::new(ironclaw_filesystem::CompositeRootFilesystem::new())),
             extension_registry: Some(Arc::new(ironclaw_extensions::ExtensionRegistry::new())),
+            trust_policy: Some(Arc::new(ironclaw_trust::HostTrustPolicy::empty())),
+            secret_store: Some(Arc::new(ironclaw_secrets::InMemorySecretStore::new())),
+            network_enforcer: Some(Arc::new(
+                ironclaw_network::StaticNetworkPolicyEnforcer::new(
+                    ironclaw_host_api::NetworkPolicy::default(),
+                ),
+            )),
+            process_services: Some(Arc::new(RebornProcessServices {
+                cancellation: Arc::new(ironclaw_processes::ProcessCancellationRegistry::new()),
+                store: Arc::new(ironclaw_processes::InMemoryProcessStore::new()),
+                result_store: Arc::new(ironclaw_processes::InMemoryProcessResultStore::new()),
+            })),
         }
     }
 
@@ -725,6 +1057,45 @@ mod tests {
         }
     }
 
+    #[test]
+    fn validate_rejects_extension_registry_without_trust_policy() {
+        // Rule 6: extension_registry requires trust_policy. A registry
+        // without host trust would let manifest fields drive
+        // authorization — exactly what `ironclaw_trust` exists to
+        // prevent.
+        let mut services = local_dev_services();
+        services.trust_policy = None;
+        let err = services
+            .validate()
+            .expect_err("extensions without trust must fail");
+        match err {
+            RebornBuildError::InvalidConfig { reason } => {
+                assert!(reason.contains("extension_registry"));
+                assert!(reason.contains("trust_policy"));
+            }
+            other => panic!("expected InvalidConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_process_services_without_resource_governor() {
+        // Rule 7: process_services requires resource_governor. A spawn
+        // with no governor would have nowhere to debit — uncapped
+        // process creation.
+        let mut services = local_dev_services();
+        services.resource_governor = None;
+        let err = services
+            .validate()
+            .expect_err("processes without governor must fail");
+        match err {
+            RebornBuildError::InvalidConfig { reason } => {
+                assert!(reason.contains("process_services"));
+                assert!(reason.contains("resource_governor"));
+            }
+            other => panic!("expected InvalidConfig, got {other:?}"),
+        }
+    }
+
     // ── Readiness surface (AC #14) ───────────────────────────────────────
 
     #[test]
@@ -757,32 +1128,70 @@ mod tests {
         assert!(r.slots.audit_log);
         assert!(r.slots.filesystem_root);
         assert!(r.slots.extension_registry);
+        assert!(r.slots.trust_policy);
+        assert!(r.slots.secret_store);
+        assert!(r.slots.network_enforcer);
+        assert!(r.slots.process_services);
     }
 
     #[test]
     fn readiness_serialization_does_not_leak_sensitive_fields() {
         // The JSON rendering of the readiness surface is what an HTTP
-        // /health handler emits. Confirm field names cannot match
-        // anything that suggests credential material — a future
-        // refactor that added an operator-only field with the wrong
-        // name would fail this test.
+        // /health handler emits. The slot names (e.g. `secret_store`,
+        // `network_enforcer`) are intentionally part of the wire
+        // contract — operators and dashboards rely on them. So we
+        // can't naively grep for "secret" in the whole payload.
+        //
+        // Instead, walk the parsed JSON and assert that every leaf
+        // *value* is either a typed enum string (profile / state) or
+        // a boolean. Anything that looks like credential material
+        // would have to surface as a non-allowed value type, which
+        // this assertion rejects.
         let r = local_dev_services().readiness();
         let rendered = serde_json::to_string(&r).expect("serialize readiness");
-        let lc = rendered.to_ascii_lowercase();
-        for forbidden in ["api_key", "secret", "password", "token", "credential"] {
+        let parsed: serde_json::Value =
+            serde_json::from_str(&rendered).expect("re-parse readiness");
+
+        fn assert_safe_leaves(value: &serde_json::Value, path: &str) {
+            match value {
+                serde_json::Value::Bool(_) => {}
+                serde_json::Value::String(s) => {
+                    // The only allowed string values are the typed
+                    // enum variants. Anything else is a wire-contract
+                    // violation.
+                    let allowed = [
+                        "disabled",
+                        "local-dev",
+                        "production",
+                        "migration-dry-run",
+                        "dev-only",
+                        "production-ready",
+                    ];
+                    assert!(
+                        allowed.contains(&s.as_str()),
+                        "unexpected string value '{s}' at {path}"
+                    );
+                }
+                serde_json::Value::Object(map) => {
+                    for (k, v) in map {
+                        assert_safe_leaves(v, &format!("{path}.{k}"));
+                    }
+                }
+                other => panic!("unexpected JSON value type at {path}: {other}"),
+            }
+        }
+        assert_safe_leaves(&parsed, "$");
+
+        // Belt-and-braces: still confirm the raw rendering contains
+        // no obviously credential-shaped values from the legacy
+        // forbidden list. None of these should ever appear because
+        // the schema only carries typed enums and booleans.
+        for forbidden in ["api_key=", "password=", "postgres://", "/Users/"] {
             assert!(
-                !lc.contains(forbidden),
-                "readiness serialization contains forbidden token '{forbidden}': {rendered}"
+                !rendered.contains(forbidden),
+                "readiness leaked credential-shaped value '{forbidden}': {rendered}"
             );
         }
-        assert!(
-            !rendered.contains("/Users/"),
-            "readiness leaked a host path: {rendered}"
-        );
-        assert!(
-            !rendered.contains("postgres://"),
-            "readiness leaked a connection string: {rendered}"
-        );
     }
 
     #[test]
@@ -843,7 +1252,10 @@ mod tests {
                 .validate()
                 .expect_err("test cases are intentional violations");
             let rendered = err.to_string();
-            assert!(!rendered.contains("/Users/"), "leaked host path: {rendered}");
+            assert!(
+                !rendered.contains("/Users/"),
+                "leaked host path: {rendered}"
+            );
             assert!(
                 !rendered.contains("postgres://"),
                 "leaked connection string: {rendered}"

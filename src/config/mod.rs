@@ -64,7 +64,7 @@ pub use self::hygiene::HygieneConfig;
 pub use self::llm::default_session_path;
 pub use self::missions::MissionsConfig;
 pub use self::oauth::OAuthConfig;
-pub use self::reborn::{RebornConfig, RebornProfile};
+pub use self::reborn::{LegacyBridgeMode, RebornConfig, RebornProfile};
 pub use self::relay::RelayConfig;
 pub use self::routines::RoutineConfig;
 pub use self::safety::SafetyConfig;

@@ -1,17 +1,33 @@
 //! Trust-class policy engine factory.
 //!
-//! Tracked by #3012 / #3043. Trust class assignment is host-controlled — a
-//! user-installed manifest cannot self-promote to `FirstParty`/`System`. The
-//! authorization, approval, dispatcher and extension factories all need a
-//! validated trust input before they can produce a fail-closed graph, so
-//! `Production` fails here until #3043 merges and we replace this gate with a
-//! real builder over the policy engine.
+//! `ironclaw_trust` is merged. The composition root wires
+//! [`ironclaw_trust::HostTrustPolicy`] under every non-Disabled profile —
+//! authorization, approvals, dispatcher, and the extension registry all
+//! consume the resulting `TrustDecision` when they run.
+//!
+//! The wired policy starts with no `PolicySource` chain entries. An empty
+//! chain returns the default decision (Sandbox / UserTrusted) for every
+//! manifest, which is the safe fail-closed answer until the typed
+//! settings layer selects bundled / admin / signed sources. That overlay
+//! lands with the second composition phase
+//! (`reborn.trust_policy.backend` in issue #3026's config-model section).
+//!
+//! The `extension_registry` ↔ `trust_policy` coupling rule in
+//! [`crate::RebornProductionServices::validate`] (rule 6) makes the
+//! pairing a build-time guarantee — a registry without a host trust
+//! ceiling fails before traffic is served.
+
+use std::sync::Arc;
+
+use ironclaw_trust::HostTrustPolicy;
 
 use crate::{RebornBuildError, RebornBuildInput, RebornProductionServices};
 
 pub(crate) fn build(
-    input: &RebornBuildInput,
-    _services: &mut RebornProductionServices,
+    _input: &RebornBuildInput,
+    services: &mut RebornProductionServices,
 ) -> Result<(), RebornBuildError> {
-    super::gate_substrate(input, "trust_class_policy")
+    let policy = Arc::new(HostTrustPolicy::empty());
+    services.trust_policy = Some(policy);
+    Ok(())
 }

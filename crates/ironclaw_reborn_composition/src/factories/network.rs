@@ -1,15 +1,41 @@
-//! Reborn network policy / hardened HTTP egress factory.
+//! Reborn network policy enforcer factory.
 //!
-//! No `ironclaw_network` substrate crate yet. Production cannot serve traffic
-//! without a network policy backend, so this gate fails closed. When the
-//! crate lands, this module wires the `NetworkPolicyStore` and a hardened
-//! egress HTTP client behind it.
+//! `ironclaw_network` is merged. The composition root wires
+//! [`ironclaw_network::StaticNetworkPolicyEnforcer`] over a default
+//! [`ironclaw_host_api::NetworkPolicy`] (deny-all: no `allowed_targets`,
+//! private IPs not denied, no egress byte limit). With an empty
+//! `allowed_targets` list the network crate fails closed for every
+//! request — the safe starting point until typed settings overlay a
+//! configured policy.
+//!
+//! A live `NetworkPolicyStore` (per-scope policy persistence with
+//! PG/libSQL backends) lands with the second composition phase
+//! (`reborn.network.policy_backend` from issue #3026's config-model
+//! section). Until then `Production` returns
+//! [`crate::RebornBuildError::SubstrateNotImplemented`] with service
+//! `durable_network_policy_backend` because a deny-all default is not a
+//! cutover-ready policy — the operator must configure allowed targets
+//! before live traffic can flow.
+
+use std::sync::Arc;
+
+use ironclaw_host_api::NetworkPolicy;
+use ironclaw_network::StaticNetworkPolicyEnforcer;
 
 use crate::{RebornBuildError, RebornBuildInput, RebornProductionServices};
 
 pub(crate) fn build(
     input: &RebornBuildInput,
-    _services: &mut RebornProductionServices,
+    services: &mut RebornProductionServices,
 ) -> Result<(), RebornBuildError> {
-    super::gate_substrate(input, "ironclaw_network")
+    let enforcer = Arc::new(StaticNetworkPolicyEnforcer::new(NetworkPolicy::default()));
+    services.network_enforcer = Some(enforcer);
+
+    if input.profile == crate::RebornProfile::Production {
+        return Err(RebornBuildError::SubstrateNotImplemented {
+            service: "durable_network_policy_backend",
+        });
+    }
+
+    Ok(())
 }
