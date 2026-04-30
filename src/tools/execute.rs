@@ -108,17 +108,6 @@ pub async fn execute_tool_with_safety(
             reason: e.to_string(),
         })?;
 
-    // An empty Value::String is the "silent success" contract: the dispatcher
-    // skips emitting a ToolResult event when the wire string is empty, so the
-    // Responses API surfaces no function_call_output item for this call.
-    // to_string_pretty(Value::String("")) would produce `""` (two quotes),
-    // which is not empty and would defeat the guard.
-    if let serde_json::Value::String(s) = &result.result
-        && s.is_empty()
-    {
-        return Ok(String::new());
-    }
-
     serde_json::to_string_pretty(&result.result).map_err(|e| {
         crate::error::ToolError::ExecutionFailed {
             name: tool_name.to_string(),

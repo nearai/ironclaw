@@ -782,15 +782,6 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 reason: e.to_string(),
             })?;
 
-        // Empty Value::String → silent success: see comment in
-        // tools/execute.rs:execute_tool_with_safety. The dispatcher's
-        // !is_empty() guard relies on this to suppress the ToolResult event.
-        if let serde_json::Value::String(s) = &output.result
-            && s.is_empty()
-        {
-            return Ok(String::new());
-        }
-
         // Return result as string
         serde_json::to_string_pretty(&output.result).map_err(|e| {
             crate::error::ToolError::ExecutionFailed {
