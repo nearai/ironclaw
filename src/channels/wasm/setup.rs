@@ -120,11 +120,6 @@ pub async fn setup_wasm_channels(
     let load_results = futures::future::join_all(load_futures).await;
 
     let mut loaded_channels = Vec::new();
-    let startup_load_error_message = if startup_active_channel_names.is_some() {
-        "Failed to load persisted-active WASM channel at startup"
-    } else {
-        "Failed to load WASM channel at startup"
-    };
     for ((name, wasm_path, _), result) in startup_entries.into_iter().zip(load_results) {
         match result {
             Ok(loaded) => loaded_channels.push(loaded),
@@ -133,7 +128,7 @@ pub async fn setup_wasm_channels(
                     channel = %name,
                     path = %wasm_path.display(),
                     error = %err,
-                    "{startup_load_error_message}"
+                    "Failed to load startup-active WASM channel at startup"
                 );
             }
         }
