@@ -98,7 +98,7 @@ mod libsql_phase5 {
         let conn = db.connect().unwrap();
         let mut document_rows = conn
             .query(
-                "SELECT user_id, agent_id, path, content FROM memory_documents WHERE path = 'notes/versioned.md'",
+                "SELECT user_id, agent_id, path, content FROM memory_documents WHERE user_id = 'tenant:tenant-a:user:alice:project:project-1' AND agent_id = 'agent-a' AND path = 'notes/versioned.md'",
                 (),
             )
             .await
