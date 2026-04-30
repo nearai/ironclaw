@@ -9,8 +9,11 @@ use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CancelReason, CancelRuntimeWorkRequest, CapabilitySurfaceVersion, DefaultHostRuntime,
-    HostRuntime, IdempotencyKey, RuntimeCapabilityRequest, RuntimeStatusRequest, RuntimeWorkId,
-    SurfaceKind, VisibleCapabilityRequest,
+    HostRuntime, HostRuntimeError, IdempotencyKey, RuntimeBackendHealth, RuntimeCapabilityRequest,
+    RuntimeStatusRequest, RuntimeWorkId, SurfaceKind, VisibleCapabilityRequest,
+};
+use ironclaw_processes::{
+    InMemoryProcessStore, ProcessCancellationRegistry, ProcessStart, ProcessStatus, ProcessStore,
 };
 use ironclaw_run_state::{
     InMemoryApprovalRequestStore, InMemoryRunStateStore, RunRecord, RunStart, RunStateError,
@@ -521,18 +524,29 @@ async fn default_runtime_status_reports_running_invocations_only() {
 }
 
 #[tokio::test]
-async fn default_runtime_cancel_returns_empty_outcome_when_unsupported() {
-    let registry = Arc::new(ExtensionRegistry::new());
+async fn default_runtime_cancel_reports_running_invocations_as_unsupported() {
+    let registry = Arc::new(registry_with_echo_capability());
     let dispatcher = Arc::new(RecordingDispatcher::default());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
+    let run_state = Arc::new(InMemoryRunStateStore::new());
     let runtime = DefaultHostRuntime::new(
         registry,
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
-    );
+    )
+    .with_run_state(run_state.clone());
 
     let context = execution_context_with_dispatch_grant();
+    run_state
+        .start(RunStart {
+            invocation_id: context.invocation_id,
+            capability_id: capability_id(),
+            scope: context.resource_scope.clone(),
+        })
+        .await
+        .unwrap();
+
     let outcome = runtime
         .cancel_work(CancelRuntimeWorkRequest::new(
             context.resource_scope,
@@ -544,11 +558,97 @@ async fn default_runtime_cancel_returns_empty_outcome_when_unsupported() {
 
     assert!(outcome.cancelled.is_empty());
     assert!(outcome.already_terminal.is_empty());
-    assert!(outcome.unsupported.is_empty());
+    assert_eq!(
+        outcome.unsupported,
+        vec![RuntimeWorkId::Invocation(context.invocation_id)]
+    );
 }
 
 #[tokio::test]
-async fn default_runtime_health_reports_ready_with_no_missing_backends() {
+async fn default_runtime_cancel_kills_running_processes_and_cancels_tokens() {
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
+    let process_store = Arc::new(InMemoryProcessStore::new());
+    let cancellation_registry = Arc::new(ProcessCancellationRegistry::new());
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher,
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_process_store(process_store.clone())
+    .with_process_cancellation_registry(cancellation_registry.clone());
+
+    let context = execution_context_with_dispatch_grant();
+    let process_id = ProcessId::new();
+    process_store
+        .start(process_start(&context, process_id))
+        .await
+        .unwrap();
+    let cancellation_token = cancellation_registry.register(&context.resource_scope, process_id);
+
+    let outcome = runtime
+        .cancel_work(CancelRuntimeWorkRequest::new(
+            context.resource_scope.clone(),
+            context.correlation_id,
+            CancelReason::TurnCancelled,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.cancelled, vec![RuntimeWorkId::Process(process_id)]);
+    assert!(outcome.already_terminal.is_empty());
+    assert!(outcome.unsupported.is_empty());
+    assert!(cancellation_token.is_cancelled());
+    let record = process_store
+        .get(&context.resource_scope, process_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.status, ProcessStatus::Killed);
+}
+
+#[tokio::test]
+async fn default_runtime_status_includes_running_processes_from_process_store() {
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
+    let process_store = Arc::new(InMemoryProcessStore::new());
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher,
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_process_store(process_store.clone());
+
+    let context = execution_context_with_dispatch_grant();
+    let process_id = ProcessId::new();
+    process_store
+        .start(process_start(&context, process_id))
+        .await
+        .unwrap();
+
+    let status = runtime
+        .runtime_status(RuntimeStatusRequest::new(
+            context.resource_scope,
+            context.correlation_id,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(status.active_work.len(), 1);
+    assert_eq!(
+        status.active_work[0].work_id,
+        RuntimeWorkId::Process(process_id)
+    );
+    assert_eq!(status.active_work[0].capability_id, Some(capability_id()));
+    assert_eq!(status.active_work[0].runtime, Some(RuntimeKind::Wasm));
+}
+
+#[tokio::test]
+async fn default_runtime_health_reports_ready_when_registry_requires_no_backends() {
     let registry = Arc::new(ExtensionRegistry::new());
     let dispatcher = Arc::new(RecordingDispatcher::default());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
@@ -560,8 +660,75 @@ async fn default_runtime_health_reports_ready_with_no_missing_backends() {
     );
 
     let health = runtime.health().await.unwrap();
+
     assert!(health.ready);
     assert!(health.missing_runtime_backends.is_empty());
+}
+
+#[tokio::test]
+async fn default_runtime_health_without_probe_reports_required_runtimes_missing() {
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher,
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    );
+
+    let health = runtime.health().await.unwrap();
+
+    assert!(!health.ready);
+    assert_eq!(health.missing_runtime_backends, vec![RuntimeKind::Wasm]);
+}
+
+#[tokio::test]
+async fn default_runtime_health_uses_configured_backend_probe() {
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher,
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_runtime_health(Arc::new(HealthyRuntimeProbe));
+
+    let health = runtime.health().await.unwrap();
+
+    assert!(health.ready);
+    assert!(health.missing_runtime_backends.is_empty());
+}
+
+struct HealthyRuntimeProbe;
+
+#[async_trait]
+impl RuntimeBackendHealth for HealthyRuntimeProbe {
+    async fn missing_runtime_backends(
+        &self,
+        _required: &[RuntimeKind],
+    ) -> Result<Vec<RuntimeKind>, HostRuntimeError> {
+        Ok(Vec::new())
+    }
+}
+
+fn process_start(context: &ExecutionContext, process_id: ProcessId) -> ProcessStart {
+    ProcessStart {
+        process_id,
+        parent_process_id: context.process_id,
+        invocation_id: context.invocation_id,
+        scope: context.resource_scope.clone(),
+        extension_id: extension_id(),
+        capability_id: capability_id(),
+        runtime: RuntimeKind::Wasm,
+        grants: context.grants.clone(),
+        mounts: context.mounts.clone(),
+        estimated_resources: ResourceEstimate::default(),
+        resource_reservation_id: None,
+        input: json!({"message": "background"}),
+    }
 }
 
 /// Wraps an [`InMemoryRunStateStore`] but fails every `records_for_scope`

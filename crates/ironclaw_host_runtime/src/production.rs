@@ -20,17 +20,21 @@ use ironclaw_capabilities::{
 };
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityDispatcher, CapabilityId, InvocationId, ResourceScope,
+    ApprovalRequestId, CapabilityDispatcher, CapabilityId, InvocationId, ResourceScope, RuntimeKind,
 };
-use ironclaw_processes::ProcessManager;
+use ironclaw_processes::{
+    ProcessCancellationRegistry, ProcessError, ProcessHost, ProcessManager, ProcessStatus,
+    ProcessStore,
+};
 use ironclaw_run_state::{ApprovalRequestStore, RunStateError, RunStateStore, RunStatus};
 
 use crate::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfaceVersion, HostRuntime,
     HostRuntimeError, HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalGate,
-    RuntimeBlockedReason, RuntimeCapabilityCompleted, RuntimeCapabilityFailure,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeStatusRequest,
-    RuntimeWorkId, RuntimeWorkSummary, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    RuntimeBackendHealth, RuntimeBlockedReason, RuntimeCapabilityCompleted,
+    RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
+    RuntimeFailureKind, RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary,
+    VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
 
 /// Default production wiring for [`HostRuntime`].
@@ -42,6 +46,9 @@ pub struct DefaultHostRuntime {
     approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
     capability_leases: Option<Arc<dyn CapabilityLeaseStore>>,
     process_manager: Option<Arc<dyn ProcessManager>>,
+    process_store: Option<Arc<dyn ProcessStore>>,
+    process_cancellation_registry: Option<Arc<ProcessCancellationRegistry>>,
+    runtime_health: Option<Arc<dyn RuntimeBackendHealth>>,
     surface_version: CapabilitySurfaceVersion,
 }
 
@@ -70,6 +77,9 @@ impl DefaultHostRuntime {
             approval_requests: None,
             capability_leases: None,
             process_manager: None,
+            process_store: None,
+            process_cancellation_registry: None,
+            runtime_health: None,
             surface_version,
         }
     }
@@ -101,6 +111,28 @@ impl DefaultHostRuntime {
     /// Attaches the process manager used by future spawn paths.
     pub fn with_process_manager(mut self, process_manager: Arc<dyn ProcessManager>) -> Self {
         self.process_manager = Some(process_manager);
+        self
+    }
+
+    /// Attaches the process store used for status and cancellation fanout.
+    pub fn with_process_store(mut self, process_store: Arc<dyn ProcessStore>) -> Self {
+        self.process_store = Some(process_store);
+        self
+    }
+
+    /// Attaches the process cancellation registry used to notify running
+    /// background executors when `cancel_work` kills a process record.
+    pub fn with_process_cancellation_registry(
+        mut self,
+        registry: Arc<ProcessCancellationRegistry>,
+    ) -> Self {
+        self.process_cancellation_registry = Some(registry);
+        self
+    }
+
+    /// Attaches the backend health probe for concrete runtime implementations.
+    pub fn with_runtime_health(mut self, health: Arc<dyn RuntimeBackendHealth>) -> Self {
+        self.runtime_health = Some(health);
         self
     }
 }
@@ -184,19 +216,67 @@ impl HostRuntime for DefaultHostRuntime {
         })
     }
 
-    /// Best-effort cancellation fanout.
+    /// Best-effort cancellation fanout for active work in one scope.
     ///
-    /// This implementation is a deliberate stub at this layer: the underlying
-    /// [`CapabilityHost`] does not yet expose a cancellation port, so we always
-    /// return an empty outcome. Upper services must not treat an empty result
-    /// as confirmation that work was cancelled — it is `unknown`/`no-op` until
-    /// a richer cancellation contract lands.
+    /// Background processes can be terminalized through the process store and
+    /// cooperative cancellation registry. Inline capability invocations do not
+    /// yet expose a cancellation token through [`CapabilityHost`], so active
+    /// invocation records are returned as `unsupported` instead of silently
+    /// disappearing behind an empty outcome.
     async fn cancel_work(
         &self,
         request: CancelRuntimeWorkRequest,
     ) -> Result<CancelRuntimeWorkOutcome, HostRuntimeError> {
-        let _ = request;
-        Ok(CancelRuntimeWorkOutcome::default())
+        tracing::debug!(
+            correlation_id = %request.correlation_id,
+            reason = ?request.reason,
+            "host runtime cancellation requested"
+        );
+
+        let mut outcome = CancelRuntimeWorkOutcome::default();
+        let mut process_invocations = Vec::new();
+
+        if let Some(process_store) = &self.process_store {
+            let records = process_store
+                .records_for_scope(&request.scope)
+                .await
+                .map_err(unavailable_from_process_error)?;
+            let mut process_host = ProcessHost::new(process_store.as_ref());
+            if let Some(registry) = &self.process_cancellation_registry {
+                process_host = process_host.with_cancellation_registry(Arc::clone(registry));
+            }
+
+            for record in records {
+                if record.status != ProcessStatus::Running {
+                    continue;
+                }
+                process_invocations.push(record.invocation_id);
+                let work_id = RuntimeWorkId::Process(record.process_id);
+                match process_host.kill(&request.scope, record.process_id).await {
+                    Ok(_) => outcome.cancelled.push(work_id),
+                    Err(ProcessError::InvalidTransition { .. }) => {
+                        outcome.already_terminal.push(work_id);
+                    }
+                    Err(error) => return Err(unavailable_from_process_error(error)),
+                }
+            }
+        }
+
+        if let Some(run_state) = &self.run_state {
+            let records = run_state
+                .records_for_scope(&request.scope)
+                .await
+                .map_err(unavailable_from_run_state)?;
+            outcome.unsupported.extend(
+                records
+                    .into_iter()
+                    .filter(|record| record.status == RunStatus::Running)
+                    .filter(|record| !process_invocations.contains(&record.invocation_id))
+                    .map(|record| RuntimeWorkId::Invocation(record.invocation_id)),
+            );
+        }
+
+        Ok(outcome)
     }
 
     /// Snapshot of active host runtime work for one scope.
@@ -209,45 +289,71 @@ impl HostRuntime for DefaultHostRuntime {
         &self,
         request: RuntimeStatusRequest,
     ) -> Result<HostRuntimeStatus, HostRuntimeError> {
-        let Some(run_state) = &self.run_state else {
-            return Ok(HostRuntimeStatus::default());
-        };
+        let mut active_work = Vec::new();
 
-        let records = run_state
-            .records_for_scope(&request.scope)
-            .await
-            .map_err(unavailable_from_run_state)?;
+        if let Some(run_state) = &self.run_state {
+            let records = run_state
+                .records_for_scope(&request.scope)
+                .await
+                .map_err(unavailable_from_run_state)?;
 
-        let active_work = records
-            .into_iter()
-            .filter(|record| record.status == RunStatus::Running)
-            .map(|record| {
-                let runtime = self
-                    .registry
-                    .get_capability(&record.capability_id)
-                    .map(|descriptor| descriptor.runtime);
-                RuntimeWorkSummary {
-                    work_id: RuntimeWorkId::Invocation(record.invocation_id),
-                    capability_id: Some(record.capability_id),
-                    runtime,
-                }
-            })
-            .collect();
+            active_work.extend(
+                records
+                    .into_iter()
+                    .filter(|record| record.status == RunStatus::Running)
+                    .map(|record| {
+                        let runtime = self
+                            .registry
+                            .get_capability(&record.capability_id)
+                            .map(|descriptor| descriptor.runtime);
+                        RuntimeWorkSummary {
+                            work_id: RuntimeWorkId::Invocation(record.invocation_id),
+                            capability_id: Some(record.capability_id),
+                            runtime,
+                        }
+                    }),
+            );
+        }
+
+        if let Some(process_store) = &self.process_store {
+            let records = process_store
+                .records_for_scope(&request.scope)
+                .await
+                .map_err(unavailable_from_process_error)?;
+            active_work.extend(
+                records
+                    .into_iter()
+                    .filter(|record| record.status == ProcessStatus::Running)
+                    .map(|record| RuntimeWorkSummary {
+                        work_id: RuntimeWorkId::Process(record.process_id),
+                        capability_id: Some(record.capability_id),
+                        runtime: Some(record.runtime),
+                    }),
+            );
+        }
 
         Ok(HostRuntimeStatus { active_work })
     }
 
-    /// Returns a coarse readiness signal for the composed host runtime.
-    ///
-    /// This is a deliberate stub at this layer: the underlying capability
-    /// host does not yet expose backend-level health probes, so we always
-    /// report `ready = true` with no missing backends. Upper services must not
-    /// rely on this for liveness — richer health surfaces will land alongside
-    /// the runtime registry.
+    /// Returns readiness for runtime backends required by registered capabilities.
     async fn health(&self) -> Result<HostRuntimeHealth, HostRuntimeError> {
+        let required = required_runtime_backends(&self.registry);
+        if required.is_empty() {
+            return Ok(HostRuntimeHealth {
+                ready: true,
+                missing_runtime_backends: Vec::new(),
+            });
+        }
+
+        let missing_runtime_backends = if let Some(health) = &self.runtime_health {
+            let reported = health.missing_runtime_backends(&required).await?;
+            normalize_missing_runtime_backends(&required, reported)
+        } else {
+            required
+        };
         Ok(HostRuntimeHealth {
-            ready: true,
-            missing_runtime_backends: Vec::new(),
+            ready: missing_runtime_backends.is_empty(),
+            missing_runtime_backends,
         })
     }
 }
@@ -333,6 +439,67 @@ fn unavailable_from_run_state(error: RunStateError) -> HostRuntimeError {
         RunStateError::Deserialization(_) => "run-state deserialization failed",
     };
     HostRuntimeError::unavailable(reason)
+}
+
+/// Maps a [`ProcessError`] to a sanitized [`HostRuntimeError::Unavailable`].
+fn unavailable_from_process_error(error: ProcessError) -> HostRuntimeError {
+    let reason = match error {
+        ProcessError::UnknownProcess { .. } => "process record not found",
+        ProcessError::ProcessAlreadyExists { .. } => "process record already exists",
+        ProcessError::InvalidTransition { .. } => "process lifecycle transition invalid",
+        ProcessError::ResourceReservationMismatch { .. } => "process resource reservation mismatch",
+        ProcessError::ResourceReservationAlreadyAssigned { .. } => {
+            "process resource reservation already assigned"
+        }
+        ProcessError::ResourceReservationNotOwned { .. } => {
+            "process resource reservation not owned"
+        }
+        ProcessError::Resource(_) => "process resource lifecycle failed",
+        ProcessError::ResourceCleanupFailed { .. } => "process resource cleanup failed",
+        ProcessError::ProcessResultStoreUnavailable => "process result store unavailable",
+        ProcessError::ProcessResultUnavailable { .. } => "process result unavailable",
+        ProcessError::InvalidStoredRecord { .. } => "process stored record invalid",
+        ProcessError::InvalidPath(_) => "process storage path invalid",
+        ProcessError::Filesystem(_) => "process filesystem unavailable",
+        ProcessError::Serialization(_) => "process serialization failed",
+        ProcessError::Deserialization(_) => "process deserialization failed",
+    };
+    HostRuntimeError::unavailable(reason)
+}
+
+fn required_runtime_backends(registry: &ExtensionRegistry) -> Vec<RuntimeKind> {
+    let mut required = Vec::new();
+    for descriptor in registry.capabilities() {
+        if !required.contains(&descriptor.runtime) {
+            required.push(descriptor.runtime);
+        }
+    }
+    required.sort_by_key(|runtime| runtime_kind_rank(*runtime));
+    required
+}
+
+fn normalize_missing_runtime_backends(
+    required: &[RuntimeKind],
+    reported: Vec<RuntimeKind>,
+) -> Vec<RuntimeKind> {
+    let mut missing = Vec::new();
+    for runtime in reported {
+        if required.contains(&runtime) && !missing.contains(&runtime) {
+            missing.push(runtime);
+        }
+    }
+    missing.sort_by_key(|runtime| runtime_kind_rank(*runtime));
+    missing
+}
+
+fn runtime_kind_rank(runtime: RuntimeKind) -> u8 {
+    match runtime {
+        RuntimeKind::Wasm => 0,
+        RuntimeKind::Mcp => 1,
+        RuntimeKind::Script => 2,
+        RuntimeKind::FirstParty => 3,
+        RuntimeKind::System => 4,
+    }
 }
 
 fn completed_outcome_from(
@@ -669,6 +836,35 @@ mod tests {
                     "sanitized reason must not leak filesystem paths, got {reason:?}"
                 );
                 assert_eq!(reason, "run-state filesystem unavailable");
+            }
+            other => panic!("expected Unavailable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unavailable_from_process_error_uses_redacted_reasons() {
+        let error = ProcessError::InvalidPath("/private/users/secret/processes".to_string());
+        let host_error = unavailable_from_process_error(error);
+        match host_error {
+            HostRuntimeError::Unavailable { reason } => {
+                assert!(
+                    !reason.contains("/private/"),
+                    "sanitized reason must not leak filesystem paths, got {reason:?}"
+                );
+                assert_eq!(reason, "process storage path invalid");
+            }
+            other => panic!("expected Unavailable, got {other:?}"),
+        }
+
+        let error = ProcessError::Filesystem("connection refused at /tmp/processes.db".to_string());
+        let host_error = unavailable_from_process_error(error);
+        match host_error {
+            HostRuntimeError::Unavailable { reason } => {
+                assert!(
+                    !reason.contains("/tmp"),
+                    "sanitized reason must not leak filesystem paths, got {reason:?}"
+                );
+                assert_eq!(reason, "process filesystem unavailable");
             }
             other => panic!("expected Unavailable, got {other:?}"),
         }

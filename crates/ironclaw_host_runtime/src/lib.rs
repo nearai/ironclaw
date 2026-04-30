@@ -513,6 +513,21 @@ pub struct HostRuntimeHealth {
     pub missing_runtime_backends: Vec<RuntimeKind>,
 }
 
+/// Backend health probe for concrete runtime implementations.
+///
+/// The host runtime asks this port about the runtime kinds required by the
+/// current visible capability registry. Implementations should return the
+/// subset of `required` that is not currently available. Callers must treat a
+/// missing probe as "unknown/unready" whenever the registry requires at least
+/// one runtime backend.
+#[async_trait]
+pub trait RuntimeBackendHealth: Send + Sync {
+    async fn missing_runtime_backends(
+        &self,
+        required: &[RuntimeKind],
+    ) -> Result<Vec<RuntimeKind>, HostRuntimeError>;
+}
+
 /// Contract for the Reborn host runtime facade.
 #[async_trait]
 pub trait HostRuntime: Send + Sync {
