@@ -1,5 +1,5 @@
 name: QA Bug Report
-description: Bug found during QA testing on hosted or local environments
+description: Bug found during QA testing on hosted, staging, production, or local environments
 title: "[QA] "
 labels: ["qa-bug"]
 body:

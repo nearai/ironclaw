@@ -213,7 +213,7 @@ jobs:
         run: python3 scripts/check_gateway_boundaries.py test
 
   code-style:
-    name: Code Style (fmt + gateway-js-syntax + clippy + deny)
+    name: Code Style (fmt + clippy)
     runs-on: ubuntu-latest
     if: always()
     needs:
