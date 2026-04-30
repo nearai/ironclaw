@@ -38,7 +38,6 @@ jobs:
       has_wasm_abi_risk: ${{ steps.non_diff.outputs.has_wasm_abi_risk || steps.diff.outputs.has_wasm_abi_risk }}
       has_telegram_risk: ${{ steps.non_diff.outputs.has_telegram_risk || steps.diff.outputs.has_telegram_risk }}
       has_slack_risk: ${{ steps.non_diff.outputs.has_slack_risk || steps.diff.outputs.has_slack_risk }}
-      has_platform_build_risk: ${{ steps.non_diff.outputs.has_platform_build_risk || steps.diff.outputs.has_platform_build_risk }}
     steps:
       - id: non_diff
         if: github.event_name != 'pull_request' && github.event_name != 'merge_group'
@@ -57,7 +56,6 @@ jobs:
           echo "has_wasm_abi_risk=true" >> "$GITHUB_OUTPUT"
           echo "has_telegram_risk=true" >> "$GITHUB_OUTPUT"
           echo "has_slack_risk=true" >> "$GITHUB_OUTPUT"
-          echo "has_platform_build_risk=true" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         with:
@@ -117,22 +115,16 @@ jobs:
             echo "has_wasm_abi_risk=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if has_match '^(channels-src/telegram/|src/channels/wasm/telegram_host_config\.rs$|tests/telegram_auth_integration\.rs$|tests/e2e_telegram_message_routing\.rs$|tests/e2e/scenarios/test_telegram_.*|\.github/workflows/test\.yml$)'; then
+          if has_match '^(channels-src/telegram/|src/channels/wasm/|tests/telegram_auth_integration\.rs$|tests/e2e_telegram_message_routing\.rs$|tests/e2e/scenarios/test_telegram_.*|\.github/workflows/test\.yml$)'; then
             echo "has_telegram_risk=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_telegram_risk=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if has_match '^(channels-src/slack/|tests/slack_auth_integration\.rs$|\.github/workflows/test\.yml$)'; then
+          if has_match '^(channels-src/slack/|src/channels/wasm/|tests/slack_auth_integration\.rs$|\.github/workflows/test\.yml$)'; then
             echo "has_slack_risk=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_slack_risk=false" >> "$GITHUB_OUTPUT"
-          fi
-
-          if has_match '^(Dockerfile$|Dockerfile\.worker$|crates/Dockerfile\.sandbox$|infra/runner/|wix/|scripts/build-all\.sh$|scripts/test-ci-artifact-naming\.sh$|\.github/workflows/(docker|release|release-plz|rebuild-release-image|coverage|live-canary|pr-label-classify|pr-label-scope|test)\.yml$|\.github/(dependabot|labeler)\.yml$|Cargo\.toml$|Cargo\.lock$|build\.rs$)'; then
-            echo "has_platform_build_risk=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_platform_build_risk=false" >> "$GITHUB_OUTPUT"
           fi
 
   matrix-config:
@@ -344,7 +336,7 @@ jobs:
   windows-build:
     name: Windows Build (${{ matrix.name }})
     needs: [changes, matrix-config]
-    if: needs.changes.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || needs.changes.outputs.has_platform_build_risk == 'true')
+    if: needs.changes.outputs.docs_only != 'true' && github.event_name != 'pull_request'
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -425,7 +417,7 @@ jobs:
   docker-build:
     name: Docker Build
     needs: changes
-    if: needs.changes.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || needs.changes.outputs.has_platform_build_risk == 'true')
+    if: needs.changes.outputs.docs_only != 'true' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -586,11 +578,11 @@ jobs:
             require_success "wasm-wit-compat" "${{ needs.wasm-wit-compat.result }}"
           fi
 
-          if [[ "$event" != "pull_request" || "${{ needs.changes.outputs.has_platform_build_risk }}" == "true" ]]; then
+          if [[ "$event" != "pull_request" ]]; then
             require_success "docker-build" "${{ needs.docker-build.result }}"
           fi
 
-          if [[ "$event" != "pull_request" || "${{ needs.changes.outputs.has_platform_build_risk }}" == "true" ]]; then
+          if [[ "$event" != "pull_request" ]]; then
             require_success "windows-build" "${{ needs.windows-build.result }}"
           fi
 
