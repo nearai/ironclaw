@@ -23,7 +23,7 @@ The abandoned JSON pointer/length ABI (`alloc`, `invoke_json`, `output_ptr`, `ou
 
 - Compile once, instantiate a fresh component instance for every execution.
 - Apply fuel, epoch-timeout, memory, table, and instance limits to every metadata and execution call.
-- Reject multi-memory components; Reborn tools get one canonical linear memory, so `WitToolLimits::memory_bytes` is the per-execution memory budget rather than a per-memory multiplier.
+- Allow component-model tools to instantiate multiple internal memories when needed, but enforce `WitToolLimits::memory_bytes` as an aggregate per-execution memory budget across all memories.
 - Treat WIT metadata as the source of runtime compatibility: `description()` and `schema()` are called through generated Wasmtime component bindings.
 - Keep V1 `src/tools/wasm/*` and `src/channels/wasm/*` as compatibility references only; Reborn is a separate binary path.
 

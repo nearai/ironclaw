@@ -20,7 +20,6 @@ impl WitToolRuntime {
     pub fn new(config: WitToolRuntimeConfig) -> Result<Self, WasmError> {
         let mut wasmtime_config = Config::new();
         wasmtime_config.wasm_component_model(true);
-        wasmtime_config.wasm_multi_memory(false);
         wasmtime_config.wasm_threads(false);
         wasmtime_config.consume_fuel(true);
         wasmtime_config.epoch_interruption(true);

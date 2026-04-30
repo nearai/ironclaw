@@ -337,8 +337,35 @@ fn execution_error_preserves_usage_when_guest_traps_after_host_egress() {
 }
 
 #[test]
-fn rejects_components_with_multiple_linear_memories() {
-    let runtime = WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap();
+fn allows_multiple_linear_memories_within_aggregate_memory_budget() {
+    let runtime = WitToolRuntime::new(WitToolRuntimeConfig {
+        default_limits: ironclaw_wasm::WitToolLimits::default()
+            .with_memory_bytes(128 * 1024)
+            .with_fuel(100_000)
+            .with_timeout(std::time::Duration::from_secs(5)),
+    })
+    .unwrap();
+    let multi_memory = COUNTER_TOOL_WAT.replace(
+        "(memory (export \"memory\") 1)",
+        "(memory (export \"memory\") 1)\n  (memory 1)",
+    );
+
+    let prepared = runtime
+        .prepare("counter", &tool_component(&multi_memory))
+        .unwrap();
+
+    assert_eq!(prepared.name(), "counter");
+}
+
+#[test]
+fn rejects_multiple_linear_memories_that_exceed_aggregate_memory_budget() {
+    let runtime = WitToolRuntime::new(WitToolRuntimeConfig {
+        default_limits: ironclaw_wasm::WitToolLimits::default()
+            .with_memory_bytes(64 * 1024)
+            .with_fuel(100_000)
+            .with_timeout(std::time::Duration::from_secs(5)),
+    })
+    .unwrap();
     let multi_memory = COUNTER_TOOL_WAT.replace(
         "(memory (export \"memory\") 1)",
         "(memory (export \"memory\") 1)\n  (memory 1)",
@@ -348,7 +375,7 @@ fn rejects_components_with_multiple_linear_memories() {
 
     assert!(
         result.is_err(),
-        "components with multiple memories must not multiply the configured memory budget"
+        "memory_bytes should be enforced across all component memories"
     );
 }
 
