@@ -182,7 +182,7 @@ def run_pipeline_replay_guided(
         chk("action=send was called (not skipped)", send_response is not None, sub,
             "model called execute directly, skipping send" if execute_seen else "model did not call send")
         if send_response is not None:
-            chk("action=send tool executed", tool_output_ok(send_output), sub,
+            chk("action=send tool executed", tool_output_ok(send_output, send_agent_text), sub,
                 f"no output or tool error: {send_output!r}")
         chk("action=execute was NOT called directly", not execute_seen, sub,
             f"execute fired without send: {json.dumps(send_call_args)}")

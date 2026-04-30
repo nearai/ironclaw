@@ -133,7 +133,7 @@ def run_pipeline(
         chk("action=send was called", send_response is not None, sub,
             "model did not call send after 'Send now.'")
         if send_response is not None:
-            chk("action=send tool executed", tool_output_ok(send_output), sub,
+            chk("action=send tool executed", tool_output_ok(send_output, send_agent_text), sub,
                 f"no output or tool error: {send_output!r}")
 
         if send_response and initiate_call_args:

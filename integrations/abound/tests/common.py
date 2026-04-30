@@ -33,17 +33,18 @@ def get_tool_calls(response) -> list[dict]:
     return calls
 
 
-def tool_output_ok(output: str | None) -> bool:
+def tool_output_ok(output: str | None, agent_text: str | None = None) -> bool:
     """Return True if the tool executed successfully.
 
-    abound_send_wire(action="send") returns an empty string on success and the
-    agent emits no prose for that turn. The Responses API only surfaces
-    function_call_output items for errors (prefixed with "Error:"), so success
-    is signaled by output being None or empty.
+    Checks function_call_output first; falls back to agent text because the
+    Responses API only surfaces function_call_output items for errors — successful
+    tool outputs appear in agent text instead.
     """
-    if output and output.startswith("Error:"):
-        return False
-    return True
+    if output:
+        return not output.startswith("Error:")
+    if agent_text and "Notification sent" in agent_text:
+        return True
+    return False
 
 
 def format_tool_calls(calls: list[dict], prefix: str) -> list[str]:
