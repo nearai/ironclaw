@@ -14,6 +14,7 @@ use ironclaw_transport::{
     TransportStatus, TransportStatusUpdate, TransportThreadId,
 };
 use serde_json::{Map, Value, json};
+use tokio::{sync::Mutex, task::JoinHandle};
 
 use crate::channels::{
     AttachmentKind, Channel, ChatApprovalPrompt, EngineThreadSummary, HistoryMessage,
@@ -22,12 +23,17 @@ use crate::channels::{
 };
 use crate::error::ChannelError;
 
-const LEGACY_STATUS_METADATA_KEY: &str = "__ironclaw_status_update";
+/// Internal-only metadata key used to round-trip the full legacy [`StatusUpdate`]
+/// payload through the transport boundary. Never expose this to third-party
+/// adapters — strip on inbound, refuse to honor on outbound from external
+/// metadata sources.
+pub(crate) const LEGACY_STATUS_METADATA_KEY: &str = "__ironclaw_status_update";
 
 /// Adapter wrapper that lets an existing [`Channel`] speak the Reborn transport contract.
 pub struct ChannelTransportAdapter {
     adapter_id: TransportAdapterId,
     channel: Arc<dyn Channel>,
+    pump_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl ChannelTransportAdapter {
@@ -36,6 +42,7 @@ impl ChannelTransportAdapter {
         Ok(Self {
             adapter_id,
             channel,
+            pump_handle: Mutex::new(None),
         })
     }
 
@@ -60,12 +67,14 @@ impl TransportAdapter for ChannelTransportAdapter {
 
     async fn start(&self, sink: Arc<dyn TransportIngressSink>) -> Result<(), TransportError> {
         let mut stream = self.channel.start().await.map_err(channel_error)?;
-        tokio::spawn(async move {
+        let adapter_id = self.adapter_id.clone();
+        let handle = tokio::spawn(async move {
             while let Some(message) = stream.next().await {
                 match incoming_message_to_transport(&message) {
                     Ok(ingress) => {
                         if let Err(error) = sink.submit_ingress(ingress).await {
                             tracing::warn!(
+                                adapter = %adapter_id,
                                 kind = %error.kind(),
                                 reason = error.safe_reason(),
                                 "transport sink rejected channel ingress"
@@ -74,6 +83,7 @@ impl TransportAdapter for ChannelTransportAdapter {
                     }
                     Err(error) => {
                         tracing::warn!(
+                            adapter = %adapter_id,
                             channel = %message.channel,
                             kind = %error.kind(),
                             reason = error.safe_reason(),
@@ -83,6 +93,10 @@ impl TransportAdapter for ChannelTransportAdapter {
                 }
             }
         });
+        let mut slot = self.pump_handle.lock().await;
+        if let Some(prev) = slot.replace(handle) {
+            prev.abort();
+        }
         Ok(())
     }
 
@@ -157,10 +171,26 @@ impl TransportAdapter for ChannelTransportAdapter {
 
     async fn health_check(&self) -> Result<TransportHealth, TransportError> {
         self.channel.health_check().await.map_err(channel_error)?;
+        // If the ingress pump panicked or completed early, the adapter is
+        // not actually receiving messages even though the underlying channel
+        // reports healthy. Reflect that in the transport health view.
+        let slot = self.pump_handle.lock().await;
+        if let Some(handle) = slot.as_ref()
+            && handle.is_finished()
+        {
+            return Err(TransportError::new(
+                TransportErrorKind::Unavailable,
+                "channel ingress pump task is no longer running",
+            ));
+        }
         Ok(TransportHealth::healthy())
     }
 
     async fn shutdown(&self) -> Result<(), TransportError> {
+        let handle = self.pump_handle.lock().await.take();
+        if let Some(handle) = handle {
+            handle.abort();
+        }
         self.channel.shutdown().await.map_err(channel_error)
     }
 }
@@ -181,6 +211,12 @@ pub fn incoming_message_to_transport(
         .map(|thread_id| TransportThreadId::new(thread_id.as_str()))
         .transpose()?;
 
+    // Internal-only legacy status payload key must never round-trip through
+    // the transport boundary in either direction. Strip on inbound so an
+    // adapter cannot smuggle a synthetic legacy status into the agent.
+    let mut sanitized_metadata = metadata_from_value(&message.metadata);
+    sanitized_metadata.remove(LEGACY_STATUS_METADATA_KEY);
+
     Ok(TransportIngress {
         message_id: TransportMessageId::new(message.id.to_string())?,
         route: TransportRoute {
@@ -189,7 +225,7 @@ pub fn incoming_message_to_transport(
             recipient: message.routing_target(),
             conversation_id: message.conversation_scope().map(ToString::to_string),
             thread_id,
-            metadata: metadata_from_value(&message.metadata),
+            metadata: sanitized_metadata.clone(),
         },
         message: TransportMessage {
             text: message.content.clone(),
@@ -202,7 +238,7 @@ pub fn incoming_message_to_transport(
         sender_display_name: message.user_name.clone(),
         timezone: message.timezone.clone(),
         received_at: message.received_at,
-        metadata: metadata_from_value(&message.metadata),
+        metadata: sanitized_metadata,
     })
 }
 
@@ -250,11 +286,20 @@ fn transport_route_from_channel_status(
     channel_name: &str,
     metadata: &Value,
 ) -> Result<TransportRoute, TransportError> {
+    // Fail-closed: status egress must carry one of the canonical user-id
+    // fields. Falling back to a literal "default" routes status updates to a
+    // shared synthetic user, leaks one user's status to another, and breaks
+    // multi-tenant isolation.
     let user_id = metadata_string(metadata, "transport_user_id")
         .or_else(|| metadata_string(metadata, "owner_id"))
         .or_else(|| metadata_string(metadata, "user_id"))
         .or_else(|| metadata_string(metadata, "sender_id"))
-        .unwrap_or_else(|| "default".to_string());
+        .ok_or_else(|| {
+            TransportError::new(
+                TransportErrorKind::InvalidRequest,
+                "status egress metadata missing user identity (transport_user_id/owner_id/user_id/sender_id)",
+            )
+        })?;
     let user_id = UserId::new(&user_id).map_err(|error| {
         TransportError::new(TransportErrorKind::InvalidRequest, error.to_string())
     })?;

@@ -34,7 +34,7 @@ mod manager;
 pub mod relay;
 mod repl;
 mod signal;
-mod transport_adapter;
+pub(crate) mod transport_adapter;
 #[cfg(feature = "tui")]
 pub mod tui;
 pub mod wasm;
