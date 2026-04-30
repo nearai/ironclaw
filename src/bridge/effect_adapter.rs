@@ -866,10 +866,20 @@ impl EffectBridgeAdapter {
 
         match result {
             Ok(output) => {
-                let sanitized = self.safety.sanitize_tool_output(&lookup_name, &output);
-                let wrapped = self.safety.wrap_for_llm(&lookup_name, &sanitized.content);
-                let output_value = serde_json::from_str::<serde_json::Value>(&output)
-                    .unwrap_or(serde_json::Value::String(wrapped));
+                // Silent-success contract: an empty tool output is a deliberate
+                // "no message" signal (see tools/execute.rs). Use an empty Value
+                // directly — do NOT fall through to wrap_for_llm, whose XML
+                // wrapper would leak as user-facing text on the terminal-action
+                // stash path (orchestrator returns the stashed value as agent
+                // text, skipping the LLM).
+                let output_value = if output.is_empty() {
+                    serde_json::Value::String(String::new())
+                } else {
+                    let sanitized = self.safety.sanitize_tool_output(&lookup_name, &output);
+                    let wrapped = self.safety.wrap_for_llm(&lookup_name, &sanitized.content);
+                    serde_json::from_str::<serde_json::Value>(&output)
+                        .unwrap_or(serde_json::Value::String(wrapped))
+                };
 
                 if (lookup_name == "tool_activate" || lookup_name == "tool_auth")
                     && let Some(err) = Self::auth_gate_from_extension_result(
