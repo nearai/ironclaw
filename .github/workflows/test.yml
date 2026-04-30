@@ -586,7 +586,7 @@ jobs:
             require_success "windows-build" "${{ needs.windows-build.result }}"
           fi
 
-          if [[ "$event" != "pull_request" || "${{ needs.changes.outputs.has_core_code }}" == "true" ]]; then
+          if [[ "$event" != "pull_request" && "${{ needs.changes.outputs.has_core_code }}" == "true" ]]; then
             require_success "bench-compile" "${{ needs.bench-compile.result }}"
           fi
 

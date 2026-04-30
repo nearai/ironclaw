@@ -15,6 +15,8 @@ if ! git rev-parse "origin/${BASE_BRANCH}" >/dev/null 2>&1; then
     git fetch origin "$BASE_BRANCH" --depth=1
 fi
 
+MERGE_BASE=$(git merge-base "origin/${BASE_BRANCH}" HEAD)
+
 # --- Skip mechanism -----------------------------------------------------------
 
 if [[ "${ALLOW_SKIP_VERSION_CHECK}" == "true" ]]; then
@@ -24,7 +26,7 @@ if [[ "${ALLOW_SKIP_VERSION_CHECK}" == "true" ]]; then
     fi
 
     # Check commit messages for [skip-version-check]
-    if git log "origin/${BASE_BRANCH}..HEAD" --pretty=format:"%s %b" 2>/dev/null \
+    if git log "${MERGE_BASE}..HEAD" --pretty=format:"%s %b" 2>/dev/null \
         | grep -qF '[skip-version-check]'; then
         echo "[skip-version-check] found in commit message — skipping all version checks."
         exit 0
@@ -35,7 +37,7 @@ fi
 
 echo "Base branch: $BASE_BRANCH"
 
-CHANGED_FILES=$(git diff --name-only "origin/${BASE_BRANCH}...HEAD")
+CHANGED_FILES=$(git diff --name-only "$MERGE_BASE" HEAD)
 
 if [[ -z "$CHANGED_FILES" ]]; then
     echo "No changed files detected. Nothing to check."
