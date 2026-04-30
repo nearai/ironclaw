@@ -11,8 +11,9 @@
 //! - callers see structured capability outcomes instead of lower substrate
 //!   handles;
 //! - approval/auth/resource waits are suspension states, not errors;
-//! - request origin and capability projection metadata never grant or bypass
-//!   authority.
+//! - caller/workflow origin taxonomy is intentionally kept outside this lower
+//!   facade; authority remains in `ExecutionContext` and projection selection
+//!   remains explicit surface metadata.
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
@@ -152,20 +153,6 @@ impl fmt::Display for CapabilitySurfaceVersion {
     }
 }
 
-/// Product-owned workflow origin for audit/correlation context.
-///
-/// This is not authority and must never grant or bypass authority. Authority
-/// remains exclusively in `ExecutionContext`, principals, grants, leases, and
-/// policy. Projection differences belong in [`CapabilitySurfaceKind`]. Runtime
-/// adapters are callees of `HostRuntime`, not top-level caller/origin values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum RuntimeRequestOrigin {
-    TurnCoordinator,
-    MissionService,
-    SystemService,
-}
-
 /// Which host-filtered surface a caller is asking to render.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -176,6 +163,12 @@ pub enum CapabilitySurfaceKind {
 }
 
 /// Request to invoke one capability through the composed host runtime.
+///
+/// Caller/workflow origin is intentionally not part of this lower contract.
+/// Host runtime authorization must be derived from [`ExecutionContext`],
+/// principals, grants, leases, and policy; upper workflow services can attach
+/// audit labels outside this facade when they need product-specific origin
+/// vocabulary.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeCapabilityRequest {
     pub context: ExecutionContext,
@@ -187,8 +180,6 @@ pub struct RuntimeCapabilityRequest {
     /// and must not trust caller estimates as binding limits or actual usage.
     pub estimate: ResourceEstimate,
     pub input: Value,
-    /// Product workflow origin for audit/correlation only.
-    pub request_origin: RuntimeRequestOrigin,
     pub idempotency_key: Option<IdempotencyKey>,
 }
 
@@ -197,8 +188,8 @@ pub struct RuntimeCapabilityRequest {
 pub struct VisibleCapabilityRequest {
     pub scope: ResourceScope,
     pub correlation_id: CorrelationId,
-    /// Product workflow origin for audit/correlation only.
-    pub request_origin: RuntimeRequestOrigin,
+    /// Projection surface selection only; this is not authority and must not
+    /// grant or bypass authorization.
     pub surface_kind: CapabilitySurfaceKind,
 }
 

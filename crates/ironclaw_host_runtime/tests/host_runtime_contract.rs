@@ -4,9 +4,9 @@ use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeError, HostRuntimeHealth, HostRuntimeStatus,
     IdempotencyKey, RuntimeApprovalGate, RuntimeAuthGate, RuntimeBlockedReason,
     RuntimeCapabilityCompleted, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeGateId, RuntimeRequestOrigin,
-    RuntimeResourceGate, RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary,
-    VisibleCapabilityRequest, VisibleCapabilitySurface, testkit::FakeHostRuntime,
+    RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeGateId, RuntimeResourceGate,
+    RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary, VisibleCapabilityRequest,
+    VisibleCapabilitySurface, testkit::FakeHostRuntime,
 };
 use serde_json::json;
 
@@ -40,7 +40,6 @@ async fn fake_runtime_records_invocation_and_preserves_structured_outcomes() {
         capability_id: capability_id.clone(),
         estimate: ResourceEstimate::default(),
         input: json!({"message": "hello"}),
-        request_origin: RuntimeRequestOrigin::TurnCoordinator,
         idempotency_key: Some(IdempotencyKey::new("turn-1/tool-1").unwrap()),
     };
 
@@ -88,7 +87,6 @@ async fn fake_runtime_surfaces_approval_auth_and_resource_waits_as_values_not_er
                 capability_id: capability_id.clone(),
                 estimate: ResourceEstimate::default(),
                 input: json!({}),
-                request_origin: RuntimeRequestOrigin::TurnCoordinator,
                 idempotency_key: None,
             })
             .await
@@ -121,7 +119,6 @@ async fn fake_runtime_returns_versioned_visible_surface_and_records_requests() {
     let request = VisibleCapabilityRequest {
         scope: context.resource_scope.clone(),
         correlation_id: context.correlation_id,
-        request_origin: RuntimeRequestOrigin::TurnCoordinator,
         surface_kind: CapabilitySurfaceKind::AgentLoop,
     };
 
@@ -213,7 +210,6 @@ async fn fake_runtime_reports_sanitized_failures_as_outcomes() {
             capability_id,
             estimate: ResourceEstimate::default(),
             input: json!({}),
-            request_origin: RuntimeRequestOrigin::SystemService,
             idempotency_key: None,
         })
         .await
