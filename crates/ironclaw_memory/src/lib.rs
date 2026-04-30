@@ -3796,6 +3796,6 @@ fn valid_memory_path() -> VirtualPath {
     // If construction fails, host_api's VIRTUAL_ROOTS list is out of sync with
     // this crate at build time, which is a build-system invariant violation.
     MEMORY_PATH
-        .get_or_init(|| VirtualPath::new("/memory").expect("/memory is a registered VIRTUAL_ROOT"))
+        .get_or_init(|| VirtualPath::new("/memory").expect("/memory is a registered VIRTUAL_ROOT")) // safety: `/memory` is a registered VIRTUAL_ROOT.
         .clone()
 }
