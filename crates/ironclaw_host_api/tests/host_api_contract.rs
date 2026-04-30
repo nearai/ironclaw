@@ -468,6 +468,23 @@ fn invocation_fingerprint_is_stable_and_input_hashed() {
 }
 
 #[test]
+fn invocation_fingerprint_separates_dispatch_and_spawn_actions() {
+    let ctx = sample_context();
+    let capability = CapabilityId::new("echo.say").unwrap();
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "same"});
+
+    let dispatch =
+        InvocationFingerprint::for_dispatch(&ctx.resource_scope, &capability, &estimate, &input)
+            .unwrap();
+    let spawn =
+        InvocationFingerprint::for_spawn(&ctx.resource_scope, &capability, &estimate, &input)
+            .unwrap();
+
+    assert_ne!(dispatch, spawn);
+}
+
+#[test]
 fn invocation_fingerprint_rejects_deeply_nested_input() {
     let ctx = sample_context();
     let capability = CapabilityId::new("echo.say").unwrap();

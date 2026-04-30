@@ -214,7 +214,7 @@ id = "echo-wasm"
 name = "WASM Echo"
 version = "0.1.0"
 description = "WASM echo demo extension"
-trust = "sandbox"
+trust = "untrusted"
 
 [runtime]
 kind = "wasm"
@@ -233,7 +233,7 @@ id = "echo-mcp"
 name = "MCP Echo"
 version = "0.1.0"
 description = "MCP echo demo adapter"
-trust = "sandbox"
+trust = "untrusted"
 
 [runtime]
 kind = "mcp"
@@ -254,7 +254,7 @@ id = "echo-script"
 name = "Script Echo"
 version = "0.1.0"
 description = "Script echo demo extension"
-trust = "sandbox"
+trust = "untrusted"
 
 [runtime]
 kind = "script"

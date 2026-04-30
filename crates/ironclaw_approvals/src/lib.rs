@@ -7,8 +7,9 @@
 use ironclaw_authorization::{CapabilityLease, CapabilityLeaseError, CapabilityLeaseStore};
 use ironclaw_events::AuditSink;
 use ironclaw_host_api::{
-    Action, CapabilityGrant, CapabilityGrantId, EffectKind, GrantConstraints, MountView,
-    NetworkPolicy, Principal, ResourceCeiling, ResourceScope, SecretHandle, Timestamp,
+    Action, ApprovalRequestId, CapabilityGrant, CapabilityGrantId, CapabilityId, EffectKind,
+    GrantConstraints, MountView, NetworkPolicy, Principal, ResourceCeiling, ResourceScope,
+    SecretHandle, Timestamp,
 };
 use ironclaw_run_state::{ApprovalRecord, ApprovalRequestStore, ApprovalStatus, RunStateError};
 use thiserror::Error;
@@ -44,8 +45,34 @@ where
     pub async fn approve_dispatch(
         &self,
         scope: &ResourceScope,
-        request_id: ironclaw_host_api::ApprovalRequestId,
+        request_id: ApprovalRequestId,
         approval: LeaseApproval,
+    ) -> Result<CapabilityLease, ApprovalResolutionError> {
+        self.approve_capability_action(
+            scope,
+            request_id,
+            approval,
+            ApprovedCapabilityAction::Dispatch,
+        )
+        .await
+    }
+
+    pub async fn approve_spawn(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+        approval: LeaseApproval,
+    ) -> Result<CapabilityLease, ApprovalResolutionError> {
+        self.approve_capability_action(scope, request_id, approval, ApprovedCapabilityAction::Spawn)
+            .await
+    }
+
+    async fn approve_capability_action(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+        approval: LeaseApproval,
+        expected_action: ApprovedCapabilityAction,
     ) -> Result<CapabilityLease, ApprovalResolutionError> {
         let record = self
             .approvals
@@ -58,9 +85,8 @@ where
             });
         }
 
-        let Action::Dispatch { capability, .. } = record.request.action.as_ref() else {
-            return Err(ApprovalResolutionError::UnsupportedAction);
-        };
+        let capability = capability_for_action(record.request.action.as_ref(), expected_action)
+            .ok_or(ApprovalResolutionError::UnsupportedAction)?;
 
         let invocation_fingerprint = record
             .request
@@ -143,6 +169,25 @@ where
         if let Some(sink) = self.audit_sink {
             let _ = sink.emit_audit(record).await;
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApprovedCapabilityAction {
+    Dispatch,
+    Spawn,
+}
+
+fn capability_for_action(
+    action: &Action,
+    expected: ApprovedCapabilityAction,
+) -> Option<&CapabilityId> {
+    match (expected, action) {
+        (ApprovedCapabilityAction::Dispatch, Action::Dispatch { capability, .. })
+        | (ApprovedCapabilityAction::Spawn, Action::SpawnCapability { capability, .. }) => {
+            Some(capability)
+        }
+        _ => None,
     }
 }
 

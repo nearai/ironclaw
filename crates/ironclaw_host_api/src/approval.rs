@@ -37,6 +37,25 @@ impl InvocationFingerprint {
         estimate: &ResourceEstimate,
         input: &serde_json::Value,
     ) -> Result<Self, HostApiError> {
+        Self::for_action("dispatch", scope, capability, estimate, input)
+    }
+
+    pub fn for_spawn(
+        scope: &ResourceScope,
+        capability: &CapabilityId,
+        estimate: &ResourceEstimate,
+        input: &serde_json::Value,
+    ) -> Result<Self, HostApiError> {
+        Self::for_action("spawn_capability", scope, capability, estimate, input)
+    }
+
+    fn for_action(
+        kind: &'static str,
+        scope: &ResourceScope,
+        capability: &CapabilityId,
+        estimate: &ResourceEstimate,
+        input: &serde_json::Value,
+    ) -> Result<Self, HostApiError> {
         #[derive(Serialize)]
         struct Payload<'a> {
             version: u8,
@@ -50,7 +69,7 @@ impl InvocationFingerprint {
         let canonical_input = canonical_json(input)?;
         let payload = Payload {
             version: 1,
-            kind: "dispatch",
+            kind,
             scope,
             capability,
             estimate,
