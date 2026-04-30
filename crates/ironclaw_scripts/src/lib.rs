@@ -15,7 +15,8 @@ use std::{
 use ironclaw_extensions::{ExtensionPackage, ExtensionRuntime};
 use ironclaw_host_api::{
     CapabilityId, ExtensionId, ResourceEstimate, ResourceReservation, ResourceReservationId,
-    ResourceScope, ResourceUsage, RuntimeKind,
+    ResourceScope, ResourceUsage, RuntimeHttpEgress, RuntimeHttpEgressError,
+    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind,
 };
 use ironclaw_resources::{ResourceError, ResourceGovernor, ResourceReceipt};
 use serde_json::Value;
@@ -148,6 +149,65 @@ pub struct ScriptCapabilityResult {
 pub struct ScriptExecutionResult {
     pub result: ScriptCapabilityResult,
     pub receipt: ResourceReceipt,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptHostHttpRequest {
+    pub scope: ResourceScope,
+    pub method: ironclaw_host_api::NetworkMethod,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+    pub network_policy: ironclaw_host_api::NetworkPolicy,
+    pub credential_injections: Vec<ironclaw_host_api::RuntimeCredentialInjection>,
+    pub response_body_limit: Option<u64>,
+}
+
+pub type ScriptHostHttpResponse = RuntimeHttpEgressResponse;
+
+#[derive(Debug, Error)]
+pub enum ScriptHostHttpError {
+    #[error("script host HTTP error: {reason}")]
+    Egress { reason: String },
+}
+
+#[derive(Debug, Clone)]
+pub struct ScriptRuntimeHttpAdapter<E> {
+    egress: E,
+}
+
+impl<E> ScriptRuntimeHttpAdapter<E>
+where
+    E: RuntimeHttpEgress,
+{
+    pub fn new(egress: E) -> Self {
+        Self { egress }
+    }
+
+    pub fn request(
+        &self,
+        request: ScriptHostHttpRequest,
+    ) -> Result<ScriptHostHttpResponse, ScriptHostHttpError> {
+        self.egress
+            .execute(RuntimeHttpEgressRequest {
+                runtime: RuntimeKind::Script,
+                scope: request.scope,
+                method: request.method,
+                url: request.url,
+                headers: request.headers,
+                body: request.body,
+                network_policy: request.network_policy,
+                credential_injections: request.credential_injections,
+                response_body_limit: request.response_body_limit,
+            })
+            .map_err(script_http_error)
+    }
+}
+
+fn script_http_error(error: RuntimeHttpEgressError) -> ScriptHostHttpError {
+    ScriptHostHttpError::Egress {
+        reason: error.to_string(),
+    }
 }
 
 /// Script runtime failures.
@@ -525,10 +585,8 @@ fn release_after_failure<G>(
 where
     G: ResourceGovernor + ?Sized,
 {
-    match governor.release(reservation_id) {
-        Ok(_) => original,
-        Err(error) => ScriptError::Resource(Box::new(error)),
-    }
+    let _ = governor.release(reservation_id);
+    original
 }
 
 fn bounded_lossy(bytes: &[u8], limit: u64) -> String {

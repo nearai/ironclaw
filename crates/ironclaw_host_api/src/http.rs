@@ -1,0 +1,129 @@
+//! Shared runtime HTTP egress contracts.
+//!
+//! Runtime lanes translate their native HTTP surfaces into these shapes and
+//! delegate to one host-owned egress service. The service composes network
+//! policy/transport with scoped secret leases; runtime crates must not perform
+//! their own outbound HTTP, DNS, private-IP checks, or credential injection.
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+use crate::{NetworkMethod, NetworkPolicy, ResourceScope, RuntimeKind, SecretHandle};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeHttpEgressRequest {
+    pub runtime: RuntimeKind,
+    pub scope: ResourceScope,
+    pub method: NetworkMethod,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+    pub network_policy: NetworkPolicy,
+    /// Host-derived credential injection plan.
+    ///
+    /// This field is authority-bearing: runtime lanes and guest/plugin code
+    /// must not invent it from untrusted input. Upstream capability/obligation
+    /// composition is responsible for deriving it from declared credentials,
+    /// authorization/approval, destination policy, and host-approved injection
+    /// shape before this request reaches [`RuntimeHttpEgress`].
+    pub credential_injections: Vec<RuntimeCredentialInjection>,
+    pub response_body_limit: Option<u64>,
+}
+
+/// One host-approved credential injection.
+///
+/// The handle and target describe what the host has already authorized for this
+/// runtime HTTP call. The egress service only leases, injects, redacts, and
+/// enforces fail-closed required/optional behavior; it does not grant authority
+/// to use arbitrary secrets by itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeCredentialInjection {
+    pub handle: SecretHandle,
+    pub target: RuntimeCredentialTarget,
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum RuntimeCredentialTarget {
+    Header {
+        name: String,
+        prefix: Option<String>,
+    },
+    QueryParam {
+        name: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeHttpEgressResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+    pub request_bytes: u64,
+    pub response_bytes: u64,
+    pub redaction_applied: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum RuntimeHttpEgressError {
+    #[error("runtime HTTP credential error: {reason}")]
+    Credential { reason: String },
+    #[error("runtime HTTP request error: {reason}")]
+    Request {
+        reason: String,
+        request_bytes: u64,
+        response_bytes: u64,
+    },
+    #[error("runtime HTTP network error: {reason}")]
+    Network {
+        reason: String,
+        request_bytes: u64,
+        response_bytes: u64,
+    },
+    #[error("runtime HTTP response error: {reason}")]
+    Response {
+        reason: String,
+        request_bytes: u64,
+        response_bytes: u64,
+    },
+}
+
+impl RuntimeHttpEgressError {
+    pub fn request_bytes(&self) -> u64 {
+        match self {
+            Self::Credential { .. } => 0,
+            Self::Request { request_bytes, .. }
+            | Self::Network { request_bytes, .. }
+            | Self::Response { request_bytes, .. } => *request_bytes,
+        }
+    }
+
+    pub fn response_bytes(&self) -> u64 {
+        match self {
+            Self::Credential { .. } => 0,
+            Self::Request { response_bytes, .. }
+            | Self::Network { response_bytes, .. }
+            | Self::Response { response_bytes, .. } => *response_bytes,
+        }
+    }
+}
+
+pub trait RuntimeHttpEgress: Send + Sync {
+    fn execute(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError>;
+}
+
+impl<T> RuntimeHttpEgress for std::sync::Arc<T>
+where
+    T: RuntimeHttpEgress + ?Sized,
+{
+    fn execute(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        self.as_ref().execute(request)
+    }
+}

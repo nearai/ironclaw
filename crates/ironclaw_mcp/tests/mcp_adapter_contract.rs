@@ -53,7 +53,7 @@ async fn mcp_runtime_reserves_calls_adapter_and_reconciles_success() {
     assert_eq!(result.receipt.status, ReservationStatus::Reconciled);
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
     assert!(governor.usage_for(&account).output_bytes > 0);
-    assert_eq!(governor.usage_for(&account).process_count, 1);
+    assert_eq!(governor.usage_for(&account).process_count, 0);
 
     let requests = client.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
@@ -65,15 +65,72 @@ async fn mcp_runtime_reserves_calls_adapter_and_reconciles_success() {
         requests[0].capability_id,
         CapabilityId::new("github-mcp.search").unwrap()
     );
-    assert_eq!(requests[0].transport, "stdio");
-    assert_eq!(requests[0].command.as_deref(), Some("github-mcp"));
-    assert_eq!(requests[0].args, vec!["--stdio".to_string()]);
-    assert_eq!(requests[0].url, None);
+    assert_eq!(requests[0].transport, "http");
+    assert_eq!(requests[0].command, None);
+    assert!(requests[0].args.is_empty());
+    assert_eq!(
+        requests[0].url.as_deref(),
+        Some("https://mcp.example.test/mcp")
+    );
     assert_eq!(requests[0].input, json!({"query": "ironclaw"}));
     assert_eq!(
         requests[0].max_output_bytes,
         McpRuntimeConfig::for_testing().max_output_bytes
     );
+}
+
+#[tokio::test]
+async fn mcp_runtime_requires_host_mediated_egress_for_http_transports() {
+    let package = package_from_manifest(MCP_MANIFEST);
+    let client = RecordingMcpClient::direct_network(Ok(McpClientOutput::json(json!({
+        "items": ["issue-1"]
+    }))));
+    let runtime = McpRuntime::new(McpRuntimeConfig::for_testing(), client.clone());
+    let governor = InMemoryResourceGovernor::new();
+
+    let err = runtime
+        .execute_extension_json(
+            &governor,
+            McpExecutionRequest {
+                package: &package,
+                capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
+                scope: sample_scope(),
+                estimate: ResourceEstimate::default(),
+                resource_reservation: None,
+                invocation: McpInvocation { input: json!({}) },
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, McpError::HostHttpEgressRequired { .. }));
+    assert!(client.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn mcp_runtime_fails_closed_for_external_stdio_process_egress() {
+    let package = package_from_manifest(STDIO_MCP_MANIFEST);
+    let client = RecordingMcpClient::new(Ok(McpClientOutput::json(json!({"ok": true}))));
+    let runtime = McpRuntime::new(McpRuntimeConfig::for_testing(), client.clone());
+    let governor = InMemoryResourceGovernor::new();
+
+    let err = runtime
+        .execute_extension_json(
+            &governor,
+            McpExecutionRequest {
+                package: &package,
+                capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
+                scope: sample_scope(),
+                estimate: ResourceEstimate::default(),
+                resource_reservation: None,
+                invocation: McpInvocation { input: json!({}) },
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, McpError::ExternalStdioTransportUnsupported));
+    assert!(client.requests.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -146,6 +203,34 @@ async fn mcp_runtime_releases_reservation_when_adapter_fails() {
     assert_eq!(client.requests.lock().unwrap().len(), 1);
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
     assert_eq!(governor.usage_for(&account), ResourceTally::default());
+}
+
+#[tokio::test]
+async fn mcp_runtime_preserves_adapter_error_when_release_cleanup_fails() {
+    let package = package_from_manifest(MCP_MANIFEST);
+    let client = RecordingMcpClient::new(Err("server disconnected".to_string()));
+    let runtime = McpRuntime::new(McpRuntimeConfig::for_testing(), client);
+    let governor = ReleaseFailingGovernor::new();
+
+    let err = runtime
+        .execute_extension_json(
+            &governor,
+            McpExecutionRequest {
+                package: &package,
+                capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
+                scope: sample_scope(),
+                estimate: ResourceEstimate {
+                    concurrency_slots: Some(1),
+                    ..ResourceEstimate::default()
+                },
+                resource_reservation: None,
+                invocation: McpInvocation { input: json!({}) },
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, McpError::Client { .. }));
 }
 
 #[tokio::test]
@@ -346,6 +431,7 @@ async fn mcp_runtime_rejects_output_when_adapter_under_reports_size() {
 struct RecordingMcpClient {
     output: Result<McpClientOutput, String>,
     requests: Arc<Mutex<Vec<McpClientRequest>>>,
+    host_mediated_http: bool,
 }
 
 impl RecordingMcpClient {
@@ -353,15 +439,78 @@ impl RecordingMcpClient {
         Self {
             output,
             requests: Arc::new(Mutex::new(Vec::new())),
+            host_mediated_http: true,
+        }
+    }
+
+    fn direct_network(output: Result<McpClientOutput, String>) -> Self {
+        Self {
+            output,
+            requests: Arc::new(Mutex::new(Vec::new())),
+            host_mediated_http: false,
         }
     }
 }
 
 #[async_trait]
 impl McpClient for RecordingMcpClient {
+    fn uses_host_mediated_http_egress(&self) -> bool {
+        self.host_mediated_http
+    }
+
     async fn call_tool(&self, request: McpClientRequest) -> Result<McpClientOutput, String> {
         self.requests.lock().unwrap().push(request);
         self.output.clone()
+    }
+}
+
+struct ReleaseFailingGovernor {
+    inner: InMemoryResourceGovernor,
+}
+
+impl ReleaseFailingGovernor {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryResourceGovernor::new(),
+        }
+    }
+}
+
+impl ResourceGovernor for ReleaseFailingGovernor {
+    fn set_limit(&self, account: ResourceAccount, limits: ResourceLimits) {
+        self.inner.set_limit(account, limits);
+    }
+
+    fn reserve(
+        &self,
+        scope: ResourceScope,
+        estimate: ResourceEstimate,
+    ) -> Result<ResourceReservation, ResourceError> {
+        self.inner.reserve(scope, estimate)
+    }
+
+    fn reserve_with_id(
+        &self,
+        scope: ResourceScope,
+        estimate: ResourceEstimate,
+        reservation_id: ResourceReservationId,
+    ) -> Result<ResourceReservation, ResourceError> {
+        self.inner.reserve_with_id(scope, estimate, reservation_id)
+    }
+
+    fn reconcile(
+        &self,
+        reservation_id: ResourceReservationId,
+        actual: ResourceUsage,
+    ) -> Result<ResourceReceipt, ResourceError> {
+        self.inner.reconcile(reservation_id, actual)
+    }
+
+    fn release(
+        &self,
+        reservation_id: ResourceReservationId,
+    ) -> Result<ResourceReceipt, ResourceError> {
+        Err(ResourceError::UnknownReservation { id: reservation_id })
     }
 }
 
@@ -384,6 +533,26 @@ fn sample_scope() -> ResourceScope {
 }
 
 const MCP_MANIFEST: &str = r#"
+id = "github-mcp"
+name = "GitHub MCP"
+version = "0.1.0"
+description = "GitHub MCP adapter"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "https://mcp.example.test/mcp"
+
+[[capabilities]]
+id = "github-mcp.search"
+description = "Search GitHub"
+effects = ["network", "dispatch_capability"]
+default_permission = "ask"
+parameters_schema = { type = "object" }
+"#;
+
+const STDIO_MCP_MANIFEST: &str = r#"
 id = "github-mcp"
 name = "GitHub MCP"
 version = "0.1.0"

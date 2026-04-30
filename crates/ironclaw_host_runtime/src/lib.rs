@@ -29,6 +29,16 @@ use ironclaw_host_api::{
     ProcessId, ResourceEstimate, ResourceScope, ResourceUsage, RuntimeKind, SecretHandle,
 };
 use ironclaw_trust::TrustDecision;
+use ironclaw_host_api::{
+    RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+    RuntimeHttpEgressResponse,
+};
+use ironclaw_network::{
+    NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse,
+};
+use ironclaw_safety::{LeakDetector, params_contain_manual_credentials};
+use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStoreError};
+use secrecy::ExposeSecret;
 use serde_json::Value;
 use std::fmt;
 use thiserror::Error;
@@ -561,4 +571,427 @@ impl HostRuntimeError {
             reason: reason.into(),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct HostHttpEgressService<N, S> {
+    network: N,
+    secrets: S,
+}
+
+impl<N, S> HostHttpEgressService<N, S> {
+    pub fn new(network: N, secrets: S) -> Self {
+        Self { network, secrets }
+    }
+
+    pub fn network(&self) -> &N {
+        &self.network
+    }
+
+    pub fn secrets(&self) -> &S {
+        &self.secrets
+    }
+}
+
+impl<N, S> RuntimeHttpEgress for HostHttpEgressService<N, S>
+where
+    N: NetworkHttpEgress,
+    S: SecretStore,
+{
+    fn execute(
+        &self,
+        mut request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        validate_runtime_request(&request)?;
+
+        let mut redaction_values = Vec::new();
+        for injection in request.credential_injections.clone() {
+            let Some(material) = lease_secret_for_injection(&self.secrets, &request, &injection)?
+            else {
+                continue;
+            };
+            let value = material.expose_secret().to_string();
+            apply_credential_injection(&mut request, &injection.target, &value)?;
+            redaction_values.extend(redaction_values_for_secret(&value));
+        }
+
+        let response = self
+            .network
+            .execute(NetworkHttpRequest {
+                scope: request.scope,
+                method: request.method,
+                url: request.url,
+                headers: request.headers,
+                body: request.body,
+                policy: request.network_policy,
+                response_body_limit: request.response_body_limit,
+            })
+            .map_err(runtime_network_error)?;
+        let credentials_injected = !redaction_values.is_empty();
+        let (response, response_redacted) = sanitize_runtime_response(response, &redaction_values)?;
+        Ok(runtime_response(
+            response,
+            credentials_injected || response_redacted,
+        ))
+    }
+}
+
+fn lease_secret_for_injection<S>(
+    secrets: &S,
+    request: &RuntimeHttpEgressRequest,
+    injection: &ironclaw_host_api::RuntimeCredentialInjection,
+) -> Result<Option<SecretMaterial>, RuntimeHttpEgressError>
+where
+    S: SecretStore,
+{
+    let metadata = block_on_secret(secrets.metadata(&request.scope, &injection.handle))?;
+    if metadata.is_none() {
+        if injection.required {
+            return Err(RuntimeHttpEgressError::Credential {
+                reason: "required credential is unavailable".to_string(),
+            });
+        }
+        return Ok(None);
+    }
+    let lease = block_on_secret(secrets.lease_once(&request.scope, &injection.handle))?;
+    let material = block_on_secret(secrets.consume(&request.scope, lease.id))?;
+    Ok(Some(material))
+}
+
+fn block_on_secret<T>(
+    future: impl std::future::Future<Output = Result<T, SecretStoreError>> + Send,
+) -> Result<T, RuntimeHttpEgressError>
+where
+    T: Send,
+{
+    let joined = std::thread::scope(|scope| {
+        scope
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|_| RuntimeHttpEgressError::Credential {
+                        reason: "secret store runtime unavailable".to_string(),
+                    })?;
+                runtime
+                    .block_on(future)
+                    .map_err(|error| RuntimeHttpEgressError::Credential {
+                        reason: sanitized_secret_error(&error),
+                    })
+            })
+            .join()
+    });
+    joined.unwrap_or_else(|_| {
+        Err(RuntimeHttpEgressError::Credential {
+            reason: "secret store worker panicked".to_string(),
+        })
+    })
+}
+
+fn sanitized_secret_error(error: &SecretStoreError) -> String {
+    match error {
+        SecretStoreError::UnknownSecret { .. } => "credential is unavailable".to_string(),
+        SecretStoreError::UnknownLease { .. } => "credential lease is unavailable".to_string(),
+        SecretStoreError::LeaseConsumed { .. } => "credential lease was already used".to_string(),
+        SecretStoreError::LeaseRevoked { .. } => "credential lease was revoked".to_string(),
+        SecretStoreError::StoreUnavailable { .. } => "credential store unavailable".to_string(),
+    }
+}
+
+fn apply_credential_injection(
+    request: &mut RuntimeHttpEgressRequest,
+    target: &RuntimeCredentialTarget,
+    value: &str,
+) -> Result<(), RuntimeHttpEgressError> {
+    match target {
+        RuntimeCredentialTarget::Header { name, prefix } => {
+            let injected = match prefix {
+                Some(prefix) => format!("{prefix}{value}"),
+                None => value.to_string(),
+            };
+            request.headers.push((name.clone(), injected));
+        }
+        RuntimeCredentialTarget::QueryParam { name } => {
+            let mut url =
+                url::Url::parse(&request.url).map_err(|_| RuntimeHttpEgressError::Credential {
+                    reason: "credential injection target URL is invalid".to_string(),
+                })?;
+            url.query_pairs_mut().append_pair(name, value);
+            request.url = url.to_string();
+        }
+    }
+    Ok(())
+}
+
+fn runtime_network_error(error: NetworkHttpError) -> RuntimeHttpEgressError {
+    RuntimeHttpEgressError::Network {
+        reason: error.stable_reason().to_string(),
+        request_bytes: error.request_bytes(),
+        response_bytes: error.response_bytes(),
+    }
+}
+
+fn validate_runtime_request(
+    request: &RuntimeHttpEgressRequest,
+) -> Result<(), RuntimeHttpEgressError> {
+    if let Some((name, _)) = request
+        .headers
+        .iter()
+        .find(|(name, _)| is_sensitive_request_header(name))
+    {
+        return Err(RuntimeHttpEgressError::Request {
+            reason: format!("sensitive_header_denied:{name}"),
+            request_bytes: 0,
+            response_bytes: 0,
+        });
+    }
+
+    if runtime_request_contains_manual_credentials(request) {
+        return Err(RuntimeHttpEgressError::Request {
+            reason: "manual_credentials_denied".to_string(),
+            request_bytes: 0,
+            response_bytes: 0,
+        });
+    }
+
+    let detector = LeakDetector::new();
+    detector
+        .scan_http_request(&request.url, &request.headers, Some(&request.body))
+        .map_err(|_| runtime_request_leak_error())?;
+    scan_decoded_url_for_leaks(&detector, &request.url)?;
+    Ok(())
+}
+
+fn runtime_request_contains_manual_credentials(request: &RuntimeHttpEgressRequest) -> bool {
+    let headers = request
+        .headers
+        .iter()
+        .map(|(name, value)| serde_json::json!({ "name": name, "value": value }))
+        .collect::<Vec<_>>();
+    let params = serde_json::json!({
+        "url": request.url,
+        "headers": headers,
+    });
+    params_contain_manual_credentials(&params)
+}
+
+fn scan_decoded_url_for_leaks(
+    detector: &LeakDetector,
+    raw_url: &str,
+) -> Result<(), RuntimeHttpEgressError> {
+    let Ok(parsed) = url::Url::parse(raw_url) else {
+        return Ok(());
+    };
+
+    scan_component_for_leaks(detector, parsed.path())?;
+    if let Some(query) = parsed.query() {
+        scan_component_for_leaks(detector, query)?;
+    }
+    if !parsed.username().is_empty() {
+        scan_component_for_leaks(detector, parsed.username())?;
+    }
+    if let Some(password) = parsed.password() {
+        scan_component_for_leaks(detector, password)?;
+    }
+    for (name, value) in parsed.query_pairs() {
+        detector
+            .scan_and_clean(name.as_ref())
+            .map_err(|_| runtime_request_leak_error())?;
+        detector
+            .scan_and_clean(value.as_ref())
+            .map_err(|_| runtime_request_leak_error())?;
+    }
+    Ok(())
+}
+
+fn scan_component_for_leaks(
+    detector: &LeakDetector,
+    component: &str,
+) -> Result<(), RuntimeHttpEgressError> {
+    let decoded = percent_decode_lossy(component);
+    if decoded != component {
+        detector
+            .scan_and_clean(&decoded)
+            .map_err(|_| runtime_request_leak_error())?;
+    }
+    Ok(())
+}
+
+fn percent_decode_lossy(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let (Some(high), Some(low)) =
+                (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
+        {
+            decoded.push((high << 4) | low);
+            index += 3;
+            continue;
+        }
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn runtime_request_leak_error() -> RuntimeHttpEgressError {
+    RuntimeHttpEgressError::Request {
+        reason: "credential_leak_blocked".to_string(),
+        request_bytes: 0,
+        response_bytes: 0,
+    }
+}
+
+fn sanitize_runtime_response(
+    response: NetworkHttpResponse,
+    redaction_values: &[String],
+) -> Result<(NetworkHttpResponse, bool), RuntimeHttpEgressError> {
+    let NetworkHttpResponse {
+        status,
+        headers,
+        body,
+        usage,
+    } = response;
+    let mut redaction_applied = false;
+    let mut sanitized_headers = Vec::new();
+    let detector = LeakDetector::new();
+
+    for (name, value) in headers {
+        if is_sensitive_response_header(&name) {
+            redaction_applied = true;
+            continue;
+        }
+        let exact_redacted = redact(value, redaction_values);
+        if exact_redacted.contains("[REDACTED]") {
+            redaction_applied = true;
+        }
+        let cleaned = detector.scan_and_clean(&exact_redacted).map_err(|_| {
+            RuntimeHttpEgressError::Response {
+                reason: "response_leak_blocked".to_string(),
+                request_bytes: usage.request_bytes,
+                response_bytes: usage.response_bytes,
+            }
+        })?;
+        if cleaned != exact_redacted {
+            redaction_applied = true;
+        }
+        sanitized_headers.push((name, cleaned));
+    }
+
+    let body_text = String::from_utf8_lossy(&body).into_owned();
+    let exact_redacted = redact(body_text, redaction_values);
+    let exact_body_redacted = exact_redacted.contains("[REDACTED]");
+    if exact_body_redacted {
+        redaction_applied = true;
+    }
+    let cleaned =
+        detector
+            .scan_and_clean(&exact_redacted)
+            .map_err(|_| RuntimeHttpEgressError::Response {
+                reason: "response_leak_blocked".to_string(),
+                request_bytes: usage.request_bytes,
+                response_bytes: usage.response_bytes,
+            })?;
+    let leak_detector_redacted = cleaned != exact_redacted;
+    if leak_detector_redacted {
+        redaction_applied = true;
+    }
+    let body = if exact_body_redacted || leak_detector_redacted {
+        cleaned.into_bytes()
+    } else {
+        body
+    };
+
+    Ok((
+        NetworkHttpResponse {
+            status,
+            headers: sanitized_headers,
+            body,
+            usage,
+        },
+        redaction_applied,
+    ))
+}
+
+fn is_sensitive_request_header(name: &str) -> bool {
+    const SENSITIVE_REQUEST_HEADERS: &[&str] = &[
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "x-api-key",
+        "api-key",
+        "x-auth-token",
+        "x-token",
+        "x-access-token",
+        "x-session-token",
+        "x-csrf-token",
+        "x-secret",
+        "x-api-secret",
+    ];
+    SENSITIVE_REQUEST_HEADERS
+        .iter()
+        .any(|header| name.trim().eq_ignore_ascii_case(header))
+}
+
+fn is_sensitive_response_header(name: &str) -> bool {
+    const SENSITIVE_RESPONSE_HEADERS: &[&str] = &[
+        "authorization",
+        "www-authenticate",
+        "set-cookie",
+        "x-api-key",
+        "x-auth-token",
+        "proxy-authenticate",
+        "proxy-authorization",
+    ];
+    SENSITIVE_RESPONSE_HEADERS
+        .iter()
+        .any(|header| name.trim().eq_ignore_ascii_case(header))
+}
+
+fn runtime_response(
+    response: NetworkHttpResponse,
+    redaction_applied: bool,
+) -> RuntimeHttpEgressResponse {
+    RuntimeHttpEgressResponse {
+        status: response.status,
+        headers: response.headers,
+        body: response.body,
+        request_bytes: response.usage.request_bytes,
+        response_bytes: response.usage.response_bytes,
+        redaction_applied,
+    }
+}
+
+fn redact(mut text: String, values: &[String]) -> String {
+    for value in values {
+        if !value.is_empty() {
+            text = text.replace(value, "[REDACTED]");
+        }
+    }
+    text
+}
+
+fn redaction_values_for_secret(value: &str) -> Vec<String> {
+    let mut values = vec![value.to_string()];
+    let encoded = url::form_urlencoded::byte_serialize(value.as_bytes()).collect::<String>();
+    if encoded != value {
+        values.push(encoded.clone());
+    }
+    let plus_encoded = encoded.replace("%20", "+");
+    if plus_encoded != encoded && plus_encoded != value {
+        values.push(plus_encoded);
+    }
+    values
 }

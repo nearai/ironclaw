@@ -9,7 +9,8 @@ use async_trait::async_trait;
 use ironclaw_extensions::{ExtensionPackage, ExtensionRuntime};
 use ironclaw_host_api::{
     CapabilityId, ExtensionId, ResourceEstimate, ResourceReservation, ResourceReservationId,
-    ResourceScope, ResourceUsage, RuntimeKind,
+    ResourceScope, ResourceUsage, RuntimeHttpEgress, RuntimeHttpEgressError,
+    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind,
 };
 use ironclaw_resources::{ResourceError, ResourceGovernor, ResourceReceipt};
 use serde_json::Value;
@@ -94,6 +95,13 @@ impl McpClientOutput {
 /// that check is a second line of defense rather than the primary memory bound.
 #[async_trait]
 pub trait McpClient: Send + Sync {
+    /// HTTP/SSE MCP transports must be implemented through the shared host-mediated
+    /// runtime egress boundary. The default is fail-closed so a generic client
+    /// cannot accidentally perform direct outbound HTTP.
+    fn uses_host_mediated_http_egress(&self) -> bool {
+        false
+    }
+
     async fn call_tool(&self, request: McpClientRequest) -> Result<McpClientOutput, String>;
 }
 
@@ -113,6 +121,65 @@ pub struct McpExecutionResult {
     pub receipt: ResourceReceipt,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpHostHttpRequest {
+    pub scope: ResourceScope,
+    pub method: ironclaw_host_api::NetworkMethod,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+    pub network_policy: ironclaw_host_api::NetworkPolicy,
+    pub credential_injections: Vec<ironclaw_host_api::RuntimeCredentialInjection>,
+    pub response_body_limit: Option<u64>,
+}
+
+pub type McpHostHttpResponse = RuntimeHttpEgressResponse;
+
+#[derive(Debug, Error)]
+pub enum McpHostHttpError {
+    #[error("MCP host HTTP error: {reason}")]
+    Egress { reason: String },
+}
+
+#[derive(Debug, Clone)]
+pub struct McpRuntimeHttpAdapter<E> {
+    egress: E,
+}
+
+impl<E> McpRuntimeHttpAdapter<E>
+where
+    E: RuntimeHttpEgress,
+{
+    pub fn new(egress: E) -> Self {
+        Self { egress }
+    }
+
+    pub fn request(
+        &self,
+        request: McpHostHttpRequest,
+    ) -> Result<McpHostHttpResponse, McpHostHttpError> {
+        self.egress
+            .execute(RuntimeHttpEgressRequest {
+                runtime: RuntimeKind::Mcp,
+                scope: request.scope,
+                method: request.method,
+                url: request.url,
+                headers: request.headers,
+                body: request.body,
+                network_policy: request.network_policy,
+                credential_injections: request.credential_injections,
+                response_body_limit: request.response_body_limit,
+            })
+            .map_err(mcp_http_error)
+    }
+}
+
+fn mcp_http_error(error: RuntimeHttpEgressError) -> McpHostHttpError {
+    McpHostHttpError::Egress {
+        reason: error.to_string(),
+    }
+}
+
 /// MCP runtime failures.
 #[derive(Debug, Error)]
 pub enum McpError {
@@ -122,6 +189,10 @@ pub enum McpError {
     Client { reason: String },
     #[error("unsupported MCP transport {transport}")]
     UnsupportedTransport { transport: String },
+    #[error("MCP transport {transport} requires host-mediated HTTP egress")]
+    HostHttpEgressRequired { transport: String },
+    #[error("stdio MCP transport is unsupported until process-level egress controls land")]
+    ExternalStdioTransportUnsupported,
     #[error("extension {extension} uses runtime {actual:?}, not RuntimeKind::Mcp")]
     ExtensionRuntimeMismatch {
         extension: ExtensionId,
@@ -172,6 +243,9 @@ where
     {
         let client_request = self.prepare_client_request(&request)?;
         let transport = client_request.transport.clone();
+        if requires_host_http_egress(&transport) && !self.client.uses_host_mediated_http_egress() {
+            return Err(McpError::HostHttpEgressRequired { transport });
+        }
         let reservation = reserve_or_use_existing(
             governor,
             request.scope.clone(),
@@ -277,14 +351,12 @@ where
             }
         };
 
-        if !matches!(transport.as_str(), "stdio" | "http" | "sse") {
+        if transport == "stdio" {
+            return Err(McpError::ExternalStdioTransportUnsupported);
+        }
+        if !matches!(transport.as_str(), "http" | "sse") {
             return Err(McpError::UnsupportedTransport {
                 transport: transport.clone(),
-            });
-        }
-        if transport == "stdio" && command.is_none() {
-            return Err(McpError::InvalidInvocation {
-                reason: "stdio MCP transport requires a manifest command".to_string(),
             });
         }
         if matches!(transport.as_str(), "http" | "sse") && url.is_none() {
@@ -331,6 +403,10 @@ where
     }
 }
 
+fn requires_host_http_egress(transport: &str) -> bool {
+    matches!(transport, "http" | "sse")
+}
+
 fn reserve_or_use_existing<G>(
     governor: &G,
     scope: ResourceScope,
@@ -359,8 +435,6 @@ fn release_after_failure<G>(
 where
     G: ResourceGovernor + ?Sized,
 {
-    match governor.release(reservation_id) {
-        Ok(_) => original,
-        Err(error) => McpError::Resource(Box::new(error)),
-    }
+    let _ = governor.release(reservation_id);
+    original
 }

@@ -162,6 +162,33 @@ fn script_runtime_releases_reservation_when_backend_exits_nonzero() {
 }
 
 #[test]
+fn script_runtime_preserves_backend_error_when_release_cleanup_fails() {
+    let backend = RecordingScriptBackend::failure("backend unavailable");
+    let runtime = ScriptRuntime::new(ScriptRuntimeConfig::for_testing(), backend);
+    let governor = ReleaseFailingGovernor::new();
+    let capability_id = CapabilityId::new("script.echo").unwrap();
+
+    let err = runtime
+        .execute_extension_json(
+            &governor,
+            ScriptExecutionRequest {
+                package: &script_package(),
+                capability_id: &capability_id,
+                scope: sample_scope(),
+                estimate: ResourceEstimate {
+                    concurrency_slots: Some(1),
+                    ..ResourceEstimate::default()
+                },
+                resource_reservation: None,
+                invocation: ScriptInvocation { input: json!({}) },
+            },
+        )
+        .unwrap_err();
+
+    assert!(matches!(err, ScriptError::Backend { .. }));
+}
+
+#[test]
 fn script_runtime_releases_reservation_when_output_limit_fails() {
     let backend = RecordingScriptBackend::success(ScriptBackendOutput {
         exit_code: 0,
@@ -299,12 +326,69 @@ impl RecordingScriptBackend {
             requests: Arc::new(Mutex::new(Vec::new())),
         }
     }
+
+    fn failure(reason: &str) -> Self {
+        Self {
+            output: Arc::new(Mutex::new(Err(reason.to_string()))),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
 }
 
 impl ScriptBackend for RecordingScriptBackend {
     fn execute(&self, request: ScriptBackendRequest) -> Result<ScriptBackendOutput, String> {
         self.requests.lock().unwrap().push(request);
         self.output.lock().unwrap().clone()
+    }
+}
+
+struct ReleaseFailingGovernor {
+    inner: InMemoryResourceGovernor,
+}
+
+impl ReleaseFailingGovernor {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryResourceGovernor::new(),
+        }
+    }
+}
+
+impl ResourceGovernor for ReleaseFailingGovernor {
+    fn set_limit(&self, account: ResourceAccount, limits: ResourceLimits) {
+        self.inner.set_limit(account, limits);
+    }
+
+    fn reserve(
+        &self,
+        scope: ResourceScope,
+        estimate: ResourceEstimate,
+    ) -> Result<ResourceReservation, ResourceError> {
+        self.inner.reserve(scope, estimate)
+    }
+
+    fn reserve_with_id(
+        &self,
+        scope: ResourceScope,
+        estimate: ResourceEstimate,
+        reservation_id: ResourceReservationId,
+    ) -> Result<ResourceReservation, ResourceError> {
+        self.inner.reserve_with_id(scope, estimate, reservation_id)
+    }
+
+    fn reconcile(
+        &self,
+        reservation_id: ResourceReservationId,
+        actual: ResourceUsage,
+    ) -> Result<ResourceReceipt, ResourceError> {
+        self.inner.reconcile(reservation_id, actual)
+    }
+
+    fn release(
+        &self,
+        reservation_id: ResourceReservationId,
+    ) -> Result<ResourceReceipt, ResourceError> {
+        Err(ResourceError::UnknownReservation { id: reservation_id })
     }
 }
 
