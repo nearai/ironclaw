@@ -8,7 +8,7 @@
 //! See `crates/ironclaw_reborn_composition/` for the factory this config
 //! drives, and issue #3026 for the cutover contract.
 
-use crate::config::helpers::{optional_env, parse_bool_env};
+use crate::config::helpers::{parse_bool_env, parse_option_env};
 use crate::error::ConfigError;
 use crate::settings::Settings;
 
@@ -54,7 +54,93 @@ impl Default for RebornConfig {
     }
 }
 
+/// Pre-validation snapshot of every Reborn configuration field.
+///
+/// `resolve()` and `resolve_with_settings()` both build one of these,
+/// then run [`RebornConfig::finalize`] to apply cross-validation and the
+/// `enabled + Disabled → LocalDev` mirror once. Splitting the env
+/// extraction from validation lets the settings overlay correct an
+/// inconsistent env baseline before the build fails — without the split,
+/// `resolve()?` rejected an env-only input that a DB-backed
+/// `enabled=true` would have rescued, which is the bug surfaced by
+/// PR #3101 review.
+struct RebornConfigRaw {
+    enabled: bool,
+    profile: RebornProfile,
+    legacy_bridge_mode: LegacyBridgeMode,
+    production_migration_ack: bool,
+}
+
 impl RebornConfig {
+    /// Read every Reborn env knob into a raw snapshot without applying
+    /// cross-validation. Each individual variable is parsed and rejected
+    /// with `InvalidValue` if the value itself is malformed (unknown
+    /// profile name, unknown bridge mode); only the inter-field
+    /// invariants ("non-disabled profile requires enabled=true") are
+    /// deferred to `finalize` so a settings overlay can supply the
+    /// missing field before the build fails.
+    fn raw_from_env() -> Result<RebornConfigRaw, ConfigError> {
+        let enabled = parse_bool_env("REBORN_ENABLED", false)?;
+        let profile =
+            parse_option_env::<RebornProfile>("REBORN_PROFILE")?.unwrap_or(RebornProfile::Disabled);
+        let legacy_bridge_mode = parse_option_env::<LegacyBridgeMode>("REBORN_LEGACY_BRIDGE_MODE")?
+            .unwrap_or(LegacyBridgeMode::Off);
+        let production_migration_ack = parse_bool_env("REBORN_PRODUCTION_MIGRATION_ACK", false)?;
+        Ok(RebornConfigRaw {
+            enabled,
+            profile,
+            legacy_bridge_mode,
+            production_migration_ack,
+        })
+    }
+
+    /// Apply the cross-field invariants and the
+    /// `enabled + Disabled → LocalDev` mirror to a raw snapshot, then
+    /// produce the final typed `RebornConfig`.
+    ///
+    /// `key_scope` is the operator-facing key the failure cites — typically
+    /// `"REBORN_ENABLED"` for env-only resolution and `"settings.reborn"`
+    /// for the DB-overlay path. The chosen scope is what the
+    /// `profile_without_enabled_is_rejected` and
+    /// `resolve_with_settings_rejects_db_inconsistency` tests assert
+    /// against, so the value here is part of the operator-visible
+    /// contract.
+    fn finalize(raw: RebornConfigRaw, key_scope: &'static str) -> Result<Self, ConfigError> {
+        // Cross-validation: an explicit non-disabled profile without
+        // `enabled=true` is almost always a misconfiguration. Fail closed
+        // rather than silently dropping the profile to Disabled.
+        if !raw.enabled && raw.profile != RebornProfile::Disabled {
+            return Err(ConfigError::InvalidValue {
+                key: key_scope.to_string(),
+                message: format!(
+                    "reborn.profile={} requires reborn.enabled=true; \
+                     unset the profile or enable Reborn explicitly",
+                    raw.profile
+                ),
+            });
+        }
+
+        // Mirror invariant: enabled without a profile defaults the
+        // profile to `LocalDev` so the operator gets a working dev
+        // graph rather than a Disabled no-op when they explicitly
+        // turned Reborn on. Production must be selected by name — no
+        // implicit promotion. Applied after the overlay so an enabled
+        // toggle from settings is treated identically to an enabled
+        // toggle from env.
+        let profile = if raw.enabled && raw.profile == RebornProfile::Disabled {
+            RebornProfile::LocalDev
+        } else {
+            raw.profile
+        };
+
+        Ok(Self {
+            enabled: raw.enabled,
+            profile,
+            legacy_bridge_mode: raw.legacy_bridge_mode,
+            production_migration_ack: raw.production_migration_ack,
+        })
+    }
+
     /// Resolve from environment variables.
     ///
     /// `REBORN_ENABLED` (default: `false`) and `REBORN_PROFILE` (default:
@@ -66,66 +152,8 @@ impl RebornConfig {
     /// `Disabled` would let an operator who intended to flip Reborn on
     /// believe they had, which is the exact opposite of the contract.
     pub fn resolve() -> Result<Self, ConfigError> {
-        let enabled = parse_bool_env("REBORN_ENABLED", false)?;
-
-        let profile = match optional_env("REBORN_PROFILE")? {
-            None => RebornProfile::Disabled,
-            Some(raw) => raw
-                .parse::<RebornProfile>()
-                .map_err(|err| ConfigError::InvalidValue {
-                    key: "REBORN_PROFILE".to_string(),
-                    message: err.to_string(),
-                })?,
-        };
-
-        // Cross-validation: an explicit non-disabled profile without
-        // `REBORN_ENABLED=true` is almost always a misconfiguration. Fail
-        // closed rather than silently dropping the profile down to disabled.
-        if !enabled && profile != RebornProfile::Disabled {
-            return Err(ConfigError::InvalidValue {
-                key: "REBORN_ENABLED".to_string(),
-                message: format!(
-                    "REBORN_PROFILE={profile} requires REBORN_ENABLED=true; \
-                     unset the profile or enable Reborn explicitly"
-                ),
-            });
-        }
-
-        // Mirror invariant: enabled without a profile defaults the profile
-        // to `LocalDev` so the operator gets a working dev graph rather
-        // than a Disabled no-op when they explicitly turned Reborn on.
-        // Production must be selected by name — no implicit promotion.
-        let profile = if enabled && profile == RebornProfile::Disabled {
-            RebornProfile::LocalDev
-        } else {
-            profile
-        };
-
-        // Legacy bridge mode: separate env knob. Default `Off` so a fresh
-        // deployment cannot accidentally accept cross-schema reads from
-        // legacy state. Validation that a non-Off bridge requires an
-        // active profile lives in the composition root, not here — the
-        // operator may legitimately pre-stage `REBORN_LEGACY_BRIDGE_MODE`
-        // before flipping `REBORN_ENABLED=true`.
-        let legacy_bridge_mode = match optional_env("REBORN_LEGACY_BRIDGE_MODE")? {
-            None => LegacyBridgeMode::Off,
-            Some(raw) => {
-                raw.parse::<LegacyBridgeMode>()
-                    .map_err(|err| ConfigError::InvalidValue {
-                        key: "REBORN_LEGACY_BRIDGE_MODE".to_string(),
-                        message: err.to_string(),
-                    })?
-            }
-        };
-
-        let production_migration_ack = parse_bool_env("REBORN_PRODUCTION_MIGRATION_ACK", false)?;
-
-        Ok(Self {
-            enabled,
-            profile,
-            legacy_bridge_mode,
-            production_migration_ack,
-        })
+        let raw = Self::raw_from_env()?;
+        Self::finalize(raw, "REBORN_ENABLED")
     }
 
     /// True when the operator has selected an explicit non-disabled
@@ -138,35 +166,34 @@ impl RebornConfig {
     /// Resolve from settings (DB/TOML overlay) with env fallback.
     ///
     /// Precedence (highest first):
-    /// 1. `settings.reborn.{enabled,profile}` (DB/TOML)
-    /// 2. `REBORN_ENABLED` / `REBORN_PROFILE` env vars
+    /// 1. `settings.reborn.{enabled,profile,legacy_bridge_mode,production_migration_ack}`
+    /// 2. `REBORN_*` env vars
     /// 3. Built-in defaults (`enabled=false`, `profile=Disabled`)
     ///
     /// This is the production resolver called by `Config::build`. The
     /// env-only [`RebornConfig::resolve`] is kept for bootstrap paths that
     /// run before `Settings` is loaded (CLI subcommands, `--no-db` mode).
     ///
-    /// Cross-validation matches [`RebornConfig::resolve`]: an explicit
-    /// non-disabled profile without `enabled=true` is a startup error so
-    /// operators cannot accidentally believe Reborn is on while the legacy
-    /// path is running. An invalid `profile` string fails the same way —
-    /// silent coercion would defeat the purpose of typed settings.
+    /// Cross-validation runs once after the overlay. An env-only input
+    /// like `REBORN_PROFILE=production` (without `REBORN_ENABLED=true`)
+    /// would fail under [`RebornConfig::resolve`], but here it can be
+    /// rescued by a DB-backed `enabled=true` because the inter-field
+    /// invariants are deferred until both layers have been merged. An
+    /// invalid `profile` string in either layer still fails immediately
+    /// at parse time.
     pub fn resolve_with_settings(settings: &Settings) -> Result<Self, ConfigError> {
-        // Step 1: env baseline. We start from `resolve()` so the env
-        // resolver's invariants (default-off, cross-validation, snake_case
-        // accept) all apply automatically.
-        let mut cfg = Self::resolve()?;
+        // Step 1: env baseline as a raw, unvalidated snapshot.
+        let mut raw = Self::raw_from_env()?;
 
         // Step 2: DB/TOML overlay. A typed setting with a value overrides
         // the env baseline. `None` defers to env unchanged.
         if let Some(enabled) = settings.reborn.enabled {
-            cfg.enabled = enabled;
+            raw.enabled = enabled;
         }
-
         if let Some(profile_str) = settings.reborn.profile.as_deref() {
             let trimmed = profile_str.trim();
             if !trimmed.is_empty() {
-                cfg.profile =
+                raw.profile =
                     trimmed
                         .parse::<RebornProfile>()
                         .map_err(|err| ConfigError::InvalidValue {
@@ -175,14 +202,10 @@ impl RebornConfig {
                         })?;
             }
         }
-
-        // Legacy bridge mode + production-migration ack: same precedence
-        // (DB overlay over env), same fail-closed rule when the DB
-        // overlay names an unknown variant.
         if let Some(mode_str) = settings.reborn.legacy_bridge_mode.as_deref() {
             let trimmed = mode_str.trim();
             if !trimmed.is_empty() {
-                cfg.legacy_bridge_mode = trimmed.parse::<LegacyBridgeMode>().map_err(|err| {
+                raw.legacy_bridge_mode = trimmed.parse::<LegacyBridgeMode>().map_err(|err| {
                     ConfigError::InvalidValue {
                         key: "settings.reborn.legacy_bridge_mode".to_string(),
                         message: err.to_string(),
@@ -191,28 +214,14 @@ impl RebornConfig {
             }
         }
         if let Some(ack) = settings.reborn.production_migration_ack {
-            cfg.production_migration_ack = ack;
+            raw.production_migration_ack = ack;
         }
 
-        // Step 3: re-apply the cross-validation invariants. If a DB
-        // overlay produced an inconsistent state (e.g. enabled=false but
-        // profile=production via the settings table), fail closed the same
-        // way `resolve()` does for env-only inputs.
-        if !cfg.enabled && cfg.profile != RebornProfile::Disabled {
-            return Err(ConfigError::InvalidValue {
-                key: "settings.reborn".to_string(),
-                message: format!(
-                    "reborn.profile={} requires reborn.enabled=true; \
-                     unset the profile or enable Reborn explicitly",
-                    cfg.profile
-                ),
-            });
-        }
-        if cfg.enabled && cfg.profile == RebornProfile::Disabled {
-            cfg.profile = RebornProfile::LocalDev;
-        }
-
-        Ok(cfg)
+        // Step 3: cross-validation runs once on the merged snapshot. The
+        // key scope cites the settings layer so the diagnostic points
+        // at the typed config as the source of truth — that's what
+        // `resolve_with_settings_rejects_db_inconsistency` asserts.
+        Self::finalize(raw, "settings.reborn")
     }
 }
 
@@ -435,6 +444,52 @@ mod tests {
             match err {
                 ConfigError::InvalidValue { key, .. } => {
                     assert_eq!(key, "settings.reborn");
+                }
+                other => panic!("expected InvalidValue, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn settings_overlay_can_rescue_env_only_inconsistency() {
+        // Regression for the PR #3101 review finding: env had a
+        // non-disabled profile but no `REBORN_ENABLED=true`, which the
+        // old resolver rejected at the env layer before the settings
+        // overlay could provide the missing flag. Now the env baseline
+        // is captured raw and validated only after the overlay merges,
+        // so a DB-backed `enabled=true` rescues an env-only profile.
+        with_clean_env(|| {
+            // SAFETY: under ENV_MUTEX in with_clean_env.
+            unsafe {
+                std::env::set_var("REBORN_PROFILE", "production");
+            }
+            let settings = settings_with(RebornSettings {
+                enabled: Some(true),
+                profile: None,
+                ..RebornSettings::default()
+            });
+            let cfg = RebornConfig::resolve_with_settings(&settings)
+                .expect("settings overlay must rescue env-only inconsistency");
+            assert!(cfg.enabled);
+            assert_eq!(cfg.profile, RebornProfile::Production);
+        });
+    }
+
+    #[test]
+    fn env_only_inconsistency_still_fails_under_resolve() {
+        // The env-only resolver retains the old fail-closed contract
+        // when no settings overlay is available — `resolve()` runs
+        // `finalize` against the raw env snapshot directly.
+        with_clean_env(|| {
+            // SAFETY: under ENV_MUTEX in with_clean_env.
+            unsafe {
+                std::env::set_var("REBORN_PROFILE", "production");
+            }
+            let err = RebornConfig::resolve()
+                .expect_err("env-only resolve must still reject inconsistent input");
+            match err {
+                ConfigError::InvalidValue { key, .. } => {
+                    assert_eq!(key, "REBORN_ENABLED");
                 }
                 other => panic!("expected InvalidValue, got {other:?}"),
             }
