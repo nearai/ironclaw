@@ -1,11 +1,17 @@
 //! Extension registry factory.
 //!
-//! `ironclaw_extensions` is merged. The composition root wires an empty
-//! [`ExtensionRegistry`] under every non-disabled profile. Production
-//! discovery against a real `RootFilesystem` lives in a follow-up that
-//! co-lands with the trust-class policy engine (#3012/#3043) so that
-//! manifest trust assignment is gated by host policy rather than by
-//! self-declared manifest fields.
+//! `ironclaw_extensions` is merged, and the trust-class policy engine
+//! it gates against landed via PR #3043 (issue #3012, merged
+//! 2026-04-29). The composition root wires an empty
+//! [`ExtensionRegistry`] under every non-disabled profile and pairs it
+//! with `factories::trust`'s `HostTrustPolicy::empty()`.
+//!
+//! Production discovery against a real `RootFilesystem` is the
+//! remaining additive work: the registry needs a typed-settings
+//! overlay that selects bundled / admin / signed sources for the trust
+//! policy chain, then populates the registry against those. The
+//! `extension_registry` ↔ `trust_policy` coupling rule (validate rule
+//! 6) keeps the pairing a build-time guarantee.
 
 use std::sync::Arc;
 

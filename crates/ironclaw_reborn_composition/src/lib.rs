@@ -29,8 +29,21 @@
 //! permitted to fail with [`RebornBuildError::SubstrateNotImplemented`] when a
 //! required service crate has not yet merged. That keeps the composition
 //! root reviewable today without blocking on the full set of cutover-blocker
-//! PRs (#3013, #3016, #3019, #3022 plus the secrets/network/memory/
-//! capabilities/dispatcher crates that are still in flight).
+//! PRs:
+//!
+//! - **#3012 trust-class policy engine** — merged via PR #3043
+//!   (2026-04-29). `factories::trust` wires `HostTrustPolicy::empty()`;
+//!   typed source-chain overlay is the remaining additive work.
+//! - **#3013 TurnCoordinator** — open, builds against PR #3095
+//!   (`feat(reborn): add host runtime contract facade`).
+//! - **#3016 AgentLoopHost facade** — open, same precursor as #3013.
+//! - **#3019 PromptWriteSafetyPolicy hook** — open, no implementing PR
+//!   in flight as of 2026-04-29.
+//! - **#3022 event substrate integration tests** — open, no
+//!   implementing PR in flight as of 2026-04-29; gates the durable
+//!   event/audit log backends.
+//! - **`ironclaw_capabilities`** — substrate crate not yet in workspace.
+//! - **`ironclaw_memory`** — substrate crate not yet in workspace.
 //!
 //! # What this crate is *not*
 //!
