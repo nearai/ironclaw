@@ -9,6 +9,22 @@
 //! `/api/...` prefix used by the rest of IronClaw's HTTP surface. The legacy
 //! `/v1/responses` path is still accepted as an alias for backward
 //! compatibility with clients configured against it (see ironclaw#2201).
+//!
+//! ## Externally-provided tools
+//!
+//! Callers can declare their own tools alongside IronClaw's built-in
+//! registry by passing `tools: [{type: "function", name, description,
+//! parameters}]` and feeding back results via `function_call_output` items
+//! in the next request's `input`. IronClaw's engine doesn't expose a
+//! per-request tool surface, so external tools are integrated at the
+//! prompt level: the catalog is rendered into the user message as
+//! `<external-tools>` and the agent is told to invoke a tool by ending its
+//! response with a fenced ```` ```tool_call ```` block containing
+//! `{"name": ..., "arguments": ...}`. When that fence appears with a
+//! recognised tool name, this module splits the agent's reply into a
+//! leading `Message` plus a `function_call` `ResponseOutputItem`,
+//! matching the OpenAI wire shape so existing client libraries can consume
+//! it unmodified.
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -90,16 +106,47 @@ fn default_model() -> String {
 #[serde(untagged)]
 pub enum ResponsesInput {
     Text(String),
-    Messages(Vec<ResponsesInputMessage>),
+    Items(Vec<ResponsesInputItem>),
 }
 
+/// A single item in the Responses API `input` array.
+///
+/// Items without an explicit `type` default to a user message — this preserves
+/// backward compatibility with the simpler `[{"role":"user","content":"..."}]`
+/// shape that pre-dates external tool support.
 #[derive(Debug, Clone, Deserialize)]
-pub struct ResponsesInputMessage {
-    pub role: String,
-    pub content: String,
+pub struct ResponsesInputItem {
+    /// Item type tag: `message`, `function_call`, or `function_call_output`.
+    /// Absent or empty means `message` (legacy shape).
+    #[serde(rename = "type", default)]
+    pub item_type: Option<String>,
+    /// For `message` items: role (`user`, `assistant`, `system`).
+    #[serde(default)]
+    pub role: Option<String>,
+    /// For `message` items: text content.
+    #[serde(default)]
+    pub content: Option<String>,
+    /// For `function_call` and `function_call_output` items: links a call to its result.
+    #[serde(default)]
+    pub call_id: Option<String>,
+    /// For `function_call` items: the tool name the agent (previously) chose.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// For `function_call` items: stringified JSON arguments.
+    #[serde(default)]
+    pub arguments: Option<String>,
+    /// For `function_call_output` items: the tool result the caller executed externally.
+    #[serde(default)]
+    pub output: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+/// Externally-provided tool definition.
+///
+/// Per the OpenAI Responses API spec, only `type: "function"` is currently
+/// honoured. Built-in tool types like `web_search`, `file_search`, or
+/// `code_interpreter` are rejected with 400 — IronClaw routes those through
+/// its own internal tool registry, not through caller-provided definitions.
+#[derive(Debug, Clone, Deserialize)]
 pub struct ResponsesTool {
     #[serde(rename = "type")]
     pub tool_type: String,
@@ -344,30 +391,253 @@ fn format_context(ctx: &serde_json::Value) -> String {
     parts.join("\n")
 }
 
-/// Extract the user message text from the input.
-fn extract_user_content(input: &ResponsesInput) -> Result<String, String> {
+/// Outputs of previously-executed tools the caller is feeding back in.
+#[derive(Debug, Default, Clone)]
+struct ExtractedInput {
+    /// The latest user message text (the prompt for this turn).
+    user_text: String,
+    /// Previous tool outputs (`function_call_output` items) supplied by the
+    /// caller. Pairs of `(call_id, output)`. Surfaced to the agent as a
+    /// preamble so it can reason over the results of the tools it asked the
+    /// caller to run on the prior turn.
+    tool_outputs: Vec<(String, String)>,
+}
+
+/// Extract the latest user message and any caller-supplied tool outputs from
+/// the input.
+///
+/// Accepts:
+/// - a plain string (legacy text input)
+/// - a list of `{role, content}` items (legacy message input, no `type` tag)
+/// - a list of typed items: `message`, `function_call`, `function_call_output`
+///
+/// `function_call` items are accepted but ignored — they are echoes of what
+/// the agent emitted on a previous turn. `function_call_output` items are
+/// extracted into `tool_outputs` so we can surface them to the agent.
+fn extract_user_content(input: &ResponsesInput) -> Result<ExtractedInput, String> {
     match input {
         ResponsesInput::Text(s) => {
             if s.is_empty() {
                 Err("input must not be empty".to_string())
             } else {
-                Ok(s.clone())
+                Ok(ExtractedInput {
+                    user_text: s.clone(),
+                    tool_outputs: Vec::new(),
+                })
             }
         }
-        ResponsesInput::Messages(msgs) => {
-            // Find the last user message.
-            let last_user = msgs
-                .iter()
-                .rev()
-                .find(|m| m.role == "user")
-                .ok_or("input messages must contain at least one user message")?;
-            if last_user.content.is_empty() {
-                Err("user message content must not be empty".to_string())
-            } else {
-                Ok(last_user.content.clone())
+        ResponsesInput::Items(items) => {
+            let mut last_user_text: Option<String> = None;
+            let mut tool_outputs: Vec<(String, String)> = Vec::new();
+            for item in items {
+                match item.item_type.as_deref().unwrap_or("message") {
+                    "message" => {
+                        if item.role.as_deref() == Some("user")
+                            && let Some(text) = item.content.as_ref()
+                            && !text.is_empty()
+                        {
+                            last_user_text = Some(text.clone());
+                        }
+                    }
+                    "function_call" => {
+                        // Echo of a previous turn's output. The agent's own
+                        // history is reconstructed from the conversation
+                        // store, so we don't need to re-inject it.
+                    }
+                    "function_call_output" => {
+                        let Some(output) = item.output.as_ref() else {
+                            return Err(
+                                "function_call_output items must include an `output` field"
+                                    .to_string(),
+                            );
+                        };
+                        let call_id = item.call_id.clone().unwrap_or_default();
+                        tool_outputs.push((call_id, output.clone()));
+                    }
+                    other => {
+                        return Err(format!(
+                            "unsupported input item type: '{other}' \
+                             (expected 'message', 'function_call', or 'function_call_output')"
+                        ));
+                    }
+                }
             }
+
+            // A turn without a user message is allowed *only* when the caller
+            // is exclusively delivering function_call_output items — i.e. they
+            // want the agent to react to tool results without saying anything
+            // new. In that case we synthesise a minimal user prompt so the
+            // engine still sees a "user turn".
+            let user_text = match last_user_text {
+                Some(t) => t,
+                None if !tool_outputs.is_empty() => {
+                    "[Continue with the tool results above.]".to_string()
+                }
+                None => {
+                    return Err(
+                        "input must contain at least one user message or function_call_output"
+                            .to_string(),
+                    );
+                }
+            };
+
+            Ok(ExtractedInput {
+                user_text,
+                tool_outputs,
+            })
         }
     }
+}
+
+/// Tool-call protocol marker the agent emits to invoke an external tool.
+///
+/// IronClaw's engine doesn't have a per-request tool surface, so externally-
+/// provided tools are exposed to the agent as a prompt-level catalog. The
+/// agent signals an external tool call by ending its response with a
+/// fenced code block tagged `tool_call` containing a JSON object:
+///
+/// ```text
+/// ```tool_call
+/// {"name": "<tool_name>", "arguments": {...}}
+/// ```
+/// ```
+///
+/// When the response API endpoint detects this marker, it emits a
+/// `function_call` output item instead of (or in addition to) a message,
+/// matching the OpenAI Responses API wire shape.
+const TOOL_CALL_FENCE: &str = "```tool_call";
+const TOOL_CALL_FENCE_END: &str = "```";
+
+/// Maximum total serialized size of caller-supplied tool definitions (16 KiB).
+///
+/// Caps prompt blow-up from a misconfigured client passing hundreds of tool
+/// schemas. Mirrors the existing 10 KiB cap on `x_context`.
+const MAX_TOOLS_BYTES: usize = 16 * 1024;
+
+/// Validate and normalise the externally-provided tool list.
+///
+/// Returns an error string on the first violation so the handler can surface a
+/// 400 with a precise message. Only `type: "function"` is supported.
+fn validate_external_tools(tools: &[ResponsesTool]) -> Result<(), String> {
+    if tools.is_empty() {
+        return Ok(());
+    }
+    let serialized_size = serde_json::to_string(
+        &tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "type": t.tool_type,
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .map(|s| s.len())
+    .unwrap_or(0);
+    if serialized_size > MAX_TOOLS_BYTES {
+        return Err(format!(
+            "tools exceed {MAX_TOOLS_BYTES}-byte limit ({serialized_size} bytes)"
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for tool in tools {
+        if tool.tool_type != "function" {
+            return Err(format!(
+                "unsupported tool type '{}'; only 'function' is accepted",
+                tool.tool_type
+            ));
+        }
+        let name = tool
+            .name
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "function tool missing 'name'".to_string())?;
+        if !seen.insert(name.to_string()) {
+            return Err(format!("duplicate tool name '{name}'"));
+        }
+    }
+    Ok(())
+}
+
+/// Render the external tool catalog and any caller-supplied tool outputs as
+/// a preamble that gets prepended to the user message.
+///
+/// The format is human-readable rather than JSON because it is consumed by
+/// the LLM, not parsed by code. It documents the protocol described on
+/// [`TOOL_CALL_FENCE`] so the agent knows how to invoke a tool.
+fn render_external_tools_preamble(
+    tools: &[ResponsesTool],
+    prior_outputs: &[(String, String)],
+) -> String {
+    let mut out = String::new();
+    if !tools.is_empty() {
+        out.push_str("<external-tools>\n");
+        out.push_str(
+            "You have access to these caller-provided tools. To invoke one, end your response with a fenced code block tagged `tool_call` containing a JSON object:\n",
+        );
+        out.push_str("```tool_call\n");
+        out.push_str("{\"name\": \"<tool_name>\", \"arguments\": { ... }}\n");
+        out.push_str("```\n");
+        out.push_str("If you do not need a tool, just answer normally.\n\n");
+        for tool in tools {
+            let name = tool.name.as_deref().unwrap_or("");
+            let description = tool.description.as_deref().unwrap_or("(no description)");
+            out.push_str(&format!("- {name}: {description}\n"));
+            if let Some(params) = &tool.parameters
+                && let Ok(rendered) = serde_json::to_string(params)
+            {
+                out.push_str(&format!("  parameters: {rendered}\n"));
+            }
+        }
+        out.push_str("</external-tools>\n");
+    }
+    if !prior_outputs.is_empty() {
+        out.push_str("<previous-tool-results>\n");
+        for (call_id, output) in prior_outputs {
+            if call_id.is_empty() {
+                out.push_str(&format!("- {output}\n"));
+            } else {
+                out.push_str(&format!("- call {call_id}: {output}\n"));
+            }
+        }
+        out.push_str("</previous-tool-results>\n");
+    }
+    out
+}
+
+/// Parsed tool call extracted from an agent response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedToolCall {
+    name: String,
+    arguments: String,
+}
+
+/// If the agent's text response ends with a fenced ```tool_call ... ``` block,
+/// extract the (name, arguments) pair and return the leading message text
+/// (which may be empty). Returns `None` when the response is plain text.
+fn extract_trailing_tool_call(text: &str) -> Option<(String, ParsedToolCall)> {
+    // Find the last occurrence of the opening fence so a model that includes
+    // a code block earlier (e.g. example output) won't trip this.
+    let fence_start = text.rfind(TOOL_CALL_FENCE)?;
+    let after_fence = &text[fence_start + TOOL_CALL_FENCE.len()..];
+    // Strip a trailing code-fence terminator. Allow optional trailing newline.
+    let trimmed_end = after_fence.trim_end();
+    let body = trimmed_end.strip_suffix(TOOL_CALL_FENCE_END)?.trim();
+    let json: serde_json::Value = serde_json::from_str(body).ok()?;
+    let name = json.get("name").and_then(|v| v.as_str())?.to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let arguments = match json.get("arguments") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(other) => serde_json::to_string(other).ok()?,
+        None => "{}".to_string(),
+    };
+    let leading = text[..fence_start].trim_end().to_string();
+    Some((leading, ParsedToolCall { name, arguments }))
 }
 
 /// Check whether an `AppEvent` belongs to the target thread.
@@ -443,10 +713,25 @@ struct ResponseAccumulator {
     usage: ResponseUsage,
     failed: bool,
     error_message: Option<String>,
+    /// Caller-declared external tool names. Trailing `tool_call` fences
+    /// in the agent's response are only converted to `function_call` output
+    /// items when the parsed name matches one of these — otherwise the fence
+    /// is treated as ordinary text so we don't accidentally mistake an
+    /// unrelated code block for a tool invocation.
+    external_tool_names: std::collections::HashSet<String>,
 }
 
 impl ResponseAccumulator {
+    #[cfg(test)]
     fn new(resp_id: String, model: String) -> Self {
+        Self::with_external_tools(resp_id, model, std::collections::HashSet::new())
+    }
+
+    fn with_external_tools(
+        resp_id: String,
+        model: String,
+        external_tool_names: std::collections::HashSet<String>,
+    ) -> Self {
         Self {
             resp_id,
             model,
@@ -456,7 +741,19 @@ impl ResponseAccumulator {
             usage: ResponseUsage::default(),
             failed: false,
             error_message: None,
+            external_tool_names,
         }
+    }
+
+    /// Try to parse a trailing `tool_call` fence from `text` whose `name`
+    /// matches one of the declared external tools. Returns the leading text
+    /// (possibly empty) and the parsed call.
+    fn parse_external_tool_call(&self, text: &str) -> Option<(String, ParsedToolCall)> {
+        let (leading, parsed) = extract_trailing_tool_call(text)?;
+        if !self.external_tool_names.contains(&parsed.name) {
+            return None;
+        }
+        Some((leading, parsed))
     }
 
     /// Process one `AppEvent` and return `true` if the turn is finished.
@@ -474,11 +771,31 @@ impl ResponseAccumulator {
                     content
                 };
                 if !text.is_empty() {
-                    self.output.push(ResponseOutputItem::Message {
-                        id: make_item_id(),
-                        role: "assistant".to_string(),
-                        content: vec![MessageContent::OutputText { text }],
-                    });
+                    // If the agent ended its response with a tool_call fence
+                    // for one of the caller's external tools, split the
+                    // response into a (possibly empty) preamble message
+                    // followed by a function_call output item.
+                    if let Some((leading, parsed)) = self.parse_external_tool_call(&text) {
+                        if !leading.is_empty() {
+                            self.output.push(ResponseOutputItem::Message {
+                                id: make_item_id(),
+                                role: "assistant".to_string(),
+                                content: vec![MessageContent::OutputText { text: leading }],
+                            });
+                        }
+                        self.output.push(ResponseOutputItem::FunctionCall {
+                            id: make_item_id(),
+                            call_id: format!("call_{}", Uuid::new_v4().simple()),
+                            name: parsed.name,
+                            arguments: parsed.arguments,
+                        });
+                    } else {
+                        self.output.push(ResponseOutputItem::Message {
+                            id: make_item_id(),
+                            role: "assistant".to_string(),
+                            content: vec![MessageContent::OutputText { text }],
+                        });
+                    }
                 }
                 true // turn complete
             }
@@ -719,14 +1036,14 @@ pub async fn create_response_handler(
             "invalid_request_error",
         ));
     }
-    if req.tools.is_some() {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "The 'tools' field is not yet supported",
-            "invalid_request_error",
-        ));
-    }
+    let external_tools: Vec<ResponsesTool> = req.tools.clone().unwrap_or_default();
+    validate_external_tools(&external_tools)
+        .map_err(|e| api_error(StatusCode::BAD_REQUEST, e, "invalid_request_error"))?;
     if req.tool_choice.is_some() {
+        // `tool_choice` (auto / none / required / specific function) is not
+        // honoured because the engine doesn't have a per-request tool surface
+        // to enforce it against. Reject explicitly so callers don't get
+        // silently-ignored steering.
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             "The 'tool_choice' field is not yet supported",
@@ -748,8 +1065,17 @@ pub async fn create_response_handler(
         ));
     }
 
-    let mut content = extract_user_content(&req.input)
+    let extracted = extract_user_content(&req.input)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, e, "invalid_request_error"))?;
+    let mut content = extracted.user_text;
+
+    // Prepend the external tool catalog and any caller-supplied tool outputs.
+    // The agent sees these in-context and can invoke a tool by emitting the
+    // `tool_call` fenced block protocol described in `render_external_tools_preamble`.
+    let tools_preamble = render_external_tools_preamble(&external_tools, &extracted.tool_outputs);
+    if !tools_preamble.is_empty() {
+        content = format!("{tools_preamble}\n{content}");
+    }
 
     // Prepend structured context (e.g. notification approval/rejection).
     // Enforce a 10 KB size limit to prevent context window exhaustion.
@@ -801,15 +1127,35 @@ pub async fn create_response_handler(
     let model = req.model.clone();
     let stream = req.stream.unwrap_or(false);
     let user_id = user.user_id.clone();
+    let external_tool_names: std::collections::HashSet<String> = external_tools
+        .iter()
+        .filter_map(|t| t.name.clone())
+        .collect();
 
     if stream {
-        handle_streaming(state, msg, resp_id, model, thread_id_str, user_id)
-            .await
-            .map(IntoResponse::into_response)
+        handle_streaming(
+            state,
+            msg,
+            resp_id,
+            model,
+            thread_id_str,
+            user_id,
+            external_tool_names,
+        )
+        .await
+        .map(IntoResponse::into_response)
     } else {
-        handle_non_streaming(state, msg, resp_id, model, thread_id_str, &user_id)
-            .await
-            .map(IntoResponse::into_response)
+        handle_non_streaming(
+            state,
+            msg,
+            resp_id,
+            model,
+            thread_id_str,
+            &user_id,
+            external_tool_names,
+        )
+        .await
+        .map(IntoResponse::into_response)
     }
 }
 
@@ -820,6 +1166,7 @@ async fn handle_non_streaming(
     model: String,
     thread_id: String,
     user_id: &str,
+    external_tool_names: std::collections::HashSet<String>,
 ) -> Result<Json<ResponseObject>, ApiError> {
     // Subscribe BEFORE sending so we don't miss events.
     let mut event_stream = state
@@ -835,7 +1182,7 @@ async fn handle_non_streaming(
 
     send_to_agent(&state, msg).await?;
 
-    let mut acc = ResponseAccumulator::new(resp_id, model);
+    let mut acc = ResponseAccumulator::with_external_tools(resp_id, model, external_tool_names);
 
     let result = tokio::time::timeout(RESPONSE_TIMEOUT, async {
         while let Some(event) = event_stream.next().await {
@@ -864,6 +1211,7 @@ async fn handle_streaming(
     model: String,
     thread_id: String,
     user_id: String,
+    external_tool_names: std::collections::HashSet<String>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>> + Send>, ApiError> {
     let event_stream = state
         .sse
@@ -887,6 +1235,7 @@ async fn handle_streaming(
         resp_id,
         model,
         thread_id,
+        external_tool_names,
     ));
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(Ok::<_, Infallible>);
@@ -901,6 +1250,7 @@ async fn streaming_worker(
     resp_id: String,
     model: String,
     thread_id: String,
+    external_tool_names: std::collections::HashSet<String>,
 ) {
     use std::pin::pin;
 
@@ -930,7 +1280,7 @@ async fn streaming_worker(
         return;
     }
 
-    let mut acc = ResponseAccumulator::new(resp_id, model);
+    let mut acc = ResponseAccumulator::with_external_tools(resp_id, model, external_tool_names);
     let mut message_output_index: Option<usize> = None;
     let mut event_stream = pin!(event_stream);
     let timeout = tokio::time::sleep(RESPONSE_TIMEOUT);
@@ -1126,67 +1476,106 @@ async fn streaming_worker(
                     content.clone()
                 };
                 if !text.is_empty() {
-                    let idx = match message_output_index {
-                        Some(i) => i,
-                        None => {
-                            // Create the output item first.
-                            let i = acc.output.len();
-                            let placeholder = ResponseOutputItem::Message {
-                                id: make_item_id(),
-                                role: "assistant".to_string(),
-                                content: vec![MessageContent::OutputText {
-                                    text: String::new(),
-                                }],
-                            };
+                    // Detect a trailing external tool_call fence so we can
+                    // split the response into a leading message + a
+                    // function_call output item.
+                    let parsed_call = acc.parse_external_tool_call(&text);
+                    let message_text = parsed_call
+                        .as_ref()
+                        .map(|(leading, _)| leading.clone())
+                        .unwrap_or_else(|| text.clone());
+
+                    if !message_text.is_empty() {
+                        let idx = match message_output_index {
+                            Some(i) => i,
+                            None => {
+                                // Create the output item first.
+                                let i = acc.output.len();
+                                let placeholder = ResponseOutputItem::Message {
+                                    id: make_item_id(),
+                                    role: "assistant".to_string(),
+                                    content: vec![MessageContent::OutputText {
+                                        text: String::new(),
+                                    }],
+                                };
+                                emit(
+                                    &tx,
+                                    "response.output_item.added",
+                                    &ResponseStreamEvent::OutputItemAdded {
+                                        output_index: i,
+                                        item: placeholder.clone(),
+                                    },
+                                );
+                                acc.output.push(placeholder);
+                                i
+                            }
+                        };
+
+                        // Emit the full text as a delta so streaming clients
+                        // receive it via response.output_text.delta, but only
+                        // when StreamChunks haven't already delivered the content.
+                        if acc.text_chunks.is_empty() {
                             emit(
                                 &tx,
-                                "response.output_item.added",
-                                &ResponseStreamEvent::OutputItemAdded {
-                                    output_index: i,
-                                    item: placeholder.clone(),
+                                "response.output_text.delta",
+                                &ResponseStreamEvent::OutputTextDelta {
+                                    output_index: idx,
+                                    content_index: 0,
+                                    delta: message_text.clone(),
                                 },
                             );
-                            acc.output.push(placeholder);
-                            i
                         }
-                    };
 
-                    // Emit the full text as a delta so streaming clients
-                    // receive it via response.output_text.delta, but only
-                    // when StreamChunks haven't already delivered the content.
-                    if acc.text_chunks.is_empty() {
-                        emit(
-                            &tx,
-                            "response.output_text.delta",
-                            &ResponseStreamEvent::OutputTextDelta {
-                                output_index: idx,
-                                content_index: 0,
-                                delta: text.clone(),
-                            },
-                        );
-                    }
-
-                    // Reuse the placeholder's ID so added→done correlation works.
-                    let item_id =
-                        if let Some(ResponseOutputItem::Message { id, .. }) = acc.output.get(idx) {
+                        // Reuse the placeholder's ID so added→done correlation works.
+                        let item_id = if let Some(ResponseOutputItem::Message { id, .. }) =
+                            acc.output.get(idx)
+                        {
                             id.clone()
                         } else {
                             make_item_id()
                         };
-                    let item = ResponseOutputItem::Message {
-                        id: item_id,
-                        role: "assistant".to_string(),
-                        content: vec![MessageContent::OutputText { text }],
-                    };
-                    acc.output[idx] = item.clone();
-                    emit(
-                        &tx,
-                        "response.output_item.done",
-                        &ResponseStreamEvent::OutputItemDone {
-                            output_index: idx,
-                            item,
-                        },
-                    );
+                        let item = ResponseOutputItem::Message {
+                            id: item_id,
+                            role: "assistant".to_string(),
+                            content: vec![MessageContent::OutputText { text: message_text }],
+                        };
+                        acc.output[idx] = item.clone();
+                        emit(
+                            &tx,
+                            "response.output_item.done",
+                            &ResponseStreamEvent::OutputItemDone {
+                                output_index: idx,
+                                item,
+                            },
+                        );
+                    }
+
+                    if let Some((_, parsed)) = parsed_call {
+                        let idx = acc.output.len();
+                        let item = ResponseOutputItem::FunctionCall {
+                            id: make_item_id(),
+                            call_id: format!("call_{}", Uuid::new_v4().simple()),
+                            name: parsed.name,
+                            arguments: parsed.arguments,
+                        };
+                        emit(
+                            &tx,
+                            "response.output_item.added",
+                            &ResponseStreamEvent::OutputItemAdded {
+                                output_index: idx,
+                                item: item.clone(),
+                            },
+                        );
+                        emit(
+                            &tx,
+                            "response.output_item.done",
+                            &ResponseStreamEvent::OutputItemDone {
+                                output_index: idx,
+                                item: item.clone(),
+                            },
+                        );
+                        acc.output.push(item);
+                    }
                 }
             }
 
@@ -1420,10 +1809,49 @@ mod tests {
         assert!(decode_response_id("resp_not_a_uuid").is_err());
     }
 
+    fn message_item(role: &str, content: &str) -> ResponsesInputItem {
+        ResponsesInputItem {
+            item_type: Some("message".to_string()),
+            role: Some(role.to_string()),
+            content: Some(content.to_string()),
+            call_id: None,
+            name: None,
+            arguments: None,
+            output: None,
+        }
+    }
+
+    fn legacy_message_item(role: &str, content: &str) -> ResponsesInputItem {
+        // Backwards-compatible shape: no `type` field.
+        ResponsesInputItem {
+            item_type: None,
+            role: Some(role.to_string()),
+            content: Some(content.to_string()),
+            call_id: None,
+            name: None,
+            arguments: None,
+            output: None,
+        }
+    }
+
+    fn function_call_output_item(call_id: &str, output: &str) -> ResponsesInputItem {
+        ResponsesInputItem {
+            item_type: Some("function_call_output".to_string()),
+            role: None,
+            content: None,
+            call_id: Some(call_id.to_string()),
+            name: None,
+            arguments: None,
+            output: Some(output.to_string()),
+        }
+    }
+
     #[test]
     fn extract_user_content_text() {
         let input = ResponsesInput::Text("hello".to_string());
-        assert_eq!(extract_user_content(&input).unwrap(), "hello");
+        let extracted = extract_user_content(&input).expect("extract");
+        assert_eq!(extracted.user_text, "hello");
+        assert!(extracted.tool_outputs.is_empty());
     }
 
     #[test]
@@ -1434,30 +1862,258 @@ mod tests {
 
     #[test]
     fn extract_user_content_messages_uses_last_user() {
-        let input = ResponsesInput::Messages(vec![
-            ResponsesInputMessage {
-                role: "user".to_string(),
-                content: "first".to_string(),
-            },
-            ResponsesInputMessage {
-                role: "assistant".to_string(),
-                content: "middle".to_string(),
-            },
-            ResponsesInputMessage {
-                role: "user".to_string(),
-                content: "last".to_string(),
-            },
+        let input = ResponsesInput::Items(vec![
+            legacy_message_item("user", "first"),
+            legacy_message_item("assistant", "middle"),
+            legacy_message_item("user", "last"),
         ]);
-        assert_eq!(extract_user_content(&input).unwrap(), "last");
+        let extracted = extract_user_content(&input).expect("extract");
+        assert_eq!(extracted.user_text, "last");
+        assert!(extracted.tool_outputs.is_empty());
     }
 
     #[test]
     fn extract_user_content_no_user_message_errors() {
-        let input = ResponsesInput::Messages(vec![ResponsesInputMessage {
-            role: "system".to_string(),
-            content: "hello".to_string(),
+        let input = ResponsesInput::Items(vec![legacy_message_item("system", "hello")]);
+        assert!(extract_user_content(&input).is_err());
+    }
+
+    #[test]
+    fn extract_user_content_collects_function_call_outputs() {
+        let input = ResponsesInput::Items(vec![
+            message_item("user", "what is the weather?"),
+            function_call_output_item("call_abc", "{\"temp\":72}"),
+            function_call_output_item("call_def", "sunny"),
+        ]);
+        let extracted = extract_user_content(&input).expect("extract");
+        assert_eq!(extracted.user_text, "what is the weather?");
+        assert_eq!(
+            extracted.tool_outputs,
+            vec![
+                ("call_abc".to_string(), "{\"temp\":72}".to_string()),
+                ("call_def".to_string(), "sunny".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_user_content_function_call_output_only_synthesises_prompt() {
+        // A follow-up turn that only carries tool results (no new user text)
+        // should still produce a non-empty `user_text` so the engine sees a
+        // user turn.
+        let input = ResponsesInput::Items(vec![function_call_output_item("call_x", "result")]);
+        let extracted = extract_user_content(&input).expect("extract");
+        assert!(!extracted.user_text.is_empty());
+        assert_eq!(
+            extracted.tool_outputs,
+            vec![("call_x".to_string(), "result".to_string())]
+        );
+    }
+
+    #[test]
+    fn extract_user_content_rejects_unknown_item_type() {
+        let input = ResponsesInput::Items(vec![ResponsesInputItem {
+            item_type: Some("file_search".to_string()),
+            ..legacy_message_item("user", "hi")
         }]);
         assert!(extract_user_content(&input).is_err());
+    }
+
+    #[test]
+    fn validate_external_tools_accepts_function_type() {
+        let tools = vec![ResponsesTool {
+            tool_type: "function".to_string(),
+            name: Some("get_weather".to_string()),
+            description: Some("Look up the weather".to_string()),
+            parameters: Some(serde_json::json!({"type":"object"})),
+        }];
+        assert!(validate_external_tools(&tools).is_ok());
+    }
+
+    #[test]
+    fn validate_external_tools_rejects_other_types() {
+        let tools = vec![ResponsesTool {
+            tool_type: "web_search".to_string(),
+            name: Some("search".to_string()),
+            description: None,
+            parameters: None,
+        }];
+        let err = validate_external_tools(&tools).expect_err("must reject");
+        assert!(err.contains("web_search"));
+    }
+
+    #[test]
+    fn validate_external_tools_rejects_missing_name() {
+        let tools = vec![ResponsesTool {
+            tool_type: "function".to_string(),
+            name: None,
+            description: None,
+            parameters: None,
+        }];
+        assert!(validate_external_tools(&tools).is_err());
+    }
+
+    #[test]
+    fn validate_external_tools_rejects_duplicate_names() {
+        let tools = vec![
+            ResponsesTool {
+                tool_type: "function".to_string(),
+                name: Some("dup".to_string()),
+                description: None,
+                parameters: None,
+            },
+            ResponsesTool {
+                tool_type: "function".to_string(),
+                name: Some("dup".to_string()),
+                description: None,
+                parameters: None,
+            },
+        ];
+        let err = validate_external_tools(&tools).expect_err("must reject");
+        assert!(err.contains("duplicate"));
+    }
+
+    #[test]
+    fn validate_external_tools_rejects_oversized_payload() {
+        // One tool with a giant description blows past the 16 KiB cap.
+        let big = "x".repeat(MAX_TOOLS_BYTES + 1024);
+        let tools = vec![ResponsesTool {
+            tool_type: "function".to_string(),
+            name: Some("big".to_string()),
+            description: Some(big),
+            parameters: None,
+        }];
+        let err = validate_external_tools(&tools).expect_err("must reject");
+        assert!(err.contains("limit"));
+    }
+
+    #[test]
+    fn render_external_tools_preamble_includes_protocol_and_catalog() {
+        let tools = vec![ResponsesTool {
+            tool_type: "function".to_string(),
+            name: Some("get_weather".to_string()),
+            description: Some("Look up the weather".to_string()),
+            parameters: Some(
+                serde_json::json!({"type":"object","properties":{"city":{"type":"string"}}}),
+            ),
+        }];
+        let preamble = render_external_tools_preamble(&tools, &[]);
+        assert!(preamble.contains("<external-tools>"));
+        assert!(preamble.contains("```tool_call"));
+        assert!(preamble.contains("get_weather"));
+        assert!(preamble.contains("Look up the weather"));
+    }
+
+    #[test]
+    fn render_external_tools_preamble_includes_prior_tool_outputs() {
+        let outputs = vec![
+            ("call_1".to_string(), "first result".to_string()),
+            (String::new(), "anonymous result".to_string()),
+        ];
+        let preamble = render_external_tools_preamble(&[], &outputs);
+        assert!(preamble.contains("<previous-tool-results>"));
+        assert!(preamble.contains("call call_1: first result"));
+        assert!(preamble.contains("- anonymous result"));
+    }
+
+    #[test]
+    fn render_external_tools_preamble_empty_when_nothing_provided() {
+        assert!(render_external_tools_preamble(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn extract_trailing_tool_call_object_arguments() {
+        let text = concat!(
+            "Calling the weather tool now.\n\n",
+            "```tool_call\n",
+            "{\"name\":\"get_weather\",\"arguments\":{\"city\":\"NYC\"}}\n",
+            "```",
+        );
+        let (leading, parsed) = extract_trailing_tool_call(text).expect("must parse");
+        assert_eq!(leading, "Calling the weather tool now.");
+        assert_eq!(parsed.name, "get_weather");
+        assert_eq!(parsed.arguments, "{\"city\":\"NYC\"}");
+    }
+
+    #[test]
+    fn extract_trailing_tool_call_string_arguments_pass_through() {
+        // When `arguments` is a JSON string literal, the inner JSON is
+        // unescaped during parse — we forward it verbatim, matching the
+        // OpenAI Responses API convention where `arguments` is *always*
+        // a stringified JSON value.
+        let text = concat!(
+            "```tool_call\n",
+            "{\"name\":\"foo\",\"arguments\":\"{\\\"raw\\\":true}\"}\n",
+            "```",
+        );
+        let (leading, parsed) = extract_trailing_tool_call(text).expect("must parse");
+        assert_eq!(leading, "");
+        assert_eq!(parsed.name, "foo");
+        assert_eq!(parsed.arguments, "{\"raw\":true}");
+    }
+
+    #[test]
+    fn extract_trailing_tool_call_default_empty_arguments() {
+        let text = "```tool_call\n{\"name\":\"foo\"}\n```";
+        let (_, parsed) = extract_trailing_tool_call(text).expect("must parse");
+        assert_eq!(parsed.arguments, "{}");
+    }
+
+    #[test]
+    fn extract_trailing_tool_call_returns_none_for_plain_text() {
+        assert!(extract_trailing_tool_call("just a regular reply").is_none());
+    }
+
+    #[test]
+    fn extract_trailing_tool_call_returns_none_when_name_missing() {
+        let text = "```tool_call\n{\"arguments\":{}}\n```";
+        assert!(extract_trailing_tool_call(text).is_none());
+    }
+
+    #[test]
+    fn accumulator_emits_function_call_when_response_ends_with_known_tool() {
+        let mut external = std::collections::HashSet::new();
+        external.insert("get_weather".to_string());
+        let mut acc = ResponseAccumulator::with_external_tools(
+            "resp_test".to_string(),
+            "m".to_string(),
+            external,
+        );
+        let text = concat!(
+            "Looking that up.\n\n",
+            "```tool_call\n",
+            "{\"name\":\"get_weather\",\"arguments\":{\"city\":\"NYC\"}}\n",
+            "```",
+        );
+        assert!(acc.process(AppEvent::Response {
+            content: text.to_string(),
+            thread_id: "t".to_string(),
+        }));
+        let resp = acc.finish();
+        assert_eq!(resp.output.len(), 2);
+        assert!(matches!(
+            &resp.output[0],
+            ResponseOutputItem::Message { content, .. }
+                if matches!(&content[0], MessageContent::OutputText { text } if text == "Looking that up.")
+        ));
+        assert!(matches!(
+            &resp.output[1],
+            ResponseOutputItem::FunctionCall { name, arguments, .. }
+                if name == "get_weather" && arguments == "{\"city\":\"NYC\"}"
+        ));
+    }
+
+    #[test]
+    fn accumulator_does_not_emit_function_call_for_unknown_tool() {
+        // The trailing fence parses as JSON but the tool name isn't in the
+        // external registry — treat the whole response as text.
+        let acc = ResponseAccumulator::with_external_tools(
+            "resp_test".to_string(),
+            "m".to_string(),
+            std::collections::HashSet::new(),
+        );
+        let text = "```tool_call\n{\"name\":\"unregistered\"}\n```";
+        assert!(acc.parse_external_tool_call(text).is_none());
     }
 
     #[test]

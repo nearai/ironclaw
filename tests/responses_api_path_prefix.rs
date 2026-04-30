@@ -193,6 +193,74 @@ async fn both_paths_require_auth() {
     }
 }
 
+/// `tools: [{type: "function", ...}]` is the externally-provided-tools
+/// surface. POST handler must accept the field instead of rejecting with
+/// 400 — the agent's reply is delivered asynchronously, but the request
+/// validation has to clear. We use an obviously bad tool definition
+/// (missing `name`) to assert the dedicated 400 path: this proves both
+/// "the tools field is parsed" and "validation kicks in".
+#[tokio::test]
+async fn missing_tool_name_returns_validation_error() {
+    let (addr, _state, _guard) = start_test_server().await;
+    let url = format!("http://{}/api/v1/responses", addr);
+
+    let resp = client()
+        .post(&url)
+        .bearer_auth(AUTH_TOKEN)
+        .json(&serde_json::json!({
+            "model": "default",
+            "input": "hi",
+            "tools": [
+                {"type": "function", "description": "nameless"}
+            ]
+        }))
+        .send()
+        .await
+        .expect("POST /api/v1/responses with malformed tool");
+
+    assert_eq!(
+        resp.status(),
+        400,
+        "expected 400 from external-tool validator, got {}",
+        resp.status()
+    );
+    let body = resp.text().await.unwrap_or_default();
+    assert!(
+        body.contains("name"),
+        "validation error should mention the missing 'name' field, got: {body}"
+    );
+}
+
+/// Unsupported tool types (e.g. `web_search`) must be rejected by the
+/// validator with a clear 400 — not silently accepted, since the engine
+/// doesn't honour them.
+#[tokio::test]
+async fn unsupported_tool_type_returns_validation_error() {
+    let (addr, _state, _guard) = start_test_server().await;
+    let url = format!("http://{}/api/v1/responses", addr);
+
+    let resp = client()
+        .post(&url)
+        .bearer_auth(AUTH_TOKEN)
+        .json(&serde_json::json!({
+            "model": "default",
+            "input": "hi",
+            "tools": [
+                {"type": "web_search", "name": "search"}
+            ]
+        }))
+        .send()
+        .await
+        .expect("POST /api/v1/responses with unsupported tool type");
+
+    assert_eq!(resp.status(), 400);
+    let body = resp.text().await.unwrap_or_default();
+    assert!(
+        body.contains("web_search"),
+        "validation error should mention the unsupported tool type, got: {body}"
+    );
+}
+
 /// Both GET item paths (`/api/v1/responses/{id}` and `/v1/responses/{id}`)
 /// must also enforce bearer-token auth. A missing token should return 401,
 /// not 404 — the auth middleware has to apply to legacy aliases as well.
