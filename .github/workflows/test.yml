@@ -405,7 +405,7 @@ jobs:
   bench-compile:
     name: Benchmark Compilation
     needs: changes
-    if: needs.changes.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || needs.changes.outputs.has_core_code == 'true')
+    if: needs.changes.outputs.docs_only != 'true' && github.event_name != 'pull_request' && needs.changes.outputs.has_core_code == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
