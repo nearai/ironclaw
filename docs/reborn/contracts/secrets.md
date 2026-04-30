@@ -92,7 +92,7 @@ The shared Reborn runtime HTTP egress service uses this surface to:
 - check metadata for required or optional credential handles
 - create one-shot leases scoped to the request
 - consume the lease exactly once inside the host process
-- reject runtime-supplied sensitive headers and credential-shaped request content before network dispatch
+- reject runtime-supplied sensitive headers, auth-like headers, credential query parameters, and credential-shaped request content before network dispatch
 - inject material into the outgoing request shape
 - scrub leased values from runtime-visible network errors and response headers/bodies
 - strip sensitive response headers and block credential-shaped response bodies before they reach runtime callers

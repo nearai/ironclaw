@@ -83,7 +83,7 @@ V1 semantics intentionally mirror the current WASM network import policy checks 
 - `deny_private_ip_ranges` blocks literal private, loopback, link-local, documentation, broadcast, multicast, unspecified, carrier-grade NAT, IPv4-mapped IPv6 private ranges, and unique-local IP targets
 - `max_egress_bytes` requires a request-byte estimate and denies requests whose estimated bytes exceed the configured limit. Host-mediated HTTP estimates include the method, URL, headers, HTTP framing overhead, and body so large URLs or headers cannot bypass the limit.
 
-HTTP egress rejects URL userinfo before policy, DNS, or transport so credentials cannot be smuggled through an allowlisted host URL. It resolves hostnames before dispatch and denies the request before transport when `deny_private_ip_ranges` is true and any resolved address is private, loopback, link-local, documentation, multicast, broadcast, unspecified, carrier-grade NAT, unique-local, or an IPv4-mapped IPv6 address that maps to a non-public IPv4 address. The default transport disables redirects and pins the request to the vetted resolved address set so a later DNS answer cannot silently change the destination for that request, while still allowing connector-level fallback across alternate A/AAAA answers. Caller-provided `Host` headers are rejected before transport so virtual-host routing cannot diverge from the URL host that policy validated. If a runtime caller omits `response_body_limit`, the transport clamps the response body to the V1 default in-memory cap rather than reading unbounded data.
+HTTP egress rejects URL userinfo before policy, DNS, or transport so credentials cannot be smuggled through an allowlisted host URL. It resolves hostnames before dispatch and denies the request before transport when `deny_private_ip_ranges` is true and any resolved address is private, loopback, link-local, documentation, multicast, broadcast, unspecified, carrier-grade NAT, unique-local, or an IPv4-mapped IPv6 address that maps to a non-public IPv4 address. The default transport disables redirects and pins the request to the vetted resolved address set so a later DNS answer cannot silently change the destination for that request, while still allowing connector-level fallback across alternate A/AAAA answers. Caller-provided `Host` headers are rejected before transport so virtual-host routing cannot diverge from the URL host that policy validated. Runtime-visible response bodies are always bounded: omitted and oversized explicit `response_body_limit` values clamp to the V1 default in-memory cap rather than reading unbounded data.
 
 ---
 
@@ -158,6 +158,6 @@ The crate tests cover:
 - default-port target matching for URL-derived requests
 - redirects are not followed by the default transport
 - streaming response body limits are enforced separately from request-byte accounting
-- omitted response body limits clamp to a safe default instead of unbounded reads
+- omitted and oversized explicit response body limits clamp to a safe default instead of unbounded reads
 - fail-closed empty policy behavior
 - crate boundary remains low-level and does not depend on workflow/runtime/secret/observability crates

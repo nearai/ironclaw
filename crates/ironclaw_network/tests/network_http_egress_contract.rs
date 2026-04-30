@@ -256,6 +256,34 @@ fn reqwest_transport_enforces_streaming_response_limit_separately_from_request_b
 }
 
 #[test]
+fn reqwest_transport_clamps_oversized_explicit_response_limit_to_safe_default() {
+    let body_len = DEFAULT_RESPONSE_BODY_LIMIT + 1;
+    let (url, server) = sized_response_server(body_len);
+    let transport = ReqwestNetworkTransport::new(Duration::from_secs(2));
+
+    let error = transport
+        .execute(NetworkTransportRequest {
+            method: NetworkMethod::Get,
+            url,
+            headers: vec![],
+            body: vec![],
+            resolved_ips: vec![IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))],
+            response_body_limit: Some(DEFAULT_RESPONSE_BODY_LIMIT + 1024),
+        })
+        .expect_err("oversized explicit response limits should still be clamped");
+    server.join().unwrap();
+
+    assert!(matches!(
+        error,
+        NetworkHttpError::ResponseBodyLimit {
+            limit: DEFAULT_RESPONSE_BODY_LIMIT,
+            ..
+        }
+    ));
+    assert_eq!(error.response_bytes(), DEFAULT_RESPONSE_BODY_LIMIT + 1);
+}
+
+#[test]
 fn reqwest_transport_clamps_unspecified_response_limit_to_safe_default() {
     let body_len = DEFAULT_RESPONSE_BODY_LIMIT + 1;
     let (url, server) = sized_response_server(body_len);

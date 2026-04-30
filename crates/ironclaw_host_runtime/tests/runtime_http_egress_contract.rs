@@ -7,8 +7,14 @@ use ironclaw_host_runtime::HostHttpEgressService;
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
 };
-use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
-use std::sync::{Arc, Mutex};
+use ironclaw_secrets::{
+    InMemorySecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore,
+    SecretStoreError,
+};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 #[test]
 fn host_http_egress_injects_leased_credentials_and_redacts_errors() {
@@ -21,7 +27,7 @@ fn host_http_egress_injects_leased_credentials_and_redacts_errors() {
     let secrets = InMemorySecretStore::new();
     let scope = sample_scope();
     let handle = SecretHandle::new("api-token").unwrap();
-    futures::executor::block_on(secrets.put(
+    block_on_test(secrets.put(
         scope.clone(),
         handle.clone(),
         SecretMaterial::from("sk-test-secret"),
@@ -118,7 +124,7 @@ fn host_http_egress_injects_and_redacts_url_encoded_query_credentials() {
     let secrets = InMemorySecretStore::new();
     let scope = sample_scope();
     let handle = SecretHandle::new("api-token").unwrap();
-    futures::executor::block_on(secrets.put(
+    block_on_test(secrets.put(
         scope.clone(),
         handle.clone(),
         SecretMaterial::from("secret with/slash+plus?"),
@@ -216,7 +222,7 @@ fn host_http_egress_redacts_injected_credentials_from_runtime_visible_response()
     let secrets = InMemorySecretStore::new();
     let scope = sample_scope();
     let handle = SecretHandle::new("api-token").unwrap();
-    futures::executor::block_on(secrets.put(
+    block_on_test(secrets.put(
         scope.clone(),
         handle.clone(),
         SecretMaterial::from("sk-test-secret"),
@@ -368,6 +374,144 @@ fn host_http_egress_blocks_runtime_supplied_sensitive_headers_before_network() {
 }
 
 #[test]
+fn host_http_egress_blocks_runtime_supplied_credential_query_before_network() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let service = HostHttpEgressService::new(network, InMemorySecretStore::new());
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope: sample_scope(),
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1/run?api_key=short-manual-key".to_string(),
+            headers: vec![],
+            body: Vec::new(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+        })
+        .expect_err("runtime-supplied credential query params should fail before network dispatch");
+
+    assert!(matches!(
+        error,
+        ironclaw_host_api::RuntimeHttpEgressError::Request { .. }
+    ));
+    assert!(error.to_string().contains("manual_credentials"));
+    assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+#[test]
+fn host_http_egress_blocks_runtime_supplied_auth_like_headers_before_network() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let service = HostHttpEgressService::new(network, InMemorySecretStore::new());
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope: sample_scope(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![("X-Custom-Auth".to_string(), "short-manual-key".to_string())],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+        })
+        .expect_err("runtime-supplied auth-like headers should fail before network dispatch");
+
+    assert!(matches!(
+        error,
+        ironclaw_host_api::RuntimeHttpEgressError::Request { .. }
+    ));
+    assert!(error.to_string().contains("manual_credentials"));
+    assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+#[test]
+fn host_http_egress_runs_async_secret_store_futures_with_tokio_context() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let secrets = TokioBackedSecretStore::new();
+    let scope = sample_scope();
+    let handle = SecretHandle::new("api-token").unwrap();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(secrets.put(
+            scope.clone(),
+            handle.clone(),
+            SecretMaterial::from("sk-test-secret"),
+        ))
+        .unwrap();
+    let service = HostHttpEgressService::new(network, secrets);
+
+    let response = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope,
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle,
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+        })
+        .expect("host egress should poll async secret stores inside a Tokio context");
+
+    assert_eq!(response.status, 200);
+    let requests = network_recorder.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0]
+            .headers
+            .iter()
+            .find(|(name, _)| name == "authorization"),
+        Some(&(
+            "authorization".to_string(),
+            "Bearer sk-test-secret".to_string()
+        ))
+    );
+}
+
+#[test]
 fn host_http_egress_maps_network_errors_to_stable_runtime_reasons() {
     let network = RecordingNetwork::err(NetworkHttpError::Transport {
         reason: "connection failed for https://api.example.test/path?token=raw-secret".to_string(),
@@ -457,6 +601,87 @@ impl NetworkHttpEgress for RecordingNetwork {
         self.requests.lock().unwrap().push(request);
         self.response.clone()
     }
+}
+
+struct TokioBackedSecretStore {
+    inner: InMemorySecretStore,
+}
+
+impl TokioBackedSecretStore {
+    fn new() -> Self {
+        Self {
+            inner: InMemorySecretStore::new(),
+        }
+    }
+
+    async fn yield_to_tokio() {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
+#[async_trait::async_trait]
+impl SecretStore for TokioBackedSecretStore {
+    async fn put(
+        &self,
+        scope: ResourceScope,
+        handle: SecretHandle,
+        material: SecretMaterial,
+    ) -> Result<SecretMetadata, SecretStoreError> {
+        Self::yield_to_tokio().await;
+        self.inner.put(scope, handle, material).await
+    }
+
+    async fn metadata(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<Option<SecretMetadata>, SecretStoreError> {
+        Self::yield_to_tokio().await;
+        self.inner.metadata(scope, handle).await
+    }
+
+    async fn lease_once(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<SecretLease, SecretStoreError> {
+        Self::yield_to_tokio().await;
+        self.inner.lease_once(scope, handle).await
+    }
+
+    async fn consume(
+        &self,
+        scope: &ResourceScope,
+        lease_id: SecretLeaseId,
+    ) -> Result<SecretMaterial, SecretStoreError> {
+        Self::yield_to_tokio().await;
+        self.inner.consume(scope, lease_id).await
+    }
+
+    async fn revoke(
+        &self,
+        scope: &ResourceScope,
+        lease_id: SecretLeaseId,
+    ) -> Result<SecretLease, SecretStoreError> {
+        Self::yield_to_tokio().await;
+        self.inner.revoke(scope, lease_id).await
+    }
+
+    async fn leases_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<SecretLease>, SecretStoreError> {
+        Self::yield_to_tokio().await;
+        self.inner.leases_for_scope(scope).await
+    }
+}
+
+fn block_on_test<T>(future: impl std::future::Future<Output = T>) -> T {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(future)
 }
 
 fn sample_scope() -> ResourceScope {

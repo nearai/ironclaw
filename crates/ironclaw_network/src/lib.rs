@@ -21,6 +21,7 @@ use ironclaw_host_api::{
 use thiserror::Error;
 
 pub const DEFAULT_RESPONSE_BODY_LIMIT: u64 = 5 * 1024 * 1024;
+const MAX_RESPONSE_BODY_LIMIT: u64 = DEFAULT_RESPONSE_BODY_LIMIT;
 
 /// One scoped network operation to authorize before a runtime performs I/O.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -433,9 +434,7 @@ impl NetworkHttpTransport for ReqwestNetworkTransport {
             .iter()
             .filter_map(|(name, value)| Some((name.to_string(), value.to_str().ok()?.to_string())))
             .collect::<Vec<_>>();
-        let limit = request
-            .response_body_limit
-            .unwrap_or(DEFAULT_RESPONSE_BODY_LIMIT);
+        let limit = effective_response_body_limit(request.response_body_limit);
         let mut body = Vec::new();
         let mut reader = response.take(limit.saturating_add(1));
         reader
@@ -773,6 +772,12 @@ where
         });
     }
     Ok(resolved_ips)
+}
+
+fn effective_response_body_limit(requested: Option<u64>) -> u64 {
+    requested
+        .unwrap_or(DEFAULT_RESPONSE_BODY_LIMIT)
+        .min(MAX_RESPONSE_BODY_LIMIT)
 }
 
 fn reject_caller_host_header(headers: &[(String, String)]) -> Result<(), NetworkHttpError> {
