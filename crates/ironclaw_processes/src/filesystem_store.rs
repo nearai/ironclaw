@@ -21,7 +21,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::types::{
     ProcessError, ProcessRecord, ProcessResultRecord, ProcessResultStore, ProcessStart,
-    ProcessStatus, ProcessStore, ensure_status_transition, same_scope_owner,
+    ProcessStatus, ProcessStore, ensure_status_transition, invalid_path, same_scope_owner,
 };
 
 pub(crate) enum FilesystemHandle<'a, F>
@@ -401,11 +401,11 @@ fn process_record_path(
         "{}/{process_id}.json",
         process_records_root(scope)?.as_str()
     ))
-    .map_err(Into::into)
+    .map_err(invalid_path)
 }
 
 fn process_records_root(scope: &ResourceScope) -> Result<VirtualPath, ProcessError> {
-    VirtualPath::new(format!("{}/processes", tenant_user_root(scope))).map_err(Into::into)
+    VirtualPath::new(format!("{}/processes", tenant_user_root(scope))).map_err(invalid_path)
 }
 
 fn process_result_path(
@@ -416,11 +416,11 @@ fn process_result_path(
         "{}/{process_id}.json",
         process_results_root(scope)?.as_str()
     ))
-    .map_err(Into::into)
+    .map_err(invalid_path)
 }
 
 fn process_results_root(scope: &ResourceScope) -> Result<VirtualPath, ProcessError> {
-    VirtualPath::new(format!("{}/process-results", tenant_user_root(scope))).map_err(Into::into)
+    VirtualPath::new(format!("{}/process-results", tenant_user_root(scope))).map_err(invalid_path)
 }
 
 fn process_output_path(
@@ -431,7 +431,7 @@ fn process_output_path(
         "{}/output.json",
         process_outputs_root(scope, process_id)?.as_str()
     ))
-    .map_err(Into::into)
+    .map_err(invalid_path)
 }
 
 fn process_outputs_root(
@@ -442,7 +442,7 @@ fn process_outputs_root(
         "{}/process-outputs/{process_id}",
         tenant_user_root(scope)
     ))
-    .map_err(Into::into)
+    .map_err(invalid_path)
 }
 
 fn tenant_user_root(scope: &ResourceScope) -> String {
