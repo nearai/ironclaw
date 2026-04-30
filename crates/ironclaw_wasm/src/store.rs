@@ -1,8 +1,10 @@
+use std::time::{Duration, Instant};
+
 use ironclaw_host_api::ResourceUsage;
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::bindings;
-use crate::config::{MAX_LOG_MESSAGE_BYTES, MAX_LOGS_PER_EXECUTION};
+use crate::config::{DEFAULT_HTTP_TIMEOUT_MS, MAX_LOG_MESSAGE_BYTES, MAX_LOGS_PER_EXECUTION};
 use crate::host::{WasmHttpRequest, WitToolHost};
 use crate::limiter::WasmResourceLimiter;
 use crate::types::{WasmLogLevel, WasmLogRecord};
@@ -14,10 +16,11 @@ pub(crate) struct StoreData {
     table: ResourceTable,
     pub(crate) usage: ResourceUsage,
     pub(crate) logs: Vec<WasmLogRecord>,
+    deadline: Option<Instant>,
 }
 
 impl StoreData {
-    pub(crate) fn new(host: WitToolHost, memory_limit: u64) -> Self {
+    pub(crate) fn new(host: WitToolHost, memory_limit: u64, timeout: Duration) -> Self {
         Self {
             host,
             limiter: WasmResourceLimiter::new(memory_limit),
@@ -25,7 +28,36 @@ impl StoreData {
             table: ResourceTable::new(),
             usage: ResourceUsage::default(),
             logs: Vec::new(),
+            deadline: Instant::now().checked_add(timeout),
         }
+    }
+
+    pub(crate) fn deadline_exceeded(&self) -> bool {
+        self.deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+    }
+
+    fn deadline_error(&self) -> Option<String> {
+        self.deadline_exceeded()
+            .then(|| "WASM execution deadline exceeded during host import".to_string())
+    }
+
+    fn remaining_timeout_ms(&self, requested_timeout_ms: Option<u32>) -> Option<u32> {
+        let requested_timeout_ms = requested_timeout_ms.unwrap_or(DEFAULT_HTTP_TIMEOUT_MS);
+        let deadline_timeout_ms = self.deadline.map(|deadline| {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let remaining_ms = remaining.as_millis();
+            if remaining_ms == 0 {
+                1
+            } else {
+                remaining_ms.min(u128::from(u32::MAX)) as u32
+            }
+        });
+
+        Some(match deadline_timeout_ms {
+            Some(deadline) => requested_timeout_ms.min(deadline),
+            None => requested_timeout_ms,
+        })
     }
 
     fn record_network_egress(&mut self, request_body_bytes: u64) {
@@ -66,7 +98,14 @@ impl bindings::near::agent::host::Host for StoreData {
     }
 
     fn workspace_read(&mut self, path: String) -> Option<String> {
-        self.host.workspace.read(&path)
+        if self.deadline_exceeded() {
+            return None;
+        }
+        let result = self.host.workspace.read(&path);
+        if self.deadline_exceeded() {
+            return None;
+        }
+        result
     }
 
     fn http_request(
@@ -77,17 +116,24 @@ impl bindings::near::agent::host::Host for StoreData {
         body: Option<Vec<u8>>,
         timeout_ms: Option<u32>,
     ) -> Result<bindings::near::agent::host::HttpResponse, String> {
+        if let Some(error) = self.deadline_error() {
+            return Err(error);
+        }
+
         let request_body_bytes = body.as_ref().map(|body| body.len() as u64).unwrap_or(0);
         let response = self.host.http.request(WasmHttpRequest {
             method,
             url,
             headers_json,
             body,
-            timeout_ms,
+            timeout_ms: self.remaining_timeout_ms(timeout_ms),
         });
         match response {
             Ok(response) => {
                 self.record_network_egress(request_body_bytes);
+                if let Some(error) = self.deadline_error() {
+                    return Err(error);
+                }
                 Ok(bindings::near::agent::host::HttpResponse {
                     status: response.status,
                     headers_json: response.headers_json,
@@ -104,14 +150,29 @@ impl bindings::near::agent::host::Host for StoreData {
     }
 
     fn tool_invoke(&mut self, alias: String, params_json: String) -> Result<String, String> {
-        self.host
+        if let Some(error) = self.deadline_error() {
+            return Err(error);
+        }
+        let result = self
+            .host
             .tools
             .invoke(&alias, &params_json)
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string());
+        if let Some(error) = self.deadline_error() {
+            return Err(error);
+        }
+        result
     }
 
     fn secret_exists(&mut self, name: String) -> bool {
-        self.host.secrets.exists(&name)
+        if self.deadline_exceeded() {
+            return false;
+        }
+        let exists = self.host.secrets.exists(&name);
+        if self.deadline_exceeded() {
+            return false;
+        }
+        exists
     }
 }
 

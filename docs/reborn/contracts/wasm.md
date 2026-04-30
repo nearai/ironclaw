@@ -23,6 +23,7 @@ The abandoned JSON pointer/length ABI (`alloc`, `invoke_json`, `output_ptr`, `ou
 
 - Compile once, instantiate a fresh component instance for every execution.
 - Apply fuel, epoch-timeout, memory, table, and instance limits to every metadata and execution call.
+- Reject multi-memory components; Reborn tools get one canonical linear memory, so `WitToolLimits::memory_bytes` is the per-execution memory budget rather than a per-memory multiplier.
 - Treat WIT metadata as the source of runtime compatibility: `description()` and `schema()` are called through generated Wasmtime component bindings.
 - Keep V1 `src/tools/wasm/*` and `src/channels/wasm/*` as compatibility references only; Reborn is a separate binary path.
 
@@ -35,8 +36,8 @@ All host capabilities are injected through explicit Rust seams. The default host
 - Secret access is existence-only and returns `false` unless a secret implementation is injected.
 - Nested tool invocation returns unavailable unless a tool implementation is injected.
 
-Production HTTP must be wired to the shared Reborn runtime egress service tracked by #3085, not implemented directly inside `ironclaw_wasm`.
+Production HTTP must be wired to the shared Reborn runtime egress service tracked by #3085, not implemented directly inside `ironclaw_wasm`. The WASM runtime applies the WIT HTTP default timeout when `timeout-ms` is omitted, caps it to the remaining execution deadline, and reports a timeout if a host import returns after that deadline; injected synchronous host implementations must still honor the supplied timeout because they cannot be safely preempted mid-call.
 
 ## Network accounting
 
-`ResourceUsage.network_egress_bytes` counts outbound request body bytes only. Response body limits and response scanning are separate host-egress responsibilities and must not be recorded as egress usage. If the host reports that a request was sent but later failed during response handling, the request body still counts as egress; fail-closed denials before send count zero.
+`ResourceUsage.network_egress_bytes` counts outbound request body bytes only. Response body limits and response scanning are separate host-egress responsibilities and must not be recorded as egress usage. If the host reports that a request was sent but later failed during response handling, the request body still counts as egress; fail-closed denials before send count zero. Execution failures preserve the usage/log snapshot collected before the failure so callers can reconcile sent egress even when the guest traps.

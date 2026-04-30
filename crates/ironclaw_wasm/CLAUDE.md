@@ -20,5 +20,7 @@ Owns the Reborn WASM component runtime lane.
 
 - No JSON pointer/length ABI (`invoke_json`, `alloc`, `output_ptr`, `output_len`) in Reborn WASM.
 - Instantiate fresh component instances per call.
-- Preserve fuel, epoch timeout, memory, and table/instance limits.
+- Preserve fuel, epoch timeout, memory, and table/instance limits; reject multi-memory components so `memory_bytes` remains a per-execution budget.
+- Cap HTTP host-call timeouts to the remaining execution deadline, and require injected synchronous host implementations to honor that timeout.
 - `ResourceUsage.network_egress_bytes` counts outbound request body bytes only; response-size limits are separate.
+- Preserve usage/log snapshots on execution failure so sent egress can still be reconciled.

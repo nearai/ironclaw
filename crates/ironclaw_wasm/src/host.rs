@@ -24,7 +24,11 @@ pub struct WasmHttpResponse {
 ///
 /// Production composition should wire this to the shared Reborn runtime egress
 /// service. Until that service exists, the default implementation denies every
-/// request so WASM cannot perform direct network I/O.
+/// request so WASM cannot perform direct network I/O. The runtime caps
+/// `WasmHttpRequest::timeout_ms` to the smaller of the WIT HTTP default (when
+/// omitted by the guest) and the remaining execution deadline before calling
+/// this trait; implementations must honor that timeout because a
+/// synchronous host call cannot be preempted safely once entered.
 pub trait WasmHostHttp: Send + Sync {
     fn request(&self, request: WasmHttpRequest) -> Result<WasmHttpResponse, WasmHostError>;
 }

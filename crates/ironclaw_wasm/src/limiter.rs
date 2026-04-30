@@ -3,7 +3,6 @@ use wasmtime::ResourceLimiter;
 #[derive(Debug)]
 pub(crate) struct WasmResourceLimiter {
     memory_limit: u64,
-    memory_used: u64,
     max_tables: u32,
     max_instances: u32,
     max_memories: u32,
@@ -13,10 +12,9 @@ impl WasmResourceLimiter {
     pub(crate) fn new(memory_limit: u64) -> Self {
         Self {
             memory_limit,
-            memory_used: 0,
             max_tables: 10,
             max_instances: 10,
-            max_memories: 10,
+            max_memories: 1,
         }
     }
 }
@@ -38,7 +36,6 @@ impl ResourceLimiter for WasmResourceLimiter {
             );
             return Ok(false);
         }
-        self.memory_used = desired;
         Ok(true)
     }
 
@@ -75,10 +72,10 @@ mod tests {
     use super::WasmResourceLimiter;
 
     #[test]
-    fn memories_limit_uses_dedicated_memory_count() {
+    fn memories_limit_fails_closed_to_single_canonical_memory() {
         let limiter = WasmResourceLimiter::new(1024);
         assert_eq!(limiter.instances(), 10);
         assert_eq!(limiter.tables(), 10);
-        assert_eq!(limiter.memories(), 10);
+        assert_eq!(limiter.memories(), 1);
     }
 }

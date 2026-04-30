@@ -309,3 +309,220 @@ fn default_http_host_fails_closed_without_recording_egress() {
 
     assert_eq!(executed.usage.network_egress_bytes, 0);
 }
+
+#[test]
+fn execution_error_preserves_usage_when_guest_traps_after_host_egress() {
+    let runtime = WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap();
+    let prepared = runtime
+        .prepare("http", &tool_component(&trap_after_http_wat()))
+        .unwrap();
+    let http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 201,
+        headers_json: "{}".to_string(),
+        body: Vec::new(),
+    }));
+    let host = WitToolHost::deny_all().with_http(http.clone());
+
+    let error = runtime
+        .execute(&prepared, host, WitToolRequest::new("{}"))
+        .unwrap_err();
+
+    assert_eq!(http.requests().unwrap().len(), 1);
+    match error {
+        ironclaw_wasm::WasmError::ExecutionFailed { usage, .. } => {
+            assert_eq!(usage.network_egress_bytes, 5);
+        }
+        other => panic!("expected execution failure with usage, got {other:?}"),
+    }
+}
+
+#[test]
+fn rejects_components_with_multiple_linear_memories() {
+    let runtime = WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap();
+    let multi_memory = COUNTER_TOOL_WAT.replace(
+        "(memory (export \"memory\") 1)",
+        "(memory (export \"memory\") 1)\n  (memory 1)",
+    );
+
+    let result = runtime.prepare("counter", &tool_component(&multi_memory));
+
+    assert!(
+        result.is_err(),
+        "components with multiple memories must not multiply the configured memory budget"
+    );
+}
+
+#[test]
+fn http_import_caps_guest_timeout_to_remaining_execution_deadline() {
+    use std::sync::Mutex;
+
+    #[derive(Debug, Default)]
+    struct CapturingHttp {
+        timeout_ms: Mutex<Option<u32>>,
+    }
+
+    impl WasmHostHttp for CapturingHttp {
+        fn request(
+            &self,
+            request: WasmHttpRequest,
+        ) -> Result<WasmHttpResponse, ironclaw_wasm::WasmHostError> {
+            *self.timeout_ms.lock().unwrap() = request.timeout_ms;
+            Ok(WasmHttpResponse {
+                status: 200,
+                headers_json: "{}".to_string(),
+                body: Vec::new(),
+            })
+        }
+    }
+
+    let runtime = WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap();
+    let prepared = runtime
+        .prepare("http", &tool_component(HTTP_TOOL_WAT))
+        .unwrap();
+    let http = Arc::new(CapturingHttp::default());
+    let host = WitToolHost::deny_all().with_http(http.clone());
+
+    runtime
+        .execute(&prepared, host, WitToolRequest::new("{}"))
+        .unwrap();
+
+    let timeout_ms = http.timeout_ms.lock().unwrap().expect("timeout is capped");
+    assert!(
+        timeout_ms <= 5_000,
+        "host timeout should be capped to the execution deadline, got {timeout_ms}ms"
+    );
+}
+
+#[test]
+fn guest_trap_after_overdue_host_import_reports_deadline_and_preserves_usage() {
+    use std::time::Duration;
+
+    struct SlowHttp;
+
+    impl WasmHostHttp for SlowHttp {
+        fn request(
+            &self,
+            _request: WasmHttpRequest,
+        ) -> Result<WasmHttpResponse, ironclaw_wasm::WasmHostError> {
+            std::thread::sleep(Duration::from_millis(50));
+            Ok(WasmHttpResponse {
+                status: 200,
+                headers_json: "{}".to_string(),
+                body: Vec::new(),
+            })
+        }
+    }
+
+    let runtime = WitToolRuntime::new(WitToolRuntimeConfig {
+        default_limits: ironclaw_wasm::WitToolLimits::default()
+            .with_memory_bytes(1024 * 1024)
+            .with_fuel(100_000)
+            .with_timeout(Duration::from_millis(20)),
+    })
+    .unwrap();
+    let prepared = runtime
+        .prepare("http", &tool_component(&trap_after_http_wat()))
+        .unwrap();
+    let host = WitToolHost::deny_all().with_http(Arc::new(SlowHttp));
+
+    let error = runtime
+        .execute(&prepared, host, WitToolRequest::new("{}"))
+        .unwrap_err();
+
+    assert!(
+        error.to_string().contains("deadline"),
+        "unexpected error: {error}"
+    );
+    match error {
+        ironclaw_wasm::WasmError::ExecutionFailed { usage, .. } => {
+            assert_eq!(usage.network_egress_bytes, 5);
+        }
+        other => panic!("expected execution failure with usage, got {other:?}"),
+    }
+}
+
+#[test]
+fn http_import_uses_wit_default_when_guest_omits_timeout_below_execution_deadline() {
+    use std::sync::Mutex;
+
+    #[derive(Debug, Default)]
+    struct CapturingHttp {
+        timeout_ms: Mutex<Option<u32>>,
+    }
+
+    impl WasmHostHttp for CapturingHttp {
+        fn request(
+            &self,
+            request: WasmHttpRequest,
+        ) -> Result<WasmHttpResponse, ironclaw_wasm::WasmHostError> {
+            *self.timeout_ms.lock().unwrap() = request.timeout_ms;
+            Ok(WasmHttpResponse {
+                status: 200,
+                headers_json: "{}".to_string(),
+                body: Vec::new(),
+            })
+        }
+    }
+
+    let runtime = WitToolRuntime::new(WitToolRuntimeConfig::default()).unwrap();
+    let prepared = runtime
+        .prepare("http", &tool_component(HTTP_TOOL_WAT))
+        .unwrap();
+    let http = Arc::new(CapturingHttp::default());
+    let host = WitToolHost::deny_all().with_http(http.clone());
+
+    runtime
+        .execute(&prepared, host, WitToolRequest::new("{}"))
+        .unwrap();
+
+    assert_eq!(*http.timeout_ms.lock().unwrap(), Some(30_000));
+}
+
+#[test]
+fn execution_fails_when_host_import_returns_after_deadline() {
+    use std::time::Duration;
+
+    struct SlowHttp;
+
+    impl WasmHostHttp for SlowHttp {
+        fn request(
+            &self,
+            _request: WasmHttpRequest,
+        ) -> Result<WasmHttpResponse, ironclaw_wasm::WasmHostError> {
+            std::thread::sleep(Duration::from_millis(50));
+            Ok(WasmHttpResponse {
+                status: 200,
+                headers_json: "{}".to_string(),
+                body: Vec::new(),
+            })
+        }
+    }
+
+    let runtime = WitToolRuntime::new(WitToolRuntimeConfig {
+        default_limits: ironclaw_wasm::WitToolLimits::default()
+            .with_memory_bytes(1024 * 1024)
+            .with_fuel(100_000)
+            .with_timeout(Duration::from_millis(20)),
+    })
+    .unwrap();
+    let prepared = runtime
+        .prepare("http", &tool_component(HTTP_TOOL_WAT))
+        .unwrap();
+    let host = WitToolHost::deny_all().with_http(Arc::new(SlowHttp));
+
+    let error = runtime
+        .execute(&prepared, host, WitToolRequest::new("{}"))
+        .unwrap_err();
+
+    assert!(
+        error.to_string().contains("deadline"),
+        "unexpected error: {error}"
+    );
+}
+
+fn trap_after_http_wat() -> String {
+    HTTP_TOOL_WAT.replace(
+        "i32.const 48\n    i32.const 1\n    i32.store",
+        "unreachable\n\n    i32.const 48\n    i32.const 1\n    i32.store",
+    )
+}

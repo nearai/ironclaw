@@ -20,6 +20,7 @@ impl WitToolRuntime {
     pub fn new(config: WitToolRuntimeConfig) -> Result<Self, WasmError> {
         let mut wasmtime_config = Config::new();
         wasmtime_config.wasm_component_model(true);
+        wasmtime_config.wasm_multi_memory(false);
         wasmtime_config.wasm_threads(false);
         wasmtime_config.consume_fuel(true);
         wasmtime_config.epoch_interruption(true);
@@ -69,9 +70,24 @@ impl WitToolRuntime {
             params: request.params_json,
             context: request.context_json,
         };
-        let response = tool
-            .call_execute(&mut store, &request)
-            .map_err(|error| WasmError::ExecutionFailed(error.to_string()))?;
+        let response = match tool.call_execute(&mut store, &request) {
+            Ok(response) => response,
+            Err(error) => {
+                let message = if store.data().deadline_exceeded() {
+                    "WASM execution deadline exceeded".to_string()
+                } else {
+                    error.to_string()
+                };
+                return Err(execution_failed_with_usage(message, &store, started));
+            }
+        };
+        if store.data().deadline_exceeded() {
+            return Err(execution_failed_with_usage(
+                "WASM execution deadline exceeded".to_string(),
+                &store,
+                started,
+            ));
+        }
 
         let mut usage = store.data().usage.clone();
         usage.wall_clock_ms = elapsed_millis(started);
@@ -99,10 +115,10 @@ impl WitToolRuntime {
         let tool = instance.near_agent_tool();
         let description = tool
             .call_description(&mut store)
-            .map_err(|error| WasmError::ExecutionFailed(error.to_string()))?;
+            .map_err(|error| WasmError::execution_failed(error.to_string()))?;
         let schema_json = tool
             .call_schema(&mut store)
-            .map_err(|error| WasmError::ExecutionFailed(error.to_string()))?;
+            .map_err(|error| WasmError::execution_failed(error.to_string()))?;
         let schema = serde_json::from_str::<serde_json::Value>(&schema_json)
             .map_err(|error| WasmError::InvalidSchema(error.to_string()))?;
         if !schema.is_object() {
@@ -119,7 +135,10 @@ impl WitToolRuntime {
         host: WitToolHost,
         limits: &WitToolLimits,
     ) -> Result<(Store<StoreData>, bindings::SandboxedTool), WasmError> {
-        let mut store = Store::new(&self.engine, StoreData::new(host, limits.memory_bytes));
+        let mut store = Store::new(
+            &self.engine,
+            StoreData::new(host, limits.memory_bytes, limits.timeout),
+        );
         configure_store(&mut store, limits)?;
         let linker = create_linker(&self.engine)?;
         let instance = bindings::SandboxedTool::instantiate(&mut store, component, &linker)
@@ -151,6 +170,20 @@ fn spawn_epoch_ticker(engine: Engine) -> Result<(), WasmError> {
 
 fn elapsed_millis(started: Instant) -> u64 {
     started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn execution_failed_with_usage(
+    message: String,
+    store: &Store<StoreData>,
+    started: Instant,
+) -> WasmError {
+    let mut usage = store.data().usage.clone();
+    usage.wall_clock_ms = elapsed_millis(started);
+    WasmError::ExecutionFailed {
+        message,
+        usage,
+        logs: store.data().logs.clone(),
+    }
 }
 
 fn configure_store(store: &mut Store<StoreData>, limits: &WitToolLimits) -> Result<(), WasmError> {
