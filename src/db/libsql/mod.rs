@@ -8,6 +8,7 @@
 
 mod conversations;
 mod identities;
+mod insights;
 mod jobs;
 mod pairing;
 mod routines;

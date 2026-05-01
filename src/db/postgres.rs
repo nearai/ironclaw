@@ -16,9 +16,10 @@ use crate::agent::routine::{Routine, RoutineRun, RunStatus};
 use crate::config::DatabaseConfig;
 use crate::context::{ActionRecord, JobContext, JobState};
 use crate::db::{
-    ApiTokenRecord, ChannelPairingStore, ConversationStore, Database, IdentityStore, JobStore,
-    PairingRequestRecord, RoutineStore, SandboxStore, SettingsStore, ToolFailureStore,
-    UserIdentityRecord, UserRecord, UserStore, WorkspaceStore,
+    ApiTokenRecord, ChannelPairingStore, ConversationStore, DailyActivity, Database, IdentityStore,
+    InsightsAggregate, InsightsStore, JobStore, PairingRequestRecord, RoutineStore, SandboxStore,
+    SettingsStore, ToolFailureStore, ToolFrequency, UserIdentityRecord, UserRecord, UserStore,
+    WorkspaceStore,
 };
 use crate::error::{DatabaseError, WorkspaceError};
 use crate::history::{
@@ -1649,5 +1650,85 @@ impl IdentityStore for PgBackend {
 
         tx.commit().await?;
         Ok(())
+    }
+}
+
+// ==================== InsightsStore ====================
+
+#[async_trait]
+impl InsightsStore for PgBackend {
+    async fn aggregate_insights(
+        &self,
+        since: DateTime<Utc>,
+        top_tools_limit: i64,
+    ) -> Result<InsightsAggregate, DatabaseError> {
+        let conn = self.store.pool().get().await?;
+        let limit = top_tools_limit.max(1);
+
+        // Combined jobs + tokens query (single round-trip for the most-used aggregate).
+        let job_row = conn
+            .query_one(
+                "SELECT COUNT(*)::BIGINT AS total_jobs, \
+                 COALESCE(SUM(total_tokens_used), 0)::BIGINT AS total_tokens \
+                 FROM agent_jobs WHERE created_at >= $1",
+                &[&since],
+            )
+            .await?;
+        let total_jobs: i64 = job_row.get("total_jobs");
+        let total_tokens: i64 = job_row.get("total_tokens");
+
+        let runs_row = conn
+            .query_one(
+                "SELECT COUNT(*)::BIGINT AS cnt FROM routine_runs WHERE created_at >= $1",
+                &[&since],
+            )
+            .await?;
+        let total_routine_runs: i64 = runs_row.get("cnt");
+
+        let tool_rows = conn
+            .query(
+                "SELECT ja.tool_name, COUNT(*)::BIGINT AS invocations \
+                 FROM job_actions ja \
+                 INNER JOIN agent_jobs aj ON aj.id = ja.job_id \
+                 WHERE aj.created_at >= $1 \
+                 GROUP BY ja.tool_name \
+                 ORDER BY invocations DESC, ja.tool_name ASC \
+                 LIMIT $2",
+                &[&since, &limit],
+            )
+            .await?;
+        let top_tools = tool_rows
+            .iter()
+            .map(|r| ToolFrequency {
+                tool_name: r.get::<_, String>("tool_name"),
+                invocations: r.get::<_, i64>("invocations").max(0) as u64,
+            })
+            .collect();
+
+        let day_rows = conn
+            .query(
+                "SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, \
+                        COUNT(*)::BIGINT AS jobs \
+                 FROM agent_jobs WHERE created_at >= $1 \
+                 GROUP BY day \
+                 ORDER BY day ASC",
+                &[&since],
+            )
+            .await?;
+        let daily_activity = day_rows
+            .iter()
+            .map(|r| DailyActivity {
+                date: r.get::<_, String>("day"),
+                jobs: r.get::<_, i64>("jobs").max(0) as u64,
+            })
+            .collect();
+
+        Ok(InsightsAggregate {
+            total_jobs: total_jobs.max(0) as u64,
+            total_routine_runs: total_routine_runs.max(0) as u64,
+            total_tokens_used: total_tokens.max(0) as u64,
+            top_tools,
+            daily_activity,
+        })
     }
 }
