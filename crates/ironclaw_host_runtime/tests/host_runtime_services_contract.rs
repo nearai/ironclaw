@@ -1071,6 +1071,52 @@ async fn host_runtime_services_cancel_and_status_share_process_result_and_cancel
 }
 
 #[tokio::test]
+async fn host_runtime_services_cancel_writes_killed_result_when_reservation_is_stale() {
+    let process_services = ProcessServices::in_memory();
+    let process_store = process_services.process_store();
+    let result_store = process_services.result_store();
+    let cancellation_registry = process_services.cancellation_registry();
+    let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
+    let runtime = HostRuntimeServices::new(
+        registry,
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        process_services,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .host_runtime();
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let stale_reservation_id = ResourceReservationId::new();
+    let scope = sample_scope(invocation_id);
+    let token = cancellation_registry.register(&scope, process_id);
+    let mut start = process_start(process_id, invocation_id, scope.clone());
+    start.resource_reservation_id = Some(stale_reservation_id);
+    process_store.start(start).await.unwrap();
+
+    let outcome = runtime
+        .cancel_work(CancelRuntimeWorkRequest::new(
+            scope.clone(),
+            CorrelationId::new(),
+            CancelReason::UserRequested,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.cancelled, vec![RuntimeWorkId::Process(process_id)]);
+    assert!(token.is_cancelled());
+    let record = process_store
+        .get(&scope, process_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.status, ProcessStatus::Killed);
+    let result = result_store.get(&scope, process_id).await.unwrap().unwrap();
+    assert_eq!(result.status, ProcessStatus::Killed);
+}
+
+#[tokio::test]
 async fn spawned_obligation_lifecycle_reconciles_resources_and_discards_handoffs_on_success() {
     let reservation_id = ResourceReservationId::new();
     let secret_handle = SecretHandle::new("api_token").unwrap();

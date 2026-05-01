@@ -467,12 +467,17 @@ impl ProcessObligationLifecycleStore {
         Ok(())
     }
 
-    fn cleanup_terminal(
-        &self,
-        record: &ProcessRecord,
-        reconcile: bool,
-    ) -> Result<(), ProcessError> {
-        self.cleanup_record_obligations(record, reconcile)
+    fn cleanup_terminal(&self, record: &ProcessRecord, reconcile: bool) {
+        if let Err(error) = self.cleanup_record_obligations(record, reconcile) {
+            tracing::warn!(
+                process_id = %record.process_id,
+                tenant_id = %record.scope.tenant_id,
+                user_id = %record.scope.user_id,
+                reconcile,
+                error = %error,
+                "process obligation cleanup failed after terminal transition"
+            );
+        }
     }
 
     fn cleanup_record_obligations(
@@ -519,7 +524,7 @@ impl ProcessStore for ProcessObligationLifecycleStore {
         process_id: ProcessId,
     ) -> Result<ProcessRecord, ProcessError> {
         let record = self.inner.complete(scope, process_id).await?;
-        self.cleanup_terminal(&record, true)?;
+        self.cleanup_terminal(&record, true);
         Ok(record)
     }
 
@@ -530,7 +535,7 @@ impl ProcessStore for ProcessObligationLifecycleStore {
         error_kind: String,
     ) -> Result<ProcessRecord, ProcessError> {
         let record = self.inner.fail(scope, process_id, error_kind).await?;
-        self.cleanup_terminal(&record, false)?;
+        self.cleanup_terminal(&record, false);
         Ok(record)
     }
 
@@ -540,7 +545,7 @@ impl ProcessStore for ProcessObligationLifecycleStore {
         process_id: ProcessId,
     ) -> Result<ProcessRecord, ProcessError> {
         let record = self.inner.kill(scope, process_id).await?;
-        self.cleanup_terminal(&record, false)?;
+        self.cleanup_terminal(&record, false);
         Ok(record)
     }
 
@@ -564,6 +569,7 @@ fn close_reservation_once<T>(result: Result<T, ResourceError>) -> Result<(), Pro
     match result {
         Ok(_) => Ok(()),
         Err(ResourceError::ReservationClosed { .. }) => Ok(()),
+        Err(ResourceError::UnknownReservation { .. }) => Ok(()),
         Err(error) => Err(error.into()),
     }
 }
