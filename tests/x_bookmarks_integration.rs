@@ -57,7 +57,7 @@ async fn insert_then_dedupe() {
     let item = one_item();
 
     let (inserted, dup) = db
-        .insert_x_bookmarks("user-1", &[item.clone()])
+        .insert_x_bookmarks("user-1", std::slice::from_ref(&item))
         .await
         .expect("insert");
     assert_eq!(inserted, 1);
@@ -77,7 +77,7 @@ async fn dedupe_is_per_user() {
     let (db, _dir) = fresh_db().await;
     let item = one_item();
 
-    db.insert_x_bookmarks("user-a", &[item.clone()])
+    db.insert_x_bookmarks("user-a", std::slice::from_ref(&item))
         .await
         .unwrap();
     let (inserted, dup) = db
@@ -253,7 +253,9 @@ async fn ingest_validation_rejects_non_x_url() {
 fn batch_constants_are_consistent() {
     // The handler exposes MAX_INGEST_BATCH; the triage module enforces a
     // smaller per-call cap because batched LLM prompts get unwieldy.
-    assert!(MAX_INGEST_BATCH >= ironclaw::x_bookmarks::triage::MAX_TRIAGE_BATCH);
+    const {
+        assert!(MAX_INGEST_BATCH >= ironclaw::x_bookmarks::triage::MAX_TRIAGE_BATCH);
+    };
 }
 
 /// Codex adversarial review fix: when a second triage writer arrives after
