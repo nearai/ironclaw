@@ -1007,6 +1007,69 @@ WHERE key = 'wasm.default_fuel_limit'
   AND CAST(json_extract(value, '$') AS INTEGER) = 10000000;
 "#,
     ),
+    (
+        26,
+        "legal_harness",
+        // Legal harness — projects, documents, chats, messages.
+        //
+        // Mirrors the PostgreSQL migration migrations/V26__legal_harness.sql.
+        // Stream A introduces all four tables; Streams B (chat) and C
+        // (DOCX export) consume the same shape. Schema is canonical — see
+        // legal-harness-spec.md.
+        //
+        // Storage notes:
+        // * Timestamps use `unixepoch()` — INTEGER seconds since epoch — to
+        //   match the canonical schema in the spec. This diverges from the
+        //   ISO-8601 TEXT pattern used elsewhere in the libSQL schema; the
+        //   tradeoff is intentional so all three streams agree on a single
+        //   shape across both backends.
+        // * `metadata` and `document_refs` carry JSON encoded as TEXT.
+        r#"
+CREATE TABLE IF NOT EXISTS legal_projects (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    deleted_at  INTEGER,
+    created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+    metadata    TEXT
+);
+
+CREATE TABLE IF NOT EXISTS legal_documents (
+    id              TEXT PRIMARY KEY,
+    project_id      TEXT NOT NULL REFERENCES legal_projects(id) ON DELETE CASCADE,
+    filename        TEXT NOT NULL,
+    content_type    TEXT NOT NULL,
+    storage_path    TEXT NOT NULL,
+    extracted_text  TEXT,
+    page_count      INTEGER,
+    bytes           INTEGER NOT NULL,
+    sha256          TEXT NOT NULL,
+    uploaded_at     INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE INDEX IF NOT EXISTS idx_legal_documents_project ON legal_documents(project_id);
+CREATE INDEX IF NOT EXISTS idx_legal_documents_sha256  ON legal_documents(sha256);
+
+CREATE TABLE IF NOT EXISTS legal_chats (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL REFERENCES legal_projects(id) ON DELETE CASCADE,
+    title       TEXT,
+    created_at  INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE INDEX IF NOT EXISTS idx_legal_chats_project ON legal_chats(project_id);
+
+CREATE TABLE IF NOT EXISTS legal_chat_messages (
+    id              TEXT PRIMARY KEY,
+    chat_id         TEXT NOT NULL REFERENCES legal_chats(id) ON DELETE CASCADE,
+    role            TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system', 'tool')),
+    content         TEXT NOT NULL,
+    document_refs   TEXT,
+    created_at      INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE INDEX IF NOT EXISTS idx_legal_chat_messages_chat ON legal_chat_messages(chat_id);
+"#,
+    ),
 ];
 
 /// Migrations whose ADD COLUMN should be skipped when the column already

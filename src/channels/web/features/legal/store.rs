@@ -1,0 +1,327 @@
+//! Database access for the legal harness.
+//!
+//! libSQL-only today: the Postgres backend has the schema (migrations/V26)
+//! but no Rust query layer wired in. Calling these helpers when the
+//! database is the Postgres backend returns
+//! [`crate::error::DatabaseError::Unsupported`] so handlers can map it
+//! into a 501 response. Adding Postgres support is a follow-up tracked in
+//! the PR body — the legal v1 deployment target is libSQL/Turso.
+//!
+//! No `unwrap` in the data-path code; row decode failures bubble up as
+//! `DatabaseError::Query` so the gateway always returns a 500 instead of
+//! crashing the worker.
+
+use std::sync::Arc;
+
+use crate::db::Database;
+use crate::error::DatabaseError;
+
+use super::models::{LegalDocument, LegalProject};
+
+/// Convenience: borrow the libSQL backend from `Arc<dyn Database>` or
+/// return `Unsupported`. Centralising the cast here keeps the not-supported
+/// error message identical at every call site so route handlers can map
+/// it onto a single 501 response.
+fn libsql<'a>(
+    db: &'a Arc<dyn Database>,
+) -> Result<&'a crate::db::libsql::LibSqlBackend, DatabaseError> {
+    crate::db::libsql_backend(db).ok_or_else(|| {
+        DatabaseError::Unsupported(
+            "Legal harness currently requires the libSQL backend".to_string(),
+        )
+    })
+}
+
+/// Insert a project. Caller supplies the ULID; the row's `created_at` is
+/// populated by the column default.
+pub async fn create_project(
+    db: &Arc<dyn Database>,
+    id: &str,
+    name: &str,
+    metadata: Option<&str>,
+) -> Result<LegalProject, DatabaseError> {
+    let backend = libsql(db)?;
+    let conn = backend.connect().await?;
+
+    conn.execute(
+        "INSERT INTO legal_projects (id, name, metadata) VALUES (?1, ?2, ?3)",
+        libsql::params![id, name, metadata.map(str::to_string)],
+    )
+    .await
+    .map_err(|e| DatabaseError::Query(format!("create_project: {e}")))?;
+
+    fetch_project_inner(&conn, id).await?.ok_or_else(|| {
+        DatabaseError::Query("create_project: row missing immediately after insert".to_string())
+    })
+}
+
+/// List active (not soft-deleted) projects ordered by `created_at` desc.
+pub async fn list_active_projects(
+    db: &Arc<dyn Database>,
+) -> Result<Vec<LegalProject>, DatabaseError> {
+    let backend = libsql(db)?;
+    let conn = backend.connect().await?;
+
+    let mut rows = conn
+        .query(
+            "SELECT id, name, deleted_at, created_at, metadata
+               FROM legal_projects
+              WHERE deleted_at IS NULL
+              ORDER BY created_at DESC",
+            libsql::params![],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(format!("list_active_projects: {e}")))?;
+
+    let mut out = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|e| DatabaseError::Query(format!("list_active_projects iter: {e}")))?
+    {
+        out.push(row_to_project(&row)?);
+    }
+    Ok(out)
+}
+
+/// Fetch a single project by id (including soft-deleted ones — the gateway
+/// decides whether to surface them).
+pub async fn fetch_project(
+    db: &Arc<dyn Database>,
+    id: &str,
+) -> Result<Option<LegalProject>, DatabaseError> {
+    let backend = libsql(db)?;
+    let conn = backend.connect().await?;
+    fetch_project_inner(&conn, id).await
+}
+
+async fn fetch_project_inner(
+    conn: &libsql::Connection,
+    id: &str,
+) -> Result<Option<LegalProject>, DatabaseError> {
+    let mut rows = conn
+        .query(
+            "SELECT id, name, deleted_at, created_at, metadata
+               FROM legal_projects
+              WHERE id = ?1",
+            libsql::params![id],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(format!("fetch_project: {e}")))?;
+
+    let row = rows
+        .next()
+        .await
+        .map_err(|e| DatabaseError::Query(format!("fetch_project iter: {e}")))?;
+    match row {
+        Some(r) => Ok(Some(row_to_project(&r)?)),
+        None => Ok(None),
+    }
+}
+
+/// Soft-delete a project. Returns `true` if a row was updated, `false` if
+/// the project was already deleted or never existed (the handler maps that
+/// into a 404).
+pub async fn soft_delete_project(
+    db: &Arc<dyn Database>,
+    id: &str,
+    now_unix: i64,
+) -> Result<bool, DatabaseError> {
+    let backend = libsql(db)?;
+    let conn = backend.connect().await?;
+
+    let affected = conn
+        .execute(
+            "UPDATE legal_projects
+                SET deleted_at = ?1
+              WHERE id = ?2
+                AND deleted_at IS NULL",
+            libsql::params![now_unix, id],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(format!("soft_delete_project: {e}")))?;
+
+    Ok(affected > 0)
+}
+
+/// Find a document in a project by sha256 (for upload dedupe).
+pub async fn find_document_by_sha(
+    db: &Arc<dyn Database>,
+    project_id: &str,
+    sha256: &str,
+) -> Result<Option<LegalDocument>, DatabaseError> {
+    let backend = libsql(db)?;
+    let conn = backend.connect().await?;
+
+    let mut rows = conn
+        .query(
+            "SELECT id, project_id, filename, content_type, storage_path,
+                    extracted_text, page_count, bytes, sha256, uploaded_at
+               FROM legal_documents
+              WHERE project_id = ?1 AND sha256 = ?2
+              LIMIT 1",
+            libsql::params![project_id, sha256],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(format!("find_document_by_sha: {e}")))?;
+
+    let row = rows
+        .next()
+        .await
+        .map_err(|e| DatabaseError::Query(format!("find_document_by_sha iter: {e}")))?;
+    match row {
+        Some(r) => Ok(Some(row_to_document(&r)?)),
+        None => Ok(None),
+    }
+}
+
+/// Insert a new document row. Caller has already written the blob to disk
+/// and computed the sha256/size/extraction.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_document(
+    db: &Arc<dyn Database>,
+    id: &str,
+    project_id: &str,
+    filename: &str,
+    content_type: &str,
+    storage_path: &str,
+    extracted_text: Option<&str>,
+    page_count: Option<i64>,
+    bytes: i64,
+    sha256: &str,
+) -> Result<LegalDocument, DatabaseError> {
+    let backend = libsql(db)?;
+    let conn = backend.connect().await?;
+
+    conn.execute(
+        "INSERT INTO legal_documents
+            (id, project_id, filename, content_type, storage_path,
+             extracted_text, page_count, bytes, sha256)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        libsql::params![
+            id,
+            project_id,
+            filename,
+            content_type,
+            storage_path,
+            extracted_text.map(str::to_string),
+            page_count,
+            bytes,
+            sha256,
+        ],
+    )
+    .await
+    .map_err(|e| DatabaseError::Query(format!("create_document: {e}")))?;
+
+    fetch_document_inner(&conn, id).await?.ok_or_else(|| {
+        DatabaseError::Query("create_document: row missing immediately after insert".to_string())
+    })
+}
+
+/// Fetch a single document by id. Does not filter on soft-deleted parents
+/// — that's the handler's responsibility (it usually returns 404 anyway).
+pub async fn fetch_document(
+    db: &Arc<dyn Database>,
+    id: &str,
+) -> Result<Option<LegalDocument>, DatabaseError> {
+    let backend = libsql(db)?;
+    let conn = backend.connect().await?;
+    fetch_document_inner(&conn, id).await
+}
+
+async fn fetch_document_inner(
+    conn: &libsql::Connection,
+    id: &str,
+) -> Result<Option<LegalDocument>, DatabaseError> {
+    let mut rows = conn
+        .query(
+            "SELECT id, project_id, filename, content_type, storage_path,
+                    extracted_text, page_count, bytes, sha256, uploaded_at
+               FROM legal_documents
+              WHERE id = ?1",
+            libsql::params![id],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(format!("fetch_document: {e}")))?;
+
+    let row = rows
+        .next()
+        .await
+        .map_err(|e| DatabaseError::Query(format!("fetch_document iter: {e}")))?;
+    match row {
+        Some(r) => Ok(Some(row_to_document(&r)?)),
+        None => Ok(None),
+    }
+}
+
+/// All documents in a project, newest first.
+pub async fn list_documents_for_project(
+    db: &Arc<dyn Database>,
+    project_id: &str,
+) -> Result<Vec<LegalDocument>, DatabaseError> {
+    let backend = libsql(db)?;
+    let conn = backend.connect().await?;
+
+    let mut rows = conn
+        .query(
+            "SELECT id, project_id, filename, content_type, storage_path,
+                    extracted_text, page_count, bytes, sha256, uploaded_at
+               FROM legal_documents
+              WHERE project_id = ?1
+              ORDER BY uploaded_at DESC",
+            libsql::params![project_id],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(format!("list_documents_for_project: {e}")))?;
+
+    let mut out = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|e| DatabaseError::Query(format!("list_documents iter: {e}")))?
+    {
+        out.push(row_to_document(&row)?);
+    }
+    Ok(out)
+}
+
+// ---- Row decoders ------------------------------------------------------
+
+fn row_to_project(row: &libsql::Row) -> Result<LegalProject, DatabaseError> {
+    let map = |col: &str, e: libsql::Error| {
+        DatabaseError::Query(format!("legal_projects column {col}: {e}"))
+    };
+    Ok(LegalProject {
+        id: row.get::<String>(0).map_err(|e| map("id", e))?,
+        name: row.get::<String>(1).map_err(|e| map("name", e))?,
+        deleted_at: row
+            .get::<Option<i64>>(2)
+            .map_err(|e| map("deleted_at", e))?,
+        created_at: row.get::<i64>(3).map_err(|e| map("created_at", e))?,
+        metadata: row
+            .get::<Option<String>>(4)
+            .map_err(|e| map("metadata", e))?,
+    })
+}
+
+fn row_to_document(row: &libsql::Row) -> Result<LegalDocument, DatabaseError> {
+    let map = |col: &str, e: libsql::Error| {
+        DatabaseError::Query(format!("legal_documents column {col}: {e}"))
+    };
+    Ok(LegalDocument {
+        id: row.get::<String>(0).map_err(|e| map("id", e))?,
+        project_id: row.get::<String>(1).map_err(|e| map("project_id", e))?,
+        filename: row.get::<String>(2).map_err(|e| map("filename", e))?,
+        content_type: row.get::<String>(3).map_err(|e| map("content_type", e))?,
+        storage_path: row.get::<String>(4).map_err(|e| map("storage_path", e))?,
+        extracted_text: row
+            .get::<Option<String>>(5)
+            .map_err(|e| map("extracted_text", e))?,
+        page_count: row
+            .get::<Option<i64>>(6)
+            .map_err(|e| map("page_count", e))?,
+        bytes: row.get::<i64>(7).map_err(|e| map("bytes", e))?,
+        sha256: row.get::<String>(8).map_err(|e| map("sha256", e))?,
+        uploaded_at: row.get::<i64>(9).map_err(|e| map("uploaded_at", e))?,
+    })
+}
