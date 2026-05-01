@@ -16,6 +16,7 @@ mod settings;
 mod tool_failures;
 mod users;
 mod workspace;
+mod x_bookmarks;
 
 use std::path::Path;
 use std::sync::Arc;

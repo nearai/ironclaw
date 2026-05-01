@@ -941,6 +941,13 @@ pub struct SkillsSettings {
     /// Maximum total context tokens allocated to skill prompts.
     #[serde(default = "default_skills_max_context_tokens")]
     pub max_context_tokens: usize,
+
+    /// Optional triage-LLM model override for the X bookmarks skill.
+    /// When unset, the global IronClaw LLM provider's default model is used.
+    /// Maps to the `X_BOOKMARKS_TRIAGE_MODEL` env var with settings-table
+    /// taking precedence per the standard DB > env > default order.
+    #[serde(default)]
+    pub x_bookmarks_triage_model: Option<String>,
 }
 
 fn default_skills_max_active() -> usize {
@@ -957,6 +964,7 @@ impl Default for SkillsSettings {
             enabled: true,
             max_active_skills: default_skills_max_active(),
             max_context_tokens: default_skills_max_context_tokens(),
+            x_bookmarks_triage_model: None,
         }
     }
 }

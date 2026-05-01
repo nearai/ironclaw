@@ -1246,6 +1246,69 @@ pub trait IdentityStore: Send + Sync {
     ) -> Result<(), DatabaseError>;
 }
 
+/// Persistence operations for the X (Twitter) bookmarks pipeline.
+///
+/// Each method is user-scoped: a bookmark's `user_id` is taken from the
+/// authenticated session at the gateway boundary and is never user-supplied.
+/// `tweet_id` is unique per `(user_id, tweet_id)` so multiple users can
+/// independently bookmark the same tweet.
+#[async_trait]
+pub trait XBookmarkStore: Send + Sync {
+    /// Insert a batch of bookmarks for a user. Duplicates (matching
+    /// `(user_id, tweet_id)`) are silently dropped. Returns `(inserted,
+    /// duplicate)` counts.
+    async fn insert_x_bookmarks(
+        &self,
+        user_id: &str,
+        items: &[crate::x_bookmarks::NormalizedIngestItem],
+    ) -> Result<(u64, u64), DatabaseError>;
+
+    /// Fetch up to `limit` untriaged bookmarks for a user, newest first.
+    async fn list_untriaged_x_bookmarks(
+        &self,
+        user_id: &str,
+        limit: u32,
+    ) -> Result<Vec<crate::x_bookmarks::Bookmark>, DatabaseError>;
+
+    /// Apply triage decisions back to existing bookmarks. The `id`s passed
+    /// in `decisions` MUST refer to bookmarks already loaded from the same
+    /// user (caller is responsible for that scoping). Records `triage_model`
+    /// alongside the decision.
+    ///
+    /// Returns the number of rows updated (some may have been deleted by a
+    /// concurrent caller; the implementation must not surface those as
+    /// errors).
+    async fn apply_x_bookmark_triage(
+        &self,
+        user_id: &str,
+        decisions: &[(uuid::Uuid, ResolvedTriageDecision)],
+        triage_model: &str,
+    ) -> Result<u64, DatabaseError>;
+
+    /// Fetch the queue: bookmarks filtered by status, newest first.
+    async fn list_x_bookmarks_by_status(
+        &self,
+        user_id: &str,
+        status: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<crate::x_bookmarks::Bookmark>, DatabaseError>;
+
+    /// Aggregated counts per status for the user.
+    async fn x_bookmark_counts_by_status(
+        &self,
+        user_id: &str,
+    ) -> Result<HashMap<String, u64>, DatabaseError>;
+}
+
+/// Validated triage decision after the LLM has run.
+#[derive(Debug, Clone)]
+pub struct ResolvedTriageDecision {
+    pub status: String,
+    pub rationale: Option<String>,
+    pub project_slug: Option<String>,
+    pub tags: Vec<String>,
+}
+
 /// Backend-agnostic database supertrait.
 ///
 /// Combines all sub-traits into one. Existing `Arc<dyn Database>` consumers
@@ -1262,6 +1325,7 @@ pub trait Database:
     + UserStore
     + ChannelPairingStore
     + IdentityStore
+    + XBookmarkStore
     + Send
     + Sync
 {

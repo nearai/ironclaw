@@ -12,6 +12,7 @@ pub mod system_prompt;
 pub mod tokens;
 pub mod tool_policy;
 pub mod users;
+pub mod x_bookmarks;
 
 pub mod frontend;
 pub mod webhooks;

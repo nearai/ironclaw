@@ -25,6 +25,23 @@ pub struct SkillsConfig {
     /// Maximum recursion depth when scanning skill directories for bundle layouts.
     /// Subdirectories without `SKILL.md` are recursed into up to this depth.
     pub max_scan_depth: usize,
+    /// Per-skill configuration. Each key is a skill name; the value is the
+    /// skill-specific overrides. Currently only the `x-bookmarks` skill
+    /// reads its own entry, but the shape is generic so future skills can
+    /// share the mechanism.
+    pub x_bookmarks: XBookmarksSkillConfig,
+}
+
+/// Configuration overrides for the x-bookmarks skill.
+///
+/// All fields are optional. When `triage_model` is `None` the triage call
+/// inherits the global IronClaw LLM provider's active model — this is the
+/// default behaviour and is what users get out of the box.
+#[derive(Debug, Clone, Default)]
+pub struct XBookmarksSkillConfig {
+    /// Optional model name override for the triage LLM call. When unset, the
+    /// global IronClaw LLM provider's default model is used.
+    pub triage_model: Option<String>,
 }
 
 impl Default for SkillsConfig {
@@ -44,6 +61,7 @@ impl Default for SkillsConfig {
             // reactive skills (commitment-triage, decision-capture, etc.).
             max_context_tokens: 6000,
             max_scan_depth: 3,
+            x_bookmarks: XBookmarksSkillConfig::default(),
         }
     }
 }
@@ -83,6 +101,21 @@ impl SkillsConfig {
                 "SKILLS_MAX_CONTEXT_TOKENS",
             )?,
             max_scan_depth: parse_optional_env("SKILLS_MAX_SCAN_DEPTH", 3)?,
+            x_bookmarks: XBookmarksSkillConfig {
+                // Resolution order: settings table (`skills.x_bookmarks.triage_model`)
+                // > env var > unset (= use global LLM default).
+                //
+                // The settings counterpart lives on
+                // `Settings::skills.x_bookmarks_triage_model` so operators can
+                // tune the override at runtime via the existing
+                // `/api/settings/{key}` endpoint without restarting.
+                triage_model: ss
+                    .x_bookmarks_triage_model
+                    .clone()
+                    .or(optional_env("X_BOOKMARKS_TRIAGE_MODEL")?)
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty()),
+            },
         })
     }
 }

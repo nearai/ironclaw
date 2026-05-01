@@ -56,6 +56,10 @@ use crate::channels::web::handlers::memory::{
 use crate::channels::web::handlers::skills::{
     skills_install_handler, skills_list_handler, skills_remove_handler, skills_search_handler,
 };
+use crate::channels::web::handlers::x_bookmarks::{
+    x_bookmarks_ingest_handler, x_bookmarks_queue_handler, x_bookmarks_stats_handler,
+    x_bookmarks_triage_handler,
+};
 use crate::channels::web::platform::state::GatewayState;
 use crate::channels::web::platform::static_files::{
     BASE_CSP_HEADER, admin_css_handler, admin_html_handler, admin_js_handler, css_handler,
@@ -298,6 +302,11 @@ pub async fn start_server(
             "/api/skills/{name}",
             axum::routing::delete(skills_remove_handler),
         )
+        // X bookmarks skill
+        .route("/api/x-bookmarks/ingest", post(x_bookmarks_ingest_handler))
+        .route("/api/x-bookmarks/triage", post(x_bookmarks_triage_handler))
+        .route("/api/x-bookmarks/queue", get(x_bookmarks_queue_handler))
+        .route("/api/x-bookmarks/stats", get(x_bookmarks_stats_handler))
         // Settings
         .route("/api/settings", get(settings_list_handler))
         .route("/api/settings/export", get(settings_export_handler))

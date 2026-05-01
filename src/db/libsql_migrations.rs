@@ -674,6 +674,37 @@ CREATE TABLE IF NOT EXISTS pairing_requests (
 );
 CREATE INDEX IF NOT EXISTS idx_pairing_requests_channel ON pairing_requests (channel, external_id);
 
+-- ==================== X (Twitter) Bookmarks (V27 / libSQL 27) ====================
+
+CREATE TABLE IF NOT EXISTS x_bookmarks (
+    id              TEXT NOT NULL PRIMARY KEY,
+    user_id         TEXT NOT NULL,
+    tweet_id        TEXT NOT NULL,
+    author_handle   TEXT,
+    author_name     TEXT,
+    text            TEXT NOT NULL DEFAULT '',
+    url             TEXT,
+    media_urls      TEXT NOT NULL DEFAULT '[]',
+    quoted_tweet    TEXT,
+    thread_id       TEXT,
+    posted_at       TEXT,
+    scraped_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    status          TEXT NOT NULL DEFAULT 'untriaged',
+    rationale       TEXT,
+    project_slug    TEXT,
+    tags            TEXT NOT NULL DEFAULT '[]',
+    triaged_at      TEXT,
+    triage_model    TEXT,
+    UNIQUE (user_id, tweet_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_x_bookmarks_user_status
+    ON x_bookmarks(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_x_bookmarks_user_scraped_at
+    ON x_bookmarks(user_id, scraped_at DESC);
+CREATE INDEX IF NOT EXISTS idx_x_bookmarks_user_posted_at
+    ON x_bookmarks(user_id, posted_at DESC);
+
 "#;
 
 /// Incremental migrations applied after the base schema.
@@ -1007,6 +1038,42 @@ WHERE key = 'wasm.default_fuel_limit'
   AND CAST(json_extract(value, '$') AS INTEGER) = 10000000;
 "#,
     ),
+    (
+        27,
+        "x_bookmarks",
+        // Create x_bookmarks table for the X (Twitter) bookmarks pipeline.
+        // Idempotent: existing databases that already have the table from
+        // SCHEMA (fresh install) skip via CREATE TABLE IF NOT EXISTS.
+        r#"
+CREATE TABLE IF NOT EXISTS x_bookmarks (
+    id              TEXT NOT NULL PRIMARY KEY,
+    user_id         TEXT NOT NULL,
+    tweet_id        TEXT NOT NULL,
+    author_handle   TEXT,
+    author_name     TEXT,
+    text            TEXT NOT NULL DEFAULT '',
+    url             TEXT,
+    media_urls      TEXT NOT NULL DEFAULT '[]',
+    quoted_tweet    TEXT,
+    thread_id       TEXT,
+    posted_at       TEXT,
+    scraped_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    status          TEXT NOT NULL DEFAULT 'untriaged',
+    rationale       TEXT,
+    project_slug    TEXT,
+    tags            TEXT NOT NULL DEFAULT '[]',
+    triaged_at      TEXT,
+    triage_model    TEXT,
+    UNIQUE (user_id, tweet_id)
+);
+CREATE INDEX IF NOT EXISTS idx_x_bookmarks_user_status
+    ON x_bookmarks(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_x_bookmarks_user_scraped_at
+    ON x_bookmarks(user_id, scraped_at DESC);
+CREATE INDEX IF NOT EXISTS idx_x_bookmarks_user_posted_at
+    ON x_bookmarks(user_id, posted_at DESC);
+"#,
+    ),
 ];
 
 /// Migrations whose ADD COLUMN should be skipped when the column already
@@ -1159,9 +1226,16 @@ pub async fn run_incremental(conn: &libsql::Connection) -> Result<(), crate::err
             })?;
         }
 
-        // Record as applied (inside the same transaction)
+        // Record as applied (inside the same transaction).
+        //
+        // `INSERT OR IGNORE` makes a concurrent second runner that already
+        // saw the marker missing in the outside-tx check, then lost the race
+        // to be the writer, treat the duplicate-key conflict as success
+        // instead of crashing startup. The base SCHEMA is `CREATE TABLE IF
+        // NOT EXISTS` and every incremental migration's body is idempotent,
+        // so re-running is safe.
         tx.execute(
-            "INSERT INTO _migrations (version, name) VALUES (?1, ?2)",
+            "INSERT OR IGNORE INTO _migrations (version, name) VALUES (?1, ?2)",
             libsql::params![version, name],
         )
         .await
