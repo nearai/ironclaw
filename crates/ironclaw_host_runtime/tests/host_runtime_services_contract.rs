@@ -266,6 +266,70 @@ async fn host_runtime_services_routes_wasm_http_through_per_invocation_policy_ha
 }
 
 #[tokio::test]
+async fn host_runtime_services_routes_cached_wasm_http_through_per_invocation_policy_handoff() {
+    let parsed_manifest = ExtensionManifest::parse(WASM_HTTP_SUCCESS_MANIFEST).unwrap();
+    let component = tool_component(HTTP_TOOL_WAT);
+    let filesystem = Arc::new(
+        filesystem_with_wasm_component(
+            parsed_manifest.id.as_str(),
+            "wasm/http-success.wasm",
+            &component,
+        )
+        .await,
+    );
+    let governor = Arc::new(governor_with_default_limit(sample_account()));
+    let policy = wasm_http_policy();
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
+        Arc::new(ObligatingAuthorizer::new(vec![
+            Obligation::ApplyNetworkPolicy {
+                policy: policy.clone(),
+            },
+        ]));
+    let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(WASM_HTTP_SUCCESS_MANIFEST)),
+        filesystem,
+        governor,
+        authorizer,
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_runtime_http_egress(Arc::clone(&egress))
+    .try_with_wasm_runtime(WitToolRuntimeConfig::for_testing(), WitToolHost::deny_all())
+    .unwrap();
+    let runtime = services.host_runtime();
+    let capability_id = CapabilityId::new("wasm-http.success").unwrap();
+    let first_scope = sample_scope(InvocationId::new());
+    let second_scope = sample_scope(InvocationId::new());
+
+    let first = runtime
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            first_scope.clone(),
+            json!({"call": "http-success-first"}),
+        ))
+        .await
+        .unwrap();
+    let second = runtime
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            second_scope.clone(),
+            json!({"call": "http-success-second"}),
+        ))
+        .await
+        .unwrap();
+
+    assert_completed_outcome(first, &capability_id);
+    assert_completed_outcome(second, &capability_id);
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].scope, first_scope);
+    assert_eq!(requests[1].scope, second_scope);
+    assert_eq!(requests[0].network_policy, policy);
+    assert_eq!(requests[1].network_policy, policy);
+}
+
+#[tokio::test]
 async fn host_runtime_services_denies_wasm_http_when_shared_egress_has_no_policy_handoff() {
     let parsed_manifest = ExtensionManifest::parse(WASM_HTTP_SUCCESS_MANIFEST).unwrap();
     let component = tool_component(HTTP_TOOL_WAT);
@@ -320,6 +384,31 @@ async fn host_runtime_services_denies_wasm_http_when_shared_egress_has_no_policy
     assert!(
         direct_http.requests().unwrap().is_empty(),
         "HostRuntimeServices must not let a preconfigured WASM host bypass policy handoff when shared egress is active"
+    );
+}
+
+#[test]
+fn host_runtime_services_wasm_input_encode_releases_prepared_reservation() {
+    let services = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/services.rs"),
+    )
+    .unwrap();
+    let reservation_index = services
+        .find("let reservation = match request.resource_reservation")
+        .expect("WASM execution must bind the dispatch reservation");
+    let input_index = services
+        .find("let input_json = match serde_json::to_string(&request.input)")
+        .expect("WASM input encoding must use explicit cleanup branch");
+
+    assert!(
+        reservation_index < input_index,
+        "WASM adapters must take ownership of a prepared reservation before input encoding so encode failures can release it"
+    );
+    assert!(
+        services.contains(
+            "Err(_) => {\n            release_wasm_reservation(request.governor, reservation.id);"
+        ),
+        "InputEncode failures must release the prepared WASM reservation"
     );
 }
 
@@ -495,6 +584,16 @@ fn assert_failed_outcome(outcome: RuntimeCapabilityOutcome, expected_kind: Runti
     match outcome {
         RuntimeCapabilityOutcome::Failed(failure) => assert_eq!(failure.kind, expected_kind),
         other => panic!("expected failed outcome, got {other:?}"),
+    }
+}
+
+fn assert_completed_outcome(outcome: RuntimeCapabilityOutcome, expected_capability: &CapabilityId) {
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(&completed.capability_id, expected_capability);
+            assert_eq!(completed.output, json!(1));
+        }
+        other => panic!("expected completed outcome, got {other:?}"),
     }
 }
 

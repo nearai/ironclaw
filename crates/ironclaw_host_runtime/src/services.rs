@@ -587,10 +587,10 @@ where
             request.capability_id.as_str(),
             module_path.as_str()
         );
-        if let Some(prepared) = self.prepared_guard()?.get(&cache_key).cloned() {
         let prepared = self.prepared_guard()?.get(&cache_key).cloned();
         if let Some(prepared) = prepared {
-            return execute_prepared_wasm(&self.runtime, &prepared, self.host.clone(), request);
+            let host = self.host_for_scope(&request.scope, request.capability_id);
+            return execute_prepared_wasm(&self.runtime, &prepared, host, request);
         }
 
         let wasm_bytes = request
@@ -671,9 +671,6 @@ fn execute_prepared_wasm<G>(
 where
     G: ResourceGovernor,
 {
-    let input_json = serde_json::to_string(&request.input).map_err(|_| DispatchError::Wasm {
-        kind: RuntimeDispatchErrorKind::InputEncode,
-    })?;
     let reservation = match request.resource_reservation {
         Some(reservation) => reservation,
         None => request
@@ -682,6 +679,15 @@ where
             .map_err(|_| DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Resource,
             })?,
+    };
+    let input_json = match serde_json::to_string(&request.input) {
+        Ok(json) => json,
+        Err(_) => {
+            release_wasm_reservation(request.governor, reservation.id);
+            return Err(DispatchError::Wasm {
+                kind: RuntimeDispatchErrorKind::InputEncode,
+            });
+        }
     };
     let execution = match runtime.execute(prepared, host, WitToolRequest::new(input_json)) {
         Ok(execution) => execution,
