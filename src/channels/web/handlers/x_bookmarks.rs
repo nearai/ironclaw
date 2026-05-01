@@ -280,8 +280,14 @@ pub async fn x_bookmarks_queue_handler(
     ))?;
 
     let limit = q.limit.unwrap_or(50).clamp(1, 500);
+    let status = parse_queue_status_filter(q.status.as_deref()).map_err(|message| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid status filter: {message}"),
+        )
+    })?;
     let bookmarks = store
-        .list_x_bookmarks_by_status(&user.user_id, q.status.as_deref(), limit)
+        .list_x_bookmarks_by_status(&user.user_id, status.as_deref(), limit)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(QueueResponse { bookmarks }))
@@ -311,6 +317,22 @@ pub async fn x_bookmarks_stats_handler(
         by_status: counts,
         total,
     }))
+}
+
+fn parse_queue_status_filter(raw: Option<&str>) -> Result<Option<String>, String> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let status = raw.trim().to_ascii_lowercase();
+    if status.is_empty() {
+        return Ok(None);
+    }
+    if BookmarkStatus::parse(&status).is_some() {
+        return Ok(Some(status));
+    }
+    Err(format!(
+        "{raw:?}; expected one of untriaged, build, read, reference, dead"
+    ))
 }
 
 /// Validate the LLM's decision array against the bookmark batch and pair
@@ -448,6 +470,22 @@ mod tests {
             project_slug: None,
             tags: vec![],
         }
+    }
+
+    #[test]
+    fn queue_status_filter_rejects_unknown_values() {
+        let err = parse_queue_status_filter(Some(" nonsense ")).unwrap_err();
+        assert!(err.contains("nonsense"), "got: {err}");
+    }
+
+    #[test]
+    fn queue_status_filter_accepts_case_insensitive_status() {
+        assert_eq!(
+            parse_queue_status_filter(Some(" Build ")).unwrap(),
+            Some("build".to_string())
+        );
+        assert_eq!(parse_queue_status_filter(Some(" ")).unwrap(), None);
+        assert_eq!(parse_queue_status_filter(None).unwrap(), None);
     }
 
     /// Codex finding (high): a hostile LLM with N decisions all `id = 0`
