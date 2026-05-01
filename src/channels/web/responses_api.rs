@@ -977,15 +977,25 @@ pub async fn create_response_handler(
 
     // Caller-supplied tools require engine v2 — the gate machinery that
     // pauses execution and emits `AppEvent::ExternalToolCall` only
-    // exists on the v2 path. Reject explicitly so callers don't get
-    // silent fallback to a path that can't surface the wire shape.
-    if !external_tools.is_empty() && !crate::bridge::is_engine_v2_enabled() {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "Caller-supplied 'tools' require ENGINE_V2 to be enabled on the server",
-            "invalid_request_error",
-        ));
-    }
+    // exists on the v2 path. The presence of an initialized
+    // `ExternalToolCatalog` is the canonical "engine v2 is up" signal
+    // here: the catalog is constructed inside `init_engine` and shared
+    // between the bridge and this handler. Falling back to the
+    // `ENGINE_V2` env var would diverge from the agent loop's runtime
+    // config (`Config::agent::engine_v2`), which is the actual switch.
+    let catalog = if !external_tools.is_empty() {
+        let cat = crate::bridge::engine_external_tool_catalog().await;
+        if cat.is_none() {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "Caller-supplied 'tools' require engine v2 to be enabled on the server",
+                "invalid_request_error",
+            ));
+        }
+        cat
+    } else {
+        None
+    };
 
     let extracted = extract_user_content(&req.input)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, e, "invalid_request_error"))?;
@@ -1037,9 +1047,7 @@ pub async fn create_response_handler(
     // every action call to short-circuit caller tools to a
     // `GatePaused { resume_kind: External { ext_tool:<call_id> } }`,
     // which the bridge router projects to `AppEvent::ExternalToolCall`.
-    if !external_tools.is_empty()
-        && let Some(catalog) = crate::bridge::engine_external_tool_catalog().await
-    {
+    if let Some(catalog) = catalog.as_ref() {
         let action_defs = responses_tools_to_action_defs(&external_tools);
         catalog
             .register(ironclaw_engine::ThreadId(thread_uuid), action_defs)

@@ -297,22 +297,16 @@ async fn instructions_field_is_accepted() {
     );
 }
 
-/// External tools require engine v2: when the global flag is off the
-/// handler must reject the request with a clear 4xx instead of silently
-/// degrading. The test gateway boots without `ENGINE_V2=true`, so a
-/// well-formed `tools[]` payload exercises this branch.
+/// External tools require engine v2: when the engine is not initialized
+/// the handler must reject the request with a clear 4xx instead of
+/// silently degrading. The path-prefix gateway boots without engine v2
+/// (no `init_engine` call, so the `ExternalToolCatalog` is absent), and
+/// the handler keys off catalog presence rather than reading env vars
+/// directly — so this test exercises the no-engine branch by virtue of
+/// what `TestGatewayBuilder` actually wires up. No process-global env
+/// mutation required.
 #[tokio::test]
 async fn external_tools_rejected_when_engine_v2_disabled() {
-    // Belt-and-braces: explicitly clear the env var so this test passes
-    // even if some earlier test left it set in the same process.
-    // SAFETY: `set_var` is unsafe because it mutates process global state
-    // shared across threads. This test is a #[tokio::test] and the env
-    // var is only consulted synchronously by `is_engine_v2_enabled`, so
-    // racing with other tests' reads is acceptable here.
-    unsafe {
-        std::env::remove_var("ENGINE_V2");
-    }
-
     let (addr, _state, _guard) = start_test_server().await;
     let url = format!("http://{}/api/v1/responses", addr);
 
@@ -328,18 +322,18 @@ async fn external_tools_rejected_when_engine_v2_disabled() {
         }))
         .send()
         .await
-        .expect("POST /api/v1/responses with tools and ENGINE_V2 off");
+        .expect("POST /api/v1/responses with tools and engine v2 unavailable");
 
     assert_eq!(
         resp.status(),
         400,
-        "expected 400 when ENGINE_V2 is off, got {}",
+        "expected 400 when engine v2 is unavailable, got {}",
         resp.status()
     );
     let body = resp.text().await.unwrap_or_default();
     assert!(
-        body.contains("ENGINE_V2"),
-        "rejection should mention ENGINE_V2, got: {body}"
+        body.to_ascii_lowercase().contains("engine v2"),
+        "rejection should mention engine v2, got: {body}"
     );
 }
 

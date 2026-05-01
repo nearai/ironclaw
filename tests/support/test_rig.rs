@@ -283,6 +283,29 @@ impl TestRig {
         self.channel.send_incoming(msg).await;
     }
 
+    /// Resolve a caller-tool external gate (Responses API path) with a
+    /// JSON resolution payload. The payload becomes
+    /// `GateResolution::ExternalCallback { payload }` after submission;
+    /// the engine then has to materialise it back into an `ActionResult`
+    /// the LLM can see.
+    pub async fn send_external_callback_with_payload(
+        &self,
+        request_id: uuid::Uuid,
+        payload: serde_json::Value,
+    ) {
+        let submission = ironclaw::agent::submission::Submission::ExternalCallback {
+            request_id,
+            payload: Some(payload),
+        };
+        let msg = ironclaw::channels::IncomingMessage::new(
+            self.channel.channel_name(),
+            self.channel.user_id(),
+            "",
+        )
+        .with_structured_submission(submission);
+        self.channel.send_incoming(msg).await;
+    }
+
     /// Return all message lists that were sent to the LLM provider.
     ///
     /// Only available when the rig was built with a `TraceLlm` (i.e., via `.with_trace()`).
