@@ -21,8 +21,9 @@ use ironclaw_events::{AuditSink, EventSink};
 use ironclaw_extensions::{ExtensionRegistry, ExtensionRuntime};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    CapabilityDispatchRequest, CapabilityDispatcher, DispatchError, ResourceReservationId,
-    ResourceUsage, RuntimeDispatchErrorKind, RuntimeKind,
+    CapabilityDispatchRequest, CapabilityDispatcher, CapabilityId, DispatchError,
+    ResourceReservationId, ResourceScope, ResourceUsage, RuntimeDispatchErrorKind,
+    RuntimeHttpEgress, RuntimeKind,
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutor, McpInvocation};
 use ironclaw_processes::{
@@ -32,11 +33,18 @@ use ironclaw_processes::{
 use ironclaw_resources::ResourceGovernor;
 use ironclaw_run_state::{ApprovalRequestStore, RunStateStore};
 use ironclaw_scripts::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};
+use ironclaw_secrets::SecretStore;
 use ironclaw_wasm::{
-    PreparedWitTool, WasmError, WitToolHost, WitToolRequest, WitToolRuntime, WitToolRuntimeConfig,
+    DenyWasmHostHttp, PreparedWitTool, WasmError, WasmRuntimeHttpAdapter, WitToolHost,
+    WitToolRequest, WitToolRuntime, WitToolRuntimeConfig,
 };
 
-use crate::{CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntimeError, RuntimeBackendHealth};
+use crate::{
+    BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntimeError,
+    NetworkObligationPolicyStore, RuntimeBackendHealth, RuntimeSecretInjectionStore,
+};
+
+type SharedRuntimeHttpEgress = Arc<Mutex<Option<Arc<dyn RuntimeHttpEgress>>>>;
 
 /// Concrete composition bundle for one Reborn host-runtime vertical slice.
 ///
@@ -63,6 +71,10 @@ where
     capability_leases: Option<Arc<dyn CapabilityLeaseStore>>,
     event_sink: Option<Arc<dyn EventSink>>,
     audit_sink: Option<Arc<dyn AuditSink>>,
+    secret_store: Option<Arc<dyn SecretStore>>,
+    network_policy_store: Arc<NetworkObligationPolicyStore>,
+    secret_injection_store: Arc<RuntimeSecretInjectionStore>,
+    runtime_http_egress: SharedRuntimeHttpEgress,
     runtime_health: Option<Arc<dyn RuntimeBackendHealth>>,
     script_runtime: Option<Arc<dyn ScriptExecutor>>,
     mcp_runtime: Option<Arc<dyn McpExecutor>>,
@@ -96,6 +108,10 @@ where
             capability_leases: None,
             event_sink: None,
             audit_sink: None,
+            secret_store: None,
+            network_policy_store: Arc::new(NetworkObligationPolicyStore::new()),
+            secret_injection_store: Arc::new(RuntimeSecretInjectionStore::new()),
+            runtime_http_egress: Arc::new(Mutex::new(None)),
             runtime_health: None,
             script_runtime: None,
             mcp_runtime: None,
@@ -143,6 +159,23 @@ where
         self
     }
 
+    pub fn with_secret_store<T>(mut self, secret_store: Arc<T>) -> Self
+    where
+        T: SecretStore + 'static,
+    {
+        self.secret_store = Some(secret_store);
+        self
+    }
+
+    pub fn with_runtime_http_egress<T>(self, runtime_http_egress: Arc<T>) -> Self
+    where
+        T: RuntimeHttpEgress + 'static,
+    {
+        let runtime_http_egress: Arc<dyn RuntimeHttpEgress> = runtime_http_egress;
+        set_runtime_http_egress(&self.runtime_http_egress, runtime_http_egress);
+        self
+    }
+
     pub fn with_runtime_health<T>(mut self, runtime_health: Arc<T>) -> Self
     where
         T: RuntimeBackendHealth + 'static,
@@ -177,7 +210,12 @@ where
         config: WitToolRuntimeConfig,
         host: WitToolHost,
     ) -> Result<Self, WasmError> {
-        let adapter = Arc::new(WasmRuntimeAdapter::try_new(config, host)?);
+        let adapter = Arc::new(WasmRuntimeAdapter::try_new(
+            config,
+            host,
+            Arc::clone(&self.network_policy_store),
+            Arc::clone(&self.runtime_http_egress),
+        )?);
         Ok(self.with_wasm_runtime(adapter))
     }
 
@@ -251,7 +289,24 @@ where
             runtime = runtime.with_capability_leases(Arc::clone(capability_leases));
         }
 
-        runtime
+        runtime.with_obligation_handler(Arc::new(self.builtin_obligation_handler()))
+    }
+
+    fn builtin_obligation_handler(&self) -> BuiltinObligationHandler {
+        let governor: Arc<dyn ResourceGovernor> = self.governor.clone();
+        let mut handler = BuiltinObligationHandler::new()
+            .with_network_policy_store(Arc::clone(&self.network_policy_store))
+            .with_secret_injection_store(Arc::clone(&self.secret_injection_store))
+            .with_resource_governor_dyn(governor);
+
+        if let Some(audit_sink) = &self.audit_sink {
+            handler = handler.with_audit_sink_dyn(Arc::clone(audit_sink));
+        }
+        if let Some(secret_store) = &self.secret_store {
+            handler = handler.with_secret_store_dyn(Arc::clone(secret_store));
+        }
+
+        handler
     }
 
     /// Builds an approval resolver over the same approval and lease stores used
@@ -281,6 +336,27 @@ where
             backends.push(RuntimeKind::Script);
         }
         backends
+    }
+}
+
+fn set_runtime_http_egress(
+    slot: &SharedRuntimeHttpEgress,
+    runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
+) {
+    match slot.lock() {
+        Ok(mut guard) => {
+            *guard = Some(runtime_http_egress);
+        }
+        Err(poisoned) => {
+            *poisoned.into_inner() = Some(runtime_http_egress);
+        }
+    }
+}
+
+fn runtime_http_egress(slot: &SharedRuntimeHttpEgress) -> Option<Arc<dyn RuntimeHttpEgress>> {
+    match slot.lock() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
     }
 }
 
@@ -415,20 +491,39 @@ where
 struct WasmRuntimeAdapter {
     runtime: WitToolRuntime,
     host: WitToolHost,
+    network_policy_store: Arc<NetworkObligationPolicyStore>,
+    runtime_http_egress: SharedRuntimeHttpEgress,
     prepared: Mutex<HashMap<String, Arc<PreparedWitTool>>>,
 }
 
 impl WasmRuntimeAdapter {
-    pub fn new(runtime: WitToolRuntime, host: WitToolHost) -> Self {
+    pub fn new(
+        runtime: WitToolRuntime,
+        host: WitToolHost,
+        network_policy_store: Arc<NetworkObligationPolicyStore>,
+        runtime_http_egress: SharedRuntimeHttpEgress,
+    ) -> Self {
         Self {
             runtime,
             host,
+            network_policy_store,
+            runtime_http_egress,
             prepared: Mutex::new(HashMap::new()),
         }
     }
 
-    pub fn try_new(config: WitToolRuntimeConfig, host: WitToolHost) -> Result<Self, WasmError> {
-        Ok(Self::new(WitToolRuntime::new(config)?, host))
+    pub fn try_new(
+        config: WitToolRuntimeConfig,
+        host: WitToolHost,
+        network_policy_store: Arc<NetworkObligationPolicyStore>,
+        runtime_http_egress: SharedRuntimeHttpEgress,
+    ) -> Result<Self, WasmError> {
+        Ok(Self::new(
+            WitToolRuntime::new(config)?,
+            host,
+            network_policy_store,
+            runtime_http_egress,
+        ))
     }
 
     fn prepared_guard(
@@ -437,6 +532,27 @@ impl WasmRuntimeAdapter {
         self.prepared.lock().map_err(|_| DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Executor,
         })
+    }
+
+    fn host_for_scope(&self, scope: &ResourceScope, capability_id: &CapabilityId) -> WitToolHost {
+        let egress = runtime_http_egress(&self.runtime_http_egress);
+        let Some(policy) = self.network_policy_store.take(scope, capability_id) else {
+            return if egress.is_some() {
+                self.host.clone().with_http(Arc::new(DenyWasmHostHttp))
+            } else {
+                self.host.clone()
+            };
+        };
+        let Some(egress) = egress else {
+            return self.host.clone().with_http(Arc::new(DenyWasmHostHttp));
+        };
+        self.host
+            .clone()
+            .with_http(Arc::new(WasmRuntimeHttpAdapter::new(
+                egress,
+                scope.clone(),
+                policy,
+            )))
     }
 }
 
@@ -472,7 +588,8 @@ where
             module_path.as_str()
         );
         if let Some(prepared) = self.prepared_guard()?.get(&cache_key).cloned() {
-            return execute_prepared_wasm(&self.runtime, &prepared, self.host.clone(), request);
+            let host = self.host_for_scope(&request.scope, request.capability_id);
+            return execute_prepared_wasm(&self.runtime, &prepared, host, request);
         }
 
         let wasm_bytes = request
@@ -498,7 +615,8 @@ where
                 prepared
             }
         };
-        execute_prepared_wasm(&self.runtime, &prepared, self.host.clone(), request)
+        let host = self.host_for_scope(&request.scope, request.capability_id);
+        execute_prepared_wasm(&self.runtime, &prepared, host, request)
     }
 }
 

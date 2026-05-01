@@ -5,7 +5,7 @@ use chrono::Utc;
 use ironclaw_authorization::{
     GrantAuthorizer, InMemoryCapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer,
 };
-use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
+use ironclaw_events::{InMemoryAuditSink, InMemoryEventSink, RuntimeEventKind};
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry};
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
@@ -151,6 +151,176 @@ async fn host_runtime_services_health_fails_closed_for_unregistered_required_run
 
     assert!(!health.ready);
     assert_eq!(health.missing_runtime_backends, vec![RuntimeKind::Script]);
+}
+
+#[tokio::test]
+async fn host_runtime_services_installs_builtin_obligation_handler_with_audit_sink() {
+    let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
+    let filesystem = Arc::new(LocalFilesystem::new());
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let audit = Arc::new(InMemoryAuditSink::new());
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
+        Arc::new(ObligatingAuthorizer::new(vec![Obligation::AuditBefore]));
+    let script_runtime = Arc::new(ScriptRuntime::new(
+        ScriptRuntimeConfig::for_testing(),
+        EchoScriptBackend,
+    ));
+    let services = HostRuntimeServices::new(
+        registry,
+        filesystem,
+        governor,
+        authorizer,
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_audit_sink(Arc::clone(&audit))
+    .with_script_runtime(script_runtime);
+
+    let outcome = services
+        .host_runtime()
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            execution_context_with_dispatch_grant(script_capability_id()),
+            script_capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "audited through services"}),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(
+                completed.output,
+                json!({"message": "audited through services"})
+            );
+        }
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+    let records = audit.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].stage, AuditStage::Before);
+    assert_eq!(records[0].action.target.as_deref(), Some("script.echo"));
+}
+
+#[tokio::test]
+async fn host_runtime_services_routes_wasm_http_through_per_invocation_policy_handoff() {
+    let parsed_manifest = ExtensionManifest::parse(WASM_HTTP_SUCCESS_MANIFEST).unwrap();
+    let component = tool_component(HTTP_TOOL_WAT);
+    let filesystem = Arc::new(
+        filesystem_with_wasm_component(
+            parsed_manifest.id.as_str(),
+            "wasm/http-success.wasm",
+            &component,
+        )
+        .await,
+    );
+    let governor = Arc::new(governor_with_default_limit(sample_account()));
+    let policy = wasm_http_policy();
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
+        Arc::new(ObligatingAuthorizer::new(vec![
+            Obligation::ApplyNetworkPolicy {
+                policy: policy.clone(),
+            },
+        ]));
+    let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(WASM_HTTP_SUCCESS_MANIFEST)),
+        filesystem,
+        governor,
+        authorizer,
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_runtime_http_egress(Arc::clone(&egress))
+    .try_with_wasm_runtime(WitToolRuntimeConfig::for_testing(), WitToolHost::deny_all())
+    .unwrap();
+    let capability_id = CapabilityId::new("wasm-http.success").unwrap();
+    let scope = sample_scope(InvocationId::new());
+
+    let outcome = services
+        .host_runtime()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope.clone(),
+            json!({"call": "http-success"}),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, capability_id);
+            assert_eq!(completed.output, json!(1));
+        }
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].runtime, RuntimeKind::Wasm);
+    assert_eq!(requests[0].scope, scope);
+    assert_eq!(requests[0].network_policy, policy);
+    assert_eq!(requests[0].method, NetworkMethod::Post);
+    assert_eq!(requests[0].url, "https://example.test/api");
+    assert_eq!(requests[0].body, b"hello".to_vec());
+}
+
+#[tokio::test]
+async fn host_runtime_services_denies_wasm_http_when_shared_egress_has_no_policy_handoff() {
+    let parsed_manifest = ExtensionManifest::parse(WASM_HTTP_SUCCESS_MANIFEST).unwrap();
+    let component = tool_component(HTTP_TOOL_WAT);
+    let filesystem = Arc::new(
+        filesystem_with_wasm_component(
+            parsed_manifest.id.as_str(),
+            "wasm/http-success.wasm",
+            &component,
+        )
+        .await,
+    );
+    let governor = Arc::new(governor_with_default_limit(sample_account()));
+    let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+    let direct_http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 200,
+        headers_json: "{}".to_string(),
+        body: Vec::new(),
+    }));
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(WASM_HTTP_SUCCESS_MANIFEST)),
+        filesystem,
+        governor,
+        Arc::new(AllowAllDispatchAuthorizer),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_runtime_http_egress(Arc::clone(&egress))
+    .try_with_wasm_runtime(
+        WitToolRuntimeConfig::for_testing(),
+        WitToolHost::deny_all().with_http(Arc::clone(&direct_http)),
+    )
+    .unwrap();
+    let capability_id = CapabilityId::new("wasm-http.success").unwrap();
+
+    let outcome = services
+        .host_runtime()
+        .invoke_capability(wasm_runtime_request(
+            capability_id,
+            json!({"call": "http-without-policy"}),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.usage.network_egress_bytes, 0);
+        }
+        RuntimeCapabilityOutcome::Failed(_) => {}
+        other => panic!("expected completed or failed outcome, got {other:?}"),
+    }
+    assert!(egress.requests().is_empty());
+    assert!(
+        direct_http.requests().unwrap().is_empty(),
+        "HostRuntimeServices must not let a preconfigured WASM host bypass policy handoff when shared egress is active"
+    );
 }
 
 #[tokio::test]
@@ -339,6 +509,44 @@ impl ScriptBackend for EchoScriptBackend {
 
 struct AllowAllDispatchAuthorizer;
 
+struct ObligatingAuthorizer {
+    obligations: Vec<Obligation>,
+}
+
+impl ObligatingAuthorizer {
+    fn new(obligations: Vec<Obligation>) -> Self {
+        Self { obligations }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct RecordingRuntimeHttpEgress {
+    requests: Arc<std::sync::Mutex<Vec<RuntimeHttpEgressRequest>>>,
+}
+
+impl RecordingRuntimeHttpEgress {
+    fn requests(&self) -> Vec<RuntimeHttpEgressRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
+    fn execute(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        self.requests.lock().unwrap().push(request.clone());
+        Ok(RuntimeHttpEgressResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: Vec::new(),
+            request_bytes: request.body.len() as u64,
+            response_bytes: 0,
+            redaction_applied: false,
+        })
+    }
+}
+
 #[async_trait]
 impl TrustAwareCapabilityDispatchAuthorizer for AllowAllDispatchAuthorizer {
     async fn authorize_dispatch_with_trust(
@@ -362,6 +570,33 @@ impl TrustAwareCapabilityDispatchAuthorizer for AllowAllDispatchAuthorizer {
     ) -> Decision {
         Decision::Allow {
             obligations: Obligations::empty(),
+        }
+    }
+}
+
+#[async_trait]
+impl TrustAwareCapabilityDispatchAuthorizer for ObligatingAuthorizer {
+    async fn authorize_dispatch_with_trust(
+        &self,
+        _context: &ExecutionContext,
+        _descriptor: &CapabilityDescriptor,
+        _estimate: &ResourceEstimate,
+        _trust_decision: &TrustDecision,
+    ) -> Decision {
+        Decision::Allow {
+            obligations: Obligations::new(self.obligations.clone()).unwrap(),
+        }
+    }
+
+    async fn authorize_spawn_with_trust(
+        &self,
+        _context: &ExecutionContext,
+        _descriptor: &CapabilityDescriptor,
+        _estimate: &ResourceEstimate,
+        _trust_decision: &TrustDecision,
+    ) -> Decision {
+        Decision::Allow {
+            obligations: Obligations::new(self.obligations.clone()).unwrap(),
         }
     }
 }
@@ -678,6 +913,14 @@ fn wasm_runtime_request(
     input: serde_json::Value,
 ) -> RuntimeCapabilityRequest {
     let scope = sample_scope(InvocationId::new());
+    wasm_runtime_request_for_scope(capability_id, scope, input)
+}
+
+fn wasm_runtime_request_for_scope(
+    capability_id: CapabilityId,
+    scope: ResourceScope,
+    input: serde_json::Value,
+) -> RuntimeCapabilityRequest {
     let context = execution_context_with_dispatch_grant_for_scope(capability_id.clone(), scope);
     RuntimeCapabilityRequest::new(
         context,
@@ -699,6 +942,18 @@ fn wasm_http_estimate() -> ResourceEstimate {
 
 fn sample_account() -> ResourceAccount {
     ResourceAccount::tenant(TenantId::new("tenant-a").unwrap())
+}
+
+fn wasm_http_policy() -> NetworkPolicy {
+    NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: "example.test".to_string(),
+            port: None,
+        }],
+        deny_private_ip_ranges: true,
+        max_egress_bytes: Some(10_000),
+    }
 }
 
 fn tool_component(wat_src: &str) -> Vec<u8> {
@@ -802,6 +1057,25 @@ module = "tool.wasm"
 id = "wasm.count"
 description = "Count through WASM"
 effects = ["dispatch_capability"]
+default_permission = "allow"
+parameters_schema = { type = "object" }
+"#;
+
+const WASM_HTTP_SUCCESS_MANIFEST: &str = r#"
+id = "wasm-http"
+name = "WASM HTTP Success"
+version = "0.1.0"
+description = "WASM HTTP success extension"
+trust = "untrusted"
+
+[runtime]
+kind = "wasm"
+module = "wasm/http-success.wasm"
+
+[[capabilities]]
+id = "wasm-http.success"
+description = "Call host HTTP then return success"
+effects = ["dispatch_capability", "network"]
 default_permission = "allow"
 parameters_schema = { type = "object" }
 "#;
