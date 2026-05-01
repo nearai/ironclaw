@@ -119,38 +119,6 @@ mod tests {
         }
     }
 
-    /// Wait until the engine's external-tool catalog has at least one
-    /// thread registered (the engine has spawned a thread for this
-    /// request). Returns the first registered ThreadId snapshot — this
-    /// is how a test discovers the engine-assigned thread id without
-    /// reaching into private engine state.
-    async fn wait_for_first_engine_thread(
-        catalog: &ExternalToolCatalog,
-        timeout: Duration,
-    ) -> Option<ThreadId> {
-        let deadline = tokio::time::Instant::now() + timeout;
-        loop {
-            // Best-effort: borrow the inner map via `is_empty`/`len`
-            // to detect when something is registered.
-            if !catalog.is_empty().await {
-                // The catalog doesn't expose its keys publicly. Instead,
-                // we rely on the agent's session manager to expose the
-                // active engine thread id. Falls back to None on
-                // timeout — the caller should treat that as a hard
-                // failure mode (engine never spawned a thread).
-                //
-                // This helper exists primarily to give the round-trip
-                // test a deterministic point at which to check the
-                // catalog state.
-                return None;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return None;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    }
-
     // -------------------------------------------------------------------
     // Round-trip tests (the load-bearing showstopper coverage)
     // -------------------------------------------------------------------
@@ -481,17 +449,13 @@ mod tests {
         );
     }
 
-    /// **Documents an unfixed gap**: there is currently no hook that
-    /// clears the catalog when a thread reaches a terminal state.
-    /// Until that hook lands, catalog entries leak monotonically —
-    /// a long-running gateway with many short-lived requests will
-    /// accumulate entries.
-    ///
-    /// This test asserts the cleanup behaviour we want; today it
-    /// passes only because we've explicitly invoked `clear()`. The
-    /// test name reminds us the production cleanup is missing.
+    /// Direct unit-level proof that `clear()` removes a registered
+    /// entry. The production cleanup (Bug 4 fix) is wired in
+    /// `await_thread_outcome` and exercised end-to-end by
+    /// `catalog_cleared_on_terminal_completed_outcome` above; this
+    /// test is the narrow primitive coverage for the helper itself.
     #[tokio::test]
-    async fn catalog_clear_on_terminal_state_explicit() {
+    async fn catalog_clear_removes_entry() {
         let catalog = ExternalToolCatalog::new();
         let thread = ThreadId::new();
         catalog
@@ -499,10 +463,6 @@ mod tests {
             .await;
         assert!(!catalog.is_empty().await);
 
-        // The fix is to invoke this on `EventKind::StateChanged { to:
-        // Done | Failed }`. Until that hook exists, the catalog has
-        // to be cleared explicitly by whoever has the catalog handle
-        // — and there's no such caller today.
         catalog.clear(thread).await;
         assert!(catalog.is_empty().await);
     }
@@ -515,14 +475,4 @@ mod tests {
     // colliding name. A cargo-feature-gated registry isn't reachable
     // from this engine-tier file, so the check belongs at the wire
     // boundary.
-
-    // -------------------------------------------------------------------
-    // Helper for tests above (avoids unused-import lint when ignored
-    // tests are skipped on a default `cargo test` run).
-    // -------------------------------------------------------------------
-    #[allow(dead_code)]
-    async fn _harness_compiles() {
-        let _ = wait_for_first_engine_thread;
-        let _: Arc<ExternalToolCatalog> = Arc::new(ExternalToolCatalog::new());
-    }
 }

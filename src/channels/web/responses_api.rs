@@ -15,16 +15,35 @@
 //! Callers can declare their own tools alongside IronClaw's built-in
 //! registry by passing `tools: [{type: "function", name, description,
 //! parameters}]` and feeding back results via `function_call_output` items
-//! in the next request's `input`. IronClaw's engine doesn't expose a
-//! per-request tool surface, so external tools are integrated at the
-//! prompt level: the catalog is rendered into the user message as
-//! `<external-tools>` and the agent is told to invoke a tool by ending its
-//! response with a fenced ```` ```tool_call ```` block containing
-//! `{"name": ..., "arguments": ...}`. When that fence appears with a
-//! recognised tool name, this module splits the agent's reply into a
-//! leading `Message` plus a `function_call` `ResponseOutputItem`,
-//! matching the OpenAI wire shape so existing client libraries can consume
-//! it unmodified.
+//! in the next request's `input`. The integration is engine-native, not
+//! prompt-level:
+//!
+//! 1. The handler validates the request, registers the caller's tools in
+//!    the per-thread [`ExternalToolCatalog`] keyed by the engine
+//!    `ThreadId`, and routes the user message through the agent loop. The
+//!    catalog merges into the LLM-visible action surface via
+//!    `EffectBridgeAdapter::available_actions`, so the model sees caller
+//!    tools alongside internal ones.
+//! 2. When the LLM invokes a caller tool, `EffectBridgeAdapter::execute_action`
+//!    short-circuits to `EngineError::GatePaused { resume_kind:
+//!    External { callback_id: ext_tool:<call_id> } }`. The bridge router
+//!    projects that pause to `AppEvent::ExternalToolCall` carrying the
+//!    OpenAI-shaped `function_call` fields. This handler emits it as a
+//!    `function_call` `ResponseOutputItem` (both streaming
+//!    `output_item.added`+`done` and non-streaming) and returns
+//!    `status: "completed"`. The thread sits in `Waiting`.
+//! 3. The caller resumes by POSTing a follow-up request whose `input`
+//!    array contains `function_call_output` items. The handler converts
+//!    them to `Submission::ExternalCallback { request_id, payload }`,
+//!    routed through `bridge::handle_external_callback`, which
+//!    materialises an `ActionResult` ThreadMessage from the payload and
+//!    resumes the thread. The LLM sees the result on its next call.
+//!
+//! Caller-supplied tool names that shadow registered (built-in or
+//! extension) actions are rejected at request validation with 400 — see
+//! the confused-deputy note in `create_response_handler`.
+//!
+//! [`ExternalToolCatalog`]: crate::bridge::ExternalToolCatalog
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -517,7 +536,11 @@ fn validate_external_tools(tools: &[ResponsesTool]) -> Result<(), String> {
             .collect::<Vec<_>>(),
     )
     .map(|s| s.len())
-    .unwrap_or(0);
+    // Fail closed: a serialization error means we can't measure the
+    // payload, so we must reject rather than wave it through. Treating
+    // the unknown size as `MAX + 1` falls into the size-cap branch
+    // below and surfaces a precise 400 to the caller.
+    .unwrap_or(MAX_TOOLS_BYTES + 1);
     if serialized_size > MAX_TOOLS_BYTES {
         return Err(format!(
             "tools exceed {MAX_TOOLS_BYTES}-byte limit ({serialized_size} bytes)"
@@ -2143,6 +2166,182 @@ mod tests {
             &resp.output[1],
             ResponseOutputItem::FunctionCall { name, .. } if name == "lookup"
         ));
+    }
+
+    /// Streaming round-trip: when the LLM streams a couple of text
+    /// chunks then triggers a caller-supplied external tool, the SSE
+    /// stream must (a) deliver the deltas as `output_text.delta`, (b)
+    /// flush the buffered prose as a complete Message item *before*
+    /// the function_call, (c) emit `output_item.added`+`done` for the
+    /// function_call, and (d) close with `response.completed`.
+    ///
+    /// The earlier `accumulator_*` tests cover the in-memory state
+    /// transitions; this test drives the full `streaming_worker` and
+    /// verifies the wire-frame sequence that an OpenAI client would
+    /// observe.
+    #[tokio::test]
+    async fn streaming_worker_external_tool_call_emits_correct_frame_sequence() {
+        use axum::response::Sse;
+        use axum::response::sse::KeepAlive;
+        use http_body_util::BodyExt;
+        use tokio_stream::wrappers::ReceiverStream;
+
+        let thread_id = "thread-stream-test".to_string();
+
+        // Input: synthetic AppEvent stream the worker will consume.
+        let (input_tx, input_rx) = tokio::sync::mpsc::channel::<AppEvent>(8);
+        let input_stream = ReceiverStream::new(input_rx);
+
+        // Output: the worker pushes axum SSE Events here. Buffer
+        // generously — the external-tool branch can emit up to 7
+        // frames (created, delta, item.added/done × 2, completed).
+        let (out_tx, out_rx) = tokio::sync::mpsc::channel::<axum::response::sse::Event>(16);
+
+        // Drive the worker on a background task so we can feed it
+        // synchronously from the test body.
+        let worker = tokio::spawn(streaming_worker(
+            out_tx,
+            input_stream,
+            "resp_stream_test".to_string(),
+            "test-model".to_string(),
+            thread_id.clone(),
+        ));
+
+        // Two text deltas, then the external-tool gate fires.
+        input_tx
+            .send(AppEvent::StreamChunk {
+                content: "Looking up ".to_string(),
+                thread_id: Some(thread_id.clone()),
+            })
+            .await
+            .unwrap();
+        input_tx
+            .send(AppEvent::StreamChunk {
+                content: "the weather.".to_string(),
+                thread_id: Some(thread_id.clone()),
+            })
+            .await
+            .unwrap();
+        input_tx
+            .send(AppEvent::ExternalToolCall {
+                request_id: "req-stream-1".to_string(),
+                call_id: "call_lookup_weather_1".to_string(),
+                name: "lookup_weather".to_string(),
+                arguments: "{\"city\":\"NYC\"}".to_string(),
+                thread_id: Some(thread_id.clone()),
+            })
+            .await
+            .unwrap();
+        // Closing the input stream lets the worker exit if the
+        // external-tool branch didn't already terminate it.
+        drop(input_tx);
+
+        // Collect Events. The external-tool branch returns from the
+        // worker, which drops out_tx and closes the receiver — so
+        // pulling from the stream until exhaustion gives us every
+        // emitted frame.
+        let out_stream = ReceiverStream::new(out_rx);
+        let response = Sse::new(out_stream.map(Ok::<_, Infallible>))
+            .keep_alive(KeepAlive::new().interval(Duration::from_secs(60)).text(""))
+            .into_response();
+        let body = response.into_body();
+        let bytes = tokio::time::timeout(Duration::from_secs(5), body.collect())
+            .await
+            .expect("body collected within timeout")
+            .expect("body bytes")
+            .to_bytes();
+        let text = std::str::from_utf8(&bytes).expect("utf8");
+
+        // Worker must finish cleanly (no panic).
+        worker.await.expect("worker panicked");
+
+        // Parse SSE frames. axum emits `event: <type>\ndata: <json>\n\n`
+        // for each event; a leading colon-only line is the keep-alive.
+        let frames: Vec<(String, String)> = text
+            .split("\n\n")
+            .filter_map(|frame| {
+                let mut event_type: Option<String> = None;
+                let mut data: Option<String> = None;
+                for line in frame.lines() {
+                    if let Some(t) = line.strip_prefix("event:") {
+                        event_type = Some(t.trim().to_string());
+                    } else if let Some(d) = line.strip_prefix("data:") {
+                        data = Some(d.trim().to_string());
+                    }
+                }
+                match (event_type, data) {
+                    (Some(t), Some(d)) => Some((t, d)),
+                    _ => None,
+                }
+            })
+            .collect();
+
+        let event_types: Vec<&str> = frames.iter().map(|(t, _)| t.as_str()).collect();
+
+        // Expected wire-frame sequence:
+        //   response.created
+        //   response.output_item.added       (Message placeholder for the streaming text)
+        //   response.output_text.delta × 2   (one per chunk)
+        //   response.output_item.added       (Message — flushed prose)
+        //   response.output_item.done        (Message — flushed prose)
+        //   response.output_item.added       (FunctionCall)
+        //   response.output_item.done        (FunctionCall)
+        //   response.completed
+        assert_eq!(
+            event_types,
+            vec![
+                "response.created",
+                "response.output_item.added",
+                "response.output_text.delta",
+                "response.output_text.delta",
+                "response.output_item.added",
+                "response.output_item.done",
+                "response.output_item.added",
+                "response.output_item.done",
+                "response.completed",
+            ],
+            "wire frame sequence does not match expected ordering"
+        );
+
+        // Find the function_call frames and assert they carry the
+        // caller's tool identity.
+        let function_call_frames: Vec<&(String, String)> = frames
+            .iter()
+            .filter(|(t, d)| {
+                t == "response.output_item.added" && d.contains("\"type\":\"function_call\"")
+            })
+            .collect();
+        assert_eq!(
+            function_call_frames.len(),
+            1,
+            "expected exactly one function_call output_item.added frame"
+        );
+        let payload = &function_call_frames[0].1;
+        assert!(
+            payload.contains("\"call_id\":\"call_lookup_weather_1\""),
+            "function_call frame missing caller-supplied call_id: {payload}"
+        );
+        assert!(
+            payload.contains("\"name\":\"lookup_weather\""),
+            "function_call frame missing tool name: {payload}"
+        );
+        assert!(
+            payload.contains("\"arguments\":\"{\\\"city\\\":\\\"NYC\\\"}\""),
+            "function_call frame missing arguments: {payload}"
+        );
+
+        // The flushed leading message must contain the concatenated
+        // text from both StreamChunks, in order.
+        let message_done_frames: Vec<&(String, String)> = frames
+            .iter()
+            .filter(|(t, d)| t == "response.output_item.done" && d.contains("\"type\":\"message\""))
+            .collect();
+        assert_eq!(message_done_frames.len(), 1, "expected one Message done");
+        let message_payload = &message_done_frames[0].1;
+        assert!(
+            message_payload.contains("Looking up the weather."),
+            "Message done frame missing concatenated stream text: {message_payload}"
+        );
     }
 
     #[test]

@@ -754,6 +754,20 @@ async fn notify_pending_gate(
                         thread_id: Some(pending.effective_wire_thread_id()),
                     },
                 );
+            } else {
+                // Today every external-tool flow runs through the
+                // gateway, which always wires SSE — so this branch
+                // means a future channel grew an external-tool surface
+                // without an SSE-equivalent fan-out, and the caller
+                // would never learn that the thread paused. Log so
+                // we can diagnose instead of silently hanging.
+                tracing::debug!(
+                    user_id = %message.user_id,
+                    callback = %callback_id,
+                    request_id = %pending.request_id,
+                    "external tool gate paused but no broadcaster is wired; \
+                     caller will not be notified"
+                );
             }
             // Don't run `send_pending_gate_status` — that path is for
             // approval-card UX which doesn't apply to caller-executed
@@ -1158,6 +1172,7 @@ async fn execute_pending_gate_action(
         thread_goal: Some(thread.goal.clone()),
         available_actions_snapshot: None,
         available_action_inventory_snapshot: None,
+        conversation_scope: None,
     };
     let active_leases = state
         .thread_manager
@@ -3742,6 +3757,25 @@ async fn handle_with_engine_inner(
         cfg
     };
 
+    // Stamp the conversation scope (parseable as a Uuid) into the
+    // thread's `initial_metadata`. The engine reads it back into
+    // `ThreadExecutionContext.conversation_scope`, which lets the
+    // bridge's `EffectBridgeAdapter` resolve per-conversation state
+    // (today: caller-supplied external tool catalog) by either the
+    // engine `thread_id` or the caller-side scope. Without this the
+    // executor task that starts immediately after spawn would race the
+    // bridge's post-spawn `transfer` and miss caller tools on the
+    // first turn.
+    let scope_uuid = parse_engine_thread_id(scope);
+    let extra_metadata = scope_uuid.map(|tid| {
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "conversation_scope".into(),
+            serde_json::Value::String(tid.0.to_string()),
+        );
+        map
+    });
+
     // Handle the message — spawns a new thread or injects into active one
     let thread_id = state
         .conversation_manager
@@ -3752,21 +3786,17 @@ async fn handle_with_engine_inner(
             &message.user_id,
             thread_config,
             validated_tz.as_ref().map(|tz| tz.name()),
+            extra_metadata,
         )
         .await
         .map_err(|e| engine_err("thread error", e))?;
 
-    // Bridge the catalog gap: the responses_api handler registers
-    // caller-supplied tools under the message's `conversation_scope`
-    // UUID *before* the engine spawns its thread (it can't know the
-    // engine ThreadId in advance). Now that we have the actual
-    // `thread_id`, move any catalog entry that was registered under
-    // the scope key onto the real ThreadId so `EffectBridgeAdapter`
-    // sees the tools at action-dispatch time. Without this, every
-    // caller-tool call falls through to the registry and errors as
-    // "tool not found" — even though the catalog had the right
-    // tools registered the whole time.
-    if let Some(scope_uuid) = parse_engine_thread_id(scope) {
+    // Re-key the catalog onto the engine's allocated `thread_id` so
+    // the terminal-state cleanup hook in `await_thread_outcome` finds
+    // the entry under the canonical key. The race-window protection
+    // is the conversation_scope plumbing above; this transfer is the
+    // bookkeeping leg.
+    if let Some(scope_uuid) = scope_uuid {
         state
             .external_tool_catalog
             .transfer(scope_uuid, thread_id)
@@ -10956,5 +10986,76 @@ mod tests {
         );
         let info = thread_to_info(&thread);
         assert_eq!(info.title.as_deref(), Some("Short first line"));
+    }
+
+    /// `extract_external_tool_output` returns the tool result for the
+    /// matching call_id when the payload follows the canonical
+    /// `{"outputs": [...]}` shape the responses_api handler builds.
+    #[test]
+    fn extract_external_tool_output_matches_call_id() {
+        let payload = serde_json::json!({
+            "outputs": [
+                {"call_id": "call_a", "output": "first result"},
+                {"call_id": "call_b", "output": {"weather": "sunny"}},
+            ]
+        });
+        assert_eq!(
+            extract_external_tool_output(&payload, "call_a"),
+            serde_json::Value::String("first result".into())
+        );
+        assert_eq!(
+            extract_external_tool_output(&payload, "call_b"),
+            serde_json::json!({"weather": "sunny"})
+        );
+    }
+
+    /// When the payload carries an `outputs` array but no entry
+    /// matches the requested call_id, the helper must surface a typed
+    /// `null` so the LLM sees an explicit empty result rather than
+    /// the (possibly stale) raw payload of some other call. Without
+    /// this, the bridge would echo back unrelated tool output to the
+    /// model, confusing the next turn.
+    #[test]
+    fn extract_external_tool_output_returns_null_when_call_id_missing() {
+        let payload = serde_json::json!({
+            "outputs": [
+                {"call_id": "call_other", "output": "wrong call"},
+            ]
+        });
+        let result = extract_external_tool_output(&payload, "call_missing");
+        assert_eq!(
+            result,
+            serde_json::Value::Null,
+            "missing call_id must produce a typed null, got: {result:?}"
+        );
+    }
+
+    /// When the payload has no `outputs` array at all (defensive path
+    /// for legacy OAuth-style raw resolutions), the helper falls back
+    /// to returning the whole payload — preserving the historical
+    /// `Submission::ExternalCallback { payload: <raw value> }` shape.
+    #[test]
+    fn extract_external_tool_output_falls_back_to_raw_payload() {
+        let payload = serde_json::json!({"token": "abc123"});
+        let result = extract_external_tool_output(&payload, "any_call_id");
+        assert_eq!(result, payload);
+    }
+
+    /// An `outputs` entry without a matching call_id but a different
+    /// matching one further down the array must still be found —
+    /// guards against an early-return regression in the lookup loop.
+    #[test]
+    fn extract_external_tool_output_finds_match_after_misses() {
+        let payload = serde_json::json!({
+            "outputs": [
+                {"call_id": "call_a", "output": "a"},
+                {"call_id": "call_b", "output": "b"},
+                {"call_id": "call_target", "output": "match"},
+            ]
+        });
+        assert_eq!(
+            extract_external_tool_output(&payload, "call_target"),
+            serde_json::Value::String("match".into())
+        );
     }
 }

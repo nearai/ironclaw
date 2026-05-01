@@ -189,6 +189,11 @@ impl ConversationManager {
     /// The per-conversation `Mutex` is held for the entire operation — from
     /// the active-thread check through `save_conversation`. This eliminates
     /// the TOCTOU double-spawn window present in the old 5-phase split.
+    // Bundling these into an options struct would just push the
+    // argument list around without making any caller easier to read —
+    // every caller passes literal None for the optional fields and
+    // every required field is already a typed newtype.
+    #[allow(clippy::too_many_arguments)]
     pub async fn handle_user_message(
         &self,
         conversation_id: ConversationId,
@@ -197,6 +202,7 @@ impl ConversationManager {
         user_id: &str,
         thread_config: ThreadConfig,
         user_timezone: Option<&str>,
+        extra_initial_metadata: Option<serde_json::Map<String, serde_json::Value>>,
     ) -> Result<ThreadId, EngineError> {
         let conv_arc = self.get_conversation_lock(conversation_id).await?;
         let mut conv = conv_arc.lock().await;
@@ -302,6 +308,17 @@ impl ConversationManager {
                         "user_timezone".into(),
                         serde_json::Value::String(tz.to_string()),
                     );
+                }
+                // Merge caller-supplied metadata (e.g. `conversation_scope`
+                // from the responses_api bridge so the EffectExecutor can
+                // resolve per-conversation state without racing the
+                // executor task that starts immediately after spawn).
+                // Built-in keys above win on conflict so callers can't
+                // shadow `source_channel` or `user_timezone`.
+                if let Some(extra) = extra_initial_metadata {
+                    for (k, v) in extra {
+                        initial_metadata.entry(k).or_insert(v);
+                    }
                 }
 
                 // Spawn new foreground thread with conversation history.
@@ -860,6 +877,7 @@ mod tests {
                 "user1",
                 ThreadConfig::default(),
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -927,6 +945,7 @@ mod tests {
                 project,
                 "user1",
                 ThreadConfig::default(),
+                None,
                 None,
             )
             .await
@@ -1027,6 +1046,7 @@ mod tests {
                 "user1",
                 ThreadConfig::default(),
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -1076,6 +1096,7 @@ mod tests {
                 "user1",
                 ThreadConfig::default(),
                 None,
+                None,
             )
             .await
         });
@@ -1086,6 +1107,7 @@ mod tests {
                 project,
                 "user1",
                 ThreadConfig::default(),
+                None,
                 None,
             )
             .await
@@ -1162,6 +1184,7 @@ mod tests {
                 project,
                 "user1",
                 ThreadConfig::default(),
+                None,
                 None,
             )
             .await

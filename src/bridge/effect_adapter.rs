@@ -152,6 +152,23 @@ impl EffectBridgeAdapter {
         self.external_tool_catalog.read().await.clone()
     }
 
+    /// Resolve all catalog keys this `ThreadExecutionContext` may have
+    /// caller-supplied tools registered under. The engine `thread_id`
+    /// is the canonical key after the bridge's post-spawn `transfer`,
+    /// but the executor task can run before that transfer completes —
+    /// `conversation_scope` (stamped into thread metadata by the
+    /// bridge) is the original caller-side key the catalog was
+    /// registered under, used as a race-window fallback.
+    fn external_tool_catalog_keys(
+        context: &ThreadExecutionContext,
+    ) -> impl Iterator<Item = ironclaw_engine::ThreadId> {
+        let scope = context
+            .conversation_scope
+            .filter(|uuid| *uuid != context.thread_id.0)
+            .map(ironclaw_engine::ThreadId);
+        std::iter::once(context.thread_id).chain(scope)
+    }
+
     /// Install a per-project workspace mount table on this adapter. When set,
     /// sandbox-eligible tool calls (`file_read`, `file_write`, `list_dir`,
     /// `apply_patch`, `shell`) whose path argument resolves into a mount get
@@ -1847,21 +1864,28 @@ impl EffectExecutor for EffectBridgeAdapter {
         // also bypasses the safety pipeline — that's intentional, the
         // caller is the trust boundary for the tool's parameters and
         // output, not the engine.
-        if let Some(catalog) = self.external_tool_catalog().await
-            && catalog.contains(context.thread_id, action_name).await
-        {
-            let call_id = context.current_call_id.as_deref().unwrap_or("").to_string();
-            return Err(Self::gate_paused(
-                "external_tool",
-                action_name,
-                Some(call_id.as_str()),
-                parameters,
-                ironclaw_engine::ResumeKind::External {
-                    callback_id: crate::bridge::external_tool_callback_id(&call_id),
-                },
-                None,
-                Some(lease.clone()),
-            ));
+        if let Some(catalog) = self.external_tool_catalog().await {
+            let mut hit = false;
+            for key in Self::external_tool_catalog_keys(context) {
+                if catalog.contains(key, action_name).await {
+                    hit = true;
+                    break;
+                }
+            }
+            if hit {
+                let call_id = context.current_call_id.as_deref().unwrap_or("").to_string();
+                return Err(Self::gate_paused(
+                    "external_tool",
+                    action_name,
+                    Some(call_id.as_str()),
+                    parameters,
+                    ironclaw_engine::ResumeKind::External {
+                        callback_id: crate::bridge::external_tool_callback_id(&call_id),
+                    },
+                    None,
+                    Some(lease.clone()),
+                ));
+            }
         }
 
         self.execute_action_internal(action_name, parameters, lease, context, false)
@@ -1907,8 +1931,22 @@ impl EffectExecutor for EffectBridgeAdapter {
         // rejected up-front by the Responses API handler, but the
         // dedup keeps a defensive ordering invariant: internal beats
         // external if they ever collide.
+        //
+        // The lookup walks both the engine `thread_id` and the
+        // caller-side `conversation_scope` because the responses_api
+        // handler registers under the latter and the bridge re-keys
+        // post-spawn. The executor task can poll
+        // `available_action_inventory` before the re-key lands, so we
+        // need both keys to close the race.
         if let Some(catalog) = self.external_tool_catalog().await {
-            let external = catalog.list(context.thread_id).await;
+            let mut external: Vec<ActionDef> = Vec::new();
+            for key in Self::external_tool_catalog_keys(context) {
+                let entries = catalog.list(key).await;
+                if !entries.is_empty() {
+                    external = entries;
+                    break;
+                }
+            }
             if !external.is_empty() {
                 let existing: std::collections::HashSet<&str> =
                     inventory.inline.iter().map(|a| a.name.as_str()).collect();
@@ -2933,6 +2971,7 @@ mod tests {
             thread_goal: Some("test goal".to_string()),
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            conversation_scope: None,
         }
     }
 
@@ -4699,6 +4738,7 @@ mod tests {
             ),
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            conversation_scope: None,
         };
 
         assert!(should_reject_immediate_mission_create(&ctx));
@@ -4720,6 +4760,7 @@ mod tests {
             ),
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            conversation_scope: None,
         };
 
         assert!(!should_reject_immediate_mission_create(&ctx));
@@ -4739,6 +4780,7 @@ mod tests {
             thread_goal: Some("Summarize every product feedback item right now.".to_string()),
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            conversation_scope: None,
         };
 
         assert!(should_reject_immediate_mission_create(&ctx));
@@ -4758,6 +4800,7 @@ mod tests {
             thread_goal: Some("Set up the product feedback summary right now.".to_string()),
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            conversation_scope: None,
         };
 
         assert!(should_reject_immediate_mission_create(&ctx));
@@ -4780,6 +4823,7 @@ mod tests {
             thread_goal: Some("Set up monitoring now.".to_string()),
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            conversation_scope: None,
         };
 
         // Should NOT be rejected — "monitoring" implies scheduling intent.
@@ -4800,6 +4844,7 @@ mod tests {
             thread_goal: Some("Summarize feedback immediately.".to_string()),
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            conversation_scope: None,
         };
 
         assert!(!should_reject_immediate_mission_create(&ctx));
@@ -5024,6 +5069,7 @@ mod tests {
                 thread_goal: Some(goal.to_string()),
                 available_actions_snapshot: None,
                 available_action_inventory_snapshot: None,
+                conversation_scope: None,
             }
         }
 
@@ -5353,6 +5399,7 @@ mod tests {
             thread_goal: None,
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            conversation_scope: None,
         };
 
         let result = adapter.execute_action("http", params, &lease, &ctx).await;
@@ -5466,6 +5513,7 @@ mod tests {
             thread_goal: None,
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            conversation_scope: None,
         };
 
         let result = adapter
@@ -5781,6 +5829,7 @@ mod tests {
             thread_goal: None,
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            conversation_scope: None,
         };
 
         let result = adapter
@@ -6378,6 +6427,7 @@ mod tests {
             thread_goal: None,
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            conversation_scope: None,
         };
 
         let capabilities = adapter
@@ -7929,5 +7979,143 @@ Use this skill to set up a Pika meeting.
             names.contains(&"safe_action"),
             "safe_action should surface through the engine capability path: {names:?}"
         );
+    }
+
+    /// Race-window regression: when the bridge has registered caller
+    /// tools under the conversation_scope (the responses_api handler's
+    /// pre-spawn key) and the engine task starts running before the
+    /// post-spawn `transfer` rebinds onto the engine `thread_id`, the
+    /// adapter must still surface those tools — looked up via the
+    /// `conversation_scope` field plumbed through `ThreadExecutionContext`.
+    #[tokio::test]
+    async fn available_action_inventory_falls_back_to_conversation_scope() {
+        let adapter = make_adapter();
+        let catalog = Arc::new(crate::bridge::ExternalToolCatalog::new());
+        adapter
+            .set_external_tool_catalog(Arc::clone(&catalog))
+            .await;
+
+        let scope_uuid = uuid::Uuid::new_v4();
+        let engine_thread_id = ironclaw_engine::ThreadId::new();
+        assert_ne!(
+            scope_uuid, engine_thread_id.0,
+            "test setup: scope and engine thread must differ"
+        );
+
+        catalog
+            .register(
+                ironclaw_engine::ThreadId(scope_uuid),
+                vec![ironclaw_engine::ActionDef {
+                    name: "lookup_weather".to_string(),
+                    description: "caller tool".to_string(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![ironclaw_engine::EffectType::Compute],
+                    requires_approval: false,
+                    model_tool_surface: ironclaw_engine::ModelToolSurface::FullSchema,
+                    discovery: None,
+                }],
+            )
+            .await;
+
+        let mut ctx = exec_ctx(engine_thread_id, None);
+        ctx.conversation_scope = Some(scope_uuid);
+
+        let inventory = adapter
+            .available_action_inventory(&[], &ctx)
+            .await
+            .expect("inventory");
+        assert!(
+            inventory.inline.iter().any(|a| a.name == "lookup_weather"),
+            "caller tool registered under scope must surface even before \
+             post-spawn transfer; inline = {:?}",
+            inventory
+                .inline
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Same race-window regression for `execute_action`: a tool name
+    /// registered under the conversation_scope must short-circuit to a
+    /// `GatePaused { External }` even when the engine `thread_id`
+    /// hasn't received the catalog entry yet.
+    #[tokio::test]
+    async fn execute_action_short_circuits_via_conversation_scope() {
+        let adapter = make_adapter();
+        let catalog = Arc::new(crate::bridge::ExternalToolCatalog::new());
+        adapter
+            .set_external_tool_catalog(Arc::clone(&catalog))
+            .await;
+
+        let scope_uuid = uuid::Uuid::new_v4();
+        let engine_thread_id = ironclaw_engine::ThreadId::new();
+        catalog
+            .register(
+                ironclaw_engine::ThreadId(scope_uuid),
+                vec![ironclaw_engine::ActionDef {
+                    name: "lookup_weather".to_string(),
+                    description: "caller tool".to_string(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![ironclaw_engine::EffectType::Compute],
+                    requires_approval: false,
+                    model_tool_surface: ironclaw_engine::ModelToolSurface::FullSchema,
+                    discovery: None,
+                }],
+            )
+            .await;
+
+        let mut ctx = exec_ctx(engine_thread_id, Some("call_xyz"));
+        ctx.conversation_scope = Some(scope_uuid);
+
+        let result = adapter
+            .execute_action(
+                "lookup_weather",
+                serde_json::json!({"city": "NYC"}),
+                &lease(),
+                &ctx,
+            )
+            .await;
+
+        match result {
+            Err(EngineError::GatePaused { resume_kind, .. }) => {
+                assert!(
+                    matches!(
+                        &*resume_kind,
+                        ironclaw_engine::ResumeKind::External { callback_id }
+                            if callback_id.starts_with("ext_tool:")
+                    ),
+                    "expected ResumeKind::External(ext_tool:...), got {resume_kind:?}"
+                );
+            }
+            other => {
+                panic!("expected GatePaused(External) when catalog hit via scope; got {other:?}")
+            }
+        }
+    }
+
+    /// Sanity guard: the keys helper yields the engine `thread_id`
+    /// first (so post-rebind lookups stay fast) and only emits the
+    /// `conversation_scope` when it differs. Same-key contexts must not
+    /// trigger a duplicate lookup.
+    #[test]
+    fn external_tool_catalog_keys_dedupes_when_scope_equals_thread() {
+        let thread_id = ironclaw_engine::ThreadId::new();
+
+        let mut ctx_no_scope = exec_ctx(thread_id, None);
+        ctx_no_scope.conversation_scope = None;
+        let keys: Vec<_> = EffectBridgeAdapter::external_tool_catalog_keys(&ctx_no_scope).collect();
+        assert_eq!(keys, vec![thread_id]);
+
+        let mut ctx_same = exec_ctx(thread_id, None);
+        ctx_same.conversation_scope = Some(thread_id.0);
+        let keys: Vec<_> = EffectBridgeAdapter::external_tool_catalog_keys(&ctx_same).collect();
+        assert_eq!(keys, vec![thread_id], "scope == thread must dedupe");
+
+        let mut ctx_diff = exec_ctx(thread_id, None);
+        let scope = uuid::Uuid::new_v4();
+        ctx_diff.conversation_scope = Some(scope);
+        let keys: Vec<_> = EffectBridgeAdapter::external_tool_catalog_keys(&ctx_diff).collect();
+        assert_eq!(keys, vec![thread_id, ironclaw_engine::ThreadId(scope)]);
     }
 }
