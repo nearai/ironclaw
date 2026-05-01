@@ -31,10 +31,7 @@ use ironclaw_processes::{
     ProcessStatus, ProcessStore,
 };
 use ironclaw_run_state::{ApprovalRequestStore, RunStateError, RunStateStore, RunStatus};
-use ironclaw_trust::{
-    AuthorityCeiling, EffectiveTrustClass, HostTrustPolicy, TrustDecision, TrustError, TrustPolicy,
-    TrustProvenance,
-};
+use ironclaw_trust::{HostTrustPolicy, TrustDecision, TrustError, TrustPolicy, TrustProvenance};
 
 use crate::{
     BuiltinObligationHandler, BuiltinObligationServices, CancelRuntimeWorkOutcome,
@@ -247,8 +244,7 @@ impl HostRuntime for DefaultHostRuntime {
         }
 
         let trust_decision = match self.evaluate_invocation_trust(&capability_id) {
-            Ok(Some(host_decision)) => host_decision,
-            Ok(None) => unknown_capability_trust_decision(),
+            Ok(host_decision) => host_decision,
             Err(error) => {
                 tracing::debug!(
                     capability_id = %capability_id,
@@ -484,12 +480,13 @@ impl DefaultHostRuntime {
     fn evaluate_invocation_trust(
         &self,
         capability_id: &CapabilityId,
-    ) -> Result<Option<TrustDecision>, TrustEvaluationError> {
+    ) -> Result<TrustDecision, TrustEvaluationError> {
         let policy = self.trust_policy.as_ref();
 
-        let Some(descriptor) = self.registry.get_capability(capability_id) else {
-            return Ok(None);
-        };
+        let descriptor = self
+            .registry
+            .get_capability(capability_id)
+            .ok_or(TrustEvaluationError::UnknownCapability)?;
         let package = self
             .registry
             .get_extension(&descriptor.provider)
@@ -516,7 +513,7 @@ impl DefaultHostRuntime {
             }
         };
         trace_trust_decision(capability_id, &decision);
-        Ok(Some(decision))
+        Ok(decision)
     }
 
     async fn translate_invocation_error(
@@ -582,6 +579,7 @@ impl DefaultHostRuntime {
 
 #[derive(Debug, Clone, Copy)]
 enum TrustEvaluationError {
+    UnknownCapability,
     MissingPackage,
     StalePackageDescriptor,
     ConflictingPackageDescriptor,
@@ -592,6 +590,7 @@ enum TrustEvaluationError {
 impl TrustEvaluationError {
     const fn kind(self) -> &'static str {
         match self {
+            Self::UnknownCapability => "unknown_capability",
             Self::MissingPackage => "missing_package",
             Self::StalePackageDescriptor => "stale_package_descriptor",
             Self::ConflictingPackageDescriptor => "conflicting_package_descriptor",
@@ -602,6 +601,7 @@ impl TrustEvaluationError {
 
     const fn message(self) -> &'static str {
         match self {
+            Self::UnknownCapability => "unknown capability",
             Self::MissingPackage => "capability provider trust metadata is missing",
             Self::StalePackageDescriptor | Self::ConflictingPackageDescriptor => {
                 "capability provider trust metadata is stale"
@@ -656,24 +656,26 @@ fn trust_error_label(error: &TrustError) -> &'static str {
     }
 }
 
-fn unknown_capability_trust_decision() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::sandbox(),
-        authority_ceiling: AuthorityCeiling::empty(),
-        provenance: TrustProvenance::Default,
-        evaluated_at: chrono::Utc::now(),
-    }
-}
-
 fn trust_evaluation_failure(
     capability_id: CapabilityId,
     error: TrustEvaluationError,
 ) -> RuntimeCapabilityOutcome {
     RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure {
         capability_id,
-        kind: RuntimeFailureKind::Authorization,
+        kind: trust_evaluation_failure_kind(error),
         message: Some(error.message().to_string()),
     })
+}
+
+fn trust_evaluation_failure_kind(error: TrustEvaluationError) -> RuntimeFailureKind {
+    match error {
+        TrustEvaluationError::UnknownCapability => RuntimeFailureKind::MissingRuntime,
+        TrustEvaluationError::MissingPackage
+        | TrustEvaluationError::StalePackageDescriptor
+        | TrustEvaluationError::ConflictingPackageDescriptor
+        | TrustEvaluationError::TrustInput
+        | TrustEvaluationError::Policy => RuntimeFailureKind::Authorization,
+    }
 }
 
 /// Maps a [`RunStateError`] to a sanitized [`HostRuntimeError::Unavailable`].
