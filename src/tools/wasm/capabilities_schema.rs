@@ -39,9 +39,23 @@ use crate::tools::wasm::{
     ToolInvokeCapability, WebhookCapability, WorkspaceCapability,
 };
 
+/// High-level permission tier declared by a capabilities file.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CapabilityTier {
+    Readonly,
+    Scoped,
+    #[default]
+    Full,
+}
+
 /// Root schema for a capabilities JSON file.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CapabilitiesFile {
+    /// High-level permission tier. Legacy files default to full.
+    #[serde(default)]
+    pub tier: CapabilityTier,
+
     /// Human-readable description of what the tool does.
     /// Used as the `Tool::description()` return value.
     /// If omitted, a generic fallback is used (with a warning).
@@ -160,6 +174,9 @@ impl CapabilitiesFile {
             let inner = inner.resolve_nested_inner(depth + 1);
             self.description = self.description.or(inner.description);
             self.discovery_summary = self.discovery_summary.or(inner.discovery_summary);
+            if self.tier == CapabilityTier::Full {
+                self.tier = inner.tier;
+            }
             self.http = self.http.or(inner.http);
             self.secrets = self.secrets.or(inner.secrets);
             self.tool_invoke = self.tool_invoke.or(inner.tool_invoke);

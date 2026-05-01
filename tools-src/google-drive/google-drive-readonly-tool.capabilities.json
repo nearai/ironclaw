@@ -1,19 +1,14 @@
 {
   "version": "0.2.0",
   "wit_version": "0.3.0",
-  "tier": "full",
-  "description": "Search, access, upload, share, and organize files and folders in Google Drive. Supports personal drives and shared (organizational) drives.",
+  "tier": "readonly",
+  "description": "Search, access, and download files and folders in Google Drive with read-only OAuth access. Supports personal drives and shared (organizational) drives.",
   "http": {
     "allowlist": [
       {
         "host": "www.googleapis.com",
         "path_prefix": "/drive/v3/",
-        "methods": ["GET", "POST", "PATCH", "DELETE"]
-      },
-      {
-        "host": "www.googleapis.com",
-        "path_prefix": "/upload/drive/v3/",
-        "methods": ["POST", "PUT"]
+        "methods": ["GET"]
       }
     ],
     "credentials": {
@@ -41,7 +36,7 @@
       "client_id_env": "GOOGLE_OAUTH_CLIENT_ID",
       "client_secret_env": "GOOGLE_OAUTH_CLIENT_SECRET",
       "scopes": [
-        "https://www.googleapis.com/auth/drive"
+        "https://www.googleapis.com/auth/drive.readonly"
       ],
       "use_pkce": false,
       "extra_params": {

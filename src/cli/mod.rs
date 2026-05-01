@@ -133,6 +133,7 @@ pub enum Command {
          Examples:\n  \
            ironclaw onboard                    # Full setup wizard\n  \
            ironclaw onboard --quick            # Quick: just provider + model\n  \
+           ironclaw onboard --step extensions --non-interactive  # Install default tools from env/defaults\n  \
            ironclaw onboard --step provider    # Change only the LLM provider\n  \
            ironclaw onboard --step channels    # Reconfigure messaging channels\n  \
            ironclaw onboard --step provider,model  # Change provider and model"
@@ -154,7 +155,11 @@ pub enum Command {
         #[arg(long, conflicts_with_all = ["channels_only", "provider_only", "step"])]
         quick: bool,
 
-        /// Run only specific setup steps (comma-separated: provider, channels, model, database, security)
+        /// Use environment/default choices for setup prompts where supported
+        #[arg(long)]
+        non_interactive: bool,
+
+        /// Run only specific setup steps (comma-separated: provider, channels, model, database, security, extensions)
         #[arg(long, value_delimiter = ',', conflicts_with_all = ["channels_only", "provider_only", "quick"])]
         step: Vec<String>,
     },
