@@ -267,6 +267,35 @@ impl TestRig {
         self.channel.send_incoming(msg).await;
     }
 
+    /// Cloneable handle to the underlying `TestChannel`. Used by tests that
+    /// need to spawn background helpers (e.g. an approval auto-responder)
+    /// without taking a reference to `TestRig` itself, which is not cloneable
+    /// (it owns the agent `JoinHandle` and a temp-dir guard).
+    pub fn channel_handle(&self) -> std::sync::Arc<crate::support::test_channel::TestChannel> {
+        self.channel.clone()
+    }
+
+    /// Resolve a tool-execution approval gate by submitting a typed
+    /// `Submission::ExecApproval`.
+    ///
+    /// The `request_id` must be a `Uuid` matching the `request_id` field on
+    /// a previously-emitted `StatusUpdate::ApprovalNeeded`. Tests usually
+    /// pull it from `captured_status_events()` after waiting for the gate.
+    pub async fn send_exec_approval(&self, request_id: uuid::Uuid, approved: bool, always: bool) {
+        let submission = ironclaw::agent::submission::Submission::ExecApproval {
+            request_id,
+            approved,
+            always,
+        };
+        let msg = ironclaw::channels::IncomingMessage::new(
+            self.channel.channel_name(),
+            self.channel.user_id(),
+            "",
+        )
+        .with_structured_submission(submission);
+        self.channel.send_incoming(msg).await;
+    }
+
     /// Resolve an OAuth-style gate by submitting a typed
     /// `Submission::ExternalCallback`.
     pub async fn send_external_callback(&self, request_id: uuid::Uuid) {
