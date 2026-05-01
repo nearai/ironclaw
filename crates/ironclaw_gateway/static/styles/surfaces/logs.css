@@ -135,4 +135,3 @@
 .log-entry.level-INFO .log-level { color: var(--text); }
 .log-entry.level-DEBUG .log-level { color: var(--text-secondary); }
 .log-entry.level-DEBUG .log-msg { color: var(--text-secondary); }
-

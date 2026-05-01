@@ -49,7 +49,7 @@ Yes! Zizmor ran successfully and found **many security issues** in your GitHub A
 ## 📊 Statistics:
 - **Total findings**: 100+ issues across 18 workflow files
 - **Errors**: ~15-20 critical issues
-- **Warnings**: ~10-15 medium issues  
+- **Warnings**: ~10-15 medium issues
 - **Help/Info**: 70+ low-priority issues
 
 ## ✅ Auto-fixes Available:

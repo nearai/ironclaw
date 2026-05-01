@@ -458,4 +458,3 @@ function appendToLastAssistant(chunk) {
 }
 
 // --- Inline Tool Activity Cards ---
-

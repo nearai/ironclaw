@@ -239,4 +239,3 @@ function deleteRoutine(id, name) {
 //
 // 4-layer control room: attention bar → project cards → drill-in → detail.
 // Replaces the legacy missions tab when ENGINE_V2 is enabled.
-

@@ -563,6 +563,29 @@
   gap: var(--space-4);
 }
 
+.configure-optional-group {
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-3);
+}
+
+.configure-optional-group summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  list-style-position: inside;
+}
+
+.configure-optional-group[open] summary {
+  margin-bottom: var(--space-3);
+}
+
+.configure-optional-fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
 .configure-field label {
   display: block;
   font-size: var(--text-sm);
@@ -590,6 +613,11 @@
 .configure-input-row input:focus {
   outline: none;
   border-color: var(--accent);
+}
+
+.configure-input-row input.configure-input-invalid {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.18);
 }
 
 .field-optional {

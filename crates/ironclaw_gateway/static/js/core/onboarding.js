@@ -786,4 +786,3 @@ function setAuthFlowPending(pending, instructions) {
     btn.disabled = false;
   }
 }
-

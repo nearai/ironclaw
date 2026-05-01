@@ -136,4 +136,3 @@ let missionProgressRefreshScheduled = false;
 let missionMappingRefreshTimer = null;
 let missionMappingsLastRefreshedAt = 0;
 let activityBarSnapshotInFlight = false;
-

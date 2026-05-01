@@ -2763,6 +2763,12 @@ impl SetupWizard {
 
         // Process selected WASM channels
         let mut enabled_wasm_channels = Vec::new();
+        let existing_runtime_overrides = self
+            .settings
+            .channels
+            .wasm_channel_runtime_overrides
+            .clone();
+        let mut enabled_runtime_overrides: HashMap<String, serde_json::Value> = HashMap::new();
         for channel_name in selected_wasm_channels {
             println!();
             if let Some(ref ctx) = secrets {
@@ -2777,6 +2783,7 @@ impl SetupWizard {
                         crate::setup::channels::WasmChannelSetupResult {
                             enabled: true,
                             channel_name: channel_name.clone(),
+                            config_overrides: HashMap::new(),
                         }
                     }
                 } else {
@@ -2788,7 +2795,22 @@ impl SetupWizard {
                 };
 
                 if result.enabled {
-                    enabled_wasm_channels.push(result.channel_name);
+                    let channel_name = result.channel_name;
+                    enabled_wasm_channels.push(channel_name.clone());
+                    let channel_overrides = if result.config_overrides.is_empty() {
+                        collect_wasm_channel_runtime_overrides_for_channel(
+                            &existing_runtime_overrides,
+                            &channel_name,
+                        )
+                    } else {
+                        result.config_overrides
+                    };
+                    for (config_key, value) in channel_overrides {
+                        enabled_runtime_overrides.insert(
+                            wasm_channel_runtime_override_key(&channel_name, &config_key),
+                            value,
+                        );
+                    }
                 }
             } else {
                 // No secrets context, just enable the channel
@@ -2797,10 +2819,21 @@ impl SetupWizard {
                     capitalize_first(&channel_name)
                 ));
                 enabled_wasm_channels.push(channel_name.clone());
+                let channel_overrides = collect_wasm_channel_runtime_overrides_for_channel(
+                    &existing_runtime_overrides,
+                    &channel_name,
+                );
+                for (config_key, value) in channel_overrides {
+                    enabled_runtime_overrides.insert(
+                        wasm_channel_runtime_override_key(&channel_name, &config_key),
+                        value,
+                    );
+                }
             }
         }
 
         self.settings.channels.wasm_channels = enabled_wasm_channels;
+        self.settings.channels.wasm_channel_runtime_overrides = enabled_runtime_overrides;
 
         Ok(())
     }
@@ -3784,6 +3817,26 @@ fn capitalize_first(s: &str) -> String {
         None => String::new(),
         Some(first) => first.to_uppercase().chain(chars).collect(),
     }
+}
+
+fn wasm_channel_runtime_override_key(channel_name: &str, config_key: &str) -> String {
+    format!("{}:{}", channel_name, config_key)
+}
+
+fn collect_wasm_channel_runtime_overrides_for_channel(
+    stored: &HashMap<String, serde_json::Value>,
+    channel_name: &str,
+) -> HashMap<String, serde_json::Value> {
+    let mut result = HashMap::new();
+    let prefix = format!("{channel_name}:");
+    for (key, value) in stored {
+        if let Some(config_key) = key.strip_prefix(&prefix)
+            && !config_key.trim().is_empty()
+        {
+            result.insert(config_key.to_string(), value.clone());
+        }
+    }
+    result
 }
 
 #[cfg(test)]

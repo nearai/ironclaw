@@ -156,4 +156,3 @@ document.getElementById('users-create-submit')?.addEventListener('click', functi
 });
 
 // --- Gateway status widget ---
-

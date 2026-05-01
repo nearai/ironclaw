@@ -74,5 +74,3 @@ async def test_v2_missions_tab_replaces_removed_activity_strip(
         timeout=5000,
     )
     await expect(summary).to_be_visible()
-
-

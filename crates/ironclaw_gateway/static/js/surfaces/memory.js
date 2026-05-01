@@ -240,4 +240,3 @@ function highlightQuery(text, query) {
   return escaped.replace(re, '<mark>$1</mark>');
 }
 // --- Logs ---
-

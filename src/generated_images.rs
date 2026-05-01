@@ -2,7 +2,12 @@
 
 use std::borrow::Cow;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use uuid::Uuid;
+
 pub(crate) const MAX_RECORDED_IMAGE_SENTINEL_BYTES: usize = 512 * 1024;
+pub(crate) const MAX_GENERATED_IMAGE_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 const MAX_EMBEDDED_JSON_STRING_LAYERS: usize = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -134,6 +139,75 @@ fn normalize_embedded_json(value: &serde_json::Value) -> Option<Cow<'_, serde_js
         );
     }
     Some(Cow::Owned(current))
+}
+
+pub(crate) fn generated_image_extension(media_type: &str) -> Result<&'static str, String> {
+    match media_type.trim().to_ascii_lowercase().as_str() {
+        "image/jpeg" | "image/jpg" => Ok("jpg"),
+        "image/png" | "" => Ok("png"),
+        "image/gif" => Ok("gif"),
+        "image/webp" => Ok("webp"),
+        other => Err(format!("unsupported generated image media type '{other}'")),
+    }
+}
+
+pub(crate) fn stage_generated_image_data_url(data_url: &str) -> Result<String, String> {
+    let (header, encoded) = data_url
+        .split_once(',')
+        .ok_or_else(|| "generated image data URL is missing a comma separator".to_string())?;
+    let metadata = header
+        .strip_prefix("data:")
+        .ok_or_else(|| "generated image data URL is missing data: prefix".to_string())?;
+    let mut parts = metadata.split(';');
+    let media_type = parts.next().unwrap_or("");
+    if !parts.any(|part| part.eq_ignore_ascii_case("base64")) {
+        return Err("generated image data URL is not base64 encoded".to_string());
+    }
+
+    let extension = generated_image_extension(media_type)?;
+    let bytes = BASE64_STANDARD
+        .decode(encoded.as_bytes())
+        .map_err(|e| format!("failed to decode generated image data URL: {e}"))?;
+    if bytes.len() > MAX_GENERATED_IMAGE_ATTACHMENT_BYTES {
+        return Err(format!(
+            "generated image exceeds {} MB channel delivery limit",
+            MAX_GENERATED_IMAGE_ATTACHMENT_BYTES / (1024 * 1024)
+        ));
+    }
+
+    let path = std::path::Path::new("/tmp").join(format!(
+        "ironclaw-generated-image-{}.{}",
+        Uuid::new_v4(),
+        extension
+    ));
+    std::fs::write(&path, bytes)
+        .map_err(|e| format!("failed to stage generated image '{}': {e}", path.display()))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+pub(crate) fn is_staged_generated_image_path(path: &str) -> bool {
+    let path = std::path::Path::new(path);
+    let is_tmp = path.parent() == Some(std::path::Path::new("/tmp"));
+    let is_generated = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("ironclaw-generated-image-"));
+    is_tmp && is_generated
+}
+
+pub(crate) fn remove_staged_generated_image_attachments(paths: &[String]) {
+    for path in paths {
+        if !is_staged_generated_image_path(path) {
+            continue;
+        }
+        if let Err(e) = std::fs::remove_file(path) {
+            tracing::debug!(
+                path = %path,
+                error = %e,
+                "Failed to remove staged generated image"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

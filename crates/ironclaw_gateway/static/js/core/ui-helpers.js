@@ -613,4 +613,3 @@ document.getElementById('settings-search-input').addEventListener('input', funct
 function apiFetchVoid(path, options) {
   return apiFetch(path, options).then(function() {});
 }
-

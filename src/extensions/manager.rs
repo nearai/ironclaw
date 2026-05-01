@@ -113,8 +113,154 @@ fn oauth_refresh_secret_name(secret_name: &str) -> String {
     format!("{}_refresh_token", secret_name.to_lowercase())
 }
 
+fn is_reserved_wasm_runtime_config_key(key: &str) -> bool {
+    matches!(
+        key,
+        crate::channels::wasm::RUNTIME_CONFIG_KEY_TUNNEL_URL
+            | crate::channels::wasm::RUNTIME_CONFIG_KEY_WEBHOOK_SECRET
+            | crate::channels::wasm::RUNTIME_CONFIG_KEY_OWNER_ID
+    )
+}
+
 fn oauth_scopes_secret_name(secret_name: &str) -> String {
     format!("{}_scopes", secret_name.to_lowercase())
+}
+
+const SETUP_SECRET_VALIDATION_PATTERN_MAX_BYTES: usize = 16 * 1024;
+const SETUP_SECRET_VALIDATION_REGEX_SIZE_LIMIT: usize = 1 << 20;
+const SETUP_SECRET_VALIDATION_REGEX_DFA_SIZE_LIMIT: usize = 1 << 20;
+const SETUP_VALIDATION_RESPONSE_BODY_MAX_BYTES: usize = 64 * 1024;
+
+fn validation_endpoint_placeholder_names(template: &str) -> std::collections::BTreeSet<String> {
+    let mut names = std::collections::BTreeSet::new();
+    let mut offset = 0;
+
+    while let Some(relative_start) = template[offset..].find('{') {
+        let start = offset + relative_start;
+        let value_start = start + 1;
+        let Some(relative_end) = template[value_start..].find('}') else {
+            break;
+        };
+        let end = value_start + relative_end;
+        let name = &template[value_start..end];
+        if !name.is_empty() && !name.contains(['{', '}']) {
+            names.insert(name.to_string());
+        }
+        offset = end + 1;
+    }
+
+    names
+}
+
+fn validation_endpoint_disallowed_placeholder<'a>(
+    placeholder_names: &'a std::collections::BTreeSet<String>,
+    allowed_secrets: &HashSet<String>,
+) -> Option<&'a str> {
+    placeholder_names
+        .iter()
+        .map(String::as_str)
+        .find(|name| !allowed_secrets.contains(*name))
+}
+
+fn validation_endpoint_body_error(body: &[u8]) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let errcode = parsed.get("errcode")?.as_i64()?;
+    if errcode == 0 {
+        return None;
+    }
+
+    let errmsg = parsed
+        .get("errmsg")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown error");
+    Some(format!(
+        "Validation endpoint returned errcode {errcode}: {errmsg}"
+    ))
+}
+
+fn validation_response_exceeds_limit(current_len: usize, chunk_len: usize, limit: usize) -> bool {
+    match current_len.checked_add(chunk_len) {
+        Some(total) => total > limit,
+        None => true,
+    }
+}
+
+async fn read_setup_validation_response_body(
+    response: &mut reqwest::Response,
+) -> Result<Vec<u8>, ExtensionError> {
+    if let Some(content_length) = response.content_length()
+        && content_length > SETUP_VALIDATION_RESPONSE_BODY_MAX_BYTES as u64
+    {
+        return Err(ExtensionError::Other(format!(
+            "Validation response exceeded {} bytes",
+            SETUP_VALIDATION_RESPONSE_BODY_MAX_BYTES
+        )));
+    }
+
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| ExtensionError::Other(format!("Failed to read validation response: {}", e)))?
+    {
+        if validation_response_exceeds_limit(
+            body.len(),
+            chunk.len(),
+            SETUP_VALIDATION_RESPONSE_BODY_MAX_BYTES,
+        ) {
+            return Err(ExtensionError::Other(format!(
+                "Validation response exceeded {} bytes",
+                SETUP_VALIDATION_RESPONSE_BODY_MAX_BYTES
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    Ok(body)
+}
+
+fn validate_setup_secret_value(
+    secret_name: &str,
+    value: &str,
+    validation: Option<&str>,
+) -> Result<(), ExtensionError> {
+    if value.chars().any(char::is_control) {
+        return Err(ExtensionError::ValidationFailed(format!(
+            "Secret '{}' contains disallowed control characters",
+            secret_name
+        )));
+    }
+
+    if let Some(pattern) = validation {
+        if pattern.len() > SETUP_SECRET_VALIDATION_PATTERN_MAX_BYTES {
+            return Err(ExtensionError::Config(format!(
+                "Validation pattern for secret '{}' is too large",
+                secret_name
+            )));
+        }
+
+        // Capabilities files may be installed from external packages. The
+        // regex crate matches in linear time, but compilation can still spend
+        // excessive memory on very large or accidentally complex patterns.
+        let re = regex::RegexBuilder::new(pattern)
+            .size_limit(SETUP_SECRET_VALIDATION_REGEX_SIZE_LIMIT)
+            .dfa_size_limit(SETUP_SECRET_VALIDATION_REGEX_DFA_SIZE_LIMIT)
+            .build()
+            .map_err(|e| {
+                ExtensionError::Config(format!(
+                    "Invalid validation pattern for secret '{}': {}",
+                    secret_name, e
+                ))
+            })?;
+        if !re.is_match(value) {
+            return Err(ExtensionError::ValidationFailed(format!(
+                "Secret '{}' does not match the expected format",
+                secret_name
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 fn normalize_oauth_callback_path(path: &str) -> String {
@@ -928,6 +1074,39 @@ impl ExtensionManager {
         name: &str,
     ) -> HashMap<String, serde_json::Value> {
         let mut overrides = HashMap::new();
+
+        if let Some(store) = self.settings_store() {
+            let prefix = format!("channels.wasm_channel_runtime_overrides.{name}:");
+            match store.get_all_settings(&self.user_id).await {
+                Ok(settings) => {
+                    for (setting_key, value) in settings {
+                        let Some(config_key) = setting_key.strip_prefix(&prefix) else {
+                            continue;
+                        };
+                        let config_key = config_key.trim();
+                        if config_key.is_empty() {
+                            continue;
+                        }
+                        if is_reserved_wasm_runtime_config_key(config_key) {
+                            tracing::warn!(
+                                channel = %name,
+                                key = %config_key,
+                                "Ignoring reserved wasm runtime config override key"
+                            );
+                            continue;
+                        }
+                        overrides.insert(config_key.to_string(), value);
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        channel = %name,
+                        error = %e,
+                        "Failed to load persisted wasm runtime config overrides"
+                    );
+                }
+            }
+        }
 
         if name == TELEGRAM_CHANNEL_NAME
             && let Some(store) = self.settings_store()
@@ -4216,14 +4395,21 @@ impl ExtensionManager {
             return ToolAuthState::NoAuth;
         }
 
-        let all_provided = futures::future::join_all(
-            required
-                .iter()
-                .map(|s| self.secrets.exists(user_id, &s.name)),
-        )
+        let all_provided = futures::future::join_all(required.iter().map(|secret| async move {
+            let decrypted = match self.secrets.get_decrypted(user_id, &secret.name).await {
+                Ok(secret_value) => secret_value,
+                Err(_) => return false,
+            };
+            validate_setup_secret_value(
+                &secret.name,
+                decrypted.expose(),
+                secret.validation.as_deref(),
+            )
+            .is_ok()
+        }))
         .await
         .into_iter()
-        .all(|r| r.unwrap_or(false));
+        .all(std::convert::identity);
 
         if all_provided {
             ToolAuthState::Ready
@@ -5958,6 +6144,7 @@ impl ExtensionManager {
         let webhook_secret_name = loaded.webhook_secret_name();
         let secret_header = loaded.webhook_secret_header().map(|s| s.to_string());
         let webhook_secret_managed_by_host = loaded.webhook_secret_managed_by_host();
+        let webhook_methods = loaded.webhook_methods();
         let sig_key_secret_name = loaded.signature_key_secret_name();
         let hmac_secret_name = loaded.hmac_secret_name();
         let secret_config_mappings = loaded
@@ -6018,7 +6205,7 @@ impl ExtensionManager {
             let endpoints = vec![RegisteredEndpoint {
                 channel_name: channel_name.clone(),
                 path: webhook_path,
-                methods: vec!["POST".to_string()],
+                methods: webhook_methods,
                 require_secret: host_webhook_secret.is_some(),
             }];
 
@@ -6955,6 +7142,7 @@ impl ExtensionManager {
                         name: secret.name.clone(),
                         prompt: secret.prompt.clone(),
                         optional: secret.optional,
+                        validation: secret.validation.clone(),
                         provided,
                         auto_generate: secret.auto_generate.is_some(),
                     });
@@ -6999,6 +7187,7 @@ impl ExtensionManager {
                             name: secret.name.clone(),
                             prompt: secret.prompt.clone(),
                             optional: secret.optional,
+                            validation: None,
                             provided,
                             auto_generate: false,
                         });
@@ -7082,7 +7271,8 @@ impl ExtensionManager {
         let kind = self.determine_installed_kind(&name, user_id).await?;
 
         // Load allowed secret names and tool setup field definitions from capabilities.
-        let mut channel_cap_file: Option<crate::channels::wasm::ChannelCapabilitiesFile> = None;
+        let mut channel_secret_defs: Vec<crate::channels::wasm::SecretSetupSchema> = Vec::new();
+        let mut channel_validation_endpoint: Option<String> = None;
         let (allowed_secrets, setup_fields): (
             std::collections::HashSet<String>,
             Vec<crate::tools::wasm::ToolFieldSetupSchema>,
@@ -7099,7 +7289,8 @@ impl ExtensionManager {
                     .iter()
                     .map(|s| s.name.clone())
                     .collect();
-                channel_cap_file = Some(cap_file);
+                channel_secret_defs = cap_file.setup.required_secrets.clone();
+                channel_validation_endpoint = cap_file.setup.validation_endpoint.clone();
                 (names, Vec::new())
             }
             ExtensionKind::WasmTool => {
@@ -7159,34 +7350,88 @@ impl ExtensionManager {
             .map(|f| (f.name.clone(), f))
             .collect();
 
+        let channel_secret_defs_by_name: std::collections::HashMap<
+            String,
+            crate::channels::wasm::SecretSetupSchema,
+        > = channel_secret_defs
+            .iter()
+            .cloned()
+            .map(|secret| (secret.name.clone(), secret))
+            .collect();
+
+        for (secret_name, secret_value) in secrets {
+            let trimmed_value = secret_value.trim();
+            if trimmed_value.is_empty() {
+                continue;
+            }
+            if let Some(secret_def) = channel_secret_defs_by_name.get(secret_name) {
+                validate_setup_secret_value(
+                    secret_name,
+                    trimmed_value,
+                    secret_def.validation.as_deref(),
+                )?;
+            }
+        }
+
         // Validate secrets against the validation_endpoint if declared in capabilities.
-        // The endpoint URL template uses {secret_name} placeholders that are
-        // substituted with the provided secret value before making the request.
-        // Skip for Telegram — validate_telegram_token() below does the same getMe
-        // call but also extracts bot_username, avoiding a redundant API round-trip.
+        // The endpoint URL template uses {secret_name} placeholders and resolves
+        // them from submitted values first, then falls back to stored secrets.
+        // Skip Telegram because validate_telegram_token() below performs getMe
+        // and extracts bot_username without a redundant round-trip.
         if name != TELEGRAM_CHANNEL_NAME
-            && let Some(ref cap_file) = channel_cap_file
-            && let Some(ref endpoint_template) = cap_file.setup.validation_endpoint
-            && let Some(secret_def) = cap_file
-                .setup
-                .required_secrets
-                .iter()
-                .find(|s| !s.optional && secrets.contains_key(&s.name))
-            && let Some(token_value) = secrets.get(&secret_def.name)
+            && let Some(ref endpoint_template) = channel_validation_endpoint
         {
-            let token = token_value.trim();
-            if !token.is_empty() {
-                let encoded =
-                    url::form_urlencoded::byte_serialize(token.as_bytes()).collect::<String>();
-                let url = endpoint_template.replace(&format!("{{{}}}", secret_def.name), &encoded);
-                // SSRF defense: block private IPs, localhost, cloud metadata endpoints
-                crate::tools::builtin::skill_tools::validate_fetch_url(&url)
+            let placeholder_names = validation_endpoint_placeholder_names(endpoint_template);
+            if let Some(secret_name) =
+                validation_endpoint_disallowed_placeholder(&placeholder_names, &allowed_secrets)
+            {
+                return Err(ExtensionError::Other(format!(
+                    "Validation endpoint for extension '{name}' references undeclared secret placeholder '{secret_name}'"
+                )));
+            }
+
+            let mut validation_url = endpoint_template.to_string();
+            let mut all_placeholders_resolved = true;
+
+            for secret_name in &placeholder_names {
+                let resolved_value = if let Some(value) = secrets
+                    .get(secret_name.as_str())
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+                {
+                    Some(value)
+                } else {
+                    self.secrets
+                        .get_decrypted(user_id, secret_name)
+                        .await
+                        .ok()
+                        .map(|secret| secret.expose().trim().to_string())
+                        .filter(|value| !value.is_empty())
+                };
+
+                let Some(secret_value) = resolved_value else {
+                    all_placeholders_resolved = false;
+                    break;
+                };
+
+                let encoded = if name == TELEGRAM_CHANNEL_NAME
+                    && secret_name.as_str() == "telegram_bot_token"
+                {
+                    secret_value
+                } else {
+                    url::form_urlencoded::byte_serialize(secret_value.as_bytes()).collect()
+                };
+                validation_url = validation_url.replace(&format!("{{{secret_name}}}"), &encoded);
+            }
+
+            if all_placeholders_resolved {
+                crate::tools::builtin::skill_tools::validate_fetch_url(&validation_url)
                     .map_err(|e| ExtensionError::Other(format!("SSRF blocked: {}", e)))?;
-                let resp = reqwest::Client::builder()
+                let mut response = reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(10))
                     .build()
                     .map_err(|e| ExtensionError::Other(e.to_string()))?
-                    .get(&url)
+                    .get(&validation_url)
                     .send()
                     .await
                     .map_err(|e| {
@@ -7200,11 +7445,16 @@ impl ExtensionManager {
                         );
                         ExtensionError::Other("Token validation request failed".to_string())
                     })?;
-                if !resp.status().is_success() {
+                let status = response.status();
+                if !status.is_success() {
                     return Err(ExtensionError::ValidationFailed(format!(
                         "Invalid token (API returned {})",
-                        resp.status()
+                        status
                     )));
+                }
+                let body = read_setup_validation_response_body(&mut response).await?;
+                if let Some(error) = validation_endpoint_body_error(&body) {
+                    return Err(ExtensionError::ValidationFailed(error));
                 }
             }
         }
@@ -7305,8 +7555,8 @@ impl ExtensionManager {
         }
 
         // Auto-generate any missing secrets (channel-only feature)
-        if let Some(ref cap_file) = channel_cap_file {
-            for secret_def in &cap_file.setup.required_secrets {
+        if kind == ExtensionKind::WasmChannel {
+            for secret_def in &channel_secret_defs {
                 if let Some(ref auto_gen) = secret_def.auto_generate {
                     let already_provided = secrets
                         .get(&secret_def.name)
@@ -7334,6 +7584,26 @@ impl ExtensionManager {
                             name
                         );
                     }
+                }
+            }
+
+            for secret_def in &channel_secret_defs {
+                if secret_def.optional {
+                    continue;
+                }
+                let submitted = secrets
+                    .get(&secret_def.name)
+                    .is_some_and(|v| !v.trim().is_empty());
+                let stored = self
+                    .secrets
+                    .exists(user_id, &secret_def.name)
+                    .await
+                    .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
+                if !submitted && !stored {
+                    return Err(ExtensionError::ValidationFailed(format!(
+                        "Required secret '{}' is missing for extension '{}'",
+                        secret_def.name, name
+                    )));
                 }
             }
         }
@@ -11959,6 +12229,178 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_configure_wasm_channel_rejects_invalid_secret_format() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let channels_dir = dir.path().join("channels");
+        std::fs::create_dir_all(&channels_dir).expect("channels dir");
+
+        std::fs::write(channels_dir.join("wecom.wasm"), b"\0asm fake").expect("write wasm");
+        let caps = serde_json::json!({
+            "type": "channel",
+            "name": "wecom",
+            "setup": {
+                "required_secrets": [
+                    {
+                        "name": "wecom_corp_id",
+                        "prompt": "Enter your WeCom Corp ID",
+                        "validation": "^ww[a-zA-Z0-9]{16}$"
+                    }
+                ]
+            }
+        });
+        std::fs::write(
+            channels_dir.join("wecom.capabilities.json"),
+            serde_json::to_string(&caps).expect("serialize caps"),
+        )
+        .expect("write capabilities");
+
+        let mgr = make_manager_custom_dirs(dir.path().join("tools"), channels_dir);
+        let err = mgr
+            .configure(
+                "wecom",
+                &std::collections::HashMap::from([(
+                    "wecom_corp_id".to_string(),
+                    "not-a-corp-id".to_string(),
+                )]),
+                &std::collections::HashMap::new(),
+                "test",
+            )
+            .await
+            .expect_err("invalid corp id should fail validation");
+
+        assert!(
+            matches!(err, ExtensionError::ValidationFailed(_)),
+            "expected ValidationFailed, got {err:?}"
+        );
+        assert!(
+            !mgr.secrets
+                .exists("test", "wecom_corp_id")
+                .await
+                .unwrap_or(true),
+            "invalid secret must not be persisted"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_channel_auth_status_treats_invalid_stored_secret_as_needs_setup() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let channels_dir = dir.path().join("channels");
+        std::fs::create_dir_all(&channels_dir).expect("channels dir");
+
+        std::fs::write(channels_dir.join("wecom.wasm"), b"\0asm fake").expect("write wasm");
+        let caps = serde_json::json!({
+            "type": "channel",
+            "name": "wecom",
+            "setup": {
+                "required_secrets": [
+                    {
+                        "name": "wecom_callback_encoding_aes_key",
+                        "prompt": "Enter your WeCom callback EncodingAESKey",
+                        "validation": "^[A-Za-z0-9]{43}$"
+                    }
+                ]
+            }
+        });
+        std::fs::write(
+            channels_dir.join("wecom.capabilities.json"),
+            serde_json::to_string(&caps).expect("serialize caps"),
+        )
+        .expect("write capabilities");
+
+        let mgr = make_manager_custom_dirs(dir.path().join("tools"), channels_dir);
+        mgr.secrets
+            .create(
+                "test",
+                crate::secrets::CreateSecretParams::new(
+                    "wecom_callback_encoding_aes_key",
+                    "bad key with spaces",
+                ),
+            )
+            .await
+            .expect("store invalid secret");
+
+        assert_eq!(
+            mgr.check_channel_auth_status("wecom", "test").await,
+            ToolAuthState::NeedsSetup
+        );
+    }
+
+    #[test]
+    fn validation_endpoint_body_error_extracts_errcode_message() {
+        let error = super::validation_endpoint_body_error(
+            br#"{"errcode":40013,"errmsg":"invalid corpid"}"#,
+        )
+        .expect("wecom errcode should be treated as failure");
+        assert_eq!(
+            error,
+            "Validation endpoint returned errcode 40013: invalid corpid"
+        );
+        assert!(super::validation_endpoint_body_error(br#"{"errcode":0,"errmsg":"ok"}"#).is_none());
+    }
+
+    #[test]
+    fn validation_response_exceeds_limit_detects_chunk_overflow() {
+        assert!(!super::validation_response_exceeds_limit(10, 20, 30));
+        assert!(super::validation_response_exceeds_limit(10, 21, 30));
+        assert!(super::validation_response_exceeds_limit(usize::MAX, 1, 30));
+    }
+
+    #[test]
+    fn validate_setup_secret_value_accepts_bounded_validation_pattern() {
+        assert!(
+            super::validate_setup_secret_value("wecom_corp_id", "ww123abc", Some(r"^ww[a-z0-9]+$"))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_setup_secret_value_rejects_oversized_validation_pattern() {
+        let pattern = "a".repeat(super::SETUP_SECRET_VALIDATION_PATTERN_MAX_BYTES + 1);
+        let err = super::validate_setup_secret_value("wecom_corp_id", "ww123abc", Some(&pattern))
+            .expect_err("oversized validation pattern should fail closed");
+
+        assert!(
+            matches!(&err, ExtensionError::Config(message) if message.contains("too large")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn validation_endpoint_placeholder_names_extracts_unique_names_without_regex() {
+        let names = super::validation_endpoint_placeholder_names(
+            "https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid={wecom_corp_id}&corpsecret={wecom_corp_secret}&again={wecom_corp_id}",
+        );
+
+        assert_eq!(
+            names.into_iter().collect::<Vec<_>>(),
+            vec!["wecom_corp_id".to_string(), "wecom_corp_secret".to_string()]
+        );
+    }
+
+    #[test]
+    fn validation_endpoint_disallowed_placeholder_rejects_undeclared_secret_names() {
+        let placeholders = std::collections::BTreeSet::from([
+            "openai_api_key".to_string(),
+            "wecom_corp_id".to_string(),
+        ]);
+        let allowed = std::collections::HashSet::from(["wecom_corp_id".to_string()]);
+
+        assert_eq!(
+            super::validation_endpoint_disallowed_placeholder(&placeholders, &allowed),
+            Some("openai_api_key")
+        );
+
+        let allowed = std::collections::HashSet::from([
+            "openai_api_key".to_string(),
+            "wecom_corp_id".to_string(),
+        ]);
+        assert_eq!(
+            super::validation_endpoint_disallowed_placeholder(&placeholders, &allowed),
+            None
+        );
+    }
+
+    #[tokio::test]
     async fn test_auth_is_read_only_for_wasm_channel() {
         // Regression: auth() must be a pure status check — it must not store
         // any secrets or modify state. The old API accepted a token parameter.
@@ -12102,6 +12544,47 @@ mod tests {
             serde_json::json!("Verification received. Finishing setup..."),
             "text",
         )
+    }
+
+    #[tokio::test]
+    async fn test_configure_rejects_missing_required_channel_secret() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let channels_dir = dir.path().join("channels");
+        std::fs::create_dir_all(&channels_dir).unwrap();
+        std::fs::write(channels_dir.join("test-channel.wasm"), b"\0asm fake").unwrap();
+        std::fs::write(
+            channels_dir.join("test-channel.capabilities.json"),
+            serde_json::json!({
+                "type": "channel",
+                "name": "test-channel",
+                "setup": {
+                    "required_secrets": [
+                        {
+                            "name": "test_channel_token",
+                            "prompt": "Enter token",
+                            "optional": false
+                        }
+                    ]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let mgr = make_manager_custom_dirs(dir.path().join("tools"), channels_dir);
+        let result = mgr
+            .configure(
+                "test-channel",
+                &std::collections::HashMap::new(),
+                &std::collections::HashMap::new(),
+                "test",
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(ExtensionError::ValidationFailed(_))),
+            "missing required channel secret should be a validation error: {result:?}"
+        );
     }
 
     #[tokio::test]

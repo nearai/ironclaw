@@ -437,6 +437,14 @@ pub struct ChannelSettings {
     #[serde(default)]
     pub wasm_channel_owner_ids: std::collections::HashMap<String, i64>,
 
+    /// Runtime config overrides for WASM channels.
+    ///
+    /// Keys use `<channel>:<config_key>` format (for example,
+    /// `wecom:allow_from`), and values are passed to the channel config as
+    /// JSON values.
+    #[serde(default)]
+    pub wasm_channel_runtime_overrides: std::collections::HashMap<String, serde_json::Value>,
+
     /// Enabled WASM channels by name.
     /// Primarily used by the setup wizard to track which channels were configured.
     ///
@@ -478,6 +486,7 @@ impl Default for ChannelSettings {
             signal_group_policy: None,
             signal_group_allow_from: None,
             wasm_channel_owner_ids: std::collections::HashMap::new(),
+            wasm_channel_runtime_overrides: std::collections::HashMap::new(),
             wasm_channels: Vec::new(),
             wasm_channels_enabled: true,
             wasm_channels_dir: None,
@@ -1585,6 +1594,54 @@ mod tests {
         assert_eq!(
             settings.channels.wasm_channel_owner_ids.get("telegram"),
             Some(&987654321)
+        );
+    }
+
+    #[test]
+    fn test_wasm_channel_runtime_overrides_db_round_trip() {
+        let mut settings = Settings::default();
+        settings.channels.wasm_channel_runtime_overrides.insert(
+            "wecom:dm_policy".to_string(),
+            serde_json::json!("allowlist"),
+        );
+        settings.channels.wasm_channel_runtime_overrides.insert(
+            "wecom:allow_from".to_string(),
+            serde_json::json!(["zhangsan", "lisi"]),
+        );
+
+        let map = settings.to_db_map();
+        let restored = Settings::from_db_map(&map);
+        assert_eq!(
+            restored
+                .channels
+                .wasm_channel_runtime_overrides
+                .get("wecom:dm_policy"),
+            Some(&serde_json::json!("allowlist"))
+        );
+        assert_eq!(
+            restored
+                .channels
+                .wasm_channel_runtime_overrides
+                .get("wecom:allow_from"),
+            Some(&serde_json::json!(["zhangsan", "lisi"]))
+        );
+    }
+
+    #[test]
+    fn test_wasm_channel_runtime_overrides_via_set() {
+        let mut settings = Settings::default();
+        settings
+            .set(
+                "channels.wasm_channel_runtime_overrides.wecom:allow_from",
+                "[\"zhangsan\"]",
+            )
+            .unwrap();
+        assert_eq!(
+            settings
+                .channels
+                .wasm_channel_runtime_overrides
+                .get("wecom:allow_from"),
+            Some(&serde_json::json!(["zhangsan"]))
         );
     }
 

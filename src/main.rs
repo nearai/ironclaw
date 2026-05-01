@@ -403,8 +403,10 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Initialize tracing with a reloadable EnvFilter so the gateway can switch
     // log levels at runtime without restarting.
-    let suppress_stderr =
-        config.channels.tui.is_some() && cli.message.is_none() && cfg!(feature = "tui");
+    let suppress_stderr = config.channels.cli.enabled
+        && config.channels.tui.is_some()
+        && cli.message.is_none()
+        && cfg!(feature = "tui");
     let log_level_handle = ironclaw::channels::web::log_layer::init_tracing(
         Arc::clone(&log_broadcaster),
         suppress_stderr,
@@ -510,7 +512,7 @@ async fn async_main() -> anyhow::Result<()> {
     )> = None;
 
     // Create CLI channel (REPL or TUI — mutually exclusive, both claim stdin)
-    let tui_mode = config.channels.tui.is_some();
+    let tui_mode = config.channels.cli.enabled && config.channels.tui.is_some();
 
     #[cfg(feature = "tui")]
     if tui_mode && cli.message.is_none() {

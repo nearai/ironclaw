@@ -502,8 +502,24 @@ I18n.register('zh-CN', {
   'config.alreadySet': '（已设置 — 留空以保持不变）',
   'config.alreadyConfigured': '已配置',
   'config.autoGenerate': '如果为空则自动生成',
+  'config.optionalSection': '可选设置',
+  'config.optionalSectionSummary': '可选设置（{count} 项）',
+  'config.requiredFieldMissing': '请填写{name}。',
+  'config.invalidField': '{name}格式不正确。',
+  'config.controlCharsNotAllowed': '{name}不能包含控制字符。',
+  'config.requiredPlaceholder': '必填',
+  'config.optionalPlaceholder': '可选',
   'config.save': '保存',
   'config.cancel': '取消',
+
+  // 设置字段
+  'setup.secret.wecom_bot_id': '机器人 ID',
+  'setup.secret.wecom_bot_secret': '机器人 Secret',
+  'setup.secret.wecom_corp_id': '企业 ID',
+  'setup.secret.wecom_corp_secret': '自建应用 Secret',
+  'setup.secret.wecom_agent_id': 'Agent ID',
+  'setup.secret.wecom_callback_token': '回调 Token',
+  'setup.secret.wecom_callback_encoding_aes_key': '回调 EncodingAESKey',
 
   // 设置工具栏
   'settings.export': '导出',
