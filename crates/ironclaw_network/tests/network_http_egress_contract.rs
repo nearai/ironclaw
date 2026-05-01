@@ -44,6 +44,7 @@ fn http_egress_authorizes_default_https_port_and_pins_resolved_ip() {
             body: vec![],
             policy: policy("api.example.test", Some(443), true, None),
             response_body_limit: Some(1024),
+            timeout_ms: None,
         })
         .expect("default HTTPS port should satisfy a 443 policy");
 
@@ -52,6 +53,42 @@ fn http_egress_authorizes_default_https_port_and_pins_resolved_ip() {
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].resolved_ips, resolved_ips);
     assert_eq!(requests[0].response_body_limit, Some(1024));
+}
+
+#[test]
+fn http_egress_forwards_timeout_to_transport() {
+    let transport = RecordingTransport::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: b"ok".to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 0,
+            response_bytes: 2,
+            resolved_ip: None,
+        },
+    });
+    let requests = transport.requests.clone();
+    let egress = PolicyNetworkHttpEgress::new_with_resolver(
+        transport,
+        StaticResolver::new(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]),
+    );
+
+    egress
+        .execute(NetworkHttpRequest {
+            scope: sample_scope(),
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1".to_string(),
+            headers: vec![],
+            body: vec![],
+            policy: policy("api.example.test", Some(443), true, None),
+            response_body_limit: Some(1024),
+            timeout_ms: Some(250),
+        })
+        .expect("network response should be returned");
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].timeout_ms, Some(250));
 }
 
 #[test]
@@ -77,6 +114,7 @@ fn http_egress_denies_private_resolved_host_before_transport() {
             body: b"hello".to_vec(),
             policy: policy("api.example.test", Some(443), true, Some(1024)),
             response_body_limit: Some(1024),
+            timeout_ms: None,
         })
         .expect_err("private resolved targets should fail closed");
 
@@ -108,6 +146,7 @@ fn http_egress_counts_url_and_headers_in_policy_egress_estimate_before_transport
             body: vec![],
             policy: policy("api.example.test", Some(443), true, Some(4)),
             response_body_limit: Some(1024),
+            timeout_ms: None,
         })
         .expect_err("URL and headers must count toward egress policy estimates");
 
@@ -139,6 +178,7 @@ fn http_egress_rejects_caller_provided_host_header_before_transport() {
             body: vec![],
             policy: policy("api.example.test", Some(443), true, Some(1024)),
             response_body_limit: Some(1024),
+            timeout_ms: None,
         })
         .expect_err("caller-provided Host should not be forwarded after URL policy validation");
 
@@ -171,6 +211,7 @@ fn http_egress_rejects_userinfo_url_before_transport() {
             body: vec![],
             policy: policy("api.example.test", Some(443), true, Some(1024)),
             response_body_limit: Some(1024),
+            timeout_ms: None,
         })
         .expect_err("userinfo credentials in URLs must fail before policy/DNS/transport");
 
@@ -195,6 +236,7 @@ fn reqwest_transport_does_not_follow_redirects() {
             body: vec![],
             policy: policy("127.0.0.1", None, false, None),
             response_body_limit: Some(1024),
+            timeout_ms: None,
         })
         .expect("redirect responses should be returned, not followed");
     server.join().unwrap();
@@ -223,6 +265,7 @@ fn reqwest_transport_uses_all_resolved_addresses_for_connection_fallback() {
                 IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
             ],
             response_body_limit: Some(1024),
+            timeout_ms: None,
         })
         .expect("transport should allow connector fallback across resolved addresses");
     server.join().unwrap();
@@ -246,6 +289,7 @@ fn reqwest_transport_enforces_streaming_response_limit_separately_from_request_b
             body: b"hello".to_vec(),
             policy: policy("127.0.0.1", None, false, Some(1024)),
             response_body_limit: Some(5),
+            timeout_ms: None,
         })
         .expect_err("response body limit should stop reads after the limit");
     server.join().unwrap();
@@ -269,6 +313,7 @@ fn reqwest_transport_clamps_oversized_explicit_response_limit_to_safe_default() 
             body: vec![],
             resolved_ips: vec![IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))],
             response_body_limit: Some(DEFAULT_RESPONSE_BODY_LIMIT + 1024),
+            timeout_ms: None,
         })
         .expect_err("oversized explicit response limits should still be clamped");
     server.join().unwrap();
@@ -297,6 +342,7 @@ fn reqwest_transport_clamps_unspecified_response_limit_to_safe_default() {
             body: vec![],
             resolved_ips: vec![IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))],
             response_body_limit: None,
+            timeout_ms: None,
         })
         .expect_err("unspecified response limits should still be bounded");
     server.join().unwrap();

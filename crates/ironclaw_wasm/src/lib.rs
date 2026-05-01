@@ -17,8 +17,10 @@ pub use config::{WIT_TOOL_VERSION, WitToolLimits, WitToolRuntimeConfig};
 pub use error::{WasmError, WasmHostError};
 pub use host::{
     DenyWasmHostHttp, DenyWasmHostSecrets, DenyWasmHostTools, DenyWasmHostWorkspace,
-    RecordingWasmHostHttp, SystemWasmHostClock, WasmHostClock, WasmHostHttp, WasmHostSecrets,
-    WasmHostTools, WasmHostWorkspace, WasmHttpRequest, WasmHttpResponse, WitToolHost,
+    EmptyWasmRuntimeCredentials, RecordingWasmHostHttp, SystemWasmHostClock, WasmHostClock,
+    WasmHostHttp, WasmHostSecrets, WasmHostTools, WasmHostWorkspace, WasmHttpRequest,
+    WasmHttpResponse, WasmRuntimeCredentialProvider, WasmRuntimeCredentialRequest,
+    WasmRuntimeHttpAdapter, WitToolHost,
 };
 pub use runtime::WitToolRuntime;
 pub use types::{PreparedWitTool, WasmLogLevel, WasmLogRecord, WitToolExecution, WitToolRequest};

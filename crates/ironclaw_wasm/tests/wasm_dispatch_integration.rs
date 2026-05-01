@@ -16,8 +16,7 @@ use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_resources::*;
 use ironclaw_wasm::{
-    PreparedWitTool, RecordingWasmHostHttp, WasmHttpResponse, WitToolHost, WitToolRequest,
-    WitToolRuntime,
+    PreparedWitTool, WasmRuntimeHttpAdapter, WitToolHost, WitToolRequest, WitToolRuntime,
 };
 use serde_json::{Value, json};
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
@@ -126,13 +125,20 @@ async fn wasm_lane_execution_failure_reconciles_preserved_usage_from_runtime() {
     let registry = Arc::new(registry_with_package(WASM_HTTP_TRAP_MANIFEST));
     let governor = Arc::new(governor_with_default_limit(sample_account()));
     let events = InMemoryEventSink::new();
-    let http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+    let http = Arc::new(RecordingRuntimeEgress::ok(RuntimeHttpEgressResponse {
         status: 200,
-        headers_json: "{}".to_string(),
+        headers: vec![],
         body: Vec::new(),
+        request_bytes: 5,
+        response_bytes: 0,
+        redaction_applied: false,
     }));
+    let wasm_http = Arc::new(
+        WasmRuntimeHttpAdapter::new(Arc::clone(&http), sample_scope(), wasm_http_policy())
+            .with_response_body_limit(Some(4096)),
+    );
     let adapter = Arc::new(WasmRuntimeAdapter::with_host(
-        WitToolHost::deny_all().with_http(Arc::clone(&http)),
+        WitToolHost::deny_all().with_http(wasm_http),
     ));
     let dispatcher = RuntimeDispatcher::from_arcs(registry, Arc::new(fs), Arc::clone(&governor))
         .with_runtime_adapter_arc(RuntimeKind::Wasm, adapter)
@@ -152,7 +158,13 @@ async fn wasm_lane_execution_failure_reconciles_preserved_usage_from_runtime() {
             kind: RuntimeDispatchErrorKind::Guest
         }
     ));
-    assert_eq!(http.requests().unwrap().len(), 1);
+    let http_requests = http.requests.lock().unwrap();
+    assert_eq!(http_requests.len(), 1);
+    assert_eq!(http_requests[0].runtime, RuntimeKind::Wasm);
+    assert_eq!(http_requests[0].method, NetworkMethod::Post);
+    assert_eq!(http_requests[0].url, "https://example.test/api");
+    assert_eq!(http_requests[0].body, b"hello");
+    assert_eq!(http_requests[0].response_body_limit, Some(4096));
     assert_eq!(
         governor.reserved_for(&sample_account()),
         ResourceTally::default()
@@ -320,6 +332,31 @@ async fn wasm_lane_invalid_output_json_returns_sanitized_output_error() {
     );
     let recorded = events.events();
     assert_eq!(recorded[2].error_kind.as_deref(), Some("output_decode"));
+}
+
+#[derive(Clone)]
+struct RecordingRuntimeEgress {
+    response: Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError>,
+    requests: Arc<Mutex<Vec<RuntimeHttpEgressRequest>>>,
+}
+
+impl RecordingRuntimeEgress {
+    fn ok(response: RuntimeHttpEgressResponse) -> Self {
+        Self {
+            response: Ok(response),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+impl RuntimeHttpEgress for RecordingRuntimeEgress {
+    fn execute(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        self.requests.lock().unwrap().push(request);
+        self.response.clone()
+    }
 }
 
 struct WasmRuntimeAdapter {
@@ -590,6 +627,18 @@ fn sample_scope() -> ResourceScope {
 
 fn sample_account() -> ResourceAccount {
     ResourceAccount::tenant(TenantId::new("tenant-a").unwrap())
+}
+
+fn wasm_http_policy() -> NetworkPolicy {
+    NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: "example.test".to_string(),
+            port: None,
+        }],
+        deny_private_ip_ranges: true,
+        max_egress_bytes: Some(4096),
+    }
 }
 
 fn assert_event_kinds(events: &InMemoryEventSink, expected: &[RuntimeEventKind]) {

@@ -51,6 +51,7 @@ pub struct NetworkHttpRequest {
     pub body: Vec<u8>,
     pub policy: NetworkPolicy,
     pub response_body_limit: Option<u64>,
+    pub timeout_ms: Option<u32>,
 }
 
 /// Transport request after policy, URL, DNS, and private-IP checks succeed.
@@ -62,6 +63,7 @@ pub struct NetworkTransportRequest {
     pub body: Vec<u8>,
     pub resolved_ips: Vec<IpAddr>,
     pub response_body_limit: Option<u64>,
+    pub timeout_ms: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -279,6 +281,7 @@ where
             body: request.body,
             resolved_ips,
             response_body_limit: request.response_body_limit,
+            timeout_ms: request.timeout_ms,
         };
         let mut response = self.transport.execute(transport_request)?;
         response.usage.request_bytes = response.usage.request_bytes.max(request_body_bytes);
@@ -412,7 +415,7 @@ impl NetworkHttpTransport for ReqwestNetworkTransport {
                 host,
                 port,
                 resolved_addrs,
-                timeout: self.timeout,
+                timeout: effective_request_timeout(request.timeout_ms, self.timeout),
             },
             request_bytes,
         )?;
@@ -780,6 +783,12 @@ fn effective_response_body_limit(requested: Option<u64>) -> u64 {
         .min(MAX_RESPONSE_BODY_LIMIT)
 }
 
+fn effective_request_timeout(requested_ms: Option<u32>, default: Duration) -> Duration {
+    requested_ms
+        .map(|timeout_ms| Duration::from_millis(u64::from(timeout_ms.max(1))).min(default))
+        .unwrap_or(default)
+}
+
 fn reject_caller_host_header(headers: &[(String, String)]) -> Result<(), NetworkHttpError> {
     if headers
         .iter()
@@ -845,6 +854,26 @@ fn reqwest_method(method: NetworkMethod) -> reqwest::Method {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effective_request_timeout_clamps_requested_timeout_to_transport_default() {
+        assert_eq!(
+            effective_request_timeout(Some(60_000), Duration::from_secs(30)),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            effective_request_timeout(Some(250), Duration::from_secs(30)),
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            effective_request_timeout(Some(0), Duration::from_secs(30)),
+            Duration::from_millis(1)
+        );
+        assert_eq!(
+            effective_request_timeout(None, Duration::from_secs(30)),
+            Duration::from_secs(30)
+        );
+    }
 
     #[test]
     fn reqwest_transport_caches_clients_by_resolution_key() {

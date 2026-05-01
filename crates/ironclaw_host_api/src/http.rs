@@ -28,6 +28,9 @@ pub struct RuntimeHttpEgressRequest {
     /// shape before this request reaches [`RuntimeHttpEgress`].
     pub credential_injections: Vec<RuntimeCredentialInjection>,
     pub response_body_limit: Option<u64>,
+    /// Host-call timeout in milliseconds, already capped by the invoking
+    /// runtime to its remaining execution deadline when applicable.
+    pub timeout_ms: Option<u32>,
 }
 
 /// One host-approved credential injection.
@@ -107,6 +110,74 @@ impl RuntimeHttpEgressError {
             | Self::Response { response_bytes, .. } => *response_bytes,
         }
     }
+
+    /// Stable reason token safe to expose to runtime/plugin callers.
+    pub fn stable_runtime_reason(&self) -> &'static str {
+        match self {
+            Self::Credential { .. } => "credential_unavailable",
+            Self::Request { .. } => "request_denied",
+            Self::Network { .. } => "network_error",
+            Self::Response { .. } => "response_error",
+        }
+    }
+}
+
+pub fn is_sensitive_runtime_request_header(name: &str) -> bool {
+    const SENSITIVE_REQUEST_HEADERS: &[&str] = &[
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "x-api-key",
+        "api-key",
+        "x-auth-token",
+        "x-token",
+        "x-access-token",
+        "x-session-token",
+        "x-csrf-token",
+        "x-secret",
+        "x-api-secret",
+    ];
+    SENSITIVE_REQUEST_HEADERS
+        .iter()
+        .any(|header| name.trim().eq_ignore_ascii_case(header))
+}
+
+pub fn is_sensitive_runtime_response_header(name: &str) -> bool {
+    const SENSITIVE_RESPONSE_HEADERS: &[&str] = &[
+        "authorization",
+        "www-authenticate",
+        "set-cookie",
+        "cookie",
+        "x-api-key",
+        "api-key",
+        "x-auth-token",
+        "x-token",
+        "x-access-token",
+        "x-session-token",
+        "x-csrf-token",
+        "x-secret",
+        "x-api-secret",
+        "proxy-authenticate",
+        "proxy-authorization",
+    ];
+    const SENSITIVE_RESPONSE_HEADER_MARKERS: &[&str] = &[
+        "auth",
+        "token",
+        "secret",
+        "credential",
+        "password",
+        "cookie",
+        "api-key",
+        "apikey",
+        "api_key",
+    ];
+    let normalized = name.trim().to_ascii_lowercase();
+    SENSITIVE_RESPONSE_HEADERS
+        .iter()
+        .any(|header| normalized == *header)
+        || SENSITIVE_RESPONSE_HEADER_MARKERS
+            .iter()
+            .any(|marker| normalized.contains(marker))
 }
 
 pub trait RuntimeHttpEgress: Send + Sync {

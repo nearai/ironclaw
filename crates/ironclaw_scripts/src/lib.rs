@@ -161,6 +161,7 @@ pub struct ScriptHostHttpRequest {
     pub network_policy: ironclaw_host_api::NetworkPolicy,
     pub credential_injections: Vec<ironclaw_host_api::RuntimeCredentialInjection>,
     pub response_body_limit: Option<u64>,
+    pub timeout_ms: Option<u32>,
 }
 
 pub type ScriptHostHttpResponse = RuntimeHttpEgressResponse;
@@ -199,6 +200,7 @@ where
                 network_policy: request.network_policy,
                 credential_injections: request.credential_injections,
                 response_body_limit: request.response_body_limit,
+                timeout_ms: request.timeout_ms,
             })
             .map_err(script_http_error)
     }
@@ -206,7 +208,7 @@ where
 
 fn script_http_error(error: RuntimeHttpEgressError) -> ScriptHostHttpError {
     ScriptHostHttpError::Egress {
-        reason: error.to_string(),
+        reason: error.stable_runtime_reason().to_string(),
     }
 }
 

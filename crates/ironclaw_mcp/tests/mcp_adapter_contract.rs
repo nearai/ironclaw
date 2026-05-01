@@ -107,6 +107,30 @@ async fn mcp_runtime_requires_host_mediated_egress_for_http_transports() {
     assert!(client.requests.lock().unwrap().is_empty());
 }
 
+#[test]
+fn mcp_host_http_adapter_returns_sanitized_shared_egress_errors() {
+    let adapter = McpRuntimeHttpAdapter::new(Arc::new(SecretEchoRuntimeEgress));
+
+    let error = adapter
+        .request(McpHostHttpRequest {
+            scope: sample_scope(),
+            method: NetworkMethod::Get,
+            url: "https://mcp.example.test/mcp".to_string(),
+            headers: vec![],
+            body: vec![],
+            network_policy: mcp_http_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            timeout_ms: Some(1000),
+        })
+        .expect_err("MCP HTTP adapter errors should be sanitized before runtime visibility");
+
+    let rendered = error.to_string();
+    assert!(rendered.contains("network_error"));
+    assert!(!rendered.contains("sk-test-secret"));
+    assert!(!rendered.contains("10.0.0.7"));
+}
+
 #[tokio::test]
 async fn mcp_runtime_fails_closed_for_external_stdio_process_egress() {
     let package = package_from_manifest(STDIO_MCP_MANIFEST);
@@ -464,6 +488,22 @@ impl McpClient for RecordingMcpClient {
     }
 }
 
+#[derive(Debug)]
+struct SecretEchoRuntimeEgress;
+
+impl RuntimeHttpEgress for SecretEchoRuntimeEgress {
+    fn execute(
+        &self,
+        _request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        Err(RuntimeHttpEgressError::Network {
+            reason: "private target 10.0.0.7 denied for sk-test-secret".to_string(),
+            request_bytes: 0,
+            response_bytes: 0,
+        })
+    }
+}
+
 struct ReleaseFailingGovernor {
     inner: InMemoryResourceGovernor,
 }
@@ -529,6 +569,18 @@ fn sample_scope() -> ResourceScope {
         mission_id: None,
         thread_id: None,
         invocation_id: InvocationId::new(),
+    }
+}
+
+fn mcp_http_policy() -> NetworkPolicy {
+    NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: "mcp.example.test".to_string(),
+            port: None,
+        }],
+        deny_private_ip_ranges: true,
+        max_egress_bytes: Some(4096),
     }
 }
 
