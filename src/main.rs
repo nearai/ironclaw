@@ -485,9 +485,21 @@ async fn async_main() -> anyhow::Result<()> {
     // Default user ID for extension operations (single-user mode).
     let ext_user_id = config.owner_id.clone();
     let settings_persistence_available = components.db.is_some();
+    // Use `load_startup_active_channels` so that on first boot — when
+    // `activated_channels` has never been persisted — we fall back to the
+    // setup wizard's `channels.wasm_channels` selection. This matches the
+    // documented intent of PR #2562 ("setup-selected channels as a first-run
+    // fallback"). `load_persisted_active_channels` returns an empty vec on
+    // missing state, which would leave all installed WASM channels inactive
+    // after a clean install.
     let persisted_active_channels: Vec<String> =
         if settings_persistence_available && let Some(ref ext_mgr) = components.extension_manager {
-            ext_mgr.load_persisted_active_channels(&ext_user_id).await
+            ext_mgr
+                .load_startup_active_channels(
+                    &ext_user_id,
+                    config.channels.configured_wasm_channels.clone(),
+                )
+                .await
         } else {
             Vec::new()
         };

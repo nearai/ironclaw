@@ -1,0 +1,24 @@
+services:
+  postgres:
+    # Digest pinned after first pull (Step 6).
+    image: pgvector/pgvector:pg16@sha256:7d400e340efb42f4d8c9c12c6427adb253f726881a9985d2a471bf0eed824dff
+    container_name: flask-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: flask_db
+      POSTGRES_USER: flask_user
+      # Password is injected as an environment variable by the shell that runs
+      # `docker compose up`. It NEVER persists on disk. See Step 6.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be exported from ironclaw keychain before compose up}
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - flask_pgdata:/var/lib/postgresql/data
+      - ./init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flask_user -d flask_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+volumes:
+  flask_pgdata:
