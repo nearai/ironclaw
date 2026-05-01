@@ -608,8 +608,8 @@ fn parse_mcp_json_rpc_value(
     expected_id: Option<u64>,
 ) -> Result<McpJsonRpcResponse, String> {
     let parsed_id = json_rpc_id(value);
-    if let (Some(expected), Some(actual)) = (expected_id, parsed_id)
-        && expected != actual
+    if let Some(expected) = expected_id
+        && parsed_id != Some(expected)
     {
         return Err(response_error());
     }
