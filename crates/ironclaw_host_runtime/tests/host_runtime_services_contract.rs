@@ -25,9 +25,10 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutionResult, McpExecutor};
 use ironclaw_processes::{
-    BackgroundProcessManager, InMemoryProcessResultStore, InMemoryProcessStore, ProcessError,
-    ProcessExecutionRequest, ProcessExecutionResult, ProcessExecutor, ProcessHost,
-    ProcessResultStore, ProcessServices, ProcessStart, ProcessStatus, ProcessStore,
+    BackgroundFailureStage, BackgroundProcessManager, InMemoryProcessResultStore,
+    InMemoryProcessStore, ProcessError, ProcessExecutionRequest, ProcessExecutionResult,
+    ProcessExecutor, ProcessHost, ProcessResultRecord, ProcessResultStore, ProcessServices,
+    ProcessStart, ProcessStatus, ProcessStore,
 };
 use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits,
@@ -1192,6 +1193,159 @@ async fn spawned_obligation_lifecycle_releases_resources_and_discards_handoffs_o
 }
 
 #[tokio::test]
+async fn process_obligation_lifecycle_cleans_record_started_before_wrapper_exists() {
+    let reservation_id = ResourceReservationId::new();
+    let secret_handle = SecretHandle::new("api_token").unwrap();
+    let inner_store = Arc::new(InMemoryProcessStore::new());
+    let network_policies = Arc::new(NetworkObligationPolicyStore::new());
+    let secret_injections = Arc::new(RuntimeSecretInjectionStore::new());
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id);
+    let estimate = ResourceEstimate {
+        process_count: Some(1),
+        concurrency_slots: Some(1),
+        ..ResourceEstimate::default()
+    };
+    governor
+        .reserve_with_id(scope.clone(), estimate.clone(), reservation_id)
+        .unwrap();
+    network_policies.insert(&scope, &script_capability_id(), wasm_http_policy());
+    secret_injections
+        .insert(
+            &scope,
+            &script_capability_id(),
+            &secret_handle,
+            SecretMaterial::from("runtime-secret"),
+        )
+        .unwrap();
+    let process_id = ProcessId::new();
+    let mut start = process_start(process_id, invocation_id, scope.clone());
+    start.estimated_resources = estimate;
+    start.resource_reservation_id = Some(reservation_id);
+    inner_store.start(start).await.unwrap();
+
+    let lifecycle_store = ProcessObligationLifecycleStore::new(
+        inner_store,
+        Arc::clone(&network_policies),
+        Arc::clone(&secret_injections),
+        governor.clone(),
+    );
+    lifecycle_store.kill(&scope, process_id).await.unwrap();
+
+    assert!(matches!(
+        governor.release(reservation_id).unwrap_err(),
+        ResourceError::ReservationClosed {
+            status: ReservationStatus::Released,
+            ..
+        }
+    ));
+    assert!(
+        network_policies
+            .take(&scope, &script_capability_id())
+            .is_none()
+    );
+    assert!(
+        secret_injections
+            .take(&scope, &script_capability_id(), &secret_handle)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn spawned_obligation_lifecycle_cleans_handoffs_when_result_store_complete_fails() {
+    let reservation_id = ResourceReservationId::new();
+    let secret_handle = SecretHandle::new("api_token").unwrap();
+    let result_store = Arc::new(FailingProcessResultStore::default());
+    let fixture = spawn_obligation_fixture_with_result_store(
+        reservation_id,
+        secret_handle.clone(),
+        BackgroundExecutor::success(),
+        Arc::clone(&result_store),
+    )
+    .await;
+
+    let process = fixture.spawn().await;
+    wait_for_result_store_attempt(&result_store, "complete").await;
+    wait_for_no_reserved_processes(&fixture.governor).await;
+
+    let record = fixture
+        .process_store
+        .get(&fixture.scope, process.process_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.status, ProcessStatus::Running);
+    assert!(matches!(
+        fixture.governor.release(reservation_id).unwrap_err(),
+        ResourceError::ReservationClosed {
+            status: ReservationStatus::Reconciled,
+            ..
+        }
+    ));
+    assert!(
+        fixture
+            .network_policies
+            .take(&fixture.scope, &script_capability_id())
+            .is_none()
+    );
+    assert!(
+        fixture
+            .secret_injections
+            .take(&fixture.scope, &script_capability_id(), &secret_handle)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn spawned_obligation_lifecycle_cleans_handoffs_when_result_store_fail_fails() {
+    let reservation_id = ResourceReservationId::new();
+    let secret_handle = SecretHandle::new("api_token").unwrap();
+    let result_store = Arc::new(FailingProcessResultStore::default());
+    let fixture = spawn_obligation_fixture_with_result_store(
+        reservation_id,
+        secret_handle.clone(),
+        BackgroundExecutor::failure("runtime_dispatch"),
+        Arc::clone(&result_store),
+    )
+    .await;
+
+    let process = fixture.spawn().await;
+    wait_for_result_store_attempt(&result_store, "fail").await;
+    wait_for_no_reserved_processes(&fixture.governor).await;
+
+    let record = fixture
+        .process_store
+        .get(&fixture.scope, process.process_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.status, ProcessStatus::Running);
+    assert!(matches!(
+        fixture.governor.release(reservation_id).unwrap_err(),
+        ResourceError::ReservationClosed {
+            status: ReservationStatus::Released,
+            ..
+        }
+    ));
+    assert!(
+        fixture
+            .network_policies
+            .take(&fixture.scope, &script_capability_id())
+            .is_none()
+    );
+    assert!(
+        fixture
+            .secret_injections
+            .take(&fixture.scope, &script_capability_id(), &secret_handle)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn spawned_obligation_lifecycle_abort_cleans_up_when_process_start_fails() {
     let reservation_id = ResourceReservationId::new();
     let secret_handle = SecretHandle::new("api_token").unwrap();
@@ -1671,6 +1825,24 @@ async fn spawn_obligation_fixture(
     secret_handle: SecretHandle,
     executor: BackgroundExecutor,
 ) -> SpawnObligationFixture {
+    spawn_obligation_fixture_with_result_store(
+        reservation_id,
+        secret_handle,
+        executor,
+        Arc::new(InMemoryProcessResultStore::new()),
+    )
+    .await
+}
+
+async fn spawn_obligation_fixture_with_result_store<R>(
+    reservation_id: ResourceReservationId,
+    secret_handle: SecretHandle,
+    executor: BackgroundExecutor,
+    result_store: Arc<R>,
+) -> SpawnObligationFixture
+where
+    R: ProcessResultStore + 'static,
+{
     let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
     let dispatcher = Arc::new(NoopDispatcher);
     let network_policies = Arc::new(NetworkObligationPolicyStore::new());
@@ -1717,9 +1889,23 @@ async fn spawn_obligation_fixture(
         Arc::clone(&secret_injections),
         governor.clone(),
     ));
+    let cleanup_process_store = Arc::clone(&process_store);
     let process_manager = Arc::new(
         BackgroundProcessManager::new(Arc::clone(&process_store), Arc::new(executor))
-            .with_result_store(Arc::new(InMemoryProcessResultStore::new())),
+            .with_result_store(result_store)
+            .with_error_handler(move |failure| {
+                let reconcile = match failure.stage {
+                    BackgroundFailureStage::ResultStoreComplete => true,
+                    BackgroundFailureStage::ResultStoreFail => false,
+                    _ => return,
+                };
+                let cleanup_process_store = Arc::clone(&cleanup_process_store);
+                tokio::spawn(async move {
+                    let _ = cleanup_process_store
+                        .cleanup_process_obligations(&failure.scope, failure.process_id, reconcile)
+                        .await;
+                });
+            }),
     );
 
     SpawnObligationFixture {
@@ -1735,6 +1921,63 @@ async fn spawn_obligation_fixture(
         context,
         scope,
         estimate,
+    }
+}
+
+#[derive(Default)]
+struct FailingProcessResultStore {
+    attempts: std::sync::Mutex<Vec<&'static str>>,
+}
+
+impl FailingProcessResultStore {
+    fn attempts(&self) -> Vec<&'static str> {
+        self.attempts.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl ProcessResultStore for FailingProcessResultStore {
+    async fn complete(
+        &self,
+        _scope: &ResourceScope,
+        _process_id: ProcessId,
+        _output: serde_json::Value,
+    ) -> Result<ProcessResultRecord, ProcessError> {
+        self.attempts.lock().unwrap().push("complete");
+        Err(ProcessError::InvalidStoredRecord {
+            reason: "result complete failed".to_string(),
+        })
+    }
+
+    async fn fail(
+        &self,
+        _scope: &ResourceScope,
+        _process_id: ProcessId,
+        _error_kind: String,
+    ) -> Result<ProcessResultRecord, ProcessError> {
+        self.attempts.lock().unwrap().push("fail");
+        Err(ProcessError::InvalidStoredRecord {
+            reason: "result fail failed".to_string(),
+        })
+    }
+
+    async fn kill(
+        &self,
+        _scope: &ResourceScope,
+        _process_id: ProcessId,
+    ) -> Result<ProcessResultRecord, ProcessError> {
+        self.attempts.lock().unwrap().push("kill");
+        Err(ProcessError::InvalidStoredRecord {
+            reason: "result kill failed".to_string(),
+        })
+    }
+
+    async fn get(
+        &self,
+        _scope: &ResourceScope,
+        _process_id: ProcessId,
+    ) -> Result<Option<ProcessResultRecord>, ProcessError> {
+        Ok(None)
     }
 }
 
@@ -1832,6 +2075,26 @@ async fn wait_for_status(
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     panic!("process {process_id} did not reach {status:?}");
+}
+
+async fn wait_for_result_store_attempt(store: &FailingProcessResultStore, attempt: &'static str) {
+    for _ in 0..100 {
+        if store.attempts().contains(&attempt) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("result store did not record {attempt} attempt");
+}
+
+async fn wait_for_no_reserved_processes(governor: &InMemoryResourceGovernor) {
+    for _ in 0..100 {
+        if governor.reserved_for(&sample_account()).process_count == 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("process reservation was not cleaned up");
 }
 
 #[async_trait]

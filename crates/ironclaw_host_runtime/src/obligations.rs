@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -16,11 +16,10 @@ use ironclaw_events::AuditSink;
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AuditEnvelope, AuditEventId, AuditStage,
     CapabilityDispatchResult, CapabilityId, DecisionSummary, EffectKind, MountView, NetworkPolicy,
-    Obligation, ProcessId, ResourceReservation, ResourceReservationId, ResourceScope,
-    ResourceUsage, SecretHandle,
+    Obligation, ProcessId, ResourceReservation, ResourceScope, ResourceUsage, SecretHandle,
 };
 use ironclaw_processes::{ProcessError, ProcessRecord, ProcessStart, ProcessStore};
-use ironclaw_resources::ResourceGovernor;
+use ironclaw_resources::{ResourceError, ResourceGovernor};
 use ironclaw_safety::LeakDetector;
 use ironclaw_secrets::{SecretMaterial, SecretStore};
 
@@ -411,7 +410,7 @@ pub struct ProcessObligationLifecycleStore {
     network_policies: Arc<NetworkObligationPolicyStore>,
     secret_injections: Arc<RuntimeSecretInjectionStore>,
     resource_governor: Arc<dyn ResourceGovernor>,
-    active: Mutex<HashMap<ProcessLifecycleKey, Option<ResourceReservationId>>>,
+    cleaned: Mutex<HashSet<ProcessLifecycleKey>>,
 }
 
 impl ProcessObligationLifecycleStore {
@@ -444,29 +443,28 @@ impl ProcessObligationLifecycleStore {
             network_policies,
             secret_injections,
             resource_governor,
-            active: Mutex::new(HashMap::new()),
+            cleaned: Mutex::new(HashSet::new()),
         }
     }
 
-    fn active_guard(
-        &self,
-    ) -> std::sync::MutexGuard<'_, HashMap<ProcessLifecycleKey, Option<ResourceReservationId>>>
-    {
-        self.active
+    fn cleaned_guard(&self) -> std::sync::MutexGuard<'_, HashSet<ProcessLifecycleKey>> {
+        self.cleaned
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn record_started(&self, record: &ProcessRecord) {
-        self.active_guard().insert(
-            ProcessLifecycleKey::new(&record.scope, record.process_id),
-            record.resource_reservation_id,
-        );
-    }
-
-    fn take_started(&self, record: &ProcessRecord) -> Option<Option<ResourceReservationId>> {
-        self.active_guard()
-            .remove(&ProcessLifecycleKey::new(&record.scope, record.process_id))
+    /// Discards staged obligation handoffs and closes any reservation for an
+    /// executor that finished but could not publish its result record.
+    pub async fn cleanup_process_obligations(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+        reconcile: bool,
+    ) -> Result<(), ProcessError> {
+        if let Some(record) = self.inner.get(scope, process_id).await? {
+            self.cleanup_record_obligations(&record, reconcile)?;
+        }
+        Ok(())
     }
 
     fn cleanup_terminal(
@@ -474,9 +472,19 @@ impl ProcessObligationLifecycleStore {
         record: &ProcessRecord,
         reconcile: bool,
     ) -> Result<(), ProcessError> {
-        let Some(reservation_id) = self.take_started(record) else {
+        self.cleanup_record_obligations(record, reconcile)
+    }
+
+    fn cleanup_record_obligations(
+        &self,
+        record: &ProcessRecord,
+        reconcile: bool,
+    ) -> Result<(), ProcessError> {
+        let key = ProcessLifecycleKey::new(&record.scope, record.process_id);
+        let mut cleaned = self.cleaned_guard();
+        if cleaned.contains(&key) {
             return Ok(());
-        };
+        }
         self.network_policies
             .discard_for_capability(&record.scope, &record.capability_id);
         self.secret_injections
@@ -484,14 +492,17 @@ impl ProcessObligationLifecycleStore {
             .map_err(|_| ProcessError::InvalidStoredRecord {
                 reason: "process obligation handoff cleanup failed".to_string(),
             })?;
-        if let Some(reservation_id) = reservation_id {
+        if let Some(reservation_id) = record.resource_reservation_id {
             if reconcile {
-                self.resource_governor
-                    .reconcile(reservation_id, ResourceUsage::default())?;
+                close_reservation_once(
+                    self.resource_governor
+                        .reconcile(reservation_id, ResourceUsage::default()),
+                )?;
             } else {
-                self.resource_governor.release(reservation_id)?;
+                close_reservation_once(self.resource_governor.release(reservation_id))?;
             }
         }
+        cleaned.insert(key);
         Ok(())
     }
 }
@@ -499,9 +510,7 @@ impl ProcessObligationLifecycleStore {
 #[async_trait]
 impl ProcessStore for ProcessObligationLifecycleStore {
     async fn start(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError> {
-        let record = self.inner.start(start).await?;
-        self.record_started(&record);
-        Ok(record)
+        self.inner.start(start).await
     }
 
     async fn complete(
@@ -548,6 +557,14 @@ impl ProcessStore for ProcessObligationLifecycleStore {
         scope: &ResourceScope,
     ) -> Result<Vec<ProcessRecord>, ProcessError> {
         self.inner.records_for_scope(scope).await
+    }
+}
+
+fn close_reservation_once<T>(result: Result<T, ResourceError>) -> Result<(), ProcessError> {
+    match result {
+        Ok(_) => Ok(()),
+        Err(ResourceError::ReservationClosed { .. }) => Ok(()),
+        Err(error) => Err(error.into()),
     }
 }
 

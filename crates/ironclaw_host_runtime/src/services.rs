@@ -29,8 +29,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutor, McpInvocation};
 use ironclaw_processes::{
-    ProcessExecutionError, ProcessExecutionRequest, ProcessExecutionResult, ProcessExecutor,
-    ProcessManager, ProcessResultStore, ProcessServices, ProcessStore,
+    BackgroundFailureStage, ProcessExecutionError, ProcessExecutionRequest, ProcessExecutionResult,
+    ProcessExecutor, ProcessManager, ProcessResultStore, ProcessServices, ProcessStore,
 };
 use ironclaw_resources::ResourceGovernor;
 use ironclaw_run_state::{ApprovalRequestStore, RunStateStore};
@@ -79,6 +79,7 @@ where
     secret_store: Option<Arc<dyn SecretStore>>,
     network_policy_store: Arc<NetworkObligationPolicyStore>,
     secret_injection_store: Arc<RuntimeSecretInjectionStore>,
+    process_lifecycle_store: Arc<ProcessObligationLifecycleStore>,
     runtime_http_egress: SharedRuntimeHttpEgress,
     runtime_health: Option<Arc<dyn RuntimeBackendHealth>>,
     script_runtime: Option<Arc<dyn ScriptExecutor>>,
@@ -101,6 +102,14 @@ where
         process_services: ProcessServices<S, R>,
         surface_version: CapabilitySurfaceVersion,
     ) -> Self {
+        let network_policy_store = Arc::new(NetworkObligationPolicyStore::new());
+        let secret_injection_store = Arc::new(RuntimeSecretInjectionStore::new());
+        let process_lifecycle_store = Arc::new(ProcessObligationLifecycleStore::new(
+            process_services.process_store(),
+            Arc::clone(&network_policy_store),
+            Arc::clone(&secret_injection_store),
+            governor.clone(),
+        ));
         Self {
             registry,
             trust_policy: Arc::new(HostTrustPolicy::empty()),
@@ -115,8 +124,9 @@ where
             event_sink: None,
             audit_sink: None,
             secret_store: None,
-            network_policy_store: Arc::new(NetworkObligationPolicyStore::new()),
-            secret_injection_store: Arc::new(RuntimeSecretInjectionStore::new()),
+            network_policy_store,
+            secret_injection_store,
+            process_lifecycle_store,
             runtime_http_egress: Arc::new(Mutex::new(None)),
             runtime_health: None,
             script_runtime: None,
@@ -294,20 +304,29 @@ where
         let dispatcher: Arc<dyn CapabilityDispatcher> = Arc::new(self.runtime_dispatcher());
         let process_executor =
             Arc::new(RuntimeDispatchProcessExecutor::new(Arc::clone(&dispatcher)));
-        let lifecycle_process_store = Arc::new(ProcessObligationLifecycleStore::new(
-            self.process_services.process_store(),
-            Arc::clone(&self.network_policy_store),
-            Arc::clone(&self.secret_injection_store),
-            self.governor.clone(),
-        ));
+        let lifecycle_process_store = Arc::clone(&self.process_lifecycle_store);
         let process_store: Arc<dyn ProcessStore> = lifecycle_process_store.clone();
+        let result_failure_cleanup_store = Arc::clone(&lifecycle_process_store);
         let process_manager: Arc<dyn ProcessManager> = Arc::new(
             ironclaw_processes::BackgroundProcessManager::new(
                 lifecycle_process_store,
                 process_executor,
             )
             .with_cancellation_registry(self.process_services.cancellation_registry())
-            .with_result_store(self.process_services.result_store()),
+            .with_result_store(self.process_services.result_store())
+            .with_error_handler(move |failure| {
+                let reconcile = match failure.stage {
+                    BackgroundFailureStage::ResultStoreComplete => true,
+                    BackgroundFailureStage::ResultStoreFail => false,
+                    _ => return,
+                };
+                let cleanup_store = Arc::clone(&result_failure_cleanup_store);
+                tokio::spawn(async move {
+                    let _ = cleanup_store
+                        .cleanup_process_obligations(&failure.scope, failure.process_id, reconcile)
+                        .await;
+                });
+            }),
         );
         let process_result_store: Arc<dyn ProcessResultStore> =
             self.process_services.result_store();
