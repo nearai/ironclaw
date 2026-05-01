@@ -101,6 +101,35 @@ fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
+/// Fetch a document only if its parent project is still active.
+/// Returns 404 with no information leak about whether the row exists
+/// versus whether the project was deleted — both shapes look the same
+/// to the caller.
+async fn fetch_active_document(
+    db: &Arc<dyn crate::db::Database>,
+    id: &str,
+) -> Result<LegalDocument, (StatusCode, Json<ErrorBody>)> {
+    let doc = store::fetch_document(db, id)
+        .await
+        .map_err(|e| db_err("fetch_document", e))?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, format!("document {id} not found")))?;
+
+    let project = store::fetch_project(db, &doc.project_id)
+        .await
+        .map_err(|e| db_err("fetch_project", e))?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, format!("document {id} not found")))?;
+
+    if project.deleted_at.is_some() {
+        // Indistinguishable from the row-missing case for the caller.
+        return Err(err(
+            StatusCode::NOT_FOUND,
+            format!("document {id} not found"),
+        ));
+    }
+
+    Ok(doc)
+}
+
 /// Decide which canonical mime to persist for a given upload.
 ///
 /// We trust either:
@@ -387,20 +416,27 @@ pub async fn upload_document_handler(
 }
 
 /// `GET /api/skills/legal/documents/:id` — metadata + extracted text.
+///
+/// Documents whose parent project is soft-deleted are treated as
+/// missing (404) so the foundation upholds the same active/deleted
+/// boundary that `get_project_handler` does. Without this check a
+/// caller who knew a document id could still read its text through
+/// `/documents/:id` after the project was deleted.
 pub async fn get_document_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(_user): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> Result<Json<DocumentDetailResponse>, (StatusCode, Json<ErrorBody>)> {
     let db = require_db(&state)?;
-    let doc = store::fetch_document(db, &id)
-        .await
-        .map_err(|e| db_err("fetch_document", e))?
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, format!("document {id} not found")))?;
+    let doc = fetch_active_document(db, &id).await?;
     Ok(Json(doc))
 }
 
 /// `GET /api/skills/legal/documents/:id/blob` — raw file bytes.
+///
+/// Soft-delete enforcement: same as `get_document_handler`, this
+/// endpoint refuses to serve bytes for a document whose parent
+/// project has `deleted_at IS NOT NULL`.
 ///
 /// Sanity bounds:
 /// - `Content-Type` is always one of the canonical accepted mimes
@@ -416,10 +452,7 @@ pub async fn get_document_blob_handler(
     Path(id): Path<String>,
 ) -> Result<Response, (StatusCode, Json<ErrorBody>)> {
     let db = require_db(&state)?;
-    let doc: LegalDocument = store::fetch_document(db, &id)
-        .await
-        .map_err(|e| db_err("fetch_document", e))?
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, format!("document {id} not found")))?;
+    let doc: LegalDocument = fetch_active_document(db, &id).await?;
 
     let data_dir = crate::bootstrap::ironclaw_base_dir();
     let bytes = blobs::read_blob(&data_dir, &doc.sha256).await.map_err(|e| {

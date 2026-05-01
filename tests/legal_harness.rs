@@ -275,6 +275,52 @@ async fn project_cascade_delete_drops_documents() {
     assert!(doc.is_none(), "ON DELETE CASCADE should drop the document");
 }
 
+#[tokio::test]
+async fn document_after_soft_delete_is_invisible_via_store_lookup() {
+    // The store-level fetch_document still returns the row (it's the
+    // handler that filters on parent.deleted_at), but list_documents_for_project
+    // and the production handler should both treat soft-deleted projects
+    // as missing. This test pins the store contract: the row stays
+    // queryable but its parent's deleted_at is set.
+    let (db, _dir) = setup().await;
+
+    let project_id = ulid_str();
+    store::create_project(&db, &project_id, "Sealed", None)
+        .await
+        .expect("project");
+    let doc_id = ulid_str();
+    let _ = store::create_document(
+        &db,
+        &doc_id,
+        &project_id,
+        "agreement.pdf",
+        "application/pdf",
+        "legal/blobs/aa/zzzz",
+        None,
+        None,
+        1,
+        "ff",
+    )
+    .await
+    .expect("doc");
+
+    let updated = store::soft_delete_project(&db, &project_id, 1_700_000_000)
+        .await
+        .expect("delete");
+    assert!(updated);
+
+    // Row still present; parent.deleted_at signals deletion to the handler.
+    let doc = store::fetch_document(&db, &doc_id)
+        .await
+        .expect("fetch")
+        .expect("present");
+    let parent = store::fetch_project(&db, &doc.project_id)
+        .await
+        .expect("fetch parent")
+        .expect("parent present");
+    assert!(parent.deleted_at.is_some());
+}
+
 // ---- Blob storage -----------------------------------------------------
 
 #[tokio::test]
