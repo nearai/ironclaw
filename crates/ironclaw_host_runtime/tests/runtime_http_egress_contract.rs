@@ -12,13 +12,16 @@ use ironclaw_host_runtime::{
     BuiltinObligationHandler, HostHttpEgressService, NetworkObligationPolicyStore,
     RuntimeSecretInjectionStore,
 };
+use ironclaw_mcp::{McpHostHttpRequest, McpRuntimeHttpAdapter};
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
 };
+use ironclaw_scripts::{ScriptHostHttpRequest, ScriptRuntimeHttpAdapter};
 use ironclaw_secrets::{
     InMemorySecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore,
     SecretStoreError,
 };
+use ironclaw_wasm::{WasmHostHttp, WasmHttpRequest, WasmRuntimeHttpAdapter};
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
@@ -1074,6 +1077,150 @@ fn host_http_egress_consumes_staged_network_policy_before_transport() {
         policy_store.take(&scope, &capability_id).is_none(),
         "runtime egress must consume staged policy exactly once"
     );
+}
+
+#[test]
+fn wasm_http_adapter_consumes_real_host_staged_network_policy() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: b"ok".to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 2,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let policy_store = Arc::new(NetworkObligationPolicyStore::new());
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let staged_policy = sample_policy();
+    policy_store.insert(&scope, &capability_id, staged_policy.clone());
+    let service = HostHttpEgressService::new(network, InMemorySecretStore::new())
+        .with_network_policy_store(policy_store.clone());
+    let adapter = WasmRuntimeHttpAdapter::new(
+        Arc::new(service),
+        scope.clone(),
+        capability_id.clone(),
+        caller_supplied_policy(),
+    );
+
+    let response = adapter
+        .request(WasmHttpRequest {
+            method: "POST".to_string(),
+            url: "https://api.example.test/v1/run".to_string(),
+            headers_json: "{}".to_string(),
+            body: Some(b"hello".to_vec()),
+            timeout_ms: Some(1000),
+        })
+        .expect("WASM adapter should reach host egress using staged policy");
+
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body, b"ok".to_vec());
+    let requests = network_recorder.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].policy, staged_policy);
+    assert_eq!(requests[0].url, "https://api.example.test/v1/run");
+    assert_eq!(requests[0].body, b"hello".to_vec());
+    drop(requests);
+    assert!(policy_store.take(&scope, &capability_id).is_none());
+}
+
+#[test]
+fn script_http_adapter_consumes_real_host_staged_network_policy() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 202,
+        headers: vec![],
+        body: b"script-ok".to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 9,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let policy_store = Arc::new(NetworkObligationPolicyStore::new());
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let staged_policy = sample_policy();
+    policy_store.insert(&scope, &capability_id, staged_policy.clone());
+    let service = HostHttpEgressService::new(network, InMemorySecretStore::new())
+        .with_network_policy_store(policy_store.clone());
+    let adapter = ScriptRuntimeHttpAdapter::new(Arc::new(service));
+
+    let response = adapter
+        .request(ScriptHostHttpRequest {
+            scope: scope.clone(),
+            capability_id: capability_id.clone(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: caller_supplied_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            timeout_ms: Some(1000),
+        })
+        .expect("script adapter should reach host egress using staged policy");
+
+    assert_eq!(response.status, 202);
+    assert_eq!(response.body, b"script-ok".to_vec());
+    let requests = network_recorder.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].policy, staged_policy);
+    assert_eq!(requests[0].url, "https://api.example.test/v1/run");
+    assert_eq!(requests[0].body, b"hello".to_vec());
+    drop(requests);
+    assert!(policy_store.take(&scope, &capability_id).is_none());
+}
+
+#[test]
+fn mcp_http_adapter_consumes_real_host_staged_network_policy() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 203,
+        headers: vec![],
+        body: b"mcp-ok".to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 6,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let policy_store = Arc::new(NetworkObligationPolicyStore::new());
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let staged_policy = sample_policy();
+    policy_store.insert(&scope, &capability_id, staged_policy.clone());
+    let service = HostHttpEgressService::new(network, InMemorySecretStore::new())
+        .with_network_policy_store(policy_store.clone());
+    let adapter = McpRuntimeHttpAdapter::new(Arc::new(service));
+
+    let response = adapter
+        .request(McpHostHttpRequest {
+            scope: scope.clone(),
+            capability_id: capability_id.clone(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: caller_supplied_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            timeout_ms: Some(1000),
+        })
+        .expect("MCP adapter should reach host egress using staged policy");
+
+    assert_eq!(response.status, 203);
+    assert_eq!(response.body, b"mcp-ok".to_vec());
+    let requests = network_recorder.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].policy, staged_policy);
+    assert_eq!(requests[0].url, "https://api.example.test/v1/run");
+    assert_eq!(requests[0].body, b"hello".to_vec());
+    drop(requests);
+    assert!(policy_store.take(&scope, &capability_id).is_none());
 }
 
 #[test]

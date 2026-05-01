@@ -116,7 +116,6 @@ pub struct WasmRuntimeCredentialRequest {
     pub method: NetworkMethod,
     pub url: String,
     pub headers: Vec<(String, String)>,
-    pub network_policy: NetworkPolicy,
 }
 
 pub trait WasmRuntimeCredentialProvider: Send + Sync + std::fmt::Debug {
@@ -289,7 +288,6 @@ where
                 method,
                 url: request.url.clone(),
                 headers: headers.clone(),
-                network_policy: self.network_policy.clone(),
             })
             .map_err(wasm_credential_provider_error)?;
 
