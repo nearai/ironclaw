@@ -20,6 +20,7 @@ async-trait = "0.1"
 deadpool-postgres = { version = "0.14", optional = true }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.1" }
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 jsonschema = { version = "0.45", default-features = false }
 pgvector = { version = "0.4", features = ["postgres"], optional = true }
