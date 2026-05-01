@@ -103,7 +103,7 @@ jobs:
             echo "has_runtime_heavy_risk=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if has_match '^(src/(auth|ownership|pairing|secrets|webhooks|workspace)/|src/channels/web/|crates/ironclaw_gateway/|src/channels/attachments\.rs$|tests/e2e/|tests/fixtures/gateway_traces/|tests/test-pages/|scripts/check_gateway_boundaries\.py$|\.github/workflows/(e2e|test)\.yml$)'; then
+          if has_match '^(src/(auth|bridge|extensions|ownership|pairing|secrets|webhooks|workspace)/|src/channels/web/|crates/ironclaw_gateway/|src/channels/attachments\.rs$|tests/e2e/|tests/fixtures/gateway_traces/|tests/test-pages/|scripts/check_gateway_boundaries\.py$|\.github/workflows/(e2e|test)\.yml$)'; then
             echo "has_web_risk=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_web_risk=false" >> "$GITHUB_OUTPUT"
