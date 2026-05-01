@@ -1818,8 +1818,20 @@ impl EffectExecutor for EffectBridgeAdapter {
         lease: &CapabilityLease,
         context: &ThreadExecutionContext,
     ) -> Result<ActionResult, EngineError> {
-        self.execute_action_internal(action_name, parameters, lease, context, false)
-            .await
+        // Honor the engine's one-shot approval flag. Set by inline
+        // gate-await retry paths after the user resolves the gate;
+        // mirrors the legacy `execute_resolved_pending_action` path
+        // that passes `approval_already_granted=true` to skip the
+        // per-call approval check that would otherwise re-fire.
+        let approval_already_granted = context.call_approval_granted;
+        self.execute_action_internal(
+            action_name,
+            parameters,
+            lease,
+            context,
+            approval_already_granted,
+        )
+        .await
     }
 
     async fn available_actions(
@@ -2865,6 +2877,7 @@ mod tests {
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
             gate_controller: ironclaw_engine::CancellingGateController::arc(),
+            call_approval_granted: false,
         }
     }
 
@@ -4632,6 +4645,7 @@ mod tests {
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
             gate_controller: ironclaw_engine::CancellingGateController::arc(),
+            call_approval_granted: false,
         };
 
         assert!(should_reject_immediate_mission_create(&ctx));
@@ -4654,6 +4668,7 @@ mod tests {
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
             gate_controller: ironclaw_engine::CancellingGateController::arc(),
+            call_approval_granted: false,
         };
 
         assert!(!should_reject_immediate_mission_create(&ctx));
@@ -4674,6 +4689,7 @@ mod tests {
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
             gate_controller: ironclaw_engine::CancellingGateController::arc(),
+            call_approval_granted: false,
         };
 
         assert!(should_reject_immediate_mission_create(&ctx));
@@ -4694,6 +4710,7 @@ mod tests {
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
             gate_controller: ironclaw_engine::CancellingGateController::arc(),
+            call_approval_granted: false,
         };
 
         assert!(should_reject_immediate_mission_create(&ctx));
@@ -4717,6 +4734,7 @@ mod tests {
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
             gate_controller: ironclaw_engine::CancellingGateController::arc(),
+            call_approval_granted: false,
         };
 
         // Should NOT be rejected — "monitoring" implies scheduling intent.
@@ -4738,6 +4756,7 @@ mod tests {
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
             gate_controller: ironclaw_engine::CancellingGateController::arc(),
+            call_approval_granted: false,
         };
 
         assert!(!should_reject_immediate_mission_create(&ctx));
@@ -4963,6 +4982,7 @@ mod tests {
                 available_actions_snapshot: None,
                 available_action_inventory_snapshot: None,
                 gate_controller: ironclaw_engine::CancellingGateController::arc(),
+                call_approval_granted: false,
             }
         }
 
@@ -5293,6 +5313,7 @@ mod tests {
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
             gate_controller: ironclaw_engine::CancellingGateController::arc(),
+            call_approval_granted: false,
         };
 
         let result = adapter.execute_action("http", params, &lease, &ctx).await;
@@ -5407,6 +5428,7 @@ mod tests {
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
             gate_controller: ironclaw_engine::CancellingGateController::arc(),
+            call_approval_granted: false,
         };
 
         let result = adapter
@@ -5723,6 +5745,7 @@ mod tests {
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
             gate_controller: ironclaw_engine::CancellingGateController::arc(),
+            call_approval_granted: false,
         };
 
         let result = adapter
@@ -6321,6 +6344,7 @@ mod tests {
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
             gate_controller: ironclaw_engine::CancellingGateController::arc(),
+            call_approval_granted: false,
         };
 
         let capabilities = adapter

@@ -1092,6 +1092,11 @@ async fn execute_pending_gate_action(
         // controller surfaces any unexpected re-gate as a typed denial
         // rather than reproducing the pre-fix unwind bug.
         gate_controller: ironclaw_engine::CancellingGateController::arc(),
+        // The legacy resolved-pending path passes its own
+        // `approval_already_granted` to `execute_resolved_pending_action`
+        // directly, so this field is irrelevant for that path. Reset
+        // here to keep the default obvious.
+        call_approval_granted: false,
     };
     let active_leases = state
         .thread_manager
@@ -2554,7 +2559,7 @@ pub async fn resolve_gate(
                         message: status_msg.into(),
                         thread_id: Some(pending.effective_wire_thread_id()),
                     },
-                );
+                ); // projection-exempt: bridge dispatcher, inline-await fast-path resolution event
             }
             return Ok(BridgeOutcome::Pending);
         }
@@ -3728,6 +3733,29 @@ async fn handle_with_engine_inner(
         cfg
     };
 
+    // Pre-bind per-execution context BEFORE the engine spawns the
+    // thread. `handle_user_message` allocates and starts the engine
+    // task internally; if a fast tool gate fires before
+    // `set_execution_context` lands, the controller's `pause()` would
+    // otherwise find no entry and cancel the gate silently. The
+    // pre-execution slot is keyed by user_id and the per-conversation
+    // lock upstream guarantees at most one bridge turn per
+    // conversation is in flight.
+    let scope_thread_id = message
+        .conversation_scope()
+        .and_then(|s| ironclaw_common::ExternalThreadId::new(s).ok());
+    let per_exec_context = crate::bridge::gate_controller::PerExecutionContext {
+        conversation_id: conv_id,
+        source_channel: message.channel.clone(),
+        scope_thread_id,
+        channel_metadata: message.metadata.clone(),
+        original_message: Some(message.content.clone()),
+    };
+    state
+        .gate_controller
+        .set_pre_execution_context(message.user_id.clone(), per_exec_context.clone())
+        .await;
+
     // Handle the message — spawns a new thread or injects into active one
     let thread_id = state
         .conversation_manager
@@ -3742,29 +3770,13 @@ async fn handle_with_engine_inner(
         .await
         .map_err(|e| engine_err("thread error", e))?;
 
-    // Bind per-execution context for the inline gate-await controller.
-    // If this turn surfaces an `Approval` gate, the controller looks
-    // this up to build the `PendingGate`. Cleared after `await_thread_outcome`
-    // returns. Live gates outlive the await (they get consumed by the
-    // resolve endpoint), but the per-execution registry entry can be
-    // dropped — the `PendingGate` row holds everything the resolver
-    // needs.
-    let scope_thread_id = message
-        .conversation_scope()
-        .and_then(|s| ironclaw_common::ExternalThreadId::new(s).ok());
+    // Promote the pre-execution entry to (user, thread)-keyed. From
+    // here on, gates from this thread land on the thread-keyed entry
+    // first; the per-user fallback covers any gates that fire before
+    // this promotion lands.
     state
         .gate_controller
-        .set_execution_context(
-            message.user_id.clone(),
-            thread_id,
-            crate::bridge::gate_controller::PerExecutionContext {
-                conversation_id: conv_id,
-                source_channel: message.channel.clone(),
-                scope_thread_id,
-                channel_metadata: message.metadata.clone(),
-                original_message: Some(message.content.clone()),
-            },
-        )
+        .set_execution_context(message.user_id.clone(), thread_id, per_exec_context)
         .await;
 
     if !attachment_notes.is_empty() {

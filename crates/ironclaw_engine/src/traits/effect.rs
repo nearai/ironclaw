@@ -52,6 +52,17 @@ pub struct ThreadExecutionContext {
     /// any unexpected gate as a typed denial rather than the historical
     /// "execution paused by gate" RuntimeError leak.
     pub gate_controller: Arc<dyn GateController>,
+    /// Set to `true` when the host has already collected user approval
+    /// for *this specific call* (matched by `current_call_id`) and the
+    /// executor is retrying it inline. The host's `EffectExecutor` impl
+    /// uses this to skip the `ApprovalRequirement::Always` /
+    /// `AskEachTime` gate that would otherwise re-fire on retry —
+    /// mirrors the legacy `execute_resolved_pending_action` path that
+    /// passes `approval_already_granted=true`.
+    ///
+    /// One-shot: scoped to a single retry call. Reset to `false` on
+    /// any context not owned by an inline retry.
+    pub call_approval_granted: bool,
 }
 
 // Manual Debug impl: `dyn GateController` is not Debug, but the rest of
@@ -78,6 +89,7 @@ impl std::fmt::Debug for ThreadExecutionContext {
                 &self.available_action_inventory_snapshot.is_some(),
             )
             .field("gate_controller", &"<dyn GateController>")
+            .field("call_approval_granted", &self.call_approval_granted)
             .finish()
     }
 }

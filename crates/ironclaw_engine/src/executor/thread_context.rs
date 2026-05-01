@@ -39,5 +39,6 @@ pub(crate) fn thread_execution_context(
         available_actions_snapshot: None,
         available_action_inventory_snapshot: None,
         gate_controller,
+        call_approval_granted: false,
     }
 }

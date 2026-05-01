@@ -583,15 +583,22 @@ async fn execute_with_inline_gate_retry(
     thread: &Thread,
 ) -> Result<ActionResult, EngineError> {
     let mut current_lease = lease.clone();
+    // `call_ctx` carries the one-shot approval flag across retries.
+    // First iteration: false (the gate hasn't fired yet). After each
+    // approval we set true; we reset to false immediately after the
+    // call so a re-gating tool doesn't get the flag handed back twice
+    // for one approval.
+    let mut call_ctx = exec_ctx.clone();
     for _ in 0..crate::executor::scripting::MAX_INLINE_GATE_RETRIES {
         let result = effects
             .execute_action(
                 &call.action_name,
                 call.parameters.clone(),
                 &current_lease,
-                exec_ctx,
+                &call_ctx,
             )
             .await;
+        call_ctx.call_approval_granted = false;
 
         let (gate_name, action_name, call_id, parameters, resume_kind) = match result {
             Err(EngineError::GatePaused {
@@ -631,10 +638,13 @@ async fn execute_with_inline_gate_retry(
             });
         }
 
-        // Approved: re-consume a lease use for the retry.
+        // Approved: re-consume a lease use and mark the next call as
+        // pre-approved so the host's `EffectExecutor` skips its
+        // approval check.
         match leases.find_and_consume(thread.id, &call.action_name).await {
             Ok(new_lease) => {
                 current_lease = new_lease;
+                call_ctx.call_approval_granted = true;
                 continue;
             }
             Err(e) => {
@@ -748,6 +758,7 @@ mod tests {
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
             gate_controller: crate::gate::CancellingGateController::arc(),
+            call_approval_granted: false,
         }
     }
 

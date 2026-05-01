@@ -994,6 +994,10 @@ pub async fn execute_code_with_skills(
                                 let lease_clone = lease.clone();
                                 let mut ctx = execution_context.clone();
                                 ctx.current_call_id = Some(gate_call_id.clone());
+                                // Carry the user's one-shot approval
+                                // into the retry call so the host
+                                // skips its per-call approval check.
+                                ctx.call_approval_granted = true;
                                 let ps =
                                     crate::types::event::summarize_params(&name, &gate_parameters);
 
@@ -2028,9 +2032,23 @@ async fn drive_inline_gate(
                 ));
             }
         };
+        // Carry the user's one-shot approval into the retry call so
+        // the host's `EffectExecutor` skips the
+        // `ApprovalRequirement::Always` / AskEachTime gate that would
+        // otherwise fire again. Mirrors the legacy
+        // `execute_resolved_pending_action(approval_already_granted=true)`
+        // path. Scoped to this single call by `current_call_id`.
+        let mut retry_ctx = context.clone();
+        retry_ctx.current_call_id = Some(gate.call_id.clone());
+        retry_ctx.call_approval_granted = true;
         let retry_start = Instant::now();
         let retry_result = effects
-            .execute_action(&gate.action_name, gate.parameters.clone(), &lease, context)
+            .execute_action(
+                &gate.action_name,
+                gate.parameters.clone(),
+                &lease,
+                &retry_ctx,
+            )
             .await;
         let retry_duration_ms = retry_start.elapsed().as_millis() as u64;
 
@@ -2568,6 +2586,7 @@ mod tests {
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
             gate_controller: crate::gate::CancellingGateController::arc(),
+            call_approval_granted: false,
         }
     }
 
@@ -4068,6 +4087,12 @@ result = await tool_info(name="mission-create", detail="schema")
         action: String,
         success_output: serde_json::Value,
         call_count: Mutex<u32>,
+        /// Captures `context.call_approval_granted` for every call.
+        /// Lets tests assert the inline-retry path correctly forwards
+        /// the user's one-shot approval to the host's
+        /// `EffectExecutor` — the integration point where bugs in
+        /// approval propagation surface.
+        approval_flags_observed: Mutex<Vec<bool>>,
         actions: Vec<ActionDef>,
     }
 
@@ -4077,11 +4102,15 @@ result = await tool_info(name="mission-create", detail="schema")
                 action: action.into(),
                 success_output: output,
                 call_count: Mutex::new(0),
+                approval_flags_observed: Mutex::new(Vec::new()),
                 actions: vec![test_action(action)],
             }
         }
         fn calls(&self) -> u32 {
             *self.call_count.lock().unwrap()
+        }
+        fn approval_flags(&self) -> Vec<bool> {
+            self.approval_flags_observed.lock().unwrap().clone()
         }
     }
 
@@ -4092,10 +4121,14 @@ result = await tool_info(name="mission-create", detail="schema")
             name: &str,
             params: serde_json::Value,
             _lease: &CapabilityLease,
-            _ctx: &ThreadExecutionContext,
+            ctx: &ThreadExecutionContext,
         ) -> Result<ActionResult, EngineError> {
             let mut count = self.call_count.lock().unwrap();
             *count += 1;
+            self.approval_flags_observed
+                .lock()
+                .unwrap()
+                .push(ctx.call_approval_granted);
             if *count == 1 && name == self.action {
                 return Err(EngineError::GatePaused {
                     gate_name: "approval".into(),
@@ -4235,6 +4268,17 @@ print(result)
             effects.calls(),
             2,
             "expected one gating call + one retry after approval"
+        );
+        // The retry call MUST observe `call_approval_granted=true` so
+        // the host's `EffectExecutor` skips its per-call approval
+        // check. This is the regression coverage for serrrfirat's
+        // review on PR #3157: without one-shot propagation, tools
+        // with `ApprovalRequirement::Always` would gate again on
+        // retry and the approval loop would never converge.
+        assert_eq!(
+            effects.approval_flags(),
+            vec![false, true],
+            "first call must be unapproved, retry must carry the user's approval"
         );
         assert_eq!(result.action_results.len(), 1);
         assert!(!result.action_results[0].is_error);

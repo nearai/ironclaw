@@ -185,6 +185,7 @@ mod tests {
                 available_actions_snapshot: None,
                 available_action_inventory_snapshot: None,
                 gate_controller: crate::gate::CancellingGateController::arc(),
+                call_approval_granted: false,
             },
         )
         .await
@@ -226,6 +227,7 @@ mod tests {
                 available_actions_snapshot: None,
                 available_action_inventory_snapshot: None,
                 gate_controller: crate::gate::CancellingGateController::arc(),
+                call_approval_granted: false,
             },
         )
         .await
@@ -263,6 +265,7 @@ mod tests {
                 available_actions_snapshot: None,
                 available_action_inventory_snapshot: None,
                 gate_controller: crate::gate::CancellingGateController::arc(),
+                call_approval_granted: false,
             },
         )
         .await

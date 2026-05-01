@@ -121,7 +121,18 @@ pub struct BridgeGateController {
     extension_manager: Option<Arc<ExtensionManager>>,
     channels: Arc<ChannelManager>,
     resolutions: Arc<GateResolutions>,
+    /// Per-(user, thread) registry. Populated once the bridge knows
+    /// which thread the engine spawned for a turn. The lookup here
+    /// wins when both this map and `pre_execution` carry an entry —
+    /// it's the more specific key.
     per_execution: Mutex<HashMap<ExecutionKey, PerExecutionContext>>,
+    /// Per-user pending entry, populated *before* `handle_user_message`
+    /// returns the thread_id. Closes the race where a fast tool gate
+    /// reaches `pause()` before the bridge has had a chance to register
+    /// the (user, thread)-keyed entry. Each bridge turn is serialized
+    /// per-conversation upstream, so we only need a single slot per
+    /// user-id here; later turns overwrite earlier ones.
+    pre_execution: Mutex<HashMap<String, PerExecutionContext>>,
 }
 
 impl BridgeGateController {
@@ -144,22 +155,43 @@ impl BridgeGateController {
             channels,
             resolutions,
             per_execution: Mutex::new(HashMap::new()),
+            pre_execution: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Bind per-execution data for `(user_id, thread_id)`. Call this
-    /// before invoking an engine turn that may surface a gate; clear it
-    /// with [`Self::clear_execution_context`] when the turn ends.
+    /// Bind per-execution data for `user_id` BEFORE the engine spawns
+    /// the thread. Closes the race window where a fast tool gate
+    /// reaches `pause()` before the (user, thread)-keyed entry has
+    /// been written.
+    ///
+    /// Per-conversation lock upstream means at most one bridge turn
+    /// per conversation is active at a time; concurrent threads for
+    /// the same user (background missions) are an accepted edge case
+    /// — the most-recently-set context wins.
+    pub async fn set_pre_execution_context(&self, user_id: String, context: PerExecutionContext) {
+        self.pre_execution.lock().await.insert(user_id, context);
+    }
+
+    /// Bind per-execution data for `(user_id, thread_id)` once the
+    /// engine has allocated a thread_id. Call after
+    /// [`Self::set_pre_execution_context`]; supersedes the per-user
+    /// entry for subsequent lookups.
     pub async fn set_execution_context(
         &self,
         user_id: String,
         thread_id: ThreadId,
         context: PerExecutionContext,
     ) {
-        self.per_execution
-            .lock()
-            .await
-            .insert(ExecutionKey { user_id, thread_id }, context);
+        self.per_execution.lock().await.insert(
+            ExecutionKey {
+                user_id: user_id.clone(),
+                thread_id,
+            },
+            context,
+        );
+        // Remove the per-user pending entry — the (user, thread)-keyed
+        // entry is now the source of truth for this turn.
+        self.pre_execution.lock().await.remove(&user_id);
     }
 
     /// Drop per-execution data. Idempotent.
@@ -168,6 +200,11 @@ impl BridgeGateController {
             user_id: user_id.to_string(),
             thread_id,
         });
+        // Defensive: clear any leftover pre-execution entry too. In
+        // the happy path `set_execution_context` already removed it,
+        // but if the bridge bailed before that promotion (engine spawn
+        // failed) the entry would otherwise leak.
+        self.pre_execution.lock().await.remove(user_id);
     }
 
     /// Forward a resolution into the inline-await registry. Returns
@@ -181,14 +218,16 @@ impl BridgeGateController {
         user_id: &str,
         thread_id: ThreadId,
     ) -> Option<PerExecutionContext> {
-        self.per_execution
-            .lock()
-            .await
-            .get(&ExecutionKey {
-                user_id: user_id.to_string(),
-                thread_id,
-            })
-            .cloned()
+        // Most specific match first: (user, thread). Falls back to
+        // the pre-execution per-user entry so a gate firing before
+        // `set_execution_context` lands still finds its context.
+        if let Some(ctx) = self.per_execution.lock().await.get(&ExecutionKey {
+            user_id: user_id.to_string(),
+            thread_id,
+        }) {
+            return Some(ctx.clone());
+        }
+        self.pre_execution.lock().await.get(user_id).cloned()
     }
 
     async fn build_pending_gate(
@@ -260,7 +299,7 @@ impl BridgeGateController {
                     resume_kind: serde_json::to_value(&pending.resume_kind).unwrap_or_default(),
                     thread_id: Some(pending.effective_wire_thread_id()),
                 },
-            );
+            ); // projection-exempt: bridge dispatcher, inline-await gate prompt for live VM waiting on user input
         }
 
         if let ResumeKind::Approval { allow_always } = &pending.resume_kind {
@@ -347,15 +386,46 @@ impl GateController for BridgeGateController {
         self.emit_gate_prompt(&pending, &per_exec.channel_metadata)
             .await;
 
-        match rx.await {
-            Ok(resolution) => resolution,
-            Err(_) => {
-                // Sender dropped — process shutting down or registry
-                // cleared. Treat as cancellation.
+        // Bound the await on `pending.expires_at`. Without this, a user
+        // who ignores the prompt past expiry strands the engine: the
+        // pending DB row expires, but the oneshot stays open and the
+        // VM keeps running until something else (process restart,
+        // join_thread timeout) tears it down. Race the receiver against
+        // a sleep; whichever resolves first wins.
+        let expires_at = pending.expires_at;
+        let now = chrono::Utc::now();
+        let timeout_dur = (expires_at - now)
+            .to_std()
+            .unwrap_or(std::time::Duration::ZERO);
+        let pending_key = pending.key();
+        let resolution = tokio::select! {
+            biased;
+            received = rx => match received {
+                Ok(resolution) => resolution,
+                Err(_) => {
+                    // Sender dropped — process shutting down or registry
+                    // cleared. Treat as cancellation.
+                    self.resolutions.forget(request_id).await;
+                    GateResolution::Cancelled
+                }
+            },
+            _ = tokio::time::sleep(timeout_dur) => {
+                // Expiry hit before the user resolved. Drop the
+                // registry entry and the pending row so a late
+                // resolve_gate call can't double-deliver, and surface
+                // as Cancelled to wake the VM.
                 self.resolutions.forget(request_id).await;
+                let _ = self.pending_gates.discard(&pending_key).await;
+                debug!(
+                    user = %request.user_id,
+                    thread = %request.thread_id,
+                    request_id = %request_id,
+                    "BridgeGateController: pause expired before resolution; cancelling",
+                );
                 GateResolution::Cancelled
             }
-        }
+        };
+        resolution
     }
 }
 

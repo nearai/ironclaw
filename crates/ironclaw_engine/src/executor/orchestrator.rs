@@ -1776,7 +1776,7 @@ async fn handle_execute_actions_parallel(
     }
 
     if runnable.len() == 1 {
-        // Single call: execute directly
+        // Single call: execute directly with inline gate-await retry.
         let (idx, lease) = runnable.into_iter().next().unwrap(); // safety: len()==1 checked above
         let pc = &parsed[idx];
         let action_name = available_actions
@@ -1795,28 +1795,33 @@ async fn handle_execute_actions_parallel(
             exec_ctx.available_action_inventory_snapshot = Some(Arc::clone(inventory));
         }
         let ps = summarize_params(&action_name, &pc.params);
-        let (result_json, event, output) = execute_single_action(
-            effects,
-            &action_name,
-            pc.params.clone(),
-            &pc.call_id,
-            &lease,
-            &exec_ctx,
-            ps,
-        )
-        .await;
-        if interrupted_result_needs_refund(&result_json) {
-            let _ = leases.refund_use(lease.id).await;
-        }
+        let (result_json, event, output, _final_lease_id) =
+            execute_single_action_with_inline_retry(
+                effects,
+                leases,
+                &action_name,
+                pc.params.clone(),
+                &pc.call_id,
+                lease,
+                &exec_ctx,
+                ps,
+                thread,
+            )
+            .await;
         slot_results[idx] = Some(result_json);
         slot_events[idx] = Some(event);
         slot_outputs[idx] = Some(output);
     } else if runnable.len() > 1 {
-        // Multiple calls: execute in parallel via JoinSet
+        // Multiple calls: execute in parallel via JoinSet. Each task
+        // carries its own inline retry loop so one tool's gate doesn't
+        // block the rest of the batch — and the legacy "double-execute
+        // on resume" bug never fires for parallel batches either.
         let mut join_set = tokio::task::JoinSet::new();
         let effects = effects.clone();
+        let leases_arc = Arc::clone(leases);
         // Capture once outside the loop — the thread's metadata is stable
         // for the duration of the parallel batch.
+        let thread_snapshot = thread.clone();
         for (idx, lease) in runnable {
             let pc_name = available_actions
                 .iter()
@@ -1826,9 +1831,11 @@ async fn handle_execute_actions_parallel(
             let pc_params = parsed[idx].params.clone();
             let pc_call_id = parsed[idx].call_id.clone();
             let effects = effects.clone();
+            let leases = Arc::clone(&leases_arc);
+            let thread_snapshot = thread_snapshot.clone();
             let lease = lease.clone();
             let mut exec_ctx = thread_execution_context(
-                thread,
+                &thread_snapshot,
                 step_id,
                 Some(pc_call_id.clone()),
                 gate_controller.clone(),
@@ -1840,26 +1847,29 @@ async fn handle_execute_actions_parallel(
             let ps = summarize_params(&pc_name, &pc_params);
 
             join_set.spawn(async move {
-                let (result_json, event, output) = execute_single_action(
-                    &effects,
-                    &pc_name,
-                    pc_params,
-                    &pc_call_id,
-                    &lease,
-                    &exec_ctx,
-                    ps,
-                )
-                .await;
-                (idx, lease.id, result_json, event, output)
+                let (result_json, event, output, final_lease_id) =
+                    execute_single_action_with_inline_retry(
+                        &effects,
+                        &leases,
+                        &pc_name,
+                        pc_params,
+                        &pc_call_id,
+                        lease,
+                        &exec_ctx,
+                        ps,
+                        &thread_snapshot,
+                    )
+                    .await;
+                (idx, final_lease_id, result_json, event, output)
             });
         }
 
         while let Some(join_result) = join_set.join_next().await {
             match join_result {
-                Ok((idx, lease_id, result_json, event, output)) => {
-                    if interrupted_result_needs_refund(&result_json) {
-                        let _ = leases.refund_use(lease_id).await;
-                    }
+                Ok((idx, _lease_id, result_json, event, output)) => {
+                    // The inline-retry helper already refunded any
+                    // leases consumed during gate-await. No
+                    // additional bookkeeping needed here.
                     slot_results[idx] = Some(result_json);
                     slot_events[idx] = Some(event);
                     slot_outputs[idx] = Some(output);
@@ -2005,6 +2015,169 @@ async fn execute_single_action(
 
 fn interrupted_result_needs_refund(result: &serde_json::Value) -> bool {
     result.get("gate_paused").and_then(|v| v.as_bool()) == Some(true)
+}
+
+/// Like [`execute_single_action`] but pauses inline on
+/// `Approval`-kind gate paused results and retries. Bounded by
+/// [`crate::executor::scripting::MAX_INLINE_GATE_RETRIES`] so a
+/// misbehaving tool can't spin a CPU.
+///
+/// Used by `__execute_actions_parallel__` for both the single-runnable
+/// and multi-runnable branches. Without this wrapper the multi-runnable
+/// branch falls through to the legacy `gate_paused` sentinel + thread
+/// re-entry, which double-executes earlier non-idempotent calls in the
+/// same batch — exactly the bug this PR exists to prevent.
+#[allow(clippy::too_many_arguments)]
+async fn execute_single_action_with_inline_retry(
+    effects: &Arc<dyn EffectExecutor>,
+    leases: &Arc<LeaseManager>,
+    name: &str,
+    params: serde_json::Value,
+    call_id: &str,
+    initial_lease: crate::types::capability::CapabilityLease,
+    exec_ctx: &ThreadExecutionContext,
+    params_summary: Option<String>,
+    thread: &Thread,
+) -> (
+    serde_json::Value,
+    EventKind,
+    serde_json::Value,
+    crate::types::capability::LeaseId,
+) {
+    let mut current_lease = initial_lease;
+    let mut call_ctx = exec_ctx.clone();
+    let mut last_event: Option<EventKind> = None;
+    for _ in 0..crate::executor::scripting::MAX_INLINE_GATE_RETRIES {
+        let (result_json, event, output) = execute_single_action(
+            effects,
+            name,
+            params.clone(),
+            call_id,
+            &current_lease,
+            &call_ctx,
+            params_summary.clone(),
+        )
+        .await;
+        // Reset the one-shot approval flag — only the call immediately
+        // following an approval should carry it.
+        call_ctx.call_approval_granted = false;
+
+        if !interrupted_result_needs_refund(&result_json) {
+            // Not a gate pause — return the result (success or failure).
+            return (result_json, event, output, current_lease.id);
+        }
+
+        // Gate paused. Only `Approval` resume kinds get the inline-await
+        // treatment; Auth/External fall through to the legacy
+        // `gate_paused` sentinel + re-entry path so the bridge can
+        // install credentials / wait for callbacks.
+        let resume_kind: crate::gate::ResumeKind = result_json
+            .get("resume_kind")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or(crate::gate::ResumeKind::Approval {
+                allow_always: false,
+            });
+        if !matches!(resume_kind, crate::gate::ResumeKind::Approval { .. }) {
+            return (result_json, event, output, current_lease.id);
+        }
+
+        // Refund the lease use this attempt consumed; we'll re-consume
+        // on retry if the user approves.
+        let _ = leases.refund_use(current_lease.id).await;
+
+        let resolution = exec_ctx
+            .gate_controller
+            .pause(crate::gate::GatePauseRequest {
+                thread_id: thread.id,
+                user_id: thread.user_id.clone(),
+                gate_name: result_json
+                    .get("gate_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("approval")
+                    .to_string(),
+                action_name: name.to_string(),
+                call_id: call_id.to_string(),
+                parameters: params.clone(),
+                resume_kind,
+            })
+            .await;
+
+        if let Some(reason) = crate::executor::scripting::denial_reason_for_resolution(&resolution)
+        {
+            let denial = serde_json::json!({"error": format!("denied: {reason}")});
+            let event = EventKind::ActionFailed {
+                step_id: exec_ctx.step_id,
+                action_name: name.to_string(),
+                call_id: call_id.to_string(),
+                error: format!("denied: {reason}"),
+                duration_ms: 0,
+                params_summary: params_summary.clone(),
+            };
+            let result_json = serde_json::json!({
+                "action_name": name,
+                "output": &denial,
+                "is_error": true,
+                "duration_ms": 0,
+            });
+            return (result_json, event, denial, current_lease.id);
+        }
+
+        // Approved. Re-consume a lease use and mark the next call as
+        // pre-approved.
+        match leases.find_and_consume(thread.id, name).await {
+            Ok(new_lease) => {
+                current_lease = new_lease;
+                call_ctx.call_approval_granted = true;
+                last_event = Some(event);
+                continue;
+            }
+            Err(e) => {
+                let err =
+                    serde_json::json!({"error": format!("lease exhausted after approval: {e}")});
+                let event = EventKind::ActionFailed {
+                    step_id: exec_ctx.step_id,
+                    action_name: name.to_string(),
+                    call_id: call_id.to_string(),
+                    error: format!("lease exhausted after approval: {e}"),
+                    duration_ms: 0,
+                    params_summary: params_summary.clone(),
+                };
+                let result_json = serde_json::json!({
+                    "action_name": name,
+                    "output": &err,
+                    "is_error": true,
+                    "duration_ms": 0,
+                });
+                return (result_json, event, err, current_lease.id);
+            }
+        }
+    }
+
+    // Retry budget exhausted — tool kept gating after every approval.
+    let err = serde_json::json!({
+        "error": format!(
+            "tool '{name}' still requires approval after {} retries",
+            crate::executor::scripting::MAX_INLINE_GATE_RETRIES
+        ),
+    });
+    let event = last_event.unwrap_or_else(|| EventKind::ActionFailed {
+        step_id: exec_ctx.step_id,
+        action_name: name.to_string(),
+        call_id: call_id.to_string(),
+        error: format!(
+            "tool kept gating after {} approvals",
+            crate::executor::scripting::MAX_INLINE_GATE_RETRIES
+        ),
+        duration_ms: 0,
+        params_summary,
+    });
+    let result_json = serde_json::json!({
+        "action_name": name,
+        "output": &err,
+        "is_error": true,
+        "duration_ms": 0,
+    });
+    (result_json, event, err, current_lease.id)
 }
 
 /// Handle `__check_signals__()`.
