@@ -677,7 +677,7 @@ mod tests {
             .expect("structured submission sideband");
         assert!(matches!(
             submission,
-            crate::agent::submission::Submission::ExternalCallback { request_id: rid }
+            crate::agent::submission::Submission::ExternalCallback { request_id: rid, .. }
                 if rid == request_id
         ));
         assert_eq!(callback.content, "[structured external callback]");

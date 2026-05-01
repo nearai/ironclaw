@@ -683,12 +683,39 @@ async fn notify_pending_gate(
     let extension_name =
         resolve_auth_gate_extension_name(auth_manager, extension_manager, tools, pending).await;
 
+    // External-tool gates (Responses API caller-executed tools) project
+    // to a dedicated `AppEvent::ExternalToolCall` so the Responses API
+    // accumulator can surface them as `function_call` items without
+    // re-rendering them as approval cards. OAuth/pairing callbacks
+    // (which also use `ResumeKind::External` but with a different
+    // callback_id prefix) keep flowing through the standard
+    // `AppEvent::GateRequired` path.
     if let ironclaw_engine::ResumeKind::External { callback_id } = &pending.resume_kind {
         tracing::debug!(
             gate = %pending.gate_name,
             callback = %callback_id,
             "GatePaused(External)"
         );
+        if crate::bridge::is_external_tool_callback_id(callback_id) {
+            if let Some(ref sse) = sse {
+                let arguments = serde_json::to_string(&pending.parameters)
+                    .unwrap_or_else(|_| pending.parameters.to_string());
+                sse.broadcast_for_user(
+                    &message.user_id,
+                    AppEvent::ExternalToolCall {
+                        request_id: pending.request_id.to_string(),
+                        call_id: pending.call_id.clone(),
+                        name: pending.action_name.clone(),
+                        arguments,
+                        thread_id: Some(pending.effective_wire_thread_id()),
+                    },
+                );
+            }
+            // Don't run `send_pending_gate_status` — that path is for
+            // approval-card UX which doesn't apply to caller-executed
+            // tool calls.
+            return Ok(BridgeOutcome::Pending);
+        }
     }
 
     // Send the approval/auth card via the source channel. Each channel
@@ -1247,6 +1274,17 @@ async fn resolve_user_project(
     Ok(pid)
 }
 
+/// Returns a clone of the live `ExternalToolCatalog` if the engine
+/// state has been initialized, or `None` if the engine has not started
+/// yet (engine_v2 disabled, or first message hasn't arrived). The
+/// Responses API handler uses this to register caller-supplied tools
+/// before sending the user message into the agent loop.
+pub async fn engine_external_tool_catalog() -> Option<Arc<crate::bridge::ExternalToolCatalog>> {
+    let lock = ENGINE_STATE.get()?;
+    let guard = lock.read().await;
+    guard.as_ref().map(|s| Arc::clone(&s.external_tool_catalog))
+}
+
 /// Persistent engine state that lives across messages.
 struct EngineState {
     thread_manager: Arc<ThreadManager>,
@@ -1268,6 +1306,12 @@ struct EngineState {
     extension_manager: Option<Arc<crate::extensions::ExtensionManager>>,
     /// Filesystem root for project-local attachment persistence.
     project_root: PathBuf,
+    /// Per-thread catalog of caller-provided external tools (Responses
+    /// API). Shared by `Arc` clone with the effect adapter (which
+    /// reads it during action listing and dispatch) and the Responses
+    /// API handler (which writes to it before sending the request to
+    /// the agent loop).
+    external_tool_catalog: Arc<crate::bridge::ExternalToolCatalog>,
 }
 
 /// Global engine state, initialized on first use.
@@ -1902,6 +1946,15 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         debug!("engine v2: pending gate reconciliation failed: {e}");
     }
 
+    // Build the per-thread external tool catalog. Shared by Arc clone
+    // with the effect adapter (consults it on every action call) and
+    // exposed on the engine state so the Responses API handler can
+    // register/clear caller-supplied tools.
+    let external_tool_catalog = Arc::new(crate::bridge::ExternalToolCatalog::new());
+    effect_adapter
+        .set_external_tool_catalog(Arc::clone(&external_tool_catalog))
+        .await;
+
     *guard = Some(EngineState {
         thread_manager,
         conversation_manager,
@@ -1915,6 +1968,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         auth_manager,
         extension_manager: agent.deps.extension_manager.clone(),
         project_root: resolve_project_root(),
+        external_tool_catalog,
     });
 
     Ok(())
@@ -2193,13 +2247,16 @@ pub async fn handle_external_callback(
     agent: &Agent,
     message: &IncomingMessage,
     request_id: uuid::Uuid,
+    payload: Option<serde_json::Value>,
 ) -> Result<BridgeOutcome, Error> {
     init_engine(agent).await?;
 
     let resolution = ironclaw_engine::GateResolution::ExternalCallback {
-        payload: serde_json::Value::Null,
+        payload: payload.unwrap_or(serde_json::Value::Null),
     };
 
+    // Auth-flavored callback (legacy OAuth/pairing): consult the auth
+    // predicates first, including the conversation-scope hint shortcut.
     if let Some(thread_id) = hinted_pending_gate_thread_id(
         &message.user_id,
         message.conversation_scope(),
@@ -2218,13 +2275,23 @@ pub async fn handle_external_callback(
         return resolve_gate(agent, message, thread_id, request_id, resolution).await;
     }
 
+    // Non-auth External callback (e.g. Responses API caller-executed tool
+    // result): the gate's resume_kind is `External` but it is not an
+    // authentication gate, so the auth predicates above don't match it.
+    if let Some(thread_id) =
+        pending_gate_thread_id_for_request(&message.user_id, request_id, gate_resume_is_external)
+            .await?
+    {
+        return resolve_gate(agent, message, thread_id, request_id, resolution).await;
+    }
+
     debug!(
         user_id = %message.user_id,
         request_id = %request_id,
-        "engine v2: no matching pending auth gate for external callback"
+        "engine v2: no matching pending gate for external callback"
     );
     Ok(BridgeOutcome::Respond(
-        "No matching pending authentication gate found.".into(),
+        "No matching pending gate found.".into(),
     ))
 }
 
@@ -2284,6 +2351,17 @@ fn gate_is_authentication(gate: &PendingGate) -> bool {
     matches!(
         gate.resume_kind,
         ironclaw_engine::ResumeKind::Authentication { .. }
+    )
+}
+
+/// Matches any gate whose resume kind is `External`. Used as a fallback in
+/// `handle_external_callback` to resume non-auth tool-call pauses (e.g.
+/// the Responses API caller-executed tool result path) which never go
+/// through the authentication predicates.
+fn gate_resume_is_external(gate: &PendingGate) -> bool {
+    matches!(
+        gate.resume_kind,
+        ironclaw_engine::ResumeKind::External { .. }
     )
 }
 
@@ -6050,6 +6128,7 @@ pub(crate) mod test_support {
             auth_manager: None,
             extension_manager: None,
             project_root: super::resolve_project_root(),
+            external_tool_catalog: Arc::new(crate::bridge::ExternalToolCatalog::new()),
         };
 
         let lock = ENGINE_STATE.get_or_init(|| TokioRwLock::new(None));
@@ -8146,6 +8225,7 @@ mod tests {
             auth_manager: None,
             extension_manager: None,
             project_root: resolve_project_root(),
+            external_tool_catalog: Arc::new(crate::bridge::ExternalToolCatalog::new()),
         }
     }
 
@@ -8296,6 +8376,7 @@ mod tests {
             auth_manager: None,
             extension_manager: None,
             project_root: resolve_project_root(),
+            external_tool_catalog: Arc::new(crate::bridge::ExternalToolCatalog::new()),
         }
     }
 
@@ -9962,6 +10043,7 @@ mod tests {
             auth_manager: None,
             extension_manager: None,
             project_root: resolve_project_root(),
+            external_tool_catalog: Arc::new(crate::bridge::ExternalToolCatalog::new()),
         }
     }
 

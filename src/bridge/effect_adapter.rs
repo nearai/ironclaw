@@ -84,6 +84,12 @@ pub struct EffectBridgeAdapter {
     /// capabilities like `missions` are registered here in `router.rs` and
     /// would otherwise be invisible to the LLM despite having active leases.
     capability_registry: RwLock<Option<Arc<CapabilityRegistry>>>,
+    /// Per-thread catalog of caller-supplied external tools (Responses
+    /// API). When set, `execute_action` short-circuits to a
+    /// `GatePaused { resume_kind: External { ext_tool: <call_id> } }`
+    /// for any action name in the catalog, and `available_actions`
+    /// merges the catalog into the LLM-visible action surface.
+    external_tool_catalog: RwLock<Option<Arc<crate::bridge::ExternalToolCatalog>>>,
 }
 
 struct ToolApprovalContext<'a> {
@@ -127,7 +133,23 @@ impl EffectBridgeAdapter {
             skill_registry: RwLock::new(None),
             workspace_mounts: RwLock::new(None),
             capability_registry: RwLock::new(None),
+            external_tool_catalog: RwLock::new(None),
         }
+    }
+
+    /// Install the per-thread external-tool catalog. Set once at bridge
+    /// init; the Responses API handler registers tools onto the same
+    /// catalog instance via its own `Arc` clone.
+    pub async fn set_external_tool_catalog(
+        &self,
+        catalog: Arc<crate::bridge::ExternalToolCatalog>,
+    ) {
+        *self.external_tool_catalog.write().await = Some(catalog);
+    }
+
+    /// Look up the catalog (if installed) for read-only use.
+    async fn external_tool_catalog(&self) -> Option<Arc<crate::bridge::ExternalToolCatalog>> {
+        self.external_tool_catalog.read().await.clone()
     }
 
     /// Install a per-project workspace mount table on this adapter. When set,
@@ -1818,6 +1840,30 @@ impl EffectExecutor for EffectBridgeAdapter {
         lease: &CapabilityLease,
         context: &ThreadExecutionContext,
     ) -> Result<ActionResult, EngineError> {
+        // External-tool short-circuit. If the per-thread catalog claims
+        // this action name, the caller will execute it; we pause the
+        // thread with `ResumeKind::External { ext_tool:<call_id> }` and
+        // wait for the resume payload. Skipping the dispatch path here
+        // also bypasses the safety pipeline — that's intentional, the
+        // caller is the trust boundary for the tool's parameters and
+        // output, not the engine.
+        if let Some(catalog) = self.external_tool_catalog().await
+            && catalog.contains(context.thread_id, action_name).await
+        {
+            let call_id = context.current_call_id.as_deref().unwrap_or("").to_string();
+            return Err(Self::gate_paused(
+                "external_tool",
+                action_name,
+                Some(call_id.as_str()),
+                parameters,
+                ironclaw_engine::ResumeKind::External {
+                    callback_id: crate::bridge::external_tool_callback_id(&call_id),
+                },
+                None,
+                Some(lease.clone()),
+            ));
+        }
+
         self.execute_action_internal(action_name, parameters, lease, context, false)
             .await
     }
@@ -1843,7 +1889,7 @@ impl EffectExecutor for EffectBridgeAdapter {
         let extensions = self
             .fetch_extension_map(auth_manager.as_deref(), context)
             .await;
-        ActionProjector::project_inventory(
+        let mut inventory = ActionProjector::project_inventory(
             self.tools.as_ref(),
             auth_manager.as_deref(),
             capability_registry,
@@ -1851,7 +1897,30 @@ impl EffectExecutor for EffectBridgeAdapter {
             context,
             extensions.as_ref(),
         )
-        .await
+        .await?;
+
+        // Merge per-thread external tools (Responses API caller-supplied
+        // `tools[]`) into the inline action surface so the LLM sees them
+        // as callable. Caller tools are not gated by leases or admin
+        // policy: they're owned by the caller end-to-end. Names are
+        // de-duplicated against the existing inline set; collisions are
+        // rejected up-front by the Responses API handler, but the
+        // dedup keeps a defensive ordering invariant: internal beats
+        // external if they ever collide.
+        if let Some(catalog) = self.external_tool_catalog().await {
+            let external = catalog.list(context.thread_id).await;
+            if !external.is_empty() {
+                let existing: std::collections::HashSet<&str> =
+                    inventory.inline.iter().map(|a| a.name.as_str()).collect();
+                let extras: Vec<ActionDef> = external
+                    .into_iter()
+                    .filter(|a| !existing.contains(a.name.as_str()))
+                    .collect();
+                inventory.inline.extend(extras);
+            }
+        }
+
+        Ok(inventory)
     }
 
     async fn available_capabilities(

@@ -10,6 +10,7 @@ mod capability_projector;
 mod cost_guard_gate;
 mod effect_adapter;
 mod engine_actions;
+mod external_tools;
 mod llm_adapter;
 mod router;
 pub mod sandbox;
@@ -21,6 +22,10 @@ mod user_facing_errors;
 mod workspace_reader;
 
 pub use cost_guard_gate::CostGuardBudgetGate;
+pub use external_tools::{
+    EXTERNAL_TOOL_CALLBACK_PREFIX, ExternalToolCatalog, ExternalToolEntry,
+    call_id_from_external_callback, external_tool_callback_id, is_external_tool_callback_id,
+};
 pub use workspace_reader::WorkspaceReaderAdapter;
 
 pub use effect_adapter::EffectBridgeAdapter;
@@ -40,6 +45,8 @@ pub use router::{
     ProjectsOverviewResponse,
     clear_engine_pending_auth,
     discard_engine_pending_auth_request,
+    // External tool catalog accessor (Responses API)
+    engine_external_tool_catalog,
     // Query functions
     fire_engine_mission,
     get_engine_mission,

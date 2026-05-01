@@ -1513,10 +1513,18 @@ impl Agent {
                     .await
                     .map(HandleOutcome::from);
                 }
-                Submission::ExternalCallback { request_id } => {
-                    return crate::bridge::handle_external_callback(self, message, *request_id)
-                        .await
-                        .map(HandleOutcome::from);
+                Submission::ExternalCallback {
+                    request_id,
+                    payload,
+                } => {
+                    return crate::bridge::handle_external_callback(
+                        self,
+                        message,
+                        *request_id,
+                        payload.clone(),
+                    )
+                    .await
+                    .map(HandleOutcome::from);
                 }
                 Submission::GateAuthResolution {
                     request_id,
@@ -2631,6 +2639,7 @@ mod tests {
 
         let callback = serde_json::to_string(&Submission::ExternalCallback {
             request_id: Uuid::new_v4(),
+            payload: None,
         })
         .expect("serialize external callback");
         let callback_message =

@@ -270,7 +270,10 @@ impl TestRig {
     /// Resolve an OAuth-style gate by submitting a typed
     /// `Submission::ExternalCallback`.
     pub async fn send_external_callback(&self, request_id: uuid::Uuid) {
-        let submission = ironclaw::agent::submission::Submission::ExternalCallback { request_id };
+        let submission = ironclaw::agent::submission::Submission::ExternalCallback {
+            request_id,
+            payload: None,
+        };
         let msg = ironclaw::channels::IncomingMessage::new(
             self.channel.channel_name(),
             self.channel.user_id(),

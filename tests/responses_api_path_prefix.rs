@@ -261,6 +261,42 @@ async fn unsupported_tool_type_returns_validation_error() {
     );
 }
 
+/// `instructions` is a per-request system/developer message (OpenAI Responses
+/// API spec). The handler used to reject it with 400; it must now accept it
+/// and route the request into the agent loop. We assert the request clears
+/// the synchronous validation gate by asking for a malformed `model` so the
+/// handler short-circuits with a 400 whose message is about `model`, not
+/// about `instructions`. A 400 mentioning `instructions` would mean the
+/// rejection regressed.
+#[tokio::test]
+async fn instructions_field_is_accepted() {
+    let (addr, _state, _guard) = start_test_server().await;
+    let url = format!("http://{}/api/v1/responses", addr);
+
+    let resp = client()
+        .post(&url)
+        .bearer_auth(AUTH_TOKEN)
+        .json(&serde_json::json!({
+            "model": "not-a-real-model",
+            "input": "hi",
+            "instructions": "You are a terse assistant. Always reply in one sentence.",
+        }))
+        .send()
+        .await
+        .expect("POST /api/v1/responses with instructions");
+
+    assert_eq!(resp.status(), 400);
+    let body = resp.text().await.unwrap_or_default();
+    assert!(
+        !body.contains("instructions"),
+        "instructions must no longer be rejected, got: {body}"
+    );
+    assert!(
+        body.contains("Model selection"),
+        "expected the model rejection to be the reason for 400, got: {body}"
+    );
+}
+
 /// Both GET item paths (`/api/v1/responses/{id}` and `/v1/responses/{id}`)
 /// must also enforce bearer-token auth. A missing token should return 401,
 /// not 404 — the auth middleware has to apply to legacy aliases as well.
