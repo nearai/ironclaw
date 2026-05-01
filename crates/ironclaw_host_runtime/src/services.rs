@@ -34,6 +34,7 @@ use ironclaw_resources::ResourceGovernor;
 use ironclaw_run_state::{ApprovalRequestStore, RunStateStore};
 use ironclaw_scripts::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};
 use ironclaw_secrets::SecretStore;
+use ironclaw_trust::{HostTrustPolicy, TrustPolicy};
 use ironclaw_wasm::{
     DenyWasmHostHttp, PreparedWitTool, WasmError, WasmRuntimeHttpAdapter, WitToolHost,
     WitToolRequest, WitToolRuntime, WitToolRuntimeConfig,
@@ -61,6 +62,7 @@ where
     R: ProcessResultStore + 'static,
 {
     registry: Arc<ExtensionRegistry>,
+    trust_policy: Arc<dyn TrustPolicy>,
     filesystem: Arc<F>,
     governor: Arc<G>,
     authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer>,
@@ -98,6 +100,7 @@ where
     ) -> Self {
         Self {
             registry,
+            trust_policy: Arc::new(HostTrustPolicy::empty()),
             filesystem,
             governor,
             authorizer,
@@ -117,6 +120,22 @@ where
             mcp_runtime: None,
             wasm_runtime: None,
         }
+    }
+
+    /// Attaches the host-owned trust policy used by the produced
+    /// [`DefaultHostRuntime`]. Without this, the service graph keeps the
+    /// default empty policy and capability dispatch fails closed.
+    pub fn with_trust_policy<T>(mut self, trust_policy: Arc<T>) -> Self
+    where
+        T: TrustPolicy + 'static,
+    {
+        self.trust_policy = trust_policy;
+        self
+    }
+
+    pub fn with_trust_policy_dyn(mut self, trust_policy: Arc<dyn TrustPolicy>) -> Self {
+        self.trust_policy = trust_policy;
+        self
     }
 
     pub fn with_run_state<T>(mut self, run_state: Arc<T>) -> Self
@@ -273,6 +292,7 @@ where
             Arc::clone(&self.authorizer),
             self.surface_version.clone(),
         )
+        .with_trust_policy_dyn(Arc::clone(&self.trust_policy))
         .with_process_manager(process_manager)
         .with_process_store(process_store)
         .with_process_result_store(process_result_store)

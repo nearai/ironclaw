@@ -20,7 +20,10 @@ use ironclaw_run_state::{
     InMemoryApprovalRequestStore, InMemoryRunStateStore, RunRecord, RunStart, RunStateError,
     RunStateStore,
 };
-use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
+use ironclaw_trust::{
+    AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
+    HostTrustPolicy, TrustDecision, TrustProvenance,
+};
 use serde_json::json;
 
 #[test]
@@ -56,6 +59,7 @@ async fn default_runtime_returns_completed_outcome_for_authorized_dispatch() {
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy()))
     .with_run_state(run_state.clone())
     .with_approval_requests(approval_requests.clone());
 
@@ -267,7 +271,8 @@ async fn default_runtime_idempotency_key_is_advisory_and_does_not_dedupe() {
         dispatcher.clone(),
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
-    );
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy()));
 
     let key = IdempotencyKey::new("turn-1/tool-1").unwrap();
 
@@ -1123,6 +1128,20 @@ fn execution_context_with_dispatch_grant() -> ExecutionContext {
         grants,
         MountView::default(),
     )
+    .unwrap()
+}
+
+fn local_manifest_trust_policy() -> HostTrustPolicy {
+    HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries(vec![
+        AdminEntry::for_local_manifest(
+            PackageId::new("echo").unwrap(),
+            "/system/extensions/echo/manifest.toml".to_string(),
+            None,
+            HostTrustAssignment::user_trusted(),
+            vec![EffectKind::DispatchCapability],
+            None,
+        ),
+    ]))])
     .unwrap()
 }
 

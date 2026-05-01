@@ -25,7 +25,10 @@ use ironclaw_run_state::{InMemoryApprovalRequestStore, InMemoryRunStateStore};
 use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptRuntime, ScriptRuntimeConfig,
 };
-use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
+use ironclaw_trust::{
+    AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
+    HostTrustPolicy, TrustDecision, TrustProvenance,
+};
 use ironclaw_wasm::{
     RecordingWasmHostHttp, WasmHostError, WasmHostHttp, WasmHttpRequest, WasmHttpResponse,
     WitToolHost, WitToolRuntimeConfig,
@@ -59,6 +62,10 @@ async fn host_runtime_services_builds_dispatcher_runtime_and_health_from_registe
         process_services,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability],
+    )))
     .with_run_state(run_state)
     .with_approval_requests(approval_requests)
     .with_capability_leases(capability_leases)
@@ -786,6 +793,23 @@ fn capability_grants(capability: CapabilityId) -> CapabilitySet {
         },
     });
     grants
+}
+
+fn local_manifest_trust_policy(
+    extension_id: &str,
+    allowed_effects: Vec<EffectKind>,
+) -> HostTrustPolicy {
+    HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries(vec![
+        AdminEntry::for_local_manifest(
+            PackageId::new(extension_id).unwrap(),
+            format!("/system/extensions/{extension_id}/manifest.toml"),
+            None,
+            HostTrustAssignment::user_trusted(),
+            allowed_effects,
+            None,
+        ),
+    ]))])
+    .unwrap()
 }
 
 fn trust_decision_with_dispatch_authority() -> TrustDecision {
