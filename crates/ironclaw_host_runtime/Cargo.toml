@@ -25,6 +25,7 @@ ironclaw_scripts = { path = "../ironclaw_scripts" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
 ironclaw_trust = { path = "../ironclaw_trust" }
 ironclaw_wasm = { path = "../ironclaw_wasm" }
+rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 secrecy = "0.10"
 serde_json = "1"
 thiserror = "2"

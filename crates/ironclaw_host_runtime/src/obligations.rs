@@ -15,7 +15,8 @@ use ironclaw_events::AuditSink;
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AuditEnvelope, AuditEventId, AuditStage,
     CapabilityDispatchResult, CapabilityId, DecisionSummary, EffectKind, MountView, NetworkPolicy,
-    Obligation, ResourceReservation, ResourceScope, SecretHandle,
+    Obligation, ResourceCeiling, ResourceEstimate, ResourceReservation, ResourceScope,
+    ResourceUsage, SandboxQuota, SecretHandle,
 };
 use ironclaw_resources::ResourceGovernor;
 use ironclaw_safety::LeakDetector;
@@ -464,6 +465,17 @@ impl BuiltinObligationHandler {
             .map_err(|_| resource_obligation_failed())
     }
 
+    fn preflight_resource_ceiling(
+        &self,
+        request: &CapabilityObligationRequest<'_>,
+    ) -> Result<(), CapabilityObligationError> {
+        let Some(ceiling) = resource_ceiling_obligation(request.obligations)? else {
+            return Ok(());
+        };
+        validate_supported_resource_ceiling(ceiling)?;
+        validate_estimate_within_ceiling(request.estimate, ceiling)
+    }
+
     async fn finish_prepare(
         &self,
         request: &CapabilityObligationRequest<'_>,
@@ -575,6 +587,7 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
         let secret_handles = secret_injection_obligations(request.obligations);
         self.preflight_secret_injection(&request, &secret_handles)
             .await?;
+        self.preflight_resource_ceiling(&request)?;
         let resource_reservation = self.reserve_resource_obligation(&request)?;
         let outcome = CapabilityObligationOutcome {
             mounts: scoped_mounts,
@@ -637,6 +650,12 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
         }
 
         let output_bytes = dispatch_output_bytes(&dispatch.output)?;
+        for obligation in request.obligations {
+            if let Obligation::EnforceResourceCeiling { ceiling } = obligation {
+                validate_supported_resource_ceiling(ceiling)?;
+                validate_usage_within_ceiling(&dispatch.usage, output_bytes, ceiling)?;
+            }
+        }
         for obligation in request.obligations {
             if let Obligation::EnforceOutputLimit { bytes } = obligation
                 && output_bytes > *bytes
@@ -711,6 +730,7 @@ fn post_dispatch_obligations(obligations: &[Obligation]) -> Vec<Obligation> {
                 obligation,
                 Obligation::AuditAfter
                     | Obligation::RedactOutput
+                    | Obligation::EnforceResourceCeiling { .. }
                     | Obligation::EnforceOutputLimit { .. }
             )
         })
@@ -739,7 +759,9 @@ fn obligation_supported_before_dispatch(
         | Obligation::InjectSecretOnce { .. }
         | Obligation::ReserveResources { .. }
         | Obligation::UseScopedMounts { .. } => true,
-        Obligation::EnforceResourceCeiling { .. } => false,
+        Obligation::EnforceResourceCeiling { .. } => {
+            !matches!(phase, CapabilityObligationPhase::Spawn)
+        }
         Obligation::AuditAfter
         | Obligation::RedactOutput
         | Obligation::EnforceOutputLimit { .. } => {
@@ -769,7 +791,9 @@ fn obligation_supported_after_dispatch(
         | Obligation::InjectSecretOnce { .. }
         | Obligation::ReserveResources { .. }
         | Obligation::UseScopedMounts { .. } => true,
-        Obligation::EnforceResourceCeiling { .. } => false,
+        Obligation::EnforceResourceCeiling { .. } => {
+            !matches!(phase, CapabilityObligationPhase::Spawn)
+        }
         Obligation::AuditAfter
         | Obligation::RedactOutput
         | Obligation::EnforceOutputLimit { .. } => {
@@ -822,6 +846,136 @@ fn scoped_mount_obligation(
         }
     }
     Ok(mounts)
+}
+
+fn resource_ceiling_obligation(
+    obligations: &[Obligation],
+) -> Result<Option<&ResourceCeiling>, CapabilityObligationError> {
+    let mut ceiling = None;
+    for obligation in obligations {
+        if let Obligation::EnforceResourceCeiling { ceiling: next } = obligation {
+            if ceiling.is_some() {
+                return Err(resource_obligation_failed());
+            }
+            ceiling = Some(next);
+        }
+    }
+    Ok(ceiling)
+}
+
+fn validate_supported_resource_ceiling(
+    ceiling: &ResourceCeiling,
+) -> Result<(), CapabilityObligationError> {
+    if let Some(sandbox) = &ceiling.sandbox {
+        validate_supported_sandbox_quota(sandbox)?;
+    }
+    Ok(())
+}
+
+fn validate_supported_sandbox_quota(
+    sandbox: &SandboxQuota,
+) -> Result<(), CapabilityObligationError> {
+    if sandbox.cpu_time_ms.is_some()
+        || sandbox.memory_bytes.is_some()
+        || sandbox.disk_bytes.is_some()
+    {
+        return Err(resource_obligation_failed());
+    }
+    Ok(())
+}
+
+fn validate_estimate_within_ceiling(
+    estimate: &ResourceEstimate,
+    ceiling: &ResourceCeiling,
+) -> Result<(), CapabilityObligationError> {
+    check_optional_decimal_ceiling(estimate.usd, ceiling.max_usd)?;
+    check_required_integer_ceiling(estimate.input_tokens, ceiling.max_input_tokens)?;
+    check_required_integer_ceiling(estimate.output_tokens, ceiling.max_output_tokens)?;
+    check_required_integer_ceiling(estimate.wall_clock_ms, ceiling.max_wall_clock_ms)?;
+    if let Some(sandbox) = &ceiling.sandbox {
+        check_required_integer_ceiling(
+            estimate.network_egress_bytes,
+            sandbox.network_egress_bytes,
+        )?;
+        check_required_integer_ceiling(
+            estimate.process_count.map(u64::from),
+            sandbox.process_count.map(u64::from),
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_usage_within_ceiling(
+    usage: &ResourceUsage,
+    output_bytes: u64,
+    ceiling: &ResourceCeiling,
+) -> Result<(), CapabilityObligationError> {
+    check_decimal_ceiling(usage.usd, ceiling.max_usd)?;
+    check_integer_ceiling(usage.input_tokens, ceiling.max_input_tokens)?;
+    check_integer_ceiling(usage.output_tokens, ceiling.max_output_tokens)?;
+    check_integer_ceiling(usage.wall_clock_ms, ceiling.max_wall_clock_ms)?;
+    check_integer_ceiling(
+        usage.output_bytes.max(output_bytes),
+        ceiling.max_output_bytes,
+    )?;
+    if let Some(sandbox) = &ceiling.sandbox {
+        check_integer_ceiling(usage.network_egress_bytes, sandbox.network_egress_bytes)?;
+        check_integer_ceiling(
+            u64::from(usage.process_count),
+            sandbox.process_count.map(u64::from),
+        )?;
+    }
+    Ok(())
+}
+
+fn check_optional_decimal_ceiling(
+    actual: Option<rust_decimal::Decimal>,
+    ceiling: Option<rust_decimal::Decimal>,
+) -> Result<(), CapabilityObligationError> {
+    let Some(ceiling) = ceiling else {
+        return Ok(());
+    };
+    let Some(actual) = actual else {
+        return Err(resource_obligation_failed());
+    };
+    check_decimal_ceiling(actual, Some(ceiling))
+}
+
+fn check_decimal_ceiling(
+    actual: rust_decimal::Decimal,
+    ceiling: Option<rust_decimal::Decimal>,
+) -> Result<(), CapabilityObligationError> {
+    if let Some(ceiling) = ceiling
+        && actual > ceiling
+    {
+        return Err(resource_obligation_failed());
+    }
+    Ok(())
+}
+
+fn check_required_integer_ceiling(
+    actual: Option<u64>,
+    ceiling: Option<u64>,
+) -> Result<(), CapabilityObligationError> {
+    let Some(ceiling) = ceiling else {
+        return Ok(());
+    };
+    let Some(actual) = actual else {
+        return Err(resource_obligation_failed());
+    };
+    check_integer_ceiling(actual, Some(ceiling))
+}
+
+fn check_integer_ceiling(
+    actual: u64,
+    ceiling: Option<u64>,
+) -> Result<(), CapabilityObligationError> {
+    if let Some(ceiling) = ceiling
+        && actual > ceiling
+    {
+        return Err(resource_obligation_failed());
+    }
+    Ok(())
 }
 
 fn validate_network_policy_metadata(

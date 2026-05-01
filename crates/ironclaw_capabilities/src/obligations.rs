@@ -134,6 +134,7 @@ pub(crate) fn post_dispatch_obligations(obligations: &[Obligation]) -> Vec<Oblig
                 obligation,
                 Obligation::AuditAfter
                     | Obligation::RedactOutput
+                    | Obligation::EnforceResourceCeiling { .. }
                     | Obligation::EnforceOutputLimit { .. }
             )
         })

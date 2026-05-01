@@ -121,6 +121,161 @@ async fn builtin_obligation_handler_enforces_output_limit_after_dispatch() {
 }
 
 #[tokio::test]
+async fn builtin_obligation_handler_allows_resource_ceiling_when_estimate_is_within_limit() {
+    let handler = BuiltinObligationHandler::new();
+    let context = execution_context(CapabilitySet::default());
+    let capability_id = capability_id();
+    let estimate = ResourceEstimate {
+        usd: Some(1.into()),
+        input_tokens: Some(100),
+        wall_clock_ms: Some(500),
+        ..ResourceEstimate::default()
+    };
+    let obligations = vec![Obligation::EnforceResourceCeiling {
+        ceiling: ResourceCeiling {
+            max_usd: Some(2.into()),
+            max_input_tokens: Some(200),
+            max_output_tokens: None,
+            max_wall_clock_ms: Some(1_000),
+            max_output_bytes: None,
+            sandbox: None,
+        },
+    }];
+
+    handler
+        .prepare(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn builtin_obligation_handler_rejects_resource_ceiling_above_host_estimate() {
+    let handler = BuiltinObligationHandler::new();
+    let context = execution_context(CapabilitySet::default());
+    let capability_id = capability_id();
+    let estimate = ResourceEstimate {
+        usd: Some(3.into()),
+        ..ResourceEstimate::default()
+    };
+    let obligations = vec![Obligation::EnforceResourceCeiling {
+        ceiling: ResourceCeiling {
+            max_usd: Some(2.into()),
+            max_input_tokens: None,
+            max_output_tokens: None,
+            max_wall_clock_ms: None,
+            max_output_bytes: None,
+            sandbox: None,
+        },
+    }];
+
+    let err = handler
+        .prepare(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityObligationError::Failed {
+            kind: CapabilityObligationFailureKind::Resource
+        }
+    ));
+}
+
+#[tokio::test]
+async fn builtin_obligation_handler_rejects_unenforced_sandbox_quota_fields() {
+    let handler = BuiltinObligationHandler::new();
+    let context = execution_context(CapabilitySet::default());
+    let capability_id = capability_id();
+    let estimate = ResourceEstimate::default();
+    let obligations = vec![Obligation::EnforceResourceCeiling {
+        ceiling: ResourceCeiling {
+            max_usd: None,
+            max_input_tokens: None,
+            max_output_tokens: None,
+            max_wall_clock_ms: None,
+            max_output_bytes: None,
+            sandbox: Some(SandboxQuota {
+                memory_bytes: Some(1024),
+                ..SandboxQuota::default()
+            }),
+        },
+    }];
+
+    let err = handler
+        .prepare(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityObligationError::Failed {
+            kind: CapabilityObligationFailureKind::Resource
+        }
+    ));
+}
+
+#[tokio::test]
+async fn builtin_obligation_handler_enforces_resource_ceiling_after_dispatch_usage() {
+    let handler = BuiltinObligationHandler::new();
+    let context = execution_context(CapabilitySet::default());
+    let capability_id = capability_id();
+    let estimate = ResourceEstimate {
+        output_tokens: Some(10),
+        ..ResourceEstimate::default()
+    };
+    let obligations = vec![Obligation::EnforceResourceCeiling {
+        ceiling: ResourceCeiling {
+            max_usd: None,
+            max_input_tokens: None,
+            max_output_tokens: Some(10),
+            max_wall_clock_ms: None,
+            max_output_bytes: None,
+            sandbox: None,
+        },
+    }];
+    let mut dispatch =
+        sample_dispatch(&context.resource_scope, &capability_id, json!({"ok": true}));
+    dispatch.usage.output_tokens = 11;
+
+    let err = handler
+        .complete_dispatch(CapabilityObligationCompletionRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+            dispatch: &dispatch,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityObligationError::Failed {
+            kind: CapabilityObligationFailureKind::Resource
+        }
+    ));
+}
+
+#[tokio::test]
 async fn builtin_obligation_handler_redacts_output_after_dispatch() {
     let handler = BuiltinObligationHandler::new();
     let context = execution_context(CapabilitySet::default());
@@ -661,7 +816,7 @@ async fn builtin_obligation_handler_reserves_requested_resources_and_releases_on
 }
 
 #[tokio::test]
-async fn default_host_runtime_fails_closed_on_resource_ceiling_until_handoff_exists() {
+async fn default_host_runtime_fails_closed_when_resource_ceiling_lacks_required_estimate() {
     let registry = Arc::new(registry_with_echo_capability());
     let dispatcher = Arc::new(PanicDispatcher);
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
@@ -691,10 +846,52 @@ async fn default_host_runtime_fails_closed_on_resource_ceiling_until_handoff_exi
 
     match outcome {
         RuntimeCapabilityOutcome::Failed(failure) => {
-            assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+            assert_eq!(failure.kind, RuntimeFailureKind::Resource);
         }
         other => panic!("expected failed outcome, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn default_host_runtime_dispatches_when_resource_ceiling_is_satisfied() {
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(RecordingDispatcher);
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
+        Arc::new(ObligatingAuthorizer::new(vec![
+            Obligation::EnforceResourceCeiling {
+                ceiling: ResourceCeiling {
+                    max_usd: Some(2.into()),
+                    max_input_tokens: None,
+                    max_output_tokens: None,
+                    max_wall_clock_ms: None,
+                    max_output_bytes: None,
+                    sandbox: None,
+                },
+            },
+        ]));
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher,
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_builtin_obligation_handler();
+
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            execution_context(CapabilitySet::default()),
+            capability_id(),
+            ResourceEstimate {
+                usd: Some(1.into()),
+                ..ResourceEstimate::default()
+            },
+            json!({"message": "obligated"}),
+            trust_decision(),
+        ))
+        .await
+        .unwrap();
+
+    assert!(matches!(outcome, RuntimeCapabilityOutcome::Completed(_)));
 }
 
 #[tokio::test]
