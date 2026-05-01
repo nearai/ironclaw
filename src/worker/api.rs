@@ -56,6 +56,8 @@ pub struct ProxyCompletionResponse {
     pub cache_read_input_tokens: u32,
     #[serde(default)]
     pub cache_creation_input_tokens: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -80,6 +82,8 @@ pub struct ProxyToolCompletionResponse {
     pub cache_read_input_tokens: u32,
     #[serde(default)]
     pub cache_creation_input_tokens: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
 }
 
 /// Completion result for the worker to report when done.
@@ -238,6 +242,7 @@ impl WorkerHttpClient {
             finish_reason: parse_finish_reason(&proxy_resp.finish_reason),
             cache_read_input_tokens: proxy_resp.cache_read_input_tokens,
             cache_creation_input_tokens: proxy_resp.cache_creation_input_tokens,
+            reasoning: proxy_resp.reasoning.clone(),
         })
     }
 
@@ -268,6 +273,7 @@ impl WorkerHttpClient {
             finish_reason: parse_finish_reason(&proxy_resp.finish_reason),
             cache_read_input_tokens: proxy_resp.cache_read_input_tokens,
             cache_creation_input_tokens: proxy_resp.cache_creation_input_tokens,
+            reasoning: proxy_resp.reasoning.clone(),
         })
     }
 

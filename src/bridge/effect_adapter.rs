@@ -7017,6 +7017,7 @@ Use this skill to set up a Pika meeting.
                 Ok(ironclaw_engine::LlmOutput {
                     response: ironclaw_engine::types::step::LlmResponse::Text("done".into()),
                     usage: ironclaw_engine::types::step::TokenUsage::default(),
+                    reasoning: None,
                 })
             }
             fn model_name(&self) -> &str {

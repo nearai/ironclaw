@@ -307,6 +307,18 @@ pub enum EventKind {
         content_preview: String,
     },
 
+    // ── LLM reasoning trace ─────────────────────────────────
+    /// Native chain-of-thought from the LLM, captured from
+    /// provider-specific reasoning channels (Anthropic extended
+    /// thinking, OpenAI o-series summaries, GLM/DeepSeek/Grok/
+    /// Qwen/Kimi `reasoning_content`, Gemini thought parts, etc.).
+    /// Distinct from `MessageAdded` (the assistant's user-facing
+    /// reply) and from any UX "thinking" status indicator.
+    LlmReasoning {
+        content: String,
+        model: String,
+    },
+
     // ── Thread tree ─────────────────────────────────────────
     ChildSpawned {
         child_id: ThreadId,

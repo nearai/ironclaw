@@ -783,6 +783,15 @@ async fn handle_llm_complete(
             total_tokens.output_tokens += output.usage.output_tokens;
             total_tokens.cost_usd += output.usage.cost_usd;
 
+            if let Some(reasoning) = output.reasoning.as_ref() {
+                if !reasoning.is_empty() {
+                    thread.add_event(EventKind::LlmReasoning {
+                        content: reasoning.clone(),
+                        model: deps.llm.model_name().to_string(),
+                    });
+                }
+            }
+
             let usage = serde_json::json!({
                 "input_tokens": output.usage.input_tokens,
                 "output_tokens": output.usage.output_tokens,
@@ -3980,6 +3989,7 @@ mod tests {
             Ok(crate::traits::llm::LlmOutput {
                 response: crate::types::step::LlmResponse::Text("ok".into()),
                 usage: crate::types::step::TokenUsage::default(),
+                reasoning: None,
             })
         }
     }
@@ -4043,6 +4053,7 @@ mod tests {
             Ok(crate::traits::llm::LlmOutput {
                 response: crate::types::step::LlmResponse::Text("ok".into()),
                 usage: crate::types::step::TokenUsage::default(),
+                reasoning: None,
             })
         }
     }

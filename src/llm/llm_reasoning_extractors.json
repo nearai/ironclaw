@@ -1,0 +1,75 @@
+[
+  {
+    "name": "Anthropic Claude (extended thinking)",
+    "model_match": "(?i)^claude",
+    "rules": [
+      { "kind": "block", "type_field": "type", "type_value": "thinking", "text_field": "thinking" }
+    ]
+  },
+  {
+    "name": "OpenAI o-series / gpt-5-thinking (Responses API)",
+    "model_match": "(?i)^(o[1-9]|gpt-5-thinking|gpt-5-codex)",
+    "rules": [
+      { "kind": "block", "type_field": "type", "type_value": "reasoning", "text_field": "summary[*].text" }
+    ]
+  },
+  {
+    "name": "Google Gemini (thinking)",
+    "model_match": "(?i)^gemini",
+    "rules": [
+      { "kind": "block", "flag_field": "thought", "text_field": "text" }
+    ]
+  },
+  {
+    "name": "GLM (Z.AI / direct)",
+    "model_match": "(?i)^glm",
+    "rules": [
+      { "kind": "field", "field": "reasoning_content" }
+    ]
+  },
+  {
+    "name": "DeepSeek",
+    "model_match": "(?i)^deepseek",
+    "rules": [
+      { "kind": "field", "field": "reasoning_content" }
+    ]
+  },
+  {
+    "name": "xAI Grok",
+    "model_match": "(?i)^grok",
+    "rules": [
+      { "kind": "field", "field": "reasoning_content" }
+    ]
+  },
+  {
+    "name": "Qwen",
+    "model_match": "(?i)^qwen",
+    "rules": [
+      { "kind": "field", "field": "reasoning_content" }
+    ]
+  },
+  {
+    "name": "Moonshot Kimi",
+    "model_match": "(?i)^kimi",
+    "rules": [
+      { "kind": "field", "field": "reasoning" },
+      { "kind": "field", "field": "reasoning_content" }
+    ]
+  },
+  {
+    "name": "Mistral Magistral",
+    "model_match": "(?i)^magistral",
+    "rules": [
+      { "kind": "block", "type_field": "type", "type_value": "thinking", "text_field": "thinking[*].text" },
+      { "kind": "regex_in_content", "pattern": "<think>([\\s\\S]*?)</think>" }
+    ]
+  },
+  {
+    "name": "OpenRouter (any model)",
+    "model_match": "(?i)^openrouter/",
+    "rules": [
+      { "kind": "field", "field": "reasoning" },
+      { "kind": "field", "field": "reasoning_content" }
+    ]
+  }
+]

@@ -700,6 +700,7 @@ mod tests {
                 responses: Mutex::new(vec![LlmOutput {
                     response: LlmResponse::Text(msg.into()),
                     usage: TokenUsage::default(),
+                    reasoning: None,
                 }]),
             })
         }
@@ -718,6 +719,7 @@ mod tests {
                 Ok(LlmOutput {
                     response: LlmResponse::Text("done".into()),
                     usage: TokenUsage::default(),
+                    reasoning: None,
                 })
             } else {
                 Ok(r.remove(0))
@@ -1351,6 +1353,7 @@ mod tests {
                         content: None,
                     },
                     usage: TokenUsage::default(),
+                    reasoning: None,
                 },
                 LlmOutput {
                     response: LlmResponse::ActionCalls {
@@ -1362,10 +1365,12 @@ mod tests {
                         content: None,
                     },
                     usage: TokenUsage::default(),
+                    reasoning: None,
                 },
                 LlmOutput {
                     response: LlmResponse::Text("done".into()),
                     usage: TokenUsage::default(),
+                    reasoning: None,
                 },
             ]),
         });
@@ -1408,6 +1413,7 @@ mod tests {
                     content: None,
                 },
                 usage: TokenUsage::default(),
+                reasoning: None,
             })
             .collect();
 

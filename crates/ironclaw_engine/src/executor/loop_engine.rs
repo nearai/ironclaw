@@ -602,6 +602,7 @@ mod tests {
                 Ok(LlmOutput {
                     response: LlmResponse::Text("(no more responses)".into()),
                     usage: TokenUsage::default(),
+                    reasoning: None,
                 })
             } else {
                 Ok(responses.remove(0))
@@ -679,6 +680,7 @@ mod tests {
                 output_tokens: 50,
                 ..Default::default()
             },
+            reasoning: None,
         }
     }
 
@@ -697,6 +699,7 @@ mod tests {
                 output_tokens: 50,
                 ..Default::default()
             },
+            reasoning: None,
         }
     }
 
@@ -1532,6 +1535,7 @@ mod tests {
                 output_tokens: 80,
                 ..Default::default()
             },
+            reasoning: None,
         }
     }
 
@@ -1961,6 +1965,7 @@ mod tests {
                     content: None,
                 },
                 usage: TokenUsage::default(),
+                reasoning: None,
             },
             text_response("I couldn't access that tool"),
         ]));

@@ -604,6 +604,7 @@ mod tests {
                 Ok(LlmOutput {
                     response: LlmResponse::Text("done".into()),
                     usage: TokenUsage::default(),
+                    reasoning: None,
                 })
             } else {
                 Ok(r.remove(0))
@@ -813,6 +814,7 @@ mod tests {
             Arc::new(MockLlm(Mutex::new(vec![LlmOutput {
                 response: LlmResponse::Text("Hello!".into()),
                 usage: TokenUsage::default(),
+                reasoning: None,
             }]))),
             Arc::new(MockEffects),
             store.clone(),
@@ -881,6 +883,7 @@ mod tests {
             Arc::new(MockLlm(Mutex::new(vec![LlmOutput {
                 response: LlmResponse::Text("Recovered".into()),
                 usage: TokenUsage::default(),
+                reasoning: None,
             }]))),
             Arc::new(MockEffects),
             store.clone(),

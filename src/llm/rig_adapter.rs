@@ -418,6 +418,50 @@ fn extract_cache_creation<T: Serialize>(raw: &T) -> u32 {
         .unwrap_or(0)
 }
 
+/// Extract the model's native reasoning channel (chain-of-thought) from a
+/// provider response. The per-provider knowledge lives in
+/// `llm_reasoning_extractors.json`; this just serializes the typed response
+/// to a generic JSON value and delegates.
+fn extract_reasoning_from_raw<T: Serialize>(model: &str, raw: &T) -> Option<String> {
+    let value = serde_json::to_value(raw).ok()?;
+    crate::llm::llm_reasoning::extract_reasoning(model, &value)
+}
+
+/// Build the Anthropic `thinking` request parameter for Claude models.
+///
+/// Anthropic only emits `thinking` content blocks when the request opts in
+/// via a top-level `thinking: { type: "enabled", budget_tokens: N }` field.
+/// Without this, Claude's reasoning extractor (which matches `^claude` and
+/// looks for `type: "thinking"` blocks) finds nothing and
+/// `CompletionResponse.reasoning` is `None`.
+///
+/// Budget defaults to 4096 and is overridable via `ANTHROPIC_THINKING_BUDGET`.
+/// Setting the env var to `0` disables extended thinking entirely.
+/// `budget_tokens` must be strictly less than `max_tokens`; we cap at
+/// `max_tokens.saturating_sub(1024)` to leave headroom for the actual answer.
+fn anthropic_thinking_param(model: &str, max_tokens: Option<u32>) -> Option<serde_json::Value> {
+    if !model.starts_with("claude-") {
+        return None;
+    }
+    let budget = std::env::var("ANTHROPIC_THINKING_BUDGET")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(4096);
+    if budget == 0 {
+        return None;
+    }
+    let max = max_tokens.unwrap_or(8192);
+    let actual_budget = budget.min(max.saturating_sub(1024));
+    if actual_budget < 1024 {
+        // Anthropic requires budget_tokens >= 1024; bail rather than send invalid request.
+        return None;
+    }
+    Some(serde_json::json!({
+        "type": "enabled",
+        "budget_tokens": actual_budget,
+    }))
+}
+
 /// Build a rig-core CompletionRequest from our internal types.
 ///
 /// When `cache_retention` is not `None`, injects a top-level `cache_control`
@@ -426,8 +470,16 @@ fn extract_cache_creation<T: Serialize>(raw: &T) -> u32 {
 /// the request root — which is exactly what Anthropic's **automatic caching**
 /// expects. The API auto-places the cache breakpoint at the last cacheable
 /// block and moves it forward as conversations grow.
+///
+/// When `model` matches `claude-*`, also injects a top-level `thinking`
+/// parameter so Anthropic emits extended-thinking content blocks (which the
+/// reasoning extractor then surfaces as `CompletionResponse.reasoning`).
+/// Anthropic requires `temperature=1` when extended thinking is on; we
+/// achieve that by clearing any caller-supplied temperature on Claude
+/// requests (rig-core omits the field, Anthropic defaults to 1).
 #[allow(clippy::too_many_arguments)]
 fn build_rig_request(
+    model: &str,
     preamble: Option<String>,
     mut history: Vec<RigMessage>,
     tools: Vec<RigToolDefinition>,
@@ -446,15 +498,28 @@ fn build_rig_request(
         reason: format!("Failed to build chat history: {}", e),
     })?;
 
-    // Inject top-level cache_control for Anthropic automatic prompt caching.
-    let additional_params = match cache_retention {
+    let cache_control_value = match cache_retention {
         CacheRetention::None => None,
-        CacheRetention::Short => Some(serde_json::json!({
-            "cache_control": {"type": "ephemeral"}
-        })),
-        CacheRetention::Long => Some(serde_json::json!({
-            "cache_control": {"type": "ephemeral", "ttl": "1h"}
-        })),
+        CacheRetention::Short => Some(serde_json::json!({"type": "ephemeral"})),
+        CacheRetention::Long => Some(serde_json::json!({"type": "ephemeral", "ttl": "1h"})),
+    };
+
+    let thinking_value = anthropic_thinking_param(model, max_tokens);
+    let thinking_enabled = thinking_value.is_some();
+
+    let additional_params = match (cache_control_value, thinking_value) {
+        (None, None) => None,
+        (Some(cc), None) => Some(serde_json::json!({"cache_control": cc})),
+        (None, Some(th)) => Some(serde_json::json!({"thinking": th})),
+        (Some(cc), Some(th)) => {
+            Some(serde_json::json!({"cache_control": cc, "thinking": th}))
+        }
+    };
+
+    let final_temperature = if thinking_enabled {
+        None
+    } else {
+        temperature.map(round_f32_to_f64)
     };
 
     Ok(RigRequest {
@@ -462,7 +527,7 @@ fn build_rig_request(
         chat_history,
         documents: Vec::new(),
         tools,
-        temperature: temperature.map(round_f32_to_f64),
+        temperature: final_temperature,
         max_tokens: max_tokens.map(|t| t as u64),
         tool_choice,
         additional_params,
@@ -539,6 +604,7 @@ where
         let (preamble, history) = convert_messages(&messages);
 
         let mut rig_req = build_rig_request(
+            model_override.as_deref().unwrap_or(&self.model_name),
             preamble,
             history,
             Vec::new(),
@@ -558,6 +624,8 @@ where
 
         let (text, _tool_calls, finish) = extract_response(&response.choice, &response.usage);
 
+        let reasoning = extract_reasoning_from_raw(&self.model_name, &response.raw_response);
+
         let resp = CompletionResponse {
             content: text.unwrap_or_default(),
             input_tokens: saturate_u32(response.usage.input_tokens),
@@ -565,6 +633,7 @@ where
             finish_reason: finish,
             cache_read_input_tokens: saturate_u32(response.usage.cached_input_tokens),
             cache_creation_input_tokens: extract_cache_creation(&response.raw_response),
+            reasoning,
         };
 
         if resp.cache_read_input_tokens > 0 {
@@ -598,6 +667,7 @@ where
         let tool_choice = convert_tool_choice(request.tool_choice.as_deref());
 
         let mut rig_req = build_rig_request(
+            model_override.as_deref().unwrap_or(&self.model_name),
             preamble,
             history,
             tools,
@@ -630,6 +700,8 @@ where
             }
         }
 
+        let reasoning = extract_reasoning_from_raw(&self.model_name, &response.raw_response);
+
         let resp = ToolCompletionResponse {
             content: text,
             tool_calls,
@@ -638,6 +710,7 @@ where
             finish_reason: finish,
             cache_read_input_tokens: saturate_u32(response.usage.cached_input_tokens),
             cache_creation_input_tokens: extract_cache_creation(&response.raw_response),
+            reasoning,
         };
 
         if resp.cache_read_input_tokens > 0 {
@@ -1854,6 +1927,7 @@ mod tests {
     #[test]
     fn test_build_rig_request_injects_cache_control_short() {
         let req = build_rig_request(
+            "glm-5",
             Some("You are helpful.".to_string()),
             vec![RigMessage::user("Hello")],
             Vec::new(),
@@ -1877,6 +1951,7 @@ mod tests {
     #[test]
     fn test_build_rig_request_injects_cache_control_long() {
         let req = build_rig_request(
+            "glm-5",
             Some("You are helpful.".to_string()),
             vec![RigMessage::user("Hello")],
             Vec::new(),
@@ -1897,6 +1972,7 @@ mod tests {
     #[test]
     fn test_build_rig_request_no_cache_control_when_none() {
         let req = build_rig_request(
+            "glm-5",
             Some("You are helpful.".to_string()),
             vec![RigMessage::user("Hello")],
             Vec::new(),
@@ -1910,6 +1986,148 @@ mod tests {
         assert!(
             req.additional_params.is_none(),
             "additional_params should be None when cache is disabled"
+        );
+    }
+
+    /// Save/restore an env var around a test so concurrent tests in this module
+    /// don't observe partial mutations. Mirrors the pattern used in
+    /// src/cli/doctor.rs.
+    struct EnvGuard {
+        key: &'static str,
+        prior: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn new(key: &'static str) -> Self {
+            let prior = std::env::var(key).ok();
+            // SAFETY: Caller holds ENV_MUTEX via lock_env() before constructing.
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self { key, prior }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: Caller holds ENV_MUTEX via lock_env() for the test scope.
+            unsafe {
+                match self.prior.take() {
+                    Some(v) => std::env::set_var(self.key, v),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_rig_request_injects_thinking_for_claude() {
+        let _mutex = crate::config::helpers::lock_env();
+        let _guard = EnvGuard::new("ANTHROPIC_THINKING_BUDGET");
+
+        let req = build_rig_request(
+            "claude-sonnet-4-6",
+            Some("You are helpful.".to_string()),
+            vec![RigMessage::user("Hello")],
+            Vec::new(),
+            None,
+            Some(0.5),
+            Some(8192),
+            CacheRetention::None,
+        )
+        .unwrap();
+
+        let params = req
+            .additional_params
+            .expect("Claude requests must inject thinking param");
+        assert_eq!(params["thinking"]["type"], "enabled");
+        assert_eq!(params["thinking"]["budget_tokens"], 4096);
+        assert!(
+            req.temperature.is_none(),
+            "temperature must be cleared on Claude requests with extended thinking"
+        );
+    }
+
+    #[test]
+    fn test_build_rig_request_thinking_combines_with_cache_control() {
+        let _mutex = crate::config::helpers::lock_env();
+        let _guard = EnvGuard::new("ANTHROPIC_THINKING_BUDGET");
+
+        let req = build_rig_request(
+            "claude-opus-4-1",
+            Some("You are helpful.".to_string()),
+            vec![RigMessage::user("Hello")],
+            Vec::new(),
+            None,
+            None,
+            Some(8192),
+            CacheRetention::Short,
+        )
+        .unwrap();
+
+        let params = req
+            .additional_params
+            .expect("Claude+cache requests must include both fields");
+        assert_eq!(params["cache_control"]["type"], "ephemeral");
+        assert_eq!(params["thinking"]["type"], "enabled");
+    }
+
+    #[test]
+    fn test_build_rig_request_no_thinking_for_non_claude() {
+        let _mutex = crate::config::helpers::lock_env();
+        let _guard = EnvGuard::new("ANTHROPIC_THINKING_BUDGET");
+        let req = build_rig_request(
+            "glm-5",
+            Some("You are helpful.".to_string()),
+            vec![RigMessage::user("Hello")],
+            Vec::new(),
+            None,
+            Some(0.5),
+            Some(8192),
+            CacheRetention::None,
+        )
+        .unwrap();
+
+        assert!(req.additional_params.is_none());
+        assert!(
+            req.temperature.is_some(),
+            "non-Claude models keep their caller-supplied temperature"
+        );
+    }
+
+    #[test]
+    fn test_anthropic_thinking_param_disabled_when_budget_zero() {
+        let _mutex = crate::config::helpers::lock_env();
+        let _guard = EnvGuard::new("ANTHROPIC_THINKING_BUDGET");
+        // SAFETY: holding ENV_MUTEX above.
+        unsafe {
+            std::env::set_var("ANTHROPIC_THINKING_BUDGET", "0");
+        }
+        let p = anthropic_thinking_param("claude-sonnet-4-6", Some(8192));
+        assert!(p.is_none(), "ANTHROPIC_THINKING_BUDGET=0 must disable thinking");
+    }
+
+    #[test]
+    fn test_anthropic_thinking_param_caps_at_max_tokens() {
+        let _mutex = crate::config::helpers::lock_env();
+        let _guard = EnvGuard::new("ANTHROPIC_THINKING_BUDGET");
+        // SAFETY: holding ENV_MUTEX above.
+        unsafe {
+            std::env::set_var("ANTHROPIC_THINKING_BUDGET", "10000");
+        }
+        let p = anthropic_thinking_param("claude-sonnet-4-6", Some(4096));
+        let v = p.expect("should still emit thinking with reduced budget");
+        assert_eq!(v["budget_tokens"], 4096u32 - 1024);
+    }
+
+    #[test]
+    fn test_anthropic_thinking_param_skips_when_max_too_small() {
+        let _mutex = crate::config::helpers::lock_env();
+        let _guard = EnvGuard::new("ANTHROPIC_THINKING_BUDGET");
+        let p = anthropic_thinking_param("claude-sonnet-4-6", Some(1024));
+        assert!(
+            p.is_none(),
+            "max_tokens too low to leave 1024 budget headroom must skip thinking"
         );
     }
 

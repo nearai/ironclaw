@@ -1588,6 +1588,7 @@ mod tests {
             finish_reason: crate::llm::FinishReason::Stop,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            reasoning: None,
         };
         assert!(SmartRoutingProvider::response_is_uncertain(&response));
     }
@@ -1601,6 +1602,7 @@ mod tests {
             finish_reason: crate::llm::FinishReason::Stop,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            reasoning: None,
         };
         assert!(SmartRoutingProvider::response_is_uncertain(&response));
     }
@@ -1614,6 +1616,7 @@ mod tests {
             finish_reason: crate::llm::FinishReason::Stop,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            reasoning: None,
         };
         assert!(!SmartRoutingProvider::response_is_uncertain(&response));
     }
@@ -1628,6 +1631,7 @@ mod tests {
             finish_reason: crate::llm::FinishReason::Stop,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            reasoning: None,
         };
         assert!(!SmartRoutingProvider::response_is_uncertain(&response));
     }

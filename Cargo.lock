@@ -6375,8 +6375,7 @@ dependencies = [
 [[package]]
 name = "rig-core"
 version = "0.30.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a8f7a3f0c7c00eaced15a68ee16e1bd6bb709ff598d11b9aedac8b628217dc09"
+source = "git+https://github.com/failsafesecurity/rig.git?branch=ironclaw-reasoning#c455b0c67210855ce9c596b85f3fe301fe2854b9"
 dependencies = [
  "as-any",
  "async-stream",

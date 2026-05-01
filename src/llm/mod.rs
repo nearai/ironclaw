@@ -25,6 +25,7 @@ mod nearai_chat;
 pub mod oauth_helpers;
 pub mod openai_codex_provider;
 pub mod openai_codex_session;
+pub mod llm_reasoning;
 mod provider;
 mod reasoning;
 pub mod recording;

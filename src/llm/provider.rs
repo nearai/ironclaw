@@ -232,6 +232,12 @@ pub struct CompletionResponse {
     /// Tokens written to the provider's server-side prompt cache (Anthropic).
     /// Zero when caching is not supported or no new prefix was cached.
     pub cache_creation_input_tokens: u32,
+    /// Native reasoning channel from the provider (Anthropic extended
+    /// thinking, GLM/DeepSeek/Grok/Qwen/Kimi `reasoning_content`,
+    /// OpenAI o-series reasoning summaries, etc.). `None` when the model
+    /// does not produce reasoning or no extractor matches the model name.
+    /// Populated by `llm::llm_reasoning::extract_reasoning`.
+    pub reasoning: Option<String>,
 }
 
 /// Why the completion finished.
@@ -393,6 +399,9 @@ pub struct ToolCompletionResponse {
     pub cache_read_input_tokens: u32,
     /// Tokens written to the provider's server-side prompt cache (Anthropic).
     pub cache_creation_input_tokens: u32,
+    /// Native reasoning channel from the provider. See
+    /// [`CompletionResponse::reasoning`] for details.
+    pub reasoning: Option<String>,
 }
 
 /// Metadata about a model returned by the provider's API.

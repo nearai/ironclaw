@@ -38,6 +38,11 @@ pub struct LlmCallConfig {
 pub struct LlmOutput {
     pub response: LlmResponse,
     pub usage: TokenUsage,
+    /// Native reasoning trace from the provider (Anthropic extended
+    /// thinking, OpenAI o-series reasoning summaries, GLM/DeepSeek/
+    /// Grok/Qwen/Kimi `reasoning_content`, Gemini thought parts, etc.).
+    /// `None` when the provider returned no reasoning channel.
+    pub reasoning: Option<String>,
 }
 
 /// Abstraction over language model providers.

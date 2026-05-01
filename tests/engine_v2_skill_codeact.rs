@@ -54,6 +54,7 @@ impl LlmBackend for ScriptedLlm {
             Ok(LlmOutput {
                 response: LlmResponse::Text("done".into()),
                 usage: TokenUsage::default(),
+                reasoning: None,
             })
         } else {
             Ok(queue.remove(0))
@@ -93,6 +94,7 @@ impl LlmBackend for CapturingScriptedLlm {
             Ok(LlmOutput {
                 response: LlmResponse::Text("done".into()),
                 usage: TokenUsage::default(),
+                reasoning: None,
             })
         } else {
             Ok(queue.remove(0))
@@ -581,6 +583,7 @@ FINAL(str(result))
             content: None,
         },
         usage: TokenUsage::default(),
+        reasoning: None,
     }]);
 
     // 3. Mock HTTP effects with canned GitHub response
@@ -693,6 +696,7 @@ FINAL(str(result))
             content: None,
         },
         usage: TokenUsage::default(),
+        reasoning: None,
     }]);
 
     let mut canned = HashMap::new();
@@ -770,6 +774,7 @@ async fn non_matching_goal_skips_skill_codeact() {
     let llm = ScriptedLlm::new(vec![LlmOutput {
         response: LlmResponse::Text("The weather is sunny.".into()),
         usage: TokenUsage::default(),
+        reasoning: None,
     }]);
 
     let effects = HttpMockEffects::new(HashMap::new());
@@ -832,10 +837,12 @@ async fn skill_prompt_context_survives_pause_and_resume() {
                 content: None,
             },
             usage: TokenUsage::default(),
+            reasoning: None,
         },
         LlmOutput {
             response: LlmResponse::Text("done".into()),
             usage: TokenUsage::default(),
+            reasoning: None,
         },
     ]);
 
@@ -931,6 +938,7 @@ async fn skill_prompt_context_survives_compaction_and_resume() {
         LlmOutput {
             response: LlmResponse::Text("Compaction summary text".into()),
             usage: TokenUsage::default(),
+            reasoning: None,
         },
         LlmOutput {
             response: LlmResponse::ActionCalls {
@@ -945,10 +953,12 @@ async fn skill_prompt_context_survives_compaction_and_resume() {
                 content: None,
             },
             usage: TokenUsage::default(),
+            reasoning: None,
         },
         LlmOutput {
             response: LlmResponse::Text("done".into()),
             usage: TokenUsage::default(),
+            reasoning: None,
         },
     ]);
 
