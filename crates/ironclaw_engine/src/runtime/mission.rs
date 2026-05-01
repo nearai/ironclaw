@@ -1039,6 +1039,37 @@ impl MissionManager {
         self.store.load_mission(id).await
     }
 
+    /// Find a mission by name, scoped to `(project_id, user_id)`.
+    ///
+    /// This is the typed lookup used by every name-keyed `mission_*`
+    /// dispatch path. Returns `Ok(None)` when no mission with that name
+    /// exists for the user (including shared missions, mirroring
+    /// `list_missions_with_shared`'s scope).
+    ///
+    /// Implementation note: today this scans `list_missions_with_shared`
+    /// and filters in-memory. That's O(N) per call against the user's
+    /// full mission set, including completed/archived. For accounts
+    /// with hundreds of missions and a high-frequency cron, this is the
+    /// hot path of every fire and is the perf concern flagged on
+    /// PR #3155 (serrrfirat). The right next step is a `Store`-level
+    /// `find_mission_by_name(project_id, user_id, name)` method that
+    /// pushes the predicate to the backend (an indexed SQL query for
+    /// PostgreSQL/libSQL). Adding it later is non-breaking — every
+    /// caller already goes through this method, so the optimisation
+    /// drops in without churn at the call sites.
+    pub async fn find_by_name(
+        &self,
+        project_id: ProjectId,
+        user_id: &str,
+        name: &str,
+    ) -> Result<Option<Mission>, EngineError> {
+        let missions = self
+            .store
+            .list_missions_with_shared(project_id, user_id)
+            .await?;
+        Ok(missions.into_iter().find(|m| m.name == name))
+    }
+
     /// Fire all active `OnSystemEvent` missions whose source and event_type match.
     ///
     /// The optional `payload` is forwarded as `trigger_payload` to each mission's
@@ -3635,6 +3666,74 @@ mod tests {
         assert_eq!(mission.goal, "do the thing");
         assert_eq!(mission.status, MissionStatus::Active);
         assert_eq!(mission.project_id, project_id);
+    }
+
+    #[tokio::test]
+    async fn find_by_name_round_trips_through_store() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        // Round-trip the name used at create time. This is the hot
+        // path every mission_* handler hits when the LLM provides a
+        // name (which is what it always provides — UUIDs only show up
+        // in legacy/programmatic callers).
+        let id = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "find-me",
+                "round trip",
+                MissionCadence::Manual,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        let found = mgr
+            .find_by_name(project_id, "alice", "find-me")
+            .await
+            .unwrap()
+            .expect("mission must be findable by its create-time name");
+        assert_eq!(found.id, id);
+        assert_eq!(found.name, "find-me");
+        assert_eq!(found.user_id, "alice");
+    }
+
+    #[tokio::test]
+    async fn find_by_name_returns_none_for_unknown() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        // Empty store — no missions, no matches.
+        assert!(
+            mgr.find_by_name(project_id, "alice", "no-such-mission")
+                .await
+                .unwrap()
+                .is_none(),
+            "empty store must return None, not error"
+        );
+
+        // Mission exists for a different user — the per-user scope
+        // must not leak.
+        mgr.create_mission(
+            project_id,
+            "bob",
+            "bobs-mission",
+            "bob's work",
+            MissionCadence::Manual,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            mgr.find_by_name(project_id, "alice", "bobs-mission")
+                .await
+                .unwrap()
+                .is_none(),
+            "per-user scope must filter out other users' missions"
+        );
     }
 
     #[tokio::test]

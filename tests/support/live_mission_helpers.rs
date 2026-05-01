@@ -133,6 +133,19 @@ impl ApprovalAutoResponder {
     }
 }
 
+impl Drop for ApprovalAutoResponder {
+    fn drop(&mut self) {
+        // Defensive abort: if the test panics or returns before
+        // calling `shutdown()`, the background task would otherwise
+        // keep polling the channel for the lifetime of the test
+        // process and bleed into subsequent tests on the same tokio
+        // runtime. Calling `abort()` here is idempotent — a task
+        // already aborted by an explicit `shutdown()` call simply
+        // ignores it.
+        self.handle.abort();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
