@@ -437,6 +437,103 @@ async fn host_runtime_services_resume_expired_lease_fails_before_dispatch() {
 }
 
 #[tokio::test]
+async fn host_runtime_services_resume_trust_preflight_failure_fails_only_matching_blocked_run() {
+    let fixture = approval_resume_fixture();
+    let runtime = fixture.services.host_runtime();
+    let context = execution_context_without_grants();
+    let scope = context.resource_scope.clone();
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "stale trust metadata"});
+
+    let gate = block_for_approval(&runtime, context.clone(), estimate.clone(), input.clone()).await;
+    let lease =
+        approve_dispatch_for_services(&fixture.services, &scope, gate.approval_request_id, None)
+            .await;
+    let broken_runtime = resume_runtime_with_empty_registry(&fixture);
+
+    let wrong_scope = ResourceScope {
+        user_id: UserId::new("other-user").unwrap(),
+        ..scope.clone()
+    };
+    let wrong_context = execution_context_without_grants_for_scope(wrong_scope);
+    let wrong_scope_outcome = broken_runtime
+        .resume_capability(RuntimeCapabilityResumeRequest::new(
+            wrong_context,
+            gate.approval_request_id,
+            script_capability_id(),
+            estimate.clone(),
+            input.clone(),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+    assert_failed_outcome(wrong_scope_outcome, RuntimeFailureKind::MissingRuntime);
+    assert_blocked_approval_run(
+        &fixture,
+        &scope,
+        context.invocation_id,
+        gate.approval_request_id,
+    )
+    .await;
+
+    let mut invalid_context = context.clone();
+    invalid_context.user_id = UserId::new("tampered-user").unwrap();
+    let invalid_context_outcome = broken_runtime
+        .resume_capability(RuntimeCapabilityResumeRequest::new(
+            invalid_context,
+            gate.approval_request_id,
+            script_capability_id(),
+            estimate.clone(),
+            input.clone(),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+    assert_failed_outcome(invalid_context_outcome, RuntimeFailureKind::MissingRuntime);
+    assert_blocked_approval_run(
+        &fixture,
+        &scope,
+        context.invocation_id,
+        gate.approval_request_id,
+    )
+    .await;
+
+    let matching_outcome = broken_runtime
+        .resume_capability(RuntimeCapabilityResumeRequest::new(
+            context.clone(),
+            gate.approval_request_id,
+            script_capability_id(),
+            estimate,
+            input,
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+    assert_failed_outcome(matching_outcome, RuntimeFailureKind::MissingRuntime);
+
+    let failed_run = fixture
+        .run_state
+        .get(&scope, context.invocation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(failed_run.status, RunStatus::Failed);
+    assert_eq!(failed_run.approval_request_id, None);
+    assert_eq!(failed_run.error_kind.as_deref(), Some("unknown_capability"));
+    assert_eq!(
+        fixture
+            .capability_leases
+            .get(&scope, lease.grant.id)
+            .await
+            .unwrap()
+            .status,
+        CapabilityLeaseStatus::Active,
+        "trust preflight failure must not claim or consume the approval lease"
+    );
+    assert!(fixture.events.events().is_empty());
+}
+
+#[tokio::test]
 async fn host_runtime_services_resume_without_backing_stores_fails_closed() {
     let runtime = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -1109,12 +1206,14 @@ type InMemoryHostRuntimeServices = HostRuntimeServices<
 struct ApprovalResumeFixture {
     services: InMemoryHostRuntimeServices,
     run_state: Arc<InMemoryRunStateStore>,
+    approval_requests: Arc<InMemoryApprovalRequestStore>,
     capability_leases: Arc<InMemoryCapabilityLeaseStore>,
     events: InMemoryEventSink,
 }
 
 fn approval_resume_fixture() -> ApprovalResumeFixture {
     let run_state = Arc::new(InMemoryRunStateStore::new());
+    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
     let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
     let events = InMemoryEventSink::new();
     let services = HostRuntimeServices::new(
@@ -1130,7 +1229,7 @@ fn approval_resume_fixture() -> ApprovalResumeFixture {
         vec![EffectKind::DispatchCapability],
     )))
     .with_run_state(Arc::clone(&run_state))
-    .with_approval_requests(Arc::new(InMemoryApprovalRequestStore::new()))
+    .with_approval_requests(Arc::clone(&approval_requests))
     .with_capability_leases(Arc::clone(&capability_leases))
     .with_script_runtime(Arc::new(ScriptRuntime::new(
         ScriptRuntimeConfig::for_testing(),
@@ -1141,9 +1240,50 @@ fn approval_resume_fixture() -> ApprovalResumeFixture {
     ApprovalResumeFixture {
         services,
         run_state,
+        approval_requests,
         capability_leases,
         events,
     }
+}
+
+fn resume_runtime_with_empty_registry(fixture: &ApprovalResumeFixture) -> DefaultHostRuntime {
+    HostRuntimeServices::new(
+        Arc::new(ExtensionRegistry::new()),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenGrantAuthorizer),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability],
+    )))
+    .with_run_state(Arc::clone(&fixture.run_state))
+    .with_approval_requests(Arc::clone(&fixture.approval_requests))
+    .with_capability_leases(Arc::clone(&fixture.capability_leases))
+    .with_script_runtime(Arc::new(ScriptRuntime::new(
+        ScriptRuntimeConfig::for_testing(),
+        EchoScriptBackend,
+    )))
+    .host_runtime()
+}
+
+async fn assert_blocked_approval_run(
+    fixture: &ApprovalResumeFixture,
+    scope: &ResourceScope,
+    invocation_id: InvocationId,
+    approval_request_id: ApprovalRequestId,
+) {
+    let run = fixture
+        .run_state
+        .get(scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.status, RunStatus::BlockedApproval);
+    assert_eq!(run.approval_request_id, Some(approval_request_id));
+    assert_eq!(run.error_kind, None);
 }
 
 async fn block_for_approval(
@@ -1398,6 +1538,29 @@ fn execution_context_without_grants() -> ExecutionContext {
         MountView::default(),
     )
     .unwrap()
+}
+
+fn execution_context_without_grants_for_scope(scope: ResourceScope) -> ExecutionContext {
+    let context = ExecutionContext {
+        invocation_id: scope.invocation_id,
+        correlation_id: CorrelationId::new(),
+        process_id: None,
+        parent_process_id: None,
+        tenant_id: scope.tenant_id.clone(),
+        user_id: scope.user_id.clone(),
+        agent_id: scope.agent_id.clone(),
+        project_id: scope.project_id.clone(),
+        mission_id: scope.mission_id.clone(),
+        thread_id: scope.thread_id.clone(),
+        extension_id: ExtensionId::new("caller").unwrap(),
+        runtime: RuntimeKind::Script,
+        trust: TrustClass::UserTrusted,
+        grants: CapabilitySet::default(),
+        mounts: MountView::default(),
+        resource_scope: scope,
+    };
+    context.validate().unwrap();
+    context
 }
 
 fn execution_context_with_dispatch_grant(capability: CapabilityId) -> ExecutionContext {

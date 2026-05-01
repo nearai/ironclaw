@@ -315,6 +315,13 @@ impl HostRuntime for DefaultHostRuntime {
                     trust_error_kind = error.kind(),
                     "capability trust evaluation failed before resume"
                 );
+                self.fail_matching_blocked_resume_on_preflight_error(
+                    &context,
+                    &capability_id,
+                    approval_request_id,
+                    error.kind(),
+                )
+                .await;
                 return Ok(trust_evaluation_failure(capability_id, error));
             }
         };
@@ -588,6 +595,56 @@ impl DefaultHostRuntime {
         };
         trace_trust_decision(capability_id, &decision);
         Ok(decision)
+    }
+
+    async fn fail_matching_blocked_resume_on_preflight_error(
+        &self,
+        context: &ironclaw_host_api::ExecutionContext,
+        capability_id: &CapabilityId,
+        approval_request_id: ApprovalRequestId,
+        error_kind: &'static str,
+    ) {
+        if context.validate().is_err() {
+            return;
+        }
+        let Some(run_state) = self.run_state.as_ref() else {
+            return;
+        };
+        let scope = &context.resource_scope;
+        let invocation_id = context.invocation_id;
+        let record = match run_state.get(scope, invocation_id).await {
+            Ok(Some(record)) => record,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(
+                    invocation_id = %invocation_id,
+                    capability_id = %capability_id,
+                    preflight_error_kind = error_kind,
+                    transition_error = %unavailable_from_run_state(error),
+                    "blocked resume preflight failed, but run-state lookup failed; leaving run state unchanged",
+                );
+                return;
+            }
+        };
+        if record.status != RunStatus::BlockedApproval
+            || &record.capability_id != capability_id
+            || record.approval_request_id != Some(approval_request_id)
+        {
+            return;
+        }
+        if let Err(error) = run_state
+            .fail(scope, invocation_id, error_kind.to_string())
+            .await
+        {
+            tracing::warn!(
+                invocation_id = %invocation_id,
+                capability_id = %capability_id,
+                approval_request_id = %approval_request_id,
+                preflight_error_kind = error_kind,
+                transition_error = %unavailable_from_run_state(error),
+                "blocked resume preflight failed, but run-state fail transition failed; original failure is returned to caller",
+            );
+        }
     }
 
     async fn translate_invocation_error(
