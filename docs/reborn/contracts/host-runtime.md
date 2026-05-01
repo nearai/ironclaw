@@ -33,3 +33,5 @@ Supported built-in behavior:
 ## Runtime HTTP egress
 
 Runtime HTTP remains host-mediated through `RuntimeHttpEgress` and `HostHttpEgressService`. Runtime code must not perform ad-hoc DNS/private-IP checks or direct HTTP clients; `ironclaw_network` owns network policy enforcement and `ironclaw_secrets` owns secret lease/consume semantics.
+
+MCP HTTP/SSE follows the same rule through `ironclaw_mcp::McpHostHttpClient`: the host supplies an `McpRuntimeHttpAdapter<RuntimeHttpEgress>` and an egress planner for scoped network policy, credential injection handles, response body limits, and timeouts. Generic or direct-network MCP clients keep `uses_host_mediated_http_egress() == false`, so `McpRuntime` rejects HTTP/SSE manifests before any outbound attempt.

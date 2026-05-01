@@ -147,6 +147,13 @@ impl McpTransport for HttpMcpTransport {
                 .get("Mcp-Session-Id")
                 .and_then(|v| v.to_str().ok())
         {
+            let session_id = session_id.trim();
+            if !is_safe_mcp_session_id(session_id) {
+                return Err(ToolError::ExternalService(format!(
+                    "[{}] MCP server returned invalid session id",
+                    self.server_name
+                )));
+            }
             session_manager
                 .update_session_id(user_id, &self.server_name, Some(session_id.to_string()))
                 .await;
@@ -286,6 +293,13 @@ impl HttpMcpTransport {
 ///
 /// See #263 — raw HTML error pages were propagating through the error
 /// chain into the web UI, causing a white screen.
+fn is_safe_mcp_session_id(value: &str) -> bool {
+    const MAX_MCP_SESSION_ID_BYTES: usize = 1024;
+    !value.is_empty()
+        && value.len() <= MAX_MCP_SESSION_ID_BYTES
+        && value.bytes().all(|byte| matches!(byte, 0x21..=0x7e))
+}
+
 pub(crate) fn sanitize_error_body(body: &str) -> String {
     const MAX_CHARS: usize = 200;
 
@@ -558,6 +572,52 @@ mod tests {
     /// Regression test for #1436: 202 Accepted responses for notifications
     /// were parsed as JSON, causing "Failed to parse MCP response" errors
     /// that broke the MCP session handshake.
+    #[tokio::test]
+    async fn test_wire_rejects_invalid_session_id_before_storing() {
+        use axum::{Router, http::HeaderMap, response::IntoResponse, routing::post};
+        use tokio::net::TcpListener;
+
+        async fn invalid_session_response() -> impl IntoResponse {
+            let mut headers = HeaderMap::new();
+            headers.insert("Mcp-Session-Id", "bad session".parse().unwrap());
+            (
+                headers,
+                axum::Json(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {"tools": {"listChanged": false}},
+                        "serverInfo": {"name": "mock", "version": "1"}
+                    }
+                })),
+            )
+        }
+
+        let app = Router::new().route("/", post(invalid_session_response));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://127.0.0.1:{}", addr.port());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let session_manager = Arc::new(McpSessionManager::new());
+        let transport = HttpMcpTransport::new(&url, "invalidsession")
+            .with_session_manager(Arc::clone(&session_manager), "user-a");
+        let request = McpRequest::initialize(1);
+
+        let error = transport.send(&request, &HashMap::new()).await.unwrap_err();
+
+        assert!(error.to_string().contains("invalid session id"));
+        assert_eq!(
+            session_manager
+                .get_session_id("user-a", &McpServerName::new("invalidsession").unwrap())
+                .await,
+            None
+        );
+    }
+
     #[tokio::test]
     async fn test_wire_202_accepted_for_notification() {
         use axum::{Router, http::StatusCode, routing::post};

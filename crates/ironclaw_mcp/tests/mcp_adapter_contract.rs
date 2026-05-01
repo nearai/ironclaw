@@ -132,6 +132,313 @@ fn mcp_host_http_adapter_returns_sanitized_shared_egress_errors() {
 }
 
 #[tokio::test]
+async fn concrete_mcp_http_client_routes_json_rpc_through_shared_egress() {
+    let scope = sample_scope();
+    let plan = host_http_plan();
+    let egress = RecordingRuntimeEgress::json_rpc();
+    let planner = RecordingEgressPlanner::new(plan.clone());
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(egress.clone())),
+        planner.clone(),
+    );
+
+    assert!(client.uses_host_mediated_http_egress());
+
+    let output = client
+        .call_tool(McpClientRequest {
+            provider: ExtensionId::new("github-mcp").unwrap(),
+            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+            scope: scope.clone(),
+            transport: "http".to_string(),
+            command: None,
+            args: vec![],
+            url: Some("https://mcp.example.test/mcp".to_string()),
+            input: json!({
+                "query": "ironclaw",
+                "credential_injections": [{"handle": "evil-token"}]
+            }),
+            max_output_bytes: 4096,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        output.output,
+        json!({"content":[{"type":"text","text":"ok"}],"isError":false})
+    );
+
+    let requests = egress.requests();
+    assert_eq!(
+        requests.len(),
+        3,
+        "initialize, initialized notification, tools/call"
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.runtime == RuntimeKind::Mcp)
+    );
+    assert!(requests.iter().all(|request| request.scope == scope));
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.network_policy == plan.network_policy)
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.credential_injections == plan.credential_injections)
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.response_body_limit == Some(4096))
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.timeout_ms == Some(2_500))
+    );
+    assert_eq!(json_rpc_method(&requests[0].body), "initialize");
+    assert_eq!(
+        json_rpc_method(&requests[1].body),
+        "notifications/initialized"
+    );
+    assert_eq!(json_rpc_method(&requests[2].body), "tools/call");
+    assert_eq!(json_rpc_param(&requests[2].body, "name"), json!("search"));
+    assert_eq!(
+        json_rpc_param(&requests[2].body, "arguments"),
+        json!({"query":"ironclaw","credential_injections":[{"handle":"evil-token"}]})
+    );
+    assert!(
+        requests[2]
+            .headers
+            .iter()
+            .any(|(name, value)| name == "Mcp-Session-Id" && value == "session-123")
+    );
+    assert!(requests.iter().all(|request| {
+        !request
+            .credential_injections
+            .iter()
+            .any(|injection| injection.handle.as_str() == "evil-token")
+    }));
+
+    let planner_calls = planner.calls();
+    assert_eq!(planner_calls.len(), 3);
+    assert!(planner_calls.iter().all(|call| call.scope == scope));
+    assert!(
+        planner_calls
+            .iter()
+            .all(|call| call.url == "https://mcp.example.test/mcp")
+    );
+}
+
+#[tokio::test]
+async fn concrete_mcp_http_client_scopes_session_ids_per_invocation() {
+    let egress = ScopedSessionRuntimeEgress::new();
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(egress.clone())),
+        StaticMcpHostHttpEgressPlanner::new(host_http_plan()),
+    );
+
+    for user in ["user1", "user2"] {
+        client
+            .call_tool(McpClientRequest {
+                provider: ExtensionId::new("github-mcp").unwrap(),
+                capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+                scope: sample_scope_for_user(user),
+                transport: "http".to_string(),
+                command: None,
+                args: vec![],
+                url: Some("https://mcp.example.test/mcp".to_string()),
+                input: json!({"query": user}),
+                max_output_bytes: 4096,
+            })
+            .await
+            .unwrap();
+    }
+
+    let requests = egress.requests();
+    let user2_requests = requests
+        .iter()
+        .filter(|request| request.scope.user_id.as_str() == "user2")
+        .collect::<Vec<_>>();
+    assert_eq!(user2_requests.len(), 3);
+    assert!(user2_requests.iter().all(|request| {
+        !request
+            .headers
+            .iter()
+            .any(|(_, value)| value == "session-user1")
+    }));
+    assert!(
+        user2_requests
+            .iter()
+            .filter(|request| json_rpc_method(&request.body) == "tools/call")
+            .all(|request| request
+                .headers
+                .iter()
+                .any(|(name, value)| name == "Mcp-Session-Id" && value == "session-user2"))
+    );
+}
+
+#[tokio::test]
+async fn mcp_runtime_with_concrete_http_client_consumes_shared_egress_end_to_end() {
+    let package = package_from_manifest(MCP_MANIFEST);
+    let egress = RecordingRuntimeEgress::json_rpc();
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(egress.clone())),
+        StaticMcpHostHttpEgressPlanner::new(host_http_plan()),
+    );
+    let runtime = McpRuntime::new(McpRuntimeConfig::for_testing(), client);
+    let governor = InMemoryResourceGovernor::new();
+
+    let result = runtime
+        .execute_extension_json(
+            &governor,
+            McpExecutionRequest {
+                package: &package,
+                capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
+                scope: sample_scope(),
+                estimate: ResourceEstimate::default(),
+                resource_reservation: None,
+                invocation: McpInvocation {
+                    input: json!({"query": "ironclaw"}),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.result.output,
+        json!({"content":[{"type":"text","text":"ok"}],"isError":false})
+    );
+    assert_eq!(result.receipt.status, ReservationStatus::Reconciled);
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.runtime == RuntimeKind::Mcp)
+    );
+}
+
+#[tokio::test]
+async fn concrete_mcp_sse_client_parses_event_stream_through_shared_egress() {
+    let egress = RecordingRuntimeEgress::sse();
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(egress.clone())),
+        StaticMcpHostHttpEgressPlanner::new(host_http_plan()),
+    );
+
+    let output = client
+        .call_tool(McpClientRequest {
+            provider: ExtensionId::new("github-mcp").unwrap(),
+            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+            scope: sample_scope(),
+            transport: "sse".to_string(),
+            command: None,
+            args: vec![],
+            url: Some("https://mcp.example.test/sse".to_string()),
+            input: json!({"query": "ironclaw"}),
+            max_output_bytes: 4096,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        output.output,
+        json!({"content":[{"type":"text","text":"ok from sse"}],"isError":false})
+    );
+    assert_eq!(egress.requests().len(), 3);
+}
+
+#[tokio::test]
+async fn concrete_mcp_http_client_caps_missing_plan_limit_to_client_output_limit() {
+    let mut plan = host_http_plan();
+    plan.response_body_limit = None;
+    let egress = RecordingRuntimeEgress::json_rpc();
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(egress.clone())),
+        StaticMcpHostHttpEgressPlanner::new(plan),
+    );
+
+    client
+        .call_tool(McpClientRequest {
+            provider: ExtensionId::new("github-mcp").unwrap(),
+            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+            scope: sample_scope(),
+            transport: "http".to_string(),
+            command: None,
+            args: vec![],
+            url: Some("https://mcp.example.test/mcp".to_string()),
+            input: json!({"query": "ironclaw"}),
+            max_output_bytes: 1_234,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        egress
+            .requests()
+            .iter()
+            .all(|request| request.response_body_limit == Some(1_234))
+    );
+}
+
+#[tokio::test]
+async fn concrete_mcp_http_client_rejects_invalid_session_id_before_reuse() {
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(InvalidSessionRuntimeEgress)),
+        StaticMcpHostHttpEgressPlanner::new(host_http_plan()),
+    );
+
+    let error = client
+        .call_tool(McpClientRequest {
+            provider: ExtensionId::new("github-mcp").unwrap(),
+            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+            scope: sample_scope(),
+            transport: "http".to_string(),
+            command: None,
+            args: vec![],
+            url: Some("https://mcp.example.test/mcp".to_string()),
+            input: json!({"query": "ironclaw"}),
+            max_output_bytes: 4096,
+        })
+        .await
+        .expect_err("invalid upstream session ids must not be reused as request headers");
+
+    assert_eq!(error, "response_error");
+}
+
+#[tokio::test]
+async fn concrete_mcp_http_client_sanitizes_shared_egress_failures() {
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(SecretEchoRuntimeEgress)),
+        StaticMcpHostHttpEgressPlanner::new(host_http_plan()),
+    );
+
+    let error = client
+        .call_tool(McpClientRequest {
+            provider: ExtensionId::new("github-mcp").unwrap(),
+            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+            scope: sample_scope(),
+            transport: "http".to_string(),
+            command: None,
+            args: vec![],
+            url: Some("https://mcp.example.test/mcp".to_string()),
+            input: json!({"query": "ironclaw"}),
+            max_output_bytes: 4096,
+        })
+        .await
+        .expect_err("raw shared-egress errors must not leak through the MCP client");
+
+    assert_eq!(error, "network_error");
+    assert!(!error.contains("sk-test-secret"));
+    assert!(!error.contains("10.0.0.7"));
+}
+
+#[tokio::test]
 async fn mcp_runtime_fails_closed_for_external_stdio_process_egress() {
     let package = package_from_manifest(STDIO_MCP_MANIFEST);
     let client = RecordingMcpClient::new(Ok(McpClientOutput::json(json!({"ok": true}))));
@@ -488,6 +795,274 @@ impl McpClient for RecordingMcpClient {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecordedResponseMode {
+    Json,
+    Sse,
+}
+
+#[derive(Debug, Clone)]
+struct RecordingRuntimeEgress {
+    mode: RecordedResponseMode,
+    requests: Arc<Mutex<Vec<RuntimeHttpEgressRequest>>>,
+}
+
+impl RecordingRuntimeEgress {
+    fn json_rpc() -> Self {
+        Self {
+            mode: RecordedResponseMode::Json,
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn sse() -> Self {
+        Self {
+            mode: RecordedResponseMode::Sse,
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn requests(&self) -> Vec<RuntimeHttpEgressRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+impl RuntimeHttpEgress for RecordingRuntimeEgress {
+    fn execute(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        let method = json_rpc_method(&request.body);
+        self.requests.lock().unwrap().push(request.clone());
+        match method.as_str() {
+            "initialize" => Ok(runtime_json_response(
+                Some(1),
+                json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {"listChanged": false}},
+                    "serverInfo": {"name": "mock-mcp", "version": "1.0.0"}
+                }),
+                vec![("Mcp-Session-Id".to_string(), "session-123".to_string())],
+            )),
+            "notifications/initialized" => Ok(RuntimeHttpEgressResponse {
+                status: 202,
+                headers: vec![],
+                body: vec![],
+                request_bytes: request.body.len() as u64,
+                response_bytes: 0,
+                redaction_applied: false,
+            }),
+            "tools/call" => {
+                let id = json_rpc_id(&request.body);
+                match self.mode {
+                    RecordedResponseMode::Json => Ok(runtime_json_response(
+                        id,
+                        json!({"content":[{"type":"text","text":"ok"}],"isError":false}),
+                        vec![],
+                    )),
+                    RecordedResponseMode::Sse => Ok(runtime_sse_response(
+                        id,
+                        json!({"content":[{"type":"text","text":"ok from sse"}],"isError":false}),
+                    )),
+                }
+            }
+            other => panic!("unexpected MCP JSON-RPC method {other}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecordedPlanCall {
+    scope: ResourceScope,
+    method: NetworkMethod,
+    url: String,
+}
+
+#[derive(Debug, Clone)]
+struct RecordingEgressPlanner {
+    plan: McpHostHttpEgressPlan,
+    calls: Arc<Mutex<Vec<RecordedPlanCall>>>,
+}
+
+impl RecordingEgressPlanner {
+    fn new(plan: McpHostHttpEgressPlan) -> Self {
+        Self {
+            plan,
+            calls: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn calls(&self) -> Vec<RecordedPlanCall> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+impl McpHostHttpEgressPlanner for RecordingEgressPlanner {
+    fn plan(&self, request: McpHostHttpEgressPlanRequest<'_>) -> McpHostHttpEgressPlan {
+        self.calls.lock().unwrap().push(RecordedPlanCall {
+            scope: request.scope.clone(),
+            method: request.method,
+            url: request.url.to_string(),
+        });
+        self.plan.clone()
+    }
+}
+
+fn host_http_plan() -> McpHostHttpEgressPlan {
+    McpHostHttpEgressPlan {
+        network_policy: mcp_http_policy(),
+        credential_injections: vec![RuntimeCredentialInjection {
+            handle: SecretHandle::new("github-token").unwrap(),
+            target: RuntimeCredentialTarget::Header {
+                name: "Authorization".to_string(),
+                prefix: Some("Bearer ".to_string()),
+            },
+            required: true,
+        }],
+        response_body_limit: Some(4096),
+        timeout_ms: Some(2_500),
+    }
+}
+
+fn json_rpc_method(body: &[u8]) -> String {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .unwrap()
+        .get("method")
+        .and_then(serde_json::Value::as_str)
+        .unwrap()
+        .to_string()
+}
+
+fn json_rpc_id(body: &[u8]) -> Option<u64> {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .unwrap()
+        .get("id")
+        .and_then(serde_json::Value::as_u64)
+}
+
+fn json_rpc_param(body: &[u8], key: &str) -> serde_json::Value {
+    serde_json::from_slice::<serde_json::Value>(body).unwrap()["params"][key].clone()
+}
+
+fn runtime_json_response(
+    id: Option<u64>,
+    result: serde_json::Value,
+    extra_headers: Vec<(String, String)>,
+) -> RuntimeHttpEgressResponse {
+    let mut headers = vec![("content-type".to_string(), "application/json".to_string())];
+    headers.extend(extra_headers);
+    let body = serde_json::to_vec(&json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": result,
+    }))
+    .unwrap();
+    RuntimeHttpEgressResponse {
+        status: 200,
+        headers,
+        response_bytes: body.len() as u64,
+        body,
+        request_bytes: 0,
+        redaction_applied: false,
+    }
+}
+
+fn runtime_sse_response(id: Option<u64>, result: serde_json::Value) -> RuntimeHttpEgressResponse {
+    let event = json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": result,
+    });
+    let body = format!("event: message\ndata: {event}\n\n").into_bytes();
+    RuntimeHttpEgressResponse {
+        status: 200,
+        headers: vec![("content-type".to_string(), "text/event-stream".to_string())],
+        response_bytes: body.len() as u64,
+        body,
+        request_bytes: 0,
+        redaction_applied: false,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ScopedSessionRuntimeEgress {
+    requests: Arc<Mutex<Vec<RuntimeHttpEgressRequest>>>,
+}
+
+impl ScopedSessionRuntimeEgress {
+    fn new() -> Self {
+        Self {
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn requests(&self) -> Vec<RuntimeHttpEgressRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+impl RuntimeHttpEgress for ScopedSessionRuntimeEgress {
+    fn execute(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        let method = json_rpc_method(&request.body);
+        self.requests.lock().unwrap().push(request.clone());
+        match method.as_str() {
+            "initialize" => Ok(runtime_json_response(
+                Some(json_rpc_id(&request.body).unwrap()),
+                json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {"listChanged": false}},
+                    "serverInfo": {"name": "mock-mcp", "version": "1.0.0"}
+                }),
+                vec![(
+                    "Mcp-Session-Id".to_string(),
+                    format!("session-{}", request.scope.user_id.as_str()),
+                )],
+            )),
+            "notifications/initialized" => Ok(RuntimeHttpEgressResponse {
+                status: 202,
+                headers: vec![],
+                body: vec![],
+                request_bytes: request.body.len() as u64,
+                response_bytes: 0,
+                redaction_applied: false,
+            }),
+            "tools/call" => Ok(runtime_json_response(
+                json_rpc_id(&request.body),
+                json!({"content":[{"type":"text","text":"ok"}],"isError":false}),
+                vec![],
+            )),
+            other => panic!("unexpected MCP JSON-RPC method {other}"),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct InvalidSessionRuntimeEgress;
+
+impl RuntimeHttpEgress for InvalidSessionRuntimeEgress {
+    fn execute(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        assert_eq!(json_rpc_method(&request.body), "initialize");
+        Ok(runtime_json_response(
+            Some(1),
+            json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {"listChanged": false}},
+                "serverInfo": {"name": "mock-mcp", "version": "1.0.0"}
+            }),
+            vec![(
+                "Mcp-Session-Id".to_string(),
+                "bad\r\nInjected: yes".to_string(),
+            )],
+        ))
+    }
+}
+
 #[derive(Debug)]
 struct SecretEchoRuntimeEgress;
 
@@ -570,6 +1145,13 @@ fn sample_scope() -> ResourceScope {
         thread_id: None,
         invocation_id: InvocationId::new(),
     }
+}
+
+fn sample_scope_for_user(user_id: &str) -> ResourceScope {
+    let mut scope = sample_scope();
+    scope.user_id = UserId::new(user_id).unwrap();
+    scope.invocation_id = InvocationId::new();
+    scope
 }
 
 fn mcp_http_policy() -> NetworkPolicy {

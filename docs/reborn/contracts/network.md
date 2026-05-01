@@ -134,7 +134,7 @@ This slice does not implement:
 - per-tenant persisted policy stores
 - OAuth/token refresh flows
 
-Those should be added as separate service/composition slices without moving runtime execution or product workflow semantics into this crate. Runtime adapters that wrap external protocol clients, such as MCP HTTP/SSE, must fail closed unless the host-selected client explicitly uses this host-mediated egress boundary rather than ambient direct HTTP.
+Those should be added as separate service/composition slices without moving runtime execution or product workflow semantics into this crate. Runtime adapters that wrap external protocol clients must fail closed unless the host-selected client explicitly uses this host-mediated egress boundary rather than ambient direct HTTP. Reborn MCP HTTP/SSE uses `ironclaw_mcp::McpHostHttpClient` with `McpRuntimeHttpAdapter<RuntimeHttpEgress>` plus a host-owned egress planner; only that fully host-mediated client may report `uses_host_mediated_http_egress() == true`.
 
 ---
 
