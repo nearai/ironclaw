@@ -589,6 +589,19 @@ impl ProcessObligationLifecycleStore {
         Ok(())
     }
 
+    fn has_staged_handoffs(&self, record: &ProcessRecord) -> Result<bool, ProcessError> {
+        let has_secret_handoff = self
+            .secret_injections
+            .has_for_capability(&record.scope, &record.capability_id)
+            .map_err(|_| ProcessError::InvalidStoredRecord {
+                reason: "process obligation handoff lookup failed".to_string(),
+            })?;
+        Ok(self
+            .network_policies
+            .contains(&record.scope, &record.capability_id)
+            || has_secret_handoff)
+    }
+
     fn cleanup_terminal(
         &self,
         record: &ProcessRecord,
@@ -618,8 +631,9 @@ impl ProcessObligationLifecycleStore {
         if self.process_handoff_cleaned(record)? {
             return Ok(());
         }
-        let should_cleanup_handoffs =
-            self.has_active_process_handoff(record)? || record.resource_reservation_id.is_some();
+        let should_cleanup_handoffs = self.has_active_process_handoff(record)?
+            || record.resource_reservation_id.is_some()
+            || self.has_staged_handoffs(record)?;
         if should_cleanup_handoffs {
             self.network_policies
                 .discard_for_capability(&record.scope, &record.capability_id);

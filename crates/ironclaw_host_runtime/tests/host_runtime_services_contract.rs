@@ -1354,6 +1354,51 @@ async fn process_obligation_lifecycle_cleans_record_started_before_wrapper_exist
 }
 
 #[tokio::test]
+async fn process_obligation_lifecycle_cleans_legacy_handoffs_without_resource_reservation() {
+    let secret_handle = SecretHandle::new("api_token").unwrap();
+    let inner_store = Arc::new(InMemoryProcessStore::new());
+    let network_policies = Arc::new(NetworkObligationPolicyStore::new());
+    let secret_injections = Arc::new(RuntimeSecretInjectionStore::new());
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id);
+    network_policies.insert(&scope, &script_capability_id(), wasm_http_policy());
+    secret_injections
+        .insert(
+            &scope,
+            &script_capability_id(),
+            &secret_handle,
+            SecretMaterial::from("runtime-secret"),
+        )
+        .unwrap();
+    let process_id = ProcessId::new();
+    inner_store
+        .start(process_start(process_id, invocation_id, scope.clone()))
+        .await
+        .unwrap();
+
+    let lifecycle_store = ProcessObligationLifecycleStore::new(
+        inner_store,
+        Arc::clone(&network_policies),
+        Arc::clone(&secret_injections),
+        governor,
+    );
+    lifecycle_store.kill(&scope, process_id).await.unwrap();
+
+    assert!(
+        network_policies
+            .take(&scope, &script_capability_id())
+            .is_none()
+    );
+    assert!(
+        secret_injections
+            .take(&scope, &script_capability_id(), &secret_handle)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn process_obligation_lifecycle_rejects_second_active_handoff_for_same_scope_capability() {
     let inner_store = Arc::new(InMemoryProcessStore::new());
     let network_policies = Arc::new(NetworkObligationPolicyStore::new());
