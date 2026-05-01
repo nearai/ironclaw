@@ -1031,6 +1031,7 @@ fn host_http_plan() -> McpHostHttpEgressPlan {
         network_policy: mcp_http_policy(),
         credential_injections: vec![RuntimeCredentialInjection {
             handle: SecretHandle::new("github-token").unwrap(),
+            source: RuntimeCredentialSource::SecretStoreLease,
             target: RuntimeCredentialTarget::Header {
                 name: "Authorization".to_string(),
                 prefix: Some("Bearer ".to_string()),
