@@ -4293,6 +4293,49 @@ async fn await_thread_outcome(
                 );
             }
 
+            // Caller-supplied external tool from the Responses API:
+            // surface as `AppEvent::ExternalToolCall` so the
+            // /v1/responses handler can emit a `function_call`
+            // ResponseOutputItem and complete the turn. Without this
+            // emit the handler times out waiting for a never-arriving
+            // event and the user sees `response.failed`. The mid-exec
+            // path (`notify_pending_gate`) emits the same variant, but
+            // CodeAct converts the gate into a Python RuntimeError —
+            // the thread ends with a `ThreadOutcome::GatePaused` and
+            // never traverses `notify_pending_gate`, so we have to
+            // emit it here too.
+            if let ironclaw_engine::ResumeKind::External { ref callback_id } = pending.resume_kind
+                && crate::bridge::is_external_tool_callback_id(callback_id)
+            {
+                if let Some(ref sse) = state.sse {
+                    let arguments = serde_json::to_string(&pending.parameters)
+                        .unwrap_or_else(|_| pending.parameters.to_string());
+                    sse.broadcast_for_user(
+                        &message.user_id,
+                        AppEvent::ExternalToolCall {
+                            // projection-exempt: bridge dispatcher, ThreadOutcome::GatePaused External-tool projection from CodeAct re-entry path
+                            request_id: pending.request_id.to_string(),
+                            call_id: pending.call_id.clone(),
+                            name: pending.action_name.clone(),
+                            arguments,
+                            thread_id: Some(pending.effective_wire_thread_id()),
+                        },
+                    );
+                } else {
+                    tracing::debug!(
+                        user_id = %message.user_id,
+                        callback = %callback_id,
+                        request_id = %pending.request_id,
+                        "external tool gate paused (post-CodeAct) but no broadcaster is wired; \
+                         caller will not be notified"
+                    );
+                }
+                // Skip the approval-card delivery path below — that
+                // surface is for human-in-the-loop UX which doesn't
+                // apply to caller-executed tool calls.
+                return Ok(BridgeOutcome::Pending);
+            }
+
             // Send the approval/auth card via the source channel. Each
             // channel renders this natively (web → SSE card, TUI → widget,
             // relay → buttons). No text response is returned — the caller
@@ -10714,23 +10757,28 @@ mod tests {
             "expected exactly one call site for persist_v2_tool_calls, found {call_sites}"
         );
 
-        // The call must live inside `ThreadOutcome::Completed` and must not
-        // appear in any of the terminal arms that represent non-completion
-        // outcomes. `GatePaused` is the one that triggered the bug.
-        let completed_idx = before_fn
-            .find("ThreadOutcome::Completed")
-            .expect("Completed arm must exist");
-        let gate_paused_idx = before_fn
-            .find("ThreadOutcome::GatePaused")
-            .expect("GatePaused arm must exist");
+        // The call must live inside the `ThreadOutcome::Completed` match
+        // arm and must not appear in the `ThreadOutcome::GatePaused` arm.
+        // We anchor on the match-arm destructuring patterns (with their
+        // first field name), not bare mentions, because helper guards
+        // and comments above the match block reference the same enum
+        // variants and would otherwise produce earlier `find` matches
+        // that don't reflect the structural invariant.
+        let completed_arm_idx = before_fn
+            .find("ThreadOutcome::Completed { response }")
+            .expect("Completed match arm must exist");
+        let gate_paused_arm_idx = before_fn
+            .find("ThreadOutcome::GatePaused {\n            gate_name,")
+            .expect("GatePaused match arm must exist");
         let call_idx = before_fn
             .find("persist_v2_tool_calls(")
             .expect("call site must exist");
 
         assert!(
-            completed_idx < call_idx && call_idx < gate_paused_idx,
-            "persist_v2_tool_calls call must sit between Completed and GatePaused arms, got \
-             completed={completed_idx} call={call_idx} gate_paused={gate_paused_idx}"
+            completed_arm_idx < call_idx && call_idx < gate_paused_arm_idx,
+            "persist_v2_tool_calls call must sit between the Completed and GatePaused \
+             match arms, got completed_arm={completed_arm_idx} call={call_idx} \
+             gate_paused_arm={gate_paused_arm_idx}"
         );
     }
 
