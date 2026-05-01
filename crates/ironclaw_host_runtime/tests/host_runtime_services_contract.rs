@@ -1,9 +1,11 @@
 use std::{sync::Arc, thread, time::Duration};
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{Duration as ChronoDuration, Utc};
+use ironclaw_approvals::LeaseApproval;
 use ironclaw_authorization::{
-    GrantAuthorizer, InMemoryCapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer,
+    CapabilityLeaseStatus, CapabilityLeaseStore, GrantAuthorizer, InMemoryCapabilityLeaseStore,
+    TrustAwareCapabilityDispatchAuthorizer,
 };
 use ironclaw_events::{
     DurableAuditLog, DurableEventLog, EventCursor, EventError, EventReplay, EventStreamKey,
@@ -16,16 +18,19 @@ use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CancelReason, CancelRuntimeWorkRequest, CapabilitySurfaceVersion, DefaultHostRuntime,
     HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeFailureKind, RuntimeStatusRequest, RuntimeWorkId,
+    RuntimeCapabilityResumeRequest, RuntimeFailureKind, RuntimeStatusRequest, RuntimeWorkId,
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutionResult, McpExecutor};
 use ironclaw_processes::{
-    ProcessResultStore, ProcessServices, ProcessStart, ProcessStatus, ProcessStore,
+    InMemoryProcessResultStore, InMemoryProcessStore, ProcessResultStore, ProcessServices,
+    ProcessStart, ProcessStatus, ProcessStore,
 };
 use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceGovernor, ResourceLimits,
 };
-use ironclaw_run_state::{InMemoryApprovalRequestStore, InMemoryRunStateStore};
+use ironclaw_run_state::{
+    InMemoryApprovalRequestStore, InMemoryRunStateStore, RunStateStore, RunStatus,
+};
 use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptRuntime, ScriptRuntimeConfig,
 };
@@ -210,6 +215,260 @@ async fn host_runtime_services_writes_runtime_events_to_durable_event_log_metada
     assert!(serialized.contains("script.echo"));
     assert!(serialized.contains("dispatch_requested"));
     assert!(serialized.contains("dispatch_succeeded"));
+}
+
+#[tokio::test]
+async fn host_runtime_services_resumes_approved_capability_and_consumes_lease_once() {
+    let fixture = approval_resume_fixture();
+    let runtime = fixture.services.host_runtime();
+    let context = execution_context_without_grants();
+    let scope = context.resource_scope.clone();
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "approval resume"});
+
+    let gate = block_for_approval(&runtime, context.clone(), estimate.clone(), input.clone()).await;
+    let lease =
+        approve_dispatch_for_services(&fixture.services, &scope, gate.approval_request_id, None)
+            .await;
+
+    let resumed = runtime
+        .resume_capability(RuntimeCapabilityResumeRequest::new(
+            context.clone(),
+            gate.approval_request_id,
+            script_capability_id(),
+            estimate.clone(),
+            input.clone(),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    match resumed {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, script_capability_id());
+            assert_eq!(completed.output, input);
+        }
+        other => panic!("expected completed resume outcome, got {other:?}"),
+    }
+    assert_eq!(
+        fixture
+            .capability_leases
+            .get(&scope, lease.grant.id)
+            .await
+            .unwrap()
+            .status,
+        CapabilityLeaseStatus::Consumed
+    );
+    let kinds = fixture
+        .events
+        .events()
+        .into_iter()
+        .map(|event| event.kind)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        vec![
+            RuntimeEventKind::DispatchRequested,
+            RuntimeEventKind::RuntimeSelected,
+            RuntimeEventKind::DispatchSucceeded,
+        ]
+    );
+
+    let second = runtime
+        .resume_capability(RuntimeCapabilityResumeRequest::new(
+            context,
+            gate.approval_request_id,
+            script_capability_id(),
+            estimate,
+            input,
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    assert_failed_outcome(second, RuntimeFailureKind::Authorization);
+    assert_eq!(
+        fixture.events.events().len(),
+        3,
+        "second resume must fail before a second dispatch"
+    );
+}
+
+#[tokio::test]
+async fn host_runtime_services_resume_changed_input_fails_before_lease_claim_or_dispatch() {
+    let fixture = approval_resume_fixture();
+    let runtime = fixture.services.host_runtime();
+    let context = execution_context_without_grants();
+    let scope = context.resource_scope.clone();
+    let estimate = ResourceEstimate::default();
+    let original_input = json!({"message": "original"});
+
+    let gate =
+        block_for_approval(&runtime, context.clone(), estimate.clone(), original_input).await;
+    let lease =
+        approve_dispatch_for_services(&fixture.services, &scope, gate.approval_request_id, None)
+            .await;
+
+    let outcome = runtime
+        .resume_capability(RuntimeCapabilityResumeRequest::new(
+            context,
+            gate.approval_request_id,
+            script_capability_id(),
+            estimate,
+            json!({"message": "changed"}),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    assert_failed_outcome(outcome, RuntimeFailureKind::Authorization);
+    assert!(fixture.events.events().is_empty());
+    // The approval request stores the original invocation fingerprint; changed input
+    // computes a different resume fingerprint, so no matching lease is claimable.
+    assert_eq!(
+        fixture
+            .capability_leases
+            .get(&scope, lease.grant.id)
+            .await
+            .unwrap()
+            .status,
+        CapabilityLeaseStatus::Active,
+        "fingerprint mismatch must fail before lease claim/consume"
+    );
+}
+
+#[tokio::test]
+async fn host_runtime_services_resume_wrong_user_scope_is_hidden_before_dispatch() {
+    let fixture = approval_resume_fixture();
+    let runtime = fixture.services.host_runtime();
+    let context = execution_context_without_grants();
+    let scope = context.resource_scope.clone();
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "wrong user"});
+
+    let gate = block_for_approval(&runtime, context.clone(), estimate.clone(), input.clone()).await;
+    let lease =
+        approve_dispatch_for_services(&fixture.services, &scope, gate.approval_request_id, None)
+            .await;
+    let wrong_scope = ResourceScope {
+        user_id: UserId::new("other-user").unwrap(),
+        ..scope.clone()
+    };
+    let wrong_context =
+        execution_context_with_dispatch_grant_for_scope(script_capability_id(), wrong_scope);
+
+    let outcome = runtime
+        .resume_capability(RuntimeCapabilityResumeRequest::new(
+            wrong_context,
+            gate.approval_request_id,
+            script_capability_id(),
+            estimate,
+            input,
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    assert_failed_outcome(outcome, RuntimeFailureKind::Backend);
+    assert!(fixture.events.events().is_empty());
+    let original_run = fixture
+        .run_state
+        .get(&scope, context.invocation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(original_run.status, RunStatus::BlockedApproval);
+    assert_eq!(
+        original_run.approval_request_id,
+        Some(gate.approval_request_id)
+    );
+    assert_eq!(
+        fixture
+            .capability_leases
+            .get(&scope, lease.grant.id)
+            .await
+            .unwrap()
+            .status,
+        CapabilityLeaseStatus::Active
+    );
+}
+
+#[tokio::test]
+async fn host_runtime_services_resume_expired_lease_fails_before_dispatch() {
+    let fixture = approval_resume_fixture();
+    let runtime = fixture.services.host_runtime();
+    let context = execution_context_without_grants();
+    let scope = context.resource_scope.clone();
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "expired"});
+
+    let gate = block_for_approval(&runtime, context.clone(), estimate.clone(), input.clone()).await;
+    let lease = approve_dispatch_for_services(
+        &fixture.services,
+        &scope,
+        gate.approval_request_id,
+        Some(Utc::now() - ChronoDuration::seconds(1)),
+    )
+    .await;
+
+    let outcome = runtime
+        .resume_capability(RuntimeCapabilityResumeRequest::new(
+            context,
+            gate.approval_request_id,
+            script_capability_id(),
+            estimate,
+            input,
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    assert_failed_outcome(outcome, RuntimeFailureKind::Authorization);
+    assert!(fixture.events.events().is_empty());
+    assert_eq!(
+        fixture
+            .capability_leases
+            .get(&scope, lease.grant.id)
+            .await
+            .unwrap()
+            .status,
+        CapabilityLeaseStatus::Active
+    );
+}
+
+#[tokio::test]
+async fn host_runtime_services_resume_without_backing_stores_fails_closed() {
+    let runtime = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenGrantAuthorizer),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability],
+    )))
+    .with_script_runtime(Arc::new(ScriptRuntime::new(
+        ScriptRuntimeConfig::for_testing(),
+        EchoScriptBackend,
+    )))
+    .host_runtime();
+
+    let outcome = runtime
+        .resume_capability(RuntimeCapabilityResumeRequest::new(
+            execution_context_without_grants(),
+            ApprovalRequestId::new(),
+            script_capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "missing stores"}),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    assert_failed_outcome(outcome, RuntimeFailureKind::Backend);
 }
 
 #[tokio::test]
@@ -840,6 +1099,137 @@ fn assert_completed_outcome(outcome: RuntimeCapabilityOutcome, expected_capabili
     }
 }
 
+type InMemoryHostRuntimeServices = HostRuntimeServices<
+    LocalFilesystem,
+    InMemoryResourceGovernor,
+    InMemoryProcessStore,
+    InMemoryProcessResultStore,
+>;
+
+struct ApprovalResumeFixture {
+    services: InMemoryHostRuntimeServices,
+    run_state: Arc<InMemoryRunStateStore>,
+    capability_leases: Arc<InMemoryCapabilityLeaseStore>,
+    events: InMemoryEventSink,
+}
+
+fn approval_resume_fixture() -> ApprovalResumeFixture {
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let events = InMemoryEventSink::new();
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenGrantAuthorizer),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability],
+    )))
+    .with_run_state(Arc::clone(&run_state))
+    .with_approval_requests(Arc::new(InMemoryApprovalRequestStore::new()))
+    .with_capability_leases(Arc::clone(&capability_leases))
+    .with_script_runtime(Arc::new(ScriptRuntime::new(
+        ScriptRuntimeConfig::for_testing(),
+        EchoScriptBackend,
+    )))
+    .with_event_sink(Arc::new(events.clone()));
+
+    ApprovalResumeFixture {
+        services,
+        run_state,
+        capability_leases,
+        events,
+    }
+}
+
+async fn block_for_approval(
+    runtime: &impl HostRuntime,
+    context: ExecutionContext,
+    estimate: ResourceEstimate,
+    input: serde_json::Value,
+) -> ironclaw_host_runtime::RuntimeApprovalGate {
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context,
+            script_capability_id(),
+            estimate,
+            input,
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::ApprovalRequired(gate) => gate,
+        other => panic!("expected approval gate, got {other:?}"),
+    }
+}
+
+async fn approve_dispatch_for_services(
+    services: &InMemoryHostRuntimeServices,
+    scope: &ResourceScope,
+    approval_request_id: ApprovalRequestId,
+    expires_at: Option<Timestamp>,
+) -> ironclaw_authorization::CapabilityLease {
+    services
+        .approval_resolver()
+        .expect("approval resolver should be configured")
+        .approve_dispatch(
+            scope,
+            approval_request_id,
+            LeaseApproval {
+                issued_by: Principal::HostRuntime,
+                allowed_effects: vec![EffectKind::DispatchCapability],
+                mounts: MountView::default(),
+                network: NetworkPolicy::default(),
+                secrets: Vec::new(),
+                resource_ceiling: None,
+                expires_at,
+                max_invocations: Some(1),
+            },
+        )
+        .await
+        .unwrap()
+}
+
+struct ApprovalThenGrantAuthorizer;
+
+#[async_trait]
+impl TrustAwareCapabilityDispatchAuthorizer for ApprovalThenGrantAuthorizer {
+    async fn authorize_dispatch_with_trust(
+        &self,
+        context: &ExecutionContext,
+        descriptor: &CapabilityDescriptor,
+        estimate: &ResourceEstimate,
+        trust_decision: &TrustDecision,
+    ) -> Decision {
+        if context.grants.grants.is_empty() {
+            Decision::RequireApproval {
+                request: ApprovalRequest {
+                    id: ApprovalRequestId::new(),
+                    correlation_id: context.correlation_id,
+                    requested_by: Principal::Extension(context.extension_id.clone()),
+                    action: Box::new(Action::Dispatch {
+                        capability: descriptor.id.clone(),
+                        estimated_resources: estimate.clone(),
+                    }),
+                    invocation_fingerprint: None,
+                    reason: "approval required".to_string(),
+                    reusable_scope: None,
+                },
+            }
+        } else {
+            GrantAuthorizer::new()
+                .authorize_dispatch_with_trust(context, descriptor, estimate, trust_decision)
+                .await
+        }
+    }
+}
+
 struct EchoScriptBackend;
 
 impl ScriptBackend for EchoScriptBackend {
@@ -996,6 +1386,18 @@ fn registry_with_manifests(manifests: &[&str]) -> ExtensionRegistry {
         registry.insert(package).unwrap();
     }
     registry
+}
+
+fn execution_context_without_grants() -> ExecutionContext {
+    ExecutionContext::local_default(
+        UserId::new("user").unwrap(),
+        ExtensionId::new("caller").unwrap(),
+        RuntimeKind::Script,
+        TrustClass::UserTrusted,
+        CapabilitySet::default(),
+        MountView::default(),
+    )
+    .unwrap()
 }
 
 fn execution_context_with_dispatch_grant(capability: CapabilityId) -> ExecutionContext {
