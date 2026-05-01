@@ -152,7 +152,14 @@ pub async fn find_document_by_sha(
 ) -> Result<Option<LegalDocument>, DatabaseError> {
     let backend = libsql(db)?;
     let conn = backend.connect().await?;
+    find_document_by_sha_inner(&conn, project_id, sha256).await
+}
 
+async fn find_document_by_sha_inner(
+    conn: &libsql::Connection,
+    project_id: &str,
+    sha256: &str,
+) -> Result<Option<LegalDocument>, DatabaseError> {
     let mut rows = conn
         .query(
             "SELECT id, project_id, filename, content_type, storage_path,
@@ -175,8 +182,27 @@ pub async fn find_document_by_sha(
     }
 }
 
+/// Outcome of `create_document`. Distinguishes a fresh insert from a
+/// dedupe hit so the upload handler can avoid double-counting and the
+/// caller knows which 200/200-existing semantics to surface.
+#[derive(Debug)]
+pub enum DocumentInsert {
+    /// Fresh row — the caller's write succeeded.
+    Inserted(LegalDocument),
+    /// A row with the same `(project_id, sha256)` already exists — the
+    /// returned row is the existing one (the caller's transient blob may
+    /// be discarded; both copies are byte-identical by definition of sha
+    /// equality).
+    DuplicateExisting(LegalDocument),
+}
+
 /// Insert a new document row. Caller has already written the blob to disk
 /// and computed the sha256/size/extraction.
+///
+/// Race semantics: the table has a UNIQUE(project_id, sha256) index. If a
+/// concurrent upload of identical bytes wins the race, this returns
+/// [`DocumentInsert::DuplicateExisting`] with the row that did land. The
+/// caller must treat both arms as user-observable success.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_document(
     db: &Arc<dyn Database>,
@@ -189,33 +215,56 @@ pub async fn create_document(
     page_count: Option<i64>,
     bytes: i64,
     sha256: &str,
-) -> Result<LegalDocument, DatabaseError> {
+) -> Result<DocumentInsert, DatabaseError> {
     let backend = libsql(db)?;
     let conn = backend.connect().await?;
 
-    conn.execute(
-        "INSERT INTO legal_documents
-            (id, project_id, filename, content_type, storage_path,
-             extracted_text, page_count, bytes, sha256)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        libsql::params![
-            id,
-            project_id,
-            filename,
-            content_type,
-            storage_path,
-            extracted_text.map(str::to_string),
-            page_count,
-            bytes,
-            sha256,
-        ],
-    )
-    .await
-    .map_err(|e| DatabaseError::Query(format!("create_document: {e}")))?;
+    let insert_result = conn
+        .execute(
+            "INSERT INTO legal_documents
+                (id, project_id, filename, content_type, storage_path,
+                 extracted_text, page_count, bytes, sha256)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            libsql::params![
+                id,
+                project_id,
+                filename,
+                content_type,
+                storage_path,
+                extracted_text.map(str::to_string),
+                page_count,
+                bytes,
+                sha256,
+            ],
+        )
+        .await;
 
-    fetch_document_inner(&conn, id).await?.ok_or_else(|| {
-        DatabaseError::Query("create_document: row missing immediately after insert".to_string())
-    })
+    match insert_result {
+        Ok(_) => {
+            let row = fetch_document_inner(&conn, id).await?.ok_or_else(|| {
+                DatabaseError::Query(
+                    "create_document: row missing immediately after insert".to_string(),
+                )
+            })?;
+            Ok(DocumentInsert::Inserted(row))
+        }
+        Err(e) => {
+            // The libsql crate flattens SQLITE_CONSTRAINT_UNIQUE into a
+            // generic error; matching on the message is brittle, so on
+            // any insert failure we look up the (project_id, sha256)
+            // pair. If a row exists, the error was a dedupe race;
+            // otherwise the caller sees the original failure.
+            if let Some(existing) = find_document_by_sha_inner(&conn, project_id, sha256).await? {
+                tracing::debug!(
+                    project_id, sha256,
+                    "legal_documents insert lost dedupe race; returning existing row",
+                );
+                Ok(DocumentInsert::DuplicateExisting(existing))
+            } else {
+                Err(DatabaseError::Query(format!("create_document: {e}")))
+            }
+        }
+    }
 }
 
 /// Fetch a single document by id. Does not filter on soft-deleted parents

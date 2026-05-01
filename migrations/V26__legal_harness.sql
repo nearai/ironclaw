@@ -34,6 +34,14 @@ CREATE TABLE legal_documents (
 
 CREATE INDEX idx_legal_documents_project ON legal_documents(project_id);
 CREATE INDEX idx_legal_documents_sha256  ON legal_documents(sha256);
+-- Project-scoped sha dedupe: enforced at the DB layer to close the
+-- race between `find_document_by_sha` and `create_document` in the
+-- upload handler. Two concurrent uploads of identical bytes within the
+-- same project will see one INSERT succeed and the other return a
+-- constraint violation, which the handler then translates to the
+-- existing row.
+CREATE UNIQUE INDEX uq_legal_documents_project_sha
+    ON legal_documents(project_id, sha256);
 
 CREATE TABLE legal_chats (
     id          TEXT PRIMARY KEY,

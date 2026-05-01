@@ -48,6 +48,17 @@ const MAX_PROJECT_NAME: usize = 200;
 /// from filling the row.
 const MAX_METADATA_BYTES: usize = 16 * 1024;
 
+/// Content types accepted on upload. Restricting the set narrows the
+/// download surface — `get_document_blob_handler` echoes the stored
+/// content-type back, so anything with a HTML-like media type would let
+/// an authenticated caller plant XSS that the next browser download
+/// renders. PDF and OOXML are the only types the chat skill actually
+/// reads anyway.
+const ACCEPTED_CONTENT_TYPES: &[&str] = &[
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+];
+
 /// Common error body returned on failures.
 #[derive(Debug, Serialize)]
 struct ErrorBody {
@@ -88,6 +99,43 @@ fn now_unix() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// Decide which canonical mime to persist for a given upload.
+///
+/// We trust either:
+/// 1. the client-declared content-type if it's exactly one of the two
+///    accepted mimes, OR
+/// 2. the filename extension (`.pdf` / `.docx`) when the declared mime is
+///    missing or generic.
+///
+/// Any other declared mime fails the upload rather than getting persisted
+/// and echoed back to a future download.
+fn normalise_content_type(declared: Option<&str>, filename: &str) -> Option<&'static str> {
+    let docx_mime = ACCEPTED_CONTENT_TYPES[1];
+    let declared_lc = declared.map(|s| s.trim().to_ascii_lowercase());
+    let ext = std::path::Path::new(filename)
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase());
+
+    if let Some(ref ct) = declared_lc {
+        if ct == "application/pdf" {
+            return Some(ACCEPTED_CONTENT_TYPES[0]);
+        }
+        if ct == docx_mime {
+            return Some(ACCEPTED_CONTENT_TYPES[1]);
+        }
+    }
+    if let Some(ref e) = ext {
+        if e == "pdf" {
+            return Some(ACCEPTED_CONTENT_TYPES[0]);
+        }
+        if e == "docx" {
+            return Some(ACCEPTED_CONTENT_TYPES[1]);
+        }
+    }
+    None
 }
 
 /// `POST /api/skills/legal/projects` — create a new project.
@@ -194,10 +242,9 @@ pub async fn delete_project_handler(
 /// `POST /api/skills/legal/projects/:id/documents` — multipart upload,
 /// extract text, persist blob + row.
 ///
-/// The multipart envelope expects exactly one field named `file` (matching
-/// mike's wire shape — the field *name* is not copyrightable code). All
-/// other field names are ignored to allow front-ends to layer extra
-/// metadata fields without breaking the parser.
+/// The multipart envelope expects exactly one field named `file`; any
+/// other field is ignored, so front-ends can layer extra metadata
+/// fields without breaking this parser.
 pub async fn upload_document_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(_user): AuthenticatedUser,
@@ -267,7 +314,18 @@ pub async fn upload_document_handler(
         .and_then(|s| s.to_str())
         .unwrap_or(&filename)
         .to_string();
-    let content_type = content_type.unwrap_or_else(|| "application/octet-stream".to_string());
+    // Normalise the stored content-type. We accept either the canonical
+    // PDF/OOXML mime or a `.pdf`/`.docx` extension, but persist only the
+    // canonical mime so downloads can never echo back, e.g.,
+    // `text/html` from a misbehaving uploader.
+    let normalised_ct = normalise_content_type(content_type.as_deref(), &safe_filename)
+        .ok_or_else(|| {
+            err(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "Only application/pdf and OOXML (.docx) uploads are supported".to_string(),
+            )
+        })?;
+    let content_type = normalised_ct.to_string();
 
     let sha = blobs::sha256_hex(&bytes);
 
@@ -301,7 +359,7 @@ pub async fn upload_document_handler(
     let storage_path = storage_rel.to_string_lossy().to_string();
 
     let id = ulid::Ulid::new().to_string();
-    let doc = store::create_document(
+    let outcome = store::create_document(
         db,
         &id,
         &project_id,
@@ -315,6 +373,15 @@ pub async fn upload_document_handler(
     )
     .await
     .map_err(|e| db_err("create_document", e))?;
+
+    let doc = match outcome {
+        store::DocumentInsert::Inserted(d) => d,
+        // Dedupe race winner: another concurrent upload of identical
+        // bytes already landed. Return the existing row; the orphaned
+        // sha-named blob is identical bytes so leaving it on disk is
+        // harmless and content-addressed dedupe absorbs the cost.
+        store::DocumentInsert::DuplicateExisting(d) => d,
+    };
 
     Ok(Json(doc))
 }
@@ -334,6 +401,15 @@ pub async fn get_document_handler(
 }
 
 /// `GET /api/skills/legal/documents/:id/blob` — raw file bytes.
+///
+/// Sanity bounds:
+/// - `Content-Type` is always one of the canonical accepted mimes
+///   (verified at upload time via [`normalise_content_type`]).
+/// - `Content-Disposition` is sanitised to ASCII filename only; any
+///   non-ASCII character or newline is replaced with `_` to avoid
+///   header injection. RFC 5987 `filename*` is intentionally not used
+///   so a Unicode filename downgrades to a safe ASCII fallback rather
+///   than failing the response.
 pub async fn get_document_blob_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(_user): AuthenticatedUser,
@@ -353,16 +429,19 @@ pub async fn get_document_blob_handler(
         )
     })?;
 
+    let safe_filename = sanitise_filename_for_disposition(&doc.filename);
+
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, doc.content_type.clone())
         .header(
             header::CONTENT_DISPOSITION,
-            format!(
-                "attachment; filename=\"{}\"",
-                doc.filename.replace('"', "_")
-            ),
+            format!("attachment; filename=\"{safe_filename}\""),
         )
+        // Belt-and-braces: the gateway already adds X-Content-Type-Options
+        // globally; setting it on this response too means clones that
+        // carry the body through a downstream proxy still see it.
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .body(Body::from(bytes))
         .map_err(|e| {
             err(
@@ -370,4 +449,22 @@ pub async fn get_document_blob_handler(
                 format!("response build: {e}"),
             )
         })
+}
+
+/// Sanitise a filename for use inside a `Content-Disposition: attachment;
+/// filename="..."` header. Replaces every non-printable-ASCII character,
+/// every `"`, and every CR/LF with `_`. Never returns an empty string.
+fn sanitise_filename_for_disposition(name: &str) -> String {
+    let mut out: String = name
+        .chars()
+        .map(|c| match c {
+            '"' | '\\' | '\r' | '\n' => '_',
+            c if c.is_ascii_graphic() || c == ' ' => c,
+            _ => '_',
+        })
+        .collect();
+    if out.is_empty() {
+        out.push_str("download");
+    }
+    out
 }

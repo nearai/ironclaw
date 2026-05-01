@@ -104,17 +104,48 @@ fn count_pdf_pages(bytes: &[u8]) -> Option<i64> {
     if pages > 0 { Some(pages + 1) } else { None }
 }
 
+/// Hard cap for the decompressed `word/document.xml` payload.
+///
+/// 32 MiB is well above any normal contract DOCX (typical: 100 KB-2 MB)
+/// but stops a 1 KB zip bomb from inflating to gigabytes inside an async
+/// worker. The cap is intentionally generous so we don't reject genuine
+/// long contracts; tighter limits can be plumbed in via config later.
+const DOCX_XML_MAX_BYTES: u64 = 32 * 1024 * 1024;
+
 async fn extract_docx(bytes: Vec<u8>) -> Result<Extracted, ExtractError> {
     let join = tokio::task::spawn_blocking(move || -> Result<Extracted, ExtractError> {
         let cursor = std::io::Cursor::new(&bytes);
         let mut zip = zip::ZipArchive::new(cursor)
             .map_err(|e| ExtractError::Docx(format!("zip open: {e}")))?;
-        let mut file = zip
+        let file = zip
             .by_name("word/document.xml")
             .map_err(|e| ExtractError::Docx(format!("missing word/document.xml: {e}")))?;
-        let mut xml = String::new();
-        file.read_to_string(&mut xml)
+
+        // Defensive: reject zip bombs by checking the declared
+        // uncompressed size before reading. Some malicious archives lie
+        // about `size()`, so we *also* cap the actual read via `take()`.
+        let declared = file.size();
+        if declared > DOCX_XML_MAX_BYTES {
+            return Err(ExtractError::Docx(format!(
+                "declared word/document.xml size {declared} exceeds cap {DOCX_XML_MAX_BYTES}"
+            )));
+        }
+
+        // Cap the actual read at the same limit + 1; any byte above the
+        // cap is a lying header and we abort.
+        let mut limited = file.take(DOCX_XML_MAX_BYTES.saturating_add(1));
+        let mut xml_bytes = Vec::with_capacity(declared as usize);
+        limited
+            .read_to_end(&mut xml_bytes)
             .map_err(|e| ExtractError::Docx(format!("read document.xml: {e}")))?;
+        if xml_bytes.len() as u64 > DOCX_XML_MAX_BYTES {
+            return Err(ExtractError::Docx(format!(
+                "decompressed word/document.xml exceeds cap {DOCX_XML_MAX_BYTES}"
+            )));
+        }
+        let xml = String::from_utf8(xml_bytes)
+            .map_err(|e| ExtractError::Docx(format!("document.xml utf-8: {e}")))?;
+
         let text = xml_to_text(&xml)?;
         Ok(Extracted {
             text: normalise_whitespace(&text),

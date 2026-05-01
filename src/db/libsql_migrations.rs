@@ -1048,6 +1048,11 @@ CREATE TABLE IF NOT EXISTS legal_documents (
 
 CREATE INDEX IF NOT EXISTS idx_legal_documents_project ON legal_documents(project_id);
 CREATE INDEX IF NOT EXISTS idx_legal_documents_sha256  ON legal_documents(sha256);
+-- Project-scoped sha dedupe — see migrations/V26__legal_harness.sql
+-- for the rationale. Closes the race between the dedupe lookup in
+-- `upload_document_handler` and the subsequent INSERT.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_legal_documents_project_sha
+    ON legal_documents(project_id, sha256);
 
 CREATE TABLE IF NOT EXISTS legal_chats (
     id          TEXT PRIMARY KEY,

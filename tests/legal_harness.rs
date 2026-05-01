@@ -120,7 +120,7 @@ async fn document_insert_and_project_scoped_sha_dedupe() {
 
     // First insert succeeds.
     let doc_id = ulid_str();
-    let doc = store::create_document(
+    let outcome = store::create_document(
         &db,
         &doc_id,
         &project_id,
@@ -134,6 +134,10 @@ async fn document_insert_and_project_scoped_sha_dedupe() {
     )
     .await
     .expect("create_document");
+    let doc = match outcome {
+        store::DocumentInsert::Inserted(d) => d,
+        store::DocumentInsert::DuplicateExisting(_) => panic!("first insert should not dedupe"),
+    };
     assert_eq!(doc.id, doc_id);
     assert_eq!(doc.bytes, 11);
     assert_eq!(doc.sha256, sha);
@@ -167,6 +171,66 @@ async fn document_insert_and_project_scoped_sha_dedupe() {
 }
 
 #[tokio::test]
+async fn create_document_returns_duplicate_when_sha_already_present() {
+    // Simulates the dedupe race: a second insert with identical
+    // (project_id, sha256) but a different id should not produce two
+    // rows; the second call should return DuplicateExisting with the
+    // first row.
+    let (db, _dir) = setup().await;
+
+    let project_id = ulid_str();
+    store::create_project(&db, &project_id, "P", None)
+        .await
+        .expect("project");
+
+    let sha = "deadbeef".repeat(8); // 64 hex chars
+    let first_id = ulid_str();
+    let first = store::create_document(
+        &db,
+        &first_id,
+        &project_id,
+        "a.pdf",
+        "application/pdf",
+        "legal/blobs/de/de..",
+        None,
+        None,
+        10,
+        &sha,
+    )
+    .await
+    .expect("first insert");
+    assert!(matches!(first, store::DocumentInsert::Inserted(_)));
+
+    let second_id = ulid_str();
+    let second = store::create_document(
+        &db,
+        &second_id,
+        &project_id,
+        "b.pdf",
+        "application/pdf",
+        "legal/blobs/de/de..",
+        None,
+        None,
+        10,
+        &sha,
+    )
+    .await
+    .expect("second insert (race)");
+    match second {
+        store::DocumentInsert::DuplicateExisting(row) => {
+            assert_eq!(row.id, first_id, "duplicate should yield original id");
+        }
+        store::DocumentInsert::Inserted(_) => panic!("second insert should dedupe, not insert"),
+    }
+
+    // Confirm only one row landed.
+    let docs = store::list_documents_for_project(&db, &project_id)
+        .await
+        .expect("list");
+    assert_eq!(docs.len(), 1);
+}
+
+#[tokio::test]
 async fn project_cascade_delete_drops_documents() {
     // Soft-deleting a project keeps documents attached; only ON DELETE
     // CASCADE on a hard-delete drops them. Verify the FK cascade fires.
@@ -177,7 +241,7 @@ async fn project_cascade_delete_drops_documents() {
         .await
         .expect("project");
     let doc_id = ulid_str();
-    store::create_document(
+    let _ = store::create_document(
         &db,
         &doc_id,
         &project_id,
