@@ -16,36 +16,36 @@
 //! HTTP gateway. Wire-shape coverage stays in
 //! `tests/responses_api_path_prefix.rs`.
 //!
-//! ## What these tests are designed to catch
+//! ## Regression coverage
 //!
-//! - **Resume payload not materialised**: the engine's existing
-//!   `GateResolution::ExternalCallback` path uses `pending.resume_output`
-//!   (which `EffectBridgeAdapter::execute_action` sets to `None` for
-//!   tool-flavoured pauses) and re-runs the action — meaning the
-//!   caller-supplied tool output never reaches the LLM. The
-//!   `round_trip_resume_payload_reaches_llm` test asserts the LLM's
-//!   second-turn context contains the caller-supplied output;
-//!   without a fix this test fails.
-//! - **Thread-id mismatch**: catalog is keyed by engine `ThreadId`, but
-//!   the responses_api handler registers under a separately-generated
-//!   UUID before the engine spawns the thread. Catalog entries miss
-//!   the actual thread, tool calls fall through to the registry, and
-//!   the LLM gets "tool not found" instead of a pause.
-//! - **Internal-vs-external collision in dispatch**: the catalog wins
-//!   over the registry inside `execute_action`, but loses in
-//!   `available_action_inventory` — so the LLM sees the internal tool
-//!   in its surface but a registered shadow name short-circuits to
-//!   caller execution at dispatch time. The
-//!   `external_collision_with_registry_action_is_rejected` test
-//!   asserts the request is rejected up-front; without a fix the
-//!   request is silently accepted and the security gap stays open.
-//! - **Lease coverage for external actions**: external actions are
-//!   merged into the LLM-visible action surface; the dynamic
-//!   lease-refresh path needs to also extend the lease to cover them
-//!   so `find_and_consume` succeeds. If it doesn't, calls error out
-//!   with `LeaseNotFound` before reaching the catalog short-circuit.
-//! - **Catalog cleanup on terminal state**: today nothing clears
-//!   catalog entries when a thread finishes, leaking entries forever.
+//! These tests guard the four bugs surfaced during the test-driven
+//! review of the engine-native external-tools path and fixed in the
+//! follow-up commit:
+//!
+//! 1. **Thread-id mismatch (Bug 1)** — `engine_pauses_when_llm_calls_registered_external_tool`.
+//!    Catalog is keyed by engine `ThreadId`; the responses_api handler
+//!    registers under the conversation_scope UUID it generates. The
+//!    bridge `transfer` hook in `bridge::handle_with_engine_inner`
+//!    re-keys onto the actual ThreadId after `handle_user_message`
+//!    returns. If that hook regresses, this test panics on
+//!    "engine never paused on external tool".
+//! 2. **Resume payload materialisation (Bug 2)** — `round_trip_resume_payload_reaches_llm`.
+//!    The bridge's `resolve_gate` path for `GateResolution::ExternalCallback`
+//!    used to consult `pending.resume_output` only — which is `None`
+//!    for tool-flavoured pauses, so it would re-run the action and
+//!    re-pause forever. The fix special-cases `ext_tool:` callback
+//!    ids and synthesises an `ActionResult` ThreadMessage from the
+//!    resolution payload, which the LLM sees on its next call.
+//! 3. **Collision rejection (Bug 3)** — covered at the HTTP boundary
+//!    in `tests/responses_api_path_prefix.rs::external_tool_name_shadowing_registered_action_is_rejected`.
+//!    Caller-supplied tool names that shadow registered actions are
+//!    rejected up-front so a confused LLM can't be tricked into
+//!    running caller code while believing it ran the internal tool.
+//! 4. **Catalog cleanup on terminal state (Bug 4)** —
+//!    `catalog_cleared_on_terminal_completed_outcome`. After
+//!    `await_thread_outcome` joins on a non-`GatePaused` outcome,
+//!    the catalog entry for the thread is dropped so it can't leak
+//!    monotonically.
 
 #[cfg(feature = "libsql")]
 mod support;
@@ -167,7 +167,6 @@ mod tests {
     /// fix lands (`bridge::router::resolve_gate` doesn't currently
     /// consume the payload for `ExternalCallback` resolutions).
     #[tokio::test]
-    #[ignore = "documents the resume-payload bug — unignore after fix lands"]
     async fn round_trip_resume_payload_reaches_llm() {
         let trace = round_trip_trace();
         let rig = TestRigBuilder::new()
@@ -176,39 +175,37 @@ mod tests {
             .build()
             .await;
 
-        // Pre-register the catalog. Note: we don't yet know the engine
-        // ThreadId, so this uses a placeholder UUID — exercising the
-        // current (buggy) code path the responses_api handler takes.
-        // A correct implementation would resolve the engine ThreadId
-        // first, OR the catalog would key on something stable like
-        // (user_id, conversation_scope) instead.
-        let catalog = ironclaw::bridge::engine_external_tool_catalog()
+        let scope_uuid = uuid::Uuid::new_v4();
+        let scope_str = scope_uuid.to_string();
+
+        // Register tools under the conversation_scope UUID — the
+        // bridge transfer hook re-keys to the engine's actual
+        // ThreadId once `handle_user_message` returns (Bug 1 fix).
+        register_under_scope(scope_uuid, "lookup_weather").await;
+
+        let msg = ironclaw::channels::IncomingMessage::new(
+            "gateway",
+            "test-user",
+            "Look up the weather in NYC.",
+        )
+        .with_thread(scope_str);
+        rig.send_incoming(msg).await;
+
+        let (request_id, action_name) = wait_for_external_pending_gate("test-user", TIMEOUT)
             .await
-            .expect("engine v2 must initialize the catalog");
-        let placeholder_thread = ThreadId::new();
-        catalog
-            .register(
-                placeholder_thread,
-                vec![caller_action("lookup_weather", "Look up the weather")],
-            )
-            .await;
-
-        rig.send_message("Look up the weather in NYC.").await;
-
-        // Wait for the engine to pause on the external tool. If the
-        // catalog under-key bug is real, the engine will instead try
-        // to dispatch `lookup_weather` through the registry, find
-        // nothing, and produce an error response. Either way, the
-        // pause never fires.
-        let pending = wait_for_external_pending_gate("test-user", TIMEOUT).await;
-        let (request_id, action_name) = pending.expect(
-            "engine never paused on external tool — likely thread-id mismatch \
-             between handler-registered catalog and engine-spawned ThreadId",
-        );
+            .expect(
+                "engine never paused on external tool — Bug 1 \
+                     (thread-id transfer) may have regressed",
+            );
         assert_eq!(action_name, "lookup_weather");
 
-        // Resume with the tool output. The payload mirrors the
-        // Responses API resume contract: an `outputs` array.
+        // Resume with the OpenAI-shaped output payload the
+        // responses_api handler builds out of `function_call_output`
+        // items. Bug 2 fix synthesizes an ActionResult ThreadMessage
+        // from the matching entry; without that fix, the LLM's
+        // second-turn context wouldn't see the output and
+        // `verify_trace_expects` would fail on `response_contains:
+        // ["sunny", "72F"]`.
         rig.send_external_callback_with_payload(
             request_id,
             serde_json::json!({
@@ -226,12 +223,82 @@ mod tests {
         rig.shutdown();
     }
 
-    /// Simpler smoke variant: even before the resume payload bug, the
-    /// engine should at least PAUSE when the LLM emits a tool_call
-    /// for a registered external tool. If this fails, the catalog is
-    /// not being consulted at all — likely the thread-id mismatch.
+    /// **Bug 4 regression**: the bridge clears catalog entries when
+    /// a thread reaches a terminal `Completed` outcome. Without the
+    /// `await_thread_outcome` cleanup hook, this catalog entry would
+    /// leak forever.
     #[tokio::test]
-    #[ignore = "fails today on thread-id mismatch — documents the gap"]
+    async fn catalog_cleared_on_terminal_completed_outcome() {
+        // A simple text-only trace so the thread completes immediately
+        // (no gate, no pause). We register a catalog entry under the
+        // request's conversation_scope, verify it gets transferred
+        // onto the engine ThreadId, then verify it's gone after the
+        // thread completes.
+        let trace = LlmTrace::from_file(format!(
+            "{}/tests/fixtures/llm_traces/engine_v2/smoke_text.json",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("smoke text trace");
+        let rig = TestRigBuilder::new()
+            .with_engine_v2()
+            .with_trace(trace.clone())
+            .build()
+            .await;
+
+        let scope_uuid = uuid::Uuid::new_v4();
+        let scope_str = scope_uuid.to_string();
+        register_under_scope(scope_uuid, "lookup_weather").await;
+
+        // Snapshot the pre-message catalog size (exactly the scope
+        // entry we just registered). The bridge transfer hook on the
+        // first message will move it onto the engine ThreadId, and
+        // the terminal-state cleanup will then drop it.
+        let catalog = ironclaw::bridge::engine_external_tool_catalog()
+            .await
+            .expect("catalog");
+        let pre_size = catalog.len().await;
+        assert!(pre_size >= 1);
+
+        let msg = ironclaw::channels::IncomingMessage::new(
+            "gateway",
+            "test-user",
+            "Hello! Introduce yourself briefly.",
+        )
+        .with_thread(scope_str);
+        rig.send_incoming(msg).await;
+
+        // Wait for the thread to complete.
+        let _ = rig.wait_for_responses(1, TIMEOUT).await;
+
+        // Poll briefly: the cleanup runs on the same task that does
+        // the join, but the cleanup write may race the test's read.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if catalog.len().await < pre_size {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!(
+                    "catalog entry was not cleared on terminal Completed outcome \
+                     (pre={}, current={}) — terminal cleanup hook may have regressed",
+                    pre_size,
+                    catalog.len().await
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        rig.shutdown();
+    }
+
+    /// Smoke variant of the round-trip: register a caller tool under
+    /// a `conversation_scope` UUID, send a message that carries that
+    /// UUID as its scope, and verify the engine pauses on the
+    /// resulting tool_call. This exercises the `transfer` hook in
+    /// `bridge::handle_with_engine_inner` that re-keys the catalog
+    /// from the handler-supplied UUID onto the engine's actual
+    /// `ThreadId` before the LLM call lands.
+    #[tokio::test]
     async fn engine_pauses_when_llm_calls_registered_external_tool() {
         let trace = round_trip_trace();
         let rig = TestRigBuilder::new()
@@ -240,19 +307,26 @@ mod tests {
             .build()
             .await;
 
-        let catalog = ironclaw::bridge::engine_external_tool_catalog()
-            .await
-            .expect("engine v2 catalog");
-        catalog
-            .register(
-                ThreadId::new(),
-                vec![caller_action("lookup_weather", "Look up the weather")],
-            )
-            .await;
+        let scope_uuid = uuid::Uuid::new_v4();
+        let scope_str = scope_uuid.to_string();
 
-        rig.send_message("Look up the weather in NYC.").await;
+        // Register tools under the conversation_scope UUID. The bridge
+        // transfer hook will rebind onto the actual engine ThreadId
+        // once `handle_user_message` returns. Using
+        // `register_under_scope` rather than `engine_external_tool_catalog`
+        // directly is the resilient way to bootstrap from a clean
+        // rig — see the helper for the polling rationale.
+        register_under_scope(scope_uuid, "lookup_weather").await;
 
-        let _ = &rig;
+        // Send the user message with the matching conversation_scope.
+        let msg = ironclaw::channels::IncomingMessage::new(
+            "gateway",
+            "test-user",
+            "Look up the weather in NYC.",
+        )
+        .with_thread(scope_str);
+        rig.send_incoming(msg).await;
+
         let pending = wait_for_external_pending_gate("test-user", TIMEOUT).await;
         assert!(
             pending.is_some(),
@@ -260,6 +334,35 @@ mod tests {
              tool_calls for the registered name; found none"
         );
         rig.shutdown();
+    }
+
+    /// Lazily register a caller tool under a `scope_uuid` ThreadId.
+    /// The engine catalog only exists after `init_engine` runs; that
+    /// happens on the first message routed through the bridge. To
+    /// bootstrap from a clean rig, we poll until the catalog is
+    /// available, then register. In practice the responses_api
+    /// handler depends on the same lazy bootstrap — so this mirrors
+    /// production behaviour.
+    async fn register_under_scope(scope_uuid: uuid::Uuid, action_name: &str) {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+        loop {
+            if let Some(catalog) = ironclaw::bridge::engine_external_tool_catalog().await {
+                catalog
+                    .register(
+                        ThreadId(scope_uuid),
+                        vec![caller_action(action_name, "caller-supplied test tool")],
+                    )
+                    .await;
+                return;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!(
+                    "engine catalog never initialised; the bridge may not have \
+                     bootstrapped engine v2 — verify TestRigBuilder.with_engine_v2() ran"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     // -------------------------------------------------------------------
@@ -404,48 +507,14 @@ mod tests {
         assert!(catalog.is_empty().await);
     }
 
-    /// **Documents an unfixed gap**: a caller registering a tool
-    /// whose name collides with an internal action (e.g. `shell`,
-    /// `memory_write`) is silently accepted today. The
-    /// `EffectBridgeAdapter::execute_action` catalog short-circuit
-    /// checks the catalog *before* the registry, so any LLM call to
-    /// the colliding name lands in caller-side execution — even
-    /// though the LLM saw the internal tool's description.
-    ///
-    /// `available_action_inventory` dedupes the *opposite* way
-    /// (internal beats external in the LLM-visible list), so the
-    /// vulnerability is in the dispatch path, not the surfacing path.
-    /// The right fix is to reject the collision at request validation
-    /// time so a confused LLM can't be tricked into running
-    /// caller code while believing it ran the internal tool.
-    ///
-    /// Until validation rejects, this test stays ignored — the
-    /// dispatcher behaviour today is the documented gap.
-    #[tokio::test]
-    #[ignore = "documents the collision-dispatch gap; unignore after validation rejects"]
-    async fn external_collision_with_registry_action_is_rejected() {
-        // Concrete shape of the desired check (paraphrased):
-        //
-        //     // in validate_external_tools(...)
-        //     for tool in tools {
-        //         if registry.get(name).is_some() {
-        //             return Err(format!(
-        //                 "tool '{name}' shadows a built-in action; \
-        //                  pick a different name"
-        //             ));
-        //         }
-        //     }
-        //
-        // Once that check is in place, this test should send a
-        // request with `tools: [{name: "shell"}]` and assert the
-        // handler returns 400 with an error message naming "shell".
-        //
-        // The HTTP-level scaffolding for this assertion lives in
-        // `tests/responses_api_path_prefix.rs`; this stub records
-        // the expected behaviour as soon as the registry is wired
-        // into validate_external_tools.
-        panic!("unimplemented — see comment for the desired wiring");
-    }
+    // Note on collision rejection: the request-validation rejection
+    // for caller-supplied tool names that shadow registered actions
+    // is exercised at the HTTP level in
+    // `tests/responses_api_path_prefix.rs::external_tool_name_shadowing_registered_action_is_rejected`.
+    // That test asserts the handler returns 400 mentioning the
+    // colliding name. A cargo-feature-gated registry isn't reachable
+    // from this engine-tier file, so the check belongs at the wire
+    // boundary.
 
     // -------------------------------------------------------------------
     // Helper for tests above (avoids unused-import lint when ignored

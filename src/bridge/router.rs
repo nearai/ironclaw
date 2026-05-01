@@ -48,6 +48,18 @@ pub enum BridgeOutcome {
 
 use std::collections::HashSet;
 
+/// Cadence of the external-tool catalog sweep. Backstop only — the
+/// per-thread terminal-state cleanup in `await_thread_outcome` is
+/// the primary cleanup path. Five minutes is short enough to keep
+/// memory bounded without producing visible churn for normal usage.
+const EXTERNAL_TOOL_CATALOG_SWEEP_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(5 * 60);
+
+/// Maximum age for a catalog entry before the periodic sweep evicts
+/// it. One hour matches typical pending-gate TTLs and gives callers
+/// plenty of headroom to resume a paused tool call.
+const EXTERNAL_TOOL_CATALOG_TTL: chrono::Duration = chrono::Duration::hours(1);
+
 /// Check if the engine v2 is enabled via `ENGINE_V2=true` environment variable.
 pub fn is_engine_v2_enabled() -> bool {
     std::env::var("ENGINE_V2")
@@ -510,6 +522,38 @@ fn resumed_action_result_message(
 ) -> ironclaw_engine::ThreadMessage {
     let rendered = serde_json::to_string_pretty(output).unwrap_or_else(|_| output.to_string());
     ironclaw_engine::ThreadMessage::action_result(call_id, action_name, rendered)
+}
+
+/// Extract the tool output for `call_id` from a Responses API
+/// `function_call_output` resolution payload. The handler builds the
+/// payload as `{"outputs": [{"call_id": ..., "output": <string|json>}]}`.
+/// Falls back to:
+/// - the raw payload when no `outputs` array is present (defensive
+///   path for callers that pass a plain JSON value), and
+/// - `Value::Null` when the payload doesn't contain a matching call_id
+///   at all (lets the LLM see "the caller returned nothing for this
+///   call" rather than re-running the tool).
+fn extract_external_tool_output(payload: &serde_json::Value, call_id: &str) -> serde_json::Value {
+    let outputs = payload.get("outputs").and_then(|v| v.as_array());
+    if let Some(arr) = outputs {
+        for entry in arr {
+            let entry_call_id = entry.get("call_id").and_then(|v| v.as_str());
+            if entry_call_id == Some(call_id)
+                && let Some(out) = entry.get("output")
+            {
+                return out.clone();
+            }
+        }
+        // No matching call_id: surface a typed null so the LLM sees
+        // an explicit empty result rather than the (possibly stale)
+        // raw payload.
+        return serde_json::Value::Null;
+    }
+
+    // No `outputs` array at all — treat the whole payload as the
+    // result (matches OAuth callbacks that historically passed a
+    // raw value as the resolution).
+    payload.clone()
 }
 
 /// Resolve the assistant action `call_id` that a pending gate corresponds to.
@@ -1955,6 +1999,33 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         .set_external_tool_catalog(Arc::clone(&external_tool_catalog))
         .await;
 
+    // Backstop sweep: in addition to the per-thread terminal-state
+    // cleanup in `await_thread_outcome`, evict catalog entries that
+    // are older than `EXTERNAL_TOOL_CATALOG_TTL` to bound memory
+    // when a caller registers tools and then abandons the
+    // conversation (e.g. drops the connection without resuming a
+    // pending gate). Runs on a fixed cadence so a long-lived
+    // gateway doesn't accumulate stale entries.
+    {
+        let catalog = Arc::clone(&external_tool_catalog);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(EXTERNAL_TOOL_CATALOG_SWEEP_INTERVAL);
+            // Skip the immediate first tick so we don't sweep
+            // freshly-registered entries on engine boot.
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                let evicted = catalog.sweep_older_than(EXTERNAL_TOOL_CATALOG_TTL).await;
+                if !evicted.is_empty() {
+                    debug!(
+                        evicted = evicted.len(),
+                        "engine v2: external tool catalog sweep evicted stale entries"
+                    );
+                }
+            }
+        });
+    }
+
     *guard = Some(EngineState {
         thread_manager,
         conversation_manager,
@@ -2880,7 +2951,7 @@ pub async fn resolve_gate(
             }
         }
 
-        ironclaw_engine::GateResolution::ExternalCallback { .. } => {
+        ironclaw_engine::GateResolution::ExternalCallback { ref payload } => {
             if let Some(ref sse) = state.sse {
                 sse.broadcast_for_user(
                     &message.user_id,
@@ -2894,7 +2965,45 @@ pub async fn resolve_gate(
                     },
                 );
             }
-            if let Some(resume_output) = pending.resume_output.clone() {
+
+            // Caller-tool callbacks (Responses API) carry the tool's
+            // output in the resolution payload. The pending gate has
+            // `resume_output: None` because at gate-fire time the
+            // adapter doesn't have the output yet — so the legacy
+            // OAuth/pairing branch (which uses `pending.resume_output`)
+            // would re-run the action and re-pause forever. Instead,
+            // synthesize an `ActionResult`-shaped ThreadMessage from
+            // the resolution payload and resume directly.
+            //
+            // OAuth/pairing flows keep using the original
+            // `pending.resume_output` path (their callback_id has the
+            // `pairing:` prefix, not `ext_tool:`).
+            let is_external_tool_callback = matches!(
+                pending.resume_kind,
+                ironclaw_engine::ResumeKind::External { ref callback_id }
+                    if crate::bridge::is_external_tool_callback_id(callback_id)
+            );
+
+            if is_external_tool_callback {
+                let resolved_call_id =
+                    resolved_or_synthetic_call_id_for_pending_action(state, &pending).await?;
+                let synthesized_output = extract_external_tool_output(payload, &resolved_call_id);
+                state
+                    .thread_manager
+                    .resume_thread(
+                        pending.thread_id,
+                        message.user_id.clone(),
+                        Some(resumed_action_result_message(
+                            &resolved_call_id,
+                            &pending.action_name,
+                            &synthesized_output,
+                        )),
+                        None,
+                        Some(resolved_call_id),
+                    )
+                    .await
+                    .map_err(|e| engine_err("resume error", e))?;
+            } else if let Some(resume_output) = pending.resume_output.clone() {
                 let resolved_call_id =
                     resolved_or_synthetic_call_id_for_pending_action(state, &pending).await?;
                 state
@@ -3647,6 +3756,23 @@ async fn handle_with_engine_inner(
         .await
         .map_err(|e| engine_err("thread error", e))?;
 
+    // Bridge the catalog gap: the responses_api handler registers
+    // caller-supplied tools under the message's `conversation_scope`
+    // UUID *before* the engine spawns its thread (it can't know the
+    // engine ThreadId in advance). Now that we have the actual
+    // `thread_id`, move any catalog entry that was registered under
+    // the scope key onto the real ThreadId so `EffectBridgeAdapter`
+    // sees the tools at action-dispatch time. Without this, every
+    // caller-tool call falls through to the registry and errors as
+    // "tool not found" — even though the catalog had the right
+    // tools registered the whole time.
+    if let Some(scope_uuid) = parse_engine_thread_id(scope) {
+        state
+            .external_tool_catalog
+            .transfer(scope_uuid, thread_id)
+            .await;
+    }
+
     if !attachment_notes.is_empty() {
         save_attachment_index_notes(
             &state.store,
@@ -3843,6 +3969,16 @@ async fn await_thread_outcome(
         .join_thread(thread_id)
         .await
         .map_err(|e| engine_err("join error", e))?;
+
+    // Drop the external-tool catalog entry on terminal outcomes —
+    // the thread can never resume from `Completed`, `Stopped`,
+    // `MaxIterations`, or `Failed`, so the entry would otherwise
+    // leak forever. `GatePaused` deliberately keeps the entry: a
+    // follow-up resume request needs the catalog to still know
+    // about this thread's caller-supplied tools.
+    if !matches!(outcome, ThreadOutcome::GatePaused { .. }) {
+        state.external_tool_catalog.clear(thread_id).await;
+    }
 
     state
         .conversation_manager

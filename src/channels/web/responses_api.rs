@@ -949,6 +949,38 @@ pub async fn create_response_handler(
     let external_tools: Vec<ResponsesTool> = req.tools.clone().unwrap_or_default();
     validate_external_tools(&external_tools)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, e, "invalid_request_error"))?;
+
+    // Reject names that shadow registered (built-in or extension)
+    // tools. Without this check, the catalog short-circuits the
+    // dispatcher, so an LLM call to (say) `shell` lands in
+    // caller-side execution even though the LLM saw the internal
+    // `shell` description in its action surface — a confused-deputy
+    // surface where the caller can craft any output and the LLM
+    // treats it as the trusted internal tool's reply.
+    if !external_tools.is_empty()
+        && let Some(registry) = state.tool_registry.as_ref()
+    {
+        let registered: std::collections::HashSet<String> = registry
+            .tool_definitions()
+            .await
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        for tool in &external_tools {
+            if let Some(name) = tool.name.as_deref()
+                && registered.contains(name)
+            {
+                return Err(api_error(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "tool '{name}' shadows a built-in or extension action; \
+                         pick a different name"
+                    ),
+                    "invalid_request_error",
+                ));
+            }
+        }
+    }
     if req.tool_choice.is_some() {
         // `tool_choice` (auto / none / required / specific function) is not
         // honoured because the engine doesn't have a per-request tool surface

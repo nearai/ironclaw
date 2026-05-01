@@ -47,6 +47,7 @@ pub struct TestGatewayBuilder {
     msg_tx: Option<mpsc::Sender<IncomingMessage>>,
     llm_provider: Option<Arc<dyn crate::llm::LlmProvider>>,
     user_id: String,
+    tool_registry: Option<Arc<crate::tools::ToolRegistry>>,
 }
 
 impl Default for TestGatewayBuilder {
@@ -55,6 +56,7 @@ impl Default for TestGatewayBuilder {
             msg_tx: None,
             llm_provider: None,
             user_id: "test-user".to_string(),
+            tool_registry: None,
         }
     }
 }
@@ -84,6 +86,14 @@ impl TestGatewayBuilder {
         self
     }
 
+    /// Attach a `ToolRegistry` to the gateway. Tests that need to
+    /// exercise registry-aware handler paths (collision rejection,
+    /// permission filtering, etc.) inject one here.
+    pub fn tool_registry(mut self, registry: Arc<crate::tools::ToolRegistry>) -> Self {
+        self.tool_registry = Some(registry);
+        self
+    }
+
     /// Build the `Arc<GatewayState>` without starting a server.
     pub fn build(self) -> Arc<GatewayState> {
         Arc::new(GatewayState {
@@ -96,7 +106,7 @@ impl TestGatewayBuilder {
             log_broadcaster: None,
             log_level_handle: None,
             extension_manager: None,
-            tool_registry: None,
+            tool_registry: self.tool_registry,
             store: None,
             settings_cache: None,
             job_manager: None,

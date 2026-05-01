@@ -121,6 +121,30 @@ impl ExternalToolCatalog {
         map.remove(&thread_id);
     }
 
+    /// Move the entry registered under `from` to `to`. Used by the
+    /// engine bridge to bridge the gap between the responses_api
+    /// handler (which registers under the conversation_scope UUID it
+    /// generated) and the engine's actual `ThreadId` (which is only
+    /// known after `ConversationManager::handle_user_message` returns).
+    ///
+    /// Semantics:
+    /// - If `from == to`, no-op.
+    /// - If `from` has no entry, no-op (the request didn't supply tools).
+    /// - Otherwise the entry at `from` overwrites whatever was at `to`.
+    ///   The Responses API contract is "each request restates the full
+    ///   tools[] list" — a follow-up request supersedes the prior
+    ///   registration on the same engine thread.
+    pub async fn transfer(&self, from: ThreadId, to: ThreadId) {
+        if from == to {
+            return;
+        }
+        let mut map = self.inner.write().await;
+        let Some(entry) = map.remove(&from) else {
+            return;
+        };
+        map.insert(to, entry);
+    }
+
     /// Evict entries older than `max_age`. Returns the thread ids that
     /// were dropped. Backstop for callers that abandon a paused thread.
     pub async fn sweep_older_than(&self, max_age: Duration) -> Vec<ThreadId> {
@@ -231,6 +255,52 @@ mod tests {
         assert_eq!(evicted, vec![stale]);
         assert!(!catalog.contains(stale, "b").await);
         assert!(catalog.contains(fresh, "a").await);
+    }
+
+    #[tokio::test]
+    async fn transfer_moves_entry_overwriting_destination() {
+        let catalog = ExternalToolCatalog::new();
+        let from = ThreadId::new();
+        let to = ThreadId::new();
+        catalog.register(from, vec![action("fresh")]).await;
+        catalog.register(to, vec![action("stale")]).await;
+
+        catalog.transfer(from, to).await;
+
+        // `from` is empty; `to` has the freshly registered entry.
+        assert!(catalog.list(from).await.is_empty());
+        let listed = catalog.list(to).await;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "fresh");
+    }
+
+    #[tokio::test]
+    async fn transfer_noop_when_from_empty() {
+        let catalog = ExternalToolCatalog::new();
+        let from = ThreadId::new();
+        let to = ThreadId::new();
+        catalog.register(to, vec![action("only")]).await;
+
+        catalog.transfer(from, to).await;
+
+        // The destination keeps its entry; nothing was clobbered by an
+        // empty-source transfer.
+        let listed = catalog.list(to).await;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "only");
+    }
+
+    #[tokio::test]
+    async fn transfer_noop_on_self() {
+        let catalog = ExternalToolCatalog::new();
+        let tid = ThreadId::new();
+        catalog.register(tid, vec![action("a")]).await;
+
+        catalog.transfer(tid, tid).await;
+
+        let listed = catalog.list(tid).await;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "a");
     }
 
     #[test]

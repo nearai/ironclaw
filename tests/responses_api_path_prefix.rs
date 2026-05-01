@@ -386,6 +386,114 @@ async fn resume_without_pending_gate_returns_400() {
     );
 }
 
+/// A caller-supplied tool name that shadows a registered (built-in
+/// or extension) action must be rejected at request validation with
+/// 400. Without this check, the catalog short-circuit in
+/// `EffectBridgeAdapter::execute_action` would silently route the
+/// LLM's call to caller-side execution — even though the LLM saw
+/// the *internal* tool's description in its action surface, since
+/// `available_action_inventory` dedupes the opposite way (internal
+/// wins). That's a confused-deputy surface where the caller can
+/// craft any output and the LLM treats it as the trusted internal
+/// tool's reply.
+#[tokio::test]
+async fn external_tool_name_shadowing_registered_action_is_rejected() {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use ironclaw::context::JobContext;
+    use ironclaw::tools::{Tool, ToolError, ToolOutput, ToolRegistry};
+
+    /// Stand-in for a registered built-in. Production tools have
+    /// the same name shape (`shell`, `memory_write`, etc.); this
+    /// tool deliberately uses a unique name so the test isn't
+    /// affected by which built-ins the harness happens to register.
+    struct StandInTool;
+
+    #[async_trait]
+    impl Tool for StandInTool {
+        fn name(&self) -> &str {
+            "stand_in_tool"
+        }
+        fn description(&self) -> &str {
+            "stand-in for a registered tool — used for collision tests"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::success(
+                serde_json::json!({"ok": true}),
+                std::time::Duration::from_millis(0),
+            ))
+        }
+    }
+
+    // Spin up a gateway with a registry that contains a known tool
+    // name, so the validation check has something to collide with.
+    let registry = Arc::new(ToolRegistry::new());
+    registry.register(Arc::new(StandInTool)).await;
+
+    let state = ironclaw::channels::web::test_helpers::TestGatewayBuilder::new()
+        .user_id("test-user")
+        .tool_registry(registry)
+        .build();
+    let auth = ironclaw::channels::web::auth::MultiAuthState::single(
+        AUTH_TOKEN.to_string(),
+        "test-user".to_string(),
+    );
+    let addr: SocketAddr = "127.0.0.1:0"
+        .parse()
+        .expect("hard-coded address must parse");
+    let bound =
+        ironclaw::channels::web::platform::router::start_server(addr, state.clone(), auth.into())
+            .await
+            .expect("start gateway test server");
+    let shutdown = state.shutdown_tx.write().await.take();
+    let _guard = ServerGuard { shutdown };
+
+    let url = format!("http://{}/api/v1/responses", bound);
+    let resp = client()
+        .post(&url)
+        .bearer_auth(AUTH_TOKEN)
+        .json(&serde_json::json!({
+            "model": "default",
+            "input": "hi",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "stand_in_tool",
+                    "description": "shadow attempt",
+                    "parameters": {"type": "object"}
+                }
+            ]
+        }))
+        .send()
+        .await
+        .expect("POST /api/v1/responses with shadowing tool name");
+
+    assert_eq!(
+        resp.status(),
+        400,
+        "shadowing tool name must be rejected, got {}",
+        resp.status()
+    );
+    let body = resp.text().await.unwrap_or_default();
+    assert!(
+        body.contains("stand_in_tool"),
+        "rejection should name the colliding tool, got: {body}"
+    );
+    assert!(
+        body.to_ascii_lowercase().contains("shadow")
+            || body.to_ascii_lowercase().contains("built-in"),
+        "rejection should explain why (shadow / built-in), got: {body}"
+    );
+}
+
 /// Both GET item paths (`/api/v1/responses/{id}` and `/v1/responses/{id}`)
 /// must also enforce bearer-token auth. A missing token should return 401,
 /// not 404 — the auth middleware has to apply to legacy aliases as well.
