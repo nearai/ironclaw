@@ -25,13 +25,31 @@ jobs:
     env:
       PR_NUMBER: ${{ github.event.issue.number }}
     steps:
+      - name: Check PR trust boundary
+        id: pr_metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          is_cross_repository="$(
+            gh pr view "$PR_NUMBER" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json isCrossRepository \
+              --jq .isCrossRepository
+          )"
+          echo "is_cross_repository=${is_cross_repository}" >> "$GITHUB_OUTPUT"
+          if [ "${is_cross_repository}" = "true" ]; then
+            echo "Skipping Claude review for forked pull request #${PR_NUMBER}."
+          fi
+
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        if: steps.pr_metadata.outputs.is_cross_repository != 'true'
         with:
           ref: refs/pull/${{ env.PR_NUMBER }}/merge
           fetch-depth: 0
           persist-credentials: false
 
       - name: Run Claude Code review
+        if: steps.pr_metadata.outputs.is_cross_repository != 'true'
         uses: anthropics/claude-code-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
