@@ -14,7 +14,6 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_approvals::ApprovalResolver;
 use ironclaw_authorization::{CapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer};
-use ironclaw_capabilities::CapabilityHost;
 use ironclaw_dispatcher::{
     RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher,
 };
@@ -28,7 +27,7 @@ use ironclaw_host_api::{
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutor, McpInvocation};
 use ironclaw_processes::{
     ProcessExecutionError, ProcessExecutionRequest, ProcessExecutionResult, ProcessExecutor,
-    ProcessHost, ProcessManager, ProcessResultStore, ProcessServices, ProcessStore,
+    ProcessManager, ProcessResultStore, ProcessServices, ProcessStore,
 };
 use ironclaw_resources::ResourceGovernor;
 use ironclaw_run_state::{ApprovalRequestStore, RunStateStore};
@@ -104,30 +103,6 @@ where
         }
     }
 
-    pub fn registry(&self) -> Arc<ExtensionRegistry> {
-        Arc::clone(&self.registry)
-    }
-
-    pub fn filesystem(&self) -> Arc<F> {
-        Arc::clone(&self.filesystem)
-    }
-
-    pub fn governor(&self) -> Arc<G> {
-        Arc::clone(&self.governor)
-    }
-
-    pub fn authorizer(&self) -> Arc<dyn TrustAwareCapabilityDispatchAuthorizer> {
-        Arc::clone(&self.authorizer)
-    }
-
-    pub fn process_services(&self) -> &ProcessServices<S, R> {
-        &self.process_services
-    }
-
-    pub fn process_host(&self) -> ProcessHost<'_> {
-        self.process_services.host()
-    }
-
     pub fn with_run_state<T>(mut self, run_state: Arc<T>) -> Self
     where
         T: RunStateStore + 'static,
@@ -192,7 +167,7 @@ where
         self
     }
 
-    pub fn with_wasm_runtime(mut self, runtime: Arc<WasmRuntimeAdapter>) -> Self {
+    fn with_wasm_runtime(mut self, runtime: Arc<WasmRuntimeAdapter>) -> Self {
         self.wasm_runtime = Some(runtime);
         self
     }
@@ -207,7 +182,7 @@ where
     }
 
     /// Builds a runtime dispatcher with every configured runtime adapter.
-    pub fn runtime_dispatcher(&self) -> RuntimeDispatcher<'static, F, G> {
+    fn runtime_dispatcher(&self) -> RuntimeDispatcher<'static, F, G> {
         let mut dispatcher = RuntimeDispatcher::from_arcs(
             Arc::clone(&self.registry),
             Arc::clone(&self.filesystem),
@@ -237,14 +212,10 @@ where
         dispatcher
     }
 
-    pub fn runtime_dispatcher_arc(&self) -> Arc<RuntimeDispatcher<'static, F, G>> {
-        Arc::new(self.runtime_dispatcher())
-    }
-
     /// Builds the upper facade with the same dispatcher, process services,
     /// stores, cancellation registry, result store, and runtime health graph.
     pub fn host_runtime(&self) -> DefaultHostRuntime {
-        let dispatcher: Arc<dyn CapabilityDispatcher> = self.runtime_dispatcher_arc();
+        let dispatcher: Arc<dyn CapabilityDispatcher> = Arc::new(self.runtime_dispatcher());
         let process_executor =
             Arc::new(RuntimeDispatchProcessExecutor::new(Arc::clone(&dispatcher)));
         let process_manager: Arc<dyn ProcessManager> =
@@ -298,31 +269,6 @@ where
         Some(resolver)
     }
 
-    pub fn capability_host<'a, D>(
-        &'a self,
-        dispatcher: &'a D,
-        process_manager: Option<&'a dyn ProcessManager>,
-    ) -> CapabilityHost<'a, D>
-    where
-        D: CapabilityDispatcher + ?Sized,
-    {
-        let mut host =
-            CapabilityHost::new(self.registry.as_ref(), dispatcher, self.authorizer.as_ref());
-        if let Some(run_state) = &self.run_state {
-            host = host.with_run_state(run_state.as_ref());
-        }
-        if let Some(approval_requests) = &self.approval_requests {
-            host = host.with_approval_requests(approval_requests.as_ref());
-        }
-        if let Some(capability_leases) = &self.capability_leases {
-            host = host.with_capability_leases(capability_leases.as_ref());
-        }
-        if let Some(process_manager) = process_manager {
-            host = host.with_process_manager(process_manager);
-        }
-        host
-    }
-
     fn registered_runtime_backends(&self) -> Vec<RuntimeKind> {
         let mut backends = Vec::new();
         if self.wasm_runtime.is_some() {
@@ -368,7 +314,7 @@ impl RuntimeBackendHealth for RegisteredRuntimeHealth {
 }
 
 #[derive(Clone)]
-pub struct ScriptRuntimeAdapter {
+struct ScriptRuntimeAdapter {
     executor: Arc<dyn ScriptExecutor>,
 }
 
@@ -417,7 +363,7 @@ where
 }
 
 #[derive(Clone)]
-pub struct McpRuntimeAdapter {
+struct McpRuntimeAdapter {
     executor: Arc<dyn McpExecutor>,
 }
 
@@ -466,7 +412,7 @@ where
     }
 }
 
-pub struct WasmRuntimeAdapter {
+struct WasmRuntimeAdapter {
     runtime: WitToolRuntime,
     host: WitToolHost,
     prepared: Mutex<HashMap<String, Arc<PreparedWitTool>>>,
@@ -557,7 +503,7 @@ where
 }
 
 #[derive(Clone)]
-pub struct RuntimeDispatchProcessExecutor {
+struct RuntimeDispatchProcessExecutor {
     dispatcher: Arc<dyn CapabilityDispatcher>,
 }
 

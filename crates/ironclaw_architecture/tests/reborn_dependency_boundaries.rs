@@ -28,6 +28,52 @@ fn reborn_crate_dependency_boundaries_hold() {
 }
 
 #[test]
+fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
+    let root = workspace_root();
+    let lib = std::fs::read_to_string(root.join("crates/ironclaw_host_runtime/src/lib.rs"))
+        .expect("host runtime lib.rs must be readable");
+    let services =
+        std::fs::read_to_string(root.join("crates/ironclaw_host_runtime/src/services.rs"))
+            .expect("host runtime services.rs must be readable");
+
+    let forbidden_lib_exports = [
+        "RuntimeDispatchProcessExecutor",
+        "ScriptRuntimeAdapter",
+        "McpRuntimeAdapter",
+        "WasmRuntimeAdapter",
+    ];
+    for export in forbidden_lib_exports {
+        assert!(
+            !lib.contains(export),
+            "ironclaw_host_runtime must not re-export lower substrate handle `{export}`; upper Reborn code should enter through HostRuntimeServices::host_runtime / Arc<dyn HostRuntime>"
+        );
+    }
+
+    let forbidden_public_services = [
+        "pub fn registry(",
+        "pub fn filesystem(",
+        "pub fn governor(",
+        "pub fn authorizer(",
+        "pub fn process_services(",
+        "pub fn process_host(",
+        "pub fn with_wasm_runtime(",
+        "pub fn runtime_dispatcher(",
+        "pub fn runtime_dispatcher_arc(",
+        "pub fn capability_host",
+        "pub struct RuntimeDispatchProcessExecutor",
+        "pub struct ScriptRuntimeAdapter",
+        "pub struct McpRuntimeAdapter",
+        "pub struct WasmRuntimeAdapter",
+    ];
+    for pattern in forbidden_public_services {
+        assert!(
+            !services.contains(pattern),
+            "HostRuntimeServices must not expose lower substrate escape hatch `{pattern}`; keep dispatcher/capability/process handles private to the host-runtime crate"
+        );
+    }
+}
+
+#[test]
 fn reborn_runtime_http_egress_has_single_network_boundary() {
     let forbidden = [
         ForbiddenRuntimeNetworkUse {

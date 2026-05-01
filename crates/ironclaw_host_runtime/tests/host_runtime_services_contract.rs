@@ -10,9 +10,9 @@ use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
-    CancelReason, CancelRuntimeWorkRequest, CapabilitySurfaceVersion, HostRuntime,
-    HostRuntimeServices, RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeStatusRequest,
-    RuntimeWorkId,
+    CancelReason, CancelRuntimeWorkRequest, CapabilitySurfaceVersion, DefaultHostRuntime,
+    HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
+    RuntimeFailureKind, RuntimeStatusRequest, RuntimeWorkId,
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutionResult, McpExecutor};
 use ironclaw_processes::{
@@ -217,21 +217,16 @@ async fn host_runtime_services_wasm_guest_error_reconciles_usage_after_host_effe
     )
     .await;
 
-    let error = runtime
-        .dispatcher
-        .dispatch_json(wasm_dispatch_request(
+    let outcome = runtime
+        .runtime
+        .invoke_capability(wasm_runtime_request(
             runtime.capability_id,
             json!({"call": "guest-error"}),
         ))
         .await
-        .unwrap_err();
+        .unwrap();
 
-    assert!(matches!(
-        error,
-        DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::Guest
-        }
-    ));
+    assert_failed_outcome(outcome, RuntimeFailureKind::Backend);
     assert_eq!(runtime.http.requests().unwrap().len(), 1);
     assert_eq!(
         runtime
@@ -261,21 +256,16 @@ async fn host_runtime_services_wasm_invalid_output_reconciles_usage_after_host_e
     )
     .await;
 
-    let error = runtime
-        .dispatcher
-        .dispatch_json(wasm_dispatch_request(
+    let outcome = runtime
+        .runtime
+        .invoke_capability(wasm_runtime_request(
             runtime.capability_id,
             json!({"call": "invalid-output"}),
         ))
         .await
-        .unwrap_err();
+        .unwrap();
 
-    assert!(matches!(
-        error,
-        DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::OutputDecode
-        }
-    ));
+    assert_failed_outcome(outcome, RuntimeFailureKind::InvalidInput);
     assert_eq!(runtime.http.requests().unwrap().len(), 1);
     assert_eq!(
         runtime
@@ -305,21 +295,16 @@ async fn host_runtime_services_wasm_guest_error_reconciles_wall_clock_after_host
     )
     .await;
 
-    let error = runtime
-        .dispatcher
-        .dispatch_json(wasm_dispatch_request(
+    let outcome = runtime
+        .runtime
+        .invoke_capability(wasm_runtime_request(
             runtime.capability_id,
             json!({"call": "wall-clock-failure"}),
         ))
         .await
-        .unwrap_err();
+        .unwrap();
 
-    assert!(matches!(
-        error,
-        DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::Guest
-        }
-    ));
+    assert_failed_outcome(outcome, RuntimeFailureKind::Backend);
     assert_eq!(runtime.http.requests().unwrap().len(), 1);
     let usage = runtime.governor.usage_for(&sample_account());
     assert!(
@@ -336,12 +321,48 @@ async fn host_runtime_services_wasm_guest_error_reconciles_wall_clock_after_host
     );
 }
 
+fn assert_failed_outcome(outcome: RuntimeCapabilityOutcome, expected_kind: RuntimeFailureKind) {
+    match outcome {
+        RuntimeCapabilityOutcome::Failed(failure) => assert_eq!(failure.kind, expected_kind),
+        other => panic!("expected failed outcome, got {other:?}"),
+    }
+}
+
 struct EchoScriptBackend;
 
 impl ScriptBackend for EchoScriptBackend {
     fn execute(&self, request: ScriptBackendRequest) -> Result<ScriptBackendOutput, String> {
         let value = serde_json::from_str(&request.stdin_json).map_err(|error| error.to_string())?;
         Ok(ScriptBackendOutput::json(value))
+    }
+}
+
+struct AllowAllDispatchAuthorizer;
+
+#[async_trait]
+impl TrustAwareCapabilityDispatchAuthorizer for AllowAllDispatchAuthorizer {
+    async fn authorize_dispatch_with_trust(
+        &self,
+        _context: &ExecutionContext,
+        _descriptor: &CapabilityDescriptor,
+        _estimate: &ResourceEstimate,
+        _trust_decision: &TrustDecision,
+    ) -> Decision {
+        Decision::Allow {
+            obligations: Obligations::empty(),
+        }
+    }
+
+    async fn authorize_spawn_with_trust(
+        &self,
+        _context: &ExecutionContext,
+        _descriptor: &CapabilityDescriptor,
+        _estimate: &ResourceEstimate,
+        _trust_decision: &TrustDecision,
+    ) -> Decision {
+        Decision::Allow {
+            obligations: Obligations::empty(),
+        }
     }
 }
 
@@ -375,22 +396,7 @@ fn registry_with_manifests(manifests: &[&str]) -> ExtensionRegistry {
 }
 
 fn execution_context_with_dispatch_grant(capability: CapabilityId) -> ExecutionContext {
-    let mut grants = CapabilitySet::default();
-    grants.grants.push(CapabilityGrant {
-        id: CapabilityGrantId::new(),
-        capability,
-        grantee: Principal::Extension(ExtensionId::new("caller").unwrap()),
-        issued_by: Principal::HostRuntime,
-        constraints: GrantConstraints {
-            allowed_effects: vec![EffectKind::DispatchCapability],
-            mounts: MountView::default(),
-            network: NetworkPolicy::default(),
-            secrets: Vec::new(),
-            resource_ceiling: None,
-            expires_at: None,
-            max_invocations: None,
-        },
-    });
+    let grants = capability_grants(capability);
     ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
@@ -402,11 +408,57 @@ fn execution_context_with_dispatch_grant(capability: CapabilityId) -> ExecutionC
     .unwrap()
 }
 
+fn execution_context_with_dispatch_grant_for_scope(
+    capability: CapabilityId,
+    scope: ResourceScope,
+) -> ExecutionContext {
+    let context = ExecutionContext {
+        invocation_id: scope.invocation_id,
+        correlation_id: CorrelationId::new(),
+        process_id: None,
+        parent_process_id: None,
+        tenant_id: scope.tenant_id.clone(),
+        user_id: scope.user_id.clone(),
+        agent_id: scope.agent_id.clone(),
+        project_id: scope.project_id.clone(),
+        mission_id: scope.mission_id.clone(),
+        thread_id: scope.thread_id.clone(),
+        extension_id: ExtensionId::new("caller").unwrap(),
+        runtime: RuntimeKind::Wasm,
+        trust: TrustClass::UserTrusted,
+        grants: capability_grants(capability),
+        mounts: MountView::default(),
+        resource_scope: scope,
+    };
+    context.validate().unwrap();
+    context
+}
+
+fn capability_grants(capability: CapabilityId) -> CapabilitySet {
+    let mut grants = CapabilitySet::default();
+    grants.grants.push(CapabilityGrant {
+        id: CapabilityGrantId::new(),
+        capability,
+        grantee: Principal::Extension(ExtensionId::new("caller").unwrap()),
+        issued_by: Principal::HostRuntime,
+        constraints: GrantConstraints {
+            allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
+            mounts: MountView::default(),
+            network: NetworkPolicy::default(),
+            secrets: Vec::new(),
+            resource_ceiling: None,
+            expires_at: None,
+            max_invocations: None,
+        },
+    });
+    grants
+}
+
 fn trust_decision_with_dispatch_authority() -> TrustDecision {
     TrustDecision {
         effective_trust: EffectiveTrustClass::user_trusted(),
         authority_ceiling: AuthorityCeiling {
-            allowed_effects: vec![EffectKind::DispatchCapability],
+            allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
             max_resource_ceiling: None,
         },
         provenance: TrustProvenance::Default,
@@ -456,14 +508,14 @@ fn script_capability_id() -> CapabilityId {
 }
 
 struct WasmRuntimeFixture {
-    dispatcher: Arc<dyn CapabilityDispatcher>,
+    runtime: DefaultHostRuntime,
     governor: Arc<InMemoryResourceGovernor>,
     http: Arc<RecordingWasmHostHttp>,
     capability_id: CapabilityId,
 }
 
 struct WasmWallClockRuntimeFixture {
-    dispatcher: Arc<dyn CapabilityDispatcher>,
+    runtime: DefaultHostRuntime,
     governor: Arc<InMemoryResourceGovernor>,
     http: Arc<SlowZeroBodyWasmHostHttp>,
     capability_id: CapabilityId,
@@ -519,7 +571,7 @@ async fn wasm_runtime_for_component(
     );
     let governor = Arc::new(governor_with_default_limit(sample_account()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
-        Arc::new(GrantAuthorizer::new());
+        Arc::new(AllowAllDispatchAuthorizer);
     let http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
         status: 200,
         headers_json: "{}".to_string(),
@@ -540,7 +592,7 @@ async fn wasm_runtime_for_component(
     .unwrap();
 
     WasmRuntimeFixture {
-        dispatcher: services.runtime_dispatcher_arc(),
+        runtime: services.host_runtime(),
         governor,
         http,
         capability_id: CapabilityId::new(capability).unwrap(),
@@ -560,7 +612,7 @@ async fn wasm_runtime_for_component_with_slow_zero_body_http(
     );
     let governor = Arc::new(governor_with_default_limit(sample_account()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
-        Arc::new(GrantAuthorizer::new());
+        Arc::new(AllowAllDispatchAuthorizer);
     let http = Arc::new(SlowZeroBodyWasmHostHttp::new(Duration::from_millis(25)));
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(manifest)),
@@ -577,7 +629,7 @@ async fn wasm_runtime_for_component_with_slow_zero_body_http(
     .unwrap();
 
     WasmWallClockRuntimeFixture {
-        dispatcher: services.runtime_dispatcher_arc(),
+        runtime: services.host_runtime(),
         governor,
         http,
         capability_id: CapabilityId::new(capability).unwrap(),
@@ -621,18 +673,19 @@ fn governor_with_default_limit(account: ResourceAccount) -> InMemoryResourceGove
     governor
 }
 
-fn wasm_dispatch_request(
+fn wasm_runtime_request(
     capability_id: CapabilityId,
     input: serde_json::Value,
-) -> CapabilityDispatchRequest {
-    CapabilityDispatchRequest {
+) -> RuntimeCapabilityRequest {
+    let scope = sample_scope(InvocationId::new());
+    let context = execution_context_with_dispatch_grant_for_scope(capability_id.clone(), scope);
+    RuntimeCapabilityRequest::new(
+        context,
         capability_id,
-        scope: sample_scope(InvocationId::new()),
-        estimate: wasm_http_estimate(),
-        mounts: None,
-        resource_reservation: None,
+        wasm_http_estimate(),
         input,
-    }
+        trust_decision_with_dispatch_authority(),
+    )
 }
 
 fn wasm_http_estimate() -> ResourceEstimate {
