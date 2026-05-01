@@ -78,6 +78,41 @@ async fn seed_action(
     .expect("seed insert action");
 }
 
+/// Insert a routine + a single routine_run at a given timestamp.
+/// Used to verify `total_routine_runs` aggregation respects the time window.
+async fn seed_routine_run(
+    db_path: &std::path::Path,
+    user_id: &str,
+    created_at: chrono::DateTime<chrono::Utc>,
+) {
+    let backend = LibSqlBackend::new_local(db_path)
+        .await
+        .expect("seed open");
+    let conn = backend.connect().await.expect("seed conn");
+    let routine_id = uuid::Uuid::new_v4().to_string();
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let stamp = created_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    conn.execute(
+        "INSERT INTO routines (id, name, description, user_id, trigger_type, \
+         trigger_config, action_type, action_config) VALUES \
+         (?1, ?2, '', ?3, 'cron', '{}', 'job', '{}')",
+        libsql::params![
+            routine_id.clone(),
+            format!("test-{}", &routine_id[..8]),
+            user_id.to_string(),
+        ],
+    )
+    .await
+    .expect("seed insert routine");
+    conn.execute(
+        "INSERT INTO routine_runs (id, routine_id, trigger_type, status, created_at, started_at) \
+         VALUES (?1, ?2, 'cron', 'completed', ?3, ?3)",
+        libsql::params![run_id, routine_id, stamp],
+    )
+    .await
+    .expect("seed insert routine_run");
+}
+
 #[tokio::test]
 async fn aggregate_counts_jobs_and_top_tools_in_window() {
     let (db, tmp) = create_test_db().await;
@@ -222,5 +257,32 @@ async fn time_window_excludes_old_rows() {
     assert_eq!(
         shell_count, 1,
         "tool frequency must respect the time window via the agent_jobs join"
+    );
+}
+
+#[tokio::test]
+async fn aggregate_counts_routine_runs_in_window_only() {
+    let (db, tmp) = create_test_db().await;
+    let db_path = tmp.path().join("insights.db");
+
+    let now = Utc::now();
+    // Two recent runs (must count), one ancient run (must not).
+    seed_routine_run(&db_path, "alice", now - Duration::days(1)).await;
+    seed_routine_run(&db_path, "alice", now - Duration::days(3)).await;
+    seed_routine_run(&db_path, "alice", now - Duration::days(60)).await;
+
+    // Sanity: also seed a job so the empty-table path doesn't accidentally
+    // skip the routine_runs query.
+    let job = uuid::Uuid::new_v4().to_string();
+    seed_job(&db_path, &job, "alice", now - Duration::days(1), 1).await;
+
+    let agg = db
+        .aggregate_insights(now - Duration::days(7), 10)
+        .await
+        .expect("aggregate_insights");
+
+    assert_eq!(
+        agg.total_routine_runs, 2,
+        "expected exactly two recent routine_runs (the 60-day-old one is outside the window)"
     );
 }

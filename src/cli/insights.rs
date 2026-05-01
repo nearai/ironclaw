@@ -141,20 +141,20 @@ fn emit_json(agg: &InsightsAggregate, window_days: u32) -> anyhow::Result<()> {
         "top_tools": agg.top_tools,
         "daily_activity": agg.daily_activity,
     });
-    println!("{}", serde_json::to_string_pretty(&payload)?);
+    let body = serde_json::to_string_pretty(&payload)?;
+    println!("{body}");
     Ok(())
 }
 
 fn emit_table(agg: &InsightsAggregate, window_days: u32) {
     if agg.total_jobs == 0 && agg.total_routine_runs == 0 {
         println!(
-            "No agent activity in the last {} day(s). Run `ironclaw run` to start the agent.",
-            window_days
+            "No agent activity in the last {window_days} day(s). Run `ironclaw run` to start the agent."
         );
         return;
     }
 
-    println!("IronClaw insights — last {} day(s)\n", window_days);
+    println!("IronClaw insights — last {window_days} day(s)\n");
 
     println!(
         "  jobs:           {}\n  routine runs:   {}\n  tokens used:    {}",
