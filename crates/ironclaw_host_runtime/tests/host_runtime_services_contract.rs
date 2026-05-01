@@ -1117,6 +1117,60 @@ async fn host_runtime_services_cancel_writes_killed_result_when_reservation_is_s
 }
 
 #[tokio::test]
+async fn host_runtime_services_cancel_records_kill_side_effects_when_cleanup_fails() {
+    let process_services = ProcessServices::new(
+        Arc::new(InMemoryProcessStore::new()),
+        Arc::new(InMemoryProcessResultStore::new()),
+    );
+    let process_store = process_services.process_store();
+    let result_store = process_services.result_store();
+    let cancellation_registry = process_services.cancellation_registry();
+    let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
+    let runtime = HostRuntimeServices::new(
+        registry,
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(FailingCleanupResourceGovernor),
+        Arc::new(GrantAuthorizer::new()),
+        process_services,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .host_runtime();
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id);
+    let token = cancellation_registry.register(&scope, process_id);
+    let mut start = process_start(process_id, invocation_id, scope.clone());
+    start.resource_reservation_id = Some(ResourceReservationId::new());
+    process_store.start(start).await.unwrap();
+
+    let _error = runtime
+        .cancel_work(CancelRuntimeWorkRequest::new(
+            scope.clone(),
+            CorrelationId::new(),
+            CancelReason::UserRequested,
+        ))
+        .await
+        .expect_err("cleanup failure should remain visible to callers");
+
+    assert!(
+        token.is_cancelled(),
+        "cleanup errors after terminalization must not skip cooperative cancellation"
+    );
+    let record = process_store
+        .get(&scope, process_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.status, ProcessStatus::Killed);
+    let result = result_store
+        .get(&scope, process_id)
+        .await
+        .unwrap()
+        .expect("cleanup errors after terminalization must still write a killed result");
+    assert_eq!(result.status, ProcessStatus::Killed);
+}
+
+#[tokio::test]
 async fn spawned_obligation_lifecycle_reconciles_resources_and_discards_handoffs_on_success() {
     let reservation_id = ResourceReservationId::new();
     let secret_handle = SecretHandle::new("api_token").unwrap();

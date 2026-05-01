@@ -57,6 +57,11 @@ impl<'a> ProcessHost<'a> {
         self
     }
 
+    pub fn with_result_store_dyn(mut self, store: Arc<dyn ProcessResultStore>) -> Self {
+        self.result_store = Some(store);
+        self
+    }
+
     fn result_store(&self) -> Result<&dyn ProcessResultStore, ProcessError> {
         self.result_store
             .as_deref()
@@ -76,14 +81,31 @@ impl<'a> ProcessHost<'a> {
         scope: &ResourceScope,
         process_id: ProcessId,
     ) -> Result<ProcessRecord, ProcessError> {
-        let record = self.store.kill(scope, process_id).await?;
+        match self.store.kill(scope, process_id).await {
+            Ok(record) => {
+                self.record_kill_side_effects(&record).await?;
+                Ok(record)
+            }
+            Err(error @ ProcessError::InvalidTransition { .. }) => Err(error),
+            Err(error) => {
+                if let Ok(Some(record)) = self.store.get(scope, process_id).await
+                    && record.status == ProcessStatus::Killed
+                {
+                    self.record_kill_side_effects(&record).await?;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    async fn record_kill_side_effects(&self, record: &ProcessRecord) -> Result<(), ProcessError> {
         if let Some(registry) = &self.cancellation_registry {
-            registry.cancel(scope, process_id);
+            registry.cancel(&record.scope, record.process_id);
         }
         if let Some(result_store) = &self.result_store {
             result_store.kill(&record.scope, record.process_id).await?;
         }
-        Ok(record)
+        Ok(())
     }
 
     pub async fn result(
