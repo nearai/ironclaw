@@ -367,6 +367,13 @@ fn host_http_egress_strips_all_sensitive_response_headers() {
                 "short-manual-key".to_string(),
             ),
             ("x-csrf-token".to_string(), "short-manual-key".to_string()),
+            ("x-refresh-token".to_string(), "opaque-refresh".to_string()),
+            (
+                "x-amz-security-token".to_string(),
+                "opaque-session".to_string(),
+            ),
+            ("private-token".to_string(), "opaque-private".to_string()),
+            ("x-credential".to_string(), "opaque-credential".to_string()),
             ("x-secret".to_string(), "short-manual-key".to_string()),
             ("x-api-secret".to_string(), "short-manual-key".to_string()),
             ("x-public".to_string(), "ok".to_string()),

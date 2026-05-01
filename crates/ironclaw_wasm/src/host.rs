@@ -266,7 +266,7 @@ fn encode_wasm_headers(headers: Vec<(String, String)>) -> Result<String, WasmHos
 }
 
 fn wasm_http_error(error: RuntimeHttpEgressError) -> WasmHostError {
-    let request_was_sent = error.request_bytes() > 0;
+    let request_was_sent = wasm_http_request_was_sent(&error);
     let reason = wasm_http_error_reason(&error).to_string();
     if request_was_sent {
         return WasmHostError::FailedAfterRequestSent(reason);
@@ -278,6 +278,18 @@ fn wasm_http_error(error: RuntimeHttpEgressError) -> WasmHostError {
             WasmHostError::Denied(reason)
         }
         RuntimeHttpEgressError::Response { .. } => WasmHostError::Failed(reason),
+    }
+}
+
+fn wasm_http_request_was_sent(error: &RuntimeHttpEgressError) -> bool {
+    match error {
+        RuntimeHttpEgressError::Credential { .. } | RuntimeHttpEgressError::Request { .. } => false,
+        RuntimeHttpEgressError::Network {
+            request_bytes,
+            response_bytes,
+            ..
+        } => *request_bytes > 0 || *response_bytes > 0,
+        RuntimeHttpEgressError::Response { .. } => true,
     }
 }
 

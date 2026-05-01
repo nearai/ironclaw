@@ -85,6 +85,13 @@ fn wasm_runtime_http_adapter_strips_sensitive_response_headers() {
             ("x-access-token".to_string(), "sk-test-secret".to_string()),
             ("x-session-token".to_string(), "sk-test-secret".to_string()),
             ("x-csrf-token".to_string(), "sk-test-secret".to_string()),
+            ("x-refresh-token".to_string(), "opaque-refresh".to_string()),
+            (
+                "x-amz-security-token".to_string(),
+                "opaque-session".to_string(),
+            ),
+            ("private-token".to_string(), "opaque-private".to_string()),
+            ("x-credential".to_string(), "opaque-credential".to_string()),
             ("x-secret".to_string(), "sk-test-secret".to_string()),
             ("x-api-secret".to_string(), "sk-test-secret".to_string()),
             ("x-public".to_string(), "ok".to_string()),
@@ -113,6 +120,10 @@ fn wasm_runtime_http_adapter_strips_sensitive_response_headers() {
     assert!(!response.headers_json.contains("set-cookie"));
     assert!(!response.headers_json.contains("api-key"));
     assert!(!response.headers_json.contains("x-token"));
+    assert!(!response.headers_json.contains("x-refresh-token"));
+    assert!(!response.headers_json.contains("x-amz-security-token"));
+    assert!(!response.headers_json.contains("private-token"));
+    assert!(!response.headers_json.contains("x-credential"));
 }
 
 #[test]
@@ -371,6 +382,38 @@ fn wasm_runtime_http_adapter_marks_post_send_shared_egress_errors_for_accounting
     assert!(matches!(
         error,
         WasmHostError::FailedAfterRequestSent(reason) if reason.contains("response_error")
+    ));
+    assert!(!rendered.contains("sk-test-secret"));
+}
+
+#[test]
+fn wasm_runtime_http_adapter_marks_zero_body_response_failures_after_send() {
+    let adapter = WasmRuntimeHttpAdapter::new(
+        Arc::new(RecordingRuntimeEgress::err(
+            RuntimeHttpEgressError::Network {
+                reason: "response body limit exceeded for sk-test-secret".to_string(),
+                request_bytes: 0,
+                response_bytes: 6,
+            },
+        )),
+        sample_scope(),
+        sample_policy(),
+    );
+
+    let error = adapter
+        .request(WasmHttpRequest {
+            method: "GET".to_string(),
+            url: "https://wasm-api.example.test/run".to_string(),
+            headers_json: "{}".to_string(),
+            body: None,
+            timeout_ms: Some(1000),
+        })
+        .expect_err("zero-body response-stage failures should still be post-send failures");
+
+    let rendered = error.to_string();
+    assert!(matches!(
+        error,
+        WasmHostError::FailedAfterRequestSent(reason) if reason.contains("network_error")
     ));
     assert!(!rendered.contains("sk-test-secret"));
 }

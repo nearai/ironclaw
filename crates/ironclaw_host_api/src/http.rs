@@ -160,9 +160,24 @@ pub fn is_sensitive_runtime_response_header(name: &str) -> bool {
         "proxy-authenticate",
         "proxy-authorization",
     ];
+    const SENSITIVE_RESPONSE_HEADER_MARKERS: &[&str] = &[
+        "auth",
+        "token",
+        "secret",
+        "credential",
+        "password",
+        "cookie",
+        "api-key",
+        "apikey",
+        "api_key",
+    ];
+    let normalized = name.trim().to_ascii_lowercase();
     SENSITIVE_RESPONSE_HEADERS
         .iter()
-        .any(|header| name.trim().eq_ignore_ascii_case(header))
+        .any(|header| normalized == *header)
+        || SENSITIVE_RESPONSE_HEADER_MARKERS
+            .iter()
+            .any(|marker| normalized.contains(marker))
 }
 
 pub trait RuntimeHttpEgress: Send + Sync {
