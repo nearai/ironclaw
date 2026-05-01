@@ -4,6 +4,10 @@ use crate::types::thread::Thread;
 use ironclaw_common::ValidTimezone;
 
 /// Build an execution context from the current thread state.
+///
+/// The returned context has `gate_controller: None`; live execution
+/// paths (`ExecutionLoop`, `Orchestrator`) stamp their own controller
+/// onto the result before handing it to executors.
 pub(crate) fn thread_execution_context(
     thread: &Thread,
     step_id: StepId,
@@ -29,5 +33,6 @@ pub(crate) fn thread_execution_context(
         thread_goal: Some(thread.goal.clone()),
         available_actions_snapshot: None,
         available_action_inventory_snapshot: None,
+        gate_controller: None,
     }
 }

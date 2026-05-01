@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use crate::gate::GateController;
 use crate::types::capability::{ActionDef, ActionInventory, CapabilityLease, CapabilitySummary};
 use crate::types::error::EngineError;
 use crate::types::project::ProjectId;
@@ -17,7 +18,7 @@ use ironclaw_common::ValidTimezone;
 ///
 /// Passed to the executor so it can make context-dependent decisions
 /// (e.g. different tool behavior in background vs foreground threads).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ThreadExecutionContext {
     pub thread_id: ThreadId,
     pub thread_type: ThreadType,
@@ -42,6 +43,42 @@ pub struct ThreadExecutionContext {
     pub available_actions_snapshot: Option<Arc<[ActionDef]>>,
     /// Snapshot of the full action inventory visible to the current step.
     pub available_action_inventory_snapshot: Option<Arc<ActionInventory>>,
+    /// Host-supplied callback that lets the executor pause inline on
+    /// `Approval` gates instead of unwinding back to the orchestrator.
+    ///
+    /// `None` for tests and legacy code paths that haven't been migrated;
+    /// in that case `Approval` gates fall back to the historical
+    /// `ThreadOutcome::GatePaused` re-entry behavior. Production
+    /// invocations (via the bridge) always supply one.
+    pub gate_controller: Option<Arc<dyn GateController>>,
+}
+
+// Manual Debug impl: `dyn GateController` is not Debug, but the rest of
+// the struct is. The controller is opaque host-supplied state — it
+// renders as a constant marker rather than its internals.
+impl std::fmt::Debug for ThreadExecutionContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ThreadExecutionContext")
+            .field("thread_id", &self.thread_id)
+            .field("thread_type", &self.thread_type)
+            .field("project_id", &self.project_id)
+            .field("user_id", &self.user_id)
+            .field("step_id", &self.step_id)
+            .field("current_call_id", &self.current_call_id)
+            .field("source_channel", &self.source_channel)
+            .field("user_timezone", &self.user_timezone)
+            .field("thread_goal", &self.thread_goal)
+            .field(
+                "available_actions_snapshot",
+                &self.available_actions_snapshot.as_ref().map(|a| a.len()),
+            )
+            .field(
+                "available_action_inventory_snapshot",
+                &self.available_action_inventory_snapshot.is_some(),
+            )
+            .field("gate_controller", &self.gate_controller.is_some())
+            .finish()
+    }
 }
 
 /// Abstraction over capability action execution.

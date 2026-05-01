@@ -121,6 +121,10 @@ pub struct ExecutionLoop {
     store: Option<Arc<dyn crate::traits::store::Store>>,
     /// Runtime platform metadata for self-awareness in system prompts.
     platform_info: Option<crate::executor::prompt::PlatformInfo>,
+    /// Optional host gate controller, attached to every
+    /// `ThreadExecutionContext` this loop builds so executors can pause
+    /// in place on `Approval` gates.
+    gate_controller: Option<Arc<dyn crate::gate::GateController>>,
 }
 
 impl ExecutionLoop {
@@ -146,7 +150,19 @@ impl ExecutionLoop {
             retrieval: None,
             store: None,
             platform_info: None,
+            gate_controller: None,
         }
+    }
+
+    /// Set the host gate controller. Stamped onto every
+    /// `ThreadExecutionContext` this loop produces so Tier 0 and Tier 1
+    /// executors can pause inline on `Approval` gates.
+    pub fn with_gate_controller(
+        mut self,
+        controller: Arc<dyn crate::gate::GateController>,
+    ) -> Self {
+        self.gate_controller = Some(controller);
+        self
     }
 
     /// Set the event broadcast sender for live status updates.
@@ -429,6 +445,7 @@ impl ExecutionLoop {
             self.retrieval.as_ref(),
             self.store.as_ref(),
             self.platform_info.as_ref(),
+            self.gate_controller.as_ref(),
             &checkpoint.persisted_state,
         )
         .await;

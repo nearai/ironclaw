@@ -121,6 +121,17 @@ fn build_date_today() -> MontyObject {
 }
 
 /// Default resource limits for Monty execution.
+///
+/// `max_duration` is wall-clock from VM start and ticks during inline
+/// gate-await pauses (we await user input *inside* the same Monty
+/// execution). 30s is what catches runaway CPU-bound scripts that
+/// don't allocate (`while True: x += 1`); raising it to "30 min so
+/// human approvals fit" hangs those tests. Tradeoff: with 30s, an
+/// approval that takes longer than 30s timeouts the script and the
+/// user has to retry. Most approvals come back in seconds; longer
+/// ones are a documented limitation. A proper "active CPU vs paused"
+/// timer split is on the follow-up list (see
+/// `docs/plans/2026-05-01-codeact-inline-gate-await.md`).
 fn default_limits() -> ResourceLimits {
     ResourceLimits::new()
         .max_duration(Duration::from_secs(30))
@@ -839,16 +850,247 @@ pub async fn execute_code_with_skills(
                         }
                     }
                     PreflightResult::GatePaused(outcome) => {
-                        return Ok(CodeExecutionResult {
-                            return_value: serde_json::Value::Null,
-                            stdout,
-                            action_results,
-                            events,
-                            need_approval: Some(outcome),
-                            recursive_tokens,
-                            final_answer: None,
-                            failure: None,
-                        });
+                        // Inline gate-await: keep the Monty VM alive,
+                        // pause for the user, and continue from the
+                        // exact suspension point on resolution. Without
+                        // a controller wired (tests / legacy callers)
+                        // fall back to the unwind-and-re-enter behavior.
+                        let Some(controller) = execution_context.gate_controller.as_ref() else {
+                            return Ok(CodeExecutionResult {
+                                return_value: serde_json::Value::Null,
+                                stdout,
+                                action_results,
+                                events,
+                                need_approval: Some(outcome),
+                                recursive_tokens,
+                                final_answer: None,
+                                failure: None,
+                            });
+                        };
+
+                        let crate::runtime::messaging::ThreadOutcome::GatePaused {
+                            gate_name,
+                            action_name: gate_action_name,
+                            call_id: gate_call_id,
+                            parameters: gate_parameters,
+                            resume_kind,
+                            ..
+                        } = outcome
+                        else {
+                            // ThreadOutcome::GatePaused is the only variant
+                            // PreflightResult::GatePaused builds; falling
+                            // back here would indicate a programmer error.
+                            return Ok(CodeExecutionResult {
+                                return_value: serde_json::Value::Null,
+                                stdout,
+                                action_results,
+                                events,
+                                need_approval: None,
+                                recursive_tokens,
+                                final_answer,
+                                failure: Some(CodeExecutionFailure::ToolError),
+                            });
+                        };
+
+                        let resolution = controller
+                            .pause(crate::gate::GatePauseRequest {
+                                thread_id: thread.id,
+                                user_id: thread.user_id.clone(),
+                                gate_name: gate_name.clone(),
+                                action_name: gate_action_name.clone(),
+                                call_id: gate_call_id.clone(),
+                                parameters: gate_parameters.clone(),
+                                resume_kind: resume_kind.clone(),
+                            })
+                            .await;
+
+                        let denial_reason = match resolution {
+                            crate::gate::GateResolution::Approved { .. } => None,
+                            crate::gate::GateResolution::Denied { reason } => {
+                                Some(reason.unwrap_or_else(|| "denied by user".into()))
+                            }
+                            crate::gate::GateResolution::Cancelled => Some("cancelled".into()),
+                            crate::gate::GateResolution::CredentialProvided { .. }
+                            | crate::gate::GateResolution::ExternalCallback { .. } => {
+                                Some("unsupported gate resolution".into())
+                            }
+                        };
+
+                        if let Some(reason) = denial_reason {
+                            // Resume Monty with a typed exception. RuntimeError
+                            // is what we emit; the message is explicit so users
+                            // (and the LLM) can distinguish denial from other
+                            // runtime errors.
+                            let ext_result = ExtFunctionResult::Error(MontyException::new(
+                                ExcType::RuntimeError,
+                                Some(format!("user denied tool '{gate_action_name}': {reason}")),
+                            ));
+                            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                call.resume(ext_result, PrintWriter::CollectString(&mut stdout))
+                            })) {
+                                Ok(Ok(p)) => progress = p,
+                                Ok(Err(e)) => {
+                                    stdout.push_str(&format!("\nError: {e}"));
+                                    return Ok(CodeExecutionResult {
+                                        return_value: serde_json::Value::Null,
+                                        stdout,
+                                        action_results,
+                                        events,
+                                        need_approval: None,
+                                        recursive_tokens,
+                                        final_answer,
+                                        failure: Some(CodeExecutionFailure::ToolError),
+                                    });
+                                }
+                                Err(_) => {
+                                    return Ok(CodeExecutionResult {
+                                        return_value: serde_json::Value::Null,
+                                        stdout: format!(
+                                            "{stdout}\nVmPanic: Monty VM panicked during resume"
+                                        ),
+                                        action_results,
+                                        events,
+                                        need_approval: None,
+                                        recursive_tokens,
+                                        final_answer,
+                                        failure: Some(CodeExecutionFailure::VmPanic),
+                                    });
+                                }
+                            }
+                            continue;
+                        }
+
+                        // Approved. Re-do preflight — the bridge installed
+                        // any auto-approve preference before delivering the
+                        // resolution, so policy now returns Allow.
+                        let retry_preflight = preflight_action(
+                            &gate_action_name,
+                            &gate_parameters,
+                            thread,
+                            leases,
+                            policy,
+                            &execution_context,
+                            capability_policies,
+                            &gate_call_id,
+                            &mut events,
+                        )
+                        .await;
+                        match retry_preflight {
+                            PreflightResult::Approved(lease) => {
+                                let effects = effects.clone();
+                                let name = gate_action_name.clone();
+                                let params_clone = gate_parameters.clone();
+                                let lease_clone = lease.clone();
+                                let mut ctx = execution_context.clone();
+                                ctx.current_call_id = Some(gate_call_id.clone());
+                                let ps =
+                                    crate::types::event::summarize_params(&name, &gate_parameters);
+
+                                let handle = tokio::spawn(async move {
+                                    let execution_start = Instant::now();
+                                    let result = effects
+                                        .execute_action(&name, params_clone, &lease_clone, &ctx)
+                                        .await;
+                                    (result, execution_start.elapsed().as_millis() as u64)
+                                });
+
+                                pending_futures.insert(
+                                    monty_call_id,
+                                    PendingFuture::Tool {
+                                        handle,
+                                        action_name: gate_action_name,
+                                        call_id: gate_call_id,
+                                        lease_id: lease.id,
+                                        parameters: gate_parameters.clone(),
+                                        params_summary: ps,
+                                    },
+                                );
+
+                                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    call.resume_pending(PrintWriter::CollectString(&mut stdout))
+                                })) {
+                                    Ok(Ok(p)) => progress = p,
+                                    Ok(Err(e)) => {
+                                        stdout.push_str(&format!("\nError: {e}"));
+                                        return Ok(CodeExecutionResult {
+                                            return_value: serde_json::Value::Null,
+                                            stdout,
+                                            action_results,
+                                            events,
+                                            need_approval: None,
+                                            recursive_tokens,
+                                            final_answer,
+                                            failure: Some(CodeExecutionFailure::ToolError),
+                                        });
+                                    }
+                                    Err(_) => {
+                                        return Ok(CodeExecutionResult {
+                                            return_value: serde_json::Value::Null,
+                                            stdout: format!(
+                                                "{stdout}\nVmPanic: Monty VM panicked during resume_pending"
+                                            ),
+                                            action_results,
+                                            events,
+                                            need_approval: None,
+                                            recursive_tokens,
+                                            final_answer,
+                                            failure: Some(CodeExecutionFailure::VmPanic),
+                                        });
+                                    }
+                                }
+                            }
+                            PreflightResult::Denied(ext_result) => {
+                                // Race: someone changed the lease/policy
+                                // between approval and retry. Surface the
+                                // error to Python so the script can handle
+                                // it (or crash uncaught).
+                                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    call.resume(ext_result, PrintWriter::CollectString(&mut stdout))
+                                })) {
+                                    Ok(Ok(p)) => progress = p,
+                                    _ => {
+                                        return Ok(CodeExecutionResult {
+                                            return_value: serde_json::Value::Null,
+                                            stdout,
+                                            action_results,
+                                            events,
+                                            need_approval: None,
+                                            recursive_tokens,
+                                            final_answer,
+                                            failure: Some(CodeExecutionFailure::ToolError),
+                                        });
+                                    }
+                                }
+                            }
+                            PreflightResult::GatePaused(_) => {
+                                // Policy still says approval needed even
+                                // after user said yes. Treat as denial so
+                                // we don't loop forever.
+                                let ext_result = ExtFunctionResult::Error(MontyException::new(
+                                    ExcType::RuntimeError,
+                                    Some(format!(
+                                        "tool '{gate_action_name}' still requires approval after resolution"
+                                    )),
+                                ));
+                                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    call.resume(ext_result, PrintWriter::CollectString(&mut stdout))
+                                })) {
+                                    Ok(Ok(p)) => progress = p,
+                                    _ => {
+                                        return Ok(CodeExecutionResult {
+                                            return_value: serde_json::Value::Null,
+                                            stdout,
+                                            action_results,
+                                            events,
+                                            need_approval: None,
+                                            recursive_tokens,
+                                            final_answer,
+                                            failure: Some(CodeExecutionFailure::ToolError),
+                                        });
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -883,6 +1125,7 @@ pub async fn execute_code_with_skills(
                                     parameters,
                                     params_summary,
                                     leases,
+                                    effects,
                                     context,
                                     &mut action_results,
                                     &mut events,
@@ -1689,9 +1932,15 @@ async fn resolve_tool_future(
     action_name: &str,
     call_id: &str,
     lease_id: crate::types::capability::LeaseId,
-    parameters: serde_json::Value,
+    // The original `parameters` are unused here — when a tool returns
+    // `EngineError::GatePaused`, the gate carries its own parameter
+    // snapshot (possibly transformed by the safety layer), and that's
+    // what we surface to the user. Keeping it on the function signature
+    // would be a misleading source of truth.
+    _parameters: serde_json::Value,
     params_summary: Option<String>,
     leases: &LeaseManager,
+    effects: &Arc<dyn EffectExecutor>,
     context: &ThreadExecutionContext,
     action_results: &mut Vec<ActionResult>,
     events: &mut Vec<EventKind>,
@@ -1740,8 +1989,9 @@ async fn resolve_tool_future(
         Ok((
             Err(EngineError::GatePaused {
                 gate_name,
-                action_name,
-                call_id,
+                action_name: gate_action_name,
+                call_id: gate_call_id,
+                parameters: gate_parameters,
                 resume_kind,
                 ..
             }),
@@ -1749,21 +1999,161 @@ async fn resolve_tool_future(
         )) => {
             let _ = leases.refund_use(lease_id).await;
             events.push(EventKind::ApprovalRequested {
-                action_name,
-                call_id,
-                parameters: Some(parameters),
+                action_name: gate_action_name.clone(),
+                call_id: gate_call_id.clone(),
+                parameters: Some((*gate_parameters).clone()),
                 description: None,
                 allow_always: match *resume_kind {
                     crate::gate::ResumeKind::Approval { allow_always } => Some(allow_always),
                     _ => None,
                 },
                 gate_name: Some(gate_name.clone()),
-                params_summary,
+                params_summary: params_summary.clone(),
             });
-            ExtFunctionResult::Error(MontyException::new(
-                ExcType::RuntimeError,
-                Some(format!("execution paused by gate '{gate_name}'")),
-            ))
+
+            // Inline gate-await for `Approval`. Without a controller
+            // wired (tests / legacy callers) fall back to the historical
+            // behavior — surface as a Python `RuntimeError` so the
+            // outer code path can detect it.
+            let is_approval = matches!(*resume_kind, crate::gate::ResumeKind::Approval { .. });
+            let Some(controller) = context.gate_controller.as_ref().filter(|_| is_approval) else {
+                return ExtFunctionResult::Error(MontyException::new(
+                    ExcType::RuntimeError,
+                    Some(format!("execution paused by gate '{gate_name}'")),
+                ));
+            };
+
+            let pause_resume_kind = (*resume_kind).clone();
+            let resolution = controller
+                .pause(crate::gate::GatePauseRequest {
+                    thread_id: context.thread_id,
+                    user_id: context.user_id.clone(),
+                    gate_name: gate_name.clone(),
+                    action_name: gate_action_name.clone(),
+                    call_id: gate_call_id.clone(),
+                    parameters: (*gate_parameters).clone(),
+                    resume_kind: pause_resume_kind,
+                })
+                .await;
+
+            match resolution {
+                crate::gate::GateResolution::Approved { .. } => {
+                    // Retry the action. Re-acquire a lease use — the
+                    // bridge installed any auto-approve preference
+                    // before delivering the resolution, so policy now
+                    // returns Allow.
+                    let lease = match leases
+                        .find_and_consume(context.thread_id, &gate_action_name)
+                        .await
+                    {
+                        Ok(l) => l,
+                        Err(e) => {
+                            return ExtFunctionResult::Error(MontyException::new(
+                                ExcType::RuntimeError,
+                                Some(format!("lease unavailable after approval: {e}")),
+                            ));
+                        }
+                    };
+                    let retry_start = Instant::now();
+                    let retry_result = effects
+                        .execute_action(
+                            &gate_action_name,
+                            (*gate_parameters).clone(),
+                            &lease,
+                            context,
+                        )
+                        .await;
+                    let retry_duration_ms = retry_start.elapsed().as_millis() as u64;
+                    match retry_result {
+                        Ok(result) => {
+                            if result.is_error {
+                                let error_msg = result
+                                    .output
+                                    .get("error")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from)
+                                    .unwrap_or_else(|| result.output.to_string());
+                                let duration_ms = result.duration.as_millis() as u64;
+                                events.push(EventKind::ActionFailed {
+                                    step_id: context.step_id,
+                                    action_name: gate_action_name.clone(),
+                                    call_id: gate_call_id.clone(),
+                                    error: error_msg,
+                                    duration_ms: if duration_ms > 0 {
+                                        duration_ms
+                                    } else {
+                                        retry_duration_ms
+                                    },
+                                    params_summary,
+                                });
+                            } else {
+                                events.push(EventKind::ActionExecuted {
+                                    step_id: context.step_id,
+                                    action_name: gate_action_name.clone(),
+                                    call_id: gate_call_id.clone(),
+                                    duration_ms: result.duration.as_millis() as u64,
+                                    params_summary,
+                                });
+                            }
+                            let monty_val = json_to_monty(&result.output);
+                            action_results.push(result);
+                            ExtFunctionResult::Return(monty_val)
+                        }
+                        Err(e) => {
+                            events.push(EventKind::ActionFailed {
+                                step_id: context.step_id,
+                                action_name: gate_action_name.clone(),
+                                call_id: gate_call_id.clone(),
+                                error: e.to_string(),
+                                duration_ms: retry_duration_ms,
+                                params_summary,
+                            });
+                            ExtFunctionResult::Error(MontyException::new(
+                                ExcType::RuntimeError,
+                                Some(e.to_string()),
+                            ))
+                        }
+                    }
+                }
+                crate::gate::GateResolution::Denied { reason } => {
+                    let reason = reason.unwrap_or_else(|| "denied by user".into());
+                    events.push(EventKind::ActionFailed {
+                        step_id: context.step_id,
+                        action_name: gate_action_name.clone(),
+                        call_id: gate_call_id.clone(),
+                        error: format!("denied: {reason}"),
+                        duration_ms: 0,
+                        params_summary,
+                    });
+                    ExtFunctionResult::Error(MontyException::new(
+                        ExcType::RuntimeError,
+                        Some(format!("user denied tool '{gate_action_name}': {reason}")),
+                    ))
+                }
+                crate::gate::GateResolution::Cancelled => {
+                    events.push(EventKind::ActionFailed {
+                        step_id: context.step_id,
+                        action_name: gate_action_name.clone(),
+                        call_id: gate_call_id.clone(),
+                        error: "cancelled".into(),
+                        duration_ms: 0,
+                        params_summary,
+                    });
+                    ExtFunctionResult::Error(MontyException::new(
+                        ExcType::RuntimeError,
+                        Some(format!("user denied tool '{gate_action_name}': cancelled")),
+                    ))
+                }
+                crate::gate::GateResolution::CredentialProvided { .. }
+                | crate::gate::GateResolution::ExternalCallback { .. } => {
+                    ExtFunctionResult::Error(MontyException::new(
+                        ExcType::RuntimeError,
+                        Some(format!(
+                            "unsupported gate resolution for tool '{gate_action_name}'"
+                        )),
+                    ))
+                }
+            }
         }
         Ok((Err(e), execution_duration_ms)) => {
             events.push(EventKind::ActionFailed {
@@ -2076,6 +2466,7 @@ mod tests {
             thread_goal: Some(thread.goal.clone()),
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            gate_controller: None,
         }
     }
 
@@ -3564,6 +3955,315 @@ result = await tool_info(name="mission-create", detail="schema")
         assert_eq!(
             result.action_results[0].output["schema"]["required"],
             serde_json::json!(["name", "goal", "cadence"])
+        );
+    }
+
+    // ── Inline gate-await tests ─────────────────────────────────
+
+    /// Effects stub: returns `Err(EngineError::GatePaused)` on first
+    /// call for the given action, then a success result. Mimics a tool
+    /// that gates mid-execution (e.g. policy escalation, leak detection).
+    struct GatingThenOkEffects {
+        action: String,
+        success_output: serde_json::Value,
+        call_count: Mutex<u32>,
+        actions: Vec<ActionDef>,
+    }
+
+    impl GatingThenOkEffects {
+        fn new(action: &str, output: serde_json::Value) -> Self {
+            Self {
+                action: action.into(),
+                success_output: output,
+                call_count: Mutex::new(0),
+                actions: vec![test_action(action)],
+            }
+        }
+        fn calls(&self) -> u32 {
+            *self.call_count.lock().unwrap()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EffectExecutor for GatingThenOkEffects {
+        async fn execute_action(
+            &self,
+            name: &str,
+            params: serde_json::Value,
+            _lease: &CapabilityLease,
+            _ctx: &ThreadExecutionContext,
+        ) -> Result<ActionResult, EngineError> {
+            let mut count = self.call_count.lock().unwrap();
+            *count += 1;
+            if *count == 1 && name == self.action {
+                return Err(EngineError::GatePaused {
+                    gate_name: "approval".into(),
+                    action_name: name.into(),
+                    call_id: "test_call".into(),
+                    parameters: Box::new(params),
+                    resume_kind: Box::new(crate::gate::ResumeKind::Approval { allow_always: true }),
+                    resume_output: None,
+                    paused_lease: None,
+                });
+            }
+            Ok(ActionResult {
+                call_id: String::new(),
+                action_name: name.into(),
+                output: self.success_output.clone(),
+                is_error: false,
+                duration: Duration::from_millis(1),
+            })
+        }
+
+        async fn available_actions(
+            &self,
+            _: &[CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<Vec<ActionDef>, EngineError> {
+            Ok(self.actions.clone())
+        }
+
+        async fn available_capabilities(
+            &self,
+            _: &[CapabilityLease],
+            _: &ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::CapabilitySummary>, EngineError> {
+            Ok(vec![])
+        }
+    }
+
+    /// Test gate controller. Returns the canned resolution and records
+    /// every pause request for assertion.
+    struct StubGateController {
+        resolution: Mutex<Option<crate::gate::GateResolution>>,
+        pauses: Mutex<Vec<crate::gate::GatePauseRequest>>,
+    }
+
+    impl StubGateController {
+        fn approving() -> Arc<Self> {
+            Arc::new(Self {
+                resolution: Mutex::new(Some(crate::gate::GateResolution::Approved {
+                    always: false,
+                })),
+                pauses: Mutex::new(Vec::new()),
+            })
+        }
+        fn denying() -> Arc<Self> {
+            Arc::new(Self {
+                resolution: Mutex::new(Some(crate::gate::GateResolution::Denied {
+                    reason: Some("not now".into()),
+                })),
+                pauses: Mutex::new(Vec::new()),
+            })
+        }
+        fn pause_count(&self) -> usize {
+            self.pauses.lock().unwrap().len()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::gate::GateController for StubGateController {
+        async fn pause(
+            &self,
+            request: crate::gate::GatePauseRequest,
+        ) -> crate::gate::GateResolution {
+            self.pauses.lock().unwrap().push(request);
+            self.resolution
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or(crate::gate::GateResolution::Cancelled)
+        }
+    }
+
+    /// Regression for the user-reported bug: a CodeAct script that
+    /// calls a tool which gates mid-execution should NOT abort with
+    /// `RuntimeError: execution paused by gate 'approval'`. With a
+    /// controller wired and an `Approved` resolution, the script runs
+    /// to completion and the tool's success result is delivered to
+    /// Python.
+    #[tokio::test]
+    async fn codeact_gate_inline_await_approved_delivers_result() {
+        let thread = make_test_thread();
+        let effects = Arc::new(GatingThenOkEffects::new(
+            "github_search",
+            serde_json::json!({"items": [{"number": 1, "title": "ok"}]}),
+        ));
+        let effects_dyn: Arc<dyn EffectExecutor> = effects.clone();
+        let controller = StubGateController::approving();
+        let leases = LeaseManager::new();
+        let policy = PolicyEngine::new();
+        let mut ctx = make_exec_context(&thread);
+        ctx.gate_controller = Some(controller.clone() as Arc<dyn crate::gate::GateController>);
+
+        leases
+            .grant(thread.id, "tools", GrantedActions::All, None, None)
+            .await
+            .unwrap();
+
+        let result = execute_code(
+            r#"
+result = await github_search(query="repo:foo")
+print(result)
+"#,
+            &thread,
+            &(Arc::new(StubLlm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &effects_dyn,
+            &leases,
+            &policy,
+            &ctx,
+            &[],
+            &serde_json::json!({}),
+        )
+        .await
+        .expect("execute_code did not return Err");
+
+        assert!(
+            result.failure.is_none(),
+            "expected clean completion, got failure: {:?}, stdout={}",
+            result.failure,
+            result.stdout
+        );
+        assert_eq!(controller.pause_count(), 1, "controller should pause once");
+        assert!(
+            !result.stdout.contains("execution paused by gate"),
+            "stdout must not contain the pre-fix error string; got: {}",
+            result.stdout
+        );
+        assert_eq!(
+            effects.calls(),
+            2,
+            "expected one gating call + one retry after approval"
+        );
+        assert_eq!(result.action_results.len(), 1);
+        assert!(!result.action_results[0].is_error);
+        assert_eq!(
+            result.action_results[0].output["items"][0]["number"],
+            serde_json::json!(1)
+        );
+    }
+
+    /// Denial surfaces inside the script as a typed `RuntimeError`
+    /// with a clear message — catchable by user code.
+    #[tokio::test]
+    async fn codeact_gate_inline_await_denied_raises_in_script() {
+        let thread = make_test_thread();
+        let effects = Arc::new(GatingThenOkEffects::new(
+            "github_create_issue",
+            serde_json::json!({"unused": true}),
+        ));
+        let effects_dyn: Arc<dyn EffectExecutor> = effects.clone();
+        let controller = StubGateController::denying();
+        let leases = LeaseManager::new();
+        let policy = PolicyEngine::new();
+        let mut ctx = make_exec_context(&thread);
+        ctx.gate_controller = Some(controller.clone() as Arc<dyn crate::gate::GateController>);
+
+        leases
+            .grant(thread.id, "tools", GrantedActions::All, None, None)
+            .await
+            .unwrap();
+
+        // Uncaught: the script raises; the failure is observable on
+        // CodeExecutionResult and the message identifies the tool +
+        // reason so the caller / LLM can decide what to do next.
+        let result = execute_code(
+            r#"
+result = await github_create_issue(title="x")
+print(result)
+"#,
+            &thread,
+            &(Arc::new(StubLlm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &effects_dyn,
+            &leases,
+            &policy,
+            &ctx,
+            &[],
+            &serde_json::json!({}),
+        )
+        .await
+        .expect("execute_code did not return Err");
+
+        assert_eq!(controller.pause_count(), 1);
+        // The retry never happens on denial — only the initial call.
+        assert_eq!(effects.calls(), 1, "denial must not retry the action");
+        assert_eq!(
+            result.failure,
+            Some(CodeExecutionFailure::RuntimeError),
+            "denial must surface as RuntimeError on CodeExecutionResult"
+        );
+        // The stdout message must identify the tool and the reason so
+        // the caller can debug / surface to the LLM.
+        assert!(
+            result
+                .stdout
+                .contains("user denied tool 'github_create_issue'"),
+            "denial message must identify the tool; got stdout: {}",
+            result.stdout
+        );
+        assert!(
+            result.stdout.contains("not now"),
+            "denial message must include the user-supplied reason; got stdout: {}",
+            result.stdout
+        );
+        // The pre-fix message must NOT appear — that was the user's
+        // reported bug ("Error: RuntimeError: execution paused by
+        // gate 'approval'").
+        assert!(
+            !result.stdout.contains("execution paused by gate"),
+            "denial must not surface as the pre-fix bug message; got: {}",
+            result.stdout
+        );
+    }
+
+    /// Without a controller wired (legacy path / older tests), an
+    /// `Approval` gate raised mid-execution still surfaces as a
+    /// RuntimeError with the legacy message. Locks in the fallback
+    /// behavior so removing the engine plumbing accidentally would be
+    /// caught.
+    #[tokio::test]
+    async fn codeact_gate_without_controller_falls_back_to_runtime_error() {
+        let thread = make_test_thread();
+        let effects = Arc::new(GatingThenOkEffects::new(
+            "github_create_issue",
+            serde_json::json!({"unused": true}),
+        ));
+        let effects_dyn: Arc<dyn EffectExecutor> = effects.clone();
+        let leases = LeaseManager::new();
+        let policy = PolicyEngine::new();
+        // Note: ctx.gate_controller stays `None`.
+        let ctx = make_exec_context(&thread);
+
+        leases
+            .grant(thread.id, "tools", GrantedActions::All, None, None)
+            .await
+            .unwrap();
+
+        let result = execute_code(
+            r#"
+try:
+    result = await github_create_issue(title="x")
+    outcome = "approved"
+except RuntimeError as e:
+    outcome = str(e)
+print(outcome)
+"#,
+            &thread,
+            &(Arc::new(StubLlm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &effects_dyn,
+            &leases,
+            &policy,
+            &ctx,
+            &[],
+            &serde_json::json!({}),
+        )
+        .await
+        .expect("execute_code did not return Err");
+
+        assert!(
+            result.stdout.contains("execution paused by gate"),
+            "fallback path must still emit legacy message; got: {}",
+            result.stdout
         );
     }
 

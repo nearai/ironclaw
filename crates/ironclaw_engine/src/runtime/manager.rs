@@ -44,6 +44,11 @@ pub struct ThreadManager {
     completed: Arc<RwLock<HashMap<ThreadId, ThreadOutcome>>>,
     /// Broadcast channel for thread events (for live status updates).
     event_tx: tokio::sync::broadcast::Sender<crate::types::event::ThreadEvent>,
+    /// Optional host-supplied callback that turns `Approval` gates into
+    /// inline awaits instead of unwinding the call stack. When set, the
+    /// engine attaches it to every `ThreadExecutionContext` so both
+    /// Tier 0 and Tier 1 executors can pause a live VM in place.
+    gate_controller: tokio::sync::RwLock<Option<Arc<dyn crate::gate::GateController>>>,
 }
 
 impl ThreadManager {
@@ -68,7 +73,22 @@ impl ThreadManager {
             running: Arc::new(RwLock::new(HashMap::new())),
             completed: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
+            gate_controller: tokio::sync::RwLock::new(None),
         }
+    }
+
+    /// Install (or replace) the host-supplied gate controller.
+    ///
+    /// Called once during bridge bootstrap. Subsequent thread spawns
+    /// pick up the controller and propagate it into every
+    /// `ThreadExecutionContext` they construct.
+    pub async fn set_gate_controller(&self, controller: Arc<dyn crate::gate::GateController>) {
+        *self.gate_controller.write().await = Some(controller);
+    }
+
+    /// Snapshot the current gate controller, if any.
+    pub async fn gate_controller(&self) -> Option<Arc<dyn crate::gate::GateController>> {
+        self.gate_controller.read().await.clone()
     }
 
     /// Subscribe to thread events for live status updates.
@@ -335,11 +355,14 @@ impl ThreadManager {
         let store_for_retrieval = Arc::clone(&self.store);
         let retrieval = crate::memory::RetrievalEngine::new(store_for_retrieval);
 
-        let exec_loop = ExecutionLoop::new(thread, llm, effects, leases, policy, rx, user_id)
+        let mut exec_loop = ExecutionLoop::new(thread, llm, effects, leases, policy, rx, user_id)
             .with_capabilities(Arc::clone(&self.capabilities))
             .with_event_tx(self.event_tx.clone())
             .with_retrieval(retrieval)
             .with_store(Arc::clone(&self.store));
+        if let Some(controller) = self.gate_controller.read().await.clone() {
+            exec_loop = exec_loop.with_gate_controller(controller);
+        }
 
         // Spawn background task
         let store_for_task = Arc::clone(&self.store);

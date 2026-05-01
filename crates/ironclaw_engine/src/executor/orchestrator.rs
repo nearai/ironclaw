@@ -445,6 +445,7 @@ pub async fn execute_orchestrator(
     retrieval: Option<&RetrievalEngine>,
     store: Option<&Arc<dyn Store>>,
     platform_info: Option<&crate::executor::prompt::PlatformInfo>,
+    gate_controller: Option<&Arc<dyn crate::gate::GateController>>,
     persisted_state: &serde_json::Value,
 ) -> Result<OrchestratorResult, EngineError> {
     let mut total_tokens = TokenUsage::default();
@@ -560,7 +561,15 @@ pub async fn execute_orchestrator(
                     // __execute_code_step__(code, state)
                     "__execute_code_step__" => {
                         handle_execute_code_step(
-                            args, kwargs, thread, llm, effects, leases, policy, event_tx,
+                            args,
+                            kwargs,
+                            thread,
+                            llm,
+                            effects,
+                            leases,
+                            policy,
+                            event_tx,
+                            gate_controller,
                         )
                         .await
                     }
@@ -568,7 +577,14 @@ pub async fn execute_orchestrator(
                     // __execute_action__(name, params, call_id=...)
                     "__execute_action__" => {
                         handle_execute_action(
-                            args, kwargs, thread, effects, leases, policy, event_tx,
+                            args,
+                            kwargs,
+                            thread,
+                            effects,
+                            leases,
+                            policy,
+                            event_tx,
+                            gate_controller,
                         )
                         .await
                     }
@@ -576,7 +592,13 @@ pub async fn execute_orchestrator(
                     // __execute_actions_parallel__(calls)
                     "__execute_actions_parallel__" => {
                         handle_execute_actions_parallel(
-                            args, thread, effects, leases, policy, event_tx,
+                            args,
+                            thread,
+                            effects,
+                            leases,
+                            policy,
+                            event_tx,
+                            gate_controller,
                         )
                         .await
                     }
@@ -876,6 +898,7 @@ async fn handle_execute_code_step(
     leases: &Arc<LeaseManager>,
     policy: &Arc<PolicyEngine>,
     event_tx: Option<&tokio::sync::broadcast::Sender<ThreadEvent>>,
+    gate_controller: Option<&Arc<dyn crate::gate::GateController>>,
 ) -> ExtFunctionResult {
     let code = match args.first() {
         Some(obj) => monty_to_string(obj),
@@ -892,7 +915,8 @@ async fn handle_execute_code_step(
         .map(monty_to_json)
         .unwrap_or(serde_json::json!({}));
 
-    let exec_ctx = thread_execution_context(thread, StepId::new(), None);
+    let mut exec_ctx = thread_execution_context(thread, StepId::new(), None);
+    exec_ctx.gate_controller = gate_controller.cloned();
 
     // Run user code in a nested Monty VM (same pattern as rlm_query)
     let code_start = std::time::Instant::now();
@@ -1065,6 +1089,7 @@ async fn handle_execute_code_step(
 ///
 /// Python owns the working transcript and decides how tool outputs are
 /// represented in internal message history.
+#[allow(clippy::too_many_arguments)]
 async fn handle_execute_action(
     args: &[MontyObject],
     kwargs: &[(MontyObject, MontyObject)],
@@ -1073,6 +1098,7 @@ async fn handle_execute_action(
     leases: &Arc<LeaseManager>,
     policy: &Arc<PolicyEngine>,
     event_tx: Option<&tokio::sync::broadcast::Sender<ThreadEvent>>,
+    gate_controller: Option<&Arc<dyn crate::gate::GateController>>,
 ) -> ExtFunctionResult {
     let name = match extract_string_arg(args, kwargs, "name", 0) {
         Some(n) => n,
@@ -1092,6 +1118,7 @@ async fn handle_execute_action(
     let call_id = extract_string_kwarg(kwargs, "call_id").unwrap_or_default();
 
     let mut exec_ctx = thread_execution_context(thread, StepId::new(), Some(call_id.clone()));
+    exec_ctx.gate_controller = gate_controller.cloned();
     let active_leases = leases.active_for_thread(thread.id).await;
     let inventory = match effects
         .available_action_inventory(&active_leases, &exec_ctx)
@@ -1420,6 +1447,7 @@ async fn handle_execute_action(
 /// same shape as `__execute_action__` output, plus an optional gate pause payload.
 ///
 /// Events are emitted in original call order after all parallel executions complete.
+#[allow(clippy::too_many_arguments)]
 async fn handle_execute_actions_parallel(
     args: &[MontyObject],
     thread: &mut Thread,
@@ -1427,6 +1455,7 @@ async fn handle_execute_actions_parallel(
     leases: &Arc<LeaseManager>,
     policy: &Arc<PolicyEngine>,
     event_tx: Option<&tokio::sync::broadcast::Sender<ThreadEvent>>,
+    gate_controller: Option<&Arc<dyn crate::gate::GateController>>,
 ) -> ExtFunctionResult {
     // Parse the calls list from the first argument (list of dicts)
     let calls_json = args
@@ -1515,6 +1544,7 @@ async fn handle_execute_actions_parallel(
     for pc in &parsed {
         // Find the action definition from the callable inventory.
         let mut exec_ctx = thread_execution_context(thread, step_id, Some(pc.call_id.clone()));
+        exec_ctx.gate_controller = gate_controller.cloned();
         if let Some(ref inventory) = inventory {
             exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
             exec_ctx.available_action_inventory_snapshot = Some(Arc::clone(inventory));
@@ -1741,6 +1771,7 @@ async fn handle_execute_actions_parallel(
             .map(|action| action.name.clone())
             .unwrap_or_else(|| pc.name.clone());
         let mut exec_ctx = thread_execution_context(thread, step_id, Some(pc.call_id.clone()));
+        exec_ctx.gate_controller = gate_controller.cloned();
         if let Some(ref inventory) = inventory {
             exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
             exec_ctx.available_action_inventory_snapshot = Some(Arc::clone(inventory));
@@ -1779,6 +1810,7 @@ async fn handle_execute_actions_parallel(
             let effects = effects.clone();
             let lease = lease.clone();
             let mut exec_ctx = thread_execution_context(thread, step_id, Some(pc_call_id.clone()));
+            exec_ctx.gate_controller = gate_controller.cloned();
             if let Some(ref inventory) = inventory {
                 exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
                 exec_ctx.available_action_inventory_snapshot = Some(Arc::clone(inventory));
@@ -4337,6 +4369,7 @@ mod tests {
             &leases,
             &policy,
             None,
+            None,
         )
         .await;
 
@@ -5167,6 +5200,7 @@ FINAL(batch_error_count)
             &leases,
             &policy,
             Some(&tx),
+            None,
         )
         .await;
 
