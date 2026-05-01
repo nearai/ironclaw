@@ -16,6 +16,7 @@
 //! - Checking system health (`status`)
 
 pub mod acp;
+pub mod backup;
 mod channels;
 mod completion;
 mod config;
@@ -38,6 +39,7 @@ pub mod status;
 mod tool;
 
 pub use acp::{AcpCommand, run_acp_command};
+pub use backup::{BackupArgs, run_backup_command};
 pub use channels::{ChannelsCommand, run_channels_command};
 pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
@@ -319,6 +321,19 @@ pub enum Command {
         long_about = "Migrate data from other AI assistants like OpenClaw.\nExample: ironclaw import openclaw"
     )]
     Import(ImportCommand),
+
+    /// Snapshot IronClaw state to a portable zip archive
+    #[command(
+        about = "Back up IronClaw state to a portable zip archive",
+        long_about = "Bundle the IronClaw database, config, and metadata into a single zip file.\n\n\
+         The first release supports `--quick` only: db + config.toml + manifest. \
+         Skill bundles, installed extensions, and secrets are reserved for `--full`.\n\n\
+         Examples:\n  \
+           ironclaw backup --quick\n  \
+           ironclaw backup --quick --output ~/migrations/2026-05-01.zip\n  \
+           ironclaw backup --quick --label pre-crab-shack"
+    )]
+    Backup(BackupArgs),
 
     /// Authenticate with a provider (re-login)
     #[command(
