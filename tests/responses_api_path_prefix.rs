@@ -297,6 +297,101 @@ async fn instructions_field_is_accepted() {
     );
 }
 
+/// External tools require engine v2: when the global flag is off the
+/// handler must reject the request with a clear 4xx instead of silently
+/// degrading. The test gateway boots without `ENGINE_V2=true`, so a
+/// well-formed `tools[]` payload exercises this branch.
+#[tokio::test]
+async fn external_tools_rejected_when_engine_v2_disabled() {
+    // Belt-and-braces: explicitly clear the env var so this test passes
+    // even if some earlier test left it set in the same process.
+    // SAFETY: `set_var` is unsafe because it mutates process global state
+    // shared across threads. This test is a #[tokio::test] and the env
+    // var is only consulted synchronously by `is_engine_v2_enabled`, so
+    // racing with other tests' reads is acceptable here.
+    unsafe {
+        std::env::remove_var("ENGINE_V2");
+    }
+
+    let (addr, _state, _guard) = start_test_server().await;
+    let url = format!("http://{}/api/v1/responses", addr);
+
+    let resp = client()
+        .post(&url)
+        .bearer_auth(AUTH_TOKEN)
+        .json(&serde_json::json!({
+            "model": "default",
+            "input": "hello",
+            "tools": [
+                {"type": "function", "name": "lookup", "parameters": {"type": "object"}}
+            ]
+        }))
+        .send()
+        .await
+        .expect("POST /api/v1/responses with tools and ENGINE_V2 off");
+
+    assert_eq!(
+        resp.status(),
+        400,
+        "expected 400 when ENGINE_V2 is off, got {}",
+        resp.status()
+    );
+    let body = resp.text().await.unwrap_or_default();
+    assert!(
+        body.contains("ENGINE_V2"),
+        "rejection should mention ENGINE_V2, got: {body}"
+    );
+}
+
+/// `function_call_output` items are a resume signal: they must be
+/// matched against a pending external-tool gate for the resolved
+/// thread. Without one (e.g. because the caller fabricates a
+/// `previous_response_id` or the gate already expired), the handler
+/// must reject with 400 instead of silently sending the resume into a
+/// fresh thread.
+#[tokio::test]
+async fn resume_without_pending_gate_returns_400() {
+    let (addr, _state, _guard) = start_test_server().await;
+    let url = format!("http://{}/api/v1/responses", addr);
+
+    // Synthesize a wire-valid previous_response_id (resp_<32hex><32hex>)
+    // that names a thread the gateway has never seen. The handler
+    // accepts the format, looks for a pending gate, finds none, and
+    // must respond 400 — not silently drop the function_call_output
+    // and start a fresh turn against the thread.
+    let fake_prev = format!("resp_{}{}", "0".repeat(32), "1".repeat(32));
+
+    let resp = client()
+        .post(&url)
+        .bearer_auth(AUTH_TOKEN)
+        .json(&serde_json::json!({
+            "model": "default",
+            "previous_response_id": fake_prev,
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_made_up",
+                    "output": "irrelevant"
+                }
+            ]
+        }))
+        .send()
+        .await
+        .expect("POST /api/v1/responses resume w/o pending gate");
+
+    assert_eq!(
+        resp.status(),
+        400,
+        "expected 400 for resume without pending gate, got {}",
+        resp.status()
+    );
+    let body = resp.text().await.unwrap_or_default();
+    assert!(
+        body.contains("pending"),
+        "rejection should mention the missing pending gate, got: {body}"
+    );
+}
+
 /// Both GET item paths (`/api/v1/responses/{id}` and `/v1/responses/{id}`)
 /// must also enforce bearer-token auth. A missing token should return 401,
 /// not 404 — the auth middleware has to apply to legacy aliases as well.
