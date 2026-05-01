@@ -3761,7 +3761,7 @@ fn google_drive_scope_from_env() -> Result<Option<GoogleDriveScopeChoice>, Setup
 
 fn parse_google_drive_scope_choice(raw: &str) -> Option<GoogleDriveScopeChoice> {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "" | "r" | "read" | "readonly" | "read-only" | "read_only" => {
+        "" | "r" | "read" | "readonly" | "read-only" | "read_only" | "read only" => {
             Some(GoogleDriveScopeChoice::Readonly)
         }
         "f" | "full" => Some(GoogleDriveScopeChoice::Full),
@@ -4187,6 +4187,14 @@ mod tests {
                 .as_ref()
                 .map(|source| source.capabilities.as_str()),
             Some("google-drive-readonly-tool.capabilities.json")
+        );
+    }
+
+    #[test]
+    fn test_google_drive_scope_parser_accepts_read_only_with_space() {
+        assert_eq!(
+            parse_google_drive_scope_choice(" read only "),
+            Some(GoogleDriveScopeChoice::Readonly)
         );
     }
 
