@@ -598,21 +598,51 @@ impl HostRuntimeError {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NetworkPolicySource {
+    StagedObligation,
+    RequestPolicyFallback,
+}
+
 #[derive(Debug, Clone)]
 pub struct HostHttpEgressService<N, S> {
     network: N,
     secrets: S,
     secret_injections: Option<Arc<RuntimeSecretInjectionStore>>,
     network_policy_store: Option<Arc<NetworkObligationPolicyStore>>,
+    network_policy_source: NetworkPolicySource,
 }
 
 impl<N, S> HostHttpEgressService<N, S> {
+    /// Construct host HTTP egress in production fail-closed mode.
+    ///
+    /// Callers must attach a [`NetworkObligationPolicyStore`] with
+    /// [`Self::with_network_policy_store`] before executing network requests.
+    /// Without that store, egress fails before transport rather than trusting a
+    /// caller-supplied policy.
     pub fn new(network: N, secrets: S) -> Self {
         Self {
             network,
             secrets,
             secret_injections: None,
             network_policy_store: None,
+            network_policy_source: NetworkPolicySource::StagedObligation,
+        }
+    }
+
+    /// Construct host HTTP egress that uses the policy embedded in each request.
+    ///
+    /// This is intentionally named as a test/legacy seam: production Reborn
+    /// runtime egress must consume staged `ApplyNetworkPolicy` handoffs from
+    /// [`NetworkObligationPolicyStore`] instead of trusting runtime/caller
+    /// request policy fields.
+    pub fn new_with_request_policy_for_tests(network: N, secrets: S) -> Self {
+        Self {
+            network,
+            secrets,
+            secret_injections: None,
+            network_policy_store: None,
+            network_policy_source: NetworkPolicySource::RequestPolicyFallback,
         }
     }
 
@@ -623,6 +653,7 @@ impl<N, S> HostHttpEgressService<N, S> {
 
     pub fn with_network_policy_store(mut self, store: Arc<NetworkObligationPolicyStore>) -> Self {
         self.network_policy_store = Some(store);
+        self.network_policy_source = NetworkPolicySource::StagedObligation;
         self
     }
 
@@ -648,7 +679,14 @@ impl<N, S> HostHttpEgressService<N, S> {
                 });
         }
 
-        Ok(request.network_policy.clone())
+        match self.network_policy_source {
+            NetworkPolicySource::StagedObligation => Err(RuntimeHttpEgressError::Network {
+                reason: "network_policy_missing".to_string(),
+                request_bytes: 0,
+                response_bytes: 0,
+            }),
+            NetworkPolicySource::RequestPolicyFallback => Ok(request.network_policy.clone()),
+        }
     }
 }
 
