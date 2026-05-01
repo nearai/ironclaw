@@ -2575,10 +2575,19 @@ impl EffectExecutor for InlineGateGithubEffects {
                 resume_output: None,
             });
         }
+        // Realistic mock payload — at the time of writing, nearai/ironclaw
+        // has multiple open P1 issues (e.g. #2818, #2997). Returning a
+        // non-empty fixture keeps the script's `len(items)` assertion
+        // grounded in reality rather than the misleading "Found 0".
         Ok(ActionResult {
             call_id: String::new(),
             action_name: action_name.into(),
-            output: serde_json::json!({"items": []}),
+            output: serde_json::json!({
+                "items": [
+                    {"number": 2818, "title": "[P1] mock fixture title", "html_url": "https://github.com/nearai/ironclaw/issues/2818"},
+                    {"number": 2997, "title": "[P1] another mock fixture", "html_url": "https://github.com/nearai/ironclaw/issues/2997"}
+                ]
+            }),
             is_error: false,
             duration: Duration::from_millis(1),
         })
@@ -2814,9 +2823,13 @@ FINAL(f"Found {len(items)} P1 bugs in nearai/ironclaw.")
         !final_response.contains("execution paused by gate"),
         "final response must not surface the pre-fix bug string; got: {final_response}"
     );
+    // The mock fixture returns 2 items, so the script's `len(items)`
+    // produces "Found 2 P1 bugs ...". (At least one of those issue
+    // numbers — #2818, #2997 — is actually open in nearai/ironclaw at
+    // the time of writing.)
     assert!(
-        final_response.contains("P1 bugs in nearai/ironclaw"),
-        "FINAL() text from the script must reach the user; got: {final_response}"
+        final_response.contains("Found 2 P1 bugs in nearai/ironclaw"),
+        "FINAL() must reflect the post-approval tool result; got: {final_response}"
     );
 }
 
