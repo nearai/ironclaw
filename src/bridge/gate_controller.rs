@@ -404,8 +404,13 @@ impl GateController for BridgeGateController {
                 Ok(resolution) => resolution,
                 Err(_) => {
                     // Sender dropped — process shutting down or registry
-                    // cleared. Treat as cancellation.
+                    // cleared. Discard the pending row so the UI doesn't
+                    // keep showing a stranded prompt and a future
+                    // (user, thread) gate isn't blocked by the
+                    // duplicate-insert guard. Same cleanup as the
+                    // expiry branch below.
                     self.resolutions.forget(request_id).await;
+                    let _ = self.pending_gates.discard(&pending_key).await;
                     GateResolution::Cancelled
                 }
             },

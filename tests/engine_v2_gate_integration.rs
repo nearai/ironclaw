@@ -1163,30 +1163,6 @@ async fn tool_info_does_not_gate_callable_tool_into_next_llm_callable_set() {
 }
 
 #[tokio::test]
-async fn approval_resolution_executes_pending_call_directly_via_resolved_pending_action() {
-    // Pre-PR this test asserted the engine's `ThreadOutcome::GatePaused`
-    // → `mgr.resume_thread(...)` legacy unwind flow for `Approval` gates.
-    // After PR #3157, `Approval` gates are caught inline by the engine's
-    // `GateController` and the resolved-pending-action API path is no
-    // longer the live-VM flow for Approval — it survives only for
-    // post-restart resolution and Auth/External resume kinds.
-    //
-    // The engine-level inline-approval contract is locked in by
-    // `codeact_gate_inline_await_resumes_user_reproducer` (this file)
-    // and the unit tests in `crates/ironclaw_engine/src/executor/scripting.rs`
-    // (\`codeact_gate_inline_await_approved_delivers_result\` asserts
-    // \`call_approval_granted\` propagation). The bridge-level
-    // `execute_resolved_pending_action` API is separately covered by
-    // \`auth_resolution_retries_same_pending_action_without_second_pause\`
-    // and \`install_auth_resume_followed_by_aliased_tool_call_completes_without_hanging\`
-    // for the Auth resume path, which is the API's remaining responsibility.
-    //
-    // This test is intentionally a no-op now — left in place rather
-    // than deleted so `git log` retains the rationale; remove in a
-    // follow-up sweep.
-}
-
-#[tokio::test]
 async fn auth_resolution_retries_same_pending_action_without_second_pause() {
     let project_id = ProjectId::new();
     let effects = GateMockEffects::new(vec![], vec!["http".into()]);
@@ -2273,29 +2249,6 @@ async fn auto_approve_mode_still_pauses_always_tools() {
 
     // Verify the mode is correctly propagated
     assert_eq!(ctx.execution_mode, ExecutionMode::InteractiveAutoApprove);
-}
-
-/// Execution obligation fires on the resume path: a thread hits a gate,
-/// is resumed with a user message that signals execution intent ("run the
-/// echo tool"), and the orchestrator's per-message intent detection enables
-/// the obligation nudge even though the thread config did not have
-/// `require_action_attempt` set at spawn time.
-#[tokio::test]
-async fn gate_resume_with_execution_obligation() {
-    // Pre-PR this test exercised the "Approval gate pauses thread →
-    // user resumes with a fresh execution-intent message → obligation
-    // nudge fires" path. After PR #3157 the Approval pause-then-resume
-    // path is gone (caught inline by `GateController`); the
-    // `resume_thread` call with a new user message is no longer the
-    // resume mechanism for Approval.
-    //
-    // The obligation logic itself (per-message
-    // `signals_execution_intent` detection driving the nudge in the
-    // orchestrator) is not affected by this PR and is exercised by
-    // direct unit tests in `crates/ironclaw_engine/src/executor`.
-    //
-    // Left as a no-op stub for git-log traceability; remove in a
-    // follow-up sweep alongside the deprecated auth-resume harnesses.
 }
 
 // ── Inline gate-await regression (CodeAct + Tier 0 mid-execution) ─

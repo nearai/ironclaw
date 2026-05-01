@@ -928,6 +928,22 @@ pub async fn execute_code_with_skills(
                         let denial_reason = denial_reason_for_resolution(&resolution);
 
                         if let Some(reason) = denial_reason {
+                            // Record the denial in the thread event log
+                            // before resuming Monty so observers / trace
+                            // analysis see consistent ActionFailed output
+                            // across all denial paths (this site +
+                            // `drive_inline_gate` + `structured.rs`).
+                            events.push(EventKind::ActionFailed {
+                                step_id: execution_context.step_id,
+                                action_name: gate_action_name.clone(),
+                                call_id: gate_call_id.clone(),
+                                error: format!("denied: {reason}"),
+                                duration_ms: 0,
+                                params_summary: crate::types::event::summarize_params(
+                                    &gate_action_name,
+                                    &gate_parameters,
+                                ),
+                            });
                             // Resume Monty with a typed exception. RuntimeError
                             // is what we emit; the message is explicit so users
                             // (and the LLM) can distinguish denial from other
