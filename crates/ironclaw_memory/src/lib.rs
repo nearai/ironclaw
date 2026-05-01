@@ -1195,7 +1195,7 @@ async fn enforce_prompt_write_safety(
                 },
             )
             .await;
-            tracing::warn!(
+            tracing::debug!(
                 target: "ironclaw::memory::prompt_write_safety",
                 operation = %check.operation,
                 source = %check.source,
@@ -1288,7 +1288,7 @@ async fn emit_prompt_write_safety_event(
         allowance: parts.allowance.cloned(),
     };
     if let Err(error) = event_sink.record_prompt_write_safety_event(event).await {
-        tracing::warn!(
+        tracing::debug!(
             target: "ironclaw::memory::prompt_write_safety",
             error = %error,
             operation = %check.operation,
