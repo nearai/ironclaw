@@ -694,6 +694,70 @@ pub trait DurableAuditLog: Send + Sync {
     ) -> Result<EventReplay<AuditEnvelope>, EventError>;
 }
 
+/// [`EventSink`] adapter that appends each emitted runtime event to a durable log.
+#[derive(Clone)]
+pub struct DurableEventSink {
+    log: Arc<dyn DurableEventLog>,
+}
+
+impl DurableEventSink {
+    pub fn new(log: Arc<dyn DurableEventLog>) -> Self {
+        Self { log }
+    }
+
+    pub fn log(&self) -> Arc<dyn DurableEventLog> {
+        Arc::clone(&self.log)
+    }
+}
+
+impl std::fmt::Debug for DurableEventSink {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DurableEventSink")
+            .field("log", &"<durable_event_log>")
+            .finish()
+    }
+}
+
+#[async_trait]
+impl EventSink for DurableEventSink {
+    async fn emit(&self, event: RuntimeEvent) -> Result<(), EventError> {
+        self.log.append(event).await.map(|_| ())
+    }
+}
+
+/// [`AuditSink`] adapter that appends each emitted audit envelope to a durable log.
+#[derive(Clone)]
+pub struct DurableAuditSink {
+    log: Arc<dyn DurableAuditLog>,
+}
+
+impl DurableAuditSink {
+    pub fn new(log: Arc<dyn DurableAuditLog>) -> Self {
+        Self { log }
+    }
+
+    pub fn log(&self) -> Arc<dyn DurableAuditLog> {
+        Arc::clone(&self.log)
+    }
+}
+
+impl std::fmt::Debug for DurableAuditSink {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DurableAuditSink")
+            .field("log", &"<durable_audit_log>")
+            .finish()
+    }
+}
+
+#[async_trait]
+impl AuditSink for DurableAuditSink {
+    async fn emit_audit(&self, record: AuditEnvelope) -> Result<(), EventError> {
+        self.log.append(record).await.map(|_| ())
+    }
+}
+
 // -----------------------------------------------------------------------------
 // In-memory best-effort sinks
 // -----------------------------------------------------------------------------

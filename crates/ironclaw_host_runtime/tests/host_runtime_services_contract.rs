@@ -5,7 +5,11 @@ use chrono::Utc;
 use ironclaw_authorization::{
     GrantAuthorizer, InMemoryCapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer,
 };
-use ironclaw_events::{InMemoryAuditSink, InMemoryEventSink, RuntimeEventKind};
+use ironclaw_events::{
+    DurableAuditLog, DurableEventLog, EventCursor, EventError, EventReplay, EventStreamKey,
+    InMemoryAuditSink, InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink,
+    ReadScope, RuntimeEventKind,
+};
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry};
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
@@ -113,6 +117,102 @@ async fn host_runtime_services_builds_dispatcher_runtime_and_health_from_registe
 }
 
 #[tokio::test]
+async fn host_runtime_services_writes_runtime_events_to_durable_event_log_metadata_only() {
+    let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
+    let filesystem = Arc::new(LocalFilesystem::new());
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
+        Arc::new(GrantAuthorizer::new());
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    let script_runtime = Arc::new(ScriptRuntime::new(
+        ScriptRuntimeConfig::for_testing(),
+        EchoScriptBackend,
+    ));
+    let services = HostRuntimeServices::new(
+        registry,
+        filesystem,
+        governor,
+        authorizer,
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability],
+    )))
+    .with_durable_event_log(Arc::clone(&event_log))
+    .with_script_runtime(script_runtime);
+    let scope = sample_scope(InvocationId::new());
+    let payload = json!({
+        "message": "RAW_EVENT_INPUT_SENTINEL_3147 /tmp/private-event-path",
+        "secret": "SECRET_EVENT_SENTINEL_3147_sk_live_secret",
+        "output": "RUNTIME_EVENT_OUTPUT_SENTINEL_3147",
+    });
+
+    let outcome = services
+        .host_runtime()
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
+            script_capability_id(),
+            ResourceEstimate::default(),
+            payload.clone(),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.output, payload);
+        }
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+
+    let replay = event_log
+        .read_after_cursor(
+            &EventStreamKey::from_scope(&scope),
+            &ReadScope::any(),
+            None,
+            10,
+        )
+        .await
+        .unwrap();
+    let kinds = replay
+        .entries
+        .iter()
+        .map(|entry| entry.record.kind)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        vec![
+            RuntimeEventKind::DispatchRequested,
+            RuntimeEventKind::RuntimeSelected,
+            RuntimeEventKind::DispatchSucceeded,
+        ]
+    );
+    assert_eq!(
+        replay.entries[2].record.output_bytes,
+        Some(serde_json::to_vec(&payload).unwrap().len() as u64)
+    );
+
+    let serialized = serde_json::to_string(&replay).unwrap();
+    for forbidden in [
+        "RAW_EVENT_INPUT_SENTINEL_3147",
+        "/tmp/private-event-path",
+        "SECRET_EVENT_SENTINEL_3147",
+        "RUNTIME_EVENT_OUTPUT_SENTINEL_3147",
+    ] {
+        assert!(
+            !serialized.contains(forbidden),
+            "durable runtime event replay leaked {forbidden}: {serialized}"
+        );
+    }
+    assert!(serialized.contains("script.echo"));
+    assert!(serialized.contains("dispatch_requested"));
+    assert!(serialized.contains("dispatch_succeeded"));
+}
+
+#[tokio::test]
 async fn host_runtime_services_registered_runtime_health_tracks_script_mcp_and_wasm_adapters() {
     let script_runtime = Arc::new(ScriptRuntime::new(
         ScriptRuntimeConfig::for_testing(),
@@ -208,6 +308,142 @@ async fn host_runtime_services_installs_builtin_obligation_handler_with_audit_si
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].stage, AuditStage::Before);
     assert_eq!(records[0].action.target.as_deref(), Some("script.echo"));
+}
+
+#[tokio::test]
+async fn host_runtime_services_writes_obligation_audit_records_to_durable_log_metadata_only() {
+    let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
+    let filesystem = Arc::new(LocalFilesystem::new());
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let audit_log = Arc::new(InMemoryDurableAuditLog::new());
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
+        Arc::new(ObligatingAuthorizer::new(vec![
+            Obligation::AuditBefore,
+            Obligation::AuditAfter,
+        ]));
+    let script_runtime = Arc::new(ScriptRuntime::new(
+        ScriptRuntimeConfig::for_testing(),
+        EchoScriptBackend,
+    ));
+    let services = HostRuntimeServices::new(
+        registry,
+        filesystem,
+        governor,
+        authorizer,
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_durable_audit_log(Arc::clone(&audit_log))
+    .with_script_runtime(script_runtime);
+    let scope = sample_scope(InvocationId::new());
+    let payload = json!({
+        "message": "RAW_INPUT_SENTINEL_3147 /tmp/private-host-path",
+        "secret": "SECRET_SENTINEL_3147_sk_live_secret",
+        "output": "RUNTIME_OUTPUT_SENTINEL_3147",
+    });
+
+    let outcome = services
+        .host_runtime()
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
+            script_capability_id(),
+            ResourceEstimate::default(),
+            payload.clone(),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.output, payload);
+        }
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+    let replay = audit_log
+        .read_after_cursor(
+            &EventStreamKey::from_scope(&scope),
+            &ReadScope::any(),
+            None,
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(replay.entries.len(), 2);
+    assert_eq!(replay.entries[0].record.stage, AuditStage::Before);
+    assert_eq!(replay.entries[1].record.stage, AuditStage::After);
+    assert_eq!(
+        replay.entries[1]
+            .record
+            .result
+            .as_ref()
+            .and_then(|result| result.output_bytes),
+        Some(serde_json::to_vec(&payload).unwrap().len() as u64)
+    );
+
+    let serialized = serde_json::to_string(&replay).unwrap();
+    for forbidden in [
+        "RAW_INPUT_SENTINEL_3147",
+        "/tmp/private-host-path",
+        "SECRET_SENTINEL_3147",
+        "RUNTIME_OUTPUT_SENTINEL_3147",
+    ] {
+        assert!(
+            !serialized.contains(forbidden),
+            "durable obligation audit replay leaked {forbidden}: {serialized}"
+        );
+    }
+    assert!(serialized.contains("script.echo"));
+    assert!(serialized.contains("audit_before"));
+    assert!(serialized.contains("audit_after"));
+}
+
+#[tokio::test]
+async fn host_runtime_services_fails_closed_when_durable_obligation_audit_append_fails() {
+    let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
+    let filesystem = Arc::new(LocalFilesystem::new());
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
+        Arc::new(ObligatingAuthorizer::new(vec![Obligation::AuditBefore]));
+    let script_runtime = Arc::new(ScriptRuntime::new(
+        ScriptRuntimeConfig::for_testing(),
+        EchoScriptBackend,
+    ));
+    let services = HostRuntimeServices::new(
+        registry,
+        filesystem,
+        governor,
+        authorizer,
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_durable_audit_log(Arc::new(FailingDurableAuditLog))
+    .with_script_runtime(script_runtime);
+
+    let outcome = services
+        .host_runtime()
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            execution_context_with_dispatch_grant(script_capability_id()),
+            script_capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "must not dispatch after audit append failure"}),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Failed(failure) => {
+            assert_eq!(failure.kind, RuntimeFailureKind::Backend);
+            let message = failure.message.unwrap_or_default();
+            assert!(message.contains("obligation handling failed: Audit"));
+            assert!(
+                !message.contains("/tmp/audit-backend-secret"),
+                "audit backend details must remain sanitized: {message}"
+            );
+        }
+        other => panic!("expected failed outcome, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -610,6 +846,32 @@ impl ScriptBackend for EchoScriptBackend {
     fn execute(&self, request: ScriptBackendRequest) -> Result<ScriptBackendOutput, String> {
         let value = serde_json::from_str(&request.stdin_json).map_err(|error| error.to_string())?;
         Ok(ScriptBackendOutput::json(value))
+    }
+}
+
+struct FailingDurableAuditLog;
+
+#[async_trait]
+impl DurableAuditLog for FailingDurableAuditLog {
+    async fn append(
+        &self,
+        _record: AuditEnvelope,
+    ) -> Result<ironclaw_events::EventLogEntry<AuditEnvelope>, EventError> {
+        Err(EventError::DurableLog {
+            reason: "simulated audit backend failure at /tmp/audit-backend-secret".to_string(),
+        })
+    }
+
+    async fn read_after_cursor(
+        &self,
+        _stream: &EventStreamKey,
+        _filter: &ReadScope,
+        _after: Option<EventCursor>,
+        _limit: usize,
+    ) -> Result<EventReplay<AuditEnvelope>, EventError> {
+        Err(EventError::DurableLog {
+            reason: "simulated audit replay failure".to_string(),
+        })
     }
 }
 
