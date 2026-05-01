@@ -18,12 +18,20 @@ use crate::search::{MemorySearchRequest, MemorySearchResult};
 mod in_memory;
 #[cfg(feature = "libsql")]
 mod libsql;
+#[cfg(feature = "libsql")]
+mod native_libsql;
+#[cfg(feature = "postgres")]
+mod native_postgres;
 #[cfg(feature = "postgres")]
 mod postgres;
 
 pub use in_memory::InMemoryMemoryDocumentRepository;
 #[cfg(feature = "libsql")]
 pub use libsql::LibSqlMemoryDocumentRepository;
+#[cfg(feature = "libsql")]
+pub use native_libsql::RebornLibSqlMemoryDocumentRepository;
+#[cfg(feature = "postgres")]
+pub use native_postgres::RebornPostgresMemoryDocumentRepository;
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresMemoryDocumentRepository;
 
