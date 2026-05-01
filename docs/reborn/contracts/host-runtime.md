@@ -6,7 +6,9 @@
 
 `DefaultHostRuntime` may be configured with a `CapabilityObligationHandler` through `with_obligation_handler(...)`. It forwards the handler into `CapabilityHost` for capability invocations.
 
-`BuiltinObligationHandler` is the default host-owned implementation for current V1 obligations. It is deliberately fail-closed: obligations that require backing services fail unless the corresponding store/sink/governor is configured.
+Production/service-graph construction should prefer `BuiltinObligationServices` plus `DefaultHostRuntime::with_builtin_obligation_services(...)`. `BuiltinObligationServices` requires an audit sink, secret store, and resource governor at construction time, creates the network-policy and runtime-secret handoff stores, and exposes cloned store handles for runtime adapters/HTTP egress to consume the exact state staged by the handler.
+
+`BuiltinObligationHandler` is the default host-owned implementation for current V1 obligations. It is deliberately fail-closed: obligations that require backing services fail unless the corresponding store/sink/governor is configured. The convenience `with_builtin_obligation_handler()` installs an explicit empty/dev handler and keeps those obligations fail-closed until a fully configured services value is supplied.
 
 Supported built-in behavior:
 

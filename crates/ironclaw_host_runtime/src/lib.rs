@@ -48,8 +48,8 @@ mod obligations;
 mod production;
 
 pub use obligations::{
-    BuiltinObligationHandler, NetworkObligationPolicyStore, RuntimeSecretInjectionStore,
-    RuntimeSecretInjectionStoreError,
+    BuiltinObligationHandler, BuiltinObligationServices, NetworkObligationPolicyStore,
+    RuntimeSecretInjectionStore, RuntimeSecretInjectionStoreError,
 };
 pub use production::DefaultHostRuntime;
 

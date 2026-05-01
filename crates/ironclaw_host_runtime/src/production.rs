@@ -29,12 +29,12 @@ use ironclaw_processes::{
 use ironclaw_run_state::{ApprovalRequestStore, RunStateError, RunStateStore, RunStatus};
 
 use crate::{
-    BuiltinObligationHandler, CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest,
-    CapabilitySurfaceVersion, HostRuntime, HostRuntimeError, HostRuntimeHealth, HostRuntimeStatus,
-    RuntimeApprovalGate, RuntimeBackendHealth, RuntimeBlockedReason, RuntimeCapabilityCompleted,
-    RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeFailureKind, RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary,
-    VisibleCapabilityRequest, VisibleCapabilitySurface,
+    BuiltinObligationHandler, BuiltinObligationServices, CancelRuntimeWorkOutcome,
+    CancelRuntimeWorkRequest, CapabilitySurfaceVersion, HostRuntime, HostRuntimeError,
+    HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalGate, RuntimeBackendHealth,
+    RuntimeBlockedReason, RuntimeCapabilityCompleted, RuntimeCapabilityFailure,
+    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeStatusRequest,
+    RuntimeWorkId, RuntimeWorkSummary, VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
 
 /// Default production wiring for [`HostRuntime`].
@@ -168,10 +168,21 @@ impl DefaultHostRuntime {
         self
     }
 
+    /// Installs a fully configured built-in obligation handler using the shared
+    /// service graph supplied by host-runtime composition.
+    ///
+    /// The `services` value owns the handoff stores that runtime adapters and
+    /// HTTP egress wiring will consume, while the installed handler receives
+    /// clones of the same stores for staging obligations before dispatch.
+    pub fn with_builtin_obligation_services(self, services: &BuiltinObligationServices) -> Self {
+        self.with_obligation_handler(Arc::new(services.obligation_handler()))
+    }
+
     /// Installs the default built-in obligation handler with no optional backing
     /// stores. Obligations requiring audit/network/secret/resource backing still
     /// fail closed until the caller supplies a fully configured handler through
-    /// [`Self::with_obligation_handler`] or [`Self::with_obligation_handler_dyn`].
+    /// [`Self::with_builtin_obligation_services`], [`Self::with_obligation_handler`],
+    /// or [`Self::with_obligation_handler_dyn`].
     pub fn with_builtin_obligation_handler(self) -> Self {
         self.with_obligation_handler(Arc::new(BuiltinObligationHandler::new()))
     }

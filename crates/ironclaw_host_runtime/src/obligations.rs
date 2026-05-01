@@ -193,6 +193,95 @@ impl NetworkPolicyKey {
     }
 }
 
+/// Host-runtime-owned backing services for a fully configured built-in obligation handler.
+///
+/// This value is the production composition seam for obligation handling. It
+/// keeps the in-memory network-policy and runtime-secret handoff stores alive
+/// outside the handler so runtime adapters can consume the exact staged state
+/// that [`BuiltinObligationHandler`] prepares before dispatch.
+#[derive(Clone)]
+pub struct BuiltinObligationServices {
+    audit_sink: Arc<dyn AuditSink>,
+    network_policies: Arc<NetworkObligationPolicyStore>,
+    secret_store: Arc<dyn SecretStore>,
+    secret_injections: Arc<RuntimeSecretInjectionStore>,
+    resource_governor: Arc<dyn ResourceGovernor>,
+}
+
+impl BuiltinObligationServices {
+    pub fn new(
+        audit_sink: Arc<dyn AuditSink>,
+        secret_store: Arc<dyn SecretStore>,
+        resource_governor: Arc<dyn ResourceGovernor>,
+    ) -> Self {
+        Self::with_handoff_stores(
+            audit_sink,
+            Arc::new(NetworkObligationPolicyStore::new()),
+            secret_store,
+            Arc::new(RuntimeSecretInjectionStore::new()),
+            resource_governor,
+        )
+    }
+
+    pub fn with_handoff_stores(
+        audit_sink: Arc<dyn AuditSink>,
+        network_policies: Arc<NetworkObligationPolicyStore>,
+        secret_store: Arc<dyn SecretStore>,
+        secret_injections: Arc<RuntimeSecretInjectionStore>,
+        resource_governor: Arc<dyn ResourceGovernor>,
+    ) -> Self {
+        Self {
+            audit_sink,
+            network_policies,
+            secret_store,
+            secret_injections,
+            resource_governor,
+        }
+    }
+
+    pub fn audit_sink(&self) -> Arc<dyn AuditSink> {
+        self.audit_sink.clone()
+    }
+
+    pub fn network_policy_store(&self) -> Arc<NetworkObligationPolicyStore> {
+        self.network_policies.clone()
+    }
+
+    pub fn secret_store(&self) -> Arc<dyn SecretStore> {
+        self.secret_store.clone()
+    }
+
+    pub fn secret_injection_store(&self) -> Arc<RuntimeSecretInjectionStore> {
+        self.secret_injections.clone()
+    }
+
+    pub fn resource_governor(&self) -> Arc<dyn ResourceGovernor> {
+        self.resource_governor.clone()
+    }
+
+    pub fn obligation_handler(&self) -> BuiltinObligationHandler {
+        BuiltinObligationHandler::new()
+            .with_audit_sink_dyn(self.audit_sink.clone())
+            .with_network_policy_store(self.network_policies.clone())
+            .with_secret_store_dyn(self.secret_store.clone())
+            .with_secret_injection_store(self.secret_injections.clone())
+            .with_resource_governor_dyn(self.resource_governor.clone())
+    }
+}
+
+impl fmt::Debug for BuiltinObligationServices {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BuiltinObligationServices")
+            .field("audit_sink", &"<audit_sink>")
+            .field("network_policies", &self.network_policies)
+            .field("secret_store", &"[REDACTED]")
+            .field("secret_injections", &self.secret_injections)
+            .field("resource_governor", &"<resource_governor>")
+            .finish()
+    }
+}
+
 /// Built-in obligation handler for the current host-runtime slice.
 #[derive(Clone, Default)]
 pub struct BuiltinObligationHandler {
