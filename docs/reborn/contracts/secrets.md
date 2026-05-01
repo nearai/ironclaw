@@ -109,11 +109,18 @@ must derive it only after proving:
 - the final request still passes the network policy boundary
 
 The shared egress service intentionally does not perform that authorization
-decision; it consumes the already-approved injection plan, leases the material
-once, injects it, redacts it, and fails closed when a required credential is
-unavailable. Runtime callers must not supply their own `Authorization`, cookie,
-or API-key-style headers; those values must come from the host-approved
-injection plan.
+decision; it consumes the already-approved injection plan, injects it, redacts
+it, and fails closed when a required credential is unavailable. Injection plans
+also declare a material source: `SecretStoreLease` leases and consumes directly
+from `SecretStore`, while `StagedObligation { capability_id }` consumes material
+that `BuiltinObligationHandler` already leased, consumed, and staged in
+`RuntimeSecretInjectionStore`. Runtime adapters that use the staged source must
+not lease the same handle independently; `HostHttpEgressService` removes staged
+material with `take(scope, capability_id, handle)` before outbound transport so
+the value cannot be reused after success, failure, or runtime-visible errors.
+Runtime callers must not supply their own `Authorization`, cookie, or
+API-key-style headers; those values must come from the host-approved injection
+plan.
 
 ---
 

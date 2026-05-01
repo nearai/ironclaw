@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{NetworkMethod, NetworkPolicy, ResourceScope, RuntimeKind, SecretHandle};
+use crate::{CapabilityId, NetworkMethod, NetworkPolicy, ResourceScope, RuntimeKind, SecretHandle};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeHttpEgressRequest {
@@ -42,8 +42,27 @@ pub struct RuntimeHttpEgressRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeCredentialInjection {
     pub handle: SecretHandle,
+    #[serde(default)]
+    pub source: RuntimeCredentialSource,
     pub target: RuntimeCredentialTarget,
     pub required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum RuntimeCredentialSource {
+    /// Lease and consume material directly from the scoped secret store.
+    ///
+    /// This remains the compatibility path for host-derived credentials that
+    /// are not backed by an already-satisfied authorization obligation.
+    #[default]
+    SecretStoreLease,
+    /// Consume material staged by an `InjectSecretOnce` obligation handler.
+    ///
+    /// The host egress service must call `RuntimeSecretInjectionStore::take`
+    /// with the request scope, this capability id, and the credential handle;
+    /// it must not lease the same secret independently from the secret store.
+    StagedObligation { capability_id: CapabilityId },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

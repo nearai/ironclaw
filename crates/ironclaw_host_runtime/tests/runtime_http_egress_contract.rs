@@ -1,9 +1,9 @@
 use ironclaw_host_api::{
-    InvocationId, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, ResourceScope,
-    RuntimeCredentialInjection, RuntimeCredentialTarget, RuntimeHttpEgress,
-    RuntimeHttpEgressRequest, RuntimeKind, SecretHandle, TenantId, UserId,
+    CapabilityId, InvocationId, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern,
+    ResourceScope, RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
+    RuntimeHttpEgress, RuntimeHttpEgressRequest, RuntimeKind, SecretHandle, TenantId, UserId,
 };
-use ironclaw_host_runtime::HostHttpEgressService;
+use ironclaw_host_runtime::{HostHttpEgressService, RuntimeSecretInjectionStore};
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
 };
@@ -15,6 +15,515 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
+
+#[test]
+fn host_http_egress_consumes_staged_obligation_secret_once() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("api-token").unwrap();
+    let staged = Arc::new(RuntimeSecretInjectionStore::new());
+    staged
+        .insert(
+            &scope,
+            &capability_id,
+            &handle,
+            SecretMaterial::from("sk-staged-secret"),
+        )
+        .unwrap();
+    let service = HostHttpEgressService::new(network, InMemorySecretStore::new())
+        .with_secret_injection_store(staged.clone());
+
+    let request = RuntimeHttpEgressRequest {
+        runtime: RuntimeKind::Script,
+        scope: scope.clone(),
+        method: NetworkMethod::Post,
+        url: "https://api.example.test/v1/run".to_string(),
+        headers: vec![],
+        body: b"hello".to_vec(),
+        network_policy: sample_policy(),
+        credential_injections: vec![RuntimeCredentialInjection {
+            handle: handle.clone(),
+            source: RuntimeCredentialSource::StagedObligation {
+                capability_id: capability_id.clone(),
+            },
+            target: RuntimeCredentialTarget::Header {
+                name: "authorization".to_string(),
+                prefix: Some("Bearer ".to_string()),
+            },
+            required: true,
+        }],
+        response_body_limit: Some(4096),
+        timeout_ms: None,
+    };
+
+    service
+        .execute(request.clone())
+        .expect("staged secret should be injected through host egress");
+
+    let requests = network_recorder.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0]
+            .headers
+            .iter()
+            .find(|(name, _)| name == "authorization"),
+        Some(&(
+            "authorization".to_string(),
+            "Bearer sk-staged-secret".to_string()
+        ))
+    );
+    drop(requests);
+    assert!(
+        staged
+            .take(&scope, &capability_id, &handle)
+            .expect("store should remain available")
+            .is_none(),
+        "staged material must be removed after first injection"
+    );
+
+    let error = service
+        .execute(request)
+        .expect_err("staged secret must not be reusable");
+    assert!(matches!(
+        error,
+        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+    ));
+    assert_eq!(network_recorder.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn host_http_egress_fails_closed_when_required_staged_secret_is_missing() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let service = HostHttpEgressService::new(network, InMemorySecretStore::new())
+        .with_secret_injection_store(Arc::new(RuntimeSecretInjectionStore::new()));
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope: sample_scope(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle: SecretHandle::new("api-token").unwrap(),
+                source: RuntimeCredentialSource::StagedObligation {
+                    capability_id: sample_capability_id(),
+                },
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            timeout_ms: None,
+        })
+        .expect_err("missing staged material must fail before network dispatch");
+
+    assert!(matches!(
+        error,
+        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+    ));
+    assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+#[test]
+fn host_http_egress_does_not_take_staged_secret_from_other_capability() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let scope = sample_scope();
+    let requested_capability = sample_capability_id();
+    let other_capability = CapabilityId::new("other.capability").unwrap();
+    let handle = SecretHandle::new("api-token").unwrap();
+    let staged = Arc::new(RuntimeSecretInjectionStore::new());
+    staged
+        .insert(
+            &scope,
+            &other_capability,
+            &handle,
+            SecretMaterial::from("sk-staged-secret"),
+        )
+        .unwrap();
+    let service = HostHttpEgressService::new(network, InMemorySecretStore::new())
+        .with_secret_injection_store(staged.clone());
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope: scope.clone(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle: handle.clone(),
+                source: RuntimeCredentialSource::StagedObligation {
+                    capability_id: requested_capability,
+                },
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            timeout_ms: None,
+        })
+        .expect_err("staged material for a different capability must not authorize egress");
+
+    assert!(matches!(
+        error,
+        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+    ));
+    assert!(network_recorder.lock().unwrap().is_empty());
+    assert!(
+        staged
+            .take(&scope, &other_capability, &handle)
+            .expect("store should remain available")
+            .is_some(),
+        "material staged for a different capability must not be consumed"
+    );
+}
+
+#[test]
+fn host_http_egress_does_not_take_staged_secret_for_other_handle() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let requested_handle = SecretHandle::new("api-token").unwrap();
+    let other_handle = SecretHandle::new("other-token").unwrap();
+    let staged = Arc::new(RuntimeSecretInjectionStore::new());
+    staged
+        .insert(
+            &scope,
+            &capability_id,
+            &other_handle,
+            SecretMaterial::from("sk-staged-secret"),
+        )
+        .unwrap();
+    let service = HostHttpEgressService::new(network, InMemorySecretStore::new())
+        .with_secret_injection_store(staged.clone());
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope: scope.clone(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle: requested_handle,
+                source: RuntimeCredentialSource::StagedObligation {
+                    capability_id: capability_id.clone(),
+                },
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            timeout_ms: None,
+        })
+        .expect_err("staged material for a different handle must not authorize egress");
+
+    assert!(matches!(
+        error,
+        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+    ));
+    assert!(network_recorder.lock().unwrap().is_empty());
+    assert!(
+        staged
+            .take(&scope, &capability_id, &other_handle)
+            .expect("store should remain available")
+            .is_some(),
+        "material staged for a different handle must not be consumed"
+    );
+}
+
+#[test]
+fn host_http_egress_removes_staged_secret_before_network_errors() {
+    let network = RecordingNetwork::err(NetworkHttpError::Transport {
+        reason: "upstream rejected sk-staged-secret".to_string(),
+        request_bytes: 12,
+        response_bytes: 0,
+    });
+    let network_recorder = network.requests.clone();
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("api-token").unwrap();
+    let staged = Arc::new(RuntimeSecretInjectionStore::new());
+    staged
+        .insert(
+            &scope,
+            &capability_id,
+            &handle,
+            SecretMaterial::from("sk-staged-secret"),
+        )
+        .unwrap();
+    let service = HostHttpEgressService::new(network, InMemorySecretStore::new())
+        .with_secret_injection_store(staged.clone());
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope: scope.clone(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle: handle.clone(),
+                source: RuntimeCredentialSource::StagedObligation {
+                    capability_id: capability_id.clone(),
+                },
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            timeout_ms: None,
+        })
+        .expect_err("network error should be sanitized after staged injection is consumed");
+
+    assert!(matches!(
+        error,
+        ironclaw_host_api::RuntimeHttpEgressError::Network { .. }
+    ));
+    assert!(!error.to_string().contains("sk-staged-secret"));
+    assert_eq!(network_recorder.lock().unwrap().len(), 1);
+    assert!(
+        staged
+            .take(&scope, &capability_id, &handle)
+            .expect("store should remain available")
+            .is_none(),
+        "network failures must not make staged material reusable"
+    );
+}
+
+#[test]
+fn host_http_egress_skips_optional_missing_staged_secret() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let service = HostHttpEgressService::new(network, InMemorySecretStore::new())
+        .with_secret_injection_store(Arc::new(RuntimeSecretInjectionStore::new()));
+
+    let response = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope: sample_scope(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle: SecretHandle::new("api-token").unwrap(),
+                source: RuntimeCredentialSource::StagedObligation {
+                    capability_id: sample_capability_id(),
+                },
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                },
+                required: false,
+            }],
+            response_body_limit: Some(4096),
+            timeout_ms: None,
+        })
+        .expect("optional missing staged material should not block egress");
+
+    assert_eq!(response.status, 200);
+    let requests = network_recorder.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]
+            .headers
+            .iter()
+            .all(|(name, _)| name != "authorization"),
+        "optional missing staged material should not inject a credential"
+    );
+}
+
+#[test]
+fn host_http_egress_does_not_take_staged_secret_from_other_scope() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let requested_scope = sample_scope();
+    let other_scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("api-token").unwrap();
+    let staged = Arc::new(RuntimeSecretInjectionStore::new());
+    staged
+        .insert(
+            &other_scope,
+            &capability_id,
+            &handle,
+            SecretMaterial::from("sk-staged-secret"),
+        )
+        .unwrap();
+    let service = HostHttpEgressService::new(network, InMemorySecretStore::new())
+        .with_secret_injection_store(staged.clone());
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope: requested_scope,
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle: handle.clone(),
+                source: RuntimeCredentialSource::StagedObligation {
+                    capability_id: capability_id.clone(),
+                },
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            timeout_ms: None,
+        })
+        .expect_err("staged material for a different scope must not authorize egress");
+
+    assert!(matches!(
+        error,
+        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+    ));
+    assert!(network_recorder.lock().unwrap().is_empty());
+    assert!(
+        staged
+            .take(&other_scope, &capability_id, &handle)
+            .expect("store should remain available")
+            .is_some(),
+        "material staged for a different scope must not be consumed"
+    );
+}
+
+#[test]
+fn host_http_egress_rejects_header_injection_prefix_control_chars() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let secrets = InMemorySecretStore::new();
+    let scope = sample_scope();
+    let handle = SecretHandle::new("api-token").unwrap();
+    block_on_test(secrets.put(
+        scope.clone(),
+        handle.clone(),
+        SecretMaterial::from("sk-test-secret"),
+    ))
+    .unwrap();
+    let service = HostHttpEgressService::new(network, secrets);
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope,
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle,
+                source: RuntimeCredentialSource::SecretStoreLease,
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer \r\nx-evil: ".to_string()),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            timeout_ms: None,
+        })
+        .expect_err("header injection prefixes with control characters must be rejected");
+
+    assert!(matches!(
+        error,
+        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+    ));
+    assert!(!error.to_string().contains("sk-test-secret"));
+    assert!(network_recorder.lock().unwrap().is_empty());
+}
 
 #[test]
 fn host_http_egress_injects_leased_credentials_and_redacts_errors() {
@@ -46,6 +555,7 @@ fn host_http_egress_injects_leased_credentials_and_redacts_errors() {
             network_policy: sample_policy(),
             credential_injections: vec![RuntimeCredentialInjection {
                 handle,
+                source: RuntimeCredentialSource::SecretStoreLease,
                 target: RuntimeCredentialTarget::Header {
                     name: "authorization".to_string(),
                     prefix: Some("Bearer ".to_string()),
@@ -101,6 +611,7 @@ fn host_http_egress_requires_available_required_credentials_before_network() {
             network_policy: sample_policy(),
             credential_injections: vec![RuntimeCredentialInjection {
                 handle: SecretHandle::new("missing-token").unwrap(),
+                source: RuntimeCredentialSource::SecretStoreLease,
                 target: RuntimeCredentialTarget::Header {
                     name: "authorization".to_string(),
                     prefix: Some("Bearer ".to_string()),
@@ -145,6 +656,7 @@ fn host_http_egress_injects_and_redacts_url_encoded_query_credentials() {
             network_policy: sample_policy(),
             credential_injections: vec![RuntimeCredentialInjection {
                 handle,
+                source: RuntimeCredentialSource::SecretStoreLease,
                 target: RuntimeCredentialTarget::QueryParam {
                     name: "token".to_string(),
                 },
@@ -280,6 +792,7 @@ fn host_http_egress_redacts_injected_credentials_from_runtime_visible_response()
             network_policy: sample_policy(),
             credential_injections: vec![RuntimeCredentialInjection {
                 handle,
+                source: RuntimeCredentialSource::SecretStoreLease,
                 target: RuntimeCredentialTarget::Header {
                     name: "authorization".to_string(),
                     prefix: Some("Bearer ".to_string()),
@@ -336,6 +849,7 @@ fn host_http_egress_redacts_lowercase_percent_encoded_secret_echoes() {
             network_policy: sample_policy(),
             credential_injections: vec![RuntimeCredentialInjection {
                 handle,
+                source: RuntimeCredentialSource::SecretStoreLease,
                 target: RuntimeCredentialTarget::QueryParam {
                     name: "token".to_string(),
                 },
@@ -679,6 +1193,7 @@ fn host_http_egress_runs_async_secret_store_futures_with_tokio_context() {
             network_policy: sample_policy(),
             credential_injections: vec![RuntimeCredentialInjection {
                 handle,
+                source: RuntimeCredentialSource::SecretStoreLease,
                 target: RuntimeCredentialTarget::Header {
                     name: "authorization".to_string(),
                     prefix: Some("Bearer ".to_string()),
@@ -889,6 +1404,10 @@ fn sample_scope() -> ResourceScope {
         thread_id: None,
         invocation_id: InvocationId::new(),
     }
+}
+
+fn sample_capability_id() -> CapabilityId {
+    CapabilityId::new("example.http").unwrap()
 }
 
 fn sample_policy() -> NetworkPolicy {

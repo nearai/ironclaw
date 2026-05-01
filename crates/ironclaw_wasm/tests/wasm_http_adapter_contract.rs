@@ -2,9 +2,9 @@ use std::sync::{Arc, Mutex};
 
 use ironclaw_host_api::{
     InvocationId, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, ProjectId,
-    ResourceScope, RuntimeCredentialInjection, RuntimeCredentialTarget, RuntimeHttpEgress,
-    RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind,
-    SecretHandle, TenantId, UserId,
+    ResourceScope, RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
+    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
+    RuntimeKind, SecretHandle, TenantId, UserId,
 };
 use ironclaw_wasm::{
     WasmHostError, WasmHostHttp, WasmHttpRequest, WasmRuntimeCredentialProvider,
@@ -519,6 +519,7 @@ impl WasmRuntimeCredentialProvider for FailingCredentialProvider {
 fn sample_injection() -> RuntimeCredentialInjection {
     RuntimeCredentialInjection {
         handle: SecretHandle::new("api-token").unwrap(),
+        source: RuntimeCredentialSource::SecretStoreLease,
         target: RuntimeCredentialTarget::Header {
             name: "authorization".to_string(),
             prefix: Some("Bearer ".to_string()),
