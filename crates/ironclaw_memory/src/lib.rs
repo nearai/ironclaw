@@ -1626,6 +1626,7 @@ pub struct MemoryBackendFilesystemAdapter {
     prompt_safety_policy: Option<Arc<dyn PromptWriteSafetyPolicy>>,
     prompt_safety_event_sink: Option<Arc<dyn PromptWriteSafetyEventSink>>,
     prompt_protected_path_registry: PromptProtectedPathRegistry,
+    prompt_safety_allowance: Option<PromptSafetyAllowanceId>,
 }
 
 impl MemoryBackendFilesystemAdapter {
@@ -1646,6 +1647,7 @@ impl MemoryBackendFilesystemAdapter {
             ))),
             prompt_safety_event_sink: None,
             prompt_protected_path_registry: registry,
+            prompt_safety_allowance: None,
         }
     }
 
@@ -1669,6 +1671,14 @@ impl MemoryBackendFilesystemAdapter {
     {
         let event_sink: Arc<dyn PromptWriteSafetyEventSink> = event_sink;
         self.prompt_safety_event_sink = Some(event_sink);
+        self
+    }
+
+    pub fn with_prompt_write_safety_allowance(
+        mut self,
+        allowance: PromptSafetyAllowanceId,
+    ) -> Self {
+        self.prompt_safety_allowance = Some(allowance);
         self
     }
 
@@ -1731,7 +1741,10 @@ impl RootFilesystem for MemoryBackendFilesystemAdapter {
     async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
         self.ensure_file_documents(path, FilesystemOperation::WriteFile)?;
         let document_path = self.parse_file_path(path, FilesystemOperation::WriteFile)?;
-        let context = MemoryContext::new(document_path.scope().clone());
+        let mut context = MemoryContext::new(document_path.scope().clone());
+        if let Some(allowance) = &self.prompt_safety_allowance {
+            context = context.with_prompt_write_safety_allowance(allowance.clone());
+        }
         let is_protected = prompt_write_protected_classification(
             self.prompt_safety_policy.as_ref(),
             &self.prompt_protected_path_registry,
@@ -1778,7 +1791,10 @@ impl RootFilesystem for MemoryBackendFilesystemAdapter {
     async fn append_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
         self.ensure_file_documents(path, FilesystemOperation::AppendFile)?;
         let document_path = self.parse_file_path(path, FilesystemOperation::AppendFile)?;
-        let context = MemoryContext::new(document_path.scope().clone());
+        let mut context = MemoryContext::new(document_path.scope().clone());
+        if let Some(allowance) = &self.prompt_safety_allowance {
+            context = context.with_prompt_write_safety_allowance(allowance.clone());
+        }
         let is_protected = prompt_write_protected_classification(
             self.prompt_safety_policy.as_ref(),
             &self.prompt_protected_path_registry,
@@ -2815,6 +2831,7 @@ pub struct MemoryDocumentFilesystem {
     prompt_safety_policy: Option<Arc<dyn PromptWriteSafetyPolicy>>,
     prompt_safety_event_sink: Option<Arc<dyn PromptWriteSafetyEventSink>>,
     prompt_protected_path_registry: PromptProtectedPathRegistry,
+    prompt_safety_allowance: Option<PromptSafetyAllowanceId>,
 }
 
 impl MemoryDocumentFilesystem {
@@ -2836,6 +2853,7 @@ impl MemoryDocumentFilesystem {
             ))),
             prompt_safety_event_sink: None,
             prompt_protected_path_registry: registry,
+            prompt_safety_allowance: None,
         }
     }
 
@@ -2867,6 +2885,14 @@ impl MemoryDocumentFilesystem {
     {
         let event_sink: Arc<dyn PromptWriteSafetyEventSink> = event_sink;
         self.prompt_safety_event_sink = Some(event_sink);
+        self
+    }
+
+    pub fn with_prompt_write_safety_allowance(
+        mut self,
+        allowance: PromptSafetyAllowanceId,
+    ) -> Self {
+        self.prompt_safety_allowance = Some(allowance);
         self
     }
 
@@ -2947,7 +2973,7 @@ impl RootFilesystem for MemoryDocumentFilesystem {
                     source: PromptWriteSource::MemoryDocumentFilesystem,
                     content,
                     previous_content_hash: previous_hash.as_deref(),
-                    allowance: None,
+                    allowance: self.prompt_safety_allowance.as_ref(),
                     filesystem_operation: FilesystemOperation::WriteFile,
                 },
             )
@@ -3002,7 +3028,7 @@ impl RootFilesystem for MemoryDocumentFilesystem {
                         source: PromptWriteSource::MemoryDocumentFilesystem,
                         content,
                         previous_content_hash: previous_prompt_hash.as_deref(),
-                        allowance: None,
+                        allowance: self.prompt_safety_allowance.as_ref(),
                         filesystem_operation: FilesystemOperation::AppendFile,
                     },
                 )
