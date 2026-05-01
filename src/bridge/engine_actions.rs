@@ -155,7 +155,11 @@ pub(crate) fn mission_capability_actions() -> Vec<ActionDef> {
             Some(action_discovery_summary(
                 &[],
                 &[
-                    "Identify the mission to update with `name` (preferred) or `id` — exactly one is required.",
+                    "Identify the mission with `name` (preferred) or `id` (UUID). \
+                     If both are provided they must identify the same mission, or use \
+                     the legacy `{id, name}` rename shape (where `name` is the new \
+                     name) — otherwise the resolver errors with \
+                     'identify different missions'.",
                     "Only include the fields you want to change; omitted fields keep their existing values.",
                     "When renaming, set `new_name` (not `name`); `name` remains the lookup key.",
                     "When updating cadence, keep timezone aligned with cron-based schedules.",

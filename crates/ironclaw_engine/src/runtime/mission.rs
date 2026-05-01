@@ -136,8 +136,23 @@ pub struct MissionGateInfo {
     /// `name` param, which has higher precedence than the credential
     /// fallback.
     pub parameters: serde_json::Value,
-    /// Engine-side `call_id` used to resume.
-    pub request_id: String,
+    /// Engine-side LLM tool-call id (e.g. `call_657a9167...`). This is
+    /// the identifier the engine needs to inject the resolved action
+    /// result back onto a paused thread when half-2 of #3133 wires up
+    /// auto-resume. **Not** what the user-facing auth tray sees — that
+    /// is `gate_request_id` below. (Per Copilot review on #3155: the
+    /// gateway parses the channel-side `request_id` as a UUID, so
+    /// forwarding the LLM call_id there would 400 every resolve POST.)
+    pub call_id: String,
+    /// Freshly-generated UUID identifying this surfaced gate to the
+    /// user. Forwarded by the bridge into
+    /// `StatusUpdate::AuthRequired.request_id` /
+    /// `StatusUpdate::ApprovalNeeded.request_id` so the gateway UI
+    /// can render the auth-tray entry and the resolve POST handler
+    /// (which `Uuid::parse_str`'s its input) accepts the response.
+    /// Mapping back to the engine `call_id` for half-2 auto-resume is
+    /// out of scope for this PR (#3166).
+    pub gate_request_id: uuid::Uuid,
     /// What kind of resolution unblocks this gate.
     pub resume_kind: crate::gate::ResumeKind,
 }
@@ -2445,7 +2460,8 @@ async fn process_mission_outcome_and_notify(
                 gate_name: gate_name.clone(),
                 action_name: action_name.clone(),
                 parameters: parameters.clone(),
-                request_id: call_id.clone(),
+                call_id: call_id.clone(),
+                gate_request_id: uuid::Uuid::new_v4(),
                 resume_kind: resume_kind.clone(),
             });
         }
@@ -4239,7 +4255,17 @@ mod tests {
             .as_ref()
             .expect("notification must carry MissionGateInfo for GatePaused");
         assert_eq!(gate.action_name, "tool_activate");
-        assert_eq!(gate.request_id, "call-gmail-1");
+        // call_id round-trips the engine's LLM tool-call id verbatim —
+        // the bridge keeps it for half-2 auto-resume but does NOT
+        // surface it to the channel.
+        assert_eq!(gate.call_id, "call-gmail-1");
+        // gate_request_id is a freshly-generated UUID. The bridge
+        // forwards this (not call_id) to StatusUpdate.request_id so
+        // the gateway resolve handler's UUID parse doesn't 400.
+        assert!(
+            !gate.gate_request_id.is_nil(),
+            "gate_request_id must be a freshly-generated UUID"
+        );
         assert_eq!(
             gate.parameters.get("name").and_then(|v| v.as_str()),
             Some("gmail"),

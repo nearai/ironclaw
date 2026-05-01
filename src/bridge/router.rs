@@ -4184,17 +4184,30 @@ pub(crate) async fn handle_mission_notification(
                         &notif.user_id,
                     )
                     .await;
+                    // Forward `gate_request_id` (a freshly-generated
+                    // UUID), NOT the engine `call_id`. The gateway's
+                    // gate-resolve handler at
+                    // `channels/web/features/chat/mod.rs:183` (and the
+                    // WS handler at `platform/ws.rs:236`) call
+                    // `Uuid::parse_str` on the inbound `request_id` and
+                    // 400 on non-UUIDs — `call_id` ("call_xyz...") would
+                    // make the auth-tray entry unresolvable. Engine
+                    // `call_id` is preserved on `MissionGateInfo` for
+                    // half-2 auto-resume (#3166).
                     StatusUpdate::AuthRequired {
                         extension_name,
                         instructions: Some(instructions.clone()),
                         auth_url: auth_url.clone(),
                         setup_url: None,
-                        request_id: Some(gate.request_id.clone()),
+                        request_id: Some(gate.gate_request_id.to_string()),
                     }
                 }
                 ironclaw_engine::ResumeKind::Approval { allow_always } => {
                     StatusUpdate::ApprovalNeeded {
-                        request_id: gate.request_id.clone(),
+                        // See the AuthRequired arm above for why we
+                        // forward `gate_request_id` rather than the
+                        // engine `call_id`.
+                        request_id: gate.gate_request_id.to_string(),
                         tool_name: gate.action_name.clone(),
                         description: format!(
                             "Mission '{}' is waiting for approval to run '{}'.",
