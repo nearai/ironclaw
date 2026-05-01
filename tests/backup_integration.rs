@@ -162,16 +162,42 @@ async fn quick_backup_produces_zip_with_expected_entries_and_manifest() {
         2
     );
 
-    // Bonus invariant: the db blob in the zip matches the on-disk db.
+    // Bonus invariant: the db blob in the zip is a valid SQLite database
+    // and carries the same _migrations row the source has. We do NOT
+    // assert byte equality — the snapshot is captured via `VACUUM INTO`,
+    // which produces a freshly compacted file with the same logical
+    // contents but a different byte layout (different page numbering,
+    // freelist trimmed, etc.). What matters is that we restore the
+    // same data on the other end.
     let mut db_in_zip = zip.by_name("data/ironclaw.db").expect("db entry");
     let mut zip_bytes = Vec::new();
     db_in_zip.read_to_end(&mut zip_bytes).unwrap();
     drop(db_in_zip);
-    let on_disk = fs::read(&db_path).expect("read on-disk db");
-    assert_eq!(
-        zip_bytes, on_disk,
-        "db blob in zip should match the on-disk db file"
+    assert!(
+        zip_bytes.starts_with(b"SQLite format 3\0"),
+        "db blob in zip must be a valid SQLite file (header magic)"
     );
+    // Materialize the snapshot to disk and verify the same _migrations
+    // row landed in the snapshot as we seeded into the source.
+    let restored = tmp.path().join("restored.db");
+    fs::write(&restored, &zip_bytes).expect("write restored.db");
+    let restored_backend = ironclaw::db::libsql::LibSqlBackend::new_local(&restored)
+        .await
+        .expect("open restored db");
+    let conn = restored_backend.connect().await.expect("connect restored");
+    let mut rows = conn
+        .query("SELECT version, name FROM _migrations ORDER BY version", ())
+        .await
+        .expect("read _migrations from restored snapshot");
+    let row = rows
+        .next()
+        .await
+        .expect("rows.next")
+        .expect("at least one _migrations row in snapshot");
+    let version: i64 = row.get(0).expect("version col");
+    let name: String = row.get(1).expect("name col");
+    assert_eq!(version, 25_i64, "snapshot preserves seeded migration version");
+    assert_eq!(name, "test_v25", "snapshot preserves seeded migration name");
 
     // Config preserved verbatim.
     let mut cfg_in_zip = zip.by_name("config.toml").expect("config entry");

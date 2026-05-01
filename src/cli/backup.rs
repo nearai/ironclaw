@@ -9,13 +9,15 @@
 //!
 //! ```text
 //! manifest.json          (JSON, see [`Manifest`])
-//! data/ironclaw.db       (libSQL database, WAL-checkpointed)
+//! data/ironclaw.db       (libSQL database — VACUUM INTO snapshot)
 //! config.toml            (the active TOML config, if present)
 //! ```
 //!
-//! The db is checkpointed with `PRAGMA wal_checkpoint(TRUNCATE)` before the
-//! file copy so the snapshot is self-contained without `-wal` / `-shm`
-//! sidecar files.
+//! The db is captured with `VACUUM INTO '<tempfile>'` so the snapshot is
+//! transactionally consistent and self-contained: no `-wal`/`-shm`
+//! sidecars, and no torn read if another process writes during the
+//! backup. The temp file lives in a `tempfile::TempDir` whose Drop
+//! removes it once the zip is finalized.
 
 use std::fs::{self, File};
 use std::io::{self, BufReader, Read, Write};
@@ -126,13 +128,13 @@ pub async fn run_backup_command(
         );
     }
 
-    // WAL checkpoint is required for self-containment: without it the .db
-    // file may be missing recently committed pages still parked in the
-    // -wal sidecar. Fail loudly rather than silently produce a stale
-    // snapshot.
-    checkpoint_wal(&sources.db_path)
-        .await
-        .with_context(|| format!("WAL checkpoint failed on {}", sources.db_path.display()))?;
+    // VACUUM INTO produces a transactionally consistent snapshot in a
+    // tempfile, replacing the older "wal_checkpoint then file-copy"
+    // pattern. The snapshot's TempDir auto-cleans on drop after the zip
+    // is finalized.
+    let snapshot = snapshot_db(&sources.db_path).await.with_context(|| {
+        format!("VACUUM INTO snapshot of {}", sources.db_path.display())
+    })?;
 
     let schema_version = read_schema_version(&sources.db_path)
         .await
@@ -153,8 +155,9 @@ pub async fn run_backup_command(
         components: vec!["db".into(), "config".into()],
     };
 
-    write_quick_archive(&output_path, &sources, &manifest)
+    write_quick_archive(&output_path, snapshot.path(), &sources, &manifest)
         .with_context(|| format!("failed to write backup archive {}", output_path.display()))?;
+    // `snapshot` lives until end of scope; its Drop removes the tempdir.
 
     println!("Backup written: {}", output_path.display());
     println!(
@@ -178,34 +181,69 @@ fn default_output_path() -> Result<PathBuf> {
     Ok(home.join(format!("ironclaw-backup-{stamp}.zip")))
 }
 
-/// Run `PRAGMA wal_checkpoint(TRUNCATE)` against the libSQL DB so the
-/// snapshot is self-contained.
+/// A transactionally consistent snapshot of the libSQL database.
+///
+/// On the libSQL build the snapshot lives in a `tempfile::TempDir`; its
+/// Drop removes the directory and the snapshot file after the zip has
+/// been finalized. On non-libSQL builds the "snapshot" is just the live
+/// path — the caller has no way to call `VACUUM INTO`, so the file copy
+/// can produce a torn snapshot if another process writes during the
+/// backup. That's the same behavior as before this PR for non-libSQL
+/// builds; the libSQL path is the one consumers actually exercise.
+struct DbSnapshot {
+    #[cfg(feature = "libsql")]
+    _tempdir: tempfile::TempDir,
+    snapshot_path: PathBuf,
+}
+
+impl DbSnapshot {
+    fn path(&self) -> &Path {
+        &self.snapshot_path
+    }
+}
+
+/// Capture a transactionally consistent snapshot of the libSQL DB via
+/// `VACUUM INTO`. Returns a [`DbSnapshot`] whose lifetime owns the
+/// temp directory; drop the snapshot to clean it up.
 #[cfg(feature = "libsql")]
-async fn checkpoint_wal(db_path: &Path) -> Result<()> {
+async fn snapshot_db(db_path: &Path) -> Result<DbSnapshot> {
+    let tempdir = tempfile::tempdir()
+        .context("creating tempdir for VACUUM INTO snapshot")?;
+    let snapshot_path = tempdir.path().join("ironclaw_snapshot.db");
+
     let db = libsql::Builder::new_local(db_path)
         .build()
         .await
         .with_context(|| format!("opening libSQL db at {}", db_path.display()))?;
     let conn = db.connect().context("opening libSQL connection")?;
-    // PRAGMA wal_checkpoint(TRUNCATE) returns a 3-column row
-    // (busy, log, checkpointed). libSQL's `execute()` rejects statements
-    // that produce rows with "Execute returned rows", so we use `query()`
-    // and let the resulting Rows handle drop without iteration —
-    // execution still completes (the checkpoint runs eagerly during the
-    // call, not lazily during row iteration).
-    conn.query("PRAGMA wal_checkpoint(TRUNCATE)", ())
+
+    // VACUUM INTO requires a string literal in SQLite/libSQL — parameter
+    // binding is not honored here. Single quotes are escaped; the rest
+    // of the path comes from a tempdir we own, so SQL injection is not
+    // a concern. The query returns no rows, but libSQL's `execute()`
+    // historically rejected some PRAGMA-style statements; using
+    // `query()` and dropping the Rows handle is the safe pattern across
+    // both old and new libSQL releases.
+    let escaped = snapshot_path.to_string_lossy().replace('\'', "''");
+    let sql = format!("VACUUM INTO '{escaped}'");
+    conn.query(&sql, ())
         .await
-        .context("PRAGMA wal_checkpoint(TRUNCATE) failed")?;
-    Ok(())
+        .with_context(|| format!("VACUUM INTO '{}'", snapshot_path.display()))?;
+
+    Ok(DbSnapshot {
+        _tempdir: tempdir,
+        snapshot_path,
+    })
 }
 
 #[cfg(not(feature = "libsql"))]
-async fn checkpoint_wal(_db_path: &Path) -> Result<()> {
-    // libSQL isn't compiled in; the backup still works, but the on-disk db
-    // may have a sidecar -wal/-shm if another process is writing. We skip
-    // silently rather than fail: the command must remain useful in
-    // postgres-only builds.
-    Ok(())
+async fn snapshot_db(db_path: &Path) -> Result<DbSnapshot> {
+    // libSQL isn't compiled in; we have no in-process VACUUM INTO. Fall
+    // back to streaming the live file — same TOCTOU caveat as before
+    // this PR for non-libSQL builds.
+    Ok(DbSnapshot {
+        snapshot_path: db_path.to_path_buf(),
+    })
 }
 
 /// Read `MAX(version)` from the libSQL `_migrations` table.
@@ -244,10 +282,15 @@ fn hostname() -> String {
 
 /// Stream-write the zip to `output`. Manifest first, then db, then config.
 ///
+/// `db_source` is the path the db blob streams from — typically a
+/// `VACUUM INTO` snapshot, not the live database, so the write is
+/// race-free.
+///
 /// We write to `<output>.tmp` and rename atomically on success so a crashed
 /// backup never leaves a half-written archive at the canonical path.
 fn write_quick_archive(
     output: &Path,
+    db_source: &Path,
     sources: &QuickSources,
     manifest: &Manifest,
 ) -> Result<()> {
@@ -275,11 +318,13 @@ fn write_quick_archive(
         zip.write_all(&manifest_bytes)
             .context("zip: writing manifest.json")?;
 
-        // 2. data/ironclaw.db — streamed, never buffered.
+        // 2. data/ironclaw.db — streamed from the VACUUM INTO snapshot,
+        //    never the live db, so we can't tear-read mid-write from
+        //    another process. Never buffered in memory.
         zip.start_file("data/ironclaw.db", opts)
             .context("zip: starting data/ironclaw.db")?;
-        stream_file(&sources.db_path, &mut zip)
-            .with_context(|| format!("copying {} into zip", sources.db_path.display()))?;
+        stream_file(db_source, &mut zip)
+            .with_context(|| format!("copying {} into zip", db_source.display()))?;
 
         // 3. config.toml — caller already verified it exists, so a missing
         //    file here is a TOCTOU (someone removed it during the backup);
