@@ -182,6 +182,12 @@ tar = "0.4"
 pdf-extract = "0.7"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
+# Legal harness — DOCX export (MIT-licensed; verified before adding).
+docx-rs = "0.4"
+# Lexicographically sortable IDs for legal-harness rows (canonical schema uses
+# `TEXT PRIMARY KEY` declared as ulid in the migration spec).
+ulid = "1"
+
 # HTTP proxy for sandboxed network access
 hyper = { version = "1.5", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["server", "tokio", "http1", "http2"] }

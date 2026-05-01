@@ -135,6 +135,7 @@ impl TestGatewayBuilder {
             oauth_sweep_shutdown: None,
             frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
             tool_dispatcher: None,
+            legal_chat_store: None,
         })
     }
 
@@ -249,6 +250,7 @@ pub(crate) fn test_gateway_state_with_dependencies(
         oauth_sweep_shutdown: None,
         frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
         tool_dispatcher: None,
+        legal_chat_store: None,
     })
 }
 
@@ -306,6 +308,7 @@ pub(crate) fn test_gateway_state_with_store_and_session_manager(
         oauth_sweep_shutdown: None,
         frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
         tool_dispatcher: None,
+        legal_chat_store: None,
     })
 }
 
