@@ -739,7 +739,12 @@ async fn handle_llm_complete(
             .and_then(|cfg| cfg.get("force_text"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
-        depth: thread.config.depth,
+        depth: explicit_config
+            .as_ref()
+            .and_then(|cfg| cfg.get("depth"))
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(thread.config.depth),
         model: explicit_config
             .as_ref()
             .and_then(|cfg| cfg.get("model"))
