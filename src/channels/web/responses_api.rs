@@ -514,6 +514,22 @@ fn extract_user_content(input: &ResponsesInput) -> Result<ExtractedInput, String
 /// schemas. Mirrors the existing 10 KiB cap on `x_context`.
 const MAX_TOOLS_BYTES: usize = 16 * 1024;
 
+/// `io::Write` sink that counts bytes without storing them. Lets
+/// `serde_json::to_writer` measure the serialized size of the
+/// caller-supplied tool list against `MAX_TOOLS_BYTES` without
+/// allocating an intermediate `Vec<Value>` or `String`.
+struct ByteCounter(usize);
+
+impl std::io::Write for ByteCounter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 += buf.len();
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Validate and normalise the externally-provided tool list.
 ///
 /// Returns an error string on the first violation so the handler can surface a
@@ -522,25 +538,57 @@ fn validate_external_tools(tools: &[ResponsesTool]) -> Result<(), String> {
     if tools.is_empty() {
         return Ok(());
     }
-    let serialized_size = serde_json::to_string(
-        &tools
-            .iter()
-            .map(|t| {
-                serde_json::json!({
-                    "type": t.tool_type,
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.parameters,
-                })
-            })
-            .collect::<Vec<_>>(),
-    )
-    .map(|s| s.len())
-    // Fail closed: a serialization error means we can't measure the
-    // payload, so we must reject rather than wave it through. Treating
-    // the unknown size as `MAX + 1` falls into the size-cap branch
-    // below and surfaces a precise 400 to the caller.
-    .unwrap_or(MAX_TOOLS_BYTES + 1);
+    // Stream the payload through a counting writer instead of
+    // building a `Vec<Value>` + `String` just to call `.len()`. The
+    // closure mirrors the wire shape `serde` would produce for the
+    // tool array (`type`/`name`/`description`/`parameters`) so the
+    // count matches what the caller actually sent over the wire.
+    use serde::ser::{SerializeMap, SerializeSeq, Serializer};
+    struct ToolEntry<'a>(&'a ResponsesTool, usize);
+    impl serde::Serialize for ToolEntry<'_> {
+        fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+            let mut map = ser.serialize_map(Some(self.1))?;
+            map.serialize_entry("type", &self.0.tool_type)?;
+            if let Some(ref n) = self.0.name {
+                map.serialize_entry("name", n)?;
+            }
+            if let Some(ref d) = self.0.description {
+                map.serialize_entry("description", d)?;
+            }
+            if let Some(ref p) = self.0.parameters {
+                map.serialize_entry("parameters", p)?;
+            }
+            map.end()
+        }
+    }
+
+    let mut counter = ByteCounter(0);
+    let serialize_result = (|| -> Result<(), serde_json::Error> {
+        let mut ser = serde_json::Serializer::new(&mut counter);
+        let mut seq = ser.serialize_seq(Some(tools.len()))?;
+        for t in tools {
+            // 4 fields max: type, name, description, parameters. We
+            // skip absent optional fields so the count matches what
+            // `serde_json::to_string` would have produced.
+            let field_count = 1
+                + usize::from(t.name.is_some())
+                + usize::from(t.description.is_some())
+                + usize::from(t.parameters.is_some());
+            seq.serialize_element(&ToolEntry(t, field_count))?;
+        }
+        SerializeSeq::end(seq)?;
+        Ok(())
+    })();
+    // Fail closed: if the serialization stream errored we can't
+    // trust the byte count, so reject the request as if it had
+    // exceeded the cap. This is paranoia — `Value::Object` round-trips
+    // never error in practice — but keeps the size gate from
+    // silently waving through unmeasurable payloads.
+    let serialized_size = if serialize_result.is_ok() {
+        counter.0
+    } else {
+        MAX_TOOLS_BYTES + 1
+    };
     if serialized_size > MAX_TOOLS_BYTES {
         return Err(format!(
             "tools exceed {MAX_TOOLS_BYTES}-byte limit ({serialized_size} bytes)"
@@ -1613,7 +1661,13 @@ async fn streaming_worker(
                 } else {
                     content.clone()
                 };
-                if !text.is_empty() {
+                // Finalize whenever there's text to emit OR a message
+                // item is already in flight from prior StreamChunks. A
+                // mid-flight item that never receives `output_item.done`
+                // dangles in the OpenAI client's UI as "in progress"
+                // forever.
+                let needs_finalize = !text.is_empty() || message_output_index.is_some();
+                if needs_finalize {
                     let message_text = text.clone();
                     let idx = match message_output_index {
                         Some(i) => i,
@@ -1642,8 +1696,9 @@ async fn streaming_worker(
 
                     // Emit the full text as a delta so streaming clients
                     // receive it via response.output_text.delta, but only
-                    // when StreamChunks haven't already delivered the content.
-                    if acc.text_chunks.is_empty() {
+                    // when StreamChunks haven't already delivered the content
+                    // and there's actual text to deliver.
+                    if acc.text_chunks.is_empty() && !message_text.is_empty() {
                         emit(
                             &tx,
                             "response.output_text.delta",
@@ -2341,6 +2396,94 @@ mod tests {
         assert!(
             message_payload.contains("Looking up the weather."),
             "Message done frame missing concatenated stream text: {message_payload}"
+        );
+    }
+
+    /// Regression: if `StreamChunk`s create a Message item via
+    /// `output_item.added` and the terminal `Response` event resolves
+    /// to empty text (chunks were all empty, or the content vacuums
+    /// out somehow), the worker must still emit `output_item.done` for
+    /// the item it opened. Without this, OpenAI clients leave a
+    /// dangling "in-progress" message in the UI forever.
+    #[tokio::test]
+    async fn streaming_worker_finalizes_item_when_resolved_text_is_empty() {
+        use axum::response::Sse;
+        use axum::response::sse::KeepAlive;
+        use http_body_util::BodyExt;
+        use tokio_stream::wrappers::ReceiverStream;
+
+        let thread_id = "thread-stream-empty".to_string();
+        let (input_tx, input_rx) = tokio::sync::mpsc::channel::<AppEvent>(4);
+        let (out_tx, out_rx) = tokio::sync::mpsc::channel::<axum::response::sse::Event>(16);
+
+        let worker = tokio::spawn(streaming_worker(
+            out_tx,
+            ReceiverStream::new(input_rx),
+            "resp_empty_test".to_string(),
+            "test-model".to_string(),
+            thread_id.clone(),
+        ));
+
+        // An empty StreamChunk creates the Message item but contributes
+        // no text. Without it, message_output_index would stay None and
+        // the dangling-item bug couldn't manifest.
+        input_tx
+            .send(AppEvent::StreamChunk {
+                content: String::new(),
+                thread_id: Some(thread_id.clone()),
+            })
+            .await
+            .unwrap();
+        // Terminal Response with empty content. With the buggy gate
+        // (`!text.is_empty()`), the entire finalize block was skipped.
+        input_tx
+            .send(AppEvent::Response {
+                content: String::new(),
+                thread_id: thread_id.clone(),
+            })
+            .await
+            .unwrap();
+        drop(input_tx);
+
+        let response = Sse::new(ReceiverStream::new(out_rx).map(Ok::<_, Infallible>))
+            .keep_alive(KeepAlive::new().interval(Duration::from_secs(60)).text(""))
+            .into_response();
+        let bytes = tokio::time::timeout(Duration::from_secs(5), response.into_body().collect())
+            .await
+            .expect("body collected within timeout")
+            .expect("body bytes")
+            .to_bytes();
+        let text = std::str::from_utf8(&bytes).expect("utf8");
+        worker.await.expect("worker panicked");
+
+        let event_types: Vec<&str> = text
+            .split("\n\n")
+            .filter_map(|frame| {
+                frame
+                    .lines()
+                    .find_map(|line| line.strip_prefix("event:").map(|s| s.trim()))
+            })
+            .collect();
+
+        // Every `output_item.added` for a Message item must be paired
+        // with a matching `output_item.done`. If the dangling-item
+        // regression returns, `done_count < added_count`.
+        let added_count = event_types
+            .iter()
+            .filter(|t| **t == "response.output_item.added")
+            .count();
+        let done_count = event_types
+            .iter()
+            .filter(|t| **t == "response.output_item.done")
+            .count();
+        assert_eq!(
+            added_count, done_count,
+            "every output_item.added must be paired with output_item.done; \
+             frames seen: {event_types:?}"
+        );
+        assert!(
+            added_count >= 1,
+            "expected at least one output_item.added (from the StreamChunk), got: {event_types:?}"
         );
     }
 
