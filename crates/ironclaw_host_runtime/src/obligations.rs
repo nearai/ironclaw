@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fmt,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -410,7 +410,6 @@ pub struct ProcessObligationLifecycleStore {
     network_policies: Arc<NetworkObligationPolicyStore>,
     secret_injections: Arc<RuntimeSecretInjectionStore>,
     resource_governor: Arc<dyn ResourceGovernor>,
-    cleaned: Mutex<HashSet<ProcessLifecycleKey>>,
 }
 
 impl ProcessObligationLifecycleStore {
@@ -443,14 +442,7 @@ impl ProcessObligationLifecycleStore {
             network_policies,
             secret_injections,
             resource_governor,
-            cleaned: Mutex::new(HashSet::new()),
         }
-    }
-
-    fn cleaned_guard(&self) -> std::sync::MutexGuard<'_, HashSet<ProcessLifecycleKey>> {
-        self.cleaned
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Discards staged obligation handoffs and closes any reservation for an
@@ -485,11 +477,6 @@ impl ProcessObligationLifecycleStore {
         record: &ProcessRecord,
         reconcile: bool,
     ) -> Result<(), ProcessError> {
-        let key = ProcessLifecycleKey::new(&record.scope, record.process_id);
-        let mut cleaned = self.cleaned_guard();
-        if cleaned.contains(&key) {
-            return Ok(());
-        }
         self.network_policies
             .discard_for_capability(&record.scope, &record.capability_id);
         self.secret_injections
@@ -507,7 +494,6 @@ impl ProcessObligationLifecycleStore {
                 close_reservation_once(self.resource_governor.release(reservation_id))?;
             }
         }
-        cleaned.insert(key);
         Ok(())
     }
 }
@@ -571,31 +557,6 @@ fn close_reservation_once<T>(result: Result<T, ResourceError>) -> Result<(), Pro
         Err(ResourceError::ReservationClosed { .. }) => Ok(()),
         Err(ResourceError::UnknownReservation { .. }) => Ok(()),
         Err(error) => Err(error.into()),
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ProcessLifecycleKey {
-    tenant_id: String,
-    user_id: String,
-    agent_id: Option<String>,
-    project_id: Option<String>,
-    mission_id: Option<String>,
-    thread_id: Option<String>,
-    process_id: ProcessId,
-}
-
-impl ProcessLifecycleKey {
-    fn new(scope: &ResourceScope, process_id: ProcessId) -> Self {
-        Self {
-            tenant_id: scope.tenant_id.as_str().to_string(),
-            user_id: scope.user_id.as_str().to_string(),
-            agent_id: scope.agent_id.as_ref().map(|id| id.as_str().to_string()),
-            project_id: scope.project_id.as_ref().map(|id| id.as_str().to_string()),
-            mission_id: scope.mission_id.as_ref().map(|id| id.as_str().to_string()),
-            thread_id: scope.thread_id.as_ref().map(|id| id.as_str().to_string()),
-            process_id,
-        }
     }
 }
 

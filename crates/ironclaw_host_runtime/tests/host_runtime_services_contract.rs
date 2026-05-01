@@ -1392,6 +1392,100 @@ async fn spawned_obligation_lifecycle_cleans_handoffs_when_result_store_fail_fai
 }
 
 #[tokio::test]
+async fn spawned_obligation_lifecycle_reconciles_when_store_complete_fails_after_result_write() {
+    let reservation_id = ResourceReservationId::new();
+    let secret_handle = SecretHandle::new("api_token").unwrap();
+    let inner_process_store = Arc::new(FailingTerminalProcessStore::fail_complete());
+    let fixture = spawn_obligation_fixture_with_process_store_and_result_store(
+        reservation_id,
+        secret_handle.clone(),
+        BackgroundExecutor::success(),
+        Arc::clone(&inner_process_store),
+        Arc::new(InMemoryProcessResultStore::new()),
+    )
+    .await;
+
+    let process = fixture.spawn().await;
+    wait_for_process_store_attempt(&inner_process_store, "complete").await;
+    wait_for_no_reserved_processes(&fixture.governor).await;
+
+    let record = fixture
+        .process_store
+        .get(&fixture.scope, process.process_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.status, ProcessStatus::Running);
+    assert!(matches!(
+        fixture.governor.release(reservation_id).unwrap_err(),
+        ResourceError::ReservationClosed {
+            status: ReservationStatus::Reconciled,
+            ..
+        }
+    ));
+    assert!(
+        fixture
+            .network_policies
+            .take(&fixture.scope, &script_capability_id())
+            .is_none()
+    );
+    assert!(
+        fixture
+            .secret_injections
+            .take(&fixture.scope, &script_capability_id(), &secret_handle)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn spawned_obligation_lifecycle_releases_when_store_fail_fails_after_result_write() {
+    let reservation_id = ResourceReservationId::new();
+    let secret_handle = SecretHandle::new("api_token").unwrap();
+    let inner_process_store = Arc::new(FailingTerminalProcessStore::fail_fail());
+    let fixture = spawn_obligation_fixture_with_process_store_and_result_store(
+        reservation_id,
+        secret_handle.clone(),
+        BackgroundExecutor::failure("runtime_dispatch"),
+        Arc::clone(&inner_process_store),
+        Arc::new(InMemoryProcessResultStore::new()),
+    )
+    .await;
+
+    let process = fixture.spawn().await;
+    wait_for_process_store_attempt(&inner_process_store, "fail").await;
+    wait_for_no_reserved_processes(&fixture.governor).await;
+
+    let record = fixture
+        .process_store
+        .get(&fixture.scope, process.process_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.status, ProcessStatus::Running);
+    assert!(matches!(
+        fixture.governor.release(reservation_id).unwrap_err(),
+        ResourceError::ReservationClosed {
+            status: ReservationStatus::Released,
+            ..
+        }
+    ));
+    assert!(
+        fixture
+            .network_policies
+            .take(&fixture.scope, &script_capability_id())
+            .is_none()
+    );
+    assert!(
+        fixture
+            .secret_injections
+            .take(&fixture.scope, &script_capability_id(), &secret_handle)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn spawned_obligation_lifecycle_abort_cleans_up_when_process_start_fails() {
     let reservation_id = ResourceReservationId::new();
     let secret_handle = SecretHandle::new("api_token").unwrap();
@@ -1889,6 +1983,27 @@ async fn spawn_obligation_fixture_with_result_store<R>(
 where
     R: ProcessResultStore + 'static,
 {
+    spawn_obligation_fixture_with_process_store_and_result_store(
+        reservation_id,
+        secret_handle,
+        executor,
+        Arc::new(InMemoryProcessStore::new()),
+        result_store,
+    )
+    .await
+}
+
+async fn spawn_obligation_fixture_with_process_store_and_result_store<P, R>(
+    reservation_id: ResourceReservationId,
+    secret_handle: SecretHandle,
+    executor: BackgroundExecutor,
+    inner_process_store: Arc<P>,
+    result_store: Arc<R>,
+) -> SpawnObligationFixture
+where
+    P: ProcessStore + 'static,
+    R: ProcessResultStore + 'static,
+{
     let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
     let dispatcher = Arc::new(NoopDispatcher);
     let network_policies = Arc::new(NetworkObligationPolicyStore::new());
@@ -1930,7 +2045,7 @@ where
             },
         ]));
     let process_store = Arc::new(ProcessObligationLifecycleStore::new(
-        Arc::new(InMemoryProcessStore::new()),
+        inner_process_store,
         Arc::clone(&network_policies),
         Arc::clone(&secret_injections),
         governor.clone(),
@@ -1941,6 +2056,8 @@ where
             .with_result_store(result_store)
             .with_error_handler(move |failure| {
                 let reconcile = match failure.stage {
+                    BackgroundFailureStage::StoreComplete => true,
+                    BackgroundFailureStage::StoreFail => false,
                     BackgroundFailureStage::ResultStoreComplete => true,
                     BackgroundFailureStage::ResultStoreFail => false,
                     _ => return,
@@ -2024,6 +2141,99 @@ impl ProcessResultStore for FailingProcessResultStore {
         _process_id: ProcessId,
     ) -> Result<Option<ProcessResultRecord>, ProcessError> {
         Ok(None)
+    }
+}
+
+struct FailingTerminalProcessStore {
+    inner: InMemoryProcessStore,
+    fail_complete: bool,
+    fail_fail: bool,
+    attempts: std::sync::Mutex<Vec<&'static str>>,
+}
+
+impl FailingTerminalProcessStore {
+    fn fail_complete() -> Self {
+        Self {
+            inner: InMemoryProcessStore::new(),
+            fail_complete: true,
+            fail_fail: false,
+            attempts: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn fail_fail() -> Self {
+        Self {
+            inner: InMemoryProcessStore::new(),
+            fail_complete: false,
+            fail_fail: true,
+            attempts: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn attempts(&self) -> Vec<&'static str> {
+        self.attempts.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl ProcessStore for FailingTerminalProcessStore {
+    async fn start(
+        &self,
+        start: ProcessStart,
+    ) -> Result<ironclaw_processes::ProcessRecord, ProcessError> {
+        self.inner.start(start).await
+    }
+
+    async fn complete(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<ironclaw_processes::ProcessRecord, ProcessError> {
+        self.attempts.lock().unwrap().push("complete");
+        if self.fail_complete {
+            return Err(ProcessError::InvalidStoredRecord {
+                reason: "status complete failed".to_string(),
+            });
+        }
+        self.inner.complete(scope, process_id).await
+    }
+
+    async fn fail(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+        error_kind: String,
+    ) -> Result<ironclaw_processes::ProcessRecord, ProcessError> {
+        self.attempts.lock().unwrap().push("fail");
+        if self.fail_fail {
+            return Err(ProcessError::InvalidStoredRecord {
+                reason: "status fail failed".to_string(),
+            });
+        }
+        self.inner.fail(scope, process_id, error_kind).await
+    }
+
+    async fn kill(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<ironclaw_processes::ProcessRecord, ProcessError> {
+        self.inner.kill(scope, process_id).await
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<Option<ironclaw_processes::ProcessRecord>, ProcessError> {
+        self.inner.get(scope, process_id).await
+    }
+
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<ironclaw_processes::ProcessRecord>, ProcessError> {
+        self.inner.records_for_scope(scope).await
     }
 }
 
@@ -2131,6 +2341,19 @@ async fn wait_for_result_store_attempt(store: &FailingProcessResultStore, attemp
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     panic!("result store did not record {attempt} attempt");
+}
+
+async fn wait_for_process_store_attempt(
+    store: &FailingTerminalProcessStore,
+    attempt: &'static str,
+) {
+    for _ in 0..100 {
+        if store.attempts().contains(&attempt) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("process store did not record {attempt} attempt");
 }
 
 async fn wait_for_no_reserved_processes(governor: &InMemoryResourceGovernor) {

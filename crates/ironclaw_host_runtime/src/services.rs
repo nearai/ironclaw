@@ -316,6 +316,8 @@ where
             .with_result_store(self.process_services.result_store())
             .with_error_handler(move |failure| {
                 let reconcile = match failure.stage {
+                    BackgroundFailureStage::StoreComplete => true,
+                    BackgroundFailureStage::StoreFail => false,
                     BackgroundFailureStage::ResultStoreComplete => true,
                     BackgroundFailureStage::ResultStoreFail => false,
                     _ => return,
