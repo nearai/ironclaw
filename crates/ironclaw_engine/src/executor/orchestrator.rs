@@ -1849,6 +1849,10 @@ fn handle_emit_event(
                 params_summary: None,
             }
         }
+        "skill_llm_fallback_start" => {
+            debug!("skill selection: deterministic scorer found nothing, trying LLM fallback");
+            return ExtFunctionResult::Return(MontyObject::None);
+        }
         "skill_activated" => {
             let names_str = extract_string_kwarg(kwargs, "skill_names").unwrap_or_default();
             let skill_names: Vec<String> = names_str
@@ -2260,6 +2264,9 @@ fn handle_set_active_skills(args: &[MontyObject], thread: &mut Thread) -> ExtFun
     if let Err(e) = thread.set_active_skills(&skills) {
         debug!("__set_active_skills__: failed to persist active skills: {e}");
     }
+
+    let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+    debug!(skills = ?names, "skill selection: active skills set");
 
     ExtFunctionResult::Return(MontyObject::None)
 }

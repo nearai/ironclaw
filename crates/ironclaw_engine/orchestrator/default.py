@@ -986,6 +986,7 @@ def run_loop(context, goal, actions, state, config):
             # find nothing, ask a cheap LLM to pick from skills that have no
             # positive activation metadata. Mirrors v1 agent_loop.rs fallback.
             if not active_skills and not explicit_skills:
+                __emit_event__("skill_llm_fallback_start")
                 active_skills = select_skills_with_llm(
                     all_skills, goal, max_skills=3, max_tokens=6000,
                 )
