@@ -259,13 +259,14 @@ pub struct RuntimeCapabilityRequest {
     /// The host runtime still validates and forwards the key into
     /// observability spans for audit/tracing.
     pub idempotency_key: Option<IdempotencyKey>,
-    /// Host-controlled trust decision for the package providing this capability.
+    /// Legacy caller-supplied trust decision kept for transitional request-shape
+    /// compatibility.
     ///
-    /// The host evaluates trust against its own policy before constructing this
-    /// request — callers must not synthesize trust decisions or override the
-    /// host's policy. The decision flows through to the underlying capability
-    /// host so authorization, approval, and authority ceiling are derived from
-    /// the host-validated trust posture, not caller-asserted claims.
+    /// [`DefaultHostRuntime`](crate::DefaultHostRuntime) ignores this value: it
+    /// resolves the capability provider's package identity, evaluates the
+    /// host-owned policy, stamps the resulting effective trust onto the
+    /// execution context, and passes that host-owned decision to the capability
+    /// host. Callers must not rely on this field to widen or narrow authority.
     pub trust_decision: TrustDecision,
 }
 

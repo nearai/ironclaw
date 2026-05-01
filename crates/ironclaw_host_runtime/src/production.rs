@@ -7,8 +7,11 @@
 //! run-state and approval stores, capability-lease store, and process
 //! manager.
 //!
-//! Trust is not evaluated here: callers must supply a host-validated
-//! [`TrustDecision`](ironclaw_trust::TrustDecision) on each invocation.
+//! This layer evaluates the package's manifest-derived trust input immediately
+//! before invoking [`CapabilityHost`] so authorization consumes a host-owned
+//! [`TrustDecision`](ironclaw_trust::TrustDecision) instead of caller-supplied
+//! claims. The default empty policy fails closed until composition supplies a
+//! concrete host policy.
 
 use std::sync::Arc;
 
@@ -18,15 +21,17 @@ use ironclaw_capabilities::{
     CapabilityHost, CapabilityInvocationError, CapabilityInvocationRequest,
     CapabilityInvocationResult, CapabilityObligationHandler,
 };
-use ironclaw_extensions::ExtensionRegistry;
+use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry};
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityDispatcher, CapabilityId, InvocationId, ResourceScope, RuntimeKind,
+    ApprovalRequestId, CapabilityDispatcher, CapabilityId, InvocationId, PackageSource,
+    ResourceScope, RuntimeKind,
 };
 use ironclaw_processes::{
     ProcessCancellationRegistry, ProcessError, ProcessHost, ProcessManager, ProcessResultStore,
     ProcessStatus, ProcessStore,
 };
 use ironclaw_run_state::{ApprovalRequestStore, RunStateError, RunStateStore, RunStatus};
+use ironclaw_trust::{HostTrustPolicy, TrustDecision, TrustError, TrustPolicy, TrustProvenance};
 
 use crate::{
     BuiltinObligationHandler, BuiltinObligationServices, CancelRuntimeWorkOutcome,
@@ -42,6 +47,7 @@ pub struct DefaultHostRuntime {
     registry: Arc<ExtensionRegistry>,
     dispatcher: Arc<dyn CapabilityDispatcher>,
     authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer>,
+    trust_policy: Arc<dyn TrustPolicy>,
     run_state: Option<Arc<dyn RunStateStore>>,
     approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
     capability_leases: Option<Arc<dyn CapabilityLeaseStore>>,
@@ -56,6 +62,10 @@ pub struct DefaultHostRuntime {
 
 impl DefaultHostRuntime {
     /// Constructs a default host runtime over the supplied kernel services.
+    ///
+    /// The runtime starts with an empty host trust policy, so capability
+    /// dispatch fails closed until composition attaches a concrete policy with
+    /// [`Self::with_trust_policy`] or [`Self::with_trust_policy_dyn`].
     ///
     /// Callers must additionally attach a run-state store and approval-
     /// request store via [`with_run_state`](Self::with_run_state) and
@@ -75,6 +85,7 @@ impl DefaultHostRuntime {
             registry,
             dispatcher,
             authorizer,
+            trust_policy: Arc::new(HostTrustPolicy::empty()),
             run_state: None,
             approval_requests: None,
             capability_leases: None,
@@ -86,6 +97,22 @@ impl DefaultHostRuntime {
             obligation_handler: None,
             surface_version,
         }
+    }
+
+    /// Attaches the host-owned trust policy used to evaluate each provider's
+    /// manifest-derived trust input immediately before capability dispatch.
+    pub fn with_trust_policy<T>(mut self, trust_policy: Arc<T>) -> Self
+    where
+        T: TrustPolicy + 'static,
+    {
+        self.trust_policy = trust_policy;
+        self
+    }
+
+    /// Attaches an already-erased host-owned trust policy.
+    pub fn with_trust_policy_dyn(mut self, trust_policy: Arc<dyn TrustPolicy>) -> Self {
+        self.trust_policy = trust_policy;
+        self
     }
 
     /// Attaches the run-state store used to record invocation lifecycle.
@@ -194,16 +221,20 @@ impl HostRuntime for DefaultHostRuntime {
         &self,
         request: RuntimeCapabilityRequest,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-        let scope = request.context.resource_scope.clone();
-        let invocation_id = request.context.invocation_id;
-        let capability_id = request.capability_id.clone();
+        let RuntimeCapabilityRequest {
+            mut context,
+            capability_id,
+            estimate,
+            input,
+            idempotency_key,
+            trust_decision: _caller_trust_decision,
+        } = request;
+        let scope = context.resource_scope.clone();
+        let invocation_id = context.invocation_id;
         // Forward the (currently advisory) idempotency key into spans for
         // audit/tracing only — dedupe enforcement is not yet implemented at
         // this layer (see `RuntimeCapabilityRequest::idempotency_key`).
-        let idempotency_key = request
-            .idempotency_key
-            .as_ref()
-            .map(|key| key.as_str().to_string());
+        let idempotency_key = idempotency_key.map(|key| key.as_str().to_string());
         if let Some(key) = idempotency_key.as_deref() {
             tracing::debug!(
                 capability_id = %capability_id,
@@ -211,6 +242,19 @@ impl HostRuntime for DefaultHostRuntime {
                 "capability invocation accepted advisory idempotency key (not yet enforced)"
             );
         }
+
+        let trust_decision = match self.evaluate_invocation_trust(&capability_id) {
+            Ok(host_decision) => host_decision,
+            Err(error) => {
+                tracing::debug!(
+                    capability_id = %capability_id,
+                    trust_error_kind = error.kind(),
+                    "capability trust evaluation failed before dispatch"
+                );
+                return Ok(trust_evaluation_failure(capability_id, error));
+            }
+        };
+        context.trust = trust_decision.effective_trust.class();
 
         let mut host = CapabilityHost::new(
             self.registry.as_ref(),
@@ -234,11 +278,11 @@ impl HostRuntime for DefaultHostRuntime {
         }
 
         let invocation = CapabilityInvocationRequest {
-            context: request.context,
+            context,
             capability_id: capability_id.clone(),
-            estimate: request.estimate,
-            input: request.input,
-            trust_decision: request.trust_decision,
+            estimate,
+            input,
+            trust_decision,
         };
 
         match host.invoke_json(invocation).await {
@@ -433,6 +477,45 @@ impl HostRuntime for DefaultHostRuntime {
 }
 
 impl DefaultHostRuntime {
+    fn evaluate_invocation_trust(
+        &self,
+        capability_id: &CapabilityId,
+    ) -> Result<TrustDecision, TrustEvaluationError> {
+        let policy = self.trust_policy.as_ref();
+
+        let descriptor = self
+            .registry
+            .get_capability(capability_id)
+            .ok_or(TrustEvaluationError::UnknownCapability)?;
+        let package = self
+            .registry
+            .get_extension(&descriptor.provider)
+            .ok_or(TrustEvaluationError::MissingPackage)?;
+        let package_descriptor = package
+            .capabilities
+            .iter()
+            .find(|candidate| candidate.id == *capability_id)
+            .ok_or(TrustEvaluationError::StalePackageDescriptor)?;
+        if package_descriptor != descriptor {
+            return Err(TrustEvaluationError::ConflictingPackageDescriptor);
+        }
+
+        let input = trust_policy_input_for_local_manifest(package)?;
+        let decision = match policy.evaluate(&input) {
+            Ok(decision) => decision,
+            Err(error) => {
+                tracing::debug!(
+                    capability_id = %capability_id,
+                    trust_policy_error_kind = trust_error_label(&error),
+                    "host trust policy evaluation returned an error"
+                );
+                return Err(TrustEvaluationError::Policy);
+            }
+        };
+        trace_trust_decision(capability_id, &decision);
+        Ok(decision)
+    }
+
     async fn translate_invocation_error(
         &self,
         error: CapabilityInvocationError,
@@ -491,6 +574,107 @@ impl DefaultHostRuntime {
             .await
             .map_err(unavailable_from_run_state)?;
         Ok(record.and_then(|record| record.approval_request_id))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TrustEvaluationError {
+    UnknownCapability,
+    MissingPackage,
+    StalePackageDescriptor,
+    ConflictingPackageDescriptor,
+    TrustInput,
+    Policy,
+}
+
+impl TrustEvaluationError {
+    const fn kind(self) -> &'static str {
+        match self {
+            Self::UnknownCapability => "unknown_capability",
+            Self::MissingPackage => "missing_package",
+            Self::StalePackageDescriptor => "stale_package_descriptor",
+            Self::ConflictingPackageDescriptor => "conflicting_package_descriptor",
+            Self::TrustInput => "trust_input",
+            Self::Policy => "policy",
+        }
+    }
+
+    const fn message(self) -> &'static str {
+        match self {
+            Self::UnknownCapability => "unknown capability",
+            Self::MissingPackage => "capability provider trust metadata is missing",
+            Self::StalePackageDescriptor | Self::ConflictingPackageDescriptor => {
+                "capability provider trust metadata is stale"
+            }
+            Self::TrustInput => "capability provider trust metadata is invalid",
+            Self::Policy => "capability provider trust policy evaluation failed",
+        }
+    }
+}
+
+fn trust_policy_input_for_local_manifest(
+    package: &ExtensionPackage,
+) -> Result<ironclaw_trust::TrustPolicyInput, TrustEvaluationError> {
+    package
+        .trust_policy_input(local_manifest_source(package), None, None)
+        .map_err(|_| TrustEvaluationError::TrustInput)
+}
+
+fn local_manifest_source(package: &ExtensionPackage) -> PackageSource {
+    PackageSource::LocalManifest {
+        path: format!(
+            "{}/manifest.toml",
+            package.root.as_str().trim_end_matches('/')
+        ),
+    }
+}
+
+fn trace_trust_decision(capability_id: &CapabilityId, decision: &TrustDecision) {
+    tracing::debug!(
+        capability_id = %capability_id,
+        effective_trust = ?decision.effective_trust.class(),
+        trust_provenance = trust_provenance_label(&decision.provenance),
+        trust_allowed_effect_count = decision.authority_ceiling.allowed_effects.len(),
+        trust_has_resource_ceiling = decision.authority_ceiling.max_resource_ceiling.is_some(),
+        "evaluated capability provider trust from host policy"
+    );
+}
+
+fn trust_provenance_label(provenance: &TrustProvenance) -> &'static str {
+    match provenance {
+        TrustProvenance::Default => "default",
+        TrustProvenance::Bundled => "bundled",
+        TrustProvenance::AdminConfig => "admin_config",
+        TrustProvenance::SignedRegistry { .. } => "signed_registry",
+        TrustProvenance::LocalManifest => "local_manifest",
+    }
+}
+
+fn trust_error_label(error: &TrustError) -> &'static str {
+    match error {
+        TrustError::InvariantViolation { .. } => "invariant_violation",
+    }
+}
+
+fn trust_evaluation_failure(
+    capability_id: CapabilityId,
+    error: TrustEvaluationError,
+) -> RuntimeCapabilityOutcome {
+    RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure {
+        capability_id,
+        kind: trust_evaluation_failure_kind(error),
+        message: Some(error.message().to_string()),
+    })
+}
+
+fn trust_evaluation_failure_kind(error: TrustEvaluationError) -> RuntimeFailureKind {
+    match error {
+        TrustEvaluationError::UnknownCapability => RuntimeFailureKind::MissingRuntime,
+        TrustEvaluationError::MissingPackage
+        | TrustEvaluationError::StalePackageDescriptor
+        | TrustEvaluationError::ConflictingPackageDescriptor
+        | TrustEvaluationError::TrustInput
+        | TrustEvaluationError::Policy => RuntimeFailureKind::Authorization,
     }
 }
 

@@ -21,7 +21,10 @@ use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceGovernor, ResourceTally,
 };
 use ironclaw_run_state::{InMemoryRunStateStore, RunStateStore, RunStatus};
-use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
+use ironclaw_trust::{
+    AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
+    HostTrustPolicy, TrustDecision, TrustProvenance,
+};
 use serde_json::{Value, json};
 
 #[tokio::test]
@@ -37,6 +40,7 @@ async fn default_host_runtime_invokes_through_runtime_dispatcher_with_resources_
         authorizer.clone(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy()))
     .with_run_state(run_state.clone());
     let context = execution_context(CapabilitySet {
         grants: vec![dispatch_grant()],
@@ -331,6 +335,20 @@ fn dispatch_grant() -> CapabilityGrant {
             max_invocations: None,
         },
     }
+}
+
+fn local_manifest_trust_policy() -> HostTrustPolicy {
+    HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries(vec![
+        AdminEntry::for_local_manifest(
+            PackageId::new("echo").unwrap(),
+            "/system/extensions/echo/manifest.toml".to_string(),
+            None,
+            HostTrustAssignment::user_trusted(),
+            vec![EffectKind::DispatchCapability],
+            None,
+        ),
+    ]))])
+    .unwrap()
 }
 
 fn trust_decision() -> TrustDecision {
