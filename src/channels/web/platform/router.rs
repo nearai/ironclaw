@@ -605,13 +605,11 @@ fn legal_routes() -> LegalRouter {
     axum::Router::new()
         .route(
             "/api/skills/legal/projects",
-            get(legal_handlers::list_projects_handler)
-                .post(legal_handlers::create_project_handler),
+            get(legal_handlers::list_projects_handler).post(legal_handlers::create_project_handler),
         )
         .route(
             "/api/skills/legal/projects/{id}",
-            get(legal_handlers::get_project_handler)
-                .delete(legal_handlers::delete_project_handler),
+            get(legal_handlers::get_project_handler).delete(legal_handlers::delete_project_handler),
         )
         .route(
             "/api/skills/legal/projects/{id}/documents",

@@ -19,7 +19,7 @@ pub(crate) mod jobs;
 // returns `DatabaseError::Unsupported` when the active backend is
 // Postgres, which the handlers surface as 501. Streams B (chat) and
 // C (DOCX export) extend this same module.
-pub(crate) mod legal;
+pub mod legal;
 pub(crate) mod logs;
 pub(crate) mod oauth;
 pub(crate) mod pairing;

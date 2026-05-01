@@ -16,15 +16,13 @@
 use std::sync::Arc;
 
 use ironclaw::channels::web::features::legal::{blobs, extract, store};
-use ironclaw::db::libsql::LibSqlBackend;
 use ironclaw::db::Database;
+use ironclaw::db::libsql::LibSqlBackend;
 
 async fn setup() -> (Arc<dyn Database>, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("create temp dir");
     let db_path = dir.path().join("legal.db");
-    let backend = LibSqlBackend::new_local(&db_path)
-        .await
-        .expect("create db");
+    let backend = LibSqlBackend::new_local(&db_path).await.expect("create db");
     backend.run_migrations().await.expect("run migrations");
     let db: Arc<dyn Database> = Arc::new(backend);
     (db, dir)
@@ -340,9 +338,7 @@ async fn blob_write_dedupes_on_disk() {
     assert_eq!(rel1, rel2);
 
     // Read back.
-    let read = blobs::read_blob(dir.path(), &sha_a)
-        .await
-        .expect("read");
+    let read = blobs::read_blob(dir.path(), &sha_a).await.expect("read");
     assert_eq!(read, bytes_a);
 
     // Different bytes -> different sha -> different path.
@@ -415,8 +411,8 @@ fn build_docx_with(document_xml: &str) -> Vec<u8> {
     {
         let cursor = std::io::Cursor::new(&mut buf);
         let mut zip = zip::ZipWriter::new(cursor);
-        let opts = SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
+        let opts =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
         zip.start_file("word/document.xml", opts).expect("entry");
         zip.write_all(document_xml.as_bytes()).expect("write xml");
         zip.finish().expect("finish zip");

@@ -22,9 +22,7 @@ use super::models::{LegalDocument, LegalProject};
 /// return `Unsupported`. Centralising the cast here keeps the not-supported
 /// error message identical at every call site so route handlers can map
 /// it onto a single 501 response.
-fn libsql<'a>(
-    db: &'a Arc<dyn Database>,
-) -> Result<&'a crate::db::libsql::LibSqlBackend, DatabaseError> {
+fn libsql(db: &Arc<dyn Database>) -> Result<&crate::db::libsql::LibSqlBackend, DatabaseError> {
     crate::db::libsql_backend(db).ok_or_else(|| {
         DatabaseError::Unsupported(
             "Legal harness currently requires the libSQL backend".to_string(),
@@ -256,7 +254,8 @@ pub async fn create_document(
             // otherwise the caller sees the original failure.
             if let Some(existing) = find_document_by_sha_inner(&conn, project_id, sha256).await? {
                 tracing::debug!(
-                    project_id, sha256,
+                    project_id,
+                    sha256,
                     "legal_documents insert lost dedupe race; returning existing row",
                 );
                 Ok(DocumentInsert::DuplicateExisting(existing))

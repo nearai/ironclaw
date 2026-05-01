@@ -45,6 +45,7 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// Return the directory under the data dir where legal blobs live.
+#[allow(dead_code)]
 pub fn blobs_root(data_dir: &Path) -> PathBuf {
     data_dir.join("legal").join("blobs")
 }
@@ -84,11 +85,7 @@ pub fn absolute_path(data_dir: &Path, sha256: &str) -> Result<PathBuf, BlobError
 /// in-flight write. A second `rename` may fail because the destination
 /// already exists from the first writer; we treat that as success because
 /// content-addressing means both writers had byte-identical data.
-pub async fn write_blob(
-    data_dir: &Path,
-    sha256: &str,
-    bytes: &[u8],
-) -> Result<PathBuf, BlobError> {
+pub async fn write_blob(data_dir: &Path, sha256: &str, bytes: &[u8]) -> Result<PathBuf, BlobError> {
     let abs = absolute_path(data_dir, sha256)?;
     let rel = relative_path(sha256)?;
     if let Some(parent) = abs.parent() {

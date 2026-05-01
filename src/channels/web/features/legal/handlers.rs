@@ -61,7 +61,7 @@ const ACCEPTED_CONTENT_TYPES: &[&str] = &[
 
 /// Common error body returned on failures.
 #[derive(Debug, Serialize)]
-struct ErrorBody {
+pub struct ErrorBody {
     error: String,
 }
 
@@ -71,15 +71,11 @@ fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<ErrorBod
 
 fn db_err(context: &str, e: DatabaseError) -> (StatusCode, Json<ErrorBody>) {
     match e {
-        DatabaseError::Unsupported(_) => err(
-            StatusCode::NOT_IMPLEMENTED,
-            format!("{context}: {e}"),
-        ),
+        DatabaseError::Unsupported(_) => {
+            err(StatusCode::NOT_IMPLEMENTED, format!("{context}: {e}"))
+        }
         DatabaseError::NotFound { .. } => err(StatusCode::NOT_FOUND, format!("{context}: {e}")),
-        _ => err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{context}: {e}"),
-        ),
+        _ => err(StatusCode::INTERNAL_SERVER_ERROR, format!("{context}: {e}")),
     }
 }
 
@@ -370,7 +366,9 @@ pub async fn upload_document_handler(
     // Inline extraction. If extraction fails we still want the upload to
     // succeed: text-less documents are useful for download and the chat
     // skill can degrade gracefully.
-    let extracted = extract::extract(&content_type, &safe_filename, &bytes).await.ok();
+    let extracted = extract::extract(&content_type, &safe_filename, &bytes)
+        .await
+        .ok();
     let (text, page_count) = match extracted {
         Some(e) => (Some(e.text), e.page_count),
         None => (None, None),
@@ -455,12 +453,9 @@ pub async fn get_document_blob_handler(
     let doc: LegalDocument = fetch_active_document(db, &id).await?;
 
     let data_dir = crate::bootstrap::ironclaw_base_dir();
-    let bytes = blobs::read_blob(&data_dir, &doc.sha256).await.map_err(|e| {
-        err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("blob read: {e}"),
-        )
-    })?;
+    let bytes = blobs::read_blob(&data_dir, &doc.sha256)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("blob read: {e}")))?;
 
     let safe_filename = sanitise_filename_for_disposition(&doc.filename);
 

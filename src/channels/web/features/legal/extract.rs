@@ -37,7 +37,11 @@ pub enum ExtractError {
 
 /// Probe the bytes/declared content type and pick a parser. Falls back to
 /// magic-byte sniffing when the client lies about the mime.
-pub async fn extract(content_type: &str, filename: &str, bytes: &[u8]) -> Result<Extracted, ExtractError> {
+pub async fn extract(
+    content_type: &str,
+    filename: &str,
+    bytes: &[u8],
+) -> Result<Extracted, ExtractError> {
     let kind = sniff(content_type, filename, bytes);
     match kind {
         DocKind::Pdf => extract_pdf(bytes.to_vec()).await,
@@ -56,30 +60,29 @@ enum DocKind {
 }
 
 const PDF_MAGIC: &[u8] = b"%PDF-";
-const ZIP_MAGIC: &[u8] = b"PK\x03\x04";
 
 fn sniff(content_type: &str, filename: &str, bytes: &[u8]) -> DocKind {
-    let ext = filename.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    let ext = filename
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
     let ct = content_type.trim().to_ascii_lowercase();
 
     if bytes.starts_with(PDF_MAGIC) || ct == "application/pdf" || ext == "pdf" {
         return DocKind::Pdf;
     }
-    let docx_ct =
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-    if ct == docx_ct
-        || ext == "docx"
-        // OOXML packages are zip archives: trust the extension/mime and
-        // verify the zip signature, but never trust an arbitrary zip.
-        || (bytes.starts_with(ZIP_MAGIC) && (ext == "docx" || ct == docx_ct))
-    {
+    let docx_ct = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    // OOXML packages are zip archives, but we never trust an arbitrary zip
+    // — match only when the caller has declared docx via mime or extension.
+    if ct == docx_ct || ext == "docx" {
         return DocKind::Docx;
     }
     DocKind::Unknown
 }
 
 async fn extract_pdf(bytes: Vec<u8>) -> Result<Extracted, ExtractError> {
-    let join = tokio::task::spawn_blocking(move || -> Result<Extracted, ExtractError> {
+    tokio::task::spawn_blocking(move || -> Result<Extracted, ExtractError> {
         let text = pdf_extract::extract_text_from_mem(&bytes)
             .map_err(|e| ExtractError::Pdf(e.to_string()))?;
         let page_count = count_pdf_pages(&bytes);
@@ -88,8 +91,7 @@ async fn extract_pdf(bytes: Vec<u8>) -> Result<Extracted, ExtractError> {
             page_count,
         })
     })
-    .await?;
-    join
+    .await?
 }
 
 /// Best-effort page-count using `pdf-extract`'s public API. The crate
@@ -113,7 +115,7 @@ fn count_pdf_pages(bytes: &[u8]) -> Option<i64> {
 const DOCX_XML_MAX_BYTES: u64 = 32 * 1024 * 1024;
 
 async fn extract_docx(bytes: Vec<u8>) -> Result<Extracted, ExtractError> {
-    let join = tokio::task::spawn_blocking(move || -> Result<Extracted, ExtractError> {
+    tokio::task::spawn_blocking(move || -> Result<Extracted, ExtractError> {
         let cursor = std::io::Cursor::new(&bytes);
         let mut zip = zip::ZipArchive::new(cursor)
             .map_err(|e| ExtractError::Docx(format!("zip open: {e}")))?;
@@ -152,16 +154,15 @@ async fn extract_docx(bytes: Vec<u8>) -> Result<Extracted, ExtractError> {
             page_count: None,
         })
     })
-    .await?;
-    join
+    .await?
 }
 
 /// Walk `word/document.xml` and concatenate the text inside `<w:t>` runs.
 /// Paragraph breaks (`<w:p>` end) become blank lines so downstream RAG
 /// chunks line up with logical paragraphs.
 fn xml_to_text(xml: &str) -> Result<String, ExtractError> {
-    use quick_xml::events::Event;
     use quick_xml::Reader;
+    use quick_xml::events::Event;
 
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
@@ -259,7 +260,10 @@ mod tests {
     #[test]
     fn sniff_prefers_pdf_magic() {
         let bytes = b"%PDF-1.5\n...";
-        assert_eq!(sniff("application/octet-stream", "x.bin", bytes), DocKind::Pdf);
+        assert_eq!(
+            sniff("application/octet-stream", "x.bin", bytes),
+            DocKind::Pdf
+        );
     }
 
     #[test]
