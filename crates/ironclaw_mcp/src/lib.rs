@@ -289,6 +289,25 @@ struct McpHostHttpClientState {
     session_ids: Mutex<HashMap<McpHostHttpSessionKey, String>>,
 }
 
+struct McpHostHttpSessionCleanup {
+    state: Arc<McpHostHttpClientState>,
+    session_key: McpHostHttpSessionKey,
+}
+
+impl McpHostHttpSessionCleanup {
+    fn new(state: Arc<McpHostHttpClientState>, session_key: McpHostHttpSessionKey) -> Self {
+        Self { state, session_key }
+    }
+}
+
+impl Drop for McpHostHttpSessionCleanup {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.state.session_ids.lock() {
+            guard.remove(&self.session_key);
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct McpHostHttpSessionKey {
     tenant_id: String,
@@ -341,13 +360,13 @@ where
     fn send_json_rpc(
         &self,
         request: &McpClientRequest,
+        session_key: &McpHostHttpSessionKey,
         id: Option<u64>,
         method: &str,
         params: Option<Value>,
     ) -> Result<McpJsonRpcExchange, String> {
         let url = request.url.as_deref().ok_or_else(request_denied)?;
         let body = encode_json_rpc_request(id, method, params)?;
-        let session_key = McpHostHttpSessionKey::new(&request.scope, &request.provider, url);
         let mut headers = vec![
             ("Content-Type".to_string(), "application/json".to_string()),
             (
@@ -355,7 +374,7 @@ where
                 "application/json, text/event-stream".to_string(),
             ),
         ];
-        if let Some(session_id) = self.current_session_id(&session_key)? {
+        if let Some(session_id) = self.current_session_id(session_key)? {
             headers.push(("Mcp-Session-Id".to_string(), session_id));
         }
 
@@ -387,11 +406,15 @@ where
             })
             .map_err(mcp_client_http_error)?;
 
-        self.capture_session_id(&session_key, &response)?;
         let usage = ResourceUsage {
             network_egress_bytes: response.request_bytes,
             ..ResourceUsage::default()
         };
+
+        if !(200..300).contains(&response.status) {
+            return Err(response_error());
+        }
+        self.capture_session_id(session_key, &response)?;
 
         if response.status == 202 && id.is_none() {
             return Ok(McpJsonRpcExchange {
@@ -401,9 +424,6 @@ where
                 },
                 usage,
             });
-        }
-        if !(200..300).contains(&response.status) {
-            return Err(response_error());
         }
 
         Ok(McpJsonRpcExchange {
@@ -467,9 +487,15 @@ where
             return Err(request_denied());
         }
 
+        let url = request.url.as_deref().ok_or_else(request_denied)?;
+        let session_key = McpHostHttpSessionKey::new(&request.scope, &request.provider, url);
+        let _session_cleanup =
+            McpHostHttpSessionCleanup::new(Arc::clone(&self.state), session_key.clone());
+
         let mut usage = ResourceUsage::default();
         let initialize = self.send_json_rpc(
             &request,
+            &session_key,
             Some(self.next_request_id()),
             "initialize",
             Some(json_rpc_initialize_params()),
@@ -479,7 +505,13 @@ where
             return Err(response_error());
         }
 
-        let initialized = self.send_json_rpc(&request, None, "notifications/initialized", None)?;
+        let initialized = self.send_json_rpc(
+            &request,
+            &session_key,
+            None,
+            "notifications/initialized",
+            None,
+        )?;
         accumulate_usage(&mut usage, initialized.usage);
         if initialized.response.error {
             return Err(response_error());
@@ -488,6 +520,7 @@ where
         let tool_name = mcp_tool_name(&request.provider, &request.capability_id);
         let call = self.send_json_rpc(
             &request,
+            &session_key,
             Some(self.next_request_id()),
             "tools/call",
             Some(serde_json::json!({

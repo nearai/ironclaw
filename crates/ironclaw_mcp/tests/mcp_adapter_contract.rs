@@ -282,6 +282,124 @@ async fn concrete_mcp_http_client_scopes_session_ids_per_invocation() {
 }
 
 #[tokio::test]
+async fn concrete_mcp_http_client_clears_session_ids_between_calls() {
+    let egress = ScopedSessionRuntimeEgress::new();
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(egress.clone())),
+        StaticMcpHostHttpEgressPlanner::new(host_http_plan()),
+    );
+    let scope = sample_scope();
+
+    for query in ["first", "second"] {
+        client
+            .call_tool(McpClientRequest {
+                provider: ExtensionId::new("github-mcp").unwrap(),
+                capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+                scope: scope.clone(),
+                transport: "http".to_string(),
+                command: None,
+                args: vec![],
+                url: Some("https://mcp.example.test/mcp".to_string()),
+                input: json!({"query": query}),
+                max_output_bytes: 4096,
+            })
+            .await
+            .unwrap();
+    }
+
+    let requests = egress.requests();
+    let initialize_requests = requests
+        .iter()
+        .filter(|request| json_rpc_method(&request.body) == "initialize")
+        .collect::<Vec<_>>();
+    assert_eq!(initialize_requests.len(), 2);
+    assert!(initialize_requests.iter().all(|request| {
+        !request
+            .headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("Mcp-Session-Id"))
+    }));
+}
+
+#[tokio::test]
+async fn concrete_mcp_http_client_does_not_reuse_session_from_failed_initialize() {
+    let egress = ErrorSessionRuntimeEgress::new();
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(egress.clone())),
+        StaticMcpHostHttpEgressPlanner::new(host_http_plan()),
+    );
+    let scope = sample_scope();
+
+    let error = client
+        .call_tool(McpClientRequest {
+            provider: ExtensionId::new("github-mcp").unwrap(),
+            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+            scope: scope.clone(),
+            transport: "http".to_string(),
+            command: None,
+            args: vec![],
+            url: Some("https://mcp.example.test/mcp".to_string()),
+            input: json!({"query": "first"}),
+            max_output_bytes: 4096,
+        })
+        .await
+        .expect_err("failed initialize responses must fail the call");
+    assert_eq!(error, "response_error");
+
+    client
+        .call_tool(McpClientRequest {
+            provider: ExtensionId::new("github-mcp").unwrap(),
+            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+            scope,
+            transport: "http".to_string(),
+            command: None,
+            args: vec![],
+            url: Some("https://mcp.example.test/mcp".to_string()),
+            input: json!({"query": "second"}),
+            max_output_bytes: 4096,
+        })
+        .await
+        .unwrap();
+
+    let requests = egress.requests();
+    let initialize_requests = requests
+        .iter()
+        .filter(|request| json_rpc_method(&request.body) == "initialize")
+        .collect::<Vec<_>>();
+    assert_eq!(initialize_requests.len(), 2);
+    assert!(initialize_requests.iter().all(|request| {
+        !request.headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("Mcp-Session-Id") && value == "session-from-error"
+        })
+    }));
+}
+
+#[tokio::test]
+async fn concrete_mcp_http_client_rejects_json_rpc_response_without_matching_id() {
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(MissingIdRuntimeEgress)),
+        StaticMcpHostHttpEgressPlanner::new(host_http_plan()),
+    );
+
+    let error = client
+        .call_tool(McpClientRequest {
+            provider: ExtensionId::new("github-mcp").unwrap(),
+            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+            scope: sample_scope(),
+            transport: "http".to_string(),
+            command: None,
+            args: vec![],
+            url: Some("https://mcp.example.test/mcp".to_string()),
+            input: json!({"query": "ironclaw"}),
+            max_output_bytes: 4096,
+        })
+        .await
+        .expect_err("ID-bearing JSON-RPC requests must reject missing response ids");
+
+    assert_eq!(error, "response_error");
+}
+
+#[tokio::test]
 async fn mcp_runtime_with_concrete_http_client_consumes_shared_egress_end_to_end() {
     let package = package_from_manifest(MCP_MANIFEST);
     let egress = RecordingRuntimeEgress::json_rpc();
@@ -1060,6 +1178,113 @@ impl RuntimeHttpEgress for InvalidSessionRuntimeEgress {
                 "bad\r\nInjected: yes".to_string(),
             )],
         ))
+    }
+}
+
+#[derive(Debug)]
+struct MissingIdRuntimeEgress;
+
+impl RuntimeHttpEgress for MissingIdRuntimeEgress {
+    fn execute(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        match json_rpc_method(&request.body).as_str() {
+            "initialize" => Ok(runtime_json_response(
+                json_rpc_id(&request.body),
+                json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {"listChanged": false}},
+                    "serverInfo": {"name": "mock-mcp", "version": "1.0.0"}
+                }),
+                vec![],
+            )),
+            "notifications/initialized" => Ok(RuntimeHttpEgressResponse {
+                status: 202,
+                headers: vec![],
+                body: vec![],
+                request_bytes: request.body.len() as u64,
+                response_bytes: 0,
+                redaction_applied: false,
+            }),
+            "tools/call" => Ok(runtime_json_response(
+                None,
+                json!({"content":[{"type":"text","text":"missing id"}],"isError":false}),
+                vec![],
+            )),
+            other => panic!("unexpected MCP JSON-RPC method {other}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ErrorSessionRuntimeEgress {
+    requests: Arc<Mutex<Vec<RuntimeHttpEgressRequest>>>,
+    initialize_count: Arc<Mutex<u32>>,
+}
+
+impl ErrorSessionRuntimeEgress {
+    fn new() -> Self {
+        Self {
+            requests: Arc::new(Mutex::new(Vec::new())),
+            initialize_count: Arc::new(Mutex::new(0)),
+        }
+    }
+
+    fn requests(&self) -> Vec<RuntimeHttpEgressRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+impl RuntimeHttpEgress for ErrorSessionRuntimeEgress {
+    fn execute(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        let method = json_rpc_method(&request.body);
+        self.requests.lock().unwrap().push(request.clone());
+        match method.as_str() {
+            "initialize" => {
+                let mut initialize_count = self.initialize_count.lock().unwrap();
+                *initialize_count += 1;
+                if *initialize_count == 1 {
+                    return Ok(RuntimeHttpEgressResponse {
+                        status: 500,
+                        headers: vec![(
+                            "Mcp-Session-Id".to_string(),
+                            "session-from-error".to_string(),
+                        )],
+                        body: b"server error".to_vec(),
+                        request_bytes: request.body.len() as u64,
+                        response_bytes: "server error".len() as u64,
+                        redaction_applied: false,
+                    });
+                }
+                Ok(runtime_json_response(
+                    json_rpc_id(&request.body),
+                    json!({
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {"tools": {"listChanged": false}},
+                        "serverInfo": {"name": "mock-mcp", "version": "1.0.0"}
+                    }),
+                    vec![("Mcp-Session-Id".to_string(), "session-good".to_string())],
+                ))
+            }
+            "notifications/initialized" => Ok(RuntimeHttpEgressResponse {
+                status: 202,
+                headers: vec![],
+                body: vec![],
+                request_bytes: request.body.len() as u64,
+                response_bytes: 0,
+                redaction_applied: false,
+            }),
+            "tools/call" => Ok(runtime_json_response(
+                json_rpc_id(&request.body),
+                json!({"content":[{"type":"text","text":"ok"}],"isError":false}),
+                vec![],
+            )),
+            other => panic!("unexpected MCP JSON-RPC method {other}"),
+        }
     }
 }
 
