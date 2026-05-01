@@ -77,9 +77,13 @@ impl QuickSources {
             .map(PathBuf::from)
             .unwrap_or_else(crate::config::default_libsql_path);
 
-        let config_path = config_override
-            .map(PathBuf::from)
-            .unwrap_or_else(crate::settings::Settings::default_toml_path);
+        // Use compute_ironclaw_base_dir() (env-reading) instead of
+        // Settings::default_toml_path() (LazyLock-cached) so a process-level
+        // IRONCLAW_BASE_DIR override is honored at command time. Matches the
+        // env-reading behavior of LIBSQL_PATH above for consistency.
+        let config_path = config_override.map(PathBuf::from).unwrap_or_else(|| {
+            crate::bootstrap::compute_ironclaw_base_dir().join("config.toml")
+        });
 
         Self {
             db_path,
@@ -183,8 +187,13 @@ async fn checkpoint_wal(db_path: &Path) -> Result<()> {
         .await
         .with_context(|| format!("opening libSQL db at {}", db_path.display()))?;
     let conn = db.connect().context("opening libSQL connection")?;
-    // libSQL accepts the SQLite PRAGMA verbatim. Discard the row.
-    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)", ())
+    // PRAGMA wal_checkpoint(TRUNCATE) returns a 3-column row
+    // (busy, log, checkpointed). libSQL's `execute()` rejects statements
+    // that produce rows with "Execute returned rows", so we use `query()`
+    // and let the resulting Rows handle drop without iteration —
+    // execution still completes (the checkpoint runs eagerly during the
+    // call, not lazily during row iteration).
+    conn.query("PRAGMA wal_checkpoint(TRUNCATE)", ())
         .await
         .context("PRAGMA wal_checkpoint(TRUNCATE) failed")?;
     Ok(())
