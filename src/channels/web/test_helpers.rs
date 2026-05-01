@@ -47,6 +47,8 @@ pub struct TestGatewayBuilder {
     msg_tx: Option<mpsc::Sender<IncomingMessage>>,
     llm_provider: Option<Arc<dyn crate::llm::LlmProvider>>,
     user_id: String,
+    store: Option<Arc<dyn crate::db::Database>>,
+    legal_store: Option<Arc<dyn crate::legal::LegalStore>>,
 }
 
 impl Default for TestGatewayBuilder {
@@ -55,6 +57,8 @@ impl Default for TestGatewayBuilder {
             msg_tx: None,
             llm_provider: None,
             user_id: "test-user".to_string(),
+            store: None,
+            legal_store: None,
         }
     }
 }
@@ -84,6 +88,20 @@ impl TestGatewayBuilder {
         self
     }
 
+    /// Attach a database store (needed for any handler that consults
+    /// the settings table — e.g. the legal-harness chat handler reading
+    /// `legal.chat.context_chars`).
+    pub fn store(mut self, store: Arc<dyn crate::db::Database>) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    /// Attach a legal-harness store (Stream B).
+    pub fn legal_store(mut self, store: Arc<dyn crate::legal::LegalStore>) -> Self {
+        self.legal_store = Some(store);
+        self
+    }
+
     /// Build the `Arc<GatewayState>` without starting a server.
     pub fn build(self) -> Arc<GatewayState> {
         Arc::new(GatewayState {
@@ -97,7 +115,7 @@ impl TestGatewayBuilder {
             log_level_handle: None,
             extension_manager: None,
             tool_registry: None,
-            store: None,
+            store: self.store,
             settings_cache: None,
             job_manager: None,
             prompt_queue: None,
@@ -135,6 +153,7 @@ impl TestGatewayBuilder {
             oauth_sweep_shutdown: None,
             frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
             tool_dispatcher: None,
+            legal_store: self.legal_store,
         })
     }
 
@@ -249,6 +268,7 @@ pub(crate) fn test_gateway_state_with_dependencies(
         oauth_sweep_shutdown: None,
         frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
         tool_dispatcher: None,
+        legal_store: None,
     })
 }
 
@@ -306,6 +326,7 @@ pub(crate) fn test_gateway_state_with_store_and_session_manager(
         oauth_sweep_shutdown: None,
         frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
         tool_dispatcher: None,
+        legal_store: None,
     })
 }
 

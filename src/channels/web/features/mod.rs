@@ -15,6 +15,7 @@ pub(crate) mod chat;
 pub(crate) mod debug;
 pub(crate) mod extensions;
 pub(crate) mod jobs;
+pub(crate) mod legal;
 pub(crate) mod logs;
 pub(crate) mod oauth;
 pub(crate) mod pairing;

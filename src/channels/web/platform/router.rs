@@ -81,6 +81,10 @@ use crate::channels::web::features::extensions::{
     extensions_readiness_handler, extensions_registry_handler, extensions_remove_handler,
     extensions_setup_handler, extensions_setup_submit_handler, extensions_tools_handler,
 };
+use crate::channels::web::features::legal::{
+    legal_create_chat_handler, legal_get_chat_handler, legal_list_chats_handler,
+    legal_post_message_handler,
+};
 use crate::channels::web::features::logs::{
     logs_events_handler, logs_level_get_handler, logs_level_set_handler,
 };
@@ -297,6 +301,18 @@ pub async fn start_server(
         .route(
             "/api/skills/{name}",
             axum::routing::delete(skills_remove_handler),
+        )
+        // Legal harness — chat-with-documents (Stream B). Stream A's
+        // foundation PR adds the project / document endpoints under the
+        // same `/skills/legal/` prefix; the prefix is shared by design.
+        .route(
+            "/skills/legal/projects/{id}/chats",
+            get(legal_list_chats_handler).post(legal_create_chat_handler),
+        )
+        .route("/skills/legal/chats/{id}", get(legal_get_chat_handler))
+        .route(
+            "/skills/legal/chats/{id}/messages",
+            post(legal_post_message_handler),
         )
         // Settings
         .route("/api/settings", get(settings_list_handler))

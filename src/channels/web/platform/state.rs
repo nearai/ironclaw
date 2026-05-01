@@ -464,6 +464,13 @@ pub struct GatewayState {
     /// Channel-agnostic tool dispatcher for routing handler operations through
     /// the tool pipeline with audit trail.
     pub tool_dispatcher: Option<Arc<crate::tools::dispatch::ToolDispatcher>>,
+    /// Legal-harness store for the chat-with-documents skill (Stream B).
+    ///
+    /// `None` when the legal harness is not provisioned — handlers return
+    /// 503 in that case. The store is constructed at gateway startup
+    /// alongside the main libSQL backend; see Stream A's foundation PR
+    /// for the wiring point.
+    pub legal_store: Option<Arc<dyn crate::legal::LegalStore>>,
 }
 
 /// Cached result of `build_frontend_html()`, keyed by a cheap workspace
