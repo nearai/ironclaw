@@ -1,14 +1,15 @@
 use std::sync::{Arc, Mutex};
 
 use ironclaw_host_api::{
-    InvocationId, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, ProjectId,
-    ResourceScope, RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
-    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
-    RuntimeKind, SecretHandle, TenantId, UserId,
+    CapabilityId, InvocationId, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern,
+    ProjectId, ResourceScope, RuntimeCredentialInjection, RuntimeCredentialSource,
+    RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+    RuntimeHttpEgressResponse, RuntimeKind, SecretHandle, TenantId, UserId,
 };
 use ironclaw_wasm::{
     WasmHostError, WasmHostHttp, WasmHttpRequest, WasmRuntimeCredentialProvider,
-    WasmRuntimeCredentialRequest, WasmRuntimeHttpAdapter,
+    WasmRuntimeCredentialRequest, WasmRuntimeHttpAdapter, WasmStagedRuntimeCredential,
+    WasmStagedRuntimeCredentials,
 };
 use serde_json::{Value, json};
 
@@ -234,6 +235,99 @@ fn wasm_runtime_http_adapter_does_not_reuse_credentials_for_other_destinations()
     let requests = egress.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert!(requests[0].credential_injections.is_empty());
+}
+
+#[test]
+fn wasm_runtime_http_adapter_can_build_staged_obligation_credentials() {
+    let egress = RecordingRuntimeEgress::ok(RuntimeHttpEgressResponse {
+        status: 200,
+        headers: vec![],
+        body: b"ok".to_vec(),
+        request_bytes: 0,
+        response_bytes: 2,
+        redaction_applied: true,
+    });
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("api-token").unwrap();
+    let target = RuntimeCredentialTarget::Header {
+        name: "authorization".to_string(),
+        prefix: Some("Bearer ".to_string()),
+    };
+    let adapter = WasmRuntimeHttpAdapter::new(
+        Arc::new(egress.clone()),
+        sample_scope(),
+        multi_target_policy(),
+    )
+    .with_capability_id(capability_id.clone())
+    .with_credential_provider(Arc::new(WasmStagedRuntimeCredentials::new(vec![
+        WasmStagedRuntimeCredential::for_exact_url(
+            handle.clone(),
+            target.clone(),
+            true,
+            "https://wasm-api.example.test/run".to_string(),
+        ),
+    ])));
+
+    adapter
+        .request(WasmHttpRequest {
+            method: "GET".to_string(),
+            url: "https://wasm-api.example.test/run".to_string(),
+            headers_json: "{}".to_string(),
+            body: None,
+            timeout_ms: Some(1000),
+        })
+        .unwrap();
+
+    let requests = egress.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].credential_injections,
+        vec![RuntimeCredentialInjection {
+            handle,
+            source: RuntimeCredentialSource::StagedObligation { capability_id },
+            target,
+            required: true,
+        }]
+    );
+}
+
+#[test]
+fn wasm_runtime_http_adapter_fails_closed_for_staged_credentials_without_capability_id() {
+    let egress = RecordingRuntimeEgress::ok(RuntimeHttpEgressResponse {
+        status: 200,
+        headers: vec![],
+        body: b"ok".to_vec(),
+        request_bytes: 0,
+        response_bytes: 2,
+        redaction_applied: true,
+    });
+    let adapter =
+        WasmRuntimeHttpAdapter::new(Arc::new(egress.clone()), sample_scope(), sample_policy())
+            .with_credential_provider(Arc::new(WasmStagedRuntimeCredentials::new(vec![
+                WasmStagedRuntimeCredential::for_any_request(
+                    SecretHandle::new("api-token").unwrap(),
+                    RuntimeCredentialTarget::Header {
+                        name: "authorization".to_string(),
+                        prefix: Some("Bearer ".to_string()),
+                    },
+                    true,
+                ),
+            ])));
+
+    let error = adapter
+        .request(WasmHttpRequest {
+            method: "GET".to_string(),
+            url: "https://wasm-api.example.test/run".to_string(),
+            headers_json: "{}".to_string(),
+            body: None,
+            timeout_ms: Some(1000),
+        })
+        .expect_err("staged credentials require an adapter capability id");
+
+    let rendered = error.to_string();
+    assert!(matches!(error, WasmHostError::Unavailable(_)));
+    assert!(rendered.contains("credential_unavailable"));
+    assert!(egress.requests.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -514,6 +608,10 @@ impl WasmRuntimeCredentialProvider for FailingCredentialProvider {
             "gmail-token unavailable: sk-test-secret".to_string(),
         ))
     }
+}
+
+fn sample_capability_id() -> CapabilityId {
+    CapabilityId::new("example.http").unwrap()
 }
 
 fn sample_injection() -> RuntimeCredentialInjection {

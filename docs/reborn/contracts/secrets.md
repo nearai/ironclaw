@@ -120,7 +120,10 @@ material with `take(scope, capability_id, handle)` before outbound transport so
 the value cannot be reused after success, failure, or runtime-visible errors.
 Runtime callers must not supply their own `Authorization`, cookie, or
 API-key-style headers; those values must come from the host-approved injection
-plan.
+plan. WASM host-mediated HTTP composition can construct staged plans with
+`WasmStagedRuntimeCredentials` after attaching the invoking capability id to the
+adapter; exact-url rules should be preferred when a credential is only valid for
+specific destinations.
 
 ---
 

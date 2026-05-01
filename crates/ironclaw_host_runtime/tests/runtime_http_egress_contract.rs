@@ -1,9 +1,16 @@
-use ironclaw_host_api::{
-    CapabilityId, InvocationId, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern,
-    ResourceScope, RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
-    RuntimeHttpEgress, RuntimeHttpEgressRequest, RuntimeKind, SecretHandle, TenantId, UserId,
+use ironclaw_capabilities::{
+    CapabilityObligationHandler, CapabilityObligationPhase, CapabilityObligationRequest,
 };
-use ironclaw_host_runtime::{HostHttpEgressService, RuntimeSecretInjectionStore};
+use ironclaw_host_api::{
+    CapabilityId, CapabilitySet, ExecutionContext, ExtensionId, InvocationId, MountView,
+    NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, Obligation,
+    ResourceEstimate, ResourceScope, RuntimeCredentialInjection, RuntimeCredentialSource,
+    RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressRequest, RuntimeKind,
+    SecretHandle, TenantId, TrustClass, UserId,
+};
+use ironclaw_host_runtime::{
+    BuiltinObligationHandler, HostHttpEgressService, RuntimeSecretInjectionStore,
+};
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
 };
@@ -100,6 +107,91 @@ fn host_http_egress_consumes_staged_obligation_secret_once() {
         ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
     ));
     assert_eq!(network_recorder.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn host_http_egress_consumes_secret_staged_by_builtin_obligation_handler() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let staged = Arc::new(RuntimeSecretInjectionStore::new());
+    let handler = BuiltinObligationHandler::new()
+        .with_secret_store(secret_store.clone())
+        .with_secret_injection_store(staged.clone());
+    let service = HostHttpEgressService::new(network, InMemorySecretStore::new())
+        .with_secret_injection_store(staged);
+    let context = execution_context();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("api-token").unwrap();
+    secret_store
+        .put(
+            context.resource_scope.clone(),
+            handle.clone(),
+            SecretMaterial::from("sk-staged-secret"),
+        )
+        .await
+        .unwrap();
+    let obligations = vec![Obligation::InjectSecretOnce {
+        handle: handle.clone(),
+    }];
+
+    handler
+        .satisfy(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &ResourceEstimate::default(),
+            obligations: &obligations,
+        })
+        .await
+        .expect("obligation handler should stage secret material");
+
+    service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope: context.resource_scope.clone(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle,
+                source: RuntimeCredentialSource::StagedObligation {
+                    capability_id: capability_id.clone(),
+                },
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            timeout_ms: None,
+        })
+        .expect("host egress should consume material staged by the obligation handler");
+
+    let requests = network_recorder.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0]
+            .headers
+            .iter()
+            .find(|(name, _)| name == "authorization"),
+        Some(&(
+            "authorization".to_string(),
+            "Bearer sk-staged-secret".to_string()
+        ))
+    );
 }
 
 #[test]
@@ -1404,6 +1496,18 @@ fn sample_scope() -> ResourceScope {
         thread_id: None,
         invocation_id: InvocationId::new(),
     }
+}
+
+fn execution_context() -> ExecutionContext {
+    ExecutionContext::local_default(
+        UserId::new("user1").unwrap(),
+        ExtensionId::new("example").unwrap(),
+        RuntimeKind::Script,
+        TrustClass::Sandbox,
+        CapabilitySet::default(),
+        MountView::default(),
+    )
+    .unwrap()
 }
 
 fn sample_capability_id() -> CapabilityId {
