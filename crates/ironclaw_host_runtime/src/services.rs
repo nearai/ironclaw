@@ -588,8 +588,9 @@ where
             module_path.as_str()
         );
         if let Some(prepared) = self.prepared_guard()?.get(&cache_key).cloned() {
-            let host = self.host_for_scope(&request.scope, request.capability_id);
-            return execute_prepared_wasm(&self.runtime, &prepared, host, request);
+        let prepared = self.prepared_guard()?.get(&cache_key).cloned();
+        if let Some(prepared) = prepared {
+            return execute_prepared_wasm(&self.runtime, &prepared, self.host.clone(), request);
         }
 
         let wasm_bytes = request
