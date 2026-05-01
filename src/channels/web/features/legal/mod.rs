@@ -123,9 +123,7 @@ pub(crate) async fn export_chat_docx_handler(
 
     let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
     let filename = sanitize_filename_segment(&chat_id);
-    let disposition = format!(
-        "attachment; filename=\"chat-{filename}-{timestamp}.docx\""
-    );
+    let disposition = format!("attachment; filename=\"chat-{filename}-{timestamp}.docx\"");
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -234,15 +232,12 @@ mod tests {
     /// schema runs because [`crate::testing::test_db`] calls
     /// `run_migrations` — that means our V26 legal-harness migration is
     /// present, so the four canonical tables exist for the test seed.
-    async fn fresh_libsql_with_legal_schema()
-    -> (Arc<libsql::Database>, tempfile::TempDir) {
+    async fn fresh_libsql_with_legal_schema() -> (Arc<libsql::Database>, tempfile::TempDir) {
         use crate::db::libsql::LibSqlBackend;
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("legal-c.db");
-        let backend = LibSqlBackend::new_local(&path)
-            .await
-            .expect("open backend");
+        let backend = LibSqlBackend::new_local(&path).await.expect("open backend");
         // Use the same migration entry point production uses so the
         // V26 row is recorded — otherwise rerunning tests against a
         // persistent db would silently skip the legal tables.
@@ -255,10 +250,7 @@ mod tests {
     /// Insert a chat with the given messages directly via libSQL. Each
     /// message tuple is `(role, content, document_refs)`. Returns the
     /// generated chat id.
-    async fn seed_chat(
-        db: &libsql::Database,
-        messages: &[(&str, &str, &[&str])],
-    ) -> String {
+    async fn seed_chat(db: &libsql::Database, messages: &[(&str, &str, &[&str])]) -> String {
         let conn = db.connect().expect("connect");
 
         let project_id = "proj-test-1";
@@ -441,20 +433,9 @@ mod tests {
     #[tokio::test]
     async fn message_with_xml_payload_renders_as_escaped_text() {
         let (db, _guard) = fresh_libsql_with_legal_schema().await;
-        let chat_id = seed_chat(
-            &db,
-            &[(
-                "user",
-                "</w:t><w:body><inject/></w:body>",
-                &[],
-            )],
-        )
-        .await;
+        let chat_id = seed_chat(&db, &[("user", "</w:t><w:body><inject/></w:body>", &[])]).await;
         let store = LegalChatStore::new(db);
-        let chat = store
-            .load_chat_for_export(&chat_id)
-            .await
-            .expect("load");
+        let chat = store.load_chat_for_export(&chat_id).await.expect("load");
         let bytes = render_chat_to_docx(&chat).expect("render");
         let xml = extract_document_xml(&bytes);
         assert!(
@@ -467,9 +448,11 @@ mod tests {
     #[test]
     fn safe_chat_id_byte_blocks_path_traversal() {
         // Real ULIDs / slugs: allowed.
-        assert!("01HZX6V0F9N7P2KQM4JR8YHT3W"
-            .bytes()
-            .all(super::is_safe_chat_id_byte));
+        assert!(
+            "01HZX6V0F9N7P2KQM4JR8YHT3W"
+                .bytes()
+                .all(super::is_safe_chat_id_byte)
+        );
         // `.` is allowed (filenames with dots), but `/`, `..`, spaces,
         // `\n`, `\0` are blocked.
         assert!(!b"a/b".iter().all(|b| super::is_safe_chat_id_byte(*b)));

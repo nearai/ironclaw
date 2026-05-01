@@ -100,9 +100,7 @@ pub fn render_chat_to_docx(chat: &ChatExport) -> Result<Vec<u8>, LegalError> {
 
     docx = docx.add_paragraph(subtitle_paragraph(&format!(
         "Created {}",
-        chat.created_at
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string()
+        chat.created_at.format("%Y-%m-%dT%H:%M:%SZ")
     )));
     paragraph_budget = paragraph_budget.saturating_sub(1);
 
@@ -292,12 +290,7 @@ fn body_paragraph(text: &str) -> Paragraph {
 }
 
 fn documents_callout_paragraph() -> Paragraph {
-    Paragraph::new().add_run(
-        Run::new()
-            .add_text("Documents referenced:")
-            .italic()
-            .bold(),
-    )
+    Paragraph::new().add_run(Run::new().add_text("Documents referenced:").italic().bold())
 }
 
 fn document_ref_paragraph(filename: &str) -> Paragraph {
@@ -305,11 +298,7 @@ fn document_ref_paragraph(filename: &str) -> Paragraph {
 }
 
 fn truncation_marker() -> Paragraph {
-    Paragraph::new().add_run(
-        Run::new()
-            .add_text("(\u{2026} export truncated)")
-            .italic(),
-    )
+    Paragraph::new().add_run(Run::new().add_text("(\u{2026} export truncated)").italic())
 }
 
 #[cfg(test)]
