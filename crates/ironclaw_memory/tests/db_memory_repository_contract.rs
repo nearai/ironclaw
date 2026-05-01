@@ -1,13 +1,18 @@
 #![cfg(any(feature = "libsql", feature = "postgres"))]
+#![cfg_attr(
+    all(feature = "postgres", not(feature = "libsql")),
+    allow(dead_code, unused_imports)
+)]
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::VirtualPath;
 use ironclaw_memory::{
     ChunkConfig, ChunkingMemoryDocumentIndexer, DocumentMetadata, EmbeddingError,
-    EmbeddingProvider, FusionStrategy, MemoryBackend, MemoryBackendCapabilities,
-    MemoryBackendFilesystemAdapter, MemoryContext, MemoryDocumentFilesystem, MemoryDocumentPath,
-    MemoryDocumentRepository, MemoryDocumentScope, MemorySearchRequest, RepositoryMemoryBackend,
+    EmbeddingProvider, FusionStrategy, MemoryAppendOutcome, MemoryBackend,
+    MemoryBackendCapabilities, MemoryBackendFilesystemAdapter, MemoryContext,
+    MemoryDocumentFilesystem, MemoryDocumentPath, MemoryDocumentRepository, MemoryDocumentScope,
+    MemorySearchRequest, RepositoryMemoryBackend,
 };
 
 #[cfg(feature = "libsql")]
@@ -784,6 +789,44 @@ async fn libsql_memory_repository_rejects_non_utf8_documents() {
     assert!(
         err.to_string()
             .contains("memory document content must be UTF-8")
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_memory_repository_compare_and_append_detects_stale_hashes() {
+    let (db, _dir) = libsql_db().await;
+    let repository = LibSqlMemoryDocumentRepository::new(db);
+    repository.run_migrations().await.unwrap();
+    let path = MemoryDocumentPath::new("tenant-a", "alice", None, "notes/a.md").unwrap();
+
+    repository.write_document(&path, b"base").await.unwrap();
+    let stale_hash = ironclaw_memory::content_sha256("base");
+
+    let first = repository
+        .compare_and_append_document_with_options(
+            &path,
+            Some(&stale_hash),
+            b" first",
+            &Default::default(),
+        )
+        .await
+        .unwrap();
+    let second = repository
+        .compare_and_append_document_with_options(
+            &path,
+            Some(&stale_hash),
+            b" second",
+            &Default::default(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(first, MemoryAppendOutcome::Appended);
+    assert_eq!(second, MemoryAppendOutcome::Conflict);
+    assert_eq!(
+        repository.read_document(&path).await.unwrap().unwrap(),
+        b"base first"
     );
 }
 
