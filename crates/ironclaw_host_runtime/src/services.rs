@@ -17,7 +17,9 @@ use ironclaw_authorization::{CapabilityLeaseStore, TrustAwareCapabilityDispatchA
 use ironclaw_dispatcher::{
     RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher,
 };
-use ironclaw_events::{AuditSink, EventSink};
+use ironclaw_events::{
+    AuditSink, DurableAuditLog, DurableAuditSink, DurableEventLog, DurableEventSink, EventSink,
+};
 use ironclaw_extensions::{ExtensionRegistry, ExtensionRuntime};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
@@ -151,12 +153,28 @@ where
         self
     }
 
+    pub fn with_durable_event_log<T>(self, event_log: Arc<T>) -> Self
+    where
+        T: DurableEventLog + 'static,
+    {
+        let event_log: Arc<dyn DurableEventLog> = event_log;
+        self.with_event_sink(Arc::new(DurableEventSink::new(event_log)))
+    }
+
     pub fn with_audit_sink<T>(mut self, audit_sink: Arc<T>) -> Self
     where
         T: AuditSink + 'static,
     {
         self.audit_sink = Some(audit_sink);
         self
+    }
+
+    pub fn with_durable_audit_log<T>(self, audit_log: Arc<T>) -> Self
+    where
+        T: DurableAuditLog + 'static,
+    {
+        let audit_log: Arc<dyn DurableAuditLog> = audit_log;
+        self.with_audit_sink(Arc::new(DurableAuditSink::new(audit_log)))
     }
 
     pub fn with_secret_store<T>(mut self, secret_store: Arc<T>) -> Self

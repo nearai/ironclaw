@@ -14,7 +14,8 @@ crates use to record what happened. It defines:
   alter runtime/control-plane outcomes;
 - explicit-error [`DurableEventLog`] / [`DurableAuditLog`] traits with a
   monotonic per-scope cursor envelope and replay-after semantics;
-- in-memory durable backends used by tests and reference loops.
+- in-memory durable backends used by tests and reference loops;
+- `DurableEventSink` / `DurableAuditSink` adapters that let service composition pass durable logs where producer crates expect live sink traits.
 
 Filesystem-backed JSONL durable backends and PostgreSQL/libSQL backends are
 deliberately deferred. They live in later grouped Reborn PRs that depend on
