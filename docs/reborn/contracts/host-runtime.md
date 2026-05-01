@@ -30,7 +30,7 @@ Supported built-in behavior:
 - Staged secret entries have a default five-minute TTL; insertion, `take(...)`, and `prune_expired(...)` drop expired material so abandoned handoffs stop being usable even if runtime setup never reaches egress.
 - Direct `satisfy(...)` releases any prepared resource reservation without discarding successfully staged network/secret handoffs that the caller still needs to pass to runtime adapters.
 - Inline dispatch completion discards any unconsumed staged network/secret handoffs so successful calls do not leave reusable ambient state behind.
-- Background process lifecycle cleanup claims the staged handoff generations visible at process start and only discards those exact generations, so terminal cleanup for one process cannot remove newer handoffs staged for another process using the same scoped capability.
+- Background process lifecycle cleanup currently enforces a single active process handoff per scoped capability (`ResourceScope` plus capability id). Starting a second process handoff for the same scoped capability before the first reaches terminal cleanup fails closed; process-owned handoff ids are a follow-up design.
 - Terminal process cleanup failures are surfaced through the process-store transition or background failure handler and logged with process id/stage context; they must not be silently swallowed.
 - Staged secrets must never be logged or exposed through debug output.
 - Handler errors must use stable categories and avoid raw provider/backend details.

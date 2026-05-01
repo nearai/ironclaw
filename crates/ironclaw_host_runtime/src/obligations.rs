@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -34,28 +34,17 @@ pub const DEFAULT_RUNTIME_SECRET_INJECTION_TTL: Duration = Duration::from_secs(3
 /// failures, cancellation, or adapter bugs cannot remain usable indefinitely.
 #[derive(Clone)]
 pub struct RuntimeSecretInjectionStore {
-    state: Arc<Mutex<RuntimeSecretInjectionState>>,
+    state: Arc<RuntimeSecretInjectionState>,
 }
 
-#[derive(Default)]
 struct RuntimeSecretInjectionState {
-    secrets: HashMap<RuntimeSecretInjectionKey, RuntimeSecretInjectionEntry>,
+    secrets: Mutex<HashMap<RuntimeSecretInjectionKey, RuntimeSecretInjectionEntry>>,
     ttl: Duration,
-    next_generation: u64,
-}
-
-impl RuntimeSecretInjectionState {
-    fn next_generation(&mut self) -> HandoffGeneration {
-        let generation = HandoffGeneration(self.next_generation);
-        self.next_generation = self.next_generation.wrapping_add(1);
-        generation
-    }
 }
 
 struct RuntimeSecretInjectionEntry {
     material: SecretMaterial,
     expires_at: Instant,
-    generation: HandoffGeneration,
 }
 
 impl RuntimeSecretInjectionStore {
@@ -65,19 +54,15 @@ impl RuntimeSecretInjectionStore {
 
     pub fn with_ttl(ttl: Duration) -> Self {
         Self {
-            state: Arc::new(Mutex::new(RuntimeSecretInjectionState {
-                secrets: HashMap::new(),
+            state: Arc::new(RuntimeSecretInjectionState {
+                secrets: Mutex::new(HashMap::new()),
                 ttl,
-                next_generation: 0,
-            })),
+            }),
         }
     }
 
     pub fn ttl(&self) -> Duration {
-        self.state
-            .lock()
-            .map(|state| state.ttl)
-            .unwrap_or(DEFAULT_RUNTIME_SECRET_INJECTION_TTL)
+        self.state.ttl
     }
 
     pub fn insert(
@@ -88,17 +73,14 @@ impl RuntimeSecretInjectionStore {
         material: SecretMaterial,
     ) -> Result<(), RuntimeSecretInjectionStoreError> {
         let now = Instant::now();
-        let mut state = self.lock()?;
-        let ttl = state.ttl;
-        prune_expired_entries(&mut state.secrets, now);
-        let expires_at = now.checked_add(ttl).unwrap_or(now);
-        let generation = state.next_generation();
-        state.secrets.insert(
+        let expires_at = now.checked_add(self.state.ttl).unwrap_or(now);
+        let mut secrets = self.lock()?;
+        prune_expired_entries(&mut secrets, now);
+        secrets.insert(
             RuntimeSecretInjectionKey::new(scope, capability_id, handle),
             RuntimeSecretInjectionEntry {
                 material,
                 expires_at,
-                generation,
             },
         );
         Ok(())
@@ -111,10 +93,9 @@ impl RuntimeSecretInjectionStore {
         handle: &SecretHandle,
     ) -> Result<Option<SecretMaterial>, RuntimeSecretInjectionStoreError> {
         let now = Instant::now();
-        let mut state = self.lock()?;
-        prune_expired_entries(&mut state.secrets, now);
-        Ok(state
-            .secrets
+        let mut secrets = self.lock()?;
+        prune_expired_entries(&mut secrets, now);
+        Ok(secrets
             .remove(&RuntimeSecretInjectionKey::new(
                 scope,
                 capability_id,
@@ -124,71 +105,45 @@ impl RuntimeSecretInjectionStore {
     }
 
     pub fn prune_expired(&self) -> Result<usize, RuntimeSecretInjectionStoreError> {
-        let mut state = self.lock()?;
-        Ok(prune_expired_entries(&mut state.secrets, Instant::now()))
+        let mut secrets = self.lock()?;
+        Ok(prune_expired_entries(&mut secrets, Instant::now()))
     }
 
     /// Discard all staged secrets for a scoped capability before process ownership exists.
     ///
-    /// Terminal process cleanup must use generation claims captured at process start so it
-    /// cannot remove newer handoffs staged for another process with the same scoped capability.
+    /// Background process lifecycle cleanup is guarded by a single-active-handoff
+    /// invariant for the scoped capability; this method remains the abort/inline cleanup seam.
     pub fn discard_for_capability(
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
     ) -> Result<(), RuntimeSecretInjectionStoreError> {
         let scope_key = RuntimeSecretInjectionScopeKey::new(scope, capability_id);
-        let mut state = self.lock()?;
-        prune_expired_entries(&mut state.secrets, Instant::now());
-        state.secrets.retain(|key, _| !key.matches_scope(&scope_key));
+        let mut secrets = self.lock()?;
+        prune_expired_entries(&mut secrets, Instant::now());
+        secrets.retain(|key, _| !key.matches_scope(&scope_key));
         Ok(())
     }
 
-    fn claims_for_capability(
+    fn has_for_capability(
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
-    ) -> Result<Vec<RuntimeSecretInjectionClaim>, RuntimeSecretInjectionStoreError> {
+    ) -> Result<bool, RuntimeSecretInjectionStoreError> {
         let scope_key = RuntimeSecretInjectionScopeKey::new(scope, capability_id);
-        let mut state = self.lock()?;
-        prune_expired_entries(&mut state.secrets, Instant::now());
-        Ok(state
-            .secrets
-            .iter()
-            .filter(|(key, _)| key.matches_scope(&scope_key))
-            .map(|(key, entry)| RuntimeSecretInjectionClaim {
-                key: key.clone(),
-                generation: entry.generation,
-            })
-            .collect())
-    }
-
-    fn discard_claims(
-        &self,
-        claims: &[RuntimeSecretInjectionClaim],
-    ) -> Result<(), RuntimeSecretInjectionStoreError> {
-        let mut state = self.lock()?;
-        prune_expired_entries(&mut state.secrets, Instant::now());
-        for claim in claims {
-            let should_remove = state
-                .secrets
-                .get(&claim.key)
-                .map(|entry| entry.generation == claim.generation)
-                .unwrap_or(false);
-            if should_remove {
-                state.secrets.remove(&claim.key);
-            }
-        }
-        Ok(())
+        let mut secrets = self.lock()?;
+        prune_expired_entries(&mut secrets, Instant::now());
+        Ok(secrets.keys().any(|key| key.matches_scope(&scope_key)))
     }
 
     fn lock(
         &self,
     ) -> Result<
-        std::sync::MutexGuard<'_, RuntimeSecretInjectionState>,
+        std::sync::MutexGuard<'_, HashMap<RuntimeSecretInjectionKey, RuntimeSecretInjectionEntry>>,
         RuntimeSecretInjectionStoreError,
     > {
         self.state
+            .secrets
             .lock()
             .map_err(|_| RuntimeSecretInjectionStoreError::Unavailable)
     }
@@ -205,7 +160,7 @@ impl fmt::Debug for RuntimeSecretInjectionStore {
         formatter
             .debug_struct("RuntimeSecretInjectionStore")
             .field("secrets", &"[REDACTED]")
-            .field("ttl", &self.ttl())
+            .field("ttl", &self.state.ttl)
             .finish()
     }
 }
@@ -301,15 +256,6 @@ impl RuntimeSecretInjectionScopeKey {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct HandoffGeneration(u64);
-
-#[derive(Debug, Clone)]
-struct RuntimeSecretInjectionClaim {
-    key: RuntimeSecretInjectionKey,
-    generation: HandoffGeneration,
-}
-
 /// In-memory policy handoff from obligation handling to runtime adapters.
 ///
 /// Policies are keyed by tenant/user/project/mission/thread/invocation scope and
@@ -317,27 +263,7 @@ struct RuntimeSecretInjectionClaim {
 /// actual runtime dispatch.
 #[derive(Debug, Clone, Default)]
 pub struct NetworkObligationPolicyStore {
-    state: Arc<Mutex<NetworkObligationPolicyState>>,
-}
-
-#[derive(Debug, Default)]
-struct NetworkObligationPolicyState {
-    policies: HashMap<NetworkPolicyKey, NetworkPolicyEntry>,
-    next_generation: u64,
-}
-
-impl NetworkObligationPolicyState {
-    fn next_generation(&mut self) -> HandoffGeneration {
-        let generation = HandoffGeneration(self.next_generation);
-        self.next_generation = self.next_generation.wrapping_add(1);
-        generation
-    }
-}
-
-#[derive(Debug)]
-struct NetworkPolicyEntry {
-    policy: NetworkPolicy,
-    generation: HandoffGeneration,
+    policies: Arc<Mutex<HashMap<NetworkPolicyKey, NetworkPolicy>>>,
 }
 
 impl NetworkObligationPolicyStore {
@@ -351,15 +277,10 @@ impl NetworkObligationPolicyStore {
         capability_id: &CapabilityId,
         policy: NetworkPolicy,
     ) {
-        let mut state = self
-            .state
+        self.policies
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let generation = state.next_generation();
-        state.policies.insert(
-            NetworkPolicyKey::new(scope, capability_id),
-            NetworkPolicyEntry { policy, generation },
-        );
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(NetworkPolicyKey::new(scope, capability_id), policy);
     }
 
     pub fn take(
@@ -367,52 +288,25 @@ impl NetworkObligationPolicyStore {
         scope: &ResourceScope,
         capability_id: &CapabilityId,
     ) -> Option<NetworkPolicy> {
-        self.state
+        self.policies
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .policies
             .remove(&NetworkPolicyKey::new(scope, capability_id))
-            .map(|entry| entry.policy)
     }
 
     /// Discard a staged policy for a scoped capability before process ownership exists.
     ///
-    /// Terminal process cleanup must use the generation claim captured at process start so it
-    /// cannot remove a newer handoff staged for another process with the same scoped capability.
+    /// Background process lifecycle cleanup is guarded by a single-active-handoff
+    /// invariant for the scoped capability; this method remains the abort/inline cleanup seam.
     pub fn discard_for_capability(&self, scope: &ResourceScope, capability_id: &CapabilityId) {
         let _ = self.take(scope, capability_id);
     }
 
-    fn claim_for_capability(
-        &self,
-        scope: &ResourceScope,
-        capability_id: &CapabilityId,
-    ) -> Option<NetworkObligationPolicyClaim> {
-        let key = NetworkPolicyKey::new(scope, capability_id);
-        self.state
+    fn contains(&self, scope: &ResourceScope, capability_id: &CapabilityId) -> bool {
+        self.policies
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .policies
-            .get(&key)
-            .map(|entry| NetworkObligationPolicyClaim {
-                key,
-                generation: entry.generation,
-            })
-    }
-
-    fn discard_claim(&self, claim: &NetworkObligationPolicyClaim) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let should_remove = state
-            .policies
-            .get(&claim.key)
-            .map(|entry| entry.generation == claim.generation)
-            .unwrap_or(false);
-        if should_remove {
-            state.policies.remove(&claim.key);
-        }
+            .contains_key(&NetworkPolicyKey::new(scope, capability_id))
     }
 }
 
@@ -441,12 +335,6 @@ impl NetworkPolicyKey {
             capability_id: capability_id.as_str().to_string(),
         }
     }
-}
-
-#[derive(Debug, Clone)]
-struct NetworkObligationPolicyClaim {
-    key: NetworkPolicyKey,
-    generation: HandoffGeneration,
 }
 
 /// Host-runtime-owned backing services for a fully configured built-in obligation handler.
@@ -550,7 +438,8 @@ pub struct ProcessObligationLifecycleStore {
     network_policies: Arc<NetworkObligationPolicyStore>,
     secret_injections: Arc<RuntimeSecretInjectionStore>,
     resource_governor: Arc<dyn ResourceGovernor>,
-    handoff_claims: Mutex<HashMap<ProcessObligationClaimKey, ProcessObligationClaimState>>,
+    active_process_handoffs: Mutex<HashMap<ProcessObligationHandoffKey, ProcessId>>,
+    cleaned_process_handoffs: Mutex<HashSet<ProcessObligationProcessKey>>,
 }
 
 impl ProcessObligationLifecycleStore {
@@ -583,7 +472,8 @@ impl ProcessObligationLifecycleStore {
             network_policies,
             secret_injections,
             resource_governor,
-            handoff_claims: Mutex::new(HashMap::new()),
+            active_process_handoffs: Mutex::new(HashMap::new()),
+            cleaned_process_handoffs: Mutex::new(HashSet::new()),
         }
     }
 
@@ -597,56 +487,106 @@ impl ProcessObligationLifecycleStore {
     ) -> Result<(), ProcessError> {
         if let Some(record) = self.inner.get(scope, process_id).await? {
             self.cleanup_record_obligations(&record, reconcile)?;
+            self.release_active_process_handoff(&record)?;
+            self.mark_process_handoff_cleaned(&record)?;
         }
         Ok(())
     }
 
-    fn capture_record_obligations(&self, record: &ProcessRecord) -> Result<(), ProcessError> {
-        let network_policy = self
-            .network_policies
-            .claim_for_capability(&record.scope, &record.capability_id);
-        let secret_injections = self
+    fn has_process_obligations(&self, start: &ProcessStart) -> Result<bool, ProcessError> {
+        let has_secret_handoff = self
             .secret_injections
-            .claims_for_capability(&record.scope, &record.capability_id)
+            .has_for_capability(&start.scope, &start.capability_id)
             .map_err(|_| ProcessError::InvalidStoredRecord {
-                reason: "process obligation handoff capture failed".to_string(),
+                reason: "process obligation handoff lookup failed".to_string(),
             })?;
-        let mut claims =
-            self.handoff_claims
+        Ok(start.resource_reservation_id.is_some()
+            || self
+                .network_policies
+                .contains(&start.scope, &start.capability_id)
+            || has_secret_handoff)
+    }
+
+    fn claim_active_process_handoff(&self, start: &ProcessStart) -> Result<bool, ProcessError> {
+        if !self.has_process_obligations(start)? {
+            return Ok(false);
+        }
+
+        let key = ProcessObligationHandoffKey::new(&start.scope, &start.capability_id);
+        let mut active =
+            self.active_process_handoffs
                 .lock()
                 .map_err(|_| ProcessError::InvalidStoredRecord {
-                    reason: "process obligation claim store unavailable".to_string(),
+                    reason: "process obligation handoff registry unavailable".to_string(),
                 })?;
-        claims.insert(
-            ProcessObligationClaimKey::new(&record.scope, record.process_id),
-            ProcessObligationClaimState::Active(Box::new(ProcessObligationHandoffClaim {
-                network_policy,
-                secret_injections,
-            })),
-        );
+        if let Some(existing_process_id) = active.get(&key) {
+            return Err(ProcessError::InvalidStoredRecord {
+                reason: format!(
+                    "process obligation handoff already active for scoped capability: {existing_process_id}"
+                ),
+            });
+        }
+        active.insert(key, start.process_id);
+        Ok(true)
+    }
+
+    fn release_claimed_process_handoff(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        process_id: ProcessId,
+    ) -> Result<(), ProcessError> {
+        let key = ProcessObligationHandoffKey::new(scope, capability_id);
+        let mut active =
+            self.active_process_handoffs
+                .lock()
+                .map_err(|_| ProcessError::InvalidStoredRecord {
+                    reason: "process obligation handoff registry unavailable".to_string(),
+                })?;
+        if active.get(&key) == Some(&process_id) {
+            active.remove(&key);
+        }
         Ok(())
     }
 
-    fn handoff_claim_for_cleanup(
-        &self,
-        record: &ProcessRecord,
-    ) -> Result<ProcessObligationCleanupHandoffs, ProcessError> {
-        let mut claims =
-            self.handoff_claims
+    fn release_active_process_handoff(&self, record: &ProcessRecord) -> Result<(), ProcessError> {
+        self.release_claimed_process_handoff(
+            &record.scope,
+            &record.capability_id,
+            record.process_id,
+        )
+    }
+
+    fn has_active_process_handoff(&self, record: &ProcessRecord) -> Result<bool, ProcessError> {
+        let key = ProcessObligationHandoffKey::new(&record.scope, &record.capability_id);
+        let active =
+            self.active_process_handoffs
                 .lock()
                 .map_err(|_| ProcessError::InvalidStoredRecord {
-                    reason: "process obligation claim store unavailable".to_string(),
+                    reason: "process obligation handoff registry unavailable".to_string(),
                 })?;
-        let key = ProcessObligationClaimKey::new(&record.scope, record.process_id);
-        let Some(state) = claims.get_mut(&key) else {
-            return Ok(ProcessObligationCleanupHandoffs::LegacyUnclaimed);
-        };
-        match std::mem::replace(state, ProcessObligationClaimState::Cleaned) {
-            ProcessObligationClaimState::Active(claim) => {
-                Ok(ProcessObligationCleanupHandoffs::Claimed(claim))
+        Ok(active.get(&key) == Some(&record.process_id))
+    }
+
+    fn process_handoff_cleaned(&self, record: &ProcessRecord) -> Result<bool, ProcessError> {
+        let key = ProcessObligationProcessKey::new(&record.scope, record.process_id);
+        let cleaned = self.cleaned_process_handoffs.lock().map_err(|_| {
+            ProcessError::InvalidStoredRecord {
+                reason: "process obligation cleanup registry unavailable".to_string(),
             }
-            ProcessObligationClaimState::Cleaned => Ok(ProcessObligationCleanupHandoffs::Cleaned),
-        }
+        })?;
+        Ok(cleaned.contains(&key))
+    }
+
+    fn mark_process_handoff_cleaned(&self, record: &ProcessRecord) -> Result<(), ProcessError> {
+        let key = ProcessObligationProcessKey::new(&record.scope, record.process_id);
+        let mut cleaned = self.cleaned_process_handoffs.lock().map_err(|_| {
+            ProcessError::InvalidStoredRecord {
+                reason: "process obligation cleanup registry unavailable".to_string(),
+            }
+        })?;
+        cleaned.insert(key);
+        Ok(())
     }
 
     fn cleanup_terminal(
@@ -665,6 +605,8 @@ impl ProcessObligationLifecycleStore {
             );
             return Err(error);
         }
+        self.release_active_process_handoff(record)?;
+        self.mark_process_handoff_cleaned(record)?;
         Ok(())
     }
 
@@ -673,27 +615,19 @@ impl ProcessObligationLifecycleStore {
         record: &ProcessRecord,
         reconcile: bool,
     ) -> Result<(), ProcessError> {
-        match self.handoff_claim_for_cleanup(record)? {
-            ProcessObligationCleanupHandoffs::Claimed(claim) => {
-                if let Some(network_policy) = &claim.network_policy {
-                    self.network_policies.discard_claim(network_policy);
-                }
-                self.secret_injections
-                    .discard_claims(&claim.secret_injections)
-                    .map_err(|_| ProcessError::InvalidStoredRecord {
-                        reason: "process obligation handoff cleanup failed".to_string(),
-                    })?;
-            }
-            ProcessObligationCleanupHandoffs::LegacyUnclaimed => {
-                self.network_policies
-                    .discard_for_capability(&record.scope, &record.capability_id);
-                self.secret_injections
-                    .discard_for_capability(&record.scope, &record.capability_id)
-                    .map_err(|_| ProcessError::InvalidStoredRecord {
-                        reason: "process obligation handoff cleanup failed".to_string(),
-                    })?;
-            }
-            ProcessObligationCleanupHandoffs::Cleaned => {}
+        if self.process_handoff_cleaned(record)? {
+            return Ok(());
+        }
+        let should_cleanup_handoffs =
+            self.has_active_process_handoff(record)? || record.resource_reservation_id.is_some();
+        if should_cleanup_handoffs {
+            self.network_policies
+                .discard_for_capability(&record.scope, &record.capability_id);
+            self.secret_injections
+                .discard_for_capability(&record.scope, &record.capability_id)
+                .map_err(|_| ProcessError::InvalidStoredRecord {
+                    reason: "process obligation handoff cleanup failed".to_string(),
+                })?;
         }
         if let Some(reservation_id) = record.resource_reservation_id {
             if reconcile {
@@ -710,7 +644,34 @@ impl ProcessObligationLifecycleStore {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ProcessObligationClaimKey {
+struct ProcessObligationHandoffKey {
+    tenant_id: String,
+    user_id: String,
+    agent_id: Option<String>,
+    project_id: Option<String>,
+    mission_id: Option<String>,
+    thread_id: Option<String>,
+    invocation_id: String,
+    capability_id: String,
+}
+
+impl ProcessObligationHandoffKey {
+    fn new(scope: &ResourceScope, capability_id: &CapabilityId) -> Self {
+        Self {
+            tenant_id: scope.tenant_id.as_str().to_string(),
+            user_id: scope.user_id.as_str().to_string(),
+            agent_id: scope.agent_id.as_ref().map(|id| id.as_str().to_string()),
+            project_id: scope.project_id.as_ref().map(|id| id.as_str().to_string()),
+            mission_id: scope.mission_id.as_ref().map(|id| id.as_str().to_string()),
+            thread_id: scope.thread_id.as_ref().map(|id| id.as_str().to_string()),
+            invocation_id: scope.invocation_id.to_string(),
+            capability_id: capability_id.as_str().to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ProcessObligationProcessKey {
     tenant_id: String,
     user_id: String,
     agent_id: Option<String>,
@@ -720,7 +681,7 @@ struct ProcessObligationClaimKey {
     process_id: ProcessId,
 }
 
-impl ProcessObligationClaimKey {
+impl ProcessObligationProcessKey {
     fn new(scope: &ResourceScope, process_id: ProcessId) -> Self {
         Self {
             tenant_id: scope.tenant_id.as_str().to_string(),
@@ -734,30 +695,22 @@ impl ProcessObligationClaimKey {
     }
 }
 
-#[derive(Debug)]
-enum ProcessObligationClaimState {
-    Active(Box<ProcessObligationHandoffClaim>),
-    Cleaned,
-}
-
-#[derive(Debug)]
-struct ProcessObligationHandoffClaim {
-    network_policy: Option<NetworkObligationPolicyClaim>,
-    secret_injections: Vec<RuntimeSecretInjectionClaim>,
-}
-
-enum ProcessObligationCleanupHandoffs {
-    Claimed(Box<ProcessObligationHandoffClaim>),
-    LegacyUnclaimed,
-    Cleaned,
-}
-
 #[async_trait]
 impl ProcessStore for ProcessObligationLifecycleStore {
     async fn start(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError> {
-        let record = self.inner.start(start).await?;
-        self.capture_record_obligations(&record)?;
-        Ok(record)
+        let claimed = self.claim_active_process_handoff(&start)?;
+        let process_id = start.process_id;
+        let scope = start.scope.clone();
+        let capability_id = start.capability_id.clone();
+        match self.inner.start(start).await {
+            Ok(record) => Ok(record),
+            Err(error) => {
+                if claimed {
+                    self.release_claimed_process_handoff(&scope, &capability_id, process_id)?;
+                }
+                Err(error)
+            }
+        }
     }
 
     async fn complete(

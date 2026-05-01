@@ -1354,7 +1354,70 @@ async fn process_obligation_lifecycle_cleans_record_started_before_wrapper_exist
 }
 
 #[tokio::test]
-async fn process_obligation_lifecycle_preserves_newer_handoffs_for_same_invocation_capability() {
+async fn process_obligation_lifecycle_rejects_second_active_handoff_for_same_scope_capability() {
+    let inner_store = Arc::new(InMemoryProcessStore::new());
+    let network_policies = Arc::new(NetworkObligationPolicyStore::new());
+    let secret_injections = Arc::new(RuntimeSecretInjectionStore::new());
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id);
+    let first_process_id = ProcessId::new();
+    let second_process_id = ProcessId::new();
+    let lifecycle_store = ProcessObligationLifecycleStore::new(
+        inner_store,
+        Arc::clone(&network_policies),
+        secret_injections,
+        governor,
+    );
+
+    network_policies.insert(&scope, &script_capability_id(), wasm_http_policy());
+    lifecycle_store
+        .start(process_start(
+            first_process_id,
+            invocation_id,
+            scope.clone(),
+        ))
+        .await
+        .unwrap();
+
+    network_policies.insert(&scope, &script_capability_id(), wasm_http_policy());
+    let error = lifecycle_store
+        .start(process_start(
+            second_process_id,
+            invocation_id,
+            scope.clone(),
+        ))
+        .await
+        .expect_err("a scoped capability may only have one active process handoff");
+
+    assert!(matches!(error, ProcessError::InvalidStoredRecord { .. }));
+    assert!(
+        lifecycle_store
+            .get(&scope, second_process_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "the rejected second process must not be persisted as running"
+    );
+
+    lifecycle_store
+        .complete(&scope, first_process_id)
+        .await
+        .unwrap();
+    network_policies.insert(&scope, &script_capability_id(), wasm_http_policy());
+    lifecycle_store
+        .start(process_start(
+            second_process_id,
+            invocation_id,
+            scope.clone(),
+        ))
+        .await
+        .expect("a new handoff can start after the prior handoff reaches terminal cleanup");
+}
+
+#[tokio::test]
+async fn process_obligation_lifecycle_does_not_clean_handoffs_twice_after_background_cleanup() {
+    let reservation_id = ResourceReservationId::new();
     let secret_handle = SecretHandle::new("api_token").unwrap();
     let inner_store = Arc::new(InMemoryProcessStore::new());
     let network_policies = Arc::new(NetworkObligationPolicyStore::new());
@@ -1363,7 +1426,14 @@ async fn process_obligation_lifecycle_preserves_newer_handoffs_for_same_invocati
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id);
     let process_id = ProcessId::new();
-
+    let estimate = ResourceEstimate {
+        process_count: Some(1),
+        concurrency_slots: Some(1),
+        ..ResourceEstimate::default()
+    };
+    governor
+        .reserve_with_id(scope.clone(), estimate.clone(), reservation_id)
+        .unwrap();
     network_policies.insert(&scope, &script_capability_id(), wasm_http_policy());
     secret_injections
         .insert(
@@ -1377,13 +1447,17 @@ async fn process_obligation_lifecycle_preserves_newer_handoffs_for_same_invocati
         inner_store,
         Arc::clone(&network_policies),
         Arc::clone(&secret_injections),
-        governor,
+        governor.clone(),
     );
+    let mut start = process_start(process_id, invocation_id, scope.clone());
+    start.estimated_resources = estimate;
+    start.resource_reservation_id = Some(reservation_id);
+    lifecycle_store.start(start).await.unwrap();
+
     lifecycle_store
-        .start(process_start(process_id, invocation_id, scope.clone()))
+        .cleanup_process_obligations(&scope, process_id, false)
         .await
         .unwrap();
-
     network_policies.insert(&scope, &script_capability_id(), wasm_http_policy());
     secret_injections
         .insert(
@@ -1394,20 +1468,20 @@ async fn process_obligation_lifecycle_preserves_newer_handoffs_for_same_invocati
         )
         .unwrap();
 
-    lifecycle_store.complete(&scope, process_id).await.unwrap();
+    lifecycle_store.kill(&scope, process_id).await.unwrap();
 
     assert!(
         network_policies
             .take(&scope, &script_capability_id())
             .is_some(),
-        "cleanup for the completed process must not discard a newer staged network policy for the same scoped capability"
+        "a later terminal transition for an already-cleaned process must not discard a newer staged policy"
     );
     assert!(
         secret_injections
             .take(&scope, &script_capability_id(), &secret_handle)
             .unwrap()
             .is_some(),
-        "cleanup for the completed process must not discard newer staged secret material for the same scoped capability"
+        "a later terminal transition for an already-cleaned process must not discard newer staged secret material"
     );
 }
 
