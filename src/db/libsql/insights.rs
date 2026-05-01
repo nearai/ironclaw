@@ -1,9 +1,11 @@
 //! Aggregate usage analytics for the `ironclaw insights` CLI (libSQL backend).
 //!
-//! All queries are bounded by `agent_jobs.created_at >= ?since` so the work
-//! scales with the time window, not the table size. Tool frequency joins
-//! `job_actions` to `agent_jobs` so we don't aggregate actions whose parent
-//! job falls outside the window.
+//! All queries are bounded by the closed-open interval `[since, until)`
+//! so the work scales with the time window, not the table size, AND
+//! future-dated rows (clock skew, manual seeds, replay tooling) cannot
+//! leak into the totals. Tool frequency joins `job_actions` to
+//! `agent_jobs` so we don't aggregate actions whose parent job falls
+//! outside the window.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -18,13 +20,16 @@ impl InsightsStore for LibSqlBackend {
     async fn aggregate_insights(
         &self,
         since: DateTime<Utc>,
+        until: DateTime<Utc>,
         top_tools_limit: i64,
     ) -> Result<InsightsAggregate, DatabaseError> {
         let since_text = fmt_ts(&since);
+        let until_text = fmt_ts(&until);
         let conn = self.connect().await?;
 
         // Single round-trip per metric. Each query uses the
-        // `idx_agent_jobs_created` index for the time-window scan.
+        // `idx_agent_jobs_created` and `idx_routine_runs_created` indexes
+        // for the time-window scan.
 
         // Total jobs and total tokens used in the window.
         let mut row = conn
@@ -34,9 +39,9 @@ impl InsightsStore for LibSqlBackend {
                     COUNT(*) AS total_jobs,
                     COALESCE(SUM(total_tokens_used), 0) AS total_tokens
                 FROM agent_jobs
-                WHERE created_at >= ?1
+                WHERE created_at >= ?1 AND created_at < ?2
                 "#,
-                params![since_text.clone()],
+                params![since_text.clone(), until_text.clone()],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -53,8 +58,8 @@ impl InsightsStore for LibSqlBackend {
         // Total routine runs in the window (use created_at to align with jobs).
         let mut row = conn
             .query(
-                "SELECT COUNT(*) FROM routine_runs WHERE created_at >= ?1",
-                params![since_text.clone()],
+                "SELECT COUNT(*) FROM routine_runs WHERE created_at >= ?1 AND created_at < ?2",
+                params![since_text.clone(), until_text.clone()],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -77,12 +82,12 @@ impl InsightsStore for LibSqlBackend {
                 SELECT ja.tool_name, COUNT(*) AS invocations
                 FROM job_actions ja
                 INNER JOIN agent_jobs aj ON aj.id = ja.job_id
-                WHERE aj.created_at >= ?1
+                WHERE aj.created_at >= ?1 AND aj.created_at < ?2
                 GROUP BY ja.tool_name
                 ORDER BY invocations DESC, ja.tool_name ASC
-                LIMIT ?2
+                LIMIT ?3
                 "#,
-                params![since_text.clone(), limit],
+                params![since_text.clone(), until_text.clone(), limit],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -106,11 +111,11 @@ impl InsightsStore for LibSqlBackend {
                 r#"
                 SELECT substr(created_at, 1, 10) AS day, COUNT(*) AS jobs
                 FROM agent_jobs
-                WHERE created_at >= ?1
+                WHERE created_at >= ?1 AND created_at < ?2
                 GROUP BY day
                 ORDER BY day ASC
                 "#,
-                params![since_text],
+                params![since_text, until_text],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;

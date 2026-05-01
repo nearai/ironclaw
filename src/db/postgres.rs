@@ -1660,18 +1660,24 @@ impl InsightsStore for PgBackend {
     async fn aggregate_insights(
         &self,
         since: DateTime<Utc>,
+        until: DateTime<Utc>,
         top_tools_limit: i64,
     ) -> Result<InsightsAggregate, DatabaseError> {
         let conn = self.store.pool().get().await?;
         let limit = top_tools_limit.max(1);
+
+        // Closed-open interval [since, until) so future-dated rows (clock
+        // skew, replay tooling, manual seeds) and rows committed mid-
+        // aggregation cannot leak into the totals. The agent_jobs and
+        // routine_runs `created_at` indexes carry the time-window scan.
 
         // Combined jobs + tokens query (single round-trip for the most-used aggregate).
         let job_row = conn
             .query_one(
                 "SELECT COUNT(*)::BIGINT AS total_jobs, \
                  COALESCE(SUM(total_tokens_used), 0)::BIGINT AS total_tokens \
-                 FROM agent_jobs WHERE created_at >= $1",
-                &[&since],
+                 FROM agent_jobs WHERE created_at >= $1 AND created_at < $2",
+                &[&since, &until],
             )
             .await?;
         let total_jobs: i64 = job_row.get("total_jobs");
@@ -1679,8 +1685,9 @@ impl InsightsStore for PgBackend {
 
         let runs_row = conn
             .query_one(
-                "SELECT COUNT(*)::BIGINT AS cnt FROM routine_runs WHERE created_at >= $1",
-                &[&since],
+                "SELECT COUNT(*)::BIGINT AS cnt FROM routine_runs \
+                 WHERE created_at >= $1 AND created_at < $2",
+                &[&since, &until],
             )
             .await?;
         let total_routine_runs: i64 = runs_row.get("cnt");
@@ -1690,11 +1697,11 @@ impl InsightsStore for PgBackend {
                 "SELECT ja.tool_name, COUNT(*)::BIGINT AS invocations \
                  FROM job_actions ja \
                  INNER JOIN agent_jobs aj ON aj.id = ja.job_id \
-                 WHERE aj.created_at >= $1 \
+                 WHERE aj.created_at >= $1 AND aj.created_at < $2 \
                  GROUP BY ja.tool_name \
                  ORDER BY invocations DESC, ja.tool_name ASC \
-                 LIMIT $2",
-                &[&since, &limit],
+                 LIMIT $3",
+                &[&since, &until, &limit],
             )
             .await?;
         let top_tools = tool_rows
@@ -1709,10 +1716,10 @@ impl InsightsStore for PgBackend {
             .query(
                 "SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, \
                         COUNT(*)::BIGINT AS jobs \
-                 FROM agent_jobs WHERE created_at >= $1 \
+                 FROM agent_jobs WHERE created_at >= $1 AND created_at < $2 \
                  GROUP BY day \
                  ORDER BY day ASC",
-                &[&since],
+                &[&since, &until],
             )
             .await?;
         let daily_activity = day_rows

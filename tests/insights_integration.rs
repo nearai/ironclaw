@@ -134,7 +134,7 @@ async fn aggregate_counts_jobs_and_top_tools_in_window() {
 
     let since = now - Duration::days(7);
     let agg = db
-        .aggregate_insights(since, 10)
+        .aggregate_insights(since, now, 10)
         .await
         .expect("aggregate_insights");
 
@@ -173,7 +173,7 @@ async fn json_payload_for_seeded_data_matches_fixture_shape() {
     seed_action(&db_path, &job, 1, "shell").await;
 
     let agg = db
-        .aggregate_insights(now - Duration::days(7), 10)
+        .aggregate_insights(now - Duration::days(7), now, 10)
         .await
         .expect("aggregate_insights");
 
@@ -203,8 +203,9 @@ async fn json_payload_for_seeded_data_matches_fixture_shape() {
 #[tokio::test]
 async fn empty_database_returns_zero_aggregate() {
     let (db, _tmp) = create_test_db().await;
+    let now = Utc::now();
     let agg = db
-        .aggregate_insights(Utc::now() - Duration::days(30), 10)
+        .aggregate_insights(now - Duration::days(30), now, 10)
         .await
         .expect("aggregate_insights");
 
@@ -235,7 +236,7 @@ async fn time_window_excludes_old_rows() {
 
     // Window: last 7 days.
     let agg = db
-        .aggregate_insights(now - Duration::days(7), 10)
+        .aggregate_insights(now - Duration::days(7), now, 10)
         .await
         .expect("aggregate_insights");
 
@@ -277,12 +278,64 @@ async fn aggregate_counts_routine_runs_in_window_only() {
     seed_job(&db_path, &job, "alice", now - Duration::days(1), 1).await;
 
     let agg = db
-        .aggregate_insights(now - Duration::days(7), 10)
+        .aggregate_insights(now - Duration::days(7), now, 10)
         .await
         .expect("aggregate_insights");
 
     assert_eq!(
         agg.total_routine_runs, 2,
         "expected exactly two recent routine_runs (the 60-day-old one is outside the window)"
+    );
+}
+
+/// Future-dated rows must NOT leak into the totals. Clock skew, replay
+/// tooling, or rows committed in another tick after `until` is captured
+/// would otherwise inflate the aggregate.
+#[tokio::test]
+async fn time_window_excludes_future_rows() {
+    let (db, tmp) = create_test_db().await;
+    let db_path = tmp.path().join("insights.db");
+
+    let now = Utc::now();
+    let recent_job = uuid::Uuid::new_v4().to_string();
+    let future_job = uuid::Uuid::new_v4().to_string();
+
+    seed_job(&db_path, &recent_job, "alice", now - Duration::days(1), 100).await;
+    // Stamped after `until` — must NOT be counted.
+    seed_job(&db_path, &future_job, "alice", now + Duration::days(2), 9_999).await;
+    seed_action(&db_path, &recent_job, 1, "shell").await;
+    seed_action(&db_path, &future_job, 1, "shell").await;
+    seed_action(&db_path, &future_job, 2, "shell").await;
+    seed_routine_run(&db_path, "alice", now - Duration::days(1)).await;
+    seed_routine_run(&db_path, "alice", now + Duration::days(2)).await;
+
+    // until is pinned at `now` so the future-dated rows are unambiguously
+    // outside the window.
+    let agg = db
+        .aggregate_insights(now - Duration::days(7), now, 10)
+        .await
+        .expect("aggregate_insights");
+
+    assert_eq!(
+        agg.total_jobs, 1,
+        "future_job is past the until bound and must not be counted"
+    );
+    assert_eq!(
+        agg.total_tokens_used, 100,
+        "tokens from future_job must not leak in"
+    );
+    assert_eq!(
+        agg.total_routine_runs, 1,
+        "future-dated routine_run must not be counted"
+    );
+    let shell_count = agg
+        .top_tools
+        .iter()
+        .find(|t| t.tool_name == "shell")
+        .map(|t| t.invocations)
+        .unwrap_or(0);
+    assert_eq!(
+        shell_count, 1,
+        "tool frequency must respect the upper bound via the agent_jobs join"
     );
 }

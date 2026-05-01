@@ -1,0 +1,18 @@
+-- Add index on routine_runs.created_at to speed up the time-window
+-- aggregation used by `ironclaw insights`.
+--
+-- V6 created indexes on routine_id and status but not created_at, so the
+-- insights query (`SELECT COUNT(*) FROM routine_runs WHERE created_at >=
+-- $1 AND created_at < $2`) was a full-table scan on deployments with
+-- meaningful routine_runs history. Mirrors the pattern of V24, which
+-- added the same kind of index to llm_calls for the admin usage summary.
+--
+-- WARNING: This takes a full table lock on routine_runs. For large
+-- deployments with millions of rows, this could block writes for several
+-- seconds to minutes. Refinery wraps migrations in a transaction, which
+-- prevents using CREATE INDEX CONCURRENTLY. If this is a concern, apply
+-- the index manually outside the migration framework first:
+--
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_routine_runs_created
+--       ON routine_runs(created_at);
+CREATE INDEX IF NOT EXISTS idx_routine_runs_created ON routine_runs(created_at);

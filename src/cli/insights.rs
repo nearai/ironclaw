@@ -115,9 +115,10 @@ pub async fn run_insights_with_db(
         );
     }
 
-    let since = Utc::now() - Duration::days(resolved.days as i64);
+    let until = Utc::now();
+    let since = until - Duration::days(resolved.days as i64);
     let aggregate = db
-        .aggregate_insights(since, TOP_TOOLS_LIMIT)
+        .aggregate_insights(since, until, TOP_TOOLS_LIMIT)
         .await
         .map_err(|e| anyhow::anyhow!("aggregate_insights failed: {e}"))?;
 

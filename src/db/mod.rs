@@ -1285,13 +1285,20 @@ pub struct DailyActivity {
 
 #[async_trait]
 pub trait InsightsStore: Send + Sync {
-    /// Aggregate usage stats over the window `[since, now)`.
+    /// Aggregate usage stats over the window `[since, until)`.
+    ///
+    /// The closed-open `[since, until)` interval is enforced in SQL so
+    /// future-dated rows (clock skew, manual seeds, replay tooling) and
+    /// rows committed mid-aggregation cannot leak into the totals. The
+    /// caller is expected to pass `until = Utc::now()` for the live CLI
+    /// path; tests pin a fixed `until` to make assertions deterministic.
     ///
     /// `top_tools_limit` caps the number of tool rows returned. Backends must
     /// compute aggregates server-side (no streaming all rows to the CLI).
     async fn aggregate_insights(
         &self,
         since: DateTime<Utc>,
+        until: DateTime<Utc>,
         top_tools_limit: i64,
     ) -> Result<InsightsAggregate, DatabaseError>;
 }
