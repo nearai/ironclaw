@@ -433,11 +433,12 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
     ) -> Result<(), CapabilityObligationError> {
         // `satisfy` is the direct one-shot path for callers that need staged
         // network/secret handoff but do not need to pass prepared mounts or a
-        // reservation downstream. Resource reservations are immediately
-        // released because no downstream dispatcher/process can reconcile them
-        // on this path. CapabilityHost uses `prepare`/`complete`/`abort`
-        // directly instead. Post-dispatch obligations fail closed here because
-        // this path has no dispatch result to redact, limit, or audit.
+        // reservation downstream. Resource reservations are released without
+        // discarding staged handoffs because successful callers still need the
+        // network/secret material handed to runtime adapters. CapabilityHost
+        // uses `prepare`/`complete`/`abort` directly instead. Post-dispatch
+        // obligations fail closed here because this path has no dispatch result
+        // to redact, limit, or audit.
         let post_dispatch = post_dispatch_obligations(request.obligations);
         if !post_dispatch.is_empty() {
             return Err(CapabilityObligationError::Unsupported {
@@ -453,16 +454,15 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
                 obligations: request.obligations,
             })
             .await?;
-        if outcome.resource_reservation.is_some() {
-            self.abort(CapabilityObligationAbortRequest {
-                phase: request.phase,
-                context: request.context,
-                capability_id: request.capability_id,
-                estimate: request.estimate,
-                obligations: request.obligations,
-                outcome: &outcome,
-            })
-            .await?;
+        if let Some(reservation) = &outcome.resource_reservation
+            && let Err(error) = self.release_resource_reservation(reservation)
+        {
+            let _ = self.discard_staged_handoffs(
+                &request.context.resource_scope,
+                request.capability_id,
+                request.obligations,
+            );
+            return Err(error);
         }
         Ok(())
     }
@@ -522,12 +522,7 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
         )?;
 
         if let Some(reservation) = &request.outcome.resource_reservation {
-            let Some(governor) = &self.resource_governor else {
-                return Err(resource_obligation_failed());
-            };
-            governor
-                .release(reservation.id)
-                .map_err(|_| resource_obligation_failed())?;
+            self.release_resource_reservation(reservation)?;
         }
         Ok(())
     }
@@ -580,6 +575,19 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
 }
 
 impl BuiltinObligationHandler {
+    fn release_resource_reservation(
+        &self,
+        reservation: &ResourceReservation,
+    ) -> Result<(), CapabilityObligationError> {
+        let Some(governor) = &self.resource_governor else {
+            return Err(resource_obligation_failed());
+        };
+        governor
+            .release(reservation.id)
+            .map(|_| ())
+            .map_err(|_| resource_obligation_failed())
+    }
+
     fn discard_staged_handoffs(
         &self,
         scope: &ResourceScope,

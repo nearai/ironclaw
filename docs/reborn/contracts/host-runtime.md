@@ -25,6 +25,7 @@ Supported built-in behavior:
 
 - `NetworkObligationPolicyStore` keys policies by full `ResourceScope` plus capability id and consumes entries with `take(...)`.
 - `RuntimeSecretInjectionStore` keys material by full `ResourceScope`, capability id, and secret handle and consumes entries with `take(...)`.
+- Direct `satisfy(...)` releases any prepared resource reservation without discarding successfully staged network/secret handoffs that the caller still needs to pass to runtime adapters.
 - Inline dispatch completion discards any unconsumed staged network/secret handoffs so successful calls do not leave reusable ambient state behind.
 - Staged secrets must never be logged or exposed through debug output.
 - Handler errors must use stable categories and avoid raw provider/backend details.

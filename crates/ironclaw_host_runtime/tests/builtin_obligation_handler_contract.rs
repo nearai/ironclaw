@@ -421,6 +421,72 @@ async fn builtin_obligation_handler_removes_staged_secret_on_abort() {
 }
 
 #[tokio::test]
+async fn builtin_obligation_handler_satisfy_preserves_staged_handoffs_when_releasing_reservation() {
+    let policy_store = Arc::new(NetworkObligationPolicyStore::new());
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let injection_store = Arc::new(RuntimeSecretInjectionStore::new());
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let handler = BuiltinObligationHandler::new()
+        .with_network_policy_store(policy_store.clone())
+        .with_secret_store(secret_store.clone())
+        .with_secret_injection_store(injection_store.clone())
+        .with_resource_governor(governor.clone());
+    let context = execution_context(CapabilitySet::default());
+    let account = ResourceAccount::tenant(context.resource_scope.tenant_id.clone());
+    let capability_id = capability_id();
+    let estimate = ResourceEstimate {
+        concurrency_slots: Some(1),
+        ..ResourceEstimate::default()
+    };
+    let handle = SecretHandle::new("api_token").unwrap();
+    secret_store
+        .put(
+            context.resource_scope.clone(),
+            handle.clone(),
+            SecretMaterial::from("runtime-secret"),
+        )
+        .await
+        .unwrap();
+    let obligations = vec![
+        Obligation::ApplyNetworkPolicy {
+            policy: allowed_network_policy(),
+        },
+        Obligation::InjectSecretOnce {
+            handle: handle.clone(),
+        },
+        Obligation::ReserveResources {
+            reservation_id: ResourceReservationId::new(),
+        },
+    ];
+
+    handler
+        .satisfy(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(governor.reserved_for(&account).concurrency_slots, 0);
+    assert!(
+        policy_store
+            .take(&context.resource_scope, &capability_id)
+            .is_some(),
+        "direct satisfy should preserve staged network handoff after releasing reservation"
+    );
+    assert!(
+        injection_store
+            .take(&context.resource_scope, &capability_id, &handle)
+            .unwrap()
+            .is_some(),
+        "direct satisfy should preserve staged secret handoff after releasing reservation"
+    );
+}
+
+#[tokio::test]
 async fn builtin_obligation_handler_cleans_unused_staged_handoffs_after_dispatch_completion() {
     let policy_store = Arc::new(NetworkObligationPolicyStore::new());
     let secret_store = Arc::new(InMemorySecretStore::new());
