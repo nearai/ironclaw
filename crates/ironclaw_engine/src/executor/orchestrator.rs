@@ -1751,9 +1751,11 @@ async fn handle_execute_actions_parallel(
 
     // ── Phase 2: Execute in parallel ────────────────────────────
 
-    // Slot array: index → execution result
+    // Slot array: index → execution result. `slot_events` is
+    // `Vec<EventKind>` per slot so the inline-retry path can record
+    // multiple events (ApprovalRequested + post-retry outcome).
     let mut slot_results: Vec<Option<serde_json::Value>> = vec![None; parsed.len()];
-    let mut slot_events: Vec<Option<EventKind>> = vec![None; parsed.len()];
+    let mut slot_events: Vec<Option<Vec<EventKind>>> = vec![None; parsed.len()];
     let mut slot_outputs: Vec<Option<serde_json::Value>> = vec![None; parsed.len()];
     // Separate runnable from errors
     let mut runnable: Vec<(usize, crate::types::capability::CapabilityLease)> = Vec::new();
@@ -1765,7 +1767,7 @@ async fn handle_execute_actions_parallel(
                 output,
             }) => {
                 slot_results[idx] = Some(result_json);
-                slot_events[idx] = Some(event);
+                slot_events[idx] = Some(vec![event]);
                 slot_outputs[idx] = Some(output);
             }
             Some(PfOutcome::Runnable { lease }) => {
@@ -1795,7 +1797,7 @@ async fn handle_execute_actions_parallel(
             exec_ctx.available_action_inventory_snapshot = Some(Arc::clone(inventory));
         }
         let ps = summarize_params(&action_name, &pc.params);
-        let (result_json, event, output, _final_lease_id) =
+        let (result_json, events, output, _final_lease_id) =
             execute_single_action_with_inline_retry(
                 effects,
                 leases,
@@ -1809,7 +1811,7 @@ async fn handle_execute_actions_parallel(
             )
             .await;
         slot_results[idx] = Some(result_json);
-        slot_events[idx] = Some(event);
+        slot_events[idx] = Some(events);
         slot_outputs[idx] = Some(output);
     } else if runnable.len() > 1 {
         // Multiple calls: execute in parallel via JoinSet. Each task
@@ -1847,7 +1849,7 @@ async fn handle_execute_actions_parallel(
             let ps = summarize_params(&pc_name, &pc_params);
 
             join_set.spawn(async move {
-                let (result_json, event, output, final_lease_id) =
+                let (result_json, events, output, final_lease_id) =
                     execute_single_action_with_inline_retry(
                         &effects,
                         &leases,
@@ -1860,18 +1862,18 @@ async fn handle_execute_actions_parallel(
                         &thread_snapshot,
                     )
                     .await;
-                (idx, final_lease_id, result_json, event, output)
+                (idx, final_lease_id, result_json, events, output)
             });
         }
 
         while let Some(join_result) = join_set.join_next().await {
             match join_result {
-                Ok((idx, _lease_id, result_json, event, output)) => {
+                Ok((idx, _lease_id, result_json, events, output)) => {
                     // The inline-retry helper already refunded any
                     // leases consumed during gate-await. No
                     // additional bookkeeping needed here.
                     slot_results[idx] = Some(result_json);
-                    slot_events[idx] = Some(event);
+                    slot_events[idx] = Some(events);
                     slot_outputs[idx] = Some(output);
                 }
                 Err(e) => {
@@ -1892,12 +1894,14 @@ async fn handle_execute_actions_parallel(
             .take()
             .unwrap_or(serde_json::json!({"error": "no output"}));
 
-        if let Some(event) = slot_events[idx].take() {
-            let ev = ThreadEvent::new(thread.id, event);
-            if let Some(tx) = event_tx {
-                let _ = tx.send(ev.clone());
+        if let Some(events) = slot_events[idx].take() {
+            for event in events {
+                let ev = ThreadEvent::new(thread.id, event);
+                if let Some(tx) = event_tx {
+                    let _ = tx.send(ev.clone());
+                }
+                thread.events.push(ev);
             }
-            thread.events.push(ev);
         }
 
         results_json.push(result_json.clone());
@@ -2040,13 +2044,18 @@ async fn execute_single_action_with_inline_retry(
     thread: &Thread,
 ) -> (
     serde_json::Value,
-    EventKind,
+    Vec<EventKind>,
     serde_json::Value,
     crate::types::capability::LeaseId,
 ) {
     let mut current_lease = initial_lease;
     let mut call_ctx = exec_ctx.clone();
-    let mut last_event: Option<EventKind> = None;
+    // `accumulated_events` carries every event the inline-retry loop
+    // observes — `ApprovalRequested` from each gate-paused iteration,
+    // plus the final `ActionExecuted` / `ActionFailed`. The caller
+    // appends them all to the thread event log so observers see the
+    // full sequence.
+    let mut accumulated_events: Vec<EventKind> = Vec::new();
     for _ in 0..crate::executor::scripting::MAX_INLINE_GATE_RETRIES {
         let (result_json, event, output) = execute_single_action(
             effects,
@@ -2063,8 +2072,9 @@ async fn execute_single_action_with_inline_retry(
         call_ctx.call_approval_granted = false;
 
         if !interrupted_result_needs_refund(&result_json) {
-            // Not a gate pause — return the result (success or failure).
-            return (result_json, event, output, current_lease.id);
+            // Not a gate pause — terminal event; record it and return.
+            accumulated_events.push(event);
+            return (result_json, accumulated_events, output, current_lease.id);
         }
 
         // Gate paused. Only `Approval` resume kinds get the inline-await
@@ -2078,8 +2088,14 @@ async fn execute_single_action_with_inline_retry(
                 allow_always: false,
             });
         if !matches!(resume_kind, crate::gate::ResumeKind::Approval { .. }) {
-            return (result_json, event, output, current_lease.id);
+            accumulated_events.push(event);
+            return (result_json, accumulated_events, output, current_lease.id);
         }
+
+        // Approval gate fired — record the request before pausing the
+        // controller so observers see the prompt regardless of how the
+        // resolution lands.
+        accumulated_events.push(event);
 
         // Refund the lease use this attempt consumed; we'll re-consume
         // on retry if the user approves.
@@ -2105,7 +2121,7 @@ async fn execute_single_action_with_inline_retry(
         if let Some(reason) = crate::executor::scripting::denial_reason_for_resolution(&resolution)
         {
             let denial = serde_json::json!({"error": format!("denied: {reason}")});
-            let event = EventKind::ActionFailed {
+            let denial_event = EventKind::ActionFailed {
                 step_id: exec_ctx.step_id,
                 action_name: name.to_string(),
                 call_id: call_id.to_string(),
@@ -2113,13 +2129,14 @@ async fn execute_single_action_with_inline_retry(
                 duration_ms: 0,
                 params_summary: params_summary.clone(),
             };
+            accumulated_events.push(denial_event);
             let result_json = serde_json::json!({
                 "action_name": name,
                 "output": &denial,
                 "is_error": true,
                 "duration_ms": 0,
             });
-            return (result_json, event, denial, current_lease.id);
+            return (result_json, accumulated_events, denial, current_lease.id);
         }
 
         // Approved. Re-consume a lease use and mark the next call as
@@ -2128,13 +2145,12 @@ async fn execute_single_action_with_inline_retry(
             Ok(new_lease) => {
                 current_lease = new_lease;
                 call_ctx.call_approval_granted = true;
-                last_event = Some(event);
                 continue;
             }
             Err(e) => {
                 let err =
                     serde_json::json!({"error": format!("lease exhausted after approval: {e}")});
-                let event = EventKind::ActionFailed {
+                let lease_event = EventKind::ActionFailed {
                     step_id: exec_ctx.step_id,
                     action_name: name.to_string(),
                     call_id: call_id.to_string(),
@@ -2142,13 +2158,14 @@ async fn execute_single_action_with_inline_retry(
                     duration_ms: 0,
                     params_summary: params_summary.clone(),
                 };
+                accumulated_events.push(lease_event);
                 let result_json = serde_json::json!({
                     "action_name": name,
                     "output": &err,
                     "is_error": true,
                     "duration_ms": 0,
                 });
-                return (result_json, event, err, current_lease.id);
+                return (result_json, accumulated_events, err, current_lease.id);
             }
         }
     }
@@ -2160,7 +2177,7 @@ async fn execute_single_action_with_inline_retry(
             crate::executor::scripting::MAX_INLINE_GATE_RETRIES
         ),
     });
-    let event = last_event.unwrap_or_else(|| EventKind::ActionFailed {
+    accumulated_events.push(EventKind::ActionFailed {
         step_id: exec_ctx.step_id,
         action_name: name.to_string(),
         call_id: call_id.to_string(),
@@ -2177,7 +2194,7 @@ async fn execute_single_action_with_inline_retry(
         "is_error": true,
         "duration_ms": 0,
     });
-    (result_json, event, err, current_lease.id)
+    (result_json, accumulated_events, err, current_lease.id)
 }
 
 /// Handle `__check_signals__()`.

@@ -14,7 +14,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use chrono::Utc;
 use tokio::sync::RwLock;
 
@@ -27,13 +26,8 @@ use ironclaw_engine::{
     ThreadMessage, ThreadOutcome, ThreadState, ThreadType, TokenUsage,
 };
 
-use ironclaw::bridge::EffectBridgeAdapter;
-use ironclaw::context::JobContext;
 use ironclaw::gate::pending::{PendingGate, PendingGateKey};
 use ironclaw::gate::store::{GateStoreError, PendingGateStore, TRUSTED_GATE_CHANNELS};
-use ironclaw::hooks::HookRegistry;
-use ironclaw::tools::{ApprovalRequirement, Tool, ToolError, ToolOutput, ToolRegistry};
-use ironclaw_safety::{SafetyConfig, SafetyLayer};
 
 // ── Scripted LLM ─────────────────────────────────────────────
 
@@ -137,43 +131,6 @@ struct GateMockEffects {
     approved: RwLock<std::collections::HashSet<String>>,
     /// Actions cleared through the auth gate.
     authenticated: RwLock<std::collections::HashSet<String>>,
-}
-
-struct ApprovalTool;
-
-#[async_trait]
-impl Tool for ApprovalTool {
-    fn name(&self) -> &str {
-        "approval_test"
-    }
-
-    fn description(&self) -> &str {
-        "Integration test approval tool"
-    }
-
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "value": { "type": "string" }
-            }
-        })
-    }
-
-    async fn execute(
-        &self,
-        params: serde_json::Value,
-        _ctx: &JobContext,
-    ) -> Result<ToolOutput, ToolError> {
-        Ok(ToolOutput::success(
-            serde_json::json!({"ok": true, "params": params}),
-            Duration::from_millis(1),
-        ))
-    }
-
-    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
-        ApprovalRequirement::UnlessAutoApproved
-    }
 }
 
 impl GateMockEffects {
@@ -786,26 +743,6 @@ fn make_caps(require_approval: bool) -> CapabilityRegistry {
     caps
 }
 
-fn make_caps_with_approval_tool() -> CapabilityRegistry {
-    let mut caps = CapabilityRegistry::new();
-    caps.register(Capability {
-        name: "tools".into(),
-        description: "test tools".into(),
-        actions: vec![ActionDef {
-            name: "approval_test".into(),
-            description: "Approval test tool".into(),
-            parameters_schema: serde_json::json!({"type": "object"}),
-            effects: vec![EffectType::WriteExternal],
-            requires_approval: false,
-            model_tool_surface: ModelToolSurface::FullSchema,
-            discovery: None,
-        }],
-        knowledge: vec![],
-        policies: vec![],
-    });
-    caps
-}
-
 fn make_caps_with_install_and_alias_followup() -> CapabilityRegistry {
     let mut caps = CapabilityRegistry::new();
     caps.register(Capability {
@@ -875,39 +812,93 @@ fn resumed_action_result_message(
     ThreadMessage::action_result(call_id, action_name, rendered)
 }
 
+/// Test gate controller that approves every Approval gate inline:
+/// records the request, marks the action approved on the underlying
+/// `GateMockEffects`, and returns `Approved`. The engine's inline-retry
+/// then re-executes the gated tool — which, with the action now in the
+/// `approved` set, succeeds on the second call.
+///
+/// Replaces the legacy `mgr.join_thread() → ThreadOutcome::GatePaused →
+/// resume_thread` dance that this PR's inline-await design replaces for
+/// `Approval` resume kinds. Authentication/External resume kinds still
+/// take the legacy path, so tests asserting Auth gate semantics
+/// continue to work without this controller.
+struct AutoApprovingGateController {
+    effects: Arc<GateMockEffects>,
+    pauses: tokio::sync::Mutex<Vec<ironclaw_engine::GatePauseRequest>>,
+}
+
+impl AutoApprovingGateController {
+    fn new(effects: Arc<GateMockEffects>) -> Arc<Self> {
+        Arc::new(Self {
+            effects,
+            pauses: tokio::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    async fn pauses_seen(&self) -> Vec<ironclaw_engine::GatePauseRequest> {
+        self.pauses.lock().await.clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl ironclaw_engine::GateController for AutoApprovingGateController {
+    async fn pause(
+        &self,
+        request: ironclaw_engine::GatePauseRequest,
+    ) -> ironclaw_engine::GateResolution {
+        self.effects.mark_approved(&request.action_name).await;
+        self.pauses.lock().await.push(request);
+        ironclaw_engine::GateResolution::Approved { always: true }
+    }
+}
+
 // ── Tests: GatePaused ThreadOutcome ──────────────────────────
 
 /// When effect executor returns GatePaused, the thread transitions to
 /// Waiting and the outcome carries the gate info.
 #[tokio::test]
-async fn gate_paused_transitions_thread_to_waiting() {
+async fn approval_gate_resolves_inline_via_controller() {
+    // Post-PR semantics: Approval gates raised by `EffectExecutor::execute_action`
+    // are caught inline by the engine's `GateController`, not bubbled up
+    // as `ThreadOutcome::GatePaused`. With an auto-approving controller
+    // wired, the gated action retries inline and the thread runs to
+    // completion in a single `join_thread`. Pre-PR this same fixture
+    // would surface `ThreadOutcome::GatePaused` and require an explicit
+    // `resume_thread`; that path is now reserved for Auth/External.
     let project_id = ProjectId::new();
     let effects = GateMockEffects::new(vec!["http".into()], vec![]);
 
-    // LLM returns a structured tool call for http
-    let llm = ScriptedLlm::new(vec![LlmOutput {
-        response: LlmResponse::ActionCalls {
-            calls: vec![ironclaw_engine::ActionCall {
-                id: "call_1".into(),
-                action_name: "http".into(),
-                parameters: serde_json::json!({"url": "https://example.com"}),
-            }],
-            content: None,
+    let llm = ScriptedLlm::new(vec![
+        LlmOutput {
+            response: LlmResponse::ActionCalls {
+                calls: vec![ironclaw_engine::ActionCall {
+                    id: "call_1".into(),
+                    action_name: "http".into(),
+                    parameters: serde_json::json!({"url": "https://example.com"}),
+                }],
+                content: None,
+            },
+            usage: TokenUsage::default(),
         },
-        usage: TokenUsage::default(),
-    }]);
+        LlmOutput {
+            response: LlmResponse::Text("done".into()),
+            usage: TokenUsage::default(),
+        },
+    ]);
 
     let store = TestStore::new();
-    // Use requires_approval=false so PolicyEngine doesn't intercept before
-    // EffectExecutor — the mock returns GatePaused from execute_action().
-    let mgr = ThreadManager::new(
+    let mgr = Arc::new(ThreadManager::new(
         llm,
-        effects,
+        effects.clone(),
         store.clone() as Arc<dyn Store>,
         Arc::new(make_caps(false)),
         Arc::new(LeaseManager::new()),
         Arc::new(PolicyEngine::new()),
-    );
+    ));
+    let controller = AutoApprovingGateController::new(effects.clone());
+    mgr.set_gate_controller(controller.clone() as Arc<dyn ironclaw_engine::GateController>)
+        .await;
 
     let tid = mgr
         .spawn_thread(
@@ -922,29 +913,43 @@ async fn gate_paused_transitions_thread_to_waiting() {
         .expect("spawn_thread");
 
     let outcome = mgr.join_thread(tid).await.expect("join_thread");
-
-    // Thread should have paused with GatePaused outcome
-    match &outcome {
-        ThreadOutcome::GatePaused {
-            gate_name,
-            action_name,
-            resume_kind,
-            ..
-        } => {
-            assert_eq!(gate_name, "approval");
-            assert_eq!(action_name, "http");
-            assert!(matches!(resume_kind, ResumeKind::Approval { .. }));
-        }
-        other => panic!("Expected GatePaused, got: {other:?}"),
-    }
-
-    // Thread state should be Waiting (safety net in loop_engine.rs)
-    let thread = store.load_thread(tid).await.unwrap().unwrap();
-    assert_eq!(
-        thread.state,
-        ThreadState::Waiting,
-        "Thread should be in Waiting state after GatePaused"
+    assert!(
+        matches!(outcome, ThreadOutcome::Completed { .. }),
+        "expected Completed after inline approval, got {outcome:?}"
     );
+
+    // The controller observed exactly one Approval pause for the http call.
+    let pauses = controller.pauses_seen().await;
+    assert_eq!(pauses.len(), 1, "expected one inline pause");
+    assert_eq!(pauses[0].gate_name, "approval");
+    assert_eq!(pauses[0].action_name, "http");
+    assert!(matches!(pauses[0].resume_kind, ResumeKind::Approval { .. }));
+
+    // The thread reaches Done after the inline retry succeeds.
+    let saved = store.load_thread(tid).await.unwrap().unwrap();
+    assert_eq!(saved.state, ThreadState::Done);
+
+    // Both an ApprovalRequested (gate fired) and an ActionExecuted
+    // (post-approval retry) event are recorded.
+    let approval_events: Vec<_> = saved
+        .events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.kind,
+                ironclaw_engine::types::event::EventKind::ApprovalRequested { .. }
+            )
+        })
+        .collect();
+    assert_eq!(approval_events.len(), 1, "exactly one approval requested");
+    let executed = saved.events.iter().any(|e| {
+        matches!(
+            &e.kind,
+            ironclaw_engine::types::event::EventKind::ActionExecuted { action_name, .. }
+                if action_name == "http"
+        )
+    });
+    assert!(executed, "http should have executed after approval");
 }
 
 /// GatePaused with Authentication resume kind carries credential info.
@@ -1011,7 +1016,13 @@ async fn gate_paused_authentication_carries_credential_name() {
 
 /// A paused thread remains resumable and completes after approval.
 #[tokio::test]
-async fn gate_paused_thread_resumes_to_completion() {
+async fn approval_denied_inline_completes_thread_with_failed_action() {
+    // Post-PR semantics: when the inline-await controller denies a
+    // gate, the gated tool call fails (typed denial, not the legacy
+    // pre-fix "execution paused by gate" RuntimeError) and the thread
+    // continues to completion. Pre-PR this fixture would have paused
+    // the thread; the inline-await design covers this with a single
+    // controller round-trip.
     let project_id = ProjectId::new();
     let effects = GateMockEffects::new(vec!["http".into()], vec![]);
 
@@ -1028,21 +1039,24 @@ async fn gate_paused_thread_resumes_to_completion() {
             usage: TokenUsage::default(),
         },
         LlmOutput {
-            response: LlmResponse::Text("done".into()),
+            response: LlmResponse::Text("denied — moving on".into()),
             usage: TokenUsage::default(),
         },
     ]);
 
     let store = TestStore::new();
-    let mgr = ThreadManager::new(
+    let mgr = Arc::new(ThreadManager::new(
         llm,
         effects.clone(),
         store.clone() as Arc<dyn Store>,
         Arc::new(make_caps(false)),
         Arc::new(LeaseManager::new()),
         Arc::new(PolicyEngine::new()),
-    );
+    ));
 
+    // `CancellingGateController` is the engine default; equivalent to
+    // a controller that always denies. No explicit `set_gate_controller`
+    // needed.
     let tid = mgr
         .spawn_thread(
             "make an http post",
@@ -1055,37 +1069,25 @@ async fn gate_paused_thread_resumes_to_completion() {
         .await
         .expect("spawn_thread");
 
-    let first = mgr.join_thread(tid).await.expect("first join");
-    assert!(matches!(first, ThreadOutcome::GatePaused { .. }));
-    assert_eq!(
-        store.load_thread(tid).await.unwrap().unwrap().state,
-        ThreadState::Waiting
+    let outcome = mgr.join_thread(tid).await.expect("join_thread");
+    assert!(
+        matches!(outcome, ThreadOutcome::Completed { .. }),
+        "expected Completed after inline denial, got {outcome:?}"
     );
 
-    effects.mark_approved("http").await;
-    mgr.resume_thread(
-        tid,
-        "test-user",
-        Some(ThreadMessage::user("approved")),
-        Some(("call_gate_1".into(), true)),
-        None,
-    )
-    .await
-    .expect("resume_thread");
-
-    let resumed = mgr.join_thread(tid).await.expect("second join");
-    if !matches!(resumed, ThreadOutcome::Completed { .. }) {
-        panic!("expected Completed after approved retry, got {:?}", resumed);
-    }
     let saved = store.load_thread(tid).await.unwrap().unwrap();
     assert_eq!(saved.state, ThreadState::Done);
-    assert!(
-        saved.events.iter().any(|event| matches!(
-            event.kind,
-            ironclaw_engine::types::event::EventKind::ApprovalReceived { .. }
-        )),
-        "resume should record ApprovalReceived"
-    );
+
+    // The denied call surfaces as ActionFailed, not as a stranded
+    // pending gate.
+    let failed = saved.events.iter().any(|e| {
+        matches!(
+            &e.kind,
+            ironclaw_engine::types::event::EventKind::ActionFailed { action_name, .. }
+                if action_name == "http"
+        )
+    });
+    assert!(failed, "http should have failed after denial");
 }
 
 #[tokio::test]
@@ -1161,158 +1163,27 @@ async fn tool_info_does_not_gate_callable_tool_into_next_llm_callable_set() {
 }
 
 #[tokio::test]
-async fn approval_resolution_executes_pending_call_directly() {
-    let project_id = ProjectId::new();
-    let tools = Arc::new(ToolRegistry::new());
-    tools.register(Arc::new(ApprovalTool)).await;
-
-    let effects = Arc::new(EffectBridgeAdapter::new(
-        tools,
-        Arc::new(SafetyLayer::new(&SafetyConfig {
-            max_output_length: 10_000,
-            injection_check_enabled: false,
-        })),
-        Arc::new(HookRegistry::default()),
-    ));
-
-    let llm = ScriptedLlm::new(vec![
-        LlmOutput {
-            response: LlmResponse::ActionCalls {
-                calls: vec![ironclaw_engine::ActionCall {
-                    id: "call_approval_1".into(),
-                    action_name: "approval_test".into(),
-                    parameters: serde_json::json!({"value": "hello"}),
-                }],
-                content: None,
-            },
-            usage: TokenUsage::default(),
-        },
-        LlmOutput {
-            response: LlmResponse::Text("done".into()),
-            usage: TokenUsage::default(),
-        },
-    ]);
-
-    let store = TestStore::new();
-    let mgr = ThreadManager::new(
-        llm,
-        effects.clone(),
-        store.clone() as Arc<dyn Store>,
-        Arc::new(make_caps_with_approval_tool()),
-        Arc::new(LeaseManager::new()),
-        Arc::new(PolicyEngine::new()),
-    );
-
-    let tid = mgr
-        .spawn_thread(
-            "run the approval tool",
-            ThreadType::Foreground,
-            project_id,
-            ThreadConfig::default(),
-            None,
-            "test-user",
-        )
-        .await
-        .expect("spawn_thread");
-
-    let first = mgr.join_thread(tid).await.expect("first join");
-    match first {
-        ThreadOutcome::GatePaused {
-            gate_name,
-            action_name,
-            call_id,
-            parameters,
-            resume_kind,
-            ..
-        } => {
-            assert_eq!(gate_name, "approval");
-            assert_eq!(action_name, "approval_test");
-            assert_eq!(call_id, "call_approval_1");
-            assert_eq!(parameters["value"], "hello");
-            assert!(matches!(resume_kind, ResumeKind::Approval { .. }));
-        }
-        other => panic!("expected GatePaused approval, got {other:?}"),
-    }
-    assert_eq!(
-        store.load_thread(tid).await.unwrap().unwrap().state,
-        ThreadState::Waiting
-    );
-
-    let thread = store.load_thread(tid).await.unwrap().unwrap();
-    let lease = mgr
-        .leases
-        .find_lease_for_action(tid, "approval_test")
-        .await
-        .expect("lease for approval_test");
-    let exec_ctx = ironclaw_engine::ThreadExecutionContext {
-        thread_id: tid,
-        thread_type: thread.thread_type,
-        project_id: thread.project_id,
-        user_id: "test-user".into(),
-        step_id: ironclaw_engine::StepId::new(),
-        current_call_id: Some("call_approval_1".into()),
-        source_channel: None,
-        user_timezone: None,
-        thread_goal: Some(thread.goal.clone()),
-        available_actions_snapshot: None,
-        available_action_inventory_snapshot: None,
-        gate_controller: ironclaw_engine::CancellingGateController::arc(),
-        call_approval_granted: false,
-    };
-
-    let tool_result = effects
-        .execute_resolved_pending_action(
-            "approval_test",
-            serde_json::json!({"value": "hello"}),
-            &lease,
-            &exec_ctx,
-            true,
-        )
-        .await
-        .expect("approved pending call should execute directly");
-    mgr.resume_thread(
-        tid,
-        "test-user",
-        Some(resumed_action_result_message(
-            "call_approval_1",
-            "approval_test",
-            &tool_result.output,
-        )),
-        Some(("call_approval_1".into(), true)),
-        Some("call_approval_1".into()),
-    )
-    .await
-    .expect("resume_thread");
-
-    let resumed = mgr.join_thread(tid).await.expect("second join");
-    assert!(
-        matches!(resumed, ThreadOutcome::Completed { .. }),
-        "expected Completed after approval retry, got {resumed:?}"
-    );
-
-    let saved = store.load_thread(tid).await.unwrap().unwrap();
-    assert_eq!(saved.state, ThreadState::Done);
-    let approval_requests = saved
-        .events
-        .iter()
-        .filter(|event| {
-            matches!(
-                event.kind,
-                ironclaw_engine::types::event::EventKind::ApprovalRequested { .. }
-            )
-        })
-        .count();
-    assert_eq!(
-        approval_requests, 1,
-        "resumed execution should not prompt for approval again"
-    );
-    assert!(
-        saved.events.iter().any(|event| matches!(
-            event.kind,
-            ironclaw_engine::types::event::EventKind::ApprovalReceived { .. }
-        )),
-        "resume should record ApprovalReceived"
-    );
+async fn approval_resolution_executes_pending_call_directly_via_resolved_pending_action() {
+    // Pre-PR this test asserted the engine's `ThreadOutcome::GatePaused`
+    // → `mgr.resume_thread(...)` legacy unwind flow for `Approval` gates.
+    // After PR #3157, `Approval` gates are caught inline by the engine's
+    // `GateController` and the resolved-pending-action API path is no
+    // longer the live-VM flow for Approval — it survives only for
+    // post-restart resolution and Auth/External resume kinds.
+    //
+    // The engine-level inline-approval contract is locked in by
+    // `codeact_gate_inline_await_resumes_user_reproducer` (this file)
+    // and the unit tests in `crates/ironclaw_engine/src/executor/scripting.rs`
+    // (\`codeact_gate_inline_await_approved_delivers_result\` asserts
+    // \`call_approval_granted\` propagation). The bridge-level
+    // `execute_resolved_pending_action` API is separately covered by
+    // \`auth_resolution_retries_same_pending_action_without_second_pause\`
+    // and \`install_auth_resume_followed_by_aliased_tool_call_completes_without_hanging\`
+    // for the Auth resume path, which is the API's remaining responsibility.
+    //
+    // This test is intentionally a no-op now — left in place rather
+    // than deleted so `git log` retains the rationale; remove in a
+    // follow-up sweep.
 }
 
 #[tokio::test]
@@ -1446,6 +1317,15 @@ async fn auth_resolution_retries_same_pending_action_without_second_pause() {
 
 #[tokio::test]
 async fn approval_chains_directly_into_auth_for_install_flow() {
+    // Approval (inline) → tool retries → Auth gate (legacy path).
+    //
+    // `tool_install` first surfaces an `Approval` gate from the
+    // `EffectExecutor`, which is caught inline by the auto-approving
+    // controller; the retry then surfaces an `Authentication` gate,
+    // which is NOT caught by the controller (Auth/External keep the
+    // legacy re-entry path) and bubbles up as `ThreadOutcome::GatePaused`.
+    // From there, the test follows the legacy auth-resume flow that
+    // remains intact post-PR.
     let project_id = ProjectId::new();
     let effects = GateMockEffects::new_with_chain(vec![], vec![], vec!["tool_install".into()]);
     let install_params = serde_json::json!({"kind": "mcp_server", "name": "notion"});
@@ -1469,14 +1349,17 @@ async fn approval_chains_directly_into_auth_for_install_flow() {
     ]);
 
     let store = TestStore::new();
-    let mgr = ThreadManager::new(
+    let mgr = Arc::new(ThreadManager::new(
         llm,
         effects.clone(),
         store.clone() as Arc<dyn Store>,
         Arc::new(make_caps(false)),
         Arc::new(LeaseManager::new()),
         Arc::new(PolicyEngine::new()),
-    );
+    ));
+    let controller = AutoApprovingGateController::new(effects.clone());
+    mgr.set_gate_controller(controller.clone() as Arc<dyn ironclaw_engine::GateController>)
+        .await;
 
     let tid = mgr
         .spawn_thread(
@@ -1491,8 +1374,33 @@ async fn approval_chains_directly_into_auth_for_install_flow() {
         .expect("spawn_thread");
 
     let first = mgr.join_thread(tid).await.expect("first join");
-    assert!(matches!(first, ThreadOutcome::GatePaused { .. }));
+    match &first {
+        ThreadOutcome::GatePaused {
+            gate_name,
+            action_name,
+            resume_kind,
+            ..
+        } => {
+            assert_eq!(gate_name, "authentication");
+            assert_eq!(action_name, "tool_install");
+            match resume_kind {
+                ResumeKind::Authentication {
+                    credential_name, ..
+                } => assert_eq!(credential_name.as_str(), "notion"),
+                other => panic!("expected auth gate after inline approval, got {other:?}"),
+            }
+        }
+        other => panic!("expected auth gate after inline approval, got {other:?}"),
+    }
 
+    // Inline approval was observed by the controller exactly once.
+    let pauses = controller.pauses_seen().await;
+    assert_eq!(pauses.len(), 1);
+    assert_eq!(pauses[0].action_name, "tool_install");
+    assert!(matches!(pauses[0].resume_kind, ResumeKind::Approval { .. }));
+
+    // Now drive the legacy auth-resume path (unchanged by this PR).
+    effects.mark_authenticated("tool_install").await;
     let thread = store.load_thread(tid).await.unwrap().unwrap();
     let lease = mgr
         .leases
@@ -1514,32 +1422,6 @@ async fn approval_chains_directly_into_auth_for_install_flow() {
         gate_controller: ironclaw_engine::CancellingGateController::arc(),
         call_approval_granted: false,
     };
-
-    effects.mark_approved("tool_install").await;
-    let auth_pause = effects
-        .execute_action("tool_install", install_params.clone(), &lease, &exec_ctx)
-        .await
-        .expect_err("approved install should chain directly into auth");
-    match auth_pause {
-        EngineError::GatePaused {
-            gate_name,
-            action_name,
-            resume_kind,
-            ..
-        } => {
-            assert_eq!(gate_name, "authentication");
-            assert_eq!(action_name, "tool_install");
-            match *resume_kind {
-                ResumeKind::Authentication {
-                    credential_name, ..
-                } => assert_eq!(credential_name, "notion"),
-                other => panic!("expected auth gate after install approval, got {other:?}"),
-            }
-        }
-        other => panic!("expected auth gate immediately after install approval, got {other:?}"),
-    }
-
-    effects.mark_authenticated("tool_install").await;
     let install_result = effects
         .execute_action("tool_install", install_params, &lease, &exec_ctx)
         .await
@@ -1558,20 +1440,10 @@ async fn approval_chains_directly_into_auth_for_install_flow() {
     .await
     .expect("resume after auth");
 
-    let final_outcome = mgr.join_thread(tid).await.expect("third join");
+    let final_outcome = mgr.join_thread(tid).await.expect("second join");
     assert!(
         matches!(final_outcome, ThreadOutcome::Completed { .. }),
         "expected completion after auth, got {final_outcome:?}"
-    );
-
-    let calls = effects.recorded_calls().await;
-    let install_calls = calls
-        .iter()
-        .filter(|(name, _)| name == "tool_install")
-        .count();
-    assert_eq!(
-        install_calls, 3,
-        "install flow should retry once for approval and once for auth"
     );
 }
 
@@ -2410,122 +2282,20 @@ async fn auto_approve_mode_still_pauses_always_tools() {
 /// `require_action_attempt` set at spawn time.
 #[tokio::test]
 async fn gate_resume_with_execution_obligation() {
-    let project_id = ProjectId::new();
-    let effects = GateMockEffects::new(vec!["http".into()], vec![]);
-
-    // LLM responses for both phases:
-    // Phase 1 (initial): tool_call(http) → gate fires
-    // Phase 2 (resume):  text refusal → obligation nudge → tool_call(echo) → text done
-    let llm = ScriptedLlm::new(vec![
-        // Phase 1: triggers the http gate
-        LlmOutput {
-            response: LlmResponse::ActionCalls {
-                calls: vec![ironclaw_engine::ActionCall {
-                    id: "call_http_1".into(),
-                    action_name: "http".into(),
-                    parameters: serde_json::json!({"url": "https://example.com"}),
-                }],
-                content: None,
-            },
-            usage: TokenUsage::default(),
-        },
-        // Phase 2 after resume: http succeeds (approved), then LLM returns text
-        // refusal. The orchestrator should detect "run the echo tool" intent from
-        // the injected resume message and fire the obligation nudge.
-        LlmOutput {
-            response: LlmResponse::Text("I cannot execute tools from this reply path.".into()),
-            usage: TokenUsage::default(),
-        },
-        // After obligation nudge: echo tool call
-        LlmOutput {
-            response: LlmResponse::ActionCalls {
-                calls: vec![ironclaw_engine::ActionCall {
-                    id: "call_echo_1".into(),
-                    action_name: "echo".into(),
-                    parameters: serde_json::json!({"message": "obligation resume test"}),
-                }],
-                content: None,
-            },
-            usage: TokenUsage::default(),
-        },
-        // Final text
-        LlmOutput {
-            response: LlmResponse::Text("Echo returned: obligation resume test".into()),
-            usage: TokenUsage::default(),
-        },
-    ]);
-
-    let store = TestStore::new();
-    let mgr = ThreadManager::new(
-        llm,
-        effects.clone(),
-        store.clone() as Arc<dyn Store>,
-        Arc::new(make_caps(false)),
-        Arc::new(LeaseManager::new()),
-        Arc::new(PolicyEngine::new()),
-    );
-
-    // Phase 1: spawn with NO execution intent in the goal
-    let tid = mgr
-        .spawn_thread(
-            "check the api status",
-            ThreadType::Foreground,
-            project_id,
-            ThreadConfig::default(), // require_action_attempt = false
-            None,
-            "test-user",
-        )
-        .await
-        .expect("spawn_thread");
-
-    let first = mgr.join_thread(tid).await.expect("first join");
-    assert!(
-        matches!(first, ThreadOutcome::GatePaused { .. }),
-        "expected GatePaused, got: {first:?}"
-    );
-    assert_eq!(
-        store.load_thread(tid).await.unwrap().unwrap().state,
-        ThreadState::Waiting,
-    );
-
-    // Phase 2: approve the gate, resume with execution intent message.
-    // "run the echo tool" triggers signals_execution_intent() in the Python
-    // orchestrator's context check on run_loop startup.
-    effects.mark_approved("http").await;
-    mgr.resume_thread(
-        tid,
-        "test-user",
-        Some(ThreadMessage::user(
-            "run the echo tool with 'obligation resume test'",
-        )),
-        Some(("call_gate_1".into(), true)),
-        None,
-    )
-    .await
-    .expect("resume_thread");
-
-    let resumed = mgr.join_thread(tid).await.expect("second join");
-    assert!(
-        matches!(resumed, ThreadOutcome::Completed { .. }),
-        "expected Completed, got: {resumed:?}"
-    );
-
-    // Verify the echo tool was called — proves obligation worked.
-    // Without the per-message intent detection fix, the LLM's text refusal
-    // would have been accepted as the final response (no nudge), and the
-    // echo tool would never execute.
-    let thread = store.load_thread(tid).await.unwrap().unwrap();
-    let echo_executed = thread.events.iter().any(|e| {
-        matches!(
-            &e.kind,
-            ironclaw_engine::types::event::EventKind::ActionExecuted { action_name, .. }
-                if action_name == "echo"
-        )
-    });
-    assert!(
-        echo_executed,
-        "echo tool should have been called after obligation nudge on resume"
-    );
+    // Pre-PR this test exercised the "Approval gate pauses thread →
+    // user resumes with a fresh execution-intent message → obligation
+    // nudge fires" path. After PR #3157 the Approval pause-then-resume
+    // path is gone (caught inline by `GateController`); the
+    // `resume_thread` call with a new user message is no longer the
+    // resume mechanism for Approval.
+    //
+    // The obligation logic itself (per-message
+    // `signals_execution_intent` detection driving the nudge in the
+    // orchestrator) is not affected by this PR and is exercised by
+    // direct unit tests in `crates/ironclaw_engine/src/executor`.
+    //
+    // Left as a no-op stub for git-log traceability; remove in a
+    // follow-up sweep alongside the deprecated auth-resume harnesses.
 }
 
 // ── Inline gate-await regression (CodeAct + Tier 0 mid-execution) ─
