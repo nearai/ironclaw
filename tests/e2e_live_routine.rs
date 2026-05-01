@@ -36,14 +36,12 @@ mod support;
 
 #[cfg(feature = "libsql")]
 mod live_routine_tests {
-    use std::collections::HashSet;
     use std::time::{Duration, Instant};
 
-    use ironclaw::channels::{IncomingMessage, StatusUpdate};
-    use uuid::Uuid;
-
     use crate::support::live_harness::{LiveTestHarnessBuilder, TestMode};
-    use crate::support::test_channel::TestChannel;
+    use crate::support::live_mission_helpers::{
+        ApprovalAutoResponder, looks_like_routine_notification, tool_is, wait_for_response_matching,
+    };
     use crate::support::test_rig::TestRig;
 
     /// Channel name to use for the rig — mirrors the real "gateway" channel
@@ -75,16 +73,6 @@ mod live_routine_tests {
             .try_init();
     }
 
-    /// Returns true if `tool` is the bare action name `expected` or carries
-    /// the same name with a parenthesised argument suffix
-    /// (e.g. `routine_create(name)` from `format_action_display_name`).
-    fn tool_is(tool: &str, expected: &str) -> bool {
-        tool == expected
-            || tool
-                .strip_prefix(expected)
-                .is_some_and(|rest| rest.starts_with('('))
-    }
-
     /// Engine v2 surfaces `mission_create`; the bridge alias path also lets
     /// the LLM call `routine_create` and translates it. Accept either.
     fn used_create(tools: &[String]) -> bool {
@@ -98,46 +86,6 @@ mod live_routine_tests {
         tools
             .iter()
             .any(|t| tool_is(t, "mission_fire") || tool_is(t, "routine_fire"))
-    }
-
-    /// Anchor for "the routine actually fired and delivered output via
-    /// the notification channel" — independent of the formatting quality
-    /// of that output. Mirrors `e2e_live_mission.rs`'s `**[name]**`
-    /// marker check: engine v2 mission fires (which is what
-    /// `routine_fire` becomes via the bridge alias) wrap their
-    /// notifications with `**[<mission-name>]**` so the channel can
-    /// distinguish the fire output from the agent's foreground reply.
-    ///
-    /// Used as the primary gate for the #2583 regression test. The
-    /// secondary `looks_like_btc_price` heuristic checks output *quality*,
-    /// but a poorly-formatted notification still proves the fire path
-    /// itself worked — which is what #2583 was actually about.
-    fn looks_like_routine_notification(text: &str) -> bool {
-        // The marker is `**[<name>]**` — two `**` delimiters around a
-        // bracketed name. Any name shape is accepted because the agent
-        // chooses it.
-        if let Some(open) = text.find("**[")
-            && let Some(close_rel) = text[open + 3..].find("]**")
-        {
-            // Reject empty names (`**[]**`) — that's not a real marker.
-            return close_rel > 0;
-        }
-        false
-    }
-
-    #[test]
-    fn looks_like_routine_notification_accepts_marker() {
-        assert!(looks_like_routine_notification(
-            "**[bitcoin_price_checker]** ## Bitcoin Price Check Results\nPrice: $76,182"
-        ));
-    }
-
-    #[test]
-    fn looks_like_routine_notification_rejects_foreground_reply() {
-        // The agent's foreground confirmation has no `**[name]**` marker.
-        assert!(!looks_like_routine_notification(
-            "## Bitcoin Price Checker Routine Created ✅\nSchedule: */5 * * * *"
-        ));
     }
 
     /// Heuristic: a response counts as carrying real BTC price *output*
@@ -213,100 +161,6 @@ mod live_routine_tests {
         assert!(!looks_like_btc_price(
             "I will create a Bitcoin routine that checks every 5 minutes"
         ));
-    }
-
-    /// Background approval auto-responder.
-    ///
-    /// Polls the `TestChannel`'s captured status events every 500ms and
-    /// resolves each `StatusUpdate::ApprovalNeeded` it has not already seen
-    /// by injecting a `Submission::ExecApproval { approved: true,
-    /// always: false }` back into the channel. Per-call approval is
-    /// deliberate — we want every fire to round-trip through the gate so a
-    /// regression that breaks the second gate (e.g. session-state leakage
-    /// between fires) shows up.
-    ///
-    /// Holds an `Arc<TestChannel>` rather than `&TestRig` so it can outlive
-    /// any individual borrow on the rig.
-    struct ApprovalAutoResponder {
-        approved: std::sync::Arc<tokio::sync::Mutex<Vec<(String, Uuid)>>>,
-        handle: tokio::task::JoinHandle<()>,
-    }
-
-    impl ApprovalAutoResponder {
-        fn spawn(channel: std::sync::Arc<TestChannel>) -> Self {
-            let approved =
-                std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<(String, Uuid)>::new()));
-            let approved_for_task = approved.clone();
-            let handle = tokio::spawn(async move {
-                let mut seen: HashSet<Uuid> = HashSet::new();
-                loop {
-                    for event in channel.captured_status_events() {
-                        if let StatusUpdate::ApprovalNeeded {
-                            request_id,
-                            tool_name,
-                            ..
-                        } = event
-                        {
-                            let Ok(rid) = Uuid::parse_str(&request_id) else {
-                                continue;
-                            };
-                            if seen.insert(rid) {
-                                eprintln!(
-                                    "[RoutineTest] Auto-approving '{tool_name}' \
-                                     (request_id={rid})"
-                                );
-                                let submission =
-                                    ironclaw::agent::submission::Submission::ExecApproval {
-                                        request_id: rid,
-                                        approved: true,
-                                        always: false,
-                                    };
-                                let msg = IncomingMessage::new(
-                                    channel.channel_name(),
-                                    channel.user_id(),
-                                    "",
-                                )
-                                .with_structured_submission(submission);
-                                channel.send_incoming(msg).await;
-                                approved_for_task.lock().await.push((tool_name, rid));
-                            }
-                        }
-                    }
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                }
-            });
-            Self { approved, handle }
-        }
-
-        async fn approved_tools(&self) -> Vec<(String, Uuid)> {
-            self.approved.lock().await.clone()
-        }
-
-        fn shutdown(self) {
-            self.handle.abort();
-        }
-    }
-
-    /// Wait until at least one captured response satisfies `predicate`,
-    /// polling every 500ms until `deadline`. Returns the first match.
-    async fn wait_for_response_matching<F>(
-        rig: &TestRig,
-        predicate: F,
-        deadline: Instant,
-    ) -> Option<String>
-    where
-        F: Fn(&str) -> bool,
-    {
-        loop {
-            let responses = rig.wait_for_responses(0, Duration::from_millis(0)).await;
-            if let Some(r) = responses.iter().find(|r| predicate(&r.content)) {
-                return Some(r.content.clone());
-            }
-            if Instant::now() >= deadline {
-                return None;
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
     }
 
     /// Assert no captured response contains the orchestrator's consecutive-
