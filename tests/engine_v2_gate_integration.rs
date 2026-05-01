@@ -2523,3 +2523,449 @@ async fn gate_resume_with_execution_obligation() {
         "echo tool should have been called after obligation nudge on resume"
     );
 }
+
+// ── Inline gate-await regression (CodeAct + Tier 0 mid-execution) ─
+
+/// Effects mock for the inline gate-await tests. Exposes a single
+/// `github_tool` action; on the first invocation returns
+/// `EngineError::GatePaused` (mid-execution gate, mirroring the
+/// user's reported bug where the github_tool gates inside CodeAct);
+/// after `mark_approved` is called returns a success result.
+struct InlineGateGithubEffects {
+    calls: tokio::sync::Mutex<Vec<serde_json::Value>>,
+    approved: tokio::sync::Mutex<bool>,
+}
+
+impl InlineGateGithubEffects {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            calls: tokio::sync::Mutex::new(Vec::new()),
+            approved: tokio::sync::Mutex::new(false),
+        })
+    }
+
+    async fn mark_approved(&self) {
+        *self.approved.lock().await = true;
+    }
+
+    async fn call_count(&self) -> usize {
+        self.calls.lock().await.len()
+    }
+}
+
+#[async_trait::async_trait]
+impl EffectExecutor for InlineGateGithubEffects {
+    async fn execute_action(
+        &self,
+        action_name: &str,
+        parameters: serde_json::Value,
+        _lease: &CapabilityLease,
+        _context: &ironclaw_engine::ThreadExecutionContext,
+    ) -> Result<ActionResult, EngineError> {
+        self.calls.lock().await.push(parameters.clone());
+        let approved = *self.approved.lock().await;
+        if action_name == "github_tool" && !approved {
+            return Err(EngineError::GatePaused {
+                gate_name: "approval".into(),
+                action_name: action_name.into(),
+                call_id: "github_tool_call".into(),
+                parameters: Box::new(parameters),
+                resume_kind: Box::new(ResumeKind::Approval { allow_always: true }),
+                paused_lease: None,
+                resume_output: None,
+            });
+        }
+        Ok(ActionResult {
+            call_id: String::new(),
+            action_name: action_name.into(),
+            output: serde_json::json!({"items": []}),
+            is_error: false,
+            duration: Duration::from_millis(1),
+        })
+    }
+
+    async fn available_actions(
+        &self,
+        _leases: &[CapabilityLease],
+        _context: &ironclaw_engine::ThreadExecutionContext,
+    ) -> Result<Vec<ActionDef>, EngineError> {
+        Ok(vec![ActionDef {
+            name: "github_tool".into(),
+            description: "GitHub interactions".into(),
+            parameters_schema: serde_json::json!({"type": "object"}),
+            effects: vec![EffectType::ReadExternal],
+            requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
+            discovery: None,
+        }])
+    }
+
+    async fn available_capabilities(
+        &self,
+        _leases: &[CapabilityLease],
+        _context: &ironclaw_engine::ThreadExecutionContext,
+    ) -> Result<Vec<ironclaw_engine::CapabilitySummary>, EngineError> {
+        Ok(vec![])
+    }
+}
+
+/// Test `GateController` that approves the first request it sees,
+/// holding a reference to the effects mock so it can mark the action
+/// approved BEFORE returning the resolution. The retry happens after
+/// pause() returns, so atomicity here matters — using a detached
+/// `tokio::spawn` to mark approval would race the retry.
+struct OneShotApprovingGateController {
+    requests: tokio::sync::Mutex<Vec<ironclaw_engine::GatePauseRequest>>,
+    effects: Arc<InlineGateGithubEffects>,
+}
+
+impl OneShotApprovingGateController {
+    fn new(effects: Arc<InlineGateGithubEffects>) -> Arc<Self> {
+        Arc::new(Self {
+            requests: tokio::sync::Mutex::new(Vec::new()),
+            effects,
+        })
+    }
+
+    async fn requests_seen(&self) -> Vec<ironclaw_engine::GatePauseRequest> {
+        self.requests.lock().await.clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl ironclaw_engine::GateController for OneShotApprovingGateController {
+    async fn pause(
+        &self,
+        request: ironclaw_engine::GatePauseRequest,
+    ) -> ironclaw_engine::GateResolution {
+        let mut requests = self.requests.lock().await;
+        let first = requests.is_empty();
+        requests.push(request);
+        drop(requests);
+        if first {
+            // Mark approved synchronously (await before returning).
+            // The engine's retry call to execute_action happens AFTER
+            // this future resolves, so the approval lands first.
+            self.effects.mark_approved().await;
+            ironclaw_engine::GateResolution::Approved { always: false }
+        } else {
+            ironclaw_engine::GateResolution::Cancelled
+        }
+    }
+}
+
+/// Live regression for the user-reported CodeAct bug:
+///
+/// > "what are p1 bugs in nearai/ironclaw filed in last 7 days" — the
+/// > `github_tool` call inside the CodeAct script returned mid-execution
+/// > with `EngineError::GatePaused`, and the script aborted with
+/// > `RuntimeError: execution paused by gate 'approval'` instead of
+/// > pausing for the user.
+///
+/// With the inline-await wiring (`GateController` on
+/// `ThreadExecutionContext`), the Monty VM stays alive across the gate,
+/// the controller observes the pause request, and on `Approved` the
+/// script's `await github_tool(...)` resolves to the tool's result —
+/// no re-entry, no replay, no double execution.
+#[tokio::test]
+async fn codeact_inline_gate_await_resumes_user_reproducer() {
+    let project_id = ProjectId::new();
+
+    // Effects: github_tool gates on the first invocation, succeeds on
+    // the second (after the controller marks it approved).
+    let effects = InlineGateGithubEffects::new();
+
+    // CodeAct script that mirrors the user's exact reproducer.
+    // FINAL() materializes the result so the engine can complete.
+    let codeact_script = r#"
+result = await github_tool(action="search_issues_pull_requests",
+                           query="repo:nearai/ironclaw is:issue is:open label:P1",
+                           per_page=50)
+items = result.get("items", []) if isinstance(result, dict) else []
+FINAL(f"Found {len(items)} P1 bugs in nearai/ironclaw.")
+"#;
+
+    let llm = ScriptedLlm::new(vec![LlmOutput {
+        response: LlmResponse::Code {
+            code: codeact_script.to_string(),
+            content: None,
+        },
+        usage: TokenUsage::default(),
+    }]);
+
+    // Capabilities: register github_tool. `requires_approval=false`
+    // means the gate fires from the EffectExecutor (mid-execution),
+    // not from preflight policy — exactly the user's reported shape.
+    let mut caps = CapabilityRegistry::new();
+    caps.register(Capability {
+        name: "tools".into(),
+        description: "test tools".into(),
+        actions: vec![ActionDef {
+            name: "github_tool".into(),
+            description: "GitHub interactions".into(),
+            parameters_schema: serde_json::json!({"type": "object"}),
+            effects: vec![EffectType::ReadExternal],
+            requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
+            discovery: None,
+        }],
+        knowledge: vec![],
+        policies: vec![],
+    });
+
+    let store = TestStore::new();
+    let mgr = Arc::new(ThreadManager::new(
+        llm,
+        effects.clone(),
+        store.clone() as Arc<dyn Store>,
+        Arc::new(caps),
+        Arc::new(LeaseManager::new()),
+        Arc::new(PolicyEngine::new()),
+    ));
+
+    // Wire the inline-await controller. It marks `github_tool` as
+    // approved on the effects mock BEFORE returning the resolution,
+    // so the retry-execute returns success rather than another gate.
+    let controller = OneShotApprovingGateController::new(effects.clone());
+    mgr.set_gate_controller(controller.clone() as Arc<dyn ironclaw_engine::GateController>)
+        .await;
+
+    let tid = mgr
+        .spawn_thread(
+            "what are p1 bugs in nearai/ironclaw filed in last 7 days",
+            ThreadType::Foreground,
+            project_id,
+            ThreadConfig::default(),
+            None,
+            "test-user",
+        )
+        .await
+        .expect("spawn_thread");
+
+    let outcome = mgr.join_thread(tid).await.expect("join_thread");
+
+    // The thread completes — does NOT come back as `GatePaused` (the
+    // pre-fix unwind path) or `Failed` (the pre-fix RuntimeError leak).
+    match &outcome {
+        ThreadOutcome::Completed { .. } => {}
+        other => panic!(
+            "expected Completed after inline gate await, got: {:?}",
+            other
+        ),
+    }
+
+    // Controller saw exactly one pause request — the github_tool call.
+    let requests = controller.requests_seen().await;
+    assert_eq!(
+        requests.len(),
+        1,
+        "controller should receive exactly one pause request, got: {requests:?}"
+    );
+    assert_eq!(requests[0].gate_name, "approval");
+    assert_eq!(requests[0].action_name, "github_tool");
+    assert_eq!(requests[0].user_id, "test-user");
+    assert!(matches!(
+        requests[0].resume_kind,
+        ResumeKind::Approval { .. }
+    ));
+
+    // Effects saw github_tool called twice — once gated, once approved
+    // and succeeded. Pre-fix, the retry never happened (the script
+    // aborted with RuntimeError on the first call's gate).
+    let call_count = effects.call_count().await;
+    assert_eq!(
+        call_count, 2,
+        "github_tool should be called twice (gated + approved retry), got: {call_count}"
+    );
+
+    // The thread's events include both `ApprovalRequested` (from the
+    // gate firing) and `ActionExecuted` (from the approved retry).
+    let thread = store.load_thread(tid).await.unwrap().unwrap();
+    let approval_requested = thread.events.iter().any(|e| {
+        matches!(
+            &e.kind,
+            ironclaw_engine::types::event::EventKind::ApprovalRequested { action_name, .. }
+                if action_name == "github_tool"
+        )
+    });
+    assert!(
+        approval_requested,
+        "ApprovalRequested event must be emitted for the gated call"
+    );
+    let action_executed = thread.events.iter().any(|e| {
+        matches!(
+            &e.kind,
+            ironclaw_engine::types::event::EventKind::ActionExecuted { action_name, .. }
+                if action_name == "github_tool"
+        )
+    });
+    assert!(
+        action_executed,
+        "ActionExecuted event must be emitted for the post-approval retry"
+    );
+
+    // Pre-fix bug message must NOT appear anywhere — script did not
+    // abort with a leaked RuntimeError.
+    let final_response = match outcome {
+        ThreadOutcome::Completed { response, .. } => response.unwrap_or_default(),
+        _ => unreachable!(),
+    };
+    assert!(
+        !final_response.contains("execution paused by gate"),
+        "final response must not surface the pre-fix bug string; got: {final_response}"
+    );
+    assert!(
+        final_response.contains("P1 bugs in nearai/ironclaw"),
+        "FINAL() text from the script must reach the user; got: {final_response}"
+    );
+}
+
+/// Companion test: when the controller denies the gate, the script
+/// raises a typed `RuntimeError` inside Python (catchable by
+/// `try/except`), and the gated tool runs exactly once (no retry).
+#[tokio::test]
+async fn codeact_inline_gate_await_denial_does_not_retry() {
+    let project_id = ProjectId::new();
+    let effects = InlineGateGithubEffects::new();
+
+    // Script makes the gated call without try/except — denial raises
+    // a `RuntimeError` that aborts the script. The engine surfaces the
+    // failure on the thread events (no FINAL fires). The thread itself
+    // completes (the LLM gets a chance to respond after the failed
+    // step) — what we assert is that github_tool was called exactly
+    // once (no retry on denial) and the failure was recorded with a
+    // clear "user denied" message identifying the tool.
+    let codeact_script = r#"
+result = await github_tool(action="search")
+FINAL("should not reach here")
+"#;
+
+    let llm = ScriptedLlm::new(vec![LlmOutput {
+        response: LlmResponse::Code {
+            code: codeact_script.to_string(),
+            content: None,
+        },
+        usage: TokenUsage::default(),
+    }]);
+
+    let mut caps = CapabilityRegistry::new();
+    caps.register(Capability {
+        name: "tools".into(),
+        description: "test tools".into(),
+        actions: vec![ActionDef {
+            name: "github_tool".into(),
+            description: "GitHub interactions".into(),
+            parameters_schema: serde_json::json!({"type": "object"}),
+            effects: vec![EffectType::ReadExternal],
+            requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
+            discovery: None,
+        }],
+        knowledge: vec![],
+        policies: vec![],
+    });
+
+    let store = TestStore::new();
+    let mgr = Arc::new(ThreadManager::new(
+        llm,
+        effects.clone(),
+        store.clone() as Arc<dyn Store>,
+        Arc::new(caps),
+        Arc::new(LeaseManager::new()),
+        Arc::new(PolicyEngine::new()),
+    ));
+
+    // Denying controller — always returns Denied.
+    struct DenyingGateController {
+        requests: tokio::sync::Mutex<u32>,
+    }
+    #[async_trait::async_trait]
+    impl ironclaw_engine::GateController for DenyingGateController {
+        async fn pause(
+            &self,
+            _request: ironclaw_engine::GatePauseRequest,
+        ) -> ironclaw_engine::GateResolution {
+            *self.requests.lock().await += 1;
+            ironclaw_engine::GateResolution::Denied {
+                reason: Some("not now".into()),
+            }
+        }
+    }
+    let controller = Arc::new(DenyingGateController {
+        requests: tokio::sync::Mutex::new(0),
+    });
+    mgr.set_gate_controller(controller.clone() as Arc<dyn ironclaw_engine::GateController>)
+        .await;
+
+    let tid = mgr
+        .spawn_thread(
+            "denial test",
+            ThreadType::Foreground,
+            project_id,
+            ThreadConfig::default(),
+            None,
+            "test-user",
+        )
+        .await
+        .expect("spawn_thread");
+
+    let outcome = mgr.join_thread(tid).await.expect("join_thread");
+
+    // The thread completes (the orchestrator runs the LLM again
+    // after CodeAct fails — ScriptedLlm has no further responses,
+    // so it falls through to its default "done" text). The bug-fix
+    // assertion isn't on the final response — it's on what the
+    // engine recorded mid-step:
+    //
+    //   1. Exactly one `github_tool` execution (no retry on denial).
+    //   2. The step failed via a typed `user denied tool 'X': reason`
+    //      error, NOT the pre-fix `execution paused by gate 'approval'`.
+    //   3. FINAL() never fired.
+    let _ = outcome;
+
+    // (1) github_tool called exactly once — denial does NOT retry.
+    let call_count = effects.call_count().await;
+    assert_eq!(
+        call_count, 1,
+        "denial must not retry the gated tool; got: {call_count} calls"
+    );
+
+    // (2) Look for the typed denial message on a CodeExecuted /
+    // CodeExecutionFailed event. Pre-fix, this would say "execution
+    // paused by gate 'approval'"; post-fix, it says "user denied tool
+    // 'github_tool': not now".
+    let thread = store.load_thread(tid).await.unwrap().unwrap();
+    let stdout_or_error_blobs: Vec<String> = thread
+        .events
+        .iter()
+        .filter_map(|e| match &e.kind {
+            ironclaw_engine::types::event::EventKind::CodeExecuted { stdout, .. } => {
+                Some(stdout.clone())
+            }
+            ironclaw_engine::types::event::EventKind::CodeExecutionFailed { error, .. } => {
+                Some(error.clone())
+            }
+            ironclaw_engine::types::event::EventKind::ActionFailed { error, .. } => {
+                Some(error.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    let combined = stdout_or_error_blobs.join("\n");
+    assert!(
+        combined.contains("user denied tool 'github_tool'"),
+        "expected typed denial message identifying the tool; got: {combined}"
+    );
+    assert!(
+        combined.contains("not now"),
+        "expected user-supplied reason in denial message; got: {combined}"
+    );
+    assert!(
+        !combined.contains("execution paused by gate"),
+        "denial must not surface the pre-fix bug message; got: {combined}"
+    );
+
+    // (3) Controller was invoked exactly once.
+    let request_count = *controller.requests.lock().await;
+    assert_eq!(request_count, 1);
+}

@@ -370,10 +370,7 @@ mod tests {
     async fn try_deliver_unknown_request_returns_false() {
         let resolutions = GateResolutions::new();
         let delivered = resolutions
-            .try_deliver(
-                Uuid::new_v4(),
-                GateResolution::Approved { always: false },
-            )
+            .try_deliver(Uuid::new_v4(), GateResolution::Approved { always: false })
             .await;
         assert!(!delivered, "unknown request_id must report false");
     }
