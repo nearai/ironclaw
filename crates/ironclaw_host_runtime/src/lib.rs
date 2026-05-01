@@ -667,7 +667,7 @@ impl<N, S> HostHttpEgressService<N, S> {
 
     fn network_policy_for_request(
         &self,
-        request: &RuntimeHttpEgressRequest,
+        request: &mut RuntimeHttpEgressRequest,
     ) -> Result<NetworkPolicy, RuntimeHttpEgressError> {
         if let Some(store) = &self.network_policy_store {
             return store
@@ -685,7 +685,9 @@ impl<N, S> HostHttpEgressService<N, S> {
                 request_bytes: 0,
                 response_bytes: 0,
             }),
-            NetworkPolicySource::RequestPolicyFallback => Ok(request.network_policy.clone()),
+            NetworkPolicySource::RequestPolicyFallback => {
+                Ok(std::mem::take(&mut request.network_policy))
+            }
         }
     }
 }
@@ -699,7 +701,7 @@ where
         &self,
         mut request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
-        let network_policy = self.network_policy_for_request(&request)?;
+        let network_policy = self.network_policy_for_request(&mut request)?;
         validate_runtime_request(&request)?;
 
         let mut redaction_values = Vec::new();
