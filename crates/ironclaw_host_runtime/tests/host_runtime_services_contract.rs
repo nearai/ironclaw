@@ -6,8 +6,9 @@ use ironclaw_authorization::{
     GrantAuthorizer, InMemoryCapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer,
 };
 use ironclaw_events::{
-    DurableAuditLog, EventCursor, EventError, EventReplay, EventStreamKey, InMemoryAuditSink,
-    InMemoryDurableAuditLog, InMemoryEventSink, ReadScope, RuntimeEventKind,
+    DurableAuditLog, DurableEventLog, EventCursor, EventError, EventReplay, EventStreamKey,
+    InMemoryAuditSink, InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink,
+    ReadScope, RuntimeEventKind,
 };
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry};
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
@@ -106,6 +107,98 @@ async fn host_runtime_services_builds_dispatcher_runtime_and_health_from_registe
             RuntimeEventKind::DispatchSucceeded,
         ]
     );
+}
+
+#[tokio::test]
+async fn host_runtime_services_writes_runtime_events_to_durable_event_log_metadata_only() {
+    let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
+    let filesystem = Arc::new(LocalFilesystem::new());
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
+        Arc::new(GrantAuthorizer::new());
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    let script_runtime = Arc::new(ScriptRuntime::new(
+        ScriptRuntimeConfig::for_testing(),
+        EchoScriptBackend,
+    ));
+    let services = HostRuntimeServices::new(
+        registry,
+        filesystem,
+        governor,
+        authorizer,
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_durable_event_log(Arc::clone(&event_log))
+    .with_script_runtime(script_runtime);
+    let scope = sample_scope(InvocationId::new());
+    let payload = json!({
+        "message": "RAW_EVENT_INPUT_SENTINEL_3147 /tmp/private-event-path",
+        "secret": "SECRET_EVENT_SENTINEL_3147_sk_live_secret",
+        "output": "RUNTIME_EVENT_OUTPUT_SENTINEL_3147",
+    });
+
+    let outcome = services
+        .host_runtime()
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
+            script_capability_id(),
+            ResourceEstimate::default(),
+            payload.clone(),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.output, payload);
+        }
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+
+    let replay = event_log
+        .read_after_cursor(
+            &EventStreamKey::from_scope(&scope),
+            &ReadScope::any(),
+            None,
+            10,
+        )
+        .await
+        .unwrap();
+    let kinds = replay
+        .entries
+        .iter()
+        .map(|entry| entry.record.kind)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        vec![
+            RuntimeEventKind::DispatchRequested,
+            RuntimeEventKind::RuntimeSelected,
+            RuntimeEventKind::DispatchSucceeded,
+        ]
+    );
+    assert_eq!(
+        replay.entries[2].record.output_bytes,
+        Some(serde_json::to_vec(&payload).unwrap().len() as u64)
+    );
+
+    let serialized = serde_json::to_string(&replay).unwrap();
+    for forbidden in [
+        "RAW_EVENT_INPUT_SENTINEL_3147",
+        "/tmp/private-event-path",
+        "SECRET_EVENT_SENTINEL_3147",
+        "RUNTIME_EVENT_OUTPUT_SENTINEL_3147",
+    ] {
+        assert!(
+            !serialized.contains(forbidden),
+            "durable runtime event replay leaked {forbidden}: {serialized}"
+        );
+    }
+    assert!(serialized.contains("script.echo"));
+    assert!(serialized.contains("dispatch_requested"));
+    assert!(serialized.contains("dispatch_succeeded"));
 }
 
 #[tokio::test]
