@@ -53,14 +53,31 @@ mod support;
 #[cfg(feature = "libsql")]
 mod tests {
     use std::sync::Arc;
+    use std::sync::OnceLock;
     use std::time::Duration;
 
     use crate::support::test_rig::TestRigBuilder;
     use crate::support::trace_llm::LlmTrace;
     use ironclaw::bridge::ExternalToolCatalog;
     use ironclaw_engine::{ActionDef, EffectType, ModelToolSurface, ThreadId};
+    use tokio::sync::Mutex;
 
     const TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// Serializes the engine-touching tests in this module. The
+    /// engine v2 bridge holds its state in a process-global
+    /// `OnceLock<RwLock<Option<EngineState>>>` (see
+    /// `src/bridge/router.rs::ENGINE_STATE`), so two parallel tests
+    /// would each spin up a `TestRig` whose messages are routed
+    /// through whichever rig won the `init_engine` race — one test's
+    /// messages disappear into the other's engine. Per-test state
+    /// isolation would need to land in the bridge itself; until then,
+    /// any test that drives the engine end-to-end via `TestRigBuilder`
+    /// must hold this mutex for its duration.
+    fn engine_state_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     /// Helper: build an `ActionDef` for a caller-supplied function tool.
     fn caller_action(name: &str, description: &str) -> ActionDef {
@@ -136,6 +153,10 @@ mod tests {
     /// consume the payload for `ExternalCallback` resolutions).
     #[tokio::test]
     async fn round_trip_resume_payload_reaches_llm() {
+        let _engine_guard = engine_state_lock().lock().await;
+        // Drop any engine state left over from a prior test before
+        // building this rig so the global ENGINE_STATE is bound to
+        // *this* TestRig's components, not a previous one's.
         let trace = round_trip_trace();
         let rig = TestRigBuilder::new()
             .with_engine_v2()
@@ -197,6 +218,10 @@ mod tests {
     /// leak forever.
     #[tokio::test]
     async fn catalog_cleared_on_terminal_completed_outcome() {
+        let _engine_guard = engine_state_lock().lock().await;
+        // Drop any engine state left over from a prior test before
+        // building this rig so the global ENGINE_STATE is bound to
+        // *this* TestRig's components, not a previous one's.
         // A simple text-only trace so the thread completes immediately
         // (no gate, no pause). We register a catalog entry under the
         // request's conversation_scope, verify it gets transferred
@@ -215,17 +240,22 @@ mod tests {
 
         let scope_uuid = uuid::Uuid::new_v4();
         let scope_str = scope_uuid.to_string();
-        register_under_scope(scope_uuid, "lookup_weather").await;
 
-        // Snapshot the pre-message catalog size (exactly the scope
-        // entry we just registered). The bridge transfer hook on the
-        // first message will move it onto the engine ThreadId, and
-        // the terminal-state cleanup will then drop it.
+        // Use a unique action name so the cleanup-poll check can
+        // verify "no entry anywhere has this action" regardless of
+        // what other concurrent tests have registered. Keying off
+        // `catalog.len()` was racy under parallel runs because the
+        // engine_external_tool_catalog is process-global.
+        let unique_action = format!("cleanup_marker_{}", uuid::Uuid::new_v4().simple());
+        register_under_scope(scope_uuid, &unique_action).await;
+
         let catalog = ironclaw::bridge::engine_external_tool_catalog()
             .await
             .expect("catalog");
-        let pre_size = catalog.len().await;
-        assert!(pre_size >= 1);
+        assert!(
+            catalog.contains_action_anywhere(&unique_action).await,
+            "marker action must be present immediately after registration"
+        );
 
         let msg = ironclaw::channels::IncomingMessage::new(
             "gateway",
@@ -235,22 +265,27 @@ mod tests {
         .with_thread(scope_str);
         rig.send_incoming(msg).await;
 
-        // Wait for the thread to complete.
+        // Wait for the thread to complete. We don't strictly assert
+        // on the response count: under engine v2, completed threads
+        // primarily broadcast the response over SSE (which the test
+        // channel doesn't subscribe to) and only return through
+        // `Channel::respond` for some outcomes. The catalog-cleanup
+        // poll below is the substantive assertion.
         let _ = rig.wait_for_responses(1, TIMEOUT).await;
 
-        // Poll briefly: the cleanup runs on the same task that does
-        // the join, but the cleanup write may race the test's read.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        // Cleanup runs on the same task that does the join. Poll for
+        // up to TIMEOUT — under parallel load the join task can be
+        // scheduled later than the response broadcast, so we mirror
+        // the response timeout rather than picking a tighter bound.
+        let deadline = tokio::time::Instant::now() + TIMEOUT;
         loop {
-            if catalog.len().await < pre_size {
+            if !catalog.contains_action_anywhere(&unique_action).await {
                 break;
             }
             if tokio::time::Instant::now() >= deadline {
                 panic!(
-                    "catalog entry was not cleared on terminal Completed outcome \
-                     (pre={}, current={}) — terminal cleanup hook may have regressed",
-                    pre_size,
-                    catalog.len().await
+                    "catalog entry for marker action {unique_action:?} was not cleared \
+                     after thread completion — terminal cleanup hook may have regressed"
                 );
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -268,6 +303,10 @@ mod tests {
     /// `ThreadId` before the LLM call lands.
     #[tokio::test]
     async fn engine_pauses_when_llm_calls_registered_external_tool() {
+        let _engine_guard = engine_state_lock().lock().await;
+        // Drop any engine state left over from a prior test before
+        // building this rig so the global ENGINE_STATE is bound to
+        // *this* TestRig's components, not a previous one's.
         let trace = round_trip_trace();
         let rig = TestRigBuilder::new()
             .with_engine_v2()

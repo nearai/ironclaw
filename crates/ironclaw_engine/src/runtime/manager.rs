@@ -1433,10 +1433,22 @@ mod tests {
         let _ = mgr.stop_thread(tid, "test-user").await;
 
         let outcome = mgr.join_thread(tid).await.unwrap();
-        assert!(matches!(
-            outcome,
-            ThreadOutcome::Stopped | ThreadOutcome::Completed { .. } | ThreadOutcome::MaxIterations
-        ));
+        // The test's primary assertion is that `join_thread` returns —
+        // `stop_thread` must not deadlock. Any terminal outcome
+        // satisfies that. Failed is included because the executor's
+        // consecutive-error guard (#2325) will trip on the
+        // unregistered `test_tool` calls if it lands before the stop
+        // signal does, which is timing-dependent.
+        assert!(
+            matches!(
+                outcome,
+                ThreadOutcome::Stopped
+                    | ThreadOutcome::Completed { .. }
+                    | ThreadOutcome::MaxIterations
+                    | ThreadOutcome::Failed { .. }
+            ),
+            "join_thread returned a non-terminal outcome: {outcome:?}"
+        );
     }
 
     #[tokio::test]

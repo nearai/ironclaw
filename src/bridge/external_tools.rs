@@ -169,6 +169,17 @@ impl ExternalToolCatalog {
     pub async fn is_empty(&self) -> bool {
         self.inner.read().await.is_empty()
     }
+
+    /// Whether any registered thread (regardless of key) has an entry
+    /// for `action_name`. Lets callers verify cleanup of caller tools
+    /// without needing to know the engine's allocated `ThreadId` —
+    /// useful when the registration key was a conversation_scope and
+    /// the bridge has since rebound it via `transfer`.
+    pub async fn contains_action_anywhere(&self, action_name: &str) -> bool {
+        let map = self.inner.read().await;
+        map.values()
+            .any(|entry| entry.actions.iter().any(|a| a.name == action_name))
+    }
 }
 
 #[cfg(test)]

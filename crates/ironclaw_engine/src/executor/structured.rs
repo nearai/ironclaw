@@ -739,7 +739,11 @@ mod tests {
             "test-user",
             ThreadConfig::default(),
         );
-        let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(vec![], vec![]));
+        // Register `web_search` in the inventory so the preflight
+        // doesn't short-circuit at "not callable" — we want the path
+        // that hits the lease lookup and finds nothing for this thread.
+        let effects: Arc<dyn EffectExecutor> =
+            Arc::new(MockEffects::new(vec![test_action("web_search")], vec![]));
         let leases = Arc::new(LeaseManager::new());
         let policy = Arc::new(PolicyEngine::new());
         let ctx = make_exec_context(&thread);
@@ -761,7 +765,10 @@ mod tests {
 
         if let Some(EventKind::ActionFailed { call_id, error, .. }) = result.events.first() {
             assert_eq!(call_id, "call_no_lease_123");
-            assert!(error.contains("no lease"));
+            assert!(
+                error.contains("no lease"),
+                "expected error message to mention 'no lease', got: {error}"
+            );
         } else {
             panic!("expected ActionFailed event");
         }
