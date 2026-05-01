@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use chrono::{Duration, Utc};
-use ironclaw::db::{Database, InsightsStore};
+use ironclaw::db::Database;
 use ironclaw::db::libsql::LibSqlBackend;
 
 async fn create_test_db() -> (Arc<dyn Database>, tempfile::TempDir) {
