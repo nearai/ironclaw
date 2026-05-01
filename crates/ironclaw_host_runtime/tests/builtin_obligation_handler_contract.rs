@@ -128,7 +128,6 @@ async fn builtin_obligation_handler_allows_resource_ceiling_when_estimate_is_wit
     let estimate = ResourceEstimate {
         usd: Some(1.into()),
         input_tokens: Some(100),
-        wall_clock_ms: Some(500),
         ..ResourceEstimate::default()
     };
     let obligations = vec![Obligation::EnforceResourceCeiling {
@@ -136,7 +135,7 @@ async fn builtin_obligation_handler_allows_resource_ceiling_when_estimate_is_wit
             max_usd: Some(2.into()),
             max_input_tokens: Some(200),
             max_output_tokens: None,
-            max_wall_clock_ms: Some(1_000),
+            max_wall_clock_ms: None,
             max_output_bytes: None,
             sandbox: None,
         },
@@ -228,6 +227,171 @@ async fn builtin_obligation_handler_rejects_unenforced_sandbox_quota_fields() {
         err,
         CapabilityObligationError::Failed {
             kind: CapabilityObligationFailureKind::Resource
+        }
+    ));
+}
+
+#[tokio::test]
+async fn builtin_obligation_handler_rejects_wall_clock_ceiling_until_runtime_handoff_exists() {
+    let handler = BuiltinObligationHandler::new();
+    let context = execution_context(CapabilitySet::default());
+    let capability_id = capability_id();
+    let estimate = ResourceEstimate {
+        wall_clock_ms: Some(500),
+        ..ResourceEstimate::default()
+    };
+    let obligations = vec![Obligation::EnforceResourceCeiling {
+        ceiling: ResourceCeiling {
+            max_usd: None,
+            max_input_tokens: None,
+            max_output_tokens: None,
+            max_wall_clock_ms: Some(1_000),
+            max_output_bytes: None,
+            sandbox: None,
+        },
+    }];
+
+    let err = handler
+        .prepare(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityObligationError::Failed {
+            kind: CapabilityObligationFailureKind::Resource
+        }
+    ));
+}
+
+#[tokio::test]
+async fn builtin_obligation_handler_rejects_sandbox_network_ceiling_until_runtime_handoff_exists() {
+    let handler = BuiltinObligationHandler::new();
+    let context = execution_context(CapabilitySet::default());
+    let capability_id = capability_id();
+    let estimate = ResourceEstimate {
+        network_egress_bytes: Some(512),
+        ..ResourceEstimate::default()
+    };
+    let obligations = vec![Obligation::EnforceResourceCeiling {
+        ceiling: ResourceCeiling {
+            max_usd: None,
+            max_input_tokens: None,
+            max_output_tokens: None,
+            max_wall_clock_ms: None,
+            max_output_bytes: None,
+            sandbox: Some(SandboxQuota {
+                network_egress_bytes: Some(1024),
+                ..SandboxQuota::default()
+            }),
+        },
+    }];
+
+    let err = handler
+        .prepare(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityObligationError::Failed {
+            kind: CapabilityObligationFailureKind::Resource
+        }
+    ));
+}
+
+#[tokio::test]
+async fn builtin_obligation_handler_rejects_sandbox_process_ceiling_until_runtime_handoff_exists() {
+    let handler = BuiltinObligationHandler::new();
+    let context = execution_context(CapabilitySet::default());
+    let capability_id = capability_id();
+    let estimate = ResourceEstimate {
+        process_count: Some(1),
+        ..ResourceEstimate::default()
+    };
+    let obligations = vec![Obligation::EnforceResourceCeiling {
+        ceiling: ResourceCeiling {
+            max_usd: None,
+            max_input_tokens: None,
+            max_output_tokens: None,
+            max_wall_clock_ms: None,
+            max_output_bytes: None,
+            sandbox: Some(SandboxQuota {
+                process_count: Some(1),
+                ..SandboxQuota::default()
+            }),
+        },
+    }];
+
+    let err = handler
+        .prepare(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityObligationError::Failed {
+            kind: CapabilityObligationFailureKind::Resource
+        }
+    ));
+}
+
+#[tokio::test]
+async fn builtin_obligation_handler_reports_resource_ceiling_output_bytes_as_output_failure() {
+    let handler = BuiltinObligationHandler::new();
+    let context = execution_context(CapabilitySet::default());
+    let capability_id = capability_id();
+    let estimate = ResourceEstimate::default();
+    let obligations = vec![Obligation::EnforceResourceCeiling {
+        ceiling: ResourceCeiling {
+            max_usd: None,
+            max_input_tokens: None,
+            max_output_tokens: None,
+            max_wall_clock_ms: None,
+            max_output_bytes: Some(8),
+            sandbox: None,
+        },
+    }];
+    let dispatch = sample_dispatch(
+        &context.resource_scope,
+        &capability_id,
+        json!({"message": "this output is too large"}),
+    );
+
+    let err = handler
+        .complete_dispatch(CapabilityObligationCompletionRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+            dispatch: &dispatch,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityObligationError::Failed {
+            kind: CapabilityObligationFailureKind::Output
         }
     ));
 }
@@ -1026,10 +1190,10 @@ fn mount_view(alias: &str, target: &str, permissions: MountPermissions) -> Mount
 
 fn resource_ceiling() -> ResourceCeiling {
     ResourceCeiling {
-        max_usd: None,
+        max_usd: Some(1.into()),
         max_input_tokens: None,
         max_output_tokens: None,
-        max_wall_clock_ms: Some(1),
+        max_wall_clock_ms: None,
         max_output_bytes: None,
         sandbox: None,
     }
