@@ -1300,6 +1300,101 @@ async fn process_obligation_lifecycle_cleans_record_started_before_wrapper_exist
 }
 
 #[tokio::test]
+async fn process_obligation_lifecycle_preserves_newer_handoffs_for_same_invocation_capability() {
+    let secret_handle = SecretHandle::new("api_token").unwrap();
+    let inner_store = Arc::new(InMemoryProcessStore::new());
+    let network_policies = Arc::new(NetworkObligationPolicyStore::new());
+    let secret_injections = Arc::new(RuntimeSecretInjectionStore::new());
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id);
+    let process_id = ProcessId::new();
+
+    network_policies.insert(&scope, &script_capability_id(), wasm_http_policy());
+    secret_injections
+        .insert(
+            &scope,
+            &script_capability_id(),
+            &secret_handle,
+            SecretMaterial::from("first-runtime-secret"),
+        )
+        .unwrap();
+    let lifecycle_store = ProcessObligationLifecycleStore::new(
+        inner_store,
+        Arc::clone(&network_policies),
+        Arc::clone(&secret_injections),
+        governor,
+    );
+    lifecycle_store
+        .start(process_start(process_id, invocation_id, scope.clone()))
+        .await
+        .unwrap();
+
+    network_policies.insert(&scope, &script_capability_id(), wasm_http_policy());
+    secret_injections
+        .insert(
+            &scope,
+            &script_capability_id(),
+            &secret_handle,
+            SecretMaterial::from("second-runtime-secret"),
+        )
+        .unwrap();
+
+    lifecycle_store.complete(&scope, process_id).await.unwrap();
+
+    assert!(
+        network_policies
+            .take(&scope, &script_capability_id())
+            .is_some(),
+        "cleanup for the completed process must not discard a newer staged network policy for the same scoped capability"
+    );
+    assert!(
+        secret_injections
+            .take(&scope, &script_capability_id(), &secret_handle)
+            .unwrap()
+            .is_some(),
+        "cleanup for the completed process must not discard newer staged secret material for the same scoped capability"
+    );
+}
+
+#[tokio::test]
+async fn process_obligation_lifecycle_surfaces_resource_cleanup_errors_after_terminal_transition() {
+    let reservation_id = ResourceReservationId::new();
+    let inner_store = Arc::new(InMemoryProcessStore::new());
+    let network_policies = Arc::new(NetworkObligationPolicyStore::new());
+    let secret_injections = Arc::new(RuntimeSecretInjectionStore::new());
+    let governor = Arc::new(FailingCleanupResourceGovernor);
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id);
+    let process_id = ProcessId::new();
+    let mut start = process_start(process_id, invocation_id, scope.clone());
+    start.resource_reservation_id = Some(reservation_id);
+    let lifecycle_store = ProcessObligationLifecycleStore::new(
+        inner_store,
+        network_policies,
+        secret_injections,
+        governor,
+    );
+    lifecycle_store.start(start).await.unwrap();
+
+    let error = lifecycle_store
+        .kill(&scope, process_id)
+        .await
+        .expect_err("terminal cleanup failures should be visible to callers");
+
+    assert!(matches!(
+        error,
+        ProcessError::Resource(ResourceError::ReservationMismatch { id }) if id == reservation_id
+    ));
+    let record = lifecycle_store
+        .get(&scope, process_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.status, ProcessStatus::Killed);
+}
+
+#[tokio::test]
 async fn spawned_obligation_lifecycle_cleans_handoffs_when_result_store_complete_fails() {
     let reservation_id = ResourceReservationId::new();
     let secret_handle = SecretHandle::new("api_token").unwrap();
@@ -2090,6 +2185,53 @@ where
 #[derive(Default)]
 struct FailingProcessResultStore {
     attempts: std::sync::Mutex<Vec<&'static str>>,
+}
+
+#[derive(Debug)]
+struct FailingCleanupResourceGovernor;
+
+impl ResourceGovernor for FailingCleanupResourceGovernor {
+    fn set_limit(&self, _account: ResourceAccount, _limits: ResourceLimits) {}
+
+    fn reserve(
+        &self,
+        scope: ResourceScope,
+        estimate: ResourceEstimate,
+    ) -> Result<ResourceReservation, ResourceError> {
+        Ok(ResourceReservation {
+            id: ResourceReservationId::new(),
+            scope,
+            estimate,
+        })
+    }
+
+    fn reserve_with_id(
+        &self,
+        scope: ResourceScope,
+        estimate: ResourceEstimate,
+        reservation_id: ResourceReservationId,
+    ) -> Result<ResourceReservation, ResourceError> {
+        Ok(ResourceReservation {
+            id: reservation_id,
+            scope,
+            estimate,
+        })
+    }
+
+    fn reconcile(
+        &self,
+        reservation_id: ResourceReservationId,
+        _actual: ResourceUsage,
+    ) -> Result<ResourceReceipt, ResourceError> {
+        Err(ResourceError::ReservationMismatch { id: reservation_id })
+    }
+
+    fn release(
+        &self,
+        reservation_id: ResourceReservationId,
+    ) -> Result<ResourceReceipt, ResourceError> {
+        Err(ResourceError::ReservationMismatch { id: reservation_id })
+    }
 }
 
 impl FailingProcessResultStore {

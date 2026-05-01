@@ -324,9 +324,17 @@ where
                 };
                 let cleanup_store = Arc::clone(&result_failure_cleanup_store);
                 tokio::spawn(async move {
-                    let _ = cleanup_store
+                    if let Err(error) = cleanup_store
                         .cleanup_process_obligations(&failure.scope, failure.process_id, reconcile)
-                        .await;
+                        .await
+                    {
+                        tracing::warn!(
+                            process_id = %failure.process_id,
+                            stage = ?failure.stage,
+                            error = %error,
+                            "background process obligation cleanup failed"
+                        );
+                    }
                 });
             }),
         );
