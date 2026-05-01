@@ -44,7 +44,8 @@ use ironclaw_wasm::{
 
 use crate::{
     BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntimeError,
-    NetworkObligationPolicyStore, RuntimeBackendHealth, RuntimeSecretInjectionStore,
+    NetworkObligationPolicyStore, ProcessObligationLifecycleStore, RuntimeBackendHealth,
+    RuntimeSecretInjectionStore,
 };
 
 type SharedRuntimeHttpEgress = Arc<Mutex<Option<Arc<dyn RuntimeHttpEgress>>>>;
@@ -293,9 +294,21 @@ where
         let dispatcher: Arc<dyn CapabilityDispatcher> = Arc::new(self.runtime_dispatcher());
         let process_executor =
             Arc::new(RuntimeDispatchProcessExecutor::new(Arc::clone(&dispatcher)));
-        let process_manager: Arc<dyn ProcessManager> =
-            Arc::new(self.process_services.background_manager(process_executor));
-        let process_store: Arc<dyn ProcessStore> = self.process_services.process_store();
+        let lifecycle_process_store = Arc::new(ProcessObligationLifecycleStore::new(
+            self.process_services.process_store(),
+            Arc::clone(&self.network_policy_store),
+            Arc::clone(&self.secret_injection_store),
+            self.governor.clone(),
+        ));
+        let process_store: Arc<dyn ProcessStore> = lifecycle_process_store.clone();
+        let process_manager: Arc<dyn ProcessManager> = Arc::new(
+            ironclaw_processes::BackgroundProcessManager::new(
+                lifecycle_process_store,
+                process_executor,
+            )
+            .with_cancellation_registry(self.process_services.cancellation_registry())
+            .with_result_store(self.process_services.result_store()),
+        );
         let process_result_store: Arc<dyn ProcessResultStore> =
             self.process_services.result_store();
         let runtime_health = self.runtime_health.clone().unwrap_or_else(|| {

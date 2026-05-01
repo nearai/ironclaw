@@ -51,7 +51,7 @@ mod services;
 
 pub use obligations::{
     BuiltinObligationHandler, BuiltinObligationServices, NetworkObligationPolicyStore,
-    RuntimeSecretInjectionStore, RuntimeSecretInjectionStoreError,
+    ProcessObligationLifecycleStore, RuntimeSecretInjectionStore, RuntimeSecretInjectionStoreError,
 };
 pub use production::DefaultHostRuntime;
 pub use services::{HostRuntimeServices, RegisteredRuntimeHealth};

@@ -7,6 +7,7 @@ use ironclaw_authorization::{
     CapabilityLeaseStatus, CapabilityLeaseStore, GrantAuthorizer, InMemoryCapabilityLeaseStore,
     TrustAwareCapabilityDispatchAuthorizer,
 };
+use ironclaw_capabilities::{CapabilityHost, CapabilitySpawnRequest};
 use ironclaw_events::{
     DurableAuditLog, DurableEventLog, EventCursor, EventError, EventReplay, EventStreamKey,
     InMemoryAuditSink, InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink,
@@ -16,17 +17,20 @@ use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
-    CancelReason, CancelRuntimeWorkRequest, CapabilitySurfaceVersion, DefaultHostRuntime,
-    HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeCapabilityResumeRequest, RuntimeFailureKind, RuntimeStatusRequest, RuntimeWorkId,
+    BuiltinObligationHandler, CancelReason, CancelRuntimeWorkRequest, CapabilitySurfaceVersion,
+    DefaultHostRuntime, HostRuntime, HostRuntimeServices, NetworkObligationPolicyStore,
+    ProcessObligationLifecycleStore, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
+    RuntimeCapabilityResumeRequest, RuntimeFailureKind, RuntimeSecretInjectionStore,
+    RuntimeStatusRequest, RuntimeWorkId,
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutionResult, McpExecutor};
 use ironclaw_processes::{
-    InMemoryProcessResultStore, InMemoryProcessStore, ProcessResultStore, ProcessServices,
-    ProcessStart, ProcessStatus, ProcessStore,
+    BackgroundProcessManager, InMemoryProcessResultStore, InMemoryProcessStore, ProcessError,
+    ProcessExecutionRequest, ProcessExecutionResult, ProcessExecutor, ProcessHost,
+    ProcessResultStore, ProcessServices, ProcessStart, ProcessStatus, ProcessStore,
 };
 use ironclaw_resources::{
-    InMemoryResourceGovernor, ResourceAccount, ResourceGovernor, ResourceLimits,
+    InMemoryResourceGovernor, ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits,
 };
 use ironclaw_run_state::{
     InMemoryApprovalRequestStore, InMemoryRunStateStore, RunStateStore, RunStatus,
@@ -34,6 +38,7 @@ use ironclaw_run_state::{
 use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptRuntime, ScriptRuntimeConfig,
 };
+use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
     HostTrustPolicy, TrustDecision, TrustProvenance,
@@ -1065,6 +1070,184 @@ async fn host_runtime_services_cancel_and_status_share_process_result_and_cancel
 }
 
 #[tokio::test]
+async fn spawned_obligation_lifecycle_reconciles_resources_and_discards_handoffs_on_success() {
+    let reservation_id = ResourceReservationId::new();
+    let secret_handle = SecretHandle::new("api_token").unwrap();
+    let fixture = spawn_obligation_fixture(
+        reservation_id,
+        secret_handle.clone(),
+        BackgroundExecutor::success(),
+    )
+    .await;
+
+    let process = fixture.spawn().await;
+    wait_for_status(
+        fixture.process_store.as_ref(),
+        &fixture.scope,
+        process.process_id,
+        ProcessStatus::Completed,
+    )
+    .await;
+
+    assert!(matches!(
+        fixture.governor.release(reservation_id).unwrap_err(),
+        ResourceError::ReservationClosed {
+            status: ReservationStatus::Reconciled,
+            ..
+        }
+    ));
+    assert!(
+        fixture
+            .network_policies
+            .take(&fixture.scope, &script_capability_id())
+            .is_none()
+    );
+    assert!(
+        fixture
+            .secret_injections
+            .take(&fixture.scope, &script_capability_id(), &secret_handle)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn spawned_obligation_lifecycle_releases_resources_and_discards_handoffs_on_runtime_failure()
+{
+    let reservation_id = ResourceReservationId::new();
+    let secret_handle = SecretHandle::new("api_token").unwrap();
+    let fixture = spawn_obligation_fixture(
+        reservation_id,
+        secret_handle.clone(),
+        BackgroundExecutor::failure("runtime_dispatch"),
+    )
+    .await;
+
+    let process = fixture.spawn().await;
+    wait_for_status(
+        fixture.process_store.as_ref(),
+        &fixture.scope,
+        process.process_id,
+        ProcessStatus::Failed,
+    )
+    .await;
+
+    assert!(matches!(
+        fixture.governor.release(reservation_id).unwrap_err(),
+        ResourceError::ReservationClosed {
+            status: ReservationStatus::Released,
+            ..
+        }
+    ));
+    assert!(
+        fixture
+            .network_policies
+            .take(&fixture.scope, &script_capability_id())
+            .is_none()
+    );
+    assert!(
+        fixture
+            .secret_injections
+            .take(&fixture.scope, &script_capability_id(), &secret_handle)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn spawned_obligation_lifecycle_releases_resources_and_discards_handoffs_on_kill() {
+    let reservation_id = ResourceReservationId::new();
+    let secret_handle = SecretHandle::new("api_token").unwrap();
+    let fixture = spawn_obligation_fixture(
+        reservation_id,
+        secret_handle.clone(),
+        BackgroundExecutor::delayed_success(Duration::from_millis(50)),
+    )
+    .await;
+
+    let process = fixture.spawn().await;
+    let host = ProcessHost::new(fixture.process_store.as_ref());
+    host.kill(&fixture.scope, process.process_id).await.unwrap();
+
+    assert!(matches!(
+        fixture.governor.release(reservation_id).unwrap_err(),
+        ResourceError::ReservationClosed {
+            status: ReservationStatus::Released,
+            ..
+        }
+    ));
+    assert!(
+        fixture
+            .network_policies
+            .take(&fixture.scope, &script_capability_id())
+            .is_none()
+    );
+    assert!(
+        fixture
+            .secret_injections
+            .take(&fixture.scope, &script_capability_id(), &secret_handle)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn spawned_obligation_lifecycle_abort_cleans_up_when_process_start_fails() {
+    let reservation_id = ResourceReservationId::new();
+    let secret_handle = SecretHandle::new("api_token").unwrap();
+    let fixture = spawn_obligation_fixture(
+        reservation_id,
+        secret_handle.clone(),
+        BackgroundExecutor::success(),
+    )
+    .await;
+    let failing_manager = FailingSpawnManager;
+    let host = CapabilityHost::new(
+        fixture.registry.as_ref(),
+        fixture.dispatcher.as_ref(),
+        fixture.authorizer.as_ref(),
+    )
+    .with_obligation_handler(fixture.handler.as_ref())
+    .with_process_manager(&failing_manager);
+
+    let err = host
+        .spawn_json(CapabilitySpawnRequest {
+            context: fixture.context.clone(),
+            capability_id: script_capability_id(),
+            estimate: fixture.estimate.clone(),
+            input: json!({"message": "spawn fails"}),
+            trust_decision: trust_decision_with_dispatch_authority(),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ironclaw_capabilities::CapabilityInvocationError::Process { .. }
+    ));
+    assert!(matches!(
+        fixture.governor.release(reservation_id).unwrap_err(),
+        ResourceError::ReservationClosed {
+            status: ReservationStatus::Released,
+            ..
+        }
+    ));
+    assert!(
+        fixture
+            .network_policies
+            .take(&fixture.scope, &script_capability_id())
+            .is_none()
+    );
+    assert!(
+        fixture
+            .secret_injections
+            .take(&fixture.scope, &script_capability_id(), &secret_handle)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn host_runtime_services_wasm_guest_error_reconciles_usage_after_host_effect() {
     let wat = http_then_guest_error_wat();
     let runtime = wasm_runtime_for_component(
@@ -1443,6 +1626,212 @@ impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
             redaction_applied: false,
         })
     }
+}
+
+struct SpawnObligationFixture {
+    registry: Arc<ExtensionRegistry>,
+    dispatcher: Arc<NoopDispatcher>,
+    authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer>,
+    handler: Arc<BuiltinObligationHandler>,
+    process_manager: Arc<BackgroundProcessManager>,
+    process_store: Arc<ProcessObligationLifecycleStore>,
+    network_policies: Arc<NetworkObligationPolicyStore>,
+    secret_injections: Arc<RuntimeSecretInjectionStore>,
+    governor: Arc<InMemoryResourceGovernor>,
+    context: ExecutionContext,
+    scope: ResourceScope,
+    estimate: ResourceEstimate,
+}
+
+impl SpawnObligationFixture {
+    async fn spawn(&self) -> ironclaw_processes::ProcessRecord {
+        let host = CapabilityHost::new(
+            self.registry.as_ref(),
+            self.dispatcher.as_ref(),
+            self.authorizer.as_ref(),
+        )
+        .with_obligation_handler(self.handler.as_ref())
+        .with_process_manager(self.process_manager.as_ref());
+
+        host.spawn_json(CapabilitySpawnRequest {
+            context: self.context.clone(),
+            capability_id: script_capability_id(),
+            estimate: self.estimate.clone(),
+            input: json!({"message": "background"}),
+            trust_decision: trust_decision_with_dispatch_authority(),
+        })
+        .await
+        .unwrap()
+        .process
+    }
+}
+
+async fn spawn_obligation_fixture(
+    reservation_id: ResourceReservationId,
+    secret_handle: SecretHandle,
+    executor: BackgroundExecutor,
+) -> SpawnObligationFixture {
+    let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
+    let dispatcher = Arc::new(NoopDispatcher);
+    let network_policies = Arc::new(NetworkObligationPolicyStore::new());
+    let secret_injections = Arc::new(RuntimeSecretInjectionStore::new());
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id);
+    let context =
+        execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone());
+    let estimate = ResourceEstimate {
+        process_count: Some(1),
+        concurrency_slots: Some(1),
+        ..ResourceEstimate::default()
+    };
+    secret_store
+        .put(
+            scope.clone(),
+            secret_handle.clone(),
+            SecretMaterial::from("runtime-secret"),
+        )
+        .await
+        .unwrap();
+    let handler = Arc::new(
+        BuiltinObligationHandler::new()
+            .with_network_policy_store(Arc::clone(&network_policies))
+            .with_secret_store(secret_store)
+            .with_secret_injection_store(Arc::clone(&secret_injections))
+            .with_resource_governor(Arc::clone(&governor)),
+    );
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
+        Arc::new(ObligatingAuthorizer::new(vec![
+            Obligation::ReserveResources { reservation_id },
+            Obligation::ApplyNetworkPolicy {
+                policy: wasm_http_policy(),
+            },
+            Obligation::InjectSecretOnce {
+                handle: secret_handle,
+            },
+        ]));
+    let process_store = Arc::new(ProcessObligationLifecycleStore::new(
+        Arc::new(InMemoryProcessStore::new()),
+        Arc::clone(&network_policies),
+        Arc::clone(&secret_injections),
+        governor.clone(),
+    ));
+    let process_manager = Arc::new(
+        BackgroundProcessManager::new(Arc::clone(&process_store), Arc::new(executor))
+            .with_result_store(Arc::new(InMemoryProcessResultStore::new())),
+    );
+
+    SpawnObligationFixture {
+        registry,
+        dispatcher,
+        authorizer,
+        handler,
+        process_manager,
+        process_store,
+        network_policies,
+        secret_injections,
+        governor,
+        context,
+        scope,
+        estimate,
+    }
+}
+
+struct BackgroundExecutor {
+    outcome: BackgroundExecutorOutcome,
+}
+
+impl BackgroundExecutor {
+    fn success() -> Self {
+        Self {
+            outcome: BackgroundExecutorOutcome::Success,
+        }
+    }
+
+    fn failure(kind: impl Into<String>) -> Self {
+        Self {
+            outcome: BackgroundExecutorOutcome::Failure(kind.into()),
+        }
+    }
+
+    fn delayed_success(delay: Duration) -> Self {
+        Self {
+            outcome: BackgroundExecutorOutcome::DelayedSuccess(delay),
+        }
+    }
+}
+
+enum BackgroundExecutorOutcome {
+    Success,
+    Failure(String),
+    DelayedSuccess(Duration),
+}
+
+#[async_trait]
+impl ProcessExecutor for BackgroundExecutor {
+    async fn execute(
+        &self,
+        _request: ProcessExecutionRequest,
+    ) -> Result<ProcessExecutionResult, ironclaw_processes::ProcessExecutionError> {
+        match &self.outcome {
+            BackgroundExecutorOutcome::Success => Ok(ProcessExecutionResult {
+                output: json!({"ok": true}),
+            }),
+            BackgroundExecutorOutcome::Failure(kind) => {
+                Err(ironclaw_processes::ProcessExecutionError::new(kind.clone()))
+            }
+            BackgroundExecutorOutcome::DelayedSuccess(delay) => {
+                tokio::time::sleep(*delay).await;
+                Ok(ProcessExecutionResult {
+                    output: json!({"ok": true}),
+                })
+            }
+        }
+    }
+}
+
+struct FailingSpawnManager;
+
+#[async_trait]
+impl ironclaw_processes::ProcessManager for FailingSpawnManager {
+    async fn spawn(
+        &self,
+        _start: ProcessStart,
+    ) -> Result<ironclaw_processes::ProcessRecord, ProcessError> {
+        Err(ProcessError::InvalidStoredRecord {
+            reason: "start failed".to_string(),
+        })
+    }
+}
+
+struct NoopDispatcher;
+
+#[async_trait]
+impl CapabilityDispatcher for NoopDispatcher {
+    async fn dispatch_json(
+        &self,
+        _request: CapabilityDispatchRequest,
+    ) -> Result<CapabilityDispatchResult, DispatchError> {
+        panic!("spawn tests must not invoke the foreground dispatcher")
+    }
+}
+
+async fn wait_for_status(
+    store: &dyn ProcessStore,
+    scope: &ResourceScope,
+    process_id: ProcessId,
+    status: ProcessStatus,
+) {
+    for _ in 0..100 {
+        if let Some(record) = store.get(scope, process_id).await.unwrap()
+            && record.status == status
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("process {process_id} did not reach {status:?}");
 }
 
 #[async_trait]
