@@ -2864,7 +2864,7 @@ mod tests {
             thread_goal: Some("test goal".to_string()),
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
-            gate_controller: None,
+            gate_controller: ironclaw_engine::CancellingGateController::arc(),
         }
     }
 
@@ -4631,7 +4631,7 @@ mod tests {
             ),
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
-            gate_controller: None,
+            gate_controller: ironclaw_engine::CancellingGateController::arc(),
         };
 
         assert!(should_reject_immediate_mission_create(&ctx));
@@ -4653,7 +4653,7 @@ mod tests {
             ),
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
-            gate_controller: None,
+            gate_controller: ironclaw_engine::CancellingGateController::arc(),
         };
 
         assert!(!should_reject_immediate_mission_create(&ctx));
@@ -4673,7 +4673,7 @@ mod tests {
             thread_goal: Some("Summarize every product feedback item right now.".to_string()),
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
-            gate_controller: None,
+            gate_controller: ironclaw_engine::CancellingGateController::arc(),
         };
 
         assert!(should_reject_immediate_mission_create(&ctx));
@@ -4693,7 +4693,7 @@ mod tests {
             thread_goal: Some("Set up the product feedback summary right now.".to_string()),
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
-            gate_controller: None,
+            gate_controller: ironclaw_engine::CancellingGateController::arc(),
         };
 
         assert!(should_reject_immediate_mission_create(&ctx));
@@ -4716,7 +4716,7 @@ mod tests {
             thread_goal: Some("Set up monitoring now.".to_string()),
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
-            gate_controller: None,
+            gate_controller: ironclaw_engine::CancellingGateController::arc(),
         };
 
         // Should NOT be rejected — "monitoring" implies scheduling intent.
@@ -4737,7 +4737,7 @@ mod tests {
             thread_goal: Some("Summarize feedback immediately.".to_string()),
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
-            gate_controller: None,
+            gate_controller: ironclaw_engine::CancellingGateController::arc(),
         };
 
         assert!(!should_reject_immediate_mission_create(&ctx));
@@ -4962,7 +4962,7 @@ mod tests {
                 thread_goal: Some(goal.to_string()),
                 available_actions_snapshot: None,
                 available_action_inventory_snapshot: None,
-                gate_controller: None,
+                gate_controller: ironclaw_engine::CancellingGateController::arc(),
             }
         }
 
@@ -5292,7 +5292,7 @@ mod tests {
             thread_goal: None,
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
-            gate_controller: None,
+            gate_controller: ironclaw_engine::CancellingGateController::arc(),
         };
 
         let result = adapter.execute_action("http", params, &lease, &ctx).await;
@@ -5406,7 +5406,7 @@ mod tests {
             thread_goal: None,
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
-            gate_controller: None,
+            gate_controller: ironclaw_engine::CancellingGateController::arc(),
         };
 
         let result = adapter
@@ -5722,7 +5722,7 @@ mod tests {
             thread_goal: None,
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
-            gate_controller: None,
+            gate_controller: ironclaw_engine::CancellingGateController::arc(),
         };
 
         let result = adapter
@@ -6320,7 +6320,7 @@ mod tests {
             thread_goal: None,
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
-            gate_controller: None,
+            gate_controller: ironclaw_engine::CancellingGateController::arc(),
         };
 
         let capabilities = adapter

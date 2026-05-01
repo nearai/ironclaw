@@ -63,14 +63,15 @@ exact suspension point. No replay, no restart, no double execution.
 ```rust
 // crates/ironclaw_engine/src/gate/mod.rs
 
-pub struct GatePauseRequest<'a> {
-    pub gate_name: &'a str,
-    pub action_name: &'a str,
-    pub call_id: &'a str,
-    pub parameters: &'a serde_json::Value,
+#[derive(Debug, Clone)]
+pub struct GatePauseRequest {
+    pub thread_id: ThreadId,
+    pub user_id: String,
+    pub gate_name: String,
+    pub action_name: String,
+    pub call_id: String,
+    pub parameters: serde_json::Value,
     pub resume_kind: ResumeKind,
-    pub paused_lease: Option<CapabilityLease>,
-    pub resume_output: Option<serde_json::Value>,
 }
 
 #[async_trait]
@@ -79,18 +80,38 @@ pub trait GateController: Send + Sync {
     /// external system. The implementation is responsible for any
     /// persistence, UI/SSE emission, and channel registration needed
     /// to surface the gate.
-    async fn pause(&self, req: GatePauseRequest<'_>) -> GateResolution;
+    async fn pause(&self, req: GatePauseRequest) -> GateResolution;
+}
+
+/// Default impl that immediately cancels every pause request. Use for
+/// post-resolution replay paths, mission protected writes, and tests.
+pub struct CancellingGateController;
+
+impl CancellingGateController {
+    pub fn arc() -> Arc<dyn GateController> { Arc::new(Self) }
+}
+
+#[async_trait]
+impl GateController for CancellingGateController {
+    async fn pause(&self, _: GatePauseRequest) -> GateResolution {
+        GateResolution::Cancelled
+    }
 }
 ```
 
 `ThreadExecutionContext` gets:
 
 ```rust
-pub gate_controller: Option<Arc<dyn GateController>>,
+pub gate_controller: Arc<dyn GateController>,
 ```
 
-Optional so existing tests and Tier 0 paths that don't construct a
-controller continue to work unchanged.
+**Required, not optional.** A previous iteration made it optional to
+avoid touching test fixtures, but that left a fall-back path in the
+executors that re-emitted the original `"execution paused by gate"`
+RuntimeError when the field was `None`. Removing the `Option` makes it
+a compile error to forget to wire a controller, and `CancellingGateController`
+is the explicit drop-in for paths that don't pause — gates surface as
+typed denials there, never as the legacy bug message.
 
 ### Bridge implementation: `BridgeGateController`
 
@@ -381,65 +402,130 @@ should be invalidated.
 
 ## Testing
 
-- **Unit (engine):** `scripting.rs` test that drives a CodeAct
-  call where the tool returns `Err(EngineError::GatePaused)` mid-execution,
-  with a stub `GateController` that returns `GateResolution::Approved`,
-  asserts the script completes and the gated tool's result is
-  delivered to Python.
-- **Unit (engine):** same shape with `Denied`, asserts a
-  `PermissionError` is raised inside the script (catchable by
-  `try/except`), and the Python `except` branch runs.
-- **Unit (engine):** `Cancelled` resolution also raises
-  `PermissionError` — script-level indistinguishable from `Denied`,
-  intentional.
-- **Integration (bridge):** drive `resolve_pending_gate` with both an
-  in-memory channel registered (asserts `try_deliver` succeeds, no
-  re-entry happens) and without (asserts legacy
-  `execute_pending_gate_action` still runs). Per the testing rule
-  (`Test Through the Caller, Not Just the Helper`), this is the
-  caller-level coverage that catches a wrapper that silently drops
-  the controller.
-- **Integration (bridge):** start a thread, send a CodeAct script
-  that gates, send `Stop`, assert the pause cancels and the thread
-  terminates.
+Test mapping to the as-shipped code:
+
+- **Unit (engine, `scripting.rs`):** `codeact_gate_inline_await_approved_delivers_result`
+  — tool returns `Err(EngineError::GatePaused)` mid-execution; a stub
+  `GateController` returns `Approved`; asserts the script completes
+  with the tool's result.
+- **Unit (engine, `scripting.rs`):** `codeact_gate_inline_await_denied_raises_in_script`
+  — denial surfaces as a typed `RuntimeError("user denied tool 'X': <reason>")`,
+  catchable in Python.
+- **Unit (engine, `scripting.rs`):** `codeact_default_controller_cancels_approval_gates`
+  — locks in the `CancellingGateController` default. Verifies the
+  pre-fix `"execution paused by gate"` message never appears even
+  when the controller is the inert default.
+- **Unit (engine, `scripting.rs`):** `bridge::gate_controller::tests::*`
+  — 4 tests cover `GateResolutions` registry semantics (unknown /
+  registered / dropped-receiver / one-shot).
+- **Live regression (`tests/engine_v2_gate_integration.rs`):**
+  `codeact_inline_gate_await_resumes_user_reproducer` drives the
+  user-reported reproducer through `ThreadManager`; asserts no
+  RuntimeError leak and the post-approval retry runs.
+  `codeact_inline_gate_await_denial_does_not_retry` covers denial.
+- **Unit (bridge, `router.rs`):** `invalidate_stranded_approval_gates_evicts_only_approval_kind`
+  — boot sweep evicts only `Approval` rows; Auth/External rows
+  survive.
+- **Open follow-ups:** integration test covering `resolve_gate`'s
+  auto-approve install + rollback path (caller-level coverage per
+  `.claude/rules/testing.md`); E2E click-through tests for the live
+  approve/deny/restart flows in the UI.
+
+`PermissionError` was the originally proposed Python exception kind
+but the as-shipped code uses `RuntimeError` with a descriptive message
+(`"user denied tool 'X': <reason>"`) — `RuntimeError` is what scripts
+already catch, and the message is specific enough to distinguish from
+other runtime errors.
+
+## As-shipped shape
+
+The code shipped differs from the original sketch in a few places worth
+recording so a future reader doesn't get confused:
+
+- **`gate_controller` is required, not optional.** The original sketch
+  used `Option<Arc<dyn GateController>>` and let executors fall back
+  to the V1 unwind path when `None`. That fallback re-emitted the bug
+  message, so it was removed. `CancellingGateController` is the
+  explicit drop-in for paths that don't pause (post-resolution replay,
+  mission protected writes, tests).
+- **Bounded retry on Approval.** Both `scripting::drive_inline_gate`
+  (Tier 1 async) and `structured::execute_with_inline_gate_retry`
+  (Tier 0) cap the re-pause loop at `MAX_INLINE_GATE_RETRIES = 3`.
+  Well-behaved chains (auto-approve installed before delivery)
+  converge in 1–2 iterations; the cap only ever fires on a buggy host
+  controller.
+- **`denial_reason_for_resolution` helper.** Pulled into
+  `executor::scripting` and used by Tier 0 + Tier 1 sites so denial
+  messages can't drift between executors.
+- **`max_duration` stays at 30 s.** The original plan considered
+  bumping it to 30 min so human approvals fit; the existing
+  `sandbox_enforces_cpu_limits` test relied on the 30 s cap to
+  terminate a CPU-bound script. The active-CPU vs paused-clock split
+  is on the follow-up list.
 
 ## Build order
 
-1. `GatePauseRequest` / `GateController` plumbing in
-   `crates/ironclaw_engine/src/gate/mod.rs` and
-   `traits/effect.rs::ThreadExecutionContext`. Restrict to
+1. `GatePauseRequest` / `GateController` / `CancellingGateController`
+   in `crates/ironclaw_engine/src/gate/mod.rs`. Required field
+   (`Arc<dyn GateController>`, not `Option`) on
+   `traits/effect.rs::ThreadExecutionContext`. Restricted to
    `Approval` resume-kind for this PR.
 2. `BridgeGateController` in `src/bridge/gate_controller.rs` —
-   construction, `pause`, `try_deliver`, `emit_gate_status`.
+   construction, `pause`, `try_deliver`, `emit_gate_status`,
+   per-execution context registry.
 3. Wire one controller per thread execution from
    `src/bridge/router.rs::handle_with_engine_inner` into
-   `ThreadExecutionContext.gate_controller`.
-4. **Tier 1 sites:** replace `scripting.rs:841-852` (sync
-   preflight) and `scripting.rs:1740-1766` (async output gate) with
-   `controller.pause(...).await`. Branch on `GateResolution`.
-5. **Tier 0 sites:** replace `structured.rs:185-218` (preflight)
-   and `structured.rs:457-496` (mid-execution) with
-   `controller.pause(...).await` for `Approval` gates. Other resume
-   kinds keep current behavior.
-6. Update `resolve_pending_gate` to `try_deliver` first; legacy
-   path stays as a fall-through for Auth/External and post-restart
-   stragglers.
-7. Bump `default_limits().max_duration` to 30 min. Document in
-   `crates/ironclaw_engine/CLAUDE.md`.
-8. Startup sweep: invalidate all `Approval`-kind `PendingGate` rows
-   on boot.
-9. Tests for both tiers (sync preflight, async output, denial,
-   stop-during-wait, restart cleanup).
+   `ThreadManager::set_gate_controller`. Subsequent thread spawns pick
+   it up via `ExecutionLoop::new`. `ThreadManager` defaults to
+   `CancellingGateController` so unwired hosts fail loud rather than
+   silently.
+4. **Tier 1 sites:** rewrite the sync preflight `PreflightResult::GatePaused`
+   arm and the async output `resolve_tool_future` `EngineError::GatePaused`
+   arm to call the controller. Async path delegates to
+   `drive_inline_gate` (bounded retry).
+5. **Tier 0 sites:** rewrite the preflight `RequireApproval` arm in
+   `structured::execute_action_calls` to call the controller, and the
+   mid-execution loop in `structured::execute_with_inline_gate_retry`
+   (also bounded). Authentication/External keep the legacy re-entry
+   path unchanged.
+6. Update `resolve_pending_gate` to `try_deliver` the controller's
+   in-memory channel first; install/rollback auto-approve preference
+   around the delivery so chained gates short-circuit. Legacy
+   `execute_pending_gate_action` path stays as a fall-through for
+   Auth/External and post-restart stragglers.
+7. Startup sweep: `invalidate_stranded_approval_gates` evicts every
+   `Approval`-kind `PendingGate` row on boot and emits a
+   `GateResolved` SSE with `resolution = "expired"` per row.
+8. Tests for both tiers (sync preflight, async output, denial,
+   approval, fallback-controller default, restart cleanup).
+9. Wire `CancellingGateController` into the remaining production paths
+   that build `ThreadExecutionContext` directly (mission protected
+   writes, post-resolution replay) — required field, no implicit
+   default.
 
 ## Open questions / follow-ups (not in this PR)
 
-- Active-CPU vs paused-clock split for `max_duration`. Current 30 min
-  is generous; a runaway script combined with a never-resolved gate
-  could pin a VM for the full duration.
-- Multi-gate single-prompt UX (`asyncio.gather` of two gating tools).
-- `InjectMessage` during a gate wait — current behavior queues; may
-  want to surface a marker in the script so the LLM knows the user
-  said something.
-- Migration to `GateController` for Tier 0: would let us delete the
-  thread re-entry path entirely and unify both tiers on one mechanism.
-  Worth considering after this lands.
+- **Active-CPU vs paused-clock split for `max_duration`.** Currently
+  30 s and ticks during gate awaits — long approvals time out. A
+  proper split would only count CPU time during VM execution.
+- **Multi-gate single-prompt UX** (`asyncio.gather` of two gating
+  tools).
+- **`InjectMessage` during a gate wait** — current behavior queues;
+  may want to surface a marker in the script so the LLM knows the
+  user said something.
+- **Migration of Auth/External to the controller.** Would let us
+  delete the thread re-entry path entirely. Each needs new state
+  installed (credential, callback) before the suspended call can
+  succeed, so the controller's contract would need to grow.
+- **Bridge integration test for `resolve_gate` rollback** — the
+  auto-approve install/rollback dance in `resolve_gate` deserves a
+  caller-level test per `.claude/rules/testing.md`.
+- **Per-user concurrency cap on in-flight gates.** Documented but not
+  implemented. A stuck user could accumulate paused VMs.
+- **`mission.rs::dispatch_protected_write` controller wiring.** Currently
+  uses `CancellingGateController`; if a protected write ever surfaces
+  a gate the user gets a silent denial. Decide whether to wire it
+  through the live controller or surface as a clearer engine error.
+- **Tier 0 parallel-batch mid-execution gates.** `execute_with_inline_gate_retry`
+  handles the single-call path; multi-call parallel batches with
+  simultaneous gates need the same treatment (rare).

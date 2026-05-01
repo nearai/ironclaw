@@ -445,7 +445,7 @@ pub async fn execute_orchestrator(
     retrieval: Option<&RetrievalEngine>,
     store: Option<&Arc<dyn Store>>,
     platform_info: Option<&crate::executor::prompt::PlatformInfo>,
-    gate_controller: Option<&Arc<dyn crate::gate::GateController>>,
+    gate_controller: &Arc<dyn crate::gate::GateController>,
     persisted_state: &serde_json::Value,
 ) -> Result<OrchestratorResult, EngineError> {
     let mut total_tokens = TokenUsage::default();
@@ -756,7 +756,14 @@ async fn handle_llm_complete(
     }
 
     let active_leases = deps.leases.active_for_thread(thread.id).await;
-    let actions_context = thread_execution_context(thread, StepId::new(), None);
+    // Read-only path: `available_actions` and the message refresh below
+    // don't pause; inert controller is correct.
+    let actions_context = thread_execution_context(
+        thread,
+        StepId::new(),
+        None,
+        crate::gate::CancellingGateController::arc(),
+    );
     let actions = deps
         .effects
         .available_actions(&active_leases, &actions_context)
@@ -898,7 +905,7 @@ async fn handle_execute_code_step(
     leases: &Arc<LeaseManager>,
     policy: &Arc<PolicyEngine>,
     event_tx: Option<&tokio::sync::broadcast::Sender<ThreadEvent>>,
-    gate_controller: Option<&Arc<dyn crate::gate::GateController>>,
+    gate_controller: &Arc<dyn crate::gate::GateController>,
 ) -> ExtFunctionResult {
     let code = match args.first() {
         Some(obj) => monty_to_string(obj),
@@ -915,8 +922,7 @@ async fn handle_execute_code_step(
         .map(monty_to_json)
         .unwrap_or(serde_json::json!({}));
 
-    let mut exec_ctx = thread_execution_context(thread, StepId::new(), None);
-    exec_ctx.gate_controller = gate_controller.cloned();
+    let exec_ctx = thread_execution_context(thread, StepId::new(), None, gate_controller.clone());
 
     // Run user code in a nested Monty VM (same pattern as rlm_query)
     let code_start = std::time::Instant::now();
@@ -1098,7 +1104,7 @@ async fn handle_execute_action(
     leases: &Arc<LeaseManager>,
     policy: &Arc<PolicyEngine>,
     event_tx: Option<&tokio::sync::broadcast::Sender<ThreadEvent>>,
-    gate_controller: Option<&Arc<dyn crate::gate::GateController>>,
+    gate_controller: &Arc<dyn crate::gate::GateController>,
 ) -> ExtFunctionResult {
     let name = match extract_string_arg(args, kwargs, "name", 0) {
         Some(n) => n,
@@ -1117,8 +1123,12 @@ async fn handle_execute_action(
 
     let call_id = extract_string_kwarg(kwargs, "call_id").unwrap_or_default();
 
-    let mut exec_ctx = thread_execution_context(thread, StepId::new(), Some(call_id.clone()));
-    exec_ctx.gate_controller = gate_controller.cloned();
+    let mut exec_ctx = thread_execution_context(
+        thread,
+        StepId::new(),
+        Some(call_id.clone()),
+        gate_controller.clone(),
+    );
     let active_leases = leases.active_for_thread(thread.id).await;
     let inventory = match effects
         .available_action_inventory(&active_leases, &exec_ctx)
@@ -1455,7 +1465,7 @@ async fn handle_execute_actions_parallel(
     leases: &Arc<LeaseManager>,
     policy: &Arc<PolicyEngine>,
     event_tx: Option<&tokio::sync::broadcast::Sender<ThreadEvent>>,
-    gate_controller: Option<&Arc<dyn crate::gate::GateController>>,
+    gate_controller: &Arc<dyn crate::gate::GateController>,
 ) -> ExtFunctionResult {
     // Parse the calls list from the first argument (list of dicts)
     let calls_json = args
@@ -1504,7 +1514,7 @@ async fn handle_execute_actions_parallel(
     }
 
     let step_id = StepId::new();
-    let actions_context = thread_execution_context(thread, step_id, None);
+    let actions_context = thread_execution_context(thread, step_id, None, gate_controller.clone());
     let active_leases = leases.active_for_thread(thread.id).await;
     let inventory = match effects
         .available_action_inventory(&active_leases, &actions_context)
@@ -1543,8 +1553,12 @@ async fn handle_execute_actions_parallel(
 
     for pc in &parsed {
         // Find the action definition from the callable inventory.
-        let mut exec_ctx = thread_execution_context(thread, step_id, Some(pc.call_id.clone()));
-        exec_ctx.gate_controller = gate_controller.cloned();
+        let mut exec_ctx = thread_execution_context(
+            thread,
+            step_id,
+            Some(pc.call_id.clone()),
+            gate_controller.clone(),
+        );
         if let Some(ref inventory) = inventory {
             exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
             exec_ctx.available_action_inventory_snapshot = Some(Arc::clone(inventory));
@@ -1770,8 +1784,12 @@ async fn handle_execute_actions_parallel(
             .find(|action| action.matches_name(&pc.name))
             .map(|action| action.name.clone())
             .unwrap_or_else(|| pc.name.clone());
-        let mut exec_ctx = thread_execution_context(thread, step_id, Some(pc.call_id.clone()));
-        exec_ctx.gate_controller = gate_controller.cloned();
+        let mut exec_ctx = thread_execution_context(
+            thread,
+            step_id,
+            Some(pc.call_id.clone()),
+            gate_controller.clone(),
+        );
         if let Some(ref inventory) = inventory {
             exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
             exec_ctx.available_action_inventory_snapshot = Some(Arc::clone(inventory));
@@ -1809,8 +1827,12 @@ async fn handle_execute_actions_parallel(
             let pc_call_id = parsed[idx].call_id.clone();
             let effects = effects.clone();
             let lease = lease.clone();
-            let mut exec_ctx = thread_execution_context(thread, step_id, Some(pc_call_id.clone()));
-            exec_ctx.gate_controller = gate_controller.cloned();
+            let mut exec_ctx = thread_execution_context(
+                thread,
+                step_id,
+                Some(pc_call_id.clone()),
+                gate_controller.clone(),
+            );
             if let Some(ref inventory) = inventory {
                 exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
                 exec_ctx.available_action_inventory_snapshot = Some(Arc::clone(inventory));
@@ -2245,7 +2267,15 @@ async fn handle_get_actions(
     }
 
     let active_leases = leases.active_for_thread(thread.id).await;
-    let actions_context = thread_execution_context(thread, StepId::new(), None);
+    // Read-only path: `available_actions` doesn't pause, so an inert
+    // controller is correct. Plumbing the live one here would buy
+    // nothing.
+    let actions_context = thread_execution_context(
+        thread,
+        StepId::new(),
+        None,
+        crate::gate::CancellingGateController::arc(),
+    );
     match effects
         .available_actions(&active_leases, &actions_context)
         .await
@@ -4355,6 +4385,7 @@ mod tests {
             .await
             .expect("grant lease");
 
+        let controller = crate::gate::CancellingGateController::arc();
         let result = handle_execute_action(
             &[
                 MontyObject::String("echo".into()),
@@ -4369,7 +4400,7 @@ mod tests {
             &leases,
             &policy,
             None,
-            None,
+            &controller,
         )
         .await;
 
@@ -5191,6 +5222,7 @@ FINAL(batch_error_count)
         ];
 
         let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        let controller = crate::gate::CancellingGateController::arc();
         let _result = handle_execute_code_step(
             args,
             &[],
@@ -5200,7 +5232,7 @@ FINAL(batch_error_count)
             &leases,
             &policy,
             Some(&tx),
-            None,
+            &controller,
         )
         .await;
 

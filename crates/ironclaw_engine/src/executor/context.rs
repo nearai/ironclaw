@@ -184,7 +184,7 @@ mod tests {
                 thread_goal: Some("search the web".into()),
                 available_actions_snapshot: None,
                 available_action_inventory_snapshot: None,
-                gate_controller: None,
+                gate_controller: crate::gate::CancellingGateController::arc(),
             },
         )
         .await
@@ -225,7 +225,7 @@ mod tests {
                 thread_goal: Some("hello".into()),
                 available_actions_snapshot: None,
                 available_action_inventory_snapshot: None,
-                gate_controller: None,
+                gate_controller: crate::gate::CancellingGateController::arc(),
             },
         )
         .await
@@ -262,7 +262,7 @@ mod tests {
                 thread_goal: Some("hello".into()),
                 available_actions_snapshot: None,
                 available_action_inventory_snapshot: None,
-                gate_controller: None,
+                gate_controller: crate::gate::CancellingGateController::arc(),
             },
         )
         .await

@@ -63,7 +63,6 @@ pub async fn execute_action_calls(
 ) -> Result<ActionBatchResult, EngineError> {
     let mut preflight_results: Vec<PreflightOutcome> = Vec::with_capacity(calls.len());
     let mut early_events = Vec::new();
-    let mut early_results = Vec::new();
     let active_leases = leases.active_for_thread(thread.id).await;
     let available_inventory = Arc::new(
         effects
@@ -183,91 +182,47 @@ pub async fn execute_action_calls(
                 continue;
             }
             PolicyDecision::RequireApproval { .. } => {
-                // Inline gate-await: if the host wired a `GateController`,
-                // pause this preflight loop in place until the user
-                // resolves the gate. On approval, fall through to lease
-                // consumption and queue the call for execution. On
-                // denial, mark the call failed and continue preflight
-                // for the rest of the batch — same blast radius as a
-                // policy-Deny.
+                // Inline gate-await: pause this preflight loop in place
+                // until the user resolves the gate. On approval, fall
+                // through to lease consumption and queue the call for
+                // execution. On denial, mark the call failed and continue
+                // preflight for the rest of the batch — same blast radius
+                // as a policy-Deny.
+                //
+                // The controller is required on the context. Code paths
+                // that don't pause supply `CancellingGateController`,
+                // which surfaces as a typed denial here.
                 //
                 // Policy doesn't carry the `allow_always` axis; default
                 // to the historical value (`true`) so the UI offers it.
                 let resume_kind = crate::gate::ResumeKind::Approval { allow_always: true };
-                let allow_always = true;
-                let resolution = if let Some(controller) = context.gate_controller.as_ref() {
-                    early_events.push(EventKind::ApprovalRequested {
+                early_events.push(EventKind::ApprovalRequested {
+                    action_name: call.action_name.clone(),
+                    call_id: call.id.clone(),
+                    parameters: Some(call.parameters.clone()),
+                    description: None,
+                    allow_always: Some(true),
+                    gate_name: Some("approval".into()),
+                    params_summary: crate::types::event::summarize_params(
+                        &call.action_name,
+                        &call.parameters,
+                    ),
+                });
+                let resolution = context
+                    .gate_controller
+                    .pause(crate::gate::GatePauseRequest {
+                        thread_id: thread.id,
+                        user_id: thread.user_id.clone(),
+                        gate_name: "approval".into(),
                         action_name: call.action_name.clone(),
                         call_id: call.id.clone(),
-                        parameters: Some(call.parameters.clone()),
-                        description: None,
-                        allow_always: Some(allow_always),
-                        gate_name: Some("approval".into()),
-                        params_summary: crate::types::event::summarize_params(
-                            &call.action_name,
-                            &call.parameters,
-                        ),
-                    });
-                    controller
-                        .pause(crate::gate::GatePauseRequest {
-                            thread_id: thread.id,
-                            user_id: thread.user_id.clone(),
-                            gate_name: "approval".into(),
-                            action_name: call.action_name.clone(),
-                            call_id: call.id.clone(),
-                            parameters: call.parameters.clone(),
-                            resume_kind,
-                        })
-                        .await
-                } else {
-                    // Legacy path — no controller wired (test harness or
-                    // pre-bridge call site). Fall back to the historical
-                    // unwind-and-re-enter behavior so existing tests keep
-                    // working.
-                    for pf in preflight_results {
-                        if let PreflightOutcome::Error { result, event, .. } = pf {
-                            early_results.push(result);
-                            early_events.push(event);
-                        }
-                    }
-                    early_events.push(EventKind::ApprovalRequested {
-                        action_name: call.action_name.clone(),
-                        call_id: call.id.clone(),
-                        parameters: Some(call.parameters.clone()),
-                        description: None,
-                        allow_always: None,
-                        gate_name: None,
-                        params_summary: crate::types::event::summarize_params(
-                            &call.action_name,
-                            &call.parameters,
-                        ),
-                    });
-                    return Ok(ActionBatchResult {
-                        results: early_results,
-                        events: early_events,
-                        need_approval: Some(ThreadOutcome::GatePaused {
-                            gate_name: "approval".into(),
-                            action_name: call.action_name.clone(),
-                            call_id: call.id.clone(),
-                            parameters: call.parameters.clone(),
-                            resume_kind: crate::gate::ResumeKind::Approval { allow_always: true },
-                            resume_output: None,
-                            paused_lease: None,
-                        }),
-                    });
-                };
+                        parameters: call.parameters.clone(),
+                        resume_kind,
+                    })
+                    .await;
 
-                let denial_reason = match resolution {
-                    crate::gate::GateResolution::Approved { .. } => None,
-                    crate::gate::GateResolution::Denied { reason } => {
-                        Some(reason.unwrap_or_else(|| "denied by user".into()))
-                    }
-                    crate::gate::GateResolution::Cancelled => Some("cancelled".into()),
-                    crate::gate::GateResolution::CredentialProvided { .. }
-                    | crate::gate::GateResolution::ExternalCallback { .. } => {
-                        Some("unsupported gate resolution".into())
-                    }
-                };
+                let denial_reason =
+                    crate::executor::scripting::denial_reason_for_resolution(&resolution);
                 if let Some(reason_text) = denial_reason {
                     let error_result = ActionResult {
                         call_id: call.id.clone(),
@@ -407,7 +362,11 @@ pub async fn execute_action_calls(
     // ── Phase 3: Merge results in original call order ───────────
 
     let mut results = Vec::with_capacity(calls.len());
-    let mut events = Vec::new();
+    // `early_events` carries ApprovalRequested events emitted during
+    // preflight; they're emitted *before* any per-call result event so
+    // observers see "approval asked → action failed" in the right
+    // order.
+    let mut events = std::mem::take(&mut early_events);
     let mut first_interrupt: Option<ThreadOutcome> = None;
 
     for (idx, slot) in slot_results.into_iter().enumerate() {
@@ -598,15 +557,23 @@ fn interrupted_call_needs_refund(result: &Result<ActionResult, EngineError>) -> 
 
 /// Run a single tool action with inline gate-await retry.
 ///
-/// If the executor returns `Err(EngineError::GatePaused { resume_kind: Approval, .. })`
-/// and the context has a `GateController` wired, refund the lease,
-/// pause for the user, and retry on approval. On denial / cancellation,
-/// surface as a deny-style `EngineError::Effect` so the caller produces
-/// an `ActionFailed` event rather than a "gate_paused" sentinel.
+/// If the executor returns `Err(EngineError::GatePaused { resume_kind: Approval, .. })`,
+/// refund the lease, pause for the user via the context's controller,
+/// and retry on approval. On denial / cancellation, surface as a
+/// deny-style `EngineError::Effect` so the caller produces an
+/// `ActionFailed` event rather than a "gate_paused" sentinel.
 ///
-/// Falls back to the historical behavior (returning `Err(GatePaused)`
-/// unmodified) when no controller is wired or the resume kind isn't
-/// `Approval` — keeps Auth/External flows on the legacy re-entry path.
+/// Bounded by [`MAX_INLINE_GATE_RETRIES`]: a misbehaving tool that
+/// keeps gating after each approval surfaces a clean error rather than
+/// pinning a CPU. The bridge installs auto-approve before delivering
+/// the resolution, so well-behaved chains converge in 1–2 iterations
+/// and the cap is only ever hit on bugs.
+///
+/// Authentication/External resume kinds keep the legacy re-entry
+/// path: their resolution installs new state (credentials, callback
+/// payloads) that only takes effect on the next thread run-through,
+/// not via direct hand-back to the suspended call. Those return
+/// `Err(GatePaused)` unmodified.
 async fn execute_with_inline_gate_retry(
     effects: &Arc<dyn EffectExecutor>,
     leases: &LeaseManager,
@@ -616,7 +583,7 @@ async fn execute_with_inline_gate_retry(
     thread: &Thread,
 ) -> Result<ActionResult, EngineError> {
     let mut current_lease = lease.clone();
-    loop {
+    for _ in 0..crate::executor::scripting::MAX_INLINE_GATE_RETRIES {
         let result = effects
             .execute_action(
                 &call.action_name,
@@ -625,10 +592,6 @@ async fn execute_with_inline_gate_retry(
                 exec_ctx,
             )
             .await;
-
-        let Some(controller) = exec_ctx.gate_controller.as_ref() else {
-            return result;
-        };
 
         let (gate_name, action_name, call_id, parameters, resume_kind) = match result {
             Err(EngineError::GatePaused {
@@ -648,7 +611,8 @@ async fn execute_with_inline_gate_retry(
         // on retry if the user approves.
         let _ = leases.refund_use(current_lease.id).await;
 
-        let resolution = controller
+        let resolution = exec_ctx
+            .gate_controller
             .pause(crate::gate::GatePauseRequest {
                 thread_id: thread.id,
                 user_id: thread.user_id.clone(),
@@ -660,43 +624,34 @@ async fn execute_with_inline_gate_retry(
             })
             .await;
 
-        match resolution {
-            crate::gate::GateResolution::Approved { .. } => {
-                // Re-consume a lease use for the retry. If the lease
-                // is exhausted, surface as effect error.
-                match leases.find_and_consume(thread.id, &call.action_name).await {
-                    Ok(new_lease) => {
-                        current_lease = new_lease;
-                        continue;
-                    }
-                    Err(e) => {
-                        return Err(EngineError::Effect {
-                            reason: format!("lease exhausted after approval: {e}"),
-                        });
-                    }
-                }
+        if let Some(reason) = crate::executor::scripting::denial_reason_for_resolution(&resolution)
+        {
+            return Err(EngineError::Effect {
+                reason: format!("denied: {reason}"),
+            });
+        }
+
+        // Approved: re-consume a lease use for the retry.
+        match leases.find_and_consume(thread.id, &call.action_name).await {
+            Ok(new_lease) => {
+                current_lease = new_lease;
+                continue;
             }
-            crate::gate::GateResolution::Denied { reason } => {
+            Err(e) => {
                 return Err(EngineError::Effect {
-                    reason: format!(
-                        "denied: {}",
-                        reason.unwrap_or_else(|| "denied by user".into())
-                    ),
-                });
-            }
-            crate::gate::GateResolution::Cancelled => {
-                return Err(EngineError::Effect {
-                    reason: "approval cancelled".into(),
-                });
-            }
-            crate::gate::GateResolution::CredentialProvided { .. }
-            | crate::gate::GateResolution::ExternalCallback { .. } => {
-                return Err(EngineError::Effect {
-                    reason: "unsupported gate resolution for inline await".into(),
+                    reason: format!("lease exhausted after approval: {e}"),
                 });
             }
         }
     }
+
+    Err(EngineError::Effect {
+        reason: format!(
+            "tool '{}' still requires approval after {} retries",
+            call.action_name,
+            crate::executor::scripting::MAX_INLINE_GATE_RETRIES
+        ),
+    })
 }
 
 #[cfg(test)]
@@ -792,7 +747,7 @@ mod tests {
             thread_goal: Some(thread.goal.clone()),
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
-            gate_controller: None,
+            gate_controller: crate::gate::CancellingGateController::arc(),
         }
     }
 
@@ -1105,24 +1060,26 @@ mod tests {
             .await
             .unwrap();
 
-        match result.need_approval {
-            Some(ThreadOutcome::GatePaused {
-                gate_name,
-                action_name,
-                call_id,
-                ..
-            }) => {
-                assert_eq!(gate_name, "approval");
-                assert_eq!(action_name, "create-issue");
-                assert_eq!(call_id, "call_alias_policy");
-            }
-            other => panic!("expected approval gate for aliased action, got {other:?}"),
-        }
-
+        // The default `CancellingGateController` cancels the gate
+        // synchronously, so the batch surfaces a denied error result for
+        // the aliased call rather than the legacy
+        // `need_approval = Some(ThreadOutcome::GatePaused {...})`.
+        // What still must hold: the gate was *evaluated* (an
+        // ApprovalRequested event was emitted with the aliased name and
+        // the original call_id), the action did NOT execute, and the
+        // result is_error.
         assert!(
-            result.results.is_empty(),
-            "policy preflight should pause before executing the aliased action"
+            result.need_approval.is_none(),
+            "controller-driven path must not bubble need_approval up; got {:?}",
+            result.need_approval
         );
+        assert_eq!(result.results.len(), 1);
+        assert!(
+            result.results[0].is_error,
+            "denied gate must surface as an error result"
+        );
+        assert_eq!(result.results[0].call_id, "call_alias_policy");
+        assert_eq!(result.results[0].action_name, "create-issue");
         assert!(
             result.events.iter().any(|event| matches!(
                 event,
@@ -1130,6 +1087,14 @@ mod tests {
                     if action_name == "create-issue" && call_id == "call_alias_policy"
             )),
             "approval event should use the aliased action name and original call id"
+        );
+        assert!(
+            result.events.iter().any(|event| matches!(
+                event,
+                EventKind::ActionFailed { action_name, call_id, .. }
+                    if action_name == "create-issue" && call_id == "call_alias_policy"
+            )),
+            "denied gate should produce an ActionFailed event"
         );
     }
 

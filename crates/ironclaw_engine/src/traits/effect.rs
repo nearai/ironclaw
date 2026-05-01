@@ -46,11 +46,12 @@ pub struct ThreadExecutionContext {
     /// Host-supplied callback that lets the executor pause inline on
     /// `Approval` gates instead of unwinding back to the orchestrator.
     ///
-    /// `None` for tests and legacy code paths that haven't been migrated;
-    /// in that case `Approval` gates fall back to the historical
-    /// `ThreadOutcome::GatePaused` re-entry behavior. Production
-    /// invocations (via the bridge) always supply one.
-    pub gate_controller: Option<Arc<dyn GateController>>,
+    /// Required. Code paths that don't pause (post-resolution replay,
+    /// background mission writes, tests) supply
+    /// [`crate::gate::CancellingGateController::arc()`], which surfaces
+    /// any unexpected gate as a typed denial rather than the historical
+    /// "execution paused by gate" RuntimeError leak.
+    pub gate_controller: Arc<dyn GateController>,
 }
 
 // Manual Debug impl: `dyn GateController` is not Debug, but the rest of
@@ -76,7 +77,7 @@ impl std::fmt::Debug for ThreadExecutionContext {
                 "available_action_inventory_snapshot",
                 &self.available_action_inventory_snapshot.is_some(),
             )
-            .field("gate_controller", &self.gate_controller.is_some())
+            .field("gate_controller", &"<dyn GateController>")
             .finish()
     }
 }

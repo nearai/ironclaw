@@ -121,13 +121,15 @@ pub struct ExecutionLoop {
     store: Option<Arc<dyn crate::traits::store::Store>>,
     /// Runtime platform metadata for self-awareness in system prompts.
     platform_info: Option<crate::executor::prompt::PlatformInfo>,
-    /// Optional host gate controller, attached to every
-    /// `ThreadExecutionContext` this loop builds so executors can pause
-    /// in place on `Approval` gates.
-    gate_controller: Option<Arc<dyn crate::gate::GateController>>,
+    /// Host gate controller, attached to every `ThreadExecutionContext`
+    /// this loop builds so executors can pause in place on `Approval`
+    /// gates. Required: callers without an inline-await surface use
+    /// [`crate::gate::CancellingGateController::arc()`].
+    gate_controller: Arc<dyn crate::gate::GateController>,
 }
 
 impl ExecutionLoop {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         thread: Thread,
         llm: Arc<dyn LlmBackend>,
@@ -136,6 +138,7 @@ impl ExecutionLoop {
         policy: Arc<PolicyEngine>,
         signal_rx: SignalReceiver,
         user_id: String,
+        gate_controller: Arc<dyn crate::gate::GateController>,
     ) -> Self {
         Self {
             thread,
@@ -150,19 +153,8 @@ impl ExecutionLoop {
             retrieval: None,
             store: None,
             platform_info: None,
-            gate_controller: None,
+            gate_controller,
         }
-    }
-
-    /// Set the host gate controller. Stamped onto every
-    /// `ThreadExecutionContext` this loop produces so Tier 0 and Tier 1
-    /// executors can pause inline on `Approval` gates.
-    pub fn with_gate_controller(
-        mut self,
-        controller: Arc<dyn crate::gate::GateController>,
-    ) -> Self {
-        self.gate_controller = Some(controller);
-        self
     }
 
     /// Set the event broadcast sender for live status updates.
@@ -266,6 +258,7 @@ impl ExecutionLoop {
             &self.thread,
             StepId::new(),
             None,
+            self.gate_controller.clone(),
         );
         let capabilities_result = self
             .effects
@@ -445,7 +438,7 @@ impl ExecutionLoop {
             self.retrieval.as_ref(),
             self.store.as_ref(),
             self.platform_info.as_ref(),
-            self.gate_controller.as_ref(),
+            &self.gate_controller,
             &checkpoint.persisted_state,
         )
         .await;
@@ -779,7 +772,16 @@ mod tests {
 
         let (tx, rx) = crate::runtime::messaging::signal_channel(16);
 
-        let exec = ExecutionLoop::new(thread, llm, effects, leases, policy, rx, "test-user".into());
+        let exec = ExecutionLoop::new(
+            thread,
+            llm,
+            effects,
+            leases,
+            policy,
+            rx,
+            "test-user".into(),
+            crate::gate::CancellingGateController::arc(),
+        );
         (exec, tx)
     }
 
@@ -899,6 +901,7 @@ mod tests {
             policy,
             rx,
             "test-user".into(),
+            crate::gate::CancellingGateController::arc(),
         );
 
         let outcome = exec.run().await.unwrap();
@@ -1037,6 +1040,7 @@ mod tests {
             policy,
             rx,
             "test-user".into(),
+            crate::gate::CancellingGateController::arc(),
         );
 
         let outcome = exec.run().await.unwrap();
@@ -1191,6 +1195,7 @@ mod tests {
             policy,
             rx,
             "test-user".into(),
+            crate::gate::CancellingGateController::arc(),
         );
 
         let outcome = exec.run().await.unwrap();
@@ -1283,8 +1288,16 @@ mod tests {
             .unwrap();
         let (_tx, rx) = crate::runtime::messaging::signal_channel(16);
 
-        let mut exec =
-            ExecutionLoop::new(thread, llm, effects, leases, policy, rx, "test-user".into());
+        let mut exec = ExecutionLoop::new(
+            thread,
+            llm,
+            effects,
+            leases,
+            policy,
+            rx,
+            "test-user".into(),
+            crate::gate::CancellingGateController::arc(),
+        );
 
         exec.refresh_system_prompt(&[], true, &mut checkpoint).await;
         assert_eq!(exec.thread.messages[0].content, old_prompt);
@@ -1334,8 +1347,16 @@ mod tests {
             .unwrap();
         let (_tx, rx) = crate::runtime::messaging::signal_channel(16);
 
-        let mut exec =
-            ExecutionLoop::new(thread, llm, effects, leases, policy, rx, "test-user".into());
+        let mut exec = ExecutionLoop::new(
+            thread,
+            llm,
+            effects,
+            leases,
+            policy,
+            rx,
+            "test-user".into(),
+            crate::gate::CancellingGateController::arc(),
+        );
 
         exec.refresh_system_prompt(&[], false, &mut checkpoint)
             .await;
@@ -1992,8 +2013,16 @@ mod tests {
             .unwrap();
 
         let (_tx, rx) = crate::runtime::messaging::signal_channel(16);
-        let mut exec =
-            ExecutionLoop::new(thread, llm, effects, leases, policy, rx, "test-user".into());
+        let mut exec = ExecutionLoop::new(
+            thread,
+            llm,
+            effects,
+            leases,
+            policy,
+            rx,
+            "test-user".into(),
+            crate::gate::CancellingGateController::arc(),
+        );
 
         exec.run().await.unwrap();
 

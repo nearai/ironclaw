@@ -1,3 +1,6 @@
+use std::sync::Arc;
+
+use crate::gate::GateController;
 use crate::traits::effect::ThreadExecutionContext;
 use crate::types::step::StepId;
 use crate::types::thread::Thread;
@@ -5,13 +8,15 @@ use ironclaw_common::ValidTimezone;
 
 /// Build an execution context from the current thread state.
 ///
-/// The returned context has `gate_controller: None`; live execution
-/// paths (`ExecutionLoop`, `Orchestrator`) stamp their own controller
-/// onto the result before handing it to executors.
+/// `gate_controller` is required: callers thread through the controller
+/// they were constructed with so the executor can pause inline on
+/// `Approval` gates. Code paths that don't pause supply
+/// [`crate::gate::CancellingGateController::arc()`].
 pub(crate) fn thread_execution_context(
     thread: &Thread,
     step_id: StepId,
     current_call_id: Option<String>,
+    gate_controller: Arc<dyn GateController>,
 ) -> ThreadExecutionContext {
     ThreadExecutionContext {
         thread_id: thread.id,
@@ -33,6 +38,6 @@ pub(crate) fn thread_execution_context(
         thread_goal: Some(thread.goal.clone()),
         available_actions_snapshot: None,
         available_action_inventory_snapshot: None,
-        gate_controller: None,
+        gate_controller,
     }
 }

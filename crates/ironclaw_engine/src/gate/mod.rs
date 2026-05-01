@@ -206,6 +206,38 @@ pub trait GateController: Send + Sync {
     async fn pause(&self, request: GatePauseRequest) -> GateResolution;
 }
 
+/// Default [`GateController`] that cancels every pause request.
+///
+/// `ThreadExecutionContext::gate_controller` is non-optional: every
+/// execution context must carry *some* controller. This impl is the
+/// drop-in for code paths where pausing is meaningless or already
+/// resolved upstream:
+///
+/// - **Post-resolution replay** (`execute_pending_gate_action`) — the
+///   gate has already been resolved before this call site runs.
+/// - **Mission protected writes** — background paths with no
+///   originating user channel to surface a prompt on.
+/// - **Tests** that don't exercise the gate flow.
+///
+/// Returning [`GateResolution::Cancelled`] surfaces as a typed denial
+/// in both Tier 0 and Tier 1 — never as the original user-visible
+/// "execution paused by gate" bug message.
+pub struct CancellingGateController;
+
+impl CancellingGateController {
+    /// Construct as a `dyn`-trait Arc, the form most call sites need.
+    pub fn arc() -> std::sync::Arc<dyn GateController> {
+        std::sync::Arc::new(Self)
+    }
+}
+
+#[async_trait]
+impl GateController for CancellingGateController {
+    async fn pause(&self, _request: GatePauseRequest) -> GateResolution {
+        GateResolution::Cancelled
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

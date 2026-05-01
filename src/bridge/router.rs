@@ -1087,7 +1087,11 @@ async fn execute_pending_gate_action(
         thread_goal: Some(thread.goal.clone()),
         available_actions_snapshot: None,
         available_action_inventory_snapshot: None,
-        gate_controller: None,
+        // Post-resolution replay: the gate has already been resolved
+        // upstream, so a real controller is unnecessary. The inert
+        // controller surfaces any unexpected re-gate as a typed denial
+        // rather than reproducing the pre-fix unwind bug.
+        gate_controller: ironclaw_engine::CancellingGateController::arc(),
     };
     let active_leases = state
         .thread_manager
@@ -1976,7 +1980,7 @@ async fn invalidate_stranded_approval_gates(
                     message: "Approval interrupted by restart. Please retry.".into(),
                     thread_id: Some(gate.effective_wire_thread_id()),
                 },
-            );
+            ); // projection-exempt: bridge dispatcher, restart-time gate cleanup before threads exist
         }
     }
 }
@@ -7317,6 +7321,95 @@ mod tests {
             gate.resume_kind,
             ironclaw_engine::ResumeKind::Authentication { .. }
         ));
+    }
+
+    /// Boot-time sweep must evict every `Approval` gate row carried
+    /// over from a prior process — they have no live `oneshot::Sender`
+    /// to deliver to, and falling through to `execute_pending_gate_action`
+    /// would re-run the LLM step and replay earlier non-idempotent tool
+    /// calls (the bug the inline-await path exists to prevent).
+    /// Authentication and External rows survive because their resume
+    /// path doesn't depend on a live VM.
+    #[tokio::test]
+    async fn invalidate_stranded_approval_gates_evicts_only_approval_kind() {
+        let store = crate::gate::store::PendingGateStore::in_memory();
+
+        let approval_a = uuid::Uuid::new_v4();
+        let approval_b = uuid::Uuid::new_v4();
+        let auth = uuid::Uuid::new_v4();
+        let external = uuid::Uuid::new_v4();
+
+        store
+            .insert(sample_pending_gate_with_request_id(
+                "alice",
+                ironclaw_engine::ThreadId::new(),
+                approval_a,
+                ironclaw_engine::ResumeKind::Approval { allow_always: true },
+            ))
+            .await
+            .unwrap();
+        store
+            .insert(sample_pending_gate_with_request_id(
+                "bob",
+                ironclaw_engine::ThreadId::new(),
+                approval_b,
+                ironclaw_engine::ResumeKind::Approval {
+                    allow_always: false,
+                },
+            ))
+            .await
+            .unwrap();
+        store
+            .insert(sample_pending_gate_with_request_id(
+                "alice",
+                ironclaw_engine::ThreadId::new(),
+                auth,
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name: ironclaw_common::CredentialName::new("github").unwrap(),
+                    instructions: "paste token".into(),
+                    auth_url: None,
+                },
+            ))
+            .await
+            .unwrap();
+        store
+            .insert(sample_pending_gate_with_request_id(
+                "alice",
+                ironclaw_engine::ThreadId::new(),
+                external,
+                ironclaw_engine::ResumeKind::External {
+                    callback_id: "cb-1".into(),
+                },
+            ))
+            .await
+            .unwrap();
+
+        // No SSE wired — exercises the `if let Some(sse)` skip branch.
+        invalidate_stranded_approval_gates(&store, None).await;
+
+        let surviving: std::collections::HashSet<uuid::Uuid> = store
+            .list_all()
+            .await
+            .into_iter()
+            .map(|g| g.request_id)
+            .collect();
+        assert!(
+            !surviving.contains(&approval_a),
+            "approval gate for alice must be evicted"
+        );
+        assert!(
+            !surviving.contains(&approval_b),
+            "approval gate for bob must be evicted"
+        );
+        assert!(
+            surviving.contains(&auth),
+            "auth gate must survive: {surviving:?}"
+        );
+        assert!(
+            surviving.contains(&external),
+            "external gate must survive: {surviving:?}"
+        );
+        assert_eq!(surviving.len(), 2, "exactly two non-Approval gates remain");
     }
 
     #[tokio::test]
