@@ -114,45 +114,39 @@ pub async fn run_backup_command(
             sources.db_path.display()
         );
     }
-
-    // Best-effort WAL checkpoint so the .db file is self-contained.
-    // Failure is non-fatal: a fresh DB or a stale lock shouldn't block backup,
-    // but we surface the error in stderr so operators can investigate.
-    if let Err(e) = checkpoint_wal(&sources.db_path).await {
-        eprintln!(
-            "warning: WAL checkpoint on {} failed: {e:#}. \
-             The backup may still be usable but could include uncommitted journals.",
-            sources.db_path.display()
+    if !sources.config_path.exists() {
+        anyhow::bail!(
+            "config file not found at {} — cannot back up. \
+             Run `ironclaw config init` first or pass --config <PATH>.",
+            sources.config_path.display()
         );
     }
 
+    // WAL checkpoint is required for self-containment: without it the .db
+    // file may be missing recently committed pages still parked in the
+    // -wal sidecar. Fail loudly rather than silently produce a stale
+    // snapshot.
+    checkpoint_wal(&sources.db_path)
+        .await
+        .with_context(|| format!("WAL checkpoint failed on {}", sources.db_path.display()))?;
+
     let schema_version = read_schema_version(&sources.db_path)
         .await
-        .unwrap_or_else(|e| {
-            eprintln!(
-                "warning: could not read schema_version from {}: {e:#}. \
-                 Manifest will record schema_version=0.",
+        .with_context(|| {
+            format!(
+                "reading schema_version from {} (latest applied migration)",
                 sources.db_path.display()
-            );
-            0
-        });
-
-    // Build components list reflecting what we actually ship. The contract
-    // is "every entry in `components` corresponds to a file in the zip" so
-    // omit `config` when the toml file is missing rather than lying.
-    let mut components = vec!["db".to_string()];
-    if sources.config_path.exists() {
-        components.push("config".into());
-    }
+            )
+        })?;
 
     let manifest = Manifest {
         ironclaw_version: env!("CARGO_PKG_VERSION").to_string(),
         schema_version,
         created_at: Utc::now().to_rfc3339(),
         hostname: hostname(),
-        label: args.label.clone(),
+        label: args.label,
         mode: "quick".into(),
-        components,
+        components: vec!["db".into(), "config".into()],
     };
 
     write_quick_archive(&output_path, &sources, &manifest)
@@ -278,23 +272,13 @@ fn write_quick_archive(
         stream_file(&sources.db_path, &mut zip)
             .with_context(|| format!("copying {} into zip", sources.db_path.display()))?;
 
-        // 3. config.toml — optional. If the user never ran `config init`,
-        //    the file is absent; the caller already trimmed `components`
-        //    accordingly so we just skip the entry.
-        if sources.config_path.exists() {
-            zip.start_file("config.toml", opts)
-                .context("zip: starting config.toml")?;
-            stream_file(&sources.config_path, &mut zip)
-                .with_context(|| {
-                    format!("copying {} into zip", sources.config_path.display())
-                })?;
-        } else {
-            eprintln!(
-                "warning: config file {} not found; skipping (run \
-                 `ironclaw config init` to materialize one before the next backup).",
-                sources.config_path.display()
-            );
-        }
+        // 3. config.toml — caller already verified it exists, so a missing
+        //    file here is a TOCTOU (someone removed it during the backup);
+        //    surface the IO error rather than skip silently.
+        zip.start_file("config.toml", opts)
+            .context("zip: starting config.toml")?;
+        stream_file(&sources.config_path, &mut zip)
+            .with_context(|| format!("copying {} into zip", sources.config_path.display()))?;
 
         zip.finish().context("finalizing zip")?;
     }

@@ -233,7 +233,7 @@ async fn async_main() -> anyhow::Result<()> {
                 cli.config.as_deref(),
             )
             .await;
-        }
+        } // Note: clone is unavoidable here because the parent enum is held by ref.
         Some(Command::Acp(acp_cmd)) => {
             init_cli_tracing();
             return ironclaw::cli::run_acp_command(acp_cmd.clone()).await;

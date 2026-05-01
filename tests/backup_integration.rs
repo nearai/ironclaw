@@ -114,6 +114,13 @@ async fn quick_backup_produces_zip_with_expected_entries_and_manifest() {
     // (b) zip contains exactly manifest.json, data/ironclaw.db, config.toml.
     let f = fs::File::open(&out).expect("open zip");
     let mut zip = zip::ZipArchive::new(f).expect("read zip");
+    // Manifest must be at index 0 so consumers can validate the archive
+    // before paying the deflate cost on the (potentially large) db blob.
+    assert_eq!(
+        zip.by_index(0).expect("first entry").name(),
+        "manifest.json",
+        "manifest.json must be the first entry in the archive"
+    );
     let mut names: Vec<String> = (0..zip.len())
         .map(|i| zip.by_index(i).expect("entry").name().to_string())
         .collect();
