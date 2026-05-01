@@ -9,7 +9,7 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Weak},
 };
 
 use async_trait::async_trait;
@@ -271,7 +271,7 @@ impl DurableAuditLog for JsonlDurableAuditLog {
 #[derive(Debug, Clone)]
 struct JsonlStore {
     root: PathBuf,
-    locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
 }
 
 impl JsonlStore {
@@ -293,10 +293,9 @@ impl JsonlStore {
     {
         let lock = self.stream_lock(kind, stream).await;
         let _guard = lock.lock().await;
-        let entries = self.read_entries::<T>(kind, stream).await?;
-        let next_cursor = entries
-            .last()
-            .map(|entry| entry.cursor.as_u64())
+        let next_cursor = self
+            .last_cursor(kind, stream)
+            .await?
             .unwrap_or(0)
             .checked_add(1)
             .ok_or_else(|| durable_error("jsonl event cursor overflowed u64"))?;
@@ -425,10 +424,27 @@ impl JsonlStore {
         parse_jsonl_entries(&bytes)
     }
 
+    async fn last_cursor(
+        &self,
+        kind: StreamKind,
+        stream: &EventStreamKey,
+    ) -> Result<Option<u64>, EventError> {
+        let path = self.stream_path(kind, stream);
+        tokio::task::spawn_blocking(move || read_last_jsonl_cursor(&path))
+            .await
+            .map_err(|_| durable_error("jsonl event store failed to read stream"))?
+    }
+
     async fn stream_lock(&self, kind: StreamKind, stream: &EventStreamKey) -> Arc<Mutex<()>> {
         let key = stream_lock_key(kind, stream);
         let mut locks = self.locks.lock().await;
-        Arc::clone(locks.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))))
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(Mutex::new(()));
+        locks.insert(key, Arc::downgrade(&lock));
+        lock
     }
 
     fn stream_path(&self, kind: StreamKind, stream: &EventStreamKey) -> PathBuf {
@@ -479,6 +495,66 @@ impl StreamKind {
 struct JsonlEntry<T> {
     cursor: EventCursor,
     record: T,
+}
+
+#[derive(Debug, Deserialize)]
+struct JsonlCursor {
+    cursor: EventCursor,
+}
+
+fn read_last_jsonl_cursor(path: &Path) -> Result<Option<u64>, EventError> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(durable_error("jsonl event store failed to read stream")),
+    };
+    let mut position = file
+        .metadata()
+        .map_err(|_| durable_error("jsonl event store failed to read stream"))?
+        .len();
+    if position == 0 {
+        return Ok(None);
+    }
+
+    const CHUNK_SIZE: u64 = 8192;
+    let mut reversed_line = Vec::new();
+    let mut saw_non_newline = false;
+    while position > 0 {
+        let read_len = position.min(CHUNK_SIZE) as usize;
+        position -= read_len as u64;
+        file.seek(SeekFrom::Start(position))
+            .map_err(|_| durable_error("jsonl event store failed to read stream"))?;
+        let mut chunk = vec![0; read_len];
+        file.read_exact(&mut chunk)
+            .map_err(|_| durable_error("jsonl event store failed to read stream"))?;
+        for byte in chunk.into_iter().rev() {
+            if byte == b'\n' || byte == b'\r' {
+                if saw_non_newline {
+                    reversed_line.reverse();
+                    return parse_jsonl_cursor(&reversed_line);
+                }
+                continue;
+            }
+            saw_non_newline = true;
+            reversed_line.push(byte);
+        }
+    }
+
+    if !saw_non_newline {
+        return Ok(None);
+    }
+    reversed_line.reverse();
+    parse_jsonl_cursor(&reversed_line)
+}
+
+fn parse_jsonl_cursor(line: &[u8]) -> Result<Option<u64>, EventError> {
+    let envelope =
+        serde_json::from_slice::<JsonlCursor>(line).map_err(|error| EventError::Serialize {
+            reason: error.to_string(),
+        })?;
+    Ok(Some(envelope.cursor.as_u64()))
 }
 
 fn parse_jsonl_entries<T>(bytes: &[u8]) -> Result<Vec<EventLogEntry<T>>, EventError>
@@ -539,5 +615,35 @@ fn agent_component(agent_id: Option<&AgentId>) -> String {
     match agent_id {
         Some(agent_id) => component("agent-id", agent_id.as_str()),
         None => "agent-none".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ironclaw_host_api::{AgentId, TenantId, UserId};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn jsonl_stream_lock_registry_prunes_released_locks() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = JsonlStore::new(temp.path().join("event-store"));
+        let stream_a = EventStreamKey::new(
+            TenantId::new("tenant-a").unwrap(),
+            UserId::new("user-a").unwrap(),
+            Some(AgentId::new("agent-a").unwrap()),
+        );
+        let stream_b = EventStreamKey::new(
+            TenantId::new("tenant-a").unwrap(),
+            UserId::new("user-a").unwrap(),
+            Some(AgentId::new("agent-b").unwrap()),
+        );
+
+        let lock_a = store.stream_lock(StreamKind::Runtime, &stream_a).await;
+        assert_eq!(store.locks.lock().await.len(), 1);
+        drop(lock_a);
+
+        let _lock_b = store.stream_lock(StreamKind::Runtime, &stream_b).await;
+        assert_eq!(store.locks.lock().await.len(), 1);
     }
 }

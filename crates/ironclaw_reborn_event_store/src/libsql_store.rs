@@ -6,7 +6,7 @@ use ironclaw_events::{
     EventStreamKey, ReadScope, RuntimeEvent,
 };
 use ironclaw_host_api::AuditEnvelope;
-use libsql::{Connection, Database, Transaction, params};
+use libsql::{Connection, Database, Transaction, params, params_from_iter};
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::{
@@ -274,7 +274,7 @@ impl LibSqlStore {
         after: Option<EventCursor>,
         limit: usize,
     ) -> Result<EventReplay<RuntimeEvent>, EventError> {
-        self.read_after(StreamKind::Runtime, stream, after, limit, |value| {
+        self.read_after(StreamKind::Runtime, stream, filter, after, limit, |value| {
             let event = decode_record::<RuntimeEvent>(value)?;
             let matches = filter_runtime(filter, &event);
             Ok((event, matches))
@@ -289,7 +289,7 @@ impl LibSqlStore {
         after: Option<EventCursor>,
         limit: usize,
     ) -> Result<EventReplay<AuditEnvelope>, EventError> {
-        self.read_after(StreamKind::Audit, stream, after, limit, |value| {
+        self.read_after(StreamKind::Audit, stream, filter, after, limit, |value| {
             let record = decode_record::<AuditEnvelope>(value)?;
             let matches = filter_audit(filter, &record);
             Ok((record, matches))
@@ -301,6 +301,7 @@ impl LibSqlStore {
         &self,
         kind: StreamKind,
         stream: &EventStreamKey,
+        filter: &ReadScope,
         after: Option<EventCursor>,
         limit: usize,
         decode_and_match: impl Fn(serde_json::Value) -> Result<(T, bool), EventError>,
@@ -347,9 +348,11 @@ impl LibSqlStore {
         .map_err(|_| durable_error("libsql stream retention cursor is negative"))?;
         validate_replay_request(next_cursor, earliest_retained, after, limit)?;
 
-        let mut rows = conn
-            .query(
-                r#"
+        let after_i64 = i64::try_from(after.as_u64())
+            .map_err(|_| durable_error("libsql replay cursor exceeds i64"))?;
+        let limit_i64 =
+            i64::try_from(limit).map_err(|_| durable_error("libsql replay limit exceeds i64"))?;
+        let mut query = r#"
                 SELECT cursor, record_json
                 FROM reborn_event_entries
                 WHERE stream_kind = ?1
@@ -357,21 +360,50 @@ impl LibSqlStore {
                     AND user_id = ?3
                     AND agent_id = ?4
                     AND cursor > ?5
-                ORDER BY cursor ASC
-                "#,
-                params![
-                    kind,
-                    stream.tenant_id.as_str(),
-                    stream.user_id.as_str(),
-                    agent_id,
-                    i64::try_from(after.as_u64())
-                        .map_err(|_| durable_error("libsql replay cursor exceeds i64"))?,
-                ],
-            )
+                "#
+        .to_string();
+        let mut query_params = vec![
+            libsql::Value::Text(kind.to_string()),
+            libsql::Value::Text(stream.tenant_id.as_str().to_string()),
+            libsql::Value::Text(stream.user_id.as_str().to_string()),
+            libsql::Value::Text(agent_id.to_string()),
+            libsql::Value::Integer(after_i64),
+        ];
+        push_text_filter(
+            &mut query,
+            &mut query_params,
+            "project_id",
+            filter.project_id.as_ref().map(|id| id.as_str()),
+        );
+        push_text_filter(
+            &mut query,
+            &mut query_params,
+            "mission_id",
+            filter.mission_id.as_ref().map(|id| id.as_str()),
+        );
+        push_text_filter(
+            &mut query,
+            &mut query_params,
+            "thread_id",
+            filter.thread_id.as_ref().map(|id| id.as_str()),
+        );
+        let process_filter = filter.process_id.as_ref().map(|id| id.to_string());
+        push_text_filter(
+            &mut query,
+            &mut query_params,
+            "process_id",
+            process_filter.as_deref(),
+        );
+        query.push_str(&format!(
+            " ORDER BY cursor ASC LIMIT ?{}",
+            query_params.len() + 1
+        ));
+        query_params.push(libsql::Value::Integer(limit_i64));
+        let mut rows = conn
+            .query(&query, params_from_iter(query_params))
             .await
             .map_err(|_| durable_error("libsql event store failed to read entries"))?;
         let mut entries = Vec::new();
-        let mut last_scanned = after;
         while let Some(row) = rows
             .next()
             .await
@@ -393,7 +425,6 @@ impl LibSqlStore {
                 })?;
             let (record, matches) = decode_and_match(value)?;
             let cursor = EventCursor::new(cursor);
-            last_scanned = cursor;
             if !matches {
                 continue;
             }
@@ -405,7 +436,7 @@ impl LibSqlStore {
         let next_cursor = entries
             .last()
             .map(|entry| entry.cursor)
-            .unwrap_or(last_scanned);
+            .unwrap_or_else(|| EventCursor::new(next_cursor));
         Ok(EventReplay {
             entries,
             next_cursor,
@@ -494,5 +525,17 @@ fn opt_text(value: Option<&str>) -> libsql::Value {
     match value {
         Some(value) => libsql::Value::Text(value.to_string()),
         None => libsql::Value::Null,
+    }
+}
+
+fn push_text_filter(
+    query: &mut String,
+    params: &mut Vec<libsql::Value>,
+    column: &'static str,
+    value: Option<&str>,
+) {
+    if let Some(value) = value {
+        query.push_str(&format!(" AND {column} = ?{}", params.len() + 1));
+        params.push(libsql::Value::Text(value.to_string()));
     }
 }

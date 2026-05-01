@@ -7,7 +7,7 @@ use ironclaw_events::{
 };
 use ironclaw_host_api::AuditEnvelope;
 use secrecy::{ExposeSecret, SecretString};
-use tokio_postgres::{Client, NoTls};
+use tokio_postgres::{Client, NoTls, types::ToSql};
 
 use crate::{
     RebornEventStoreError, RebornEventStores, StreamKind, durable_error,
@@ -170,7 +170,7 @@ impl PostgresStore {
         after: Option<EventCursor>,
         limit: usize,
     ) -> Result<EventReplay<RuntimeEvent>, EventError> {
-        self.read_after(StreamKind::Runtime, stream, after, limit, |value| {
+        self.read_after(StreamKind::Runtime, stream, filter, after, limit, |value| {
             let event = decode_record::<RuntimeEvent>(value)?;
             let matches = filter_runtime(filter, &event);
             Ok((event, matches))
@@ -185,7 +185,7 @@ impl PostgresStore {
         after: Option<EventCursor>,
         limit: usize,
     ) -> Result<EventReplay<AuditEnvelope>, EventError> {
-        self.read_after(StreamKind::Audit, stream, after, limit, |value| {
+        self.read_after(StreamKind::Audit, stream, filter, after, limit, |value| {
             let record = decode_record::<AuditEnvelope>(value)?;
             let matches = filter_audit(filter, &record);
             Ok((record, matches))
@@ -197,6 +197,7 @@ impl PostgresStore {
         &self,
         kind: StreamKind,
         stream: &EventStreamKey,
+        filter: &ReadScope,
         after: Option<EventCursor>,
         limit: usize,
         decode_and_match: impl Fn(serde_json::Value) -> Result<(T, bool), EventError>,
@@ -235,10 +236,16 @@ impl PostgresStore {
 
         let after_i64 = i64::try_from(after.as_u64())
             .map_err(|_| durable_error("postgres replay cursor exceeds i64"))?;
-        let rows = self
-            .client
-            .query(
-                r#"
+        let tenant_id = stream.tenant_id.as_str().to_string();
+        let user_id = stream.user_id.as_str().to_string();
+        let agent_id = agent_id.to_string();
+        let project_filter = filter.project_id.as_ref().map(|id| id.as_str().to_string());
+        let mission_filter = filter.mission_id.as_ref().map(|id| id.as_str().to_string());
+        let thread_filter = filter.thread_id.as_ref().map(|id| id.as_str().to_string());
+        let process_filter = filter.process_id.as_ref().map(|id| id.as_uuid());
+        let limit_i64 =
+            i64::try_from(limit).map_err(|_| durable_error("postgres replay limit exceeds i64"))?;
+        let mut query = r#"
                 SELECT cursor, record_json
                 FROM reborn_event_entries
                 WHERE stream_kind = $1
@@ -246,27 +253,40 @@ impl PostgresStore {
                     AND user_id = $3
                     AND agent_id = $4
                     AND cursor > $5
-                ORDER BY cursor ASC
-                "#,
-                &[
-                    &kind,
-                    &stream.tenant_id.as_str(),
-                    &stream.user_id.as_str(),
-                    &agent_id,
-                    &after_i64,
-                ],
-            )
+                "#
+        .to_string();
+        let mut params: Vec<&(dyn ToSql + Sync)> =
+            vec![&kind, &tenant_id, &user_id, &agent_id, &after_i64];
+        if let Some(project_filter) = &project_filter {
+            query.push_str(&format!(" AND project_id = ${}", params.len() + 1));
+            params.push(project_filter);
+        }
+        if let Some(mission_filter) = &mission_filter {
+            query.push_str(&format!(" AND mission_id = ${}", params.len() + 1));
+            params.push(mission_filter);
+        }
+        if let Some(thread_filter) = &thread_filter {
+            query.push_str(&format!(" AND thread_id = ${}", params.len() + 1));
+            params.push(thread_filter);
+        }
+        if let Some(process_filter) = &process_filter {
+            query.push_str(&format!(" AND process_id = ${}", params.len() + 1));
+            params.push(process_filter);
+        }
+        query.push_str(&format!(" ORDER BY cursor ASC LIMIT ${}", params.len() + 1));
+        params.push(&limit_i64);
+        let rows = self
+            .client
+            .query(&query, &params)
             .await
             .map_err(|_| durable_error("postgres event store failed to read entries"))?;
         let mut entries = Vec::new();
-        let mut last_scanned = after;
         for row in rows {
             let cursor = u64::try_from(row.get::<_, i64>("cursor"))
                 .map_err(|_| durable_error("postgres entry cursor is negative"))?;
             let value: serde_json::Value = row.get("record_json");
             let (record, matches) = decode_and_match(value)?;
             let cursor = EventCursor::new(cursor);
-            last_scanned = cursor;
             if !matches {
                 continue;
             }
@@ -278,7 +298,7 @@ impl PostgresStore {
         let next_cursor = entries
             .last()
             .map(|entry| entry.cursor)
-            .unwrap_or(last_scanned);
+            .unwrap_or_else(|| EventCursor::new(next_cursor));
         Ok(EventReplay {
             entries,
             next_cursor,
