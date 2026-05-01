@@ -187,14 +187,17 @@ async fn default_runtime_returns_failed_for_unknown_capability() {
     let registry = Arc::new(ExtensionRegistry::new());
     let dispatcher = Arc::new(RecordingDispatcher::default());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
+    let run_state = Arc::new(InMemoryRunStateStore::new());
     let runtime = DefaultHostRuntime::new(
         registry,
-        dispatcher,
+        dispatcher.clone(),
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
-    );
+    )
+    .with_run_state(run_state.clone());
 
     let context = execution_context_with_dispatch_grant();
+    let scope = context.resource_scope.clone();
     let request = RuntimeCapabilityRequest::new(
         context,
         capability_id(),
@@ -215,6 +218,18 @@ async fn default_runtime_returns_failed_for_unknown_capability() {
         }
         other => panic!("expected Failed outcome, got {:?}", other),
     }
+    assert!(
+        !dispatcher.has_request(),
+        "unknown capabilities must fail during trust evaluation before dispatch"
+    );
+    assert!(
+        run_state
+            .records_for_scope(&scope)
+            .await
+            .unwrap()
+            .is_empty(),
+        "unknown capabilities must fail before starting a capability-host run record"
+    );
 }
 
 #[tokio::test]
