@@ -295,6 +295,50 @@ impl RuntimeCapabilityRequest {
     }
 }
 
+/// Request to resume one approval-blocked capability through the composed host runtime.
+///
+/// The shape mirrors [`RuntimeCapabilityRequest`] but additionally carries the
+/// approval request selected by an upper approval workflow. Like invoke requests,
+/// `trust_decision` is transitional compatibility data: the default host runtime
+/// evaluates provider trust itself before delegating to `CapabilityHost`.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct RuntimeCapabilityResumeRequest {
+    pub context: ExecutionContext,
+    pub approval_request_id: ApprovalRequestId,
+    pub capability_id: CapabilityId,
+    pub estimate: ResourceEstimate,
+    pub input: Value,
+    pub idempotency_key: Option<IdempotencyKey>,
+    pub trust_decision: TrustDecision,
+}
+
+impl RuntimeCapabilityResumeRequest {
+    pub fn new(
+        context: ExecutionContext,
+        approval_request_id: ApprovalRequestId,
+        capability_id: CapabilityId,
+        estimate: ResourceEstimate,
+        input: Value,
+        trust_decision: TrustDecision,
+    ) -> Self {
+        Self {
+            context,
+            approval_request_id,
+            capability_id,
+            estimate,
+            input,
+            idempotency_key: None,
+            trust_decision,
+        }
+    }
+
+    pub fn with_idempotency_key(mut self, key: IdempotencyKey) -> Self {
+        self.idempotency_key = Some(key);
+        self
+    }
+}
+
 /// Request to list host-filtered visible capabilities.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -554,6 +598,11 @@ pub trait HostRuntime: Send + Sync {
     async fn invoke_capability(
         &self,
         request: RuntimeCapabilityRequest,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError>;
+
+    async fn resume_capability(
+        &self,
+        request: RuntimeCapabilityResumeRequest,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError>;
 
     async fn visible_capabilities(

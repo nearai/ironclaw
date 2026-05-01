@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use ironclaw_authorization::{CapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_capabilities::{
     CapabilityHost, CapabilityInvocationError, CapabilityInvocationRequest,
-    CapabilityInvocationResult, CapabilityObligationHandler,
+    CapabilityInvocationResult, CapabilityObligationHandler, CapabilityResumeRequest,
 };
 use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry};
 use ironclaw_host_api::{
@@ -38,8 +38,9 @@ use crate::{
     CancelRuntimeWorkRequest, CapabilitySurfaceVersion, HostRuntime, HostRuntimeError,
     HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalGate, RuntimeBackendHealth,
     RuntimeBlockedReason, RuntimeCapabilityCompleted, RuntimeCapabilityFailure,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeStatusRequest,
-    RuntimeWorkId, RuntimeWorkSummary, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
+    RuntimeFailureKind, RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary,
+    VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
 
 /// Default production wiring for [`HostRuntime`].
@@ -256,26 +257,7 @@ impl HostRuntime for DefaultHostRuntime {
         };
         context.trust = trust_decision.effective_trust.class();
 
-        let mut host = CapabilityHost::new(
-            self.registry.as_ref(),
-            self.dispatcher.as_ref(),
-            self.authorizer.as_ref(),
-        );
-        if let Some(run_state) = &self.run_state {
-            host = host.with_run_state(run_state.as_ref());
-        }
-        if let Some(approval_requests) = &self.approval_requests {
-            host = host.with_approval_requests(approval_requests.as_ref());
-        }
-        if let Some(capability_leases) = &self.capability_leases {
-            host = host.with_capability_leases(capability_leases.as_ref());
-        }
-        if let Some(process_manager) = &self.process_manager {
-            host = host.with_process_manager(process_manager.as_ref());
-        }
-        if let Some(obligation_handler) = &self.obligation_handler {
-            host = host.with_obligation_handler(obligation_handler.as_ref());
-        }
+        let host = self.capability_host();
 
         let invocation = CapabilityInvocationRequest {
             context,
@@ -298,6 +280,81 @@ impl HostRuntime for DefaultHostRuntime {
                 );
                 self.translate_invocation_error(error, capability_id, scope, invocation_id)
                     .await
+            }
+        }
+    }
+
+    async fn resume_capability(
+        &self,
+        request: RuntimeCapabilityResumeRequest,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        let RuntimeCapabilityResumeRequest {
+            mut context,
+            approval_request_id,
+            capability_id,
+            estimate,
+            input,
+            idempotency_key,
+            trust_decision: _caller_trust_decision,
+        } = request;
+        let idempotency_key = idempotency_key.map(|key| key.as_str().to_string());
+        if let Some(key) = idempotency_key.as_deref() {
+            tracing::debug!(
+                capability_id = %capability_id,
+                approval_request_id = %approval_request_id,
+                idempotency_key = %key,
+                "capability resume accepted advisory idempotency key (not yet enforced)"
+            );
+        }
+
+        let trust_decision = match self.evaluate_invocation_trust(&capability_id) {
+            Ok(host_decision) => host_decision,
+            Err(error) => {
+                tracing::debug!(
+                    capability_id = %capability_id,
+                    trust_error_kind = error.kind(),
+                    "capability trust evaluation failed before resume"
+                );
+                self.fail_matching_blocked_resume_on_preflight_error(
+                    &context,
+                    &capability_id,
+                    approval_request_id,
+                    error.kind(),
+                )
+                .await;
+                return Ok(trust_evaluation_failure(capability_id, error));
+            }
+        };
+        context.trust = trust_decision.effective_trust.class();
+
+        let host = self.capability_host();
+        let resume = CapabilityResumeRequest {
+            context,
+            approval_request_id,
+            capability_id: capability_id.clone(),
+            estimate,
+            input,
+            trust_decision,
+        };
+
+        match host.resume_json(resume).await {
+            Ok(result) => Ok(RuntimeCapabilityOutcome::Completed(Box::new(
+                completed_outcome_from(result, capability_id),
+            ))),
+            // Resume must not start a second approval loop: if the lower layer ever returns
+            // AuthorizationRequiresApproval here, surface it as a failed resume instead of
+            // translating it back into RuntimeCapabilityOutcome::ApprovalRequired.
+            Err(error) => {
+                tracing::debug!(
+                    capability_id = %capability_id,
+                    error_kind = failure_kind_from(&error).as_str(),
+                    idempotency_key = idempotency_key.as_deref().unwrap_or(""),
+                    "capability resume failed"
+                );
+                Ok(RuntimeCapabilityOutcome::Failed(failure_from(
+                    error,
+                    capability_id,
+                )))
             }
         }
     }
@@ -477,6 +534,30 @@ impl HostRuntime for DefaultHostRuntime {
 }
 
 impl DefaultHostRuntime {
+    fn capability_host(&self) -> CapabilityHost<'_, dyn CapabilityDispatcher> {
+        let mut host = CapabilityHost::new(
+            self.registry.as_ref(),
+            self.dispatcher.as_ref(),
+            self.authorizer.as_ref(),
+        );
+        if let Some(run_state) = &self.run_state {
+            host = host.with_run_state(run_state.as_ref());
+        }
+        if let Some(approval_requests) = &self.approval_requests {
+            host = host.with_approval_requests(approval_requests.as_ref());
+        }
+        if let Some(capability_leases) = &self.capability_leases {
+            host = host.with_capability_leases(capability_leases.as_ref());
+        }
+        if let Some(process_manager) = &self.process_manager {
+            host = host.with_process_manager(process_manager.as_ref());
+        }
+        if let Some(obligation_handler) = &self.obligation_handler {
+            host = host.with_obligation_handler(obligation_handler.as_ref());
+        }
+        host
+    }
+
     fn evaluate_invocation_trust(
         &self,
         capability_id: &CapabilityId,
@@ -514,6 +595,56 @@ impl DefaultHostRuntime {
         };
         trace_trust_decision(capability_id, &decision);
         Ok(decision)
+    }
+
+    async fn fail_matching_blocked_resume_on_preflight_error(
+        &self,
+        context: &ironclaw_host_api::ExecutionContext,
+        capability_id: &CapabilityId,
+        approval_request_id: ApprovalRequestId,
+        error_kind: &'static str,
+    ) {
+        if context.validate().is_err() {
+            return;
+        }
+        let Some(run_state) = self.run_state.as_ref() else {
+            return;
+        };
+        let scope = &context.resource_scope;
+        let invocation_id = context.invocation_id;
+        let record = match run_state.get(scope, invocation_id).await {
+            Ok(Some(record)) => record,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(
+                    invocation_id = %invocation_id,
+                    capability_id = %capability_id,
+                    preflight_error_kind = error_kind,
+                    transition_error = %unavailable_from_run_state(error),
+                    "blocked resume preflight failed, but run-state lookup failed; leaving run state unchanged",
+                );
+                return;
+            }
+        };
+        if record.status != RunStatus::BlockedApproval
+            || &record.capability_id != capability_id
+            || record.approval_request_id != Some(approval_request_id)
+        {
+            return;
+        }
+        if let Err(error) = run_state
+            .fail(scope, invocation_id, error_kind.to_string())
+            .await
+        {
+            tracing::warn!(
+                invocation_id = %invocation_id,
+                capability_id = %capability_id,
+                approval_request_id = %approval_request_id,
+                preflight_error_kind = error_kind,
+                transition_error = %unavailable_from_run_state(error),
+                "blocked resume preflight failed, but run-state fail transition failed; original failure is returned to caller",
+            );
+        }
     }
 
     async fn translate_invocation_error(

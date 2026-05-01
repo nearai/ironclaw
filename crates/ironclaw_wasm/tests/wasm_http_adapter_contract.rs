@@ -579,7 +579,14 @@ impl WasmRuntimeCredentialProvider for DestinationCredentialProvider {
         &self,
         request: &WasmRuntimeCredentialRequest,
     ) -> Result<Vec<RuntimeCredentialInjection>, WasmHostError> {
-        if request.url == self.approved_url {
+        let WasmRuntimeCredentialRequest {
+            scope: _,
+            capability_id: _,
+            method: _,
+            url,
+            headers: _,
+        } = request;
+        if url == &self.approved_url {
             Ok(vec![self.injection.clone()])
         } else {
             Ok(Vec::new())
