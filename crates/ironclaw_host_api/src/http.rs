@@ -14,6 +14,7 @@ use crate::{CapabilityId, NetworkMethod, NetworkPolicy, ResourceScope, RuntimeKi
 pub struct RuntimeHttpEgressRequest {
     pub runtime: RuntimeKind,
     pub scope: ResourceScope,
+    pub capability_id: CapabilityId,
     pub method: NetworkMethod,
     pub url: String,
     pub headers: Vec<(String, String)>,

@@ -589,6 +589,7 @@ impl WasmRuntimeAdapter {
             .with_http(Arc::new(WasmRuntimeHttpAdapter::new(
                 egress,
                 scope.clone(),
+                capability_id.clone(),
                 policy,
             )))
     }

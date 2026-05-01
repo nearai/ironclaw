@@ -26,7 +26,8 @@
 use async_trait::async_trait;
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityDescriptor, CapabilityId, CorrelationId, ExecutionContext,
-    ProcessId, ResourceEstimate, ResourceScope, ResourceUsage, RuntimeKind, SecretHandle,
+    NetworkPolicy, ProcessId, ResourceEstimate, ResourceScope, ResourceUsage, RuntimeKind,
+    SecretHandle,
 };
 use ironclaw_host_api::{
     RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
@@ -602,6 +603,7 @@ pub struct HostHttpEgressService<N, S> {
     network: N,
     secrets: S,
     secret_injections: Option<Arc<RuntimeSecretInjectionStore>>,
+    network_policy_store: Option<Arc<NetworkObligationPolicyStore>>,
 }
 
 impl<N, S> HostHttpEgressService<N, S> {
@@ -610,11 +612,17 @@ impl<N, S> HostHttpEgressService<N, S> {
             network,
             secrets,
             secret_injections: None,
+            network_policy_store: None,
         }
     }
 
     pub fn with_secret_injection_store(mut self, store: Arc<RuntimeSecretInjectionStore>) -> Self {
         self.secret_injections = Some(store);
+        self
+    }
+
+    pub fn with_network_policy_store(mut self, store: Arc<NetworkObligationPolicyStore>) -> Self {
+        self.network_policy_store = Some(store);
         self
     }
 
@@ -624,6 +632,23 @@ impl<N, S> HostHttpEgressService<N, S> {
 
     pub fn secrets(&self) -> &S {
         &self.secrets
+    }
+
+    fn network_policy_for_request(
+        &self,
+        request: &RuntimeHttpEgressRequest,
+    ) -> Result<NetworkPolicy, RuntimeHttpEgressError> {
+        if let Some(store) = &self.network_policy_store {
+            return store
+                .take(&request.scope, &request.capability_id)
+                .ok_or_else(|| RuntimeHttpEgressError::Network {
+                    reason: "network_policy_missing".to_string(),
+                    request_bytes: 0,
+                    response_bytes: 0,
+                });
+        }
+
+        Ok(request.network_policy.clone())
     }
 }
 
@@ -636,6 +661,7 @@ where
         &self,
         mut request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        let network_policy = self.network_policy_for_request(&request)?;
         validate_runtime_request(&request)?;
 
         let mut redaction_values = Vec::new();
@@ -664,7 +690,7 @@ where
                 url: request.url,
                 headers: request.headers,
                 body: request.body,
-                policy: request.network_policy,
+                policy: network_policy,
                 response_body_limit: request.response_body_limit,
                 timeout_ms: request.timeout_ms,
             })

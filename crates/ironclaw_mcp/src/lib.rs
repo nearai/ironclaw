@@ -133,6 +133,7 @@ pub struct McpExecutionResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpHostHttpRequest {
     pub scope: ResourceScope,
+    pub capability_id: CapabilityId,
     pub method: ironclaw_host_api::NetworkMethod,
     pub url: String,
     pub headers: Vec<(String, String)>,
@@ -172,6 +173,7 @@ where
             .execute(RuntimeHttpEgressRequest {
                 runtime: RuntimeKind::Mcp,
                 scope: request.scope,
+                capability_id: request.capability_id,
                 method: request.method,
                 url: request.url,
                 headers: request.headers,
@@ -395,6 +397,7 @@ where
             .http
             .request(McpHostHttpRequest {
                 scope: request.scope.clone(),
+                capability_id: request.capability_id.clone(),
                 method: NetworkMethod::Post,
                 url: url.to_string(),
                 headers,

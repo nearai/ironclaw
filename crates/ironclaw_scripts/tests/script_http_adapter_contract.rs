@@ -1,8 +1,8 @@
 use std::sync::{Arc, Mutex};
 
 use ironclaw_host_api::{
-    InvocationId, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, ProjectId,
-    ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+    CapabilityId, InvocationId, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern,
+    ProjectId, ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
     RuntimeHttpEgressResponse, RuntimeKind, TenantId, UserId,
 };
 use ironclaw_scripts::{ScriptHostHttpRequest, ScriptRuntimeHttpAdapter};
@@ -23,6 +23,7 @@ fn script_host_http_adapter_uses_shared_runtime_egress() {
     let response = adapter
         .request(ScriptHostHttpRequest {
             scope: scope.clone(),
+            capability_id: sample_capability_id(),
             method: NetworkMethod::Post,
             url: "https://script-api.example.test/run".to_string(),
             headers: vec![("content-type".to_string(), "application/json".to_string())],
@@ -43,6 +44,7 @@ fn script_host_http_adapter_uses_shared_runtime_egress() {
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].runtime, RuntimeKind::Script);
     assert_eq!(requests[0].scope, scope);
+    assert_eq!(requests[0].capability_id, sample_capability_id());
     assert_eq!(requests[0].method, NetworkMethod::Post);
     assert_eq!(requests[0].url, "https://script-api.example.test/run");
     assert_eq!(requests[0].body, br#"{"a":1}"#);
@@ -62,6 +64,7 @@ fn script_host_http_adapter_returns_sanitized_shared_egress_errors() {
     let error = adapter
         .request(ScriptHostHttpRequest {
             scope: sample_scope(),
+            capability_id: sample_capability_id(),
             method: NetworkMethod::Get,
             url: "https://script-api.example.test/run".to_string(),
             headers: vec![],
@@ -109,6 +112,10 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
         self.requests.lock().unwrap().push(request);
         self.response.clone()
     }
+}
+
+fn sample_capability_id() -> CapabilityId {
+    CapabilityId::new("script.http").unwrap()
 }
 
 fn sample_scope() -> ResourceScope {

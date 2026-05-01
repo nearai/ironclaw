@@ -25,9 +25,13 @@ fn wasm_runtime_http_adapter_uses_shared_runtime_egress() {
     });
     let scope = sample_scope();
     let policy = sample_policy();
-    let adapter =
-        WasmRuntimeHttpAdapter::new(Arc::new(egress.clone()), scope.clone(), policy.clone())
-            .with_response_body_limit(Some(4096));
+    let adapter = WasmRuntimeHttpAdapter::new(
+        Arc::new(egress.clone()),
+        scope.clone(),
+        sample_capability_id(),
+        policy.clone(),
+    )
+    .with_response_body_limit(Some(4096));
 
     let response = adapter
         .request(WasmHttpRequest {
@@ -51,6 +55,7 @@ fn wasm_runtime_http_adapter_uses_shared_runtime_egress() {
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].runtime, RuntimeKind::Wasm);
     assert_eq!(requests[0].scope, scope);
+    assert_eq!(requests[0].capability_id, sample_capability_id());
     assert_eq!(requests[0].method, NetworkMethod::Post);
     assert_eq!(requests[0].url, "https://wasm-api.example.test/run");
     assert_eq!(
@@ -102,7 +107,12 @@ fn wasm_runtime_http_adapter_strips_sensitive_response_headers() {
         response_bytes: 2,
         redaction_applied: true,
     });
-    let adapter = WasmRuntimeHttpAdapter::new(Arc::new(egress), sample_scope(), sample_policy());
+    let adapter = WasmRuntimeHttpAdapter::new(
+        Arc::new(egress),
+        sample_scope(),
+        sample_capability_id(),
+        sample_policy(),
+    );
 
     let response = adapter
         .request(WasmHttpRequest {
@@ -147,7 +157,12 @@ fn wasm_runtime_http_adapter_combines_duplicate_response_headers() {
         response_bytes: 2,
         redaction_applied: false,
     });
-    let adapter = WasmRuntimeHttpAdapter::new(Arc::new(egress), sample_scope(), sample_policy());
+    let adapter = WasmRuntimeHttpAdapter::new(
+        Arc::new(egress),
+        sample_scope(),
+        sample_capability_id(),
+        sample_policy(),
+    );
 
     let response = adapter
         .request(WasmHttpRequest {
@@ -180,12 +195,16 @@ fn wasm_runtime_http_adapter_resolves_credentials_per_request_destination() {
         redaction_applied: true,
     });
     let injection = sample_injection();
-    let adapter =
-        WasmRuntimeHttpAdapter::new(Arc::new(egress.clone()), sample_scope(), sample_policy())
-            .with_credential_provider(Arc::new(DestinationCredentialProvider {
-                approved_url: "https://wasm-api.example.test/run".to_string(),
-                injection: injection.clone(),
-            }));
+    let adapter = WasmRuntimeHttpAdapter::new(
+        Arc::new(egress.clone()),
+        sample_scope(),
+        sample_capability_id(),
+        sample_policy(),
+    )
+    .with_credential_provider(Arc::new(DestinationCredentialProvider {
+        approved_url: "https://wasm-api.example.test/run".to_string(),
+        injection: injection.clone(),
+    }));
 
     adapter
         .request(WasmHttpRequest {
@@ -215,6 +234,7 @@ fn wasm_runtime_http_adapter_does_not_reuse_credentials_for_other_destinations()
     let adapter = WasmRuntimeHttpAdapter::new(
         Arc::new(egress.clone()),
         sample_scope(),
+        sample_capability_id(),
         multi_target_policy(),
     )
     .with_credential_provider(Arc::new(DestinationCredentialProvider {
@@ -256,9 +276,9 @@ fn wasm_runtime_http_adapter_can_build_staged_obligation_credentials() {
     let adapter = WasmRuntimeHttpAdapter::new(
         Arc::new(egress.clone()),
         sample_scope(),
+        capability_id.clone(),
         multi_target_policy(),
     )
-    .with_capability_id(capability_id.clone())
     .with_credential_provider(Arc::new(WasmStagedRuntimeCredentials::new(vec![
         WasmStagedRuntimeCredential::for_exact_url(
             handle.clone(),
@@ -292,45 +312,6 @@ fn wasm_runtime_http_adapter_can_build_staged_obligation_credentials() {
 }
 
 #[test]
-fn wasm_runtime_http_adapter_fails_closed_for_staged_credentials_without_capability_id() {
-    let egress = RecordingRuntimeEgress::ok(RuntimeHttpEgressResponse {
-        status: 200,
-        headers: vec![],
-        body: b"ok".to_vec(),
-        request_bytes: 0,
-        response_bytes: 2,
-        redaction_applied: true,
-    });
-    let adapter =
-        WasmRuntimeHttpAdapter::new(Arc::new(egress.clone()), sample_scope(), sample_policy())
-            .with_credential_provider(Arc::new(WasmStagedRuntimeCredentials::new(vec![
-                WasmStagedRuntimeCredential::for_any_request(
-                    SecretHandle::new("api-token").unwrap(),
-                    RuntimeCredentialTarget::Header {
-                        name: "authorization".to_string(),
-                        prefix: Some("Bearer ".to_string()),
-                    },
-                    true,
-                ),
-            ])));
-
-    let error = adapter
-        .request(WasmHttpRequest {
-            method: "GET".to_string(),
-            url: "https://wasm-api.example.test/run".to_string(),
-            headers_json: "{}".to_string(),
-            body: None,
-            timeout_ms: Some(1000),
-        })
-        .expect_err("staged credentials require an adapter capability id");
-
-    let rendered = error.to_string();
-    assert!(matches!(error, WasmHostError::Unavailable(_)));
-    assert!(rendered.contains("credential_unavailable"));
-    assert!(egress.requests.lock().unwrap().is_empty());
-}
-
-#[test]
 fn wasm_runtime_http_adapter_rejects_invalid_guest_headers_before_egress() {
     let egress = RecordingRuntimeEgress::ok(RuntimeHttpEgressResponse {
         status: 200,
@@ -340,8 +321,12 @@ fn wasm_runtime_http_adapter_rejects_invalid_guest_headers_before_egress() {
         response_bytes: 0,
         redaction_applied: false,
     });
-    let adapter =
-        WasmRuntimeHttpAdapter::new(Arc::new(egress.clone()), sample_scope(), sample_policy());
+    let adapter = WasmRuntimeHttpAdapter::new(
+        Arc::new(egress.clone()),
+        sample_scope(),
+        sample_capability_id(),
+        sample_policy(),
+    );
 
     let error = adapter
         .request(WasmHttpRequest {
@@ -366,6 +351,7 @@ fn wasm_runtime_http_adapter_redacts_credential_errors_before_guest_visibility()
             },
         )),
         sample_scope(),
+        sample_capability_id(),
         sample_policy(),
     );
 
@@ -397,6 +383,7 @@ fn wasm_runtime_http_adapter_redacts_shared_request_error_reasons() {
             },
         )),
         sample_scope(),
+        sample_capability_id(),
         sample_policy(),
     );
 
@@ -428,6 +415,7 @@ fn wasm_runtime_http_adapter_redacts_shared_network_denial_reasons() {
             },
         )),
         sample_scope(),
+        sample_capability_id(),
         sample_policy(),
     );
 
@@ -459,6 +447,7 @@ fn wasm_runtime_http_adapter_marks_post_send_shared_egress_errors_for_accounting
             },
         )),
         sample_scope(),
+        sample_capability_id(),
         sample_policy(),
     );
 
@@ -491,6 +480,7 @@ fn wasm_runtime_http_adapter_marks_zero_body_response_failures_after_send() {
             },
         )),
         sample_scope(),
+        sample_capability_id(),
         sample_policy(),
     );
 
@@ -524,6 +514,7 @@ fn wasm_runtime_http_adapter_redacts_credential_provider_errors() {
             redaction_applied: false,
         })),
         sample_scope(),
+        sample_capability_id(),
         sample_policy(),
     )
     .with_credential_provider(Arc::new(FailingCredentialProvider));
@@ -611,7 +602,7 @@ impl WasmRuntimeCredentialProvider for FailingCredentialProvider {
 }
 
 fn sample_capability_id() -> CapabilityId {
-    CapabilityId::new("example.http").unwrap()
+    CapabilityId::new("wasm.http").unwrap()
 }
 
 fn sample_injection() -> RuntimeCredentialInjection {

@@ -103,7 +103,7 @@ impl WasmHostHttp for RecordingWasmHostHttp {
 pub struct WasmRuntimeHttpAdapter<E> {
     egress: E,
     scope: ResourceScope,
-    capability_id: Option<CapabilityId>,
+    capability_id: CapabilityId,
     network_policy: NetworkPolicy,
     credential_provider: Arc<dyn WasmRuntimeCredentialProvider>,
     response_body_limit: Option<u64>,
@@ -112,7 +112,7 @@ pub struct WasmRuntimeHttpAdapter<E> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasmRuntimeCredentialRequest {
     pub scope: ResourceScope,
-    pub capability_id: Option<CapabilityId>,
+    pub capability_id: CapabilityId,
     pub method: NetworkMethod,
     pub url: String,
     pub headers: Vec<(String, String)>,
@@ -220,18 +220,12 @@ impl WasmRuntimeCredentialProvider for WasmStagedRuntimeCredentials {
             return Ok(Vec::new());
         }
 
-        let Some(capability_id) = &request.capability_id else {
-            return Err(WasmHostError::Unavailable(
-                "credential_unavailable".to_string(),
-            ));
-        };
-
         Ok(matched
             .into_iter()
             .map(|credential| RuntimeCredentialInjection {
                 handle: credential.handle.clone(),
                 source: RuntimeCredentialSource::StagedObligation {
-                    capability_id: capability_id.clone(),
+                    capability_id: request.capability_id.clone(),
                 },
                 target: credential.target.clone(),
                 required: credential.required,
@@ -244,11 +238,16 @@ impl<E> WasmRuntimeHttpAdapter<E>
 where
     E: RuntimeHttpEgress,
 {
-    pub fn new(egress: E, scope: ResourceScope, network_policy: NetworkPolicy) -> Self {
+    pub fn new(
+        egress: E,
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+        network_policy: NetworkPolicy,
+    ) -> Self {
         Self {
             egress,
             scope,
-            capability_id: None,
+            capability_id,
             network_policy,
             credential_provider: Arc::new(EmptyWasmRuntimeCredentials),
             response_body_limit: None,
@@ -256,7 +255,7 @@ where
     }
 
     pub fn with_capability_id(mut self, capability_id: CapabilityId) -> Self {
-        self.capability_id = Some(capability_id);
+        self.capability_id = capability_id;
         self
     }
 
@@ -299,6 +298,7 @@ where
             .execute(RuntimeHttpEgressRequest {
                 runtime: RuntimeKind::Wasm,
                 scope: self.scope.clone(),
+                capability_id: self.capability_id.clone(),
                 method,
                 url: request.url,
                 headers,

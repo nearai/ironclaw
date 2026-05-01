@@ -154,6 +154,7 @@ pub struct ScriptExecutionResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScriptHostHttpRequest {
     pub scope: ResourceScope,
+    pub capability_id: CapabilityId,
     pub method: ironclaw_host_api::NetworkMethod,
     pub url: String,
     pub headers: Vec<(String, String)>,
@@ -193,6 +194,7 @@ where
             .execute(RuntimeHttpEgressRequest {
                 runtime: RuntimeKind::Script,
                 scope: request.scope,
+                capability_id: request.capability_id,
                 method: request.method,
                 url: request.url,
                 headers: request.headers,

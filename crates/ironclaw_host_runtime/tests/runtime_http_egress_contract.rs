@@ -2,14 +2,15 @@ use ironclaw_capabilities::{
     CapabilityObligationHandler, CapabilityObligationPhase, CapabilityObligationRequest,
 };
 use ironclaw_host_api::{
-    CapabilityId, CapabilitySet, ExecutionContext, ExtensionId, InvocationId, MountView,
+    AgentId, CapabilityId, CapabilitySet, ExecutionContext, ExtensionId, InvocationId, MountView,
     NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, Obligation,
     ResourceEstimate, ResourceScope, RuntimeCredentialInjection, RuntimeCredentialSource,
-    RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressRequest, RuntimeKind,
-    SecretHandle, TenantId, TrustClass, UserId,
+    RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+    RuntimeKind, SecretHandle, TenantId, TrustClass, UserId,
 };
 use ironclaw_host_runtime::{
-    BuiltinObligationHandler, HostHttpEgressService, RuntimeSecretInjectionStore,
+    BuiltinObligationHandler, HostHttpEgressService, NetworkObligationPolicyStore,
+    RuntimeSecretInjectionStore,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -54,6 +55,7 @@ fn host_http_egress_consumes_staged_obligation_secret_once() {
     let request = RuntimeHttpEgressRequest {
         runtime: RuntimeKind::Script,
         scope: scope.clone(),
+        capability_id: sample_capability_id(),
         method: NetworkMethod::Post,
         url: "https://api.example.test/v1/run".to_string(),
         headers: vec![],
@@ -159,6 +161,7 @@ async fn host_http_egress_consumes_secret_staged_by_builtin_obligation_handler()
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Script,
             scope: context.resource_scope.clone(),
+            capability_id: sample_capability_id(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![],
@@ -226,6 +229,7 @@ fn host_http_egress_reuses_staged_secret_for_multiple_targets_in_one_request() {
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Script,
             scope: scope.clone(),
+            capability_id: sample_capability_id(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![],
@@ -305,6 +309,7 @@ fn host_http_egress_fails_closed_when_required_staged_secret_is_missing() {
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Script,
             scope: sample_scope(),
+            capability_id: sample_capability_id(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![],
@@ -366,6 +371,7 @@ fn host_http_egress_does_not_take_staged_secret_from_other_capability() {
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Script,
             scope: scope.clone(),
+            capability_id: sample_capability_id(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![],
@@ -434,6 +440,7 @@ fn host_http_egress_does_not_take_staged_secret_for_other_handle() {
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Script,
             scope: scope.clone(),
+            capability_id: sample_capability_id(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![],
@@ -496,6 +503,7 @@ fn host_http_egress_removes_staged_secret_before_network_errors() {
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Script,
             scope: scope.clone(),
+            capability_id: sample_capability_id(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![],
@@ -552,6 +560,7 @@ fn host_http_egress_skips_optional_missing_staged_secret() {
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Script,
             scope: sample_scope(),
+            capability_id: sample_capability_id(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![],
@@ -618,6 +627,7 @@ fn host_http_egress_does_not_take_staged_secret_from_other_scope() {
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Script,
             scope: requested_scope,
+            capability_id: sample_capability_id(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![],
@@ -681,6 +691,7 @@ fn host_http_egress_rejects_header_injection_prefix_control_chars() {
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Script,
             scope,
+            capability_id: sample_capability_id(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![],
@@ -731,6 +742,7 @@ fn host_http_egress_injects_leased_credentials_and_redacts_errors() {
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Script,
             scope,
+            capability_id: sample_capability_id(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![],
@@ -787,6 +799,7 @@ fn host_http_egress_requires_available_required_credentials_before_network() {
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Script,
             scope: sample_scope(),
+            capability_id: sample_capability_id(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![],
@@ -832,6 +845,7 @@ fn host_http_egress_injects_and_redacts_url_encoded_query_credentials() {
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Script,
             scope,
+            capability_id: sample_capability_id(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![],
@@ -881,6 +895,7 @@ fn host_http_egress_forwards_timeout_to_network() {
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Wasm,
             scope: sample_scope(),
+            capability_id: sample_capability_id(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![],
@@ -916,6 +931,7 @@ fn host_http_egress_preserves_request_and_response_byte_accounting() {
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Mcp,
             scope: sample_scope(),
+            capability_id: sample_capability_id(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/mcp".to_string(),
             headers: vec![],
@@ -933,6 +949,243 @@ fn host_http_egress_preserves_request_and_response_byte_accounting() {
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].body, b"hello");
     assert_eq!(requests[0].response_body_limit, Some(4096));
+}
+
+#[test]
+fn host_http_egress_consumes_staged_network_policy_before_transport() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{\"ok\":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let policy_store = Arc::new(NetworkObligationPolicyStore::new());
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let staged_policy = sample_policy();
+    policy_store.insert(&scope, &capability_id, staged_policy.clone());
+    let service = HostHttpEgressService::new(network, InMemorySecretStore::new())
+        .with_network_policy_store(policy_store.clone());
+
+    service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Wasm,
+            scope: scope.clone(),
+            capability_id: capability_id.clone(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: caller_supplied_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            timeout_ms: None,
+        })
+        .expect("staged network policy should authorize host-mediated HTTP");
+
+    let requests = network_recorder.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].policy, staged_policy);
+    drop(requests);
+    assert!(
+        policy_store.take(&scope, &capability_id).is_none(),
+        "runtime egress must consume staged policy exactly once"
+    );
+}
+
+#[test]
+fn host_http_egress_fails_closed_without_staged_network_policy() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{\"ok\":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let policy_store = Arc::new(NetworkObligationPolicyStore::new());
+    let service = HostHttpEgressService::new(network, InMemorySecretStore::new())
+        .with_network_policy_store(policy_store);
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Wasm,
+            scope: sample_scope(),
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            timeout_ms: None,
+        })
+        .expect_err("missing staged network policy should fail before transport");
+
+    assert!(matches!(
+        error,
+        RuntimeHttpEgressError::Network {
+            reason,
+            request_bytes: 0,
+            response_bytes: 0,
+        } if reason == "network_policy_missing"
+    ));
+    assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+#[test]
+fn host_http_egress_does_not_use_cross_scope_or_cross_capability_policy() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{\"ok\":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let policy_store = Arc::new(NetworkObligationPolicyStore::new());
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let mut other_scope = scope.clone();
+    other_scope.agent_id = Some(AgentId::new("other-agent").unwrap());
+    let other_capability_id = CapabilityId::new("other.http").unwrap();
+    policy_store.insert(&other_scope, &capability_id, sample_policy());
+    policy_store.insert(&scope, &other_capability_id, sample_policy());
+    let service = HostHttpEgressService::new(network, InMemorySecretStore::new())
+        .with_network_policy_store(policy_store.clone());
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Wasm,
+            scope: scope.clone(),
+            capability_id: capability_id.clone(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            timeout_ms: None,
+        })
+        .expect_err("cross-scope or cross-capability staged policies must not authorize egress");
+
+    assert!(matches!(
+        error,
+        RuntimeHttpEgressError::Network {
+            reason,
+            request_bytes: 0,
+            response_bytes: 0,
+        } if reason == "network_policy_missing"
+    ));
+    assert!(network_recorder.lock().unwrap().is_empty());
+    assert!(policy_store.take(&other_scope, &capability_id).is_some());
+    assert!(policy_store.take(&scope, &other_capability_id).is_some());
+}
+
+#[test]
+fn host_http_egress_consumes_staged_policy_when_dispatch_fails_before_transport() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{\"ok\":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let policy_store = Arc::new(NetworkObligationPolicyStore::new());
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    policy_store.insert(&scope, &capability_id, sample_policy());
+    let service = HostHttpEgressService::new(network, InMemorySecretStore::new())
+        .with_network_policy_store(policy_store.clone());
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Wasm,
+            scope: scope.clone(),
+            capability_id: capability_id.clone(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle: SecretHandle::new("missing-token").unwrap(),
+                source: RuntimeCredentialSource::SecretStoreLease,
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            timeout_ms: None,
+        })
+        .expect_err("credential failure should not leave reusable network policy state");
+
+    assert!(matches!(error, RuntimeHttpEgressError::Credential { .. }));
+    assert!(network_recorder.lock().unwrap().is_empty());
+    assert!(policy_store.take(&scope, &capability_id).is_none());
+}
+
+#[test]
+fn host_http_egress_consumes_staged_policy_when_request_validation_fails() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{\"ok\":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let policy_store = Arc::new(NetworkObligationPolicyStore::new());
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    policy_store.insert(&scope, &capability_id, sample_policy());
+    let service = HostHttpEgressService::new(network, InMemorySecretStore::new())
+        .with_network_policy_store(policy_store.clone());
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Wasm,
+            scope: scope.clone(),
+            capability_id: capability_id.clone(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![(
+                "Authorization".to_string(),
+                "Bearer caller-token".to_string(),
+            )],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            timeout_ms: None,
+        })
+        .expect_err("request validation failure should not leave reusable policy state");
+
+    assert!(matches!(error, RuntimeHttpEgressError::Request { .. }));
+    assert!(network_recorder.lock().unwrap().is_empty());
+    assert!(policy_store.take(&scope, &capability_id).is_none());
 }
 
 #[test]
@@ -968,6 +1221,7 @@ fn host_http_egress_redacts_injected_credentials_from_runtime_visible_response()
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Script,
             scope,
+            capability_id: sample_capability_id(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![],
@@ -1025,6 +1279,7 @@ fn host_http_egress_redacts_lowercase_percent_encoded_secret_echoes() {
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Script,
             scope,
+            capability_id: sample_capability_id(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![],
@@ -1088,6 +1343,7 @@ fn host_http_egress_strips_all_sensitive_response_headers() {
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Script,
             scope: sample_scope(),
+            capability_id: sample_capability_id(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![],
@@ -1124,6 +1380,7 @@ fn host_http_egress_blocks_credential_shaped_response_body() {
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Script,
             scope: sample_scope(),
+            capability_id: sample_capability_id(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![],
@@ -1163,6 +1420,7 @@ fn host_http_egress_blocks_credential_shaped_runtime_request_before_network() {
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Script,
             scope: sample_scope(),
+            capability_id: sample_capability_id(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![],
@@ -1201,6 +1459,7 @@ fn host_http_egress_blocks_runtime_supplied_sensitive_headers_before_network() {
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Script,
             scope: sample_scope(),
+            capability_id: sample_capability_id(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![(
@@ -1242,6 +1501,7 @@ fn host_http_egress_blocks_runtime_supplied_credential_query_before_network() {
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Script,
             scope: sample_scope(),
+            capability_id: sample_capability_id(),
             method: NetworkMethod::Get,
             url: "https://api.example.test/v1/run?api_key=short-manual-key".to_string(),
             headers: vec![],
@@ -1280,6 +1540,7 @@ fn host_http_egress_blocks_percent_encoded_credential_values_before_network() {
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Script,
             scope: sample_scope(),
+            capability_id: sample_capability_id(),
             method: NetworkMethod::Get,
             url: "https://api.example.test/v1/run?data=AKIA%49OSFODNN7EXAMPLE".to_string(),
             headers: vec![],
@@ -1318,6 +1579,7 @@ fn host_http_egress_blocks_runtime_supplied_auth_like_headers_before_network() {
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Script,
             scope: sample_scope(),
+            capability_id: sample_capability_id(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![("X-Custom-Auth".to_string(), "short-manual-key".to_string())],
@@ -1369,6 +1631,7 @@ fn host_http_egress_runs_async_secret_store_futures_with_tokio_context() {
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Script,
             scope,
+            capability_id: sample_capability_id(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![],
@@ -1416,6 +1679,7 @@ fn host_http_egress_maps_network_errors_to_stable_runtime_reasons() {
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Script,
             scope: sample_scope(),
+            capability_id: sample_capability_id(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![],
@@ -1602,7 +1866,7 @@ fn execution_context() -> ExecutionContext {
 }
 
 fn sample_capability_id() -> CapabilityId {
-    CapabilityId::new("example.http").unwrap()
+    CapabilityId::new("runtime.http").unwrap()
 }
 
 fn sample_policy() -> NetworkPolicy {
@@ -1614,5 +1878,17 @@ fn sample_policy() -> NetworkPolicy {
         }],
         deny_private_ip_ranges: true,
         max_egress_bytes: Some(4096),
+    }
+}
+
+fn caller_supplied_policy() -> NetworkPolicy {
+    NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: "caller.example.test".to_string(),
+            port: None,
+        }],
+        deny_private_ip_ranges: false,
+        max_egress_bytes: Some(1),
     }
 }
