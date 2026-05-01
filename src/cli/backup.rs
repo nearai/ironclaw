@@ -272,12 +272,30 @@ async fn read_schema_version(_db_path: &Path) -> Result<i64> {
 }
 
 /// Hostname, falling back to `unknown` rather than failing the backup.
+///
+/// macOS does not set `$HOSTNAME` by default, and the env-var-only path
+/// produced `unknown` on most Apple machines. Use the OS syscall first
+/// (`gethostname(2)` on Unix, `GetComputerNameW` on Windows) and only
+/// fall back to env vars if the syscall fails or returns garbage.
+/// `$HOSTNAME` is honored second so a user override (`HOSTNAME=...
+/// ironclaw backup`) still wins over the default in test environments.
 fn hostname() -> String {
-    std::env::var("HOSTNAME")
-        .ok()
-        .or_else(|| std::env::var("COMPUTERNAME").ok())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "unknown".to_string())
+    // 1. Allow tests / scripted environments to pin a value via env var
+    //    BEFORE the syscall — useful for deterministic CI output.
+    if let Some(s) = std::env::var("HOSTNAME").ok().filter(|s| !s.is_empty()) {
+        return s;
+    }
+    if let Some(s) = std::env::var("COMPUTERNAME").ok().filter(|s| !s.is_empty()) {
+        return s;
+    }
+    // 2. Real syscall — succeeds on essentially every Unix and Windows host.
+    if let Ok(os) = ::hostname::get() {
+        let s = os.to_string_lossy().to_string();
+        if !s.is_empty() {
+            return s;
+        }
+    }
+    "unknown".to_string()
 }
 
 /// Stream-write the zip to `output`. Manifest first, then db, then config.
@@ -301,7 +319,20 @@ fn write_quick_archive(
         }
     }
 
-    let tmp = with_extension_suffix(output, ".tmp");
+    // PID + 8 random alphanumerics keeps the staging filename unique per
+    // process and per invocation, so two concurrent `ironclaw backup`
+    // calls writing to the same canonical path cannot rename-step on
+    // each other. The trailing `.tmp` suffix preserves the
+    // pre-existing convention so any external cleanup script that
+    // sweeps `.tmp` files keeps working.
+    use rand::Rng;
+    let rand_tag: String = rand::thread_rng()
+        .sample_iter(&rand::distributions::Alphanumeric)
+        .take(8)
+        .map(char::from)
+        .collect();
+    let tmp_suffix = format!(".{}.{}.tmp", std::process::id(), rand_tag);
+    let tmp = with_extension_suffix(output, &tmp_suffix);
     {
         let file = File::create(&tmp)
             .with_context(|| format!("creating {}", tmp.display()))?;
