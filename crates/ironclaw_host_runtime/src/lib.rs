@@ -701,8 +701,8 @@ where
         &self,
         mut request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
-        validate_runtime_request(&request)?;
         let network_policy = self.network_policy_for_request(&mut request)?;
+        validate_runtime_request(&request)?;
 
         let mut redaction_values = Vec::new();
         let mut credential_materials = Vec::new();

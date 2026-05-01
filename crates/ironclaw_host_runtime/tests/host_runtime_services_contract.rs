@@ -6,9 +6,9 @@ use ironclaw_authorization::{
     GrantAuthorizer, InMemoryCapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer,
 };
 use ironclaw_events::{
-    DurableAuditLog, DurableEventLog, EventCursor, EventError, EventReplay, EventStreamKey,
-    InMemoryAuditSink, InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink,
-    ReadScope, RuntimeEventKind,
+    DurableAuditLog, DurableEventLog, DurableEventSink, EventCursor, EventError, EventReplay,
+    EventStreamKey, InMemoryAuditSink, InMemoryDurableAuditLog, InMemoryDurableEventLog,
+    InMemoryEventSink, ReadScope, RuntimeEventKind,
 };
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry};
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
@@ -21,6 +21,9 @@ use ironclaw_host_runtime::{
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutionResult, McpExecutor};
 use ironclaw_processes::{
     ProcessResultStore, ProcessServices, ProcessStart, ProcessStatus, ProcessStore,
+};
+use ironclaw_reborn_event_store::{
+    RebornEventStoreConfig, RebornProfile, build_reborn_event_stores,
 };
 use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceGovernor, ResourceLimits,
@@ -210,6 +213,82 @@ async fn host_runtime_services_writes_runtime_events_to_durable_event_log_metada
     assert!(serialized.contains("script.echo"));
     assert!(serialized.contains("dispatch_requested"));
     assert!(serialized.contains("dispatch_succeeded"));
+}
+
+#[tokio::test]
+async fn host_runtime_services_consumes_reborn_jsonl_event_store_without_v1_composition() {
+    let temp = tempfile::tempdir().unwrap();
+    let stores = build_reborn_event_stores(
+        RebornProfile::LocalDev,
+        RebornEventStoreConfig::Jsonl {
+            root: temp.path().join("reborn-event-store"),
+            accept_single_node_durable: false,
+        },
+    )
+    .await
+    .unwrap();
+    let event_log = Arc::clone(&stores.events);
+    let script_runtime = Arc::new(ScriptRuntime::new(
+        ScriptRuntimeConfig::for_testing(),
+        EchoScriptBackend,
+    ));
+
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability],
+    )))
+    .with_script_runtime(script_runtime)
+    .with_event_sink(Arc::new(DurableEventSink::new(Arc::clone(&event_log))));
+
+    let scope = sample_scope(InvocationId::new());
+    let outcome = services
+        .host_runtime()
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
+            script_capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "from jsonl store"}),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        outcome,
+        RuntimeCapabilityOutcome::Completed(completed)
+            if completed.output == json!({"message": "from jsonl store"})
+    ));
+
+    let replay = event_log
+        .read_after_cursor(
+            &EventStreamKey::from_scope(&scope),
+            &ReadScope::any(),
+            None,
+            10,
+        )
+        .await
+        .unwrap();
+    let kinds = replay
+        .entries
+        .iter()
+        .map(|entry| entry.record.kind)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        vec![
+            RuntimeEventKind::DispatchRequested,
+            RuntimeEventKind::RuntimeSelected,
+            RuntimeEventKind::DispatchSucceeded,
+        ]
+    );
 }
 
 #[tokio::test]
