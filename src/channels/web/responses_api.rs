@@ -641,6 +641,19 @@ fn responses_tools_to_action_defs(tools: &[ResponsesTool]) -> Vec<ironclaw_engin
         .collect()
 }
 
+/// Synthetic engine action names that the orchestrator emits as
+/// `ActionStarted`/`ActionFailed` events for internal bookkeeping
+/// (CodeAct script execution, etc.) but which are not real
+/// caller-visible tool calls. Filtering these out of the Responses
+/// API output prevents internal markers like `__codeact__` from
+/// surfacing as `function_call` items in the response.
+///
+/// Names use the leading-underscore convention reserved for
+/// engine-internal markers.
+fn is_synthetic_engine_action(name: &str) -> bool {
+    name.starts_with("__") && name.ends_with("__")
+}
+
 /// Check whether an `AppEvent` belongs to the target thread.
 fn event_matches_thread(event: &AppEvent, target: &str) -> bool {
     match event {
@@ -788,6 +801,12 @@ impl ResponseAccumulator {
                 true // turn complete (waiting for caller-supplied result)
             }
             AppEvent::ToolStarted { name, call_id, .. } => {
+                // Filter synthetic engine markers — these are internal
+                // bookkeeping events (CodeAct script execution, etc.),
+                // not real tool calls the caller asked for.
+                if is_synthetic_engine_action(&name) {
+                    return false;
+                }
                 // Emit function_call placeholder — arguments filled on ToolCompleted.
                 let call_id =
                     call_id.unwrap_or_else(|| format!("call_{}", Uuid::new_v4().simple()));
@@ -807,6 +826,9 @@ impl ResponseAccumulator {
                 call_id,
                 ..
             } => {
+                if is_synthetic_engine_action(&name) {
+                    return false;
+                }
                 // Try to attach arguments to the matching FunctionCall.
                 if let Some(args) = parameters
                     && let Some(idx) =
@@ -833,6 +855,9 @@ impl ResponseAccumulator {
                 call_id,
                 ..
             } => {
+                if is_synthetic_engine_action(&name) {
+                    return false;
+                }
                 let call_id = self.resolve_call_id(&name, call_id.as_deref());
                 self.output.push(ResponseOutputItem::FunctionCallOutput {
                     id: make_item_id(),
@@ -1174,7 +1199,13 @@ pub async fn create_response_handler(
         let pending = pending.ok_or_else(|| {
             api_error(
                 StatusCode::BAD_REQUEST,
-                "function_call_output supplied but no pending external tool call for this thread",
+                "function_call_output supplied but no pending external tool call for \
+                 this thread. Verify the prior response.output array contained a \
+                 `function_call` item for this call_id; if it did not, the agent did \
+                 not actually invoke the caller-supplied tool. Note: caller-supplied \
+                 tools are currently dispatched only when the LLM emits a structured \
+                 tool call. CodeAct (Python) execution does not yet pause for caller \
+                 tools — see PR #3157 for the in-progress engine fix.",
                 "invalid_request_error",
             )
         })?;
@@ -1452,6 +1483,9 @@ async fn streaming_worker(
                 acc.text_chunks.push(content.clone());
             }
             AppEvent::ToolStarted { name, call_id, .. } => {
+                if is_synthetic_engine_action(name) {
+                    continue;
+                }
                 let idx = acc.output.len();
                 let call_id = call_id
                     .clone()
@@ -1480,6 +1514,9 @@ async fn streaming_worker(
                 call_id,
                 ..
             } => {
+                if is_synthetic_engine_action(name) {
+                    continue;
+                }
                 if let Some(args) = parameters
                     && let Some(idx) = acc.find_function_call_index(name, call_id.as_deref(), true)
                     && let Some(ResponseOutputItem::FunctionCall { arguments, .. }) =
@@ -1533,6 +1570,9 @@ async fn streaming_worker(
                 call_id,
                 ..
             } => {
+                if is_synthetic_engine_action(name) {
+                    continue;
+                }
                 let call_id = acc.resolve_call_id(name, call_id.as_deref());
                 let idx = acc.output.len();
                 let item = ResponseOutputItem::FunctionCallOutput {
@@ -2221,6 +2261,48 @@ mod tests {
             &resp.output[1],
             ResponseOutputItem::FunctionCall { name, .. } if name == "lookup"
         ));
+    }
+
+    /// `__codeact__` and other `__double_underscore__` action names are
+    /// internal engine markers for synthetic events (CodeAct script
+    /// execution failure, etc.) — they must NOT surface to the caller
+    /// as `function_call` output items. Filter them in the accumulator.
+    #[test]
+    fn accumulator_filters_synthetic_engine_actions() {
+        let mut acc = ResponseAccumulator::new("resp_test".to_string(), "m".to_string());
+        // Simulate the orchestrator's CodeAct-script-failed path:
+        // ToolStarted + ToolCompleted with the synthetic name.
+        acc.process(AppEvent::ToolStarted {
+            name: "__codeact__".into(),
+            detail: None,
+            call_id: Some("codeact-step-1".into()),
+            thread_id: Some("t".into()),
+        });
+        acc.process(AppEvent::ToolCompleted {
+            name: "__codeact__".into(),
+            success: false,
+            error: Some("CodeAct execution failed".into()),
+            parameters: None,
+            call_id: Some("codeact-step-1".into()),
+            duration_ms: Some(1),
+            thread_id: Some("t".into()),
+        });
+        let resp = acc.finish();
+        assert!(
+            resp.output.is_empty(),
+            "synthetic engine actions must not produce output items, got: {:?}",
+            resp.output
+        );
+    }
+
+    #[test]
+    fn is_synthetic_engine_action_recognizes_double_underscore() {
+        assert!(is_synthetic_engine_action("__codeact__"));
+        assert!(is_synthetic_engine_action("__init__"));
+        assert!(!is_synthetic_engine_action("get_balances"));
+        assert!(!is_synthetic_engine_action("_private"));
+        assert!(!is_synthetic_engine_action("__leading_only"));
+        assert!(!is_synthetic_engine_action("trailing_only__"));
     }
 
     /// Streaming round-trip: when the LLM streams a couple of text
