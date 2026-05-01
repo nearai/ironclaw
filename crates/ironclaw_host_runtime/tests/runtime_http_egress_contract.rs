@@ -195,6 +195,97 @@ async fn host_http_egress_consumes_secret_staged_by_builtin_obligation_handler()
 }
 
 #[test]
+fn host_http_egress_reuses_staged_secret_for_multiple_targets_in_one_request() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{\"ok\":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("api-token").unwrap();
+    let staged = Arc::new(RuntimeSecretInjectionStore::new());
+    staged
+        .insert(
+            &scope,
+            &capability_id,
+            &handle,
+            SecretMaterial::from("sk-staged-secret"),
+        )
+        .unwrap();
+    let service = HostHttpEgressService::new(network, InMemorySecretStore::new())
+        .with_secret_injection_store(staged.clone());
+
+    service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope: scope.clone(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![
+                RuntimeCredentialInjection {
+                    handle: handle.clone(),
+                    source: RuntimeCredentialSource::StagedObligation {
+                        capability_id: capability_id.clone(),
+                    },
+                    target: RuntimeCredentialTarget::Header {
+                        name: "authorization".to_string(),
+                        prefix: Some("Bearer ".to_string()),
+                    },
+                    required: true,
+                },
+                RuntimeCredentialInjection {
+                    handle: handle.clone(),
+                    source: RuntimeCredentialSource::StagedObligation {
+                        capability_id: capability_id.clone(),
+                    },
+                    target: RuntimeCredentialTarget::QueryParam {
+                        name: "token".to_string(),
+                    },
+                    required: true,
+                },
+            ],
+            response_body_limit: Some(4096),
+            timeout_ms: None,
+        })
+        .expect("same staged handle should be reusable within a single request plan");
+
+    let requests = network_recorder.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0]
+            .headers
+            .iter()
+            .find(|(name, _)| name == "authorization"),
+        Some(&(
+            "authorization".to_string(),
+            "Bearer sk-staged-secret".to_string()
+        ))
+    );
+    assert_eq!(
+        requests[0].url,
+        "https://api.example.test/v1/run?token=sk-staged-secret"
+    );
+    drop(requests);
+    assert!(
+        staged
+            .take(&scope, &capability_id, &handle)
+            .expect("store should remain available")
+            .is_none(),
+        "staged material must still be consumed only once across the whole request"
+    );
+}
+
+#[test]
 fn host_http_egress_fails_closed_when_required_staged_secret_is_missing() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,

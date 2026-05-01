@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     fmt,
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
@@ -21,18 +22,46 @@ use ironclaw_resources::ResourceGovernor;
 use ironclaw_safety::LeakDetector;
 use ironclaw_secrets::{SecretMaterial, SecretStore};
 
+/// Default maximum lifetime for one-shot runtime secret material staged in memory.
+pub const DEFAULT_RUNTIME_SECRET_INJECTION_TTL: Duration = Duration::from_secs(300);
+
 /// One-shot runtime secret material staged after `InjectSecretOnce` lease consumption.
 ///
 /// The store is keyed by scoped invocation, capability, and handle. Runtime adapters
 /// must use `take(...)` so staged material is removed before it can be reused.
-#[derive(Clone, Default)]
+/// Entries also expire after a short TTL so abandoned handoffs from setup
+/// failures, cancellation, or adapter bugs cannot remain usable indefinitely.
+#[derive(Clone)]
 pub struct RuntimeSecretInjectionStore {
-    secrets: Arc<Mutex<HashMap<RuntimeSecretInjectionKey, SecretMaterial>>>,
+    state: Arc<RuntimeSecretInjectionState>,
+}
+
+struct RuntimeSecretInjectionState {
+    secrets: Mutex<HashMap<RuntimeSecretInjectionKey, RuntimeSecretInjectionEntry>>,
+    ttl: Duration,
+}
+
+struct RuntimeSecretInjectionEntry {
+    material: SecretMaterial,
+    expires_at: Instant,
 }
 
 impl RuntimeSecretInjectionStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_ttl(ttl: Duration) -> Self {
+        Self {
+            state: Arc::new(RuntimeSecretInjectionState {
+                secrets: Mutex::new(HashMap::new()),
+                ttl,
+            }),
+        }
+    }
+
+    pub fn ttl(&self) -> Duration {
+        self.state.ttl
     }
 
     pub fn insert(
@@ -42,9 +71,16 @@ impl RuntimeSecretInjectionStore {
         handle: &SecretHandle,
         material: SecretMaterial,
     ) -> Result<(), RuntimeSecretInjectionStoreError> {
-        self.lock()?.insert(
+        let now = Instant::now();
+        let expires_at = now.checked_add(self.state.ttl).unwrap_or(now);
+        let mut secrets = self.lock()?;
+        prune_expired_entries(&mut secrets, now);
+        secrets.insert(
             RuntimeSecretInjectionKey::new(scope, capability_id, handle),
-            material,
+            RuntimeSecretInjectionEntry {
+                material,
+                expires_at,
+            },
         );
         Ok(())
     }
@@ -55,22 +91,39 @@ impl RuntimeSecretInjectionStore {
         capability_id: &CapabilityId,
         handle: &SecretHandle,
     ) -> Result<Option<SecretMaterial>, RuntimeSecretInjectionStoreError> {
-        Ok(self.lock()?.remove(&RuntimeSecretInjectionKey::new(
-            scope,
-            capability_id,
-            handle,
-        )))
+        let now = Instant::now();
+        let mut secrets = self.lock()?;
+        prune_expired_entries(&mut secrets, now);
+        Ok(secrets
+            .remove(&RuntimeSecretInjectionKey::new(
+                scope,
+                capability_id,
+                handle,
+            ))
+            .map(|entry| entry.material))
+    }
+
+    pub fn prune_expired(&self) -> Result<usize, RuntimeSecretInjectionStoreError> {
+        let mut secrets = self.lock()?;
+        Ok(prune_expired_entries(&mut secrets, Instant::now()))
     }
 
     fn lock(
         &self,
     ) -> Result<
-        std::sync::MutexGuard<'_, HashMap<RuntimeSecretInjectionKey, SecretMaterial>>,
+        std::sync::MutexGuard<'_, HashMap<RuntimeSecretInjectionKey, RuntimeSecretInjectionEntry>>,
         RuntimeSecretInjectionStoreError,
     > {
-        self.secrets
+        self.state
+            .secrets
             .lock()
             .map_err(|_| RuntimeSecretInjectionStoreError::Unavailable)
+    }
+}
+
+impl Default for RuntimeSecretInjectionStore {
+    fn default() -> Self {
+        Self::with_ttl(DEFAULT_RUNTIME_SECRET_INJECTION_TTL)
     }
 }
 
@@ -79,8 +132,18 @@ impl fmt::Debug for RuntimeSecretInjectionStore {
         formatter
             .debug_struct("RuntimeSecretInjectionStore")
             .field("secrets", &"[REDACTED]")
+            .field("ttl", &self.state.ttl)
             .finish()
     }
+}
+
+fn prune_expired_entries(
+    secrets: &mut HashMap<RuntimeSecretInjectionKey, RuntimeSecretInjectionEntry>,
+    now: Instant,
+) -> usize {
+    let before = secrets.len();
+    secrets.retain(|_, entry| entry.expires_at > now);
+    before.saturating_sub(secrets.len())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

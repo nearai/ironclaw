@@ -118,12 +118,16 @@ that `BuiltinObligationHandler` already leased, consumed, and staged in
 not lease the same handle independently; `HostHttpEgressService` removes staged
 material with `take(scope, capability_id, handle)` before outbound transport so
 the value cannot be reused after success, failure, or runtime-visible errors.
-Runtime callers must not supply their own `Authorization`, cookie, or
-API-key-style headers; those values must come from the host-approved injection
-plan. WASM host-mediated HTTP composition can construct staged plans with
-`WasmStagedRuntimeCredentials` after attaching the invoking capability id to the
-adapter; exact-url rules should be preferred when a credential is only valid for
-specific destinations.
+Staged entries also expire after the store TTL (five minutes by default) and
+expired material is pruned during insertion, `take(...)`, and explicit
+`prune_expired(...)` calls. If one approved request plan injects the same
+source+handle into multiple targets, the egress service consumes or leases the
+material once and reuses it only within that request. Runtime callers must not
+supply their own `Authorization`, cookie, or API-key-style headers; those values
+must come from the host-approved injection plan. WASM host-mediated HTTP
+composition can construct staged plans with `WasmStagedRuntimeCredentials` after
+attaching the invoking capability id to the adapter; exact-url rules should be
+preferred when a credential is only valid for specific destinations.
 
 ---
 

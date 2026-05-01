@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
@@ -349,6 +349,58 @@ async fn builtin_obligation_handler_leases_consumes_and_stages_secret_once() {
             .unwrap()
             .is_none(),
         "runtime secret injection store must be one-shot"
+    );
+}
+
+#[tokio::test]
+async fn builtin_obligation_handler_expires_abandoned_direct_satisfy_secret_handoff() {
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let injection_store = Arc::new(RuntimeSecretInjectionStore::with_ttl(
+        Duration::from_millis(5),
+    ));
+    let handler = BuiltinObligationHandler::new()
+        .with_secret_store(secret_store.clone())
+        .with_secret_injection_store(injection_store.clone());
+    let context = execution_context(CapabilitySet::default());
+    let capability_id = capability_id();
+    let estimate = ResourceEstimate::default();
+    let handle = SecretHandle::new("api_token").unwrap();
+    secret_store
+        .put(
+            context.resource_scope.clone(),
+            handle.clone(),
+            SecretMaterial::from("runtime-secret"),
+        )
+        .await
+        .unwrap();
+    let obligations = vec![Obligation::InjectSecretOnce {
+        handle: handle.clone(),
+    }];
+
+    handler
+        .satisfy(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+        })
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    assert_eq!(
+        injection_store.prune_expired().unwrap(),
+        1,
+        "expired abandoned handoffs should be physically removable without waiting for egress"
+    );
+    assert!(
+        injection_store
+            .take(&context.resource_scope, &capability_id, &handle)
+            .unwrap()
+            .is_none(),
+        "abandoned direct satisfy handoffs must expire instead of remaining reusable indefinitely"
     );
 }
 
