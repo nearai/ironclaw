@@ -125,12 +125,61 @@ function itaIntent(intent) {
     + '</div>';
 }
 
+function itaMoney(value) {
+  var n = Number(value || 0);
+  return '$' + n.toFixed(n < 1 ? 4 : 2);
+}
+
+function itaPaidResearch(plan) {
+  if (!plan) {
+    return '<div class="ita-empty-line">No paid research plan recorded.</div>';
+  }
+  var sources = Array.isArray(plan.payable_sources) ? plan.payable_sources : [];
+  var rails = Array.isArray(plan.payment_rails) ? plan.payment_rails : [];
+  var routes = Array.isArray(plan.near_funding_routes) ? plan.near_funding_routes : [];
+  var gates = Array.isArray(plan.policy_gates) ? plan.policy_gates : [];
+  return '<div class="ita-paid">'
+    + '<div class="ita-paid-bar">'
+    + '<div><span>Budget</span><strong>' + itaMoney(plan.budget_usd) + '</strong></div>'
+    + '<div><span>Allocated</span><strong>' + itaMoney(plan.allocated_usd) + '</strong></div>'
+    + '<div><span>Unspent</span><strong>' + itaMoney(plan.unspent_usd) + '</strong></div>'
+    + '<div><span>Fetch</span><strong>' + (plan.ready_for_paid_fetch ? 'Ready' : 'Blocked') + '</strong></div>'
+    + '</div>'
+    + (plan.query ? '<div class="ita-paid-query">' + itaEscape(plan.query) + '</div>' : '')
+    + '<div class="ita-paid-lanes">'
+    + '<div>'
+    + '<div class="ita-subtitle">Payable Sources</div>'
+    + (sources.length ? sources.map(function(source) {
+      return '<div class="ita-source-line">'
+        + '<div><strong>' + itaEscape(source.title || source.id) + '</strong>'
+        + '<span>' + itaEscape(source.author || 'Unknown author') + ' · ' + itaEscape(source.protocol || 'manual') + ' / ' + itaEscape(source.network || 'manual') + '</span></div>'
+        + '<div class="ita-source-price">' + itaMoney(source.amount_usd) + '</div>'
+        + (source.receipt_required ? '<span class="ita-pill is-warn">Receipt</span>' : '<span class="ita-pill is-pass">Free</span>')
+        + '</div>';
+    }).join('') : '<div class="ita-empty-line">No payable sources selected.</div>')
+    + '</div>'
+    + '<div>'
+    + '<div class="ita-subtitle">Rails</div>'
+    + (rails.length ? rails.map(function(rail) {
+      return '<div class="ita-rail-line"><span>' + itaEscape(rail.protocol || 'manual') + '</span><strong>' + itaMoney(rail.allocated_usd) + '</strong></div>';
+    }).join('') : '<div class="ita-empty-line">No payment rails.</div>')
+    + (routes.length ? '<div class="ita-route-note">' + routes.map(function(route) {
+      return itaEscape(route.via || 'near-intents') + ' -> ' + itaEscape(route.target_protocol || 'rail') + ' ' + itaMoney(route.amount_usd);
+    }).join('<br>') + '</div>' : '')
+    + '</div>'
+    + '</div>'
+    + (gates.length ? '<div class="ita-paid-gates">' + itaRiskGates(gates) + '</div>' : '')
+    + '</div>';
+}
+
 function itaWritePrompt(kind, state) {
   if (api && api.navigate) api.navigate('chat');
   var input = document.getElementById('chat-input');
   if (!input) return;
   var pair = state && state.pair ? state.pair : 'the watched pair';
-  input.value = kind === 'quote'
+  input.value = kind === 'paid'
+    ? 'For the Intents Trading Agent, build a paid research plan for ' + pair + ' first: discover MPP/x402/NEAR payable sources, enforce the source budget, require receipts before use, then run backtest_suite and risk gates before any unsigned NEAR intent.'
+    : kind === 'quote'
     ? 'For the Intents Trading Agent, request a live NEAR Intents quote for ' + pair + ' only if all current risk gates still pass. Keep it unsigned.'
     : 'For the Intents Trading Agent, run the paper NEAR Intents workflow for ' + pair + ': research, backtest_suite, risk gates, and unsigned intent preview.';
   input.focus();
@@ -152,21 +201,26 @@ function itaRender(state) {
     + '<div class="ita-summary">'
     + '<div><span>Mode</span><strong>' + itaEscape(state.mode || 'paper') + '</strong></div>'
     + '<div><span>Confidence</span><strong>' + (state.confidence == null ? '-' : Math.round(Number(state.confidence) * 100) + '%') + '</strong></div>'
-    + '<div><span>Sources</span><strong>' + itaEscape(state.source_count || 0) + '</strong></div>'
+    + '<div><span>Sources</span><strong>' + itaEscape(state.paid_research ? state.paid_research.selected_count : state.source_count || 0) + '</strong></div>'
     + '<div><span>Updated</span><strong>' + itaEscape(state.generated_at || '-') + '</strong></div>'
     + '</div>'
     + '<div class="ita-body">'
+    + '<section><div class="ita-section-title">Paid Research</div>' + itaPaidResearch(state.paid_research) + '</section>'
     + '<section><div class="ita-section-title">Strategy Suite</div>' + itaCandidateRows(state.top_candidates) + '</section>'
     + '<section><div class="ita-section-title">Risk Gates</div>' + itaRiskGates(state.risk_gates) + '</section>'
     + '<section><div class="ita-section-title">Unsigned Intent</div>' + itaIntent(state.intent) + '</section>'
     + '</div>'
     + (state.next_action ? '<div class="ita-next">' + itaEscape(state.next_action) + '</div>' : '')
     + '<div class="ita-actions">'
+    + '<button type="button" data-action="ita-paid">Prepare Paid Research</button>'
     + '<button type="button" data-action="ita-paper">Prepare Paper Run</button>'
     + '<button type="button" data-action="ita-quote">Prepare Live Quote Request</button>'
     + '</div>';
 
   root.querySelector('[data-action="ita-refresh"]').addEventListener('click', itaLoad);
+  root.querySelector('[data-action="ita-paid"]').addEventListener('click', function() {
+    itaWritePrompt('paid', state);
+  });
   root.querySelector('[data-action="ita-paper"]').addEventListener('click', function() {
     itaWritePrompt('paper', state);
   });

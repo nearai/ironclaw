@@ -1,0 +1,132 @@
+id: intents-trading-agent-paid-research
+description: |
+  Plans a DripStack-style premium research query before using paid
+  source text in a NEAR Intents trading decision. The plan selects
+  payable MPP/x402 sources under budget, creates NEAR funding-route
+  hints, and feeds attribution into the project widget state.
+steps:
+  - name: paid_research_plan
+    action: plan_paid_research
+    params:
+      query: "Should the NEAR/BTC paper intent pay for premium solver liquidity and route risk research before requesting a quote?"
+      pair: NEAR/BTC
+      budget_usd: 0.05
+      max_sources: 3
+      min_relevance: 0.35
+      max_source_age_days: 14
+      spending_mode: quote
+      near_funding_asset: USDC.near
+      required_tags: [near-intents]
+      sources:
+        - id: premium-near-liquidity
+          title: "NEAR/BTC solver liquidity note"
+          author: "Premium Macro Writer"
+          publisher: "DripStack Research"
+          url: "https://example.com/near-btc-liquidity"
+          summary: "Premium note on NEAR Intents solver depth, BTC routing, slippage, and quote risk."
+          tags: [near-intents, btc, liquidity]
+          price_usd: 0.02
+          relevance: 0.92
+          trust_score: 0.82
+          freshness_score: 0.95
+          age_days: 1
+          payment:
+            protocol: mpp
+            network: tempo
+            asset: USDC
+            recipient: "0x1111111111111111111111111111111111111111"
+            endpoint: "https://example.com/near-btc-liquidity/pay"
+        - id: base-x402-route-risk
+          title: "Intent route risk memo"
+          author: "Onchain Researcher"
+          publisher: "Route Desk"
+          url: "https://example.com/intent-route-risk"
+          summary: "x402 paid memo covering Base, NEAR Intents, solver route expiry, and BTC destination risk."
+          tags: [near-intents, route-risk, btc]
+          price_usd: 0.02
+          relevance: 0.89
+          trust_score: 0.78
+          freshness_score: 0.9
+          age_days: 2
+          payment:
+            protocol: x402
+            network: base
+            asset: USDC
+            recipient: "0x2222222222222222222222222222222222222222"
+            endpoint: "https://example.com/intent-route-risk/pay"
+        - id: stale-alpha
+          title: "Old NEAR/BTC alpha note"
+          author: "Archive Writer"
+          publisher: "Old Desk"
+          url: "https://example.com/stale-alpha"
+          summary: "Old note on NEAR/BTC market structure."
+          tags: [near-intents, btc]
+          price_usd: 0.01
+          relevance: 0.7
+          trust_score: 0.5
+          freshness_score: 0.2
+          age_days: 60
+          payment:
+            protocol: x402
+            network: base
+            asset: USDC
+        - id: expensive-premium-pack
+          title: "Premium intent execution pack"
+          author: "Institutional Desk"
+          publisher: "Expensive Research"
+          url: "https://example.com/expensive-pack"
+          summary: "Broad premium pack on NEAR Intents and cross-chain execution."
+          tags: [near-intents, btc]
+          price_usd: 0.20
+          relevance: 0.95
+          trust_score: 0.9
+          freshness_score: 0.9
+          age_days: 1
+          payment:
+            protocol: mpp
+            network: tempo
+            asset: USDC
+    capture:
+      paid_research_plan_var: paid_plan
+    expect:
+      paid_research_schema_version: paid-research-plan/1
+      paid_research_selected_min: 2
+      paid_research_allocated_le: 0.05
+      paid_research_has_rail: x402
+      paid_research_near_funding_routes_min: 2
+  - name: format_console_state
+    action: format_intents_widget
+    params:
+      generated_at: "2026-05-02T19:15:00Z"
+      project_id: intents-trading-agent
+      mode: paper
+      pair: NEAR/BTC
+      stance: watch
+      confidence: 0.68
+      paid_research_plan: "$paid_plan"
+      backtest_suite:
+        schema_version: intents-backtest-suite/1
+        ranked:
+          - rank: 1
+            id: sma_cross_fast
+            strategy: {kind: sma-cross}
+            selection_score: 18.5
+            passes_basic_gate: true
+            metrics:
+              total_return_pct: 12.0
+              alpha_vs_buy_hold_pct: 3.0
+              max_drawdown_pct: 8.0
+              trades: 6
+      risk_gates:
+        - {name: receipt-before-use, status: pass, detail: "Paid source text is blocked until receipts exist."}
+        - {name: backtest-required, status: pass, detail: "Premium research cannot bypass the strategy suite."}
+      research_sources:
+        - https://dripstack.xyz
+        - https://mpp.dev
+        - https://docs.x402.org/
+      next_action: "Pay for selected sources only after user approval, then re-run research before building any unsigned intent."
+    expect:
+      intents_widget_schema_version: intents-trading-widget/1
+      intents_widget_top_candidates_min: 1
+      intents_widget_paid_sources_min: 2
+      intents_widget_paid_ready: true

@@ -55,6 +55,8 @@ pub struct FormatIntentsTradingWidgetInput {
     #[serde(default)]
     pub research_sources: Vec<String>,
     #[serde(default)]
+    pub paid_research_plan: Option<serde_json::Value>,
+    #[serde(default)]
     pub next_action: Option<String>,
 }
 
@@ -176,6 +178,8 @@ pub struct IntentsTradingWidgetState {
     pub source_count: usize,
     pub research_sources: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub paid_research: Option<IntentsPaidResearchSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub next_action: Option<String>,
 }
 
@@ -220,6 +224,50 @@ pub struct IntentMinOutPreview {
     pub chain: String,
     pub amount: String,
     pub value_usd: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct IntentsPaidResearchSummary {
+    pub schema_version: String,
+    pub query: String,
+    pub budget_usd: f64,
+    pub allocated_usd: f64,
+    pub unspent_usd: f64,
+    pub selected_count: usize,
+    pub ready_for_paid_fetch: bool,
+    pub ready_for_trade_research: bool,
+    pub payment_rails: Vec<IntentsPaidResearchRail>,
+    pub payable_sources: Vec<IntentsPayableResearchSource>,
+    pub near_funding_routes: Vec<IntentsPaidResearchFundingRoute>,
+    pub policy_gates: Vec<IntentsRiskGate>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct IntentsPaidResearchRail {
+    pub protocol: String,
+    pub count: usize,
+    pub allocated_usd: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct IntentsPayableResearchSource {
+    pub id: String,
+    pub title: String,
+    pub author: String,
+    pub protocol: String,
+    pub network: String,
+    pub amount_usd: f64,
+    pub evidence_weight: f64,
+    pub receipt_required: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct IntentsPaidResearchFundingRoute {
+    pub target_protocol: String,
+    pub target_network: String,
+    pub amount_usd: f64,
+    pub via: String,
 }
 
 fn default_mode() -> String {
@@ -351,6 +399,10 @@ pub fn format_intents_trading_widget(
             min_out,
         }
     });
+    let paid_research = input
+        .paid_research_plan
+        .as_ref()
+        .map(paid_research_summary_from_value);
 
     IntentsTradingWidgetState {
         schema_version: "intents-trading-widget/1",
@@ -365,6 +417,7 @@ pub fn format_intents_trading_widget(
         intent,
         source_count: input.research_sources.len(),
         research_sources: input.research_sources,
+        paid_research,
         next_action: input.next_action,
     }
 }
@@ -406,6 +459,119 @@ fn strategy_candidate_from_value(value: &serde_json::Value) -> IntentsStrategyCa
             .unwrap_or(0.0),
         trades: metrics.get("trades").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
     }
+}
+
+fn paid_research_summary_from_value(value: &serde_json::Value) -> IntentsPaidResearchSummary {
+    let selected_sources = value
+        .get("selected_sources")
+        .and_then(|sources| sources.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let payable_sources = selected_sources
+        .iter()
+        .take(6)
+        .map(|source| {
+            let payment = source.get("payment").unwrap_or(&serde_json::Value::Null);
+            let attribution = source
+                .get("attribution")
+                .unwrap_or(&serde_json::Value::Null);
+            IntentsPayableResearchSource {
+                id: string_field(source, "id", "source"),
+                title: string_field(source, "title", "Untitled source"),
+                author: string_field(source, "author", "Unknown author"),
+                protocol: string_field(payment, "protocol", "manual"),
+                network: string_field(payment, "network", "manual"),
+                amount_usd: number_field(payment, "amount_usd"),
+                evidence_weight: number_field(source, "evidence_weight"),
+                receipt_required: attribution
+                    .get("receipt_required")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+            }
+        })
+        .collect();
+
+    let payment_rails = value
+        .get("payment_rails")
+        .and_then(|rails| rails.as_array())
+        .into_iter()
+        .flatten()
+        .map(|rail| IntentsPaidResearchRail {
+            protocol: string_field(rail, "protocol", "manual"),
+            count: rail.get("count").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+            allocated_usd: number_field(rail, "allocated_usd"),
+        })
+        .collect();
+
+    let near_funding_routes = value
+        .get("near_funding_routes")
+        .and_then(|routes| routes.as_array())
+        .into_iter()
+        .flatten()
+        .map(|route| IntentsPaidResearchFundingRoute {
+            target_protocol: string_field(route, "target_protocol", "manual"),
+            target_network: string_field(route, "target_network", "manual"),
+            amount_usd: number_field(route, "amount_usd"),
+            via: string_field(route, "via", "near-intents"),
+        })
+        .collect();
+
+    let policy_gates = value
+        .get("policy_gates")
+        .and_then(|gates| gates.as_array())
+        .into_iter()
+        .flatten()
+        .map(|gate| IntentsRiskGate {
+            name: string_field(gate, "name", "paid-research-gate"),
+            status: string_field(gate, "status", "unknown"),
+            detail: gate
+                .get("detail")
+                .and_then(|detail| detail.as_str())
+                .map(|detail| detail.to_string()),
+        })
+        .collect();
+
+    let warnings = value
+        .get("warnings")
+        .and_then(|warnings| warnings.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|warning| warning.as_str().map(|warning| warning.to_string()))
+        .collect();
+
+    IntentsPaidResearchSummary {
+        schema_version: string_field(value, "schema_version", "paid-research-plan/1"),
+        query: string_field(value, "query", ""),
+        budget_usd: number_field(value, "budget_usd"),
+        allocated_usd: number_field(value, "allocated_usd"),
+        unspent_usd: number_field(value, "unspent_usd"),
+        selected_count: selected_sources.len(),
+        ready_for_paid_fetch: value
+            .get("ready_for_paid_fetch")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        ready_for_trade_research: value
+            .get("ready_for_trade_research")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        payment_rails,
+        payable_sources,
+        near_funding_routes,
+        policy_gates,
+        warnings,
+    }
+}
+
+fn string_field(value: &serde_json::Value, field: &str, default: &str) -> String {
+    value
+        .get(field)
+        .and_then(|v| v.as_str())
+        .unwrap_or(default)
+        .to_string()
+}
+
+fn number_field(value: &serde_json::Value, field: &str) -> f64 {
+    value.get(field).and_then(|v| v.as_f64()).unwrap_or(0.0)
 }
 
 fn compute_totals(input: &FormatWidgetInput) -> WidgetTotals {
@@ -785,6 +951,46 @@ mod tests {
                 quote_source: Some("fixture".to_string()),
             }),
             research_sources: vec!["https://docs.near-intents.org/".to_string()],
+            paid_research_plan: Some(serde_json::json!({
+                "schema_version": "paid-research-plan/1",
+                "query": "NEAR/BTC route risk",
+                "budget_usd": 0.05,
+                "allocated_usd": 0.02,
+                "unspent_usd": 0.03,
+                "ready_for_paid_fetch": true,
+                "ready_for_trade_research": true,
+                "payment_rails": [{
+                    "protocol": "x402",
+                    "count": 1,
+                    "allocated_usd": 0.02
+                }],
+                "selected_sources": [{
+                    "id": "paid-alpha-1",
+                    "title": "NEAR/BTC route risk",
+                    "author": "Researcher",
+                    "evidence_weight": 1.0,
+                    "payment": {
+                        "protocol": "x402",
+                        "network": "base",
+                        "amount_usd": 0.02
+                    },
+                    "attribution": {
+                        "receipt_required": true
+                    }
+                }],
+                "near_funding_routes": [{
+                    "target_protocol": "x402",
+                    "target_network": "base",
+                    "amount_usd": 0.02,
+                    "via": "near-intents"
+                }],
+                "policy_gates": [{
+                    "name": "receipt-before-use",
+                    "status": "pass",
+                    "detail": "Receipt required."
+                }],
+                "warnings": []
+            })),
             next_action: Some("Request live quote only after user approval.".to_string()),
         });
 
@@ -793,6 +999,10 @@ mod tests {
         assert!(w.top_candidates[0].passes_basic_gate);
         assert_eq!(w.intent.unwrap().status, "paper-built");
         assert_eq!(w.source_count, 1);
+        let paid_research = w.paid_research.unwrap();
+        assert_eq!(paid_research.selected_count, 1);
+        assert_eq!(paid_research.payable_sources[0].protocol, "x402");
+        assert_eq!(paid_research.near_funding_routes[0].via, "near-intents");
     }
 
     // ---- only ready proposals in suggestions ----

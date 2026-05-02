@@ -181,6 +181,10 @@
           "items": { "type": "string" },
           "default": []
         },
+        "paid_research_plan": {
+          "type": "object",
+          "description": "Optional output from plan_paid_research. The widget extracts budget, payable sources, rails, policy gates, and NEAR funding routes."
+        },
         "next_action": {
           "type": "string",
           "description": "Operator-facing next step shown in the widget."
@@ -313,6 +317,106 @@
         "slippage_bps": { "type": "number", "minimum": 0, "default": 5 }
       },
       "required": ["action", "candles", "candidates"]
+    },
+    {
+      "properties": {
+        "action": { "const": "plan_paid_research" },
+        "query": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Question or research task to answer before a trading decision."
+        },
+        "pair": {
+          "type": "string",
+          "description": "Optional watched pair, for example NEAR/BTC."
+        },
+        "budget_usd": {
+          "type": "number",
+          "minimum": 0,
+          "default": 5,
+          "description": "Maximum total spend across selected paid sources. Zero allows only free sources."
+        },
+        "max_sources": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 4,
+          "description": "Maximum number of sources to select."
+        },
+        "min_relevance": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.35,
+          "description": "Minimum relevance gate after explicit and lexical scoring."
+        },
+        "max_source_age_days": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Optional freshness gate for sources that include age_days."
+        },
+        "spending_mode": {
+          "type": "string",
+          "enum": ["plan-only", "quote", "autopay"],
+          "default": "plan-only",
+          "description": "plan-only and quote never authorize payment; autopay still requires a policy wallet outside this tool."
+        },
+        "near_funding_asset": {
+          "type": "string",
+          "default": "USDC.near",
+          "description": "NEAR-side asset to route from when funding external MPP/x402 rails through NEAR Intents."
+        },
+        "required_tags": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "All selected sources must include these tags when provided."
+        },
+        "blocked_publishers": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Authors or publishers to exclude from selection."
+        },
+        "sources": {
+          "type": "array",
+          "description": "Candidate free or paid sources discovered from newsletters, APIs, x402/MPP discovery, or project config.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "title": { "type": "string" },
+              "author": { "type": "string" },
+              "publisher": { "type": "string" },
+              "url": { "type": "string" },
+              "summary": { "type": "string" },
+              "tags": { "type": "array", "items": { "type": "string" }, "default": [] },
+              "price_usd": { "type": "number", "minimum": 0 },
+              "relevance": { "type": "number", "minimum": 0, "maximum": 1 },
+              "trust_score": { "type": "number", "minimum": 0, "maximum": 1 },
+              "freshness_score": { "type": "number", "minimum": 0, "maximum": 1 },
+              "age_days": { "type": "integer", "minimum": 0 },
+              "payment": {
+                "type": "object",
+                "description": "Payment rail metadata. This is planning data only; no payment is signed.",
+                "properties": {
+                  "protocol": {
+                    "type": "string",
+                    "enum": ["near-intents", "mpp", "x402", "subscription", "manual", "free"],
+                    "default": "manual"
+                  },
+                  "network": { "type": "string" },
+                  "asset": { "type": "string" },
+                  "recipient": { "type": "string" },
+                  "endpoint": { "type": "string" }
+                }
+              }
+            },
+            "required": ["id", "title", "author", "url"]
+          },
+          "default": []
+        }
+      },
+      "required": ["action", "query"]
     },
     {
       "properties": {

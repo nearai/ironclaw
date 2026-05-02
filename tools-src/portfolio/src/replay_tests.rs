@@ -719,6 +719,115 @@ fn check_expectations(path: &str, step: &Step, response: &Value, prior: &BTreeMa
                     step.name
                 );
             }
+            "paid_research_schema_version" => {
+                let v = response
+                    .get("schema_version")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| {
+                        panic!("[{path}] step '{}': missing schema_version", step.name)
+                    });
+                let want = expected
+                    .as_str()
+                    .expect("paid_research_schema_version: string");
+                assert_eq!(
+                    v, want,
+                    "[{path}] step '{}': paid research schema mismatch",
+                    step.name
+                );
+            }
+            "paid_research_selected_min" => {
+                let len = response
+                    .get("selected_sources")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                let want = expected
+                    .as_u64()
+                    .expect("paid_research_selected_min: number")
+                    as usize;
+                assert!(
+                    len >= want,
+                    "[{path}] step '{}': paid research selected {len} < min {want}",
+                    step.name
+                );
+            }
+            "paid_research_allocated_le" => {
+                let allocated = response
+                    .get("allocated_usd")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or_else(|| {
+                        panic!("[{path}] step '{}': missing allocated_usd", step.name)
+                    });
+                let want = expected
+                    .as_f64()
+                    .expect("paid_research_allocated_le: number");
+                assert!(
+                    allocated <= want + f64::EPSILON,
+                    "[{path}] step '{}': paid research allocated {allocated} > {want}",
+                    step.name
+                );
+            }
+            "paid_research_has_rail" => {
+                let rail = expected.as_str().expect("paid_research_has_rail: string");
+                let rails = response
+                    .get("payment_rails")
+                    .and_then(|v| v.as_array())
+                    .unwrap_or_else(|| {
+                        panic!("[{path}] step '{}': missing payment_rails", step.name)
+                    });
+                let found = rails
+                    .iter()
+                    .any(|item| item.get("protocol").and_then(|v| v.as_str()) == Some(rail));
+                assert!(
+                    found,
+                    "[{path}] step '{}': paid research rail '{rail}' not found",
+                    step.name
+                );
+            }
+            "paid_research_near_funding_routes_min" => {
+                let len = response
+                    .get("near_funding_routes")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                let want = expected
+                    .as_u64()
+                    .expect("paid_research_near_funding_routes_min: number")
+                    as usize;
+                assert!(
+                    len >= want,
+                    "[{path}] step '{}': NEAR funding routes {len} < min {want}",
+                    step.name
+                );
+            }
+            "intents_widget_paid_sources_min" => {
+                let len = response
+                    .pointer("/paid_research/payable_sources")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                let want = expected
+                    .as_u64()
+                    .expect("intents_widget_paid_sources_min: number")
+                    as usize;
+                assert!(
+                    len >= want,
+                    "[{path}] step '{}': intents widget paid sources {len} < min {want}",
+                    step.name
+                );
+            }
+            "intents_widget_paid_ready" => {
+                let got = response
+                    .pointer("/paid_research/ready_for_paid_fetch")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let want = expected.as_bool().expect("intents_widget_paid_ready: bool");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': paid research ready mismatch",
+                    step.name
+                );
+            }
             other => panic!(
                 "[{path}] step '{}': unknown expectation key '{other}'",
                 step.name
@@ -738,6 +847,7 @@ fn capture_vars(path: &str, step: &Step, response: &Value, vars: &mut BTreeMap<S
                 .get("proposals")
                 .cloned()
                 .unwrap_or(Value::Array(Vec::new())),
+            "paid_research_plan_var" => response.clone(),
             "first_ready_plan_var" => response
                 .get("proposals")
                 .and_then(|v| v.as_array())

@@ -55,5 +55,76 @@
     "https://docs.near-intents.org/near-intents/market-makers/bus/solver-relay",
     "https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint"
   ],
+  "paid_research": {
+    "schema_version": "paid-research-plan/1",
+    "query": "Should the NEAR/BTC paper intent use premium route and liquidity research before quoting?",
+    "budget_usd": 0.05,
+    "allocated_usd": 0.04,
+    "unspent_usd": 0.01,
+    "selected_count": 2,
+    "ready_for_paid_fetch": true,
+    "ready_for_trade_research": true,
+    "payment_rails": [
+      {
+        "protocol": "mpp",
+        "count": 1,
+        "allocated_usd": 0.02
+      },
+      {
+        "protocol": "x402",
+        "count": 1,
+        "allocated_usd": 0.02
+      }
+    ],
+    "payable_sources": [
+      {
+        "id": "premium-near-liquidity",
+        "title": "NEAR/BTC solver liquidity note",
+        "author": "Premium Macro Writer",
+        "protocol": "mpp",
+        "network": "tempo",
+        "amount_usd": 0.02,
+        "evidence_weight": 0.52,
+        "receipt_required": true
+      },
+      {
+        "id": "base-x402-route-risk",
+        "title": "Intent route risk memo",
+        "author": "Onchain Researcher",
+        "protocol": "x402",
+        "network": "base",
+        "amount_usd": 0.02,
+        "evidence_weight": 0.48,
+        "receipt_required": true
+      }
+    ],
+    "near_funding_routes": [
+      {
+        "target_protocol": "mpp",
+        "target_network": "tempo",
+        "amount_usd": 0.02,
+        "via": "near-intents"
+      },
+      {
+        "target_protocol": "x402",
+        "target_network": "base",
+        "amount_usd": 0.02,
+        "via": "near-intents"
+      }
+    ],
+    "policy_gates": [
+      {
+        "name": "receipt-before-use",
+        "status": "pass",
+        "detail": "Paywalled source text is used only after a payment receipt."
+      },
+      {
+        "name": "trade-gate",
+        "status": "pass",
+        "detail": "Premium research does not bypass backtest or risk gates."
+      }
+    ],
+    "warnings": []
+  },
   "next_action": "Ask the user before requesting a live NEAR Intents quote."
 }

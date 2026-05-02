@@ -35,6 +35,17 @@ initial scaffold.
 | [DefiLlama API](https://defillama.com/docs/api) | Protocol TVL, yields, unlocks, stablecoins, broader DeFi context. | Risk/catalyst context and yield comparison. | Great for gating and context, not execution. |
 | [CCXT](https://github.com/ccxt/ccxt) | Exchange OHLCV/order books/trades from many CEX venues. | Optional external research adapter. | Use public market data only unless user explicitly designs a separate API-key execution mode. |
 
+## Paid Research / Agent Payment Inventory
+
+| Source | Useful data | Fit for IronClaw | Notes |
+|---|---|---|---|
+| [DripStack](https://dripstack.xyz) | Premium financial newsletter discovery and paid full-post access. | Pattern for a paid research layer before trading decisions. | Paid routes are MPP/x402 gated; use only through receipt-backed paid-source flows. |
+| [DripStack OpenAPI](https://dripstack.xyz/openapi.json) | Free catalog endpoints and paid post endpoint metadata with HTTP 402 challenges. | Candidate source discovery adapter. | Runtime 402 challenges are authoritative over static pricing. |
+| [MPP](https://mpp.dev/) | HTTP-native machine payments for API requests, tool calls, and content. | Payment rail for paid research, not a trading execution rail. | Treat as external until IronClaw has a payment-client boundary. |
+| [Payment Authentication specs](https://paymentauth.org/) | Payment HTTP auth scheme, charge intent, discovery, and JSON-RPC/MCP transport. | Shape for paid MCP/tool calls and source fetches. | Useful for future MCP paid-source implementation. |
+| [x402 docs](https://docs.x402.org/) | HTTP 402 payment standard for APIs/content without accounts or sessions. | Base-compatible paid-source rail. | Do not mix x402 payment with NEAR intent signing; keep each receipt explicit. |
+| [Cloudflare x402 docs](https://developers.cloudflare.com/agents/agentic-payments/x402/) | Concrete 402 challenge/retry flow for agents. | Reference for the payment-client boundary. | Portfolio tool should plan and attribute; a wallet/payment client handles signatures. |
+
 ## Hyperliquid / "HL" Strategy Notes
 
 Assumption: "HL" means Hyperliquid. If the user meant another portal,
@@ -120,6 +131,9 @@ Minimum framework requirements before a strategy can build an intent:
 - Added `portfolio.backtest` for long-only spot strategy replay.
 - Added `portfolio.backtest_suite` to rank a strategy menu over a common
   candle episode.
+- Added `portfolio.plan_paid_research` to budget and attribute premium
+  research sources before using paid newsletter/API content in a trading
+  decision.
 - Added replay scenarios for individual strategies, suite ranking, and
   a swap-shaped unsigned intent bundle.
 - Added the first bundled strategy corpus:
@@ -129,6 +143,9 @@ Minimum framework requirements before a strategy can build an intent:
   funding carry watch, book imbalance gate, and perp momentum signal.
 - Added `portfolio.format_intents_widget` and a NEAR Intents project
   widget template so the workflow has an operator-facing IronClaw UI.
+- Added paid research attribution to the widget so selected sources,
+  MPP/x402 rails, and NEAR funding-route hints are visible before any
+  unsigned intent is built.
 
 ## Multi-Day Roadmap
 

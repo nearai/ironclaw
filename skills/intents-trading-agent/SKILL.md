@@ -42,8 +42,9 @@ bundles** that the user can inspect and sign in their own wallet.
 
 This skill is a research and orchestration layer. It does not replace
 the `portfolio` WASM tool. Use `portfolio.scan`, `portfolio.propose`,
-and `portfolio.build_intent` for positions, deterministic DeFi
-proposals, and intent bundle construction.
+`portfolio.plan_paid_research`, and `portfolio.build_intent` for
+positions, deterministic DeFi proposals, paid-source budgeting, and
+intent bundle construction.
 
 ## Non-negotiables
 
@@ -62,6 +63,11 @@ proposals, and intent bundle construction.
    after the risk manager approves it against project config.
 6. **Audit trail first.** Persist research, debate notes, risk checks,
    decisions, and built intents under `projects/intents-trading-agent/`.
+7. **Paid content requires receipts.** Paywalled newsletters, APIs, or
+   premium posts can be planned and attributed before use, but their
+   actual text must not be quoted or relied on until a payment receipt
+   exists. Writers/source owners must be credited when their paid work
+   contributes to an answer.
 
 ## Project bootstrap
 
@@ -83,6 +89,9 @@ using workspace writes. Initialize:
   "allowed_chains": [],
   "allowed_assets": ["NEAR", "USDC", "USDT", "BTC", "ETH"],
   "disallowed_assets": [],
+  "paid_research_budget_usd": 0.25,
+  "paid_research_max_sources": 4,
+  "paid_research_mode": "plan-only",
   "require_user_approval": true
 }
 ```
@@ -90,8 +99,11 @@ using workspace writes. Initialize:
 - `watchlist.md` - token pairs, chains, and theses the user cares about.
 - `addresses.md` - optional wallet addresses to scan.
 - `state/latest.json` and `state/history/`.
+- `sources/paid-research.json` - optional candidate premium sources and
+  payment metadata discovered from MPP, x402, NEAR-native, newsletter, or
+  API catalogs.
 - `research/`, `debates/`, `decisions/`, `risk/`, `intents/`,
-  `journal/`, and `widgets/`.
+  `journal/`, `paid-research/`, and `widgets/`.
 - `strategies/` - copy or reference the baseline strategy docs bundled
   with this skill (`sma-cross-spot`, `breakout-spot`,
   `momentum-spot`, `mean-reversion-spot`,
@@ -154,7 +166,56 @@ grounded.
 Write role outputs to
 `projects/intents-trading-agent/research/<YYYY-MM-DD>/<role>.md`.
 
-### 3. Strategy lab and backtest
+### 3. Paid research planning
+
+When the run would benefit from premium newsletters, research APIs, or
+paid posts, create a source plan before reading paywalled content. This
+is the DripStack-style pattern: the agent can decide which sources are
+worth paying for, but payment and attribution are explicit.
+
+Candidate sources may come from:
+
+- `projects/intents-trading-agent/sources/paid-research.json`,
+- public MPP or x402 service discovery,
+- a user-provided source list,
+- free/public research already collected by the analyst team.
+
+Call `portfolio` with:
+
+```json
+{
+  "action": "plan_paid_research",
+  "query": "<specific question the trade needs answered>",
+  "pair": "<pair>",
+  "budget_usd": 0.25,
+  "max_sources": 4,
+  "spending_mode": "plan-only",
+  "near_funding_asset": "USDC.near",
+  "sources": []
+}
+```
+
+The returned `paid-research-plan/1` is a budget and attribution plan,
+not a content fetch. Persist it to:
+
+`projects/intents-trading-agent/paid-research/<YYYY-MM-DDTHH-MM>-<pair>.json`
+
+Use the plan as follows:
+
+- If `ready_for_paid_fetch` is false, continue with free sources only.
+- If selected sources require MPP on Tempo or x402 on Base, treat
+  `near_funding_routes` as hints for how a NEAR Intents-funded treasury
+  could fund the rail wallet. This does not authorize the actual paid
+  fetch.
+- Never include paid source text in the answer or research memo until
+  the payment client returns a receipt.
+- When paid source text is used, include source IDs from
+  `selected_sources[].attribution.credit_id` in the answer and journal.
+- Paid research can change the thesis or confidence, but it cannot
+  bypass the strategy suite, backtest gates, risk gates, or unsigned-only
+  NEAR Intent boundary.
+
+### 4. Strategy lab and backtest
 
 Before a strategy can become a trade proposal, run a deterministic
 backtest when historical OHLCV candles are available. Prefer
@@ -204,7 +265,7 @@ Always run `buy-hold` as a benchmark when enough candles are available.
 Always present the top ranked suite candidates and rejected candidates
 separately so the user can see what was considered.
 
-### 4. Bull/bear debate
+### 5. Bull/bear debate
 
 Create two concise debate memos:
 
@@ -221,7 +282,7 @@ Then write a manager synthesis with:
 
 Persist to `projects/intents-trading-agent/debates/<YYYY-MM-DDTHH-MM>-<pair>.md`.
 
-### 5. Trader proposal
+### 6. Trader proposal
 
 Only create a trade proposal when the manager stance is
 `paper-intent` or `quote-intent`.
@@ -236,12 +297,13 @@ A proposal must include:
 - invalidation condition,
 - expiry or review time,
 - confidence,
-- risk gates and their pass/fail result.
+- risk gates and their pass/fail result,
+- paid research source IDs used, if any.
 
 The trade proposal is not executable by itself. It is a request for an
 unsigned intent bundle.
 
-### 6. Risk gates
+### 7. Risk gates
 
 Reject or downgrade to `watch` if any gate fails:
 
@@ -255,11 +317,13 @@ Reject or downgrade to `watch` if any gate fails:
 - no unresolved security/exploit concern
 - no existing conflicting pending intent
 - backtest gates pass when candles are available
+- paid source text is not used without receipts
+- paid research spend is within `paid_research_budget_usd`
 
 If `require_user_approval` is true, do not ask the user to sign; ask
 whether they want a live quote or want to keep it as paper.
 
-### 7. Build unsigned intent
+### 8. Build unsigned intent
 
 For an approved `paper-intent`, call `portfolio.build_intent` with
 `solver: "fixture"` so the output is clearly a deterministic test
@@ -313,19 +377,21 @@ For cross-chain moves, use ordered `withdraw`, `bridge`, `swap`, and
 Persist returned bundles to
 `projects/intents-trading-agent/intents/<YYYY-MM-DDTHH-MM>-<proposal_id>.json`.
 
-### 8. Format the project widget
+### 9. Format the project widget
 
 After every run, call `portfolio` with `action="format_intents_widget"`
 and pass the latest pair, stance, confidence, `backtest_suite`, risk
-gates, research sources, and optional unsigned `IntentBundle`.
+gates, research sources, optional `paid_research_plan`, and optional
+unsigned `IntentBundle`.
 
 Persist the returned JSON exactly as:
 
 `projects/intents-trading-agent/widgets/state.json`
 
 The bundled project widget reads this file and renders ranked strategy
-candidates, risk gates, and unsigned NEAR Intents status inside the
-IronClaw Projects view. If the widget files are not installed yet, copy:
+candidates, paid source attribution, risk gates, and unsigned NEAR
+Intents status inside the IronClaw Projects view. If the widget files are
+not installed yet, copy:
 
 - `skills/intents-trading-agent/widgets/near-intents-console/manifest.json`
 - `skills/intents-trading-agent/widgets/near-intents-console/index.js`
@@ -335,12 +401,14 @@ to:
 
 `projects/intents-trading-agent/.system/widgets/near-intents-console/`
 
-### 9. Response
+### 10. Response
 
 Respond with specifics:
 
 - stance and confidence,
 - top supporting and opposing evidence,
+- paid source budget, selected sources, and receipt status if premium
+  research was planned or used,
 - backtest summary versus buy-and-hold when available,
 - top strategy-suite candidates when available,
 - risk gate table,
