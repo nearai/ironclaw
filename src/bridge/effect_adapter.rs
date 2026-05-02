@@ -1230,20 +1230,21 @@ impl EffectBridgeAdapter {
         //
         // Engine actions (`mission_*`, routine aliases, `tool_info`) and
         // host tools both declare JSON Schemas for their parameters. Run
-        // both kinds through the same coercion the dispatcher path uses
-        // (`prepare_params_for_schema`) so the LLM can pass stringified
-        // scalars (`"120"` for an integer field) without breaking the
-        // handler. Schema sources, in order: orchestrator-populated
-        // action snapshot, bridge-known engine action defs, host tool
-        // registry. Coercion is idempotent for already-typed inputs, so
-        // tools whose downstream path runs `prepare_tool_params` again
-        // see the same shape.
+        // both kinds through the same coercion that `prepare_tool_params`
+        // applies for the v1 path so the LLM can pass stringified scalars
+        // (`"120"` for an integer field) without breaking the handler.
+        // Schema sources, in order: orchestrator-populated action
+        // snapshot, bridge-known engine action defs, host tool registry
+        // (via `discovery_schema()` to match `prepare_tool_params`).
+        // Once this runs, downstream sites in this method (sandbox-path
+        // validator, `execute_tool_with_safety`'s second `prepare_tool_params`)
+        // see already-coerced input — the second pass is idempotent.
         let action_schema = context
             .available_actions_snapshot
             .as_ref()
             .and_then(|snapshot| {
                 ActionDiscovery::resolve(snapshot.as_ref(), canonical_action_name)
-                    .map(|action| action.parameters_schema.clone())
+                    .map(|action| action.discovery_schema().clone())
             })
             .or_else(|| engine_action_schema(canonical_action_name));
         let action_schema = match action_schema {
@@ -1252,7 +1253,7 @@ impl EffectBridgeAdapter {
                 .tools
                 .get(&lookup_name)
                 .await
-                .map(|tool| tool.parameters_schema()),
+                .map(|tool| tool.discovery_schema()),
         };
         let parameters = match action_schema {
             Some(schema) => crate::tools::prepare_params_for_schema(&parameters, &schema),
@@ -1571,15 +1572,10 @@ impl EffectBridgeAdapter {
         // prompt-injection / param validation must run).
         let mounts_snapshot = self.workspace_mounts.read().await.as_ref().map(Arc::clone);
         let sandbox_result = if let Some(mounts) = mounts_snapshot {
-            // Normalize parameters the same way the host path does
-            // (`execute_tool_with_safety` → `prepare_tool_params`) so
-            // validation sees consistent types (e.g. string "true" → bool).
-            let normalized = if let Some(tool) = self.tools.get(&lookup_name).await {
-                crate::tools::prepare_tool_params(tool.as_ref(), &parameters)
-            } else {
-                parameters.clone()
-            };
-            let validation = self.safety.validator().validate_tool_params(&normalized);
+            // `parameters` was already coerced by the schema-guided
+            // pre-amble above; both the validator and the mount backend
+            // see the same shape that `execute_tool_with_safety` would.
+            let validation = self.safety.validator().validate_tool_params(&parameters);
             if !validation.is_valid {
                 let details = validation
                     .errors
@@ -1594,7 +1590,7 @@ impl EffectBridgeAdapter {
                     },
                 )))
             } else {
-                match maybe_intercept(&lookup_name, &normalized, context.project_id, &mounts).await
+                match maybe_intercept(&lookup_name, &parameters, context.project_id, &mounts).await
                 {
                     Ok(InterceptOutcome::Handled(s)) => Some(Ok(s)),
                     Ok(InterceptOutcome::FellThrough) => None,
