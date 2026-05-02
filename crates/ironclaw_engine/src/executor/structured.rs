@@ -895,7 +895,14 @@ mod tests {
             "test-user",
             ThreadConfig::default(),
         );
-        let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(vec![], vec![]));
+        // Inventory contains `web_search` (so the callable-inventory
+        // gate passes), but no lease is granted — the lease lookup is
+        // the failure point this test exercises. Without `web_search`
+        // in the inventory, preflight short-circuits on
+        // "action is not callable in this execution context" before
+        // ever reaching the lease check.
+        let effects: Arc<dyn EffectExecutor> =
+            Arc::new(MockEffects::new(vec![test_action("web_search")], vec![]));
         let leases = Arc::new(LeaseManager::new());
         let policy = Arc::new(PolicyEngine::new());
         let ctx = make_exec_context(&thread);
