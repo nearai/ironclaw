@@ -397,6 +397,41 @@ async fn builtin_obligation_handler_reports_resource_ceiling_output_bytes_as_out
 }
 
 #[tokio::test]
+async fn builtin_obligation_handler_resource_ceiling_output_bytes_uses_published_output_size() {
+    let handler = BuiltinObligationHandler::new();
+    let context = execution_context(CapabilitySet::default());
+    let capability_id = capability_id();
+    let estimate = ResourceEstimate::default();
+    let obligations = vec![Obligation::EnforceResourceCeiling {
+        ceiling: ResourceCeiling {
+            max_usd: None,
+            max_input_tokens: None,
+            max_output_tokens: None,
+            max_wall_clock_ms: None,
+            max_output_bytes: Some(32),
+            sandbox: None,
+        },
+    }];
+    let mut dispatch =
+        sample_dispatch(&context.resource_scope, &capability_id, json!({"ok": true}));
+    dispatch.usage.output_bytes = 1024;
+
+    let completed = handler
+        .complete_dispatch(CapabilityObligationCompletionRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+            dispatch: &dispatch,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(completed.output, json!({"ok": true}));
+}
+
+#[tokio::test]
 async fn builtin_obligation_handler_enforces_resource_ceiling_after_dispatch_usage() {
     let handler = BuiltinObligationHandler::new();
     let context = execution_context(CapabilitySet::default());

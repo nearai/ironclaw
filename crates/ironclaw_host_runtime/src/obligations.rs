@@ -907,10 +907,7 @@ fn validate_usage_within_ceiling(
     check_decimal_ceiling(usage.usd, ceiling.max_usd)?;
     check_integer_ceiling(usage.input_tokens, ceiling.max_input_tokens)?;
     check_integer_ceiling(usage.output_tokens, ceiling.max_output_tokens)?;
-    check_output_bytes_ceiling(
-        usage.output_bytes.max(output_bytes),
-        ceiling.max_output_bytes,
-    )?;
+    check_output_bytes_ceiling(output_bytes, ceiling.max_output_bytes)?;
     Ok(())
 }
 
