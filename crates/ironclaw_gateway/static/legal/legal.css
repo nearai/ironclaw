@@ -271,6 +271,77 @@ h2 { margin: 0 0 12px; font-size: 18px; font-weight: 600; }
 .composer textarea { flex: 1; }
 .composer button { white-space: nowrap; }
 
+/* --- Search results --- */
+.list-item .item-snippet {
+  font-size: 13px;
+  color: var(--muted);
+  margin-top: 6px;
+  line-height: 1.5;
+}
+.list-item .item-snippet mark {
+  background: rgba(216,180,106,0.25);
+  color: var(--gold);
+  padding: 0 2px;
+  border-radius: 3px;
+}
+
+/* --- Tabular review --- */
+.review-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.review-form label {
+  font-size: 13px;
+  color: var(--muted);
+  font-weight: 500;
+}
+.review-results { overflow-x: auto; }
+.review-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+.review-table th,
+.review-table td {
+  border: 1px solid var(--border);
+  padding: 10px 12px;
+  vertical-align: top;
+  text-align: left;
+}
+.review-table th {
+  background: var(--bg-elev);
+  color: var(--text);
+  font-weight: 600;
+  position: sticky;
+  top: 0;
+}
+.review-table th:first-child,
+.review-table td:first-child {
+  background: var(--bg-card);
+  position: sticky;
+  left: 0;
+  font-weight: 600;
+  min-width: 160px;
+}
+.review-table .cell-error {
+  color: var(--error);
+  font-style: italic;
+  font-size: 13px;
+}
+
+/* --- Buttons & per-item actions --- */
+button.danger { color: var(--error); border-color: rgba(255,93,108,0.4); }
+button.danger:hover { border-color: var(--error); background: rgba(255,93,108,0.05); }
+.chat-actions { display: flex; gap: 6px; }
+.list-item .item-actions { display: flex; gap: 4px; align-items: center; }
+.list-item .item-actions button {
+  padding: 6px 10px;
+  font-size: 12px;
+  min-height: 32px;
+}
+
 /* --- Toast --- */
 .toast {
   position: fixed;

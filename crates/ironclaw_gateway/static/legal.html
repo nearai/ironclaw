@@ -48,12 +48,17 @@
         <p id="projects-empty" class="muted" hidden>No projects yet. Create one above.</p>
       </section>
 
-      <!-- Project detail (documents + chats) -->
+      <!-- Project detail (documents + chats + review + search) -->
       <section id="view-project" class="view" hidden>
-        <h2 id="project-title"></h2>
+        <div class="view-header">
+          <h2 id="project-title"></h2>
+          <button id="delete-project-btn" class="ghost compact danger">Delete project…</button>
+        </div>
         <div class="tabs">
           <button class="tab active" data-tab="documents">Documents</button>
           <button class="tab" data-tab="chats">Chats</button>
+          <button class="tab" data-tab="search">Search</button>
+          <button class="tab" data-tab="review">Review</button>
         </div>
 
         <div id="tab-documents" class="tab-panel">
@@ -74,13 +79,36 @@
           <ul id="chat-list" class="list"></ul>
           <p id="chats-empty" class="muted" hidden>No chats yet. Create one to ask questions about the project's documents.</p>
         </div>
+
+        <div id="tab-search" class="tab-panel" hidden>
+          <form id="search-form" class="inline-form">
+            <input id="search-input" type="text" placeholder="Search this project (FTS5 syntax: word, AND, OR, prefix*)" autocomplete="off">
+            <button type="submit" class="primary compact">Search</button>
+          </form>
+          <div id="search-status" class="muted" hidden></div>
+          <ul id="search-results" class="list"></ul>
+        </div>
+
+        <div id="tab-review" class="tab-panel" hidden>
+          <p class="muted">Run a question (or several) against every document in the project. Each row in the result is one document; each cell is the assistant's answer for that question against that document.</p>
+          <form id="review-form" class="review-form">
+            <label for="review-questions">Questions (one per line)</label>
+            <textarea id="review-questions" rows="4" placeholder="Who are the parties?&#10;What is the term?&#10;Is there an indemnification clause?"></textarea>
+            <button type="submit" class="primary compact">Run review</button>
+          </form>
+          <div id="review-status" class="status" hidden></div>
+          <div id="review-results" class="review-results"></div>
+        </div>
       </section>
 
       <!-- Chat view -->
       <section id="view-chat" class="view chat-view" hidden>
         <div class="chat-header">
           <h2 id="chat-title">Chat</h2>
-          <button id="export-docx-btn" class="ghost compact">Export DOCX</button>
+          <div class="chat-actions">
+            <button id="export-docx-btn" class="ghost compact">Export DOCX</button>
+            <button id="export-pdf-btn" class="ghost compact">Export PDF</button>
+          </div>
         </div>
         <div id="messages" class="messages"></div>
         <form id="composer" class="composer">

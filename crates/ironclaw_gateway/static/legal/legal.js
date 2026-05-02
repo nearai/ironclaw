@@ -174,13 +174,27 @@
         const sizeKB = d.bytes ? Math.max(1, Math.round(d.bytes / 1024)) : 0;
         li.innerHTML =
           '<div><div class="item-title"></div><div class="item-sub"></div></div>' +
+          '<div class="item-actions">' +
           '<div class="item-meta">' +
           (sizeKB ? sizeKB + " KB" : "") +
+          "</div>" +
+          '<button type="button" class="ghost danger" data-action="delete-doc">Delete</button>' +
           "</div>";
         li.querySelector(".item-title").textContent = d.filename;
         li.querySelector(".item-sub").textContent =
           (d.content_type || "").replace(/^application\//, "") +
           (d.page_count ? " · " + d.page_count + " pages" : "");
+        li.querySelector('button[data-action="delete-doc"]').addEventListener("click", async (ev) => {
+          ev.stopPropagation();
+          if (!confirm('Delete "' + d.filename + '"? This also removes the underlying file.')) return;
+          try {
+            await api("/documents/" + encodeURIComponent(d.id), { method: "DELETE" });
+            await loadDocuments(projectId);
+            toast("Document deleted");
+          } catch (err) {
+            toast(err.message, "error");
+          }
+        });
         list.appendChild(li);
       }
       // Update state cache for chat-view "no docs" detection.
@@ -225,6 +239,173 @@
     });
     $("tab-documents").hidden = name !== "documents";
     $("tab-chats").hidden = name !== "chats";
+    $("tab-search").hidden = name !== "search";
+    $("tab-review").hidden = name !== "review";
+  };
+
+  // --- Project deletion (hard, with confirm) ---
+  $("delete-project-btn").addEventListener("click", async () => {
+    if (!state.project) return;
+    const name = state.project.name;
+    if (!confirm("Permanently delete project \"" + name + "\"? This drops every document, chat and message under it. This cannot be undone.")) return;
+    try {
+      await api("/projects/" + encodeURIComponent(state.project.id) + "?hard=true", { method: "DELETE" });
+      toast("Project deleted");
+      renderProjects();
+    } catch (e) {
+      toast(e.message, "error");
+    }
+  });
+
+  // --- Search ---
+  const searchForm = document.getElementById("search-form");
+  if (searchForm) {
+    searchForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      if (!state.project) return;
+      const q = $("search-input").value.trim();
+      if (!q) return;
+      const status = $("search-status");
+      status.textContent = "Searching…";
+      status.hidden = false;
+      try {
+        const params = new URLSearchParams({ q });
+        const data = await api(
+          "/projects/" + encodeURIComponent(state.project.id) + "/search?" + params.toString(),
+        );
+        renderSearchResults(data);
+        status.hidden = true;
+      } catch (err) {
+        status.textContent = "Error: " + err.message;
+      }
+    });
+  }
+  const renderSearchResults = (data) => {
+    const list = $("search-results");
+    list.innerHTML = "";
+    const hits = data.hits || [];
+    if (!hits.length) {
+      const li = document.createElement("li");
+      li.className = "muted";
+      li.textContent = "No results.";
+      list.appendChild(li);
+      return;
+    }
+    for (const h of hits) {
+      const li = document.createElement("li");
+      li.className = "list-item";
+      li.innerHTML =
+        '<div style="flex:1">' +
+        '<div class="item-title"></div>' +
+        '<div class="item-snippet"></div>' +
+        "</div>";
+      li.querySelector(".item-title").textContent = h.filename;
+      // The snippet contains <mark>...</mark> highlights from FTS5.
+      // Sanitise everything else: replace any other angle-brackets with
+      // their HTML entities so we never inject arbitrary markup, then
+      // restore the <mark> we trust.
+      const safe = (h.snippet || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/&lt;mark&gt;/g, "<mark>")
+        .replace(/&lt;\/mark&gt;/g, "</mark>");
+      li.querySelector(".item-snippet").innerHTML = safe;
+      list.appendChild(li);
+    }
+  };
+
+  // --- Tabular review ---
+  const reviewForm = document.getElementById("review-form");
+  if (reviewForm) {
+    reviewForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      if (!state.project) return;
+      const raw = $("review-questions").value;
+      const questions = raw
+        .split("\n")
+        .map((q) => q.trim())
+        .filter((q) => q.length > 0);
+      if (!questions.length) {
+        showReviewStatus("Add at least one question, one per line.", "err");
+        return;
+      }
+      showReviewStatus("Running review… (sequential per-cell LLM calls — may take a moment)", "ok");
+      try {
+        const data = await api(
+          "/projects/" + encodeURIComponent(state.project.id) + "/tabular-review",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ questions }),
+          },
+        );
+        renderReviewResults(data);
+        showReviewStatus(
+          (data.llm_calls || 0) + " LLM calls" +
+            (data.model_used ? " · model: " + data.model_used : ""),
+          "ok",
+        );
+      } catch (err) {
+        showReviewStatus(err.message, "err");
+      }
+    });
+  }
+  const showReviewStatus = (msg, kind) => {
+    const el = $("review-status");
+    el.textContent = msg;
+    el.className = "status " + kind;
+    el.hidden = false;
+  };
+  const renderReviewResults = (data) => {
+    const out = $("review-results");
+    out.innerHTML = "";
+    const rows = data.rows || [];
+    if (!rows.length) {
+      const p = document.createElement("p");
+      p.className = "muted";
+      p.textContent = "No documents to review (project is empty).";
+      out.appendChild(p);
+      return;
+    }
+    const table = document.createElement("table");
+    table.className = "review-table";
+    const questions = (rows[0].answers || []).map((a) => a.question);
+    const thead = document.createElement("thead");
+    const headTr = document.createElement("tr");
+    const blank = document.createElement("th");
+    blank.textContent = "Document";
+    headTr.appendChild(blank);
+    for (const q of questions) {
+      const th = document.createElement("th");
+      th.textContent = q;
+      headTr.appendChild(th);
+    }
+    thead.appendChild(headTr);
+    table.appendChild(thead);
+
+    const tbody = document.createElement("tbody");
+    for (const row of rows) {
+      const tr = document.createElement("tr");
+      const docCell = document.createElement("td");
+      docCell.textContent = row.filename;
+      tr.appendChild(docCell);
+      for (const ans of row.answers || []) {
+        const td = document.createElement("td");
+        if (ans.error) {
+          const span = document.createElement("span");
+          span.className = "cell-error";
+          span.textContent = ans.error;
+          td.appendChild(span);
+        } else {
+          td.textContent = ans.answer || "";
+        }
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    out.appendChild(table);
   };
 
   // --- Document upload ---
@@ -373,20 +554,25 @@
     return { event, data: json };
   };
 
-  // --- Export DOCX ---
-  $("export-docx-btn").addEventListener("click", async () => {
+  // --- Export DOCX / PDF ---
+  const downloadChatExport = async (suffix, mime) => {
     if (!state.chat) return;
     try {
       const res = await fetch(
-        API_BASE + "/chats/" + encodeURIComponent(state.chat.id) + "/export.docx",
+        API_BASE + "/chats/" + encodeURIComponent(state.chat.id) + "/export." + suffix,
         { method: "POST", headers: headers() },
       );
-      if (!res.ok) throw new Error("Export failed (" + res.status + ")");
+      if (!res.ok) {
+        let body = "";
+        try { body = await res.text(); } catch {}
+        const msg = body || ("Export failed (" + res.status + ")");
+        throw new Error(msg);
+      }
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = "chat-" + state.chat.id + ".docx";
+      a.download = "chat-" + state.chat.id + "." + suffix;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -394,7 +580,12 @@
     } catch (e) {
       toast(e.message, "error");
     }
-  });
+  };
+  $("export-docx-btn").addEventListener("click", () => downloadChatExport("docx"));
+  const exportPdfBtn = document.getElementById("export-pdf-btn");
+  if (exportPdfBtn) {
+    exportPdfBtn.addEventListener("click", () => downloadChatExport("pdf"));
+  }
 
   // --- View switching ---
   const showOnly = (id) => {
