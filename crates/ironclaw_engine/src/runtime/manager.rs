@@ -96,6 +96,37 @@ impl ThreadManager {
     ) -> Result<ThreadId, EngineError> {
         self.spawn_thread_with_history(
             goal,
+            None,
+            thread_type,
+            project_id,
+            config,
+            parent_id,
+            user_id,
+            Vec::new(),
+            serde_json::Map::new(),
+        )
+        .await
+    }
+
+    /// Spawn a new thread with an explicit sidebar title.
+    ///
+    /// Callers with a semantic short label (e.g. mission name) should
+    /// use this; everything else can rely on `spawn_thread` + the
+    /// read-side fallback that derives a short title from `goal`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn spawn_thread_with_title(
+        &self,
+        goal: impl Into<String>,
+        title: Option<String>,
+        thread_type: ThreadType,
+        project_id: ProjectId,
+        config: ThreadConfig,
+        parent_id: Option<ThreadId>,
+        user_id: impl Into<String>,
+    ) -> Result<ThreadId, EngineError> {
+        self.spawn_thread_with_history(
+            goal,
+            title,
             thread_type,
             project_id,
             config,
@@ -122,39 +153,7 @@ impl ThreadManager {
     pub async fn spawn_thread_with_history(
         &self,
         goal: impl Into<String>,
-        thread_type: ThreadType,
-        project_id: ProjectId,
-        config: ThreadConfig,
-        parent_id: Option<ThreadId>,
-        user_id: impl Into<String>,
-        initial_messages: Vec<crate::types::message::ThreadMessage>,
-        initial_metadata: serde_json::Map<String, serde_json::Value>,
-    ) -> Result<ThreadId, EngineError> {
-        self.spawn_thread_with_history_and_current_message(
-            goal,
-            None,
-            thread_type,
-            project_id,
-            config,
-            parent_id,
-            user_id,
-            initial_messages,
-            initial_metadata,
-        )
-        .await
-    }
-
-    /// Spawn a thread with initial conversation history and, optionally, a
-    /// current user message distinct from the display goal.
-    ///
-    /// The separate `current_user_message` is for channel pipelines that augment
-    /// the LLM-facing message with attachment/OCR blocks while keeping
-    /// user-visible thread surfaces such as `Thread.goal` derived from raw text.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn spawn_thread_with_history_and_current_message(
-        &self,
-        goal: impl Into<String>,
-        current_user_message: Option<String>,
+        title: Option<String>,
         thread_type: ThreadType,
         project_id: ProjectId,
         config: ThreadConfig,
@@ -164,12 +163,13 @@ impl ThreadManager {
         initial_metadata: serde_json::Map<String, serde_json::Value>,
     ) -> Result<ThreadId, EngineError> {
         let user_id = user_id.into();
-        let goal = goal.into();
-        let current_user_message = current_user_message.unwrap_or_else(|| goal.clone());
         let mut thread = Thread::new(goal, thread_type, project_id, &user_id, config);
         if let Some(pid) = parent_id {
             thread = thread.with_parent(pid);
         }
+        // Set the title before save_thread + start_thread so the
+        // executor's in-memory thread observes it atomically.
+        thread.title = title;
         let thread_id = thread.id;
 
         // Apply initial metadata before save_thread + start_thread so the
@@ -211,12 +211,8 @@ impl ThreadManager {
             thread.messages.push(msg);
         }
 
-        // Add the current user message so the LLM has context. For ordinary
-        // callers this is the goal; attachment-aware callers can pass the
-        // augmented payload here while keeping `thread.goal` display-safe.
-        thread.add_message(crate::types::message::ThreadMessage::user(
-            current_user_message,
-        ));
+        // Add the goal as the current user message so the LLM has context
+        thread.add_message(crate::types::message::ThreadMessage::user(&thread.goal));
 
         // Persist
         self.store.save_thread(&thread).await?;
@@ -391,9 +387,13 @@ impl ThreadManager {
 
             let outcome = match result {
                 Ok(outcome) => outcome,
-                Err(error) => ThreadOutcome::Failed {
-                    error: error.to_string(),
-                },
+                Err(error) => {
+                    let debug_detail = error.debug_detail().map(|s| s.to_string());
+                    ThreadOutcome::Failed {
+                        error: error.to_string(),
+                        debug_detail,
+                    }
+                }
             };
             completed.write().await.insert(thread_id, outcome.clone());
             running.write().await.remove(&thread_id);
@@ -527,6 +527,7 @@ impl ThreadManager {
                         error!(thread_id = %thread_id, "thread task panicked: {e}");
                         Ok(ThreadOutcome::Failed {
                             error: format!("thread task panicked: {e}"),
+                            debug_detail: None,
                         })
                     }
                 };
@@ -676,7 +677,9 @@ fn is_resolved_action_result_message(message: &ThreadMessage, call_id: &str) -> 
 mod tests {
     use super::*;
     use crate::traits::llm::{LlmCallConfig, LlmOutput};
-    use crate::types::capability::{ActionDef, Capability, CapabilityLease, EffectType};
+    use crate::types::capability::{
+        ActionDef, Capability, CapabilityLease, EffectType, ModelToolSurface,
+    };
     use crate::types::event::ThreadEvent;
     use crate::types::memory::{DocId, MemoryDoc};
     use crate::types::project::Project;
@@ -777,7 +780,16 @@ mod tests {
         async fn available_actions(
             &self,
             _: &[CapabilityLease],
+            _: &crate::traits::effect::ThreadExecutionContext,
         ) -> Result<Vec<ActionDef>, EngineError> {
+            Ok(vec![])
+        }
+
+        async fn available_capabilities(
+            &self,
+            _: &[CapabilityLease],
+            _: &crate::traits::effect::ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::CapabilitySummary>, EngineError> {
             Ok(vec![])
         }
     }
@@ -809,8 +821,17 @@ mod tests {
         async fn available_actions(
             &self,
             _: &[CapabilityLease],
+            _: &crate::traits::effect::ThreadExecutionContext,
         ) -> Result<Vec<ActionDef>, EngineError> {
             Ok(self.actions.read().await.clone())
+        }
+
+        async fn available_capabilities(
+            &self,
+            _: &[CapabilityLease],
+            _: &crate::traits::effect::ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::CapabilitySummary>, EngineError> {
+            Ok(vec![])
         }
     }
 
@@ -986,6 +1007,8 @@ mod tests {
                 parameters_schema: serde_json::json!({}),
                 effects: vec![EffectType::ReadLocal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
             }],
             knowledge: vec![],
             policies: vec![],
@@ -1012,6 +1035,8 @@ mod tests {
                 parameters_schema: serde_json::json!({}),
                 effects: vec![EffectType::ReadLocal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
             }],
             knowledge: vec![],
             policies: vec![],
@@ -1042,6 +1067,8 @@ mod tests {
                 parameters_schema: serde_json::json!({}),
                 effects: vec![EffectType::WriteLocal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
             }],
             knowledge: vec![],
             policies: vec![],
@@ -1081,6 +1108,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn spawn_thread_defaults_title_to_none() {
+        // Regression: without explicit title, the persisted thread has
+        // title = None — so the gateway falls back to deriving from goal
+        // rather than showing stale data.
+        let mgr = make_manager(MockLlm::text("done"));
+        let tid = mgr
+            .spawn_thread(
+                "some long goal",
+                ThreadType::Foreground,
+                ProjectId::new(),
+                ThreadConfig::default(),
+                None,
+                "user",
+            )
+            .await
+            .unwrap();
+        let _ = mgr.join_thread(tid).await.unwrap();
+        let loaded = mgr.store.load_thread(tid).await.unwrap().unwrap();
+        assert_eq!(loaded.title, None);
+    }
+
+    #[tokio::test]
+    async fn spawn_thread_with_title_persists_title() {
+        // Regression: mission-spawned threads pass `Some(mission.name)` so
+        // the sidebar shows the short label instead of the multi-paragraph
+        // meta-prompt that lives in `goal`.
+        let mgr = make_manager(MockLlm::text("done"));
+        let long_goal = "a".repeat(2000);
+        let tid = mgr
+            .spawn_thread_with_title(
+                &long_goal,
+                Some("Daily summary".to_string()),
+                ThreadType::Mission,
+                ProjectId::new(),
+                ThreadConfig::default(),
+                None,
+                "user",
+            )
+            .await
+            .unwrap();
+        let _ = mgr.join_thread(tid).await.unwrap();
+        let loaded = mgr.store.load_thread(tid).await.unwrap().unwrap();
+        assert_eq!(loaded.title.as_deref(), Some("Daily summary"));
+        assert_eq!(loaded.goal.len(), 2000);
+    }
+
+    #[tokio::test]
+    async fn spawn_thread_with_history_persists_derived_title() {
+        // Regression: foreground gateway threads pass a derived short
+        // title; without this, the sidebar would show the full first
+        // user message.
+        let mgr = make_manager(MockLlm::text("done"));
+        let long_message =
+            "first line of a user message\nsecond line that should be ignored".to_string();
+        let derived = Thread::derive_title_from_message(&long_message);
+        assert_eq!(derived.as_deref(), Some("first line of a user message"));
+
+        let tid = mgr
+            .spawn_thread_with_history(
+                long_message,
+                derived.clone(),
+                ThreadType::Foreground,
+                ProjectId::new(),
+                ThreadConfig::default(),
+                None,
+                "user",
+                Vec::new(),
+                serde_json::Map::new(),
+            )
+            .await
+            .unwrap();
+        let _ = mgr.join_thread(tid).await.unwrap();
+        let loaded = mgr.store.load_thread(tid).await.unwrap().unwrap();
+        assert_eq!(loaded.title, derived);
+    }
+
+    #[tokio::test]
     async fn resume_reconciles_tool_lease_with_newly_available_actions() {
         let store = Arc::new(MockStore::new());
         let effects = DynamicEffects::new(vec![ActionDef {
@@ -1089,6 +1193,8 @@ mod tests {
             parameters_schema: serde_json::json!({}),
             effects: vec![EffectType::WriteLocal],
             requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
+            discovery: None,
         }]);
         let mgr = make_manager_with_effects(MockLlm::text("done"), store, effects.clone());
 
@@ -1125,6 +1231,8 @@ mod tests {
                     parameters_schema: serde_json::json!({}),
                     effects: vec![EffectType::WriteLocal],
                     requires_approval: false,
+                    model_tool_surface: ModelToolSurface::FullSchema,
+                    discovery: None,
                 },
                 ActionDef {
                     name: "notion_search".into(),
@@ -1132,6 +1240,8 @@ mod tests {
                     parameters_schema: serde_json::json!({}),
                     effects: vec![EffectType::ReadExternal],
                     requires_approval: false,
+                    model_tool_surface: ModelToolSurface::CompactToolInfo,
+                    discovery: None,
                 },
             ])
             .await;
@@ -1161,6 +1271,8 @@ mod tests {
                 parameters_schema: serde_json::json!({}),
                 effects: vec![EffectType::WriteLocal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
             },
             ActionDef {
                 name: "notion_search".into(),
@@ -1168,6 +1280,8 @@ mod tests {
                 parameters_schema: serde_json::json!({}),
                 effects: vec![EffectType::ReadExternal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::CompactToolInfo,
+                discovery: None,
             },
         ]);
         let mgr = make_manager_with_effects(MockLlm::text("done"), store, effects);
@@ -1200,6 +1314,8 @@ mod tests {
             parameters_schema: serde_json::json!({}),
             effects: vec![EffectType::WriteLocal],
             requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
+            discovery: None,
         }];
         let revealed_actions = vec![
             ActionDef {
@@ -1208,6 +1324,8 @@ mod tests {
                 parameters_schema: serde_json::json!({}),
                 effects: vec![EffectType::WriteLocal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
             },
             ActionDef {
                 name: "notion_search".into(),
@@ -1215,6 +1333,8 @@ mod tests {
                 parameters_schema: serde_json::json!({}),
                 effects: vec![EffectType::ReadExternal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::CompactToolInfo,
+                discovery: None,
             },
         ];
         let effects = DynamicEffects::new(initial_actions);

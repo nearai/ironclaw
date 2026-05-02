@@ -222,6 +222,11 @@ pub struct CredentialMapping {
     pub location: CredentialLocation,
     /// Host patterns this credential applies to (glob syntax).
     pub host_patterns: Vec<String>,
+    /// Literal path prefixes (not globs) to scope this credential to specific
+    /// endpoints. When empty, matches all paths on the host. When set, the
+    /// request path must match a prefix at a segment boundary (`/` or `?`).
+    #[serde(default)]
+    pub path_patterns: Vec<String>,
     /// When `true`, the tool may run without this credential — the host
     /// is allowed to skip the mapping if the secret cannot be resolved.
     /// **Defaults to `false` (required)** so a tool that simply declares
@@ -232,11 +237,38 @@ pub struct CredentialMapping {
 }
 
 impl CredentialMapping {
+    /// Returns true if this mapping matches the given host and path.
+    ///
+    /// Path matching requires a segment boundary: the path must equal the
+    /// prefix exactly, or the character after the prefix must be `/` or `?`.
+    /// This prevents `/account/info-steal` from matching `/account/info`.
+    pub fn matches(&self, host: &str, path: &str) -> bool {
+        if !self.matches_host(host) {
+            return false;
+        }
+        if self.path_patterns.is_empty() {
+            return true;
+        }
+        self.path_patterns
+            .iter()
+            .any(|prefix| path_matches_prefix(path, prefix))
+    }
+
+    /// Check host patterns only (ignoring path_patterns).
+    /// Used by `has_credentials_for_host` where we need to know if ANY
+    /// credential exists for a host, regardless of path scoping.
+    pub fn matches_host(&self, host: &str) -> bool {
+        self.host_patterns
+            .iter()
+            .any(|pattern| host_matches_pattern(host, pattern))
+    }
+
     pub fn bearer(secret_name: impl Into<String>, host_pattern: impl Into<String>) -> Self {
         Self {
             secret_name: secret_name.into(),
             location: CredentialLocation::AuthorizationBearer,
             host_patterns: vec![host_pattern.into()],
+            path_patterns: Vec::new(),
             optional: false,
         }
     }
@@ -253,9 +285,158 @@ impl CredentialMapping {
                 prefix: None,
             },
             host_patterns: vec![host_pattern.into()],
+            path_patterns: Vec::new(),
             optional: false,
         }
     }
+}
+
+/// Match `path` against a literal prefix with segment-boundary enforcement.
+/// After the prefix, the path must end or continue with `/` or `?`.
+///
+/// A segment that decodes to `.` or `..` is rejected (traversal). This
+/// covers both literal `..` and percent-encoded variants like `%2e%2e`,
+/// `%2e`, `%2E.`, etc. — every form that a server might normalize to a
+/// dot-segment before routing. Legitimate segments with embedded encoded
+/// dots (e.g. `foo%2ebar` → `foo.bar`, `v1%2e2` → `v1.2`) are allowed
+/// because the decoded segment is neither `.` nor `..`.
+pub(crate) fn path_matches_prefix(path: &str, prefix: &str) -> bool {
+    if path_has_dot_segment(path) {
+        return false;
+    }
+    let path = path.strip_suffix('/').unwrap_or(path);
+    let prefix = prefix.strip_suffix('/').unwrap_or(prefix);
+    if path == prefix {
+        return true;
+    }
+    if path.len() > prefix.len() && path.starts_with(prefix) {
+        let next_char = path.as_bytes()[prefix.len()];
+        return next_char == b'/' || next_char == b'?';
+    }
+    false
+}
+
+/// Compute the specificity of `mapping` relative to `req_path` for precedence
+/// ordering when multiple credential mappings match the same request. Longer
+/// matching path prefix = more specific. Returns 0 for mappings with no
+/// `path_patterns` (global scope).
+///
+/// Callers sort ascending by specificity so the most-specific mapping is
+/// applied LAST — that makes it overwrite any conflicting headers from
+/// less-specific mappings under a last-write-wins merge.
+pub(crate) fn match_specificity(path_patterns: &[String], req_path: &str) -> usize {
+    path_patterns
+        .iter()
+        .filter(|p| path_matches_prefix(req_path, p))
+        .map(|p| p.len())
+        .max()
+        .unwrap_or(0)
+}
+
+/// Extract the path component of a URL for credential path-pattern matching.
+///
+/// Used by both WASM wrappers (`tools/wasm/wrapper.rs` and
+/// `channels/wasm/wrapper.rs`) to feed `path_matches_prefix`. On parse
+/// failure, returns an empty string and logs at debug level — an empty
+/// string cannot match any non-empty prefix, so path-scoped credentials
+/// fail closed (safe) rather than silently injecting on malformed URLs.
+pub(crate) fn extract_url_path_for_matching(url: &str) -> String {
+    match url::Url::parse(url) {
+        Ok(parsed) => parsed.path().to_string(),
+        Err(err) => {
+            tracing::debug!(
+                url = %url,
+                error = %err,
+                "URL parse failed during path-scoped credential check; skipping injection"
+            );
+            String::new()
+        }
+    }
+}
+
+/// Returns true if any segment of `path` decodes (per RFC 3986 percent-
+/// decoding of octets) to the traversal segments `.` or `..`, or embeds
+/// a decoded `/` that a downstream server might use to re-split the path.
+///
+/// Legitimate segments with embedded encoded dots (`foo%2ebar`, `v1%2e2`)
+/// are allowed because they decode to a normal literal. Encoded slashes
+/// (`%2f`), however, are rejected whenever they appear in a segment that
+/// we haven't already deemed a dot-segment — some servers (Tomcat with
+/// `allowEncodedSlash=true`, older IIS, a handful of reverse proxies)
+/// will normalize `%2f` back to `/` and then re-apply path routing,
+/// effectively letting `/api/v1/%2e%2e%2fadmin` escape a `/api/v1` scope.
+fn path_has_dot_segment(path: &str) -> bool {
+    path.split('/').any(is_traversal_segment)
+}
+
+fn is_traversal_segment(segment: &str) -> bool {
+    let decoded = percent_decode_bytes(segment.as_bytes());
+    if matches!(decoded.as_slice(), b"." | b"..") {
+        return true;
+    }
+    // Embedded decoded `/` would be interpreted as a path separator by any
+    // server that re-splits after decoding. Treat the whole segment as
+    // traversal: if we cannot be sure the final routed path stays inside
+    // the declared scope, refuse to match.
+    if decoded.contains(&b'/') {
+        return true;
+    }
+    false
+}
+
+fn percent_decode_bytes(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex_nibble(bytes[i + 1]), hex_nibble(bytes[i + 2]))
+        {
+            out.push((hi << 4) | lo);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
+}
+
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Check if a hostname matches a pattern (supports `*.` wildcard and port stripping).
+/// Comparison is case-insensitive per RFC 4343.
+pub(crate) fn host_matches_pattern(host: &str, pattern: &str) -> bool {
+    let host = &host.to_ascii_lowercase();
+    let pattern = &pattern.to_ascii_lowercase();
+    if pattern == host {
+        return true;
+    }
+    if pattern.contains(':')
+        && pattern
+            .split(':')
+            .next()
+            .is_some_and(|pattern_host| pattern_host == host)
+    {
+        return true;
+    }
+    if let Some(suffix) = pattern.strip_prefix("*.")
+        && host.ends_with(suffix)
+        && host.len() > suffix.len()
+    {
+        let prefix = &host[..host.len() - suffix.len()];
+        if prefix.ends_with('.') || prefix.is_empty() {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -511,5 +692,142 @@ mod tests {
             SecretError::AccessDenied.to_string(),
             "Secret access denied for tool"
         );
+    }
+
+    #[test]
+    fn path_matches_prefix_segment_boundary() {
+        use super::path_matches_prefix;
+        assert!(path_matches_prefix("/api/v1", "/api/v1"));
+        assert!(path_matches_prefix("/api/v1/", "/api/v1"));
+        assert!(path_matches_prefix("/api/v1", "/api/v1/"));
+        assert!(path_matches_prefix("/api/v1/users", "/api/v1"));
+        assert!(path_matches_prefix("/api/v1?page=1", "/api/v1"));
+        assert!(!path_matches_prefix("/api/v1-malicious", "/api/v1"));
+        assert!(!path_matches_prefix("/account/info-steal", "/account/info"));
+        assert!(!path_matches_prefix("/other", "/api/v1"));
+        assert!(!path_matches_prefix("/public/../send-wire", "/public"));
+        assert!(!path_matches_prefix("/a/../b", "/a"));
+        assert!(path_matches_prefix("/api/..config", "/api"));
+        assert!(path_matches_prefix("/api/version2..beta", "/api"));
+    }
+
+    #[test]
+    fn path_matches_prefix_rejects_percent_encoded_dot_segments() {
+        use super::path_matches_prefix;
+        // Lowercase %2e%2e — classic IIS/Tomcat path-traversal smuggling
+        assert!(!path_matches_prefix("/api/v1/%2e%2e/admin", "/api/v1"));
+        // Mixed case — some decoders are case-insensitive
+        assert!(!path_matches_prefix("/api/v1/%2E%2E/admin", "/api/v1"));
+        assert!(!path_matches_prefix("/api/v1/%2e%2E/admin", "/api/v1"));
+        // Single %2e as a single-dot segment variant
+        assert!(!path_matches_prefix("/api/v1/%2e/admin", "/api/v1"));
+        // Mixed literal + encoded: `.%2e` decodes to `..`
+        assert!(!path_matches_prefix("/api/v1/.%2e/admin", "/api/v1"));
+        assert!(!path_matches_prefix("/api/v1/%2e./admin", "/api/v1"));
+    }
+
+    #[test]
+    fn path_matches_prefix_rejects_percent_encoded_slash_smuggling() {
+        // Regression for Firat round-5 (#3126256056): `%2f` (encoded slash)
+        // inside a segment can be decoded back to `/` by some servers,
+        // turning e.g. `/api/v1/%2e%2e%2fadmin` into `/api/v1/../admin` at
+        // routing time — escaping the `/api/v1` scope. Since we can't know
+        // the downstream decoder's policy, refuse to match whenever a
+        // decoded segment contains a `/`.
+        use super::path_matches_prefix;
+        // The canonical attack: %2e%2e%2fadmin → ../admin
+        assert!(!path_matches_prefix("/api/v1/%2e%2e%2fadmin", "/api/v1"));
+        assert!(!path_matches_prefix("/api/v1/%2E%2E%2Fadmin", "/api/v1"));
+        // Embedded-slash variant inside a single segment — still rejected
+        // because the decoded form would split.
+        assert!(!path_matches_prefix("/api/v1/foo%2fbar", "/api/v1"));
+        // Uppercase form.
+        assert!(!path_matches_prefix("/api/v1/foo%2Fbar", "/api/v1"));
+    }
+
+    #[test]
+    fn path_matches_prefix_allows_legit_embedded_encoded_dot() {
+        use super::path_matches_prefix;
+        // Regression for over-rejection (Firat round-4): encoded dots inside
+        // an otherwise legitimate segment decode to a normal literal dot
+        // character, not a dot-segment. These paths must be allowed.
+        assert!(path_matches_prefix("/files/foo%2ebar", "/files"));
+        assert!(path_matches_prefix("/releases/v1%2e2", "/releases"));
+        assert!(path_matches_prefix("/api/v1/some.file", "/api/v1"));
+        // Prefix equal to segment boundary still works.
+        assert!(path_matches_prefix("/files/foo%2ebar.txt", "/files"));
+    }
+
+    #[test]
+    fn match_specificity_ranks_longer_prefixes_higher() {
+        use super::{CredentialMapping, match_specificity};
+        use crate::secrets::CredentialLocation;
+        let mapping = CredentialMapping {
+            secret_name: "tok".into(),
+            location: CredentialLocation::AuthorizationBearer,
+            host_patterns: vec!["api.example.com".into()],
+            path_patterns: vec!["/api".into(), "/api/v1/write".into()],
+            optional: false,
+        };
+        // When multiple patterns match, specificity = longest matching prefix.
+        assert_eq!(
+            match_specificity(&mapping.path_patterns, "/api/v1/write/x"),
+            "/api/v1/write".len()
+        );
+        // Only the shorter pattern matches.
+        assert_eq!(
+            match_specificity(&mapping.path_patterns, "/api/other"),
+            "/api".len()
+        );
+        // No match at all.
+        assert_eq!(match_specificity(&mapping.path_patterns, "/zzz"), 0);
+        // Empty patterns (global) = 0.
+        assert_eq!(match_specificity(&[], "/anything"), 0);
+    }
+
+    #[test]
+    fn host_matches_pattern_case_insensitive() {
+        use super::host_matches_pattern;
+        assert!(host_matches_pattern("API.Example.COM", "api.example.com"));
+        assert!(host_matches_pattern("api.example.com", "API.EXAMPLE.COM"));
+        assert!(host_matches_pattern("sub.example.com", "*.example.com"));
+        assert!(host_matches_pattern("SUB.Example.COM", "*.example.com"));
+        assert!(!host_matches_pattern("example.com", "*.example.com"));
+    }
+
+    #[test]
+    fn credential_mapping_matches_with_path() {
+        use super::CredentialMapping;
+        use crate::secrets::CredentialLocation;
+        let m = CredentialMapping {
+            secret_name: "token".into(),
+            location: CredentialLocation::AuthorizationBearer,
+            host_patterns: vec!["api.example.com".into()],
+            path_patterns: vec!["/account/info".into(), "/exchange-rate".into()],
+            optional: false,
+        };
+        assert!(m.matches("api.example.com", "/account/info"));
+        assert!(m.matches("api.example.com", "/account/info/detail"));
+        assert!(m.matches("api.example.com", "/exchange-rate"));
+        assert!(m.matches("api.example.com", "/exchange-rate?from=USD"));
+        assert!(!m.matches("api.example.com", "/send-wire"));
+        assert!(!m.matches("api.example.com", "/account/info-steal"));
+        assert!(!m.matches("other.com", "/account/info"));
+        assert!(m.matches_host("api.example.com"));
+    }
+
+    #[test]
+    fn credential_mapping_empty_paths_matches_all() {
+        use super::CredentialMapping;
+        use crate::secrets::CredentialLocation;
+        let m = CredentialMapping {
+            secret_name: "token".into(),
+            location: CredentialLocation::AuthorizationBearer,
+            host_patterns: vec!["api.example.com".into()],
+            path_patterns: Vec::new(),
+            optional: false,
+        };
+        assert!(m.matches("api.example.com", "/anything"));
+        assert!(m.matches("api.example.com", "/"));
     }
 }

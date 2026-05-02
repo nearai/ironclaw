@@ -92,6 +92,8 @@ fn make_context(project_id: ProjectId) -> ThreadExecutionContext {
         source_channel: None,
         user_timezone: None,
         thread_goal: None,
+        available_actions_snapshot: None,
+        available_action_inventory_snapshot: None,
     }
 }
 

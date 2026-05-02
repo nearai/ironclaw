@@ -536,6 +536,7 @@ fn gateway_state_has_multi_tenant_fields() {
         sse: Arc::new(SseManager::new()),
         workspace: None,
         workspace_pool: None, // Multi-tenant: per-user workspace pool
+        multi_tenant_mode: true,
         session_manager: None,
         log_broadcaster: None,
         log_level_handle: None,
@@ -628,6 +629,7 @@ async fn start_owner_scoped_sender_server() -> (
         sse: Arc::new(SseManager::new()),
         workspace: None,
         workspace_pool: None,
+        multi_tenant_mode: true,
         session_manager: None,
         log_broadcaster: None,
         log_level_handle: None,
@@ -1109,6 +1111,7 @@ async fn start_multi_user_server_with_db() -> (
         sse: Arc::new(SseManager::new()),
         workspace: None,
         workspace_pool: None,
+        multi_tenant_mode: true,
         session_manager: None,
         log_broadcaster: None,
         log_level_handle: None,

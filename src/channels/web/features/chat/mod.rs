@@ -726,12 +726,14 @@ pub(crate) async fn chat_threads_handler(
                     });
                 }
 
-                // Keep the chat sidebar scoped to persisted chat conversations.
-                // Engine v2 foreground threads are assistant execution internals
-                // and can rotate per message, so surfacing them here makes
-                // ordinary prompts look like standalone `engine` threads.
-                // Explicit engine-thread history still works via
-                // `chat_history_handler` when the caller already has a thread id.
+                // Keep the chat sidebar scoped to persisted conversations.
+                // A conversation can span multiple foreground engine threads,
+                // so rendering each engine thread as its own row produces
+                // misleading per-turn labels like "try again" instead of a
+                // stable conversation label. Engine-thread history remains
+                // accessible when the caller already has a thread id via
+                // `chat_history_handler`.
+
                 let active_thread = session.lock().await.active_thread;
 
                 return Ok(Json(ThreadListResponse {
@@ -915,7 +917,7 @@ pub(crate) async fn pending_gate_extension_name(
     // "one resolver" rule in `src/bridge/CLAUDE.md` exist to prevent
     // exactly that drift.
     Some(
-        crate::bridge::auth_manager::resolve_auth_flow_extension_name(
+        crate::auth::extension::resolve_auth_flow_extension_name(
             tool_name,
             &parsed_parameters,
             credential_name.as_str(),
@@ -1192,6 +1194,27 @@ fn completed_turn_is_newer_than_in_progress(
         .is_some_and(|last_turn_time| last_turn_time >= in_progress_started_at)
 }
 
+/// Whether the turn's *current* tool step has reached a terminal state.
+///
+/// Keyed off the most recent tool call, not the full turn history. An
+/// earlier failed tool call followed by a successful retry (and a final
+/// assistant response) is a legitimate recovery — the previous `all(...)`
+/// check would keep the turn pinned to `Processing` forever because the
+/// errored call still flipped `!has_error` to false. See serrrfirat's
+/// review on PR #2753.
+///
+/// A turn is considered "recovered" if the trailing tool call has a
+/// result and no error. A trailing unfinished (`!has_result && !has_error`)
+/// or errored (`has_error`) tool call keeps the turn visible as
+/// `Processing` so the user sees the stuck step instead of fabricated
+/// success — the original #1993 regression intent.
+fn turn_tool_calls_succeeded(turn: &TurnInfo) -> bool {
+    match turn.tool_calls.last() {
+        Some(last) => last.has_result && !last.has_error,
+        None => true,
+    }
+}
+
 fn reconcile_in_progress_with_turns(
     turns: &mut [TurnInfo],
     in_progress: Option<InProgressInfo>,
@@ -1207,7 +1230,14 @@ fn reconcile_in_progress_with_turns(
     };
 
     if in_progress_matches_turn(last_turn, &in_progress) {
-        if last_turn.response.is_some() {
+        // Only treat the matching turn as "already done" if the model wrote
+        // a final response AND the trailing tool call is in a successful
+        // terminal state (see `turn_tool_calls_succeeded`). Earlier failed
+        // attempts are allowed as long as a later retry succeeded — that's
+        // a legitimate recovery. A trailing unfinished / errored tool call
+        // keeps the processing affordance visible so the user sees the
+        // stuck step instead of fabricated success (#1993).
+        if last_turn.response.is_some() && turn_tool_calls_succeeded(last_turn) {
             None
         } else {
             last_turn.state = in_progress.state.clone();
@@ -1407,6 +1437,125 @@ mod tests {
             info.tool_calls[0].result_preview.is_none(),
             "in-memory path has no separate preview — leave `result_preview` empty to match DB semantics"
         );
+    }
+
+    /// Regression for #1993 — after a 502 mid-turn the response text can
+    /// be persisted but the claimed tool call never completes. On chat
+    /// reopen, naive rehydration dropped the in-progress flag and showed
+    /// the fabricated "Done!" as if the action had succeeded. The fix
+    /// keeps the matching turn in-progress whenever any recorded tool
+    /// call errored or never produced a result.
+    #[test]
+    fn test_reconcile_retains_in_progress_when_tool_call_failed() {
+        use crate::channels::web::types::ToolCallInfo;
+
+        let started_at = chrono::Utc::now().to_rfc3339();
+        let user_message_id = Uuid::new_v4();
+        let mut turns = vec![TurnInfo {
+            turn_number: 1,
+            user_message_id: Some(user_message_id),
+            user_input: "send 'hi' to telegram".to_string(),
+            // Model claimed success even though the tool call errored.
+            response: Some("Done! I've sent 'hi' to your Telegram.".to_string()),
+            state: "Completed".to_string(),
+            started_at: started_at.clone(),
+            completed_at: Some(started_at.clone()),
+            tool_calls: vec![ToolCallInfo {
+                name: "telegram_send".to_string(),
+                has_result: false,
+                has_error: true,
+                call_id: None,
+                result_preview: None,
+                result: None,
+                error: Some("HTTP 502".to_string()),
+                rationale: None,
+            }],
+            generated_images: Vec::new(),
+            narrative: None,
+        }];
+
+        let reconciled = reconcile_in_progress_with_turns(
+            &mut turns,
+            Some(InProgressInfo {
+                turn_number: 1,
+                user_message_id: Some(user_message_id),
+                state: "Processing".to_string(),
+                user_input: "send 'hi' to telegram".to_string(),
+                started_at,
+            }),
+        );
+
+        assert!(
+            reconciled.is_some(),
+            "a turn with a failed tool call must stay in-progress so the UI \
+             does not show the fabricated success"
+        );
+        assert_eq!(turns[0].state, "Processing");
+    }
+
+    /// Regression for serrrfirat's review on PR #2753 — the original
+    /// `all(tool_calls succeeded)` rule was too strict: a turn that
+    /// recovered from an earlier tool-call error by retrying and then
+    /// produced a final response would stay pinned to `Processing`
+    /// forever. The fix keys off the *trailing* tool call instead.
+    #[test]
+    fn test_reconcile_allows_recovery_from_earlier_tool_error() {
+        use crate::channels::web::types::ToolCallInfo;
+
+        let started_at = chrono::Utc::now().to_rfc3339();
+        let user_message_id = Uuid::new_v4();
+        let mut turns = vec![TurnInfo {
+            turn_number: 1,
+            user_message_id: Some(user_message_id),
+            user_input: "send 'hi' to telegram".to_string(),
+            response: Some("Sent 'hi' to your Telegram.".to_string()),
+            state: "Completed".to_string(),
+            started_at: started_at.clone(),
+            completed_at: Some(started_at.clone()),
+            // Earlier errored call + successful retry = recovered.
+            tool_calls: vec![
+                ToolCallInfo {
+                    name: "telegram_send".to_string(),
+                    has_result: false,
+                    has_error: true,
+                    call_id: None,
+                    result_preview: None,
+                    result: None,
+                    error: Some("HTTP 502 on first attempt".to_string()),
+                    rationale: None,
+                },
+                ToolCallInfo {
+                    name: "telegram_send".to_string(),
+                    has_result: true,
+                    has_error: false,
+                    call_id: None,
+                    result_preview: Some("message_id=42".to_string()),
+                    result: Some("{\"message_id\":42}".to_string()),
+                    error: None,
+                    rationale: None,
+                },
+            ],
+            generated_images: Vec::new(),
+            narrative: None,
+        }];
+
+        let reconciled = reconcile_in_progress_with_turns(
+            &mut turns,
+            Some(InProgressInfo {
+                turn_number: 1,
+                user_message_id: Some(user_message_id),
+                state: "Processing".to_string(),
+                user_input: "send 'hi' to telegram".to_string(),
+                started_at,
+            }),
+        );
+
+        assert!(
+            reconciled.is_none(),
+            "a turn whose trailing tool call succeeded after an earlier \
+             error represents a recovery and must clear in-progress state"
+        );
+        assert_eq!(turns[0].state, "Completed");
     }
 
     #[test]
@@ -1953,7 +2102,7 @@ mod tests {
 
     #[cfg(feature = "libsql")]
     #[tokio::test]
-    async fn test_chat_threads_handler_hides_engine_threads_from_sidebar() {
+    async fn test_chat_threads_handler_hides_engine_threads_and_keeps_conversation_titles() {
         let _lock = crate::bridge::test_support::ENGINE_STATE_TEST_LOCK
             .lock()
             .await;
@@ -1961,22 +2110,42 @@ mod tests {
 
         let project_id =
             crate::bridge::test_support::install_engine_state_with_threads(Vec::new()).await;
-        let mut thread = ironclaw_engine::Thread::new(
+
+        let mut foreground_thread = ironclaw_engine::Thread::new(
             "assistant hello",
             ironclaw_engine::ThreadType::Foreground,
             project_id,
             "alice",
             ironclaw_engine::ThreadConfig::default(),
         );
-        thread
+        foreground_thread
             .messages
             .push(ironclaw_engine::ThreadMessage::user("hello"));
-        let engine_thread_id = thread.id.0;
-        crate::bridge::test_support::install_engine_state_with_threads(vec![thread]).await;
+        let foreground_thread_id = foreground_thread.id.0;
+
+        crate::bridge::test_support::install_engine_state_with_threads(vec![foreground_thread])
+            .await;
 
         let (db, _tmp) = crate::testing::test_db().await;
+        let assistant_id = db
+            .get_or_create_assistant_conversation("alice", "gateway")
+            .await
+            .expect("assistant conversation");
+        db.add_conversation_message(assistant_id, "user", "first assistant ask")
+            .await
+            .expect("seed assistant conversation");
+
+        let channel_thread_id = db
+            .create_conversation("telegram", "alice", None)
+            .await
+            .expect("create telegram conversation");
+        db.add_conversation_message(channel_thread_id, "user", "ping")
+            .await
+            .expect("seed telegram conversation");
+
         let session_manager = Arc::new(SessionManager::new());
-        let state = test_gateway_state_with_store_and_session_manager(db, session_manager);
+        let state =
+            test_gateway_state_with_store_and_session_manager(Arc::clone(&db), session_manager);
 
         let response = chat_threads_handler(
             axum::extract::State(state),
@@ -1989,20 +2158,35 @@ mod tests {
         .await
         .expect("handler ok");
 
-        assert!(response.assistant_thread.is_some());
+        assert_eq!(
+            response
+                .assistant_thread
+                .as_ref()
+                .and_then(|thread| thread.title.as_deref()),
+            Some("first assistant ask"),
+            "assistant conversation should carry the first user message as its title"
+        );
+        assert!(
+            response.threads.iter().any(|thread| {
+                thread.id == channel_thread_id
+                    && thread.channel.as_deref() == Some("telegram")
+                    && thread.title.as_deref() == Some("ping")
+            }),
+            "chat sidebar must keep persisted channel conversations"
+        );
         assert!(
             response
                 .threads
                 .iter()
-                .all(|thread| thread.id != engine_thread_id),
-            "chat sidebar must not surface engine execution threads"
+                .all(|thread| thread.id != foreground_thread_id),
+            "chat sidebar must not surface separate engine execution threads"
         );
         assert!(
             response
                 .threads
                 .iter()
                 .all(|thread| thread.channel.as_deref() != Some("engine")),
-            "chat sidebar must stay scoped to chat conversations"
+            "chat sidebar rows should stay conversation-based rather than engine-thread-based"
         );
 
         crate::bridge::test_support::clear_engine_state().await;
@@ -2493,7 +2677,7 @@ mod tests {
 
     fn test_auth_manager(
         tool_registry: Option<Arc<ToolRegistry>>,
-    ) -> Arc<crate::bridge::auth_manager::AuthManager> {
+    ) -> Arc<crate::auth::extension::AuthManager> {
         let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
             Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
                 crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
@@ -2501,7 +2685,7 @@ mod tests {
                 ))
                 .expect("crypto"),
             )));
-        Arc::new(crate::bridge::auth_manager::AuthManager::new(
+        Arc::new(crate::auth::extension::AuthManager::new(
             secrets,
             None,
             None,

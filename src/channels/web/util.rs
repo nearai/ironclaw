@@ -63,6 +63,7 @@ fn web_attachment_ext(mime: &str) -> Option<&'static str> {
         "audio/aac" => Some("aac"),
         "audio/flac" => Some("flac"),
         "audio/webm" => Some("webm"),
+        "application/octet-stream" => Some("bin"),
         _ => None,
     };
 
@@ -108,6 +109,7 @@ fn is_allowed_attachment_mime(mime: &str) -> bool {
             | "application/pdf"
             | "application/json"
             | "application/xml"
+            | "application/octet-stream"
             | "application/rtf"
             | "text/rtf"
             | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -1178,6 +1180,23 @@ mod tests {
 
         let err = web_attachments_to_incoming(&attachments).unwrap_err();
         assert!(err.contains("Unsupported file type"));
+    }
+
+    #[test]
+    fn web_upload_accepts_octet_stream_attachment() {
+        use base64::Engine;
+
+        let attachments = vec![AttachmentData {
+            mime_type: "application/octet-stream".to_string(),
+            filename: Some("mystery.bin".to_string()),
+            data_base64: base64::engine::general_purpose::STANDARD
+                .encode([0x00u8, 0x01, 0x02, 0x03]),
+        }];
+
+        let incoming = web_attachments_to_incoming(&attachments).expect("octet-stream should pass");
+        assert_eq!(incoming[0].mime_type, "application/octet-stream");
+        assert_eq!(incoming[0].filename.as_deref(), Some("mystery.bin"));
+        assert_eq!(incoming[0].kind, crate::channels::AttachmentKind::Document);
     }
 
     #[test]

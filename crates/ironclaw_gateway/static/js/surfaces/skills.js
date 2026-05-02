@@ -62,6 +62,7 @@ function loadSkills() {
   var skillsList = document.getElementById('skills-list');
   skillsList.innerHTML = renderCardsSkeleton(3);
   apiFetch('/api/skills').then(function(data) {
+    setSlashSkillEntries((data && data.skills) || []);
     if (!data.skills || data.skills.length === 0) {
       skillsList.innerHTML = '<div class="empty-state">' + I18n.t('skills.noInstalled') + '</div>';
       return;
@@ -110,6 +111,34 @@ function renderSkillCard(skill) {
     kw.className = 'ext-keywords';
     kw.textContent = I18n.t('skills.activatesOn') + ': ' + skill.keywords.join(', ');
     card.appendChild(kw);
+  }
+
+  if (skill.usage_hint) {
+    var hint = document.createElement('div');
+    hint.className = 'ext-usage-hint';
+    hint.textContent = skill.usage_hint;
+    card.appendChild(hint);
+  }
+
+  if (skill.has_requirements) {
+    var reqs = document.createElement('div');
+    reqs.className = 'ext-bundle-detail';
+    reqs.textContent = 'Bundle includes requirements.txt';
+    card.appendChild(reqs);
+  }
+
+  if (skill.has_scripts) {
+    var scripts = document.createElement('div');
+    scripts.className = 'ext-bundle-detail';
+    scripts.textContent = 'Bundle includes scripts/';
+    card.appendChild(scripts);
+  }
+
+  if (skill.install_source_url) {
+    var source = document.createElement('div');
+    source.className = 'ext-install-source';
+    source.textContent = 'Installed from: ' + skill.install_source_url;
+    card.appendChild(source);
   }
 
   var actions = document.createElement('div');
@@ -390,4 +419,3 @@ document.getElementById('skill-search-input').addEventListener('keydown', functi
 });
 
 // --- Tool Permissions ---
-

@@ -1,9 +1,14 @@
-//! OpenAI Responses API (`POST /v1/responses`, `GET /v1/responses/{id}`).
+//! OpenAI Responses API (`POST /api/v1/responses`, `GET /api/v1/responses/{id}`).
 //!
 //! Unlike the Chat Completions proxy (`openai_compat.rs`) which is a raw LLM
 //! passthrough, this module routes requests through the full agent loop —
 //! giving callers access to tools, memory, safety, and server-side
 //! conversation state via a standard OpenAI-compatible interface.
+//!
+//! The canonical path is `/api/v1/responses` so the Responses API shares the
+//! `/api/...` prefix used by the rest of IronClaw's HTTP surface. The legacy
+//! `/v1/responses` path is still accepted as an alias for backward
+//! compatibility with clients configured against it (see ironclaw#2201).
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -1213,7 +1218,8 @@ async fn streaming_worker(
 }
 
 // ---------------------------------------------------------------------------
-// GET /v1/responses/{id}
+// GET /api/v1/responses/{id}
+// (also served as GET /v1/responses/{id} for backward compat — ironclaw#2201)
 // ---------------------------------------------------------------------------
 
 pub async fn get_response_handler(

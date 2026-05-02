@@ -335,43 +335,27 @@ async fn reload_llm_after_settings_change(state: &GatewayState) -> ReloadOutcome
         return ReloadOutcome::Skipped;
     };
 
-    // Use the gateway owner scope so the admin-scope merge happens the
-    // same way it did at startup. `re_resolve_llm_with_secrets` also
-    // hydrates API keys from the secrets store — without that,
-    // `from_db_with_toml` alone would miss `OPENAI_API_KEY` /
-    // `NEARAI_SESSION_TOKEN` added alongside the backend switch.
-    let mut config = match crate::config::Config::from_db_with_toml(
-        store.as_ref(),
+    // Re-resolve just the LLM config using the same owner/admin scope layering
+    // the gateway used at startup. This avoids rebuilding unrelated config
+    // sections while still hydrating secrets-backed API keys for the new chain.
+    let llm_config = match crate::config::Config::resolve_llm_with_secrets_strict(
+        Some(store.as_ref()),
         &state.owner_id,
         state.config_toml_path.as_deref(),
+        state.secrets_store.as_deref(),
         true,
     )
     .await
     {
         Ok(c) => c,
         Err(e) => {
-            tracing::error!("LLM hot reload: from_db_with_toml failed: {}", e);
+            tracing::error!("LLM hot reload: LLM config resolve failed: {}", e);
             return ReloadOutcome::ConfigLoadFailed(e.to_string());
         }
     };
 
-    if let Some(secrets) = state.secrets_store.as_ref()
-        && let Err(e) = config
-            .re_resolve_llm_with_secrets(
-                Some(store.as_ref()),
-                &state.owner_id,
-                state.config_toml_path.as_deref(),
-                Some(secrets.as_ref()),
-                true,
-            )
-            .await
-    {
-        tracing::error!("LLM hot reload: secret re-hydration failed: {}", e);
-        return ReloadOutcome::ConfigLoadFailed(e.to_string());
-    }
-
     if let Err(e) = reloader
-        .reload(&config.llm, Arc::clone(session_manager))
+        .reload(&llm_config, Arc::clone(session_manager))
         .await
     {
         tracing::error!("LLM hot reload: provider chain build failed: {}", e);
@@ -386,15 +370,15 @@ async fn reload_llm_after_settings_change(state: &GatewayState) -> ReloadOutcome
         .llm_provider
         .as_ref()
         .map(|provider| provider.active_model_name())
-        .unwrap_or_else(|| config.llm.active_model_name());
+        .unwrap_or_else(|| llm_config.active_model_name());
     {
         let mut active = state.active_config.write().await;
-        active.llm_backend = config.llm.backend.clone();
+        active.llm_backend = llm_config.backend.clone();
         active.llm_model = active_model;
     }
 
     tracing::info!(
-        backend = %config.llm.backend,
+        backend = %llm_config.backend,
         "LLM provider chain hot-reloaded from updated settings"
     );
     ReloadOutcome::Swapped
@@ -437,8 +421,11 @@ fn is_valid_provider_id(id: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
 }
 
-/// Returns `Err(422)` if any provider has an invalid ID or unrecognised adapter.
+/// Returns `Err(422)` if any provider has an invalid ID, unrecognised adapter,
+/// or a base URL that fails SSRF validation.
 fn validate_custom_providers(value: &serde_json::Value) -> Result<(), StatusCode> {
+    use crate::config::helpers::validate_operator_base_url;
+
     let providers = match value.as_array() {
         Some(arr) => arr,
         None => return Ok(()),
@@ -459,6 +446,14 @@ fn validate_custom_providers(value: &serde_json::Value) -> Result<(), StatusCode
         }
         if !VALID_ADAPTERS.contains(&adapter) {
             tracing::warn!(id = %id, adapter = %adapter, "Rejected unknown LLM adapter");
+            return Err(StatusCode::UNPROCESSABLE_ENTITY);
+        }
+        // Validate base_url at save time to reject SSRF-unsafe URLs early.
+        if let Some(base_url) = p.get("base_url").and_then(|v| v.as_str())
+            && !base_url.is_empty()
+            && let Err(e) = validate_operator_base_url(base_url, "base_url")
+        {
+            tracing::warn!(id = %id, base_url = %base_url, error = %e, "Rejected custom provider with invalid base URL");
             return Err(StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
@@ -959,8 +954,10 @@ pub async fn settings_tools_list_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<ToolPermissionsResponse>, StatusCode> {
-    use crate::tools::ApprovalRequirement;
-    use crate::tools::permissions::{TOOL_RISK_DEFAULTS, effective_permission};
+    use crate::tools::permissions::{
+        PermissionState, TOOL_PERMISSION_LOCKED_REASON, effective_permission,
+        seeded_default_permission, tool_permission_locked,
+    };
 
     let registry = state
         .tool_registry
@@ -983,20 +980,8 @@ pub async fn settings_tools_list_handler(
             let description = tool.description().to_string();
 
             let current = effective_permission(&name, &user_overrides);
-            let default = TOOL_RISK_DEFAULTS
-                .get(name.as_str())
-                .copied()
-                .unwrap_or(crate::tools::permissions::PermissionState::AskEachTime);
-
-            let locked = matches!(
-                tool.requires_approval(&serde_json::Value::Null),
-                ApprovalRequirement::Always
-            );
-            let locked_reason = if locked {
-                Some("Always requires approval due to risk level".to_string())
-            } else {
-                None
-            };
+            let default = seeded_default_permission(&name).unwrap_or(PermissionState::AskEachTime);
+            let locked = tool_permission_locked(tool.as_ref());
 
             ToolPermissionEntry {
                 name,
@@ -1004,7 +989,7 @@ pub async fn settings_tools_list_handler(
                 current_state: permission_state_to_str(current).to_string(),
                 default_state: permission_state_to_str(default).to_string(),
                 locked,
-                locked_reason,
+                locked_reason: locked.then(|| TOOL_PERMISSION_LOCKED_REASON.to_string()),
             }
         })
         .collect();
@@ -1021,9 +1006,6 @@ pub async fn settings_tools_set_handler(
     Path(name): Path<String>,
     Json(body): Json<UpdateToolPermissionRequest>,
 ) -> Result<Json<ToolPermissionEntry>, (StatusCode, axum::Json<serde_json::Value>)> {
-    use crate::tools::ApprovalRequirement;
-    use crate::tools::permissions::{PermissionState, TOOL_RISK_DEFAULTS};
-
     let registry = state.tool_registry.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         axum::Json(serde_json::json!({"error": "Tool registry unavailable"})),
@@ -1035,19 +1017,6 @@ pub async fn settings_tools_set_handler(
         axum::Json(serde_json::json!({"error": format!("Tool '{}' not found", name)})),
     ))?;
 
-    // Reject if tool is locked (ApprovalRequirement::Always).
-    if matches!(
-        tool.requires_approval(&serde_json::Value::Null),
-        ApprovalRequirement::Always
-    ) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            axum::Json(serde_json::json!({
-                "error": format!("Tool '{}' is locked and cannot have its permission changed", name)
-            })),
-        ));
-    }
-
     // Parse the requested state.
     let new_state = str_to_permission_state(&body.state).ok_or((
         StatusCode::UNPROCESSABLE_ENTITY,
@@ -1055,6 +1024,23 @@ pub async fn settings_tools_set_handler(
             serde_json::json!({"error": format!("Invalid permission state: '{}'", body.state)}),
         ),
     ))?;
+    let locked = crate::tools::permissions::tool_permission_locked(tool.as_ref());
+    if locked
+        && matches!(
+            new_state,
+            crate::tools::permissions::PermissionState::AlwaysAllow
+        )
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({
+                "error": format!(
+                    "Tool '{}' always requires approval and cannot be set to always_allow",
+                    name
+                )
+            })),
+        ));
+    }
 
     // Persist the permission override, routed through the cached settings store
     // so the agent loop sees the change immediately.
@@ -1088,19 +1074,18 @@ pub async fn settings_tools_set_handler(
             )
         })?;
 
-    // Use new_state directly — we just wrote it, no need for an extra DB round-trip.
-    let default = TOOL_RISK_DEFAULTS
-        .get(name.as_str())
-        .copied()
-        .unwrap_or(PermissionState::AskEachTime);
-
     Ok(Json(ToolPermissionEntry {
         description: tool.description().to_string(),
+        default_state: permission_state_to_str(
+            crate::tools::permissions::seeded_default_permission(&name)
+                .unwrap_or(crate::tools::permissions::PermissionState::AskEachTime),
+        )
+        .to_string(),
         name,
         current_state: permission_state_to_str(new_state).to_string(),
-        default_state: permission_state_to_str(default).to_string(),
-        locked: false,
-        locked_reason: None,
+        locked,
+        locked_reason: locked
+            .then(|| crate::tools::permissions::TOOL_PERMISSION_LOCKED_REASON.to_string()),
     }))
 }
 
@@ -1202,6 +1187,7 @@ mod tests {
     };
 
     use crate::channels::web::auth::UserIdentity;
+    use crate::config::helpers::lock_env;
 
     #[test]
     fn test_mask_settings_api_keys_builtin_overrides() {
@@ -1279,6 +1265,7 @@ mod tests {
             sse: Arc::new(crate::channels::web::sse::SseManager::new()),
             workspace: None,
             workspace_pool: None,
+            multi_tenant_mode: false,
             session_manager: None,
             log_broadcaster: None,
             log_level_handle: None,
@@ -1582,6 +1569,52 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_custom_providers_rejects_unsafe_base_url() {
+        // Cloud metadata endpoint — must be rejected at save time.
+        let input = serde_json::json!([{
+            "id": "evil",
+            "adapter": "open_ai_completions",
+            "base_url": "https://169.254.169.254/latest/meta-data"
+        }]);
+        assert_eq!(
+            validate_custom_providers(&input).unwrap_err(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        );
+    }
+
+    #[test]
+    fn test_validate_custom_providers_accepts_valid_base_url() {
+        // Use a URL that passes operator policy without DNS resolution
+        // (localhost is always allowed, even in sandboxed CI environments).
+        let input = serde_json::json!([{
+            "id": "my-llm",
+            "adapter": "open_ai_completions",
+            "base_url": "http://localhost:8080/v1"
+        }]);
+        assert!(validate_custom_providers(&input).is_ok());
+    }
+
+    #[test]
+    fn test_validate_custom_providers_allows_empty_base_url() {
+        // Empty base_url is accepted at save time so users can stage an
+        // incomplete config without losing it. It is NOT enforced during
+        // `LlmConfig::resolve_custom_provider` either (only a warning).
+        // What actually prevents such a config from being used at runtime:
+        //   1. Frontend activation guard (isProviderConfigured in
+        //      static/js/surfaces/config.js blocks the "Use" button).
+        //   2. Startup fallback in `LlmConfig::resolve_with_fallback`
+        //      (invoked from `Config::re_resolve_llm_with_secrets`) —
+        //      demotes unusable custom providers to NearAI rather than
+        //      crash-looping the instance (#2514).
+        let input = serde_json::json!([{
+            "id": "my-llm",
+            "adapter": "open_ai_completions",
+            "base_url": ""
+        }]);
+        assert!(validate_custom_providers(&input).is_ok());
+    }
+
+    #[test]
     fn test_admin_only_setting_keys_include_network_destinations() {
         assert!(is_admin_only_setting_key("llm_builtin_overrides"));
         assert!(is_admin_only_setting_key("llm_custom_providers"));
@@ -1646,11 +1679,13 @@ mod tests {
     /// gets the wrapper missing from state, or stops threading the new model
     /// into `active_config`.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // env guard must span async hot-reload flow
     async fn settings_set_handler_triggers_llm_provider_hot_reload() {
         use crate::llm::{LlmConfig, SessionConfig, SessionManager, build_provider_chain};
 
+        let _env_guard = lock_env();
         let secrets = test_secrets_store();
-        let (db, _tmp) = crate::testing::test_db().await;
+        let (db, tmp) = crate::testing::test_db().await;
 
         // Starting config: NEAR AI backend with "model-start".
         let mut initial = LlmConfig {
@@ -1714,9 +1749,11 @@ mod tests {
         state.llm_provider = Some(Arc::clone(&primary));
         state.llm_reload = Some(Arc::clone(&reload_handle));
         state.llm_session_manager = Some(Arc::clone(&session));
-        // Owner scope is the user_id that `Config::from_db_with_toml` is
-        // called with — we set it to admin scope so the settings reload
-        // reads the same rows we just seeded.
+        let toml_path = tmp.path().join("empty-config.toml");
+        std::fs::write(&toml_path, "").expect("create empty toml");
+        state.config_toml_path = Some(toml_path);
+        // Owner scope is the user_id the reload resolves from — we set it
+        // to admin scope so it reads the same rows we just seeded.
         state.owner_id = admin_scope.to_string();
         let state = Arc::new(state);
 
@@ -1858,6 +1895,9 @@ mod tests {
         state.llm_provider = Some(Arc::clone(&primary));
         state.llm_reload = Some(Arc::clone(&reload_handle));
         state.llm_session_manager = Some(Arc::clone(&session));
+        let toml_path = tmp.path().join("empty-config.toml");
+        std::fs::write(&toml_path, "").expect("create empty toml");
+        state.config_toml_path = Some(toml_path);
         // Gateway owner is a distinct identity from admin scope, so tests
         // can tell when a reload was gated out by scope.
         state.owner_id = "owner".to_string();
@@ -1946,11 +1986,13 @@ mod tests {
     /// scope. Without this branch, the default "write to my own settings"
     /// UX would never trigger a reload for the owner.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // env guard must span async hot-reload flow
     async fn settings_set_handler_owner_scope_triggers_reload() {
+        let _env_guard = lock_env();
         let (state, primary, _tmp) = hot_reload_harness().await;
 
-        // Seed the owner scope so `Config::from_db_with_toml` resolves to
-        // the new model when it reads it back via the `owner` user_id.
+        // Seed the owner scope so the reload resolves to the new model
+        // when it reads back via the `owner` user_id.
         state
             .store
             .as_ref()
@@ -1992,7 +2034,9 @@ mod tests {
     /// see this broken sibling-config, fail resolution, and roll back the
     /// caller's write.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // env guard must span async hot-reload flow
     async fn settings_set_handler_rolls_back_on_reload_failure() {
+        let _env_guard = lock_env();
         let (state, primary, _tmp) = hot_reload_harness().await;
         let before_model = primary.active_model_name();
         let admin_scope = crate::tools::permissions::ADMIN_SETTINGS_USER_ID;
@@ -2083,7 +2127,9 @@ mod tests {
     /// override is lost and the provider ends up reporting the admin-scope
     /// model instead. With the fix, the owner's model survives.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // env guard must span async hot-reload flow
     async fn reload_rebuilds_from_owner_scope_not_effective_scope() {
+        let _env_guard = lock_env();
         let (state, primary, _tmp) = hot_reload_harness().await;
         let admin_scope = crate::tools::permissions::ADMIN_SETTINGS_USER_ID;
         let store = state.store.as_ref().expect("store"); // dispatch-exempt: test harness
@@ -2185,15 +2231,10 @@ mod tests {
         assert!(str_to_permission_state("ALWAYS_ALLOW").is_none());
     }
 
-    /// `PUT /api/settings/tools/:name` must return 400 for locked tools.
-    ///
-    /// A tool that returns `ApprovalRequirement::Always` from `requires_approval`
-    /// is locked — callers cannot override its permission state via the API.
-    /// We test this by checking the rejection path directly via the handler
-    /// function using a minimal in-memory tool registry containing a mock
-    /// "always-locked" tool.
+    /// `PUT /api/settings/tools/:name` must reject AlwaysAllow for tools whose
+    /// default approval requirement is parameter-insensitive Always.
     #[tokio::test]
-    async fn test_put_locked_tool_returns_400() {
+    async fn test_put_always_approval_tool_rejects_always_allow_override() {
         use std::sync::Arc;
 
         use crate::context::JobContext;
@@ -2231,10 +2272,9 @@ mod tests {
         let registry = Arc::new(ToolRegistry::new());
         registry.register(Arc::new(LockedTool)).await;
 
-        let state = Arc::new(GatewayState {
-            tool_registry: Some(registry),
-            ..test_gateway_state(test_secrets_store())
-        });
+        let mut state = test_gateway_state(test_secrets_store());
+        state.tool_registry = Some(registry);
+        let state = Arc::new(state);
 
         let result = settings_tools_set_handler(
             State(state),
@@ -2252,11 +2292,14 @@ mod tests {
         )
         .await;
 
-        let (status, _body) = result.unwrap_err();
-        assert_eq!(
-            status,
-            axum::http::StatusCode::BAD_REQUEST,
-            "locked tools should return 400"
+        let (status, body) = result.expect_err("locked tool should reject always_allow");
+        let body = body.0;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("cannot be set to always_allow")),
+            "unexpected error body: {body:?}"
         );
     }
 
@@ -2275,6 +2318,7 @@ mod tests {
         use axum::extract::State;
 
         struct EchoLikeTool;
+        struct LockedTool;
 
         #[async_trait::async_trait]
         impl Tool for EchoLikeTool {
@@ -2298,9 +2342,32 @@ mod tests {
                 ApprovalRequirement::Never
             }
         }
+        #[async_trait::async_trait]
+        impl Tool for LockedTool {
+            fn name(&self) -> &str {
+                "locked_test"
+            }
+            fn description(&self) -> &str {
+                "Test locked tool"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type":"object","properties":{}})
+            }
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &JobContext,
+            ) -> Result<ToolOutput, ToolError> {
+                unreachable!()
+            }
+            fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+                ApprovalRequirement::Always
+            }
+        }
 
         let registry = Arc::new(ToolRegistry::new());
         registry.register(Arc::new(EchoLikeTool)).await;
+        registry.register(Arc::new(LockedTool)).await;
 
         // Provide a file-backed temp DB so the handler can load tool permissions.
         // In-memory databases do not share state between connections in libsql,
@@ -2354,5 +2421,13 @@ mod tests {
             entry.default_state.as_str(),
             "always_allow" | "ask_each_time" | "disabled"
         ));
+
+        let locked_entry = response
+            .tools
+            .iter()
+            .find(|t| t.name == "locked_test")
+            .expect("locked_test tool should be in the list");
+        assert!(locked_entry.locked);
+        assert!(locked_entry.locked_reason.is_some());
     }
 }

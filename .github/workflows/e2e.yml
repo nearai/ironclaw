@@ -6,27 +6,43 @@ on:
         description: Commit SHA or ref to test
         required: false
         type: string
+      mode:
+        description: E2E slice to run (`smoke` or `full`)
+        required: false
+        type: string
+        default: full
   schedule:
     - cron: "0 6 * * 1"  # Weekly Monday 6 AM UTC
   workflow_dispatch:
-  pull_request:
-    branches:
-      - main
-    paths:
-      - "src/channels/web/**"
-      - "tests/e2e/**"
 
 permissions:
   contents: read
 
 concurrency:
-  group: e2e-${{ github.head_ref || github.ref }}
+  group: e2e-${{ github.event_name }}-${{ github.head_ref || github.ref }}-${{ inputs.mode || 'full' }}
   cancel-in-progress: true
 
 jobs:
-  # ── Step 1: compile once ──────────────────────────────────────────────────
+  matrix-config:
+    name: Configure E2E matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - id: set
+        run: |
+          SMOKE='[{"group":"core","files":"tests/e2e/scenarios/test_connection.py tests/e2e/scenarios/test_chat.py tests/e2e/scenarios/test_sse_reconnect.py tests/e2e/scenarios/test_html_injection.py tests/e2e/scenarios/test_csp.py"}]'
+          FULL='[{"group":"core","files":"tests/e2e/scenarios/test_connection.py tests/e2e/scenarios/test_chat.py tests/e2e/scenarios/test_sse_reconnect.py tests/e2e/scenarios/test_html_injection.py tests/e2e/scenarios/test_csp.py"},{"group":"features","files":"tests/e2e/scenarios/test_skills.py tests/e2e/scenarios/test_tool_approval.py tests/e2e/scenarios/test_webhook.py"},{"group":"extensions","files":"tests/e2e/scenarios/test_extensions.py tests/e2e/scenarios/test_extension_oauth.py tests/e2e/scenarios/test_oauth_url_parameters.py tests/e2e/scenarios/test_telegram_token_validation.py tests/e2e/scenarios/test_telegram_hot_activation.py tests/e2e/scenarios/test_wasm_lifecycle.py tests/e2e/scenarios/test_tool_execution.py tests/e2e/scenarios/test_agent_loop_recovery.py tests/e2e/scenarios/test_pairing.py tests/e2e/scenarios/test_mcp_auth_flow.py tests/e2e/scenarios/test_oauth_credential_fallback.py tests/e2e/scenarios/test_routine_oauth_credential_injection.py"},{"group":"routines","files":"tests/e2e/scenarios/test_owner_scope.py tests/e2e/scenarios/test_routine_event_batch.py"},{"group":"web-regressions","files":"tests/e2e/scenarios/test_auth_no_duplicate_response.py tests/e2e/scenarios/test_message_persistence.py tests/e2e/scenarios/test_pending_user_messages.py"},{"group":"v2-engine","files":"tests/e2e/scenarios/test_v2_engine_auth_flow.py tests/e2e/scenarios/test_v2_engine_approval_flow.py tests/e2e/scenarios/test_v2_engine_tool_lifecycle.py tests/e2e/scenarios/test_v2_kernel_auth_preflight.py tests/e2e/scenarios/test_v2_kernel_auth_gateway_flow.py tests/e2e/scenarios/test_v2_thread_visibility.py"}]'
+
+          if [ "${{ inputs.mode || 'full' }}" = "smoke" ]; then
+            echo "matrix=${SMOKE}" >> "$GITHUB_OUTPUT"
+          else
+            echo "matrix=${FULL}" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
     name: Build ironclaw (libsql)
+    needs: matrix-config
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -54,24 +70,15 @@ jobs:
           path: target/debug/ironclaw
           retention-days: 1
 
-  # ── Step 2: run test slices in parallel ───────────────────────────────────
   test:
     name: E2E (${{ matrix.group }})
-    needs: build
+    needs: [matrix-config, build]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - group: core
-            files: "tests/e2e/scenarios/test_connection.py tests/e2e/scenarios/test_chat.py tests/e2e/scenarios/test_sse_reconnect.py tests/e2e/scenarios/test_html_injection.py tests/e2e/scenarios/test_csp.py"
-          - group: features
-            files: "tests/e2e/scenarios/test_skills.py tests/e2e/scenarios/test_tool_approval.py tests/e2e/scenarios/test_webhook.py"
-          - group: extensions
-            files: "tests/e2e/scenarios/test_extensions.py tests/e2e/scenarios/test_extension_oauth.py tests/e2e/scenarios/test_oauth_url_parameters.py tests/e2e/scenarios/test_telegram_token_validation.py tests/e2e/scenarios/test_telegram_hot_activation.py tests/e2e/scenarios/test_wasm_lifecycle.py tests/e2e/scenarios/test_tool_execution.py tests/e2e/scenarios/test_agent_loop_recovery.py tests/e2e/scenarios/test_pairing.py tests/e2e/scenarios/test_mcp_auth_flow.py tests/e2e/scenarios/test_oauth_credential_fallback.py tests/e2e/scenarios/test_routine_oauth_credential_injection.py"
-          - group: routines
-            files: "tests/e2e/scenarios/test_owner_scope.py tests/e2e/scenarios/test_routine_event_batch.py"
+        include: ${{ fromJSON(needs.matrix-config.outputs.matrix) }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -108,7 +115,6 @@ jobs:
           path: tests/e2e/screenshots/
           if-no-files-found: ignore
 
-  # ── Roll-up for branch protection ────────────────────────────────────────
   e2e:
     name: E2E Tests
     runs-on: ubuntu-latest

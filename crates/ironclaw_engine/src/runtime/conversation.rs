@@ -306,15 +306,17 @@ impl ConversationManager {
                     );
                 }
 
-                // Spawn new foreground thread with conversation history. Keep
-                // the thread goal/display source raw while preserving the
-                // attachment-augmented payload as the LLM-facing message.
-                let (thread_goal, current_user_message) =
-                    thread_goal_and_current_message(content, raw_content_for_title);
+                // Spawn new foreground thread with conversation history.
+                // `goal` holds the full message (the orchestrator feeds it as
+                // the initial user turn); `title` is the short sidebar label.
+                // For attachment-augmented turns, derive that title from the
+                // raw user text so engine thread surfaces do not expose the
+                // synthesized `<attachments>` block or extracted attachment text.
+                let title = thread_title_from_message_sources(content, raw_content_for_title);
                 self.thread_manager
-                    .spawn_thread_with_history_and_current_message(
-                        thread_goal,
-                        current_user_message,
+                    .spawn_thread_with_history(
+                        content, // use message as goal
+                        title,
                         ThreadType::Foreground,
                         project_id,
                         thread_config,
@@ -401,7 +403,7 @@ impl ConversationManager {
                 ));
                 conv.untrack_thread(thread_id);
             }
-            ThreadOutcome::Failed { error } => {
+            ThreadOutcome::Failed { error, .. } => {
                 conv.add_entry(ConversationEntry::system_for_thread(
                     thread_id,
                     format!("Thread failed: {error}"),
@@ -579,26 +581,16 @@ fn build_history_from_entries(
         .collect()
 }
 
-fn thread_goal_and_current_message(
+fn thread_title_from_message_sources(
     content: &str,
     raw_content_for_title: Option<&str>,
-) -> (String, Option<String>) {
+) -> Option<String> {
     let Some(raw) = raw_content_for_title else {
-        return (content.to_string(), None);
+        return crate::types::thread::Thread::derive_title_from_message(content);
     };
 
-    let display_goal = raw.split_whitespace().collect::<Vec<_>>().join(" ");
-    let display_goal = if display_goal.is_empty() {
-        "Untitled chat".to_string()
-    } else {
-        display_goal
-    };
-    let current_user_message = if display_goal == content {
-        None
-    } else {
-        Some(content.to_string())
-    };
-    (display_goal, current_user_message)
+    crate::types::thread::Thread::derive_title_from_message(raw)
+        .or_else(|| Some("Untitled chat".to_string()))
 }
 
 #[cfg(test)]
@@ -670,7 +662,16 @@ mod tests {
         async fn available_actions(
             &self,
             _: &[CapabilityLease],
+            _: &crate::traits::effect::ThreadExecutionContext,
         ) -> Result<Vec<ActionDef>, EngineError> {
+            Ok(vec![])
+        }
+
+        async fn available_capabilities(
+            &self,
+            _: &[CapabilityLease],
+            _: &crate::traits::effect::ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::CapabilitySummary>, EngineError> {
             Ok(vec![])
         }
     }
@@ -1258,13 +1259,13 @@ mod tests {
         );
     }
 
-    /// The engine thread's user-visible goal must also be derived from raw
-    /// user text, while the LLM-facing first message keeps the augmented
-    /// payload. Otherwise thread-list/detail surfaces that expose
-    /// `thread.goal` still leak `<attachments>` blocks even though the
+    /// The engine thread's user-visible title must also be derived from raw
+    /// user text, while `goal` and the LLM-facing first message keep the
+    /// augmented payload. Otherwise thread-list/detail surfaces that expose
+    /// `Thread.title` can still leak `<attachments>` blocks even though the
     /// conversation-entry title_source is correct.
     #[tokio::test]
-    async fn handle_user_message_uses_raw_title_source_as_thread_goal() {
+    async fn handle_user_message_uses_raw_title_source_as_thread_title() {
         let store = Arc::new(MockStore::new());
         let tm = Arc::new(ThreadManager::new(
             Arc::new(MockLlm(Mutex::new(vec![LlmOutput {
@@ -1302,8 +1303,13 @@ mod tests {
 
         let thread = store.load_thread(tid).await.unwrap().expect("thread");
         assert_eq!(
-            thread.goal, raw,
-            "thread goal should be display-safe raw text"
+            thread.goal, augmented,
+            "thread goal should preserve the execution prompt"
+        );
+        assert_eq!(
+            thread.title.as_deref(),
+            Some(raw),
+            "thread title should be display-safe raw text"
         );
         let first_user_message = thread
             .messages

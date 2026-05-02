@@ -43,6 +43,7 @@ async fn start_test_server() -> (
         sse: Arc::new(SseManager::new()),
         workspace: None,
         workspace_pool: None,
+        multi_tenant_mode: false,
         session_manager: None,
         log_broadcaster: None,
         log_level_handle: None,
@@ -313,6 +314,20 @@ async fn test_gateway_status_endpoint() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["ws_connections"], 1);
     assert!(body["total_connections"].as_u64().unwrap() >= 1);
+
+    // Regression for #2982: the response carries the engine flag under a
+    // single canonical name. The old duplicate `engine_v2` field led the
+    // gateway JS to read the value from one name while writing the other,
+    // and dropping it locks in the wire-contract rule from
+    // .claude/rules/types.md.
+    assert!(
+        body.get("engine_v2_enabled").is_some(),
+        "expected engine_v2_enabled field on gateway status response"
+    );
+    assert!(
+        body.get("engine_v2").is_none(),
+        "duplicate engine_v2 field must not be re-introduced (#2982)"
+    );
 }
 
 #[tokio::test]
