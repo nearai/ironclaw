@@ -102,10 +102,7 @@ pub async fn run_insights_command(
 
 /// Run insights with an injected database. Used by tests to avoid touching
 /// `Config::from_env`.
-pub async fn run_insights_with_db(
-    args: InsightsArgs,
-    db: Arc<dyn Database>,
-) -> anyhow::Result<()> {
+pub async fn run_insights_with_db(args: InsightsArgs, db: Arc<dyn Database>) -> anyhow::Result<()> {
     let resolved = resolve_window(args.days);
     if resolved.clamped {
         eprintln!(

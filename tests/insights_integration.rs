@@ -38,9 +38,7 @@ async fn seed_job(
     created_at: chrono::DateTime<chrono::Utc>,
     tokens_used: u64,
 ) {
-    let backend = LibSqlBackend::new_local(db_path)
-        .await
-        .expect("seed open");
+    let backend = LibSqlBackend::new_local(db_path).await.expect("seed open");
     let conn = backend.connect().await.expect("seed conn");
     conn.execute(
         "INSERT INTO agent_jobs (id, title, description, status, source, user_id, \
@@ -57,15 +55,8 @@ async fn seed_job(
     .expect("seed insert job");
 }
 
-async fn seed_action(
-    db_path: &std::path::Path,
-    job_id: &str,
-    seq: i64,
-    tool_name: &str,
-) {
-    let backend = LibSqlBackend::new_local(db_path)
-        .await
-        .expect("seed open");
+async fn seed_action(db_path: &std::path::Path, job_id: &str, seq: i64, tool_name: &str) {
+    let backend = LibSqlBackend::new_local(db_path).await.expect("seed open");
     let conn = backend.connect().await.expect("seed conn");
     let action_id = uuid::Uuid::new_v4().to_string();
     conn.execute(
@@ -85,9 +76,7 @@ async fn seed_routine_run(
     user_id: &str,
     created_at: chrono::DateTime<chrono::Utc>,
 ) {
-    let backend = LibSqlBackend::new_local(db_path)
-        .await
-        .expect("seed open");
+    let backend = LibSqlBackend::new_local(db_path).await.expect("seed open");
     let conn = backend.connect().await.expect("seed conn");
     let routine_id = uuid::Uuid::new_v4().to_string();
     let run_id = uuid::Uuid::new_v4().to_string();
@@ -302,7 +291,14 @@ async fn time_window_excludes_future_rows() {
 
     seed_job(&db_path, &recent_job, "alice", now - Duration::days(1), 100).await;
     // Stamped after `until` — must NOT be counted.
-    seed_job(&db_path, &future_job, "alice", now + Duration::days(2), 9_999).await;
+    seed_job(
+        &db_path,
+        &future_job,
+        "alice",
+        now + Duration::days(2),
+        9_999,
+    )
+    .await;
     seed_action(&db_path, &recent_job, 1, "shell").await;
     seed_action(&db_path, &future_job, 1, "shell").await;
     seed_action(&db_path, &future_job, 2, "shell").await;
