@@ -157,6 +157,222 @@ pub(crate) async fn export_chat_docx_handler(
     Ok(response)
 }
 
+/// `POST /skills/legal/chats/{id}/export.pdf`
+///
+/// Render the chat thread as DOCX (same path as the .docx export) and
+/// shell out to LibreOffice to convert the result to PDF. Returns the
+/// PDF bytes with `application/pdf` and a download-friendly filename.
+///
+/// LibreOffice availability is detected at request time via the
+/// `LEGAL_LIBREOFFICE_BIN` env override or by walking PATH for
+/// `libreoffice`/`soffice`. If nothing is found we return 503 with a
+/// clear message rather than 500 so the UI can surface "PDF export
+/// is not available on this server" without guesswork.
+pub(crate) async fn export_chat_pdf_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
+    Path(chat_id): Path<String>,
+) -> Result<Response, (StatusCode, String)> {
+    if chat_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "chat id must not be empty".to_string(),
+        ));
+    }
+    if !chat_id.bytes().all(is_safe_chat_id_byte) || chat_id.len() > 128 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "chat id contains disallowed characters".to_string(),
+        ));
+    }
+
+    let store = state.legal_chat_store.as_ref().ok_or_else(|| {
+        tracing::warn!(
+            user_id = %user.user_id,
+            chat_id = %chat_id,
+            "legal chat store not configured; refusing PDF export"
+        );
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "legal harness is not enabled on this gateway".to_string(),
+        )
+    })?;
+
+    let libreoffice = locate_libreoffice().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "PDF export requires LibreOffice; install libreoffice/soffice or set LEGAL_LIBREOFFICE_BIN"
+                .to_string(),
+        )
+    })?;
+
+    let chat = store
+        .load_chat_for_export(&chat_id)
+        .await
+        .map_err(legal_error_to_status)?;
+
+    let docx_bytes = tokio::task::spawn_blocking(move || render_chat_to_docx(&chat))
+        .await
+        .map_err(|join| {
+            tracing::error!(error = %join, "docx render task panicked or was cancelled");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DOCX render failed before PDF conversion".to_string(),
+            )
+        })?
+        .map_err(legal_error_to_status)?;
+
+    let pdf_bytes = convert_docx_to_pdf(&libreoffice, docx_bytes)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "DOCX→PDF conversion failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "PDF conversion failed".to_string(),
+            )
+        })?;
+
+    let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let filename = sanitize_filename_segment(&chat_id);
+    let disposition = format!("attachment; filename=\"chat-{filename}-{timestamp}.pdf\"");
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/pdf"),
+    );
+    let disposition_value = HeaderValue::from_str(&disposition).map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to build Content-Disposition header".to_string(),
+        )
+    })?;
+    headers.insert(header::CONTENT_DISPOSITION, disposition_value);
+
+    let mut response = Response::builder()
+        .status(StatusCode::OK)
+        .body(Body::from(pdf_bytes))
+        .map_err(|e| {
+            tracing::error!(error = %e, "failed to construct PDF response");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to construct response".to_string(),
+            )
+        })?;
+    response.headers_mut().extend(headers);
+    Ok(response)
+}
+
+/// Find a LibreOffice binary on this host. Honours `LEGAL_LIBREOFFICE_BIN`
+/// first, then falls back to `libreoffice` on PATH, then `soffice`. We
+/// don't shell out to `which` — `Command::new` will fail loud at run-time
+/// if the resolved binary isn't actually executable.
+fn locate_libreoffice() -> Option<std::path::PathBuf> {
+    if let Ok(env_path) = std::env::var("LEGAL_LIBREOFFICE_BIN") {
+        let trimmed = env_path.trim();
+        if !trimmed.is_empty() {
+            let p = std::path::PathBuf::from(trimmed);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
+    for candidate in ["libreoffice", "soffice"] {
+        if let Some(p) = which_on_path(candidate) {
+            return Some(p);
+        }
+    }
+    None
+}
+
+fn which_on_path(name: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Convert in-memory DOCX bytes to PDF via LibreOffice headless. Writes
+/// the DOCX to a fresh temp directory, spawns `libreoffice --headless
+/// --convert-to pdf …`, reads the resulting PDF, and removes the temp
+/// directory. The whole thing runs on a blocking-pool task because
+/// LibreOffice's startup cost is firmly in the 1-3 s range and we don't
+/// want to park an axum worker.
+async fn convert_docx_to_pdf(
+    libreoffice: &std::path::Path,
+    docx_bytes: Vec<u8>,
+) -> Result<Vec<u8>, String> {
+    let libreoffice = libreoffice.to_path_buf();
+    tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+        let tmp_dir = make_unique_tempdir("ironclaw-legal-pdf-")
+            .map_err(|e| format!("failed to create temp dir: {e}"))?;
+        let cleanup = TempDirGuard(tmp_dir.clone());
+
+        let docx_path = tmp_dir.join("input.docx");
+        std::fs::write(&docx_path, &docx_bytes)
+            .map_err(|e| format!("failed to write temp docx: {e}"))?;
+
+        let output = std::process::Command::new(&libreoffice)
+            .args([
+                "--headless",
+                "--nologo",
+                "--nofirststartwizard",
+                "--convert-to",
+                "pdf",
+                "--outdir",
+            ])
+            .arg(&tmp_dir)
+            .arg(&docx_path)
+            .output()
+            .map_err(|e| format!("failed to launch LibreOffice: {e}"))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!(
+                "libreoffice exited with {}: {}",
+                output.status,
+                stderr.trim()
+            ));
+        }
+
+        let pdf_path = tmp_dir.join("input.pdf");
+        let pdf_bytes = std::fs::read(&pdf_path)
+            .map_err(|e| format!("LibreOffice succeeded but no PDF at {pdf_path:?}: {e}"))?;
+        drop(cleanup);
+        Ok(pdf_bytes)
+    })
+    .await
+    .map_err(|join| format!("PDF conversion task panicked: {join}"))?
+}
+
+/// Build a unique temp directory under the OS temp dir. We don't pull
+/// in `tempfile` because it currently lives in `dev-dependencies`; this
+/// helper covers the narrow needs of the PDF export path. The directory
+/// is removed by [`TempDirGuard`] on drop.
+fn make_unique_tempdir(prefix: &str) -> std::io::Result<std::path::PathBuf> {
+    use rand::RngCore;
+    let mut bytes = [0u8; 8];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let suffix: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let path = std::env::temp_dir().join(format!("{prefix}{}-{}", std::process::id(), suffix));
+    std::fs::create_dir(&path)?;
+    Ok(path)
+}
+
+/// RAII cleanup for the LibreOffice scratch dir. Removal is best-effort
+/// — if the directory has already been swept by the OS, we don't care.
+struct TempDirGuard(std::path::PathBuf);
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// Allowed bytes in a chat id: ASCII alphanumeric plus `-`, `_`, `.`.
 /// The canonical schema declares `id TEXT PRIMARY KEY` with no further
 /// constraint, but every legitimate id (ULID, UUID, or hand-typed slug)

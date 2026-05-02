@@ -38,7 +38,7 @@ use crate::channels::web::features::jobs::{
 // Legal-harness DOCX export — gated on libSQL per the shared spec
 // (ironclaw uses libSQL as the legal harness backend in v1).
 #[cfg(feature = "libsql")]
-use crate::channels::web::features::legal::export_chat_docx_handler;
+use crate::channels::web::features::legal::{export_chat_docx_handler, export_chat_pdf_handler};
 use crate::channels::web::handlers::engine::{
     engine_mission_detail_handler, engine_mission_fire_handler, engine_mission_pause_handler,
     engine_mission_resume_handler, engine_missions_handler, engine_missions_summary_handler,
@@ -313,10 +313,15 @@ pub async fn start_server(
     // handlers (which are skill-management endpoints, a different
     // surface).
     #[cfg(feature = "libsql")]
-    let protected = protected.route(
-        "/skills/legal/chats/{id}/export.docx",
-        post(export_chat_docx_handler),
-    );
+    let protected = protected
+        .route(
+            "/skills/legal/chats/{id}/export.docx",
+            post(export_chat_docx_handler),
+        )
+        .route(
+            "/skills/legal/chats/{id}/export.pdf",
+            post(export_chat_pdf_handler),
+        );
 
     let protected = protected
         // Settings
