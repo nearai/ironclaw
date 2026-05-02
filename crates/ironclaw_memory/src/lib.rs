@@ -631,6 +631,10 @@ pub trait PromptWriteSafetyPolicy: Send + Sync {
         None
     }
 
+    fn requires_previous_content_hash(&self) -> bool {
+        false
+    }
+
     async fn check_write(
         &self,
         request: PromptWriteSafetyRequest<'_>,
@@ -1078,6 +1082,14 @@ fn prompt_write_protected_classification(
         })
 }
 
+fn prompt_write_policy_requires_previous_content_hash(
+    policy: Option<&Arc<dyn PromptWriteSafetyPolicy>>,
+) -> bool {
+    policy
+        .map(|policy| policy.requires_previous_content_hash())
+        .unwrap_or(false)
+}
+
 struct PromptWriteSafetyCheck<'a> {
     scope: &'a MemoryDocumentScope,
     path: &'a MemoryDocumentPath,
@@ -1348,6 +1360,9 @@ pub struct MemoryBackendCapabilities {
     pub file_documents: bool,
     pub metadata: bool,
     pub versioning: bool,
+    /// Backend enforces prompt-write safety for protected write and append operations.
+    /// Filesystem adapters can defer duplicate policy checks to backends that advertise this.
+    pub prompt_write_safety: bool,
     pub full_text_search: bool,
     pub vector_search: bool,
     pub embeddings: bool,
@@ -1662,6 +1677,7 @@ pub struct MemoryBackendFilesystemAdapter {
     prompt_safety_policy: Option<Arc<dyn PromptWriteSafetyPolicy>>,
     prompt_safety_event_sink: Option<Arc<dyn PromptWriteSafetyEventSink>>,
     prompt_protected_path_registry: PromptProtectedPathRegistry,
+    prompt_safety_config_overridden: bool,
     one_shot_prompt_safety_allowance: Mutex<Option<PromptSafetyAllowanceId>>,
 }
 
@@ -1683,6 +1699,7 @@ impl MemoryBackendFilesystemAdapter {
             ))),
             prompt_safety_event_sink: None,
             prompt_protected_path_registry: registry,
+            prompt_safety_config_overridden: false,
             one_shot_prompt_safety_allowance: Mutex::new(None),
         }
     }
@@ -1693,11 +1710,13 @@ impl MemoryBackendFilesystemAdapter {
     {
         let policy: Arc<dyn PromptWriteSafetyPolicy> = policy;
         self.prompt_safety_policy = Some(policy);
+        self.prompt_safety_config_overridden = true;
         self
     }
 
     pub fn without_prompt_write_safety_policy(mut self) -> Self {
         self.prompt_safety_policy = None;
+        self.prompt_safety_config_overridden = true;
         self
     }
 
@@ -1707,6 +1726,7 @@ impl MemoryBackendFilesystemAdapter {
     {
         let event_sink: Arc<dyn PromptWriteSafetyEventSink> = event_sink;
         self.prompt_safety_event_sink = Some(event_sink);
+        self.prompt_safety_config_overridden = true;
         self
     }
 
@@ -1729,6 +1749,7 @@ impl MemoryBackendFilesystemAdapter {
         registry: PromptProtectedPathRegistry,
     ) -> Self {
         self.prompt_protected_path_registry = registry;
+        self.prompt_safety_config_overridden = true;
         self
     }
 
@@ -1790,6 +1811,9 @@ impl RootFilesystem for MemoryBackendFilesystemAdapter {
             &document_path,
         )
         .is_some();
+        let adapter_should_enforce_prompt_safety = is_protected
+            && (!self.backend.capabilities().prompt_write_safety
+                || self.prompt_safety_config_overridden);
         let prompt_safety_allowance = if is_protected {
             take_prompt_safety_allowance(
                 &self.one_shot_prompt_safety_allowance,
@@ -1803,7 +1827,7 @@ impl RootFilesystem for MemoryBackendFilesystemAdapter {
             context = context.with_prompt_write_safety_allowance(allowance.clone());
         }
         let mut backend_context = context.clone();
-        if is_protected {
+        if adapter_should_enforce_prompt_safety {
             let content = std::str::from_utf8(bytes).map_err(|_| {
                 memory_error(
                     path.clone(),
@@ -1811,11 +1835,16 @@ impl RootFilesystem for MemoryBackendFilesystemAdapter {
                     "memory document content must be UTF-8",
                 )
             })?;
-            let previous_hash = self
-                .backend
-                .read_document(&context, &document_path)
-                .await?
-                .and_then(|bytes| std::str::from_utf8(&bytes).ok().map(content_sha256));
+            let previous_hash = if prompt_write_policy_requires_previous_content_hash(
+                self.prompt_safety_policy.as_ref(),
+            ) {
+                self.backend
+                    .read_document(&context, &document_path)
+                    .await?
+                    .and_then(|bytes| std::str::from_utf8(&bytes).ok().map(content_sha256))
+            } else {
+                None
+            };
             let enforcement = enforce_prompt_write_safety(
                 self.prompt_safety_policy.as_ref(),
                 self.prompt_safety_event_sink.as_ref(),
@@ -1849,6 +1878,9 @@ impl RootFilesystem for MemoryBackendFilesystemAdapter {
             &document_path,
         )
         .is_some();
+        let adapter_should_enforce_prompt_safety = is_protected
+            && (!self.backend.capabilities().prompt_write_safety
+                || self.prompt_safety_config_overridden);
         let prompt_safety_allowance = if is_protected {
             take_prompt_safety_allowance(
                 &self.one_shot_prompt_safety_allowance,
@@ -1866,7 +1898,10 @@ impl RootFilesystem for MemoryBackendFilesystemAdapter {
             let previous = self.backend.read_document(&context, &document_path).await?;
             let expected_previous_hash = previous.as_deref().map(content_bytes_sha256);
             let previous_bytes = previous.unwrap_or_default();
-            let previous_prompt_hash = if is_protected {
+            let previous_prompt_hash = if adapter_should_enforce_prompt_safety
+                && prompt_write_policy_requires_previous_content_hash(
+                    self.prompt_safety_policy.as_ref(),
+                ) {
                 std::str::from_utf8(&previous_bytes)
                     .ok()
                     .map(content_sha256)
@@ -1876,7 +1911,7 @@ impl RootFilesystem for MemoryBackendFilesystemAdapter {
             let mut combined = previous_bytes;
             combined.extend_from_slice(bytes);
             let mut backend_context = context.clone();
-            if is_protected {
+            if adapter_should_enforce_prompt_safety {
                 let content = std::str::from_utf8(&combined).map_err(|_| {
                     memory_error(
                         path.clone(),
@@ -2011,6 +2046,7 @@ where
                 file_documents: true,
                 metadata: true,
                 versioning: true,
+                prompt_write_safety: true,
                 ..MemoryBackendCapabilities::default()
             },
             prompt_safety_policy: Some(Arc::new(DefaultPromptWriteSafetyPolicy::with_registry(
@@ -2110,7 +2146,9 @@ where
             path,
         )
         .is_some()
-        {
+            && prompt_write_policy_requires_previous_content_hash(
+                self.prompt_safety_policy.as_ref(),
+            ) {
             self.repository
                 .read_document(path)
                 .await?
@@ -2178,7 +2216,9 @@ where
             path,
         )
         .is_some()
-        {
+            && prompt_write_policy_requires_previous_content_hash(
+                self.prompt_safety_policy.as_ref(),
+            ) {
             std::str::from_utf8(&previous_bytes)
                 .ok()
                 .map(content_sha256)
@@ -3050,11 +3090,16 @@ impl RootFilesystem for MemoryDocumentFilesystem {
                 )
             })?;
             content_for_schema = Some(content);
-            let previous_hash = self
-                .repository
-                .read_document(&document_path)
-                .await?
-                .and_then(|bytes| std::str::from_utf8(&bytes).ok().map(content_sha256));
+            let previous_hash = if prompt_write_policy_requires_previous_content_hash(
+                self.prompt_safety_policy.as_ref(),
+            ) {
+                self.repository
+                    .read_document(&document_path)
+                    .await?
+                    .and_then(|bytes| std::str::from_utf8(&bytes).ok().map(content_sha256))
+            } else {
+                None
+            };
             enforce_prompt_write_safety(
                 self.prompt_safety_policy.as_ref(),
                 self.prompt_safety_event_sink.as_ref(),
@@ -3124,7 +3169,10 @@ impl RootFilesystem for MemoryDocumentFilesystem {
             let previous = self.repository.read_document(&document_path).await?;
             let expected_previous_hash = previous.as_deref().map(content_bytes_sha256);
             let previous_bytes = previous.unwrap_or_default();
-            let previous_prompt_hash = if is_protected {
+            let previous_prompt_hash = if is_protected
+                && prompt_write_policy_requires_previous_content_hash(
+                    self.prompt_safety_policy.as_ref(),
+                ) {
                 std::str::from_utf8(&previous_bytes)
                     .ok()
                     .map(content_sha256)
