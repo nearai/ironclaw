@@ -306,10 +306,15 @@ impl ConversationManager {
                     );
                 }
 
-                // Spawn new foreground thread with conversation history.
+                // Spawn new foreground thread with conversation history. Keep
+                // the thread goal/display source raw while preserving the
+                // attachment-augmented payload as the LLM-facing message.
+                let (thread_goal, current_user_message) =
+                    thread_goal_and_current_message(content, raw_content_for_title);
                 self.thread_manager
-                    .spawn_thread_with_history(
-                        content, // use message as goal
+                    .spawn_thread_with_history_and_current_message(
+                        thread_goal,
+                        current_user_message,
                         ThreadType::Foreground,
                         project_id,
                         thread_config,
@@ -572,6 +577,28 @@ fn build_history_from_entries(
             EntrySender::System => None, // skip system notifications
         })
         .collect()
+}
+
+fn thread_goal_and_current_message(
+    content: &str,
+    raw_content_for_title: Option<&str>,
+) -> (String, Option<String>) {
+    let Some(raw) = raw_content_for_title else {
+        return (content.to_string(), None);
+    };
+
+    let display_goal = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let display_goal = if display_goal.is_empty() {
+        "Untitled chat".to_string()
+    } else {
+        display_goal
+    };
+    let current_user_message = if display_goal == content {
+        None
+    } else {
+        Some(content.to_string())
+    };
+    (display_goal, current_user_message)
 }
 
 #[cfg(test)]
@@ -1228,6 +1255,64 @@ mod tests {
             title_source,
             Some(raw),
             "title_source must be the raw user text, not the augmented payload"
+        );
+    }
+
+    /// The engine thread's user-visible goal must also be derived from raw
+    /// user text, while the LLM-facing first message keeps the augmented
+    /// payload. Otherwise thread-list/detail surfaces that expose
+    /// `thread.goal` still leak `<attachments>` blocks even though the
+    /// conversation-entry title_source is correct.
+    #[tokio::test]
+    async fn handle_user_message_uses_raw_title_source_as_thread_goal() {
+        let store = Arc::new(MockStore::new());
+        let tm = Arc::new(ThreadManager::new(
+            Arc::new(MockLlm(Mutex::new(vec![LlmOutput {
+                response: LlmResponse::Text("Hello!".into()),
+                usage: TokenUsage::default(),
+            }]))),
+            Arc::new(MockEffects),
+            store.clone(),
+            Arc::new(CapabilityRegistry::new()),
+            Arc::new(LeaseManager::new()),
+            Arc::new(PolicyEngine::new()),
+        ));
+        let cm = ConversationManager::new(Arc::clone(&tm), store.clone());
+        let conv_id = cm
+            .get_or_create_conversation("web", "user-goal")
+            .await
+            .unwrap();
+        let project = ProjectId::new();
+
+        let raw = "Summarise the attached doc";
+        let augmented = "Summarise the attached doc\n<attachments>\n<attachment name=\"r.pdf\">Q3 rev $4.2M</attachment>\n</attachments>";
+
+        let tid = cm
+            .handle_user_message(
+                conv_id,
+                augmented,
+                project,
+                "user-goal",
+                ThreadConfig::default(),
+                None,
+                Some(raw),
+            )
+            .await
+            .unwrap();
+
+        let thread = store.load_thread(tid).await.unwrap().expect("thread");
+        assert_eq!(
+            thread.goal, raw,
+            "thread goal should be display-safe raw text"
+        );
+        let first_user_message = thread
+            .messages
+            .iter()
+            .find(|m| m.role == MessageRole::User)
+            .expect("first user message");
+        assert_eq!(
+            first_user_message.content, augmented,
+            "LLM-facing message must keep attachment context"
         );
     }
 

@@ -130,7 +130,42 @@ impl ThreadManager {
         initial_messages: Vec<crate::types::message::ThreadMessage>,
         initial_metadata: serde_json::Map<String, serde_json::Value>,
     ) -> Result<ThreadId, EngineError> {
+        self.spawn_thread_with_history_and_current_message(
+            goal,
+            None,
+            thread_type,
+            project_id,
+            config,
+            parent_id,
+            user_id,
+            initial_messages,
+            initial_metadata,
+        )
+        .await
+    }
+
+    /// Spawn a thread with initial conversation history and, optionally, a
+    /// current user message distinct from the display goal.
+    ///
+    /// The separate `current_user_message` is for channel pipelines that augment
+    /// the LLM-facing message with attachment/OCR blocks while keeping
+    /// user-visible thread surfaces such as `Thread.goal` derived from raw text.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn spawn_thread_with_history_and_current_message(
+        &self,
+        goal: impl Into<String>,
+        current_user_message: Option<String>,
+        thread_type: ThreadType,
+        project_id: ProjectId,
+        config: ThreadConfig,
+        parent_id: Option<ThreadId>,
+        user_id: impl Into<String>,
+        initial_messages: Vec<crate::types::message::ThreadMessage>,
+        initial_metadata: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<ThreadId, EngineError> {
         let user_id = user_id.into();
+        let goal = goal.into();
+        let current_user_message = current_user_message.unwrap_or_else(|| goal.clone());
         let mut thread = Thread::new(goal, thread_type, project_id, &user_id, config);
         if let Some(pid) = parent_id {
             thread = thread.with_parent(pid);
@@ -176,8 +211,12 @@ impl ThreadManager {
             thread.messages.push(msg);
         }
 
-        // Add the goal as the current user message so the LLM has context
-        thread.add_message(crate::types::message::ThreadMessage::user(&thread.goal));
+        // Add the current user message so the LLM has context. For ordinary
+        // callers this is the goal; attachment-aware callers can pass the
+        // augmented payload here while keeping `thread.goal` display-safe.
+        thread.add_message(crate::types::message::ThreadMessage::user(
+            current_user_message,
+        ));
 
         // Persist
         self.store.save_thread(&thread).await?;
