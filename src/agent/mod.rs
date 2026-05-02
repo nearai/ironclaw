@@ -20,6 +20,7 @@ pub mod cost_guard;
 mod dispatcher;
 mod heartbeat;
 pub mod job_monitor;
+pub mod patch_bus;
 mod router;
 pub mod routine;
 pub mod routine_engine;
@@ -40,6 +41,10 @@ pub use context_monitor::{CompactionStrategy, ContextBreakdown, ContextMonitor};
 pub(crate) use dispatcher::strip_suggestions;
 pub use heartbeat::{
     HeartbeatConfig, HeartbeatResult, HeartbeatRunner, spawn_heartbeat, spawn_multi_user_heartbeat,
+};
+pub use patch_bus::{
+    AgentRole, MultiAgentRouter, PatchBus, PatchBusError, PatchConflict, PatchDecision,
+    PatchEnvelope, PatchRecord, PatchStatus, RoutingRequest,
 };
 pub use router::{MessageIntent, Router};
 pub use routine::{Routine, RoutineAction, RoutineRun, Trigger};
