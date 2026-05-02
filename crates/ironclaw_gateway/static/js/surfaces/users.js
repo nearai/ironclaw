@@ -131,10 +131,22 @@ document.getElementById('users-create-cancel')?.addEventListener('click', functi
 });
 
 document.getElementById('users-create-submit')?.addEventListener('click', function() {
+  var submitBtn = this;
+  // Issue #3083: guard against a fast double/triple click that would
+  // otherwise fire N parallel POSTs and create N duplicate user
+  // records. Disable + show progress on entry; restore on completion
+  // so a validation or server error reopens the form cleanly.
+  if (submitBtn.disabled) return;
+
   var displayName = document.getElementById('user-display-name').value.trim();
   var email = document.getElementById('user-email').value.trim();
   var role = document.getElementById('user-role').value;
   if (!displayName) { alert(I18n.t('users.displayNameRequired')); return; }
+
+  var originalText = submitBtn.textContent;
+  submitBtn.disabled = true;
+  submitBtn.setAttribute('aria-busy', 'true');
+  submitBtn.textContent = I18n.t('users.creating') || 'Creating…';
 
   apiFetch('/api/admin/users', {
     method: 'POST',
@@ -152,7 +164,13 @@ document.getElementById('users-create-submit')?.addEventListener('click', functi
       showTokenBanner(data.token, I18n.t('users.userCreated'));
     }
     loadUsers();
-  }).catch(function(e) { alert(I18n.t('users.failedCreate') + ': ' + e.message); });
+  }).catch(function(e) {
+    alert(I18n.t('users.failedCreate') + ': ' + e.message);
+  }).finally(function() {
+    submitBtn.disabled = false;
+    submitBtn.removeAttribute('aria-busy');
+    submitBtn.textContent = originalText;
+  });
 });
 
 // --- Gateway status widget ---
