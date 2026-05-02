@@ -12,6 +12,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+// Paid research plans run in the WASM tool layer and use f64 only for
+// non-settlement ranking, budgeting, and policy hints. Settlement remains with
+// the payment rails; this tolerance avoids machine-epsilon threshold mistakes.
+const USD_TOLERANCE: f64 = 1e-6;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct PaidResearchPlanInput {
     pub query: String,
@@ -416,7 +421,7 @@ pub fn plan(input: PaidResearchPlanInput) -> Result<PaidResearchPlan, String> {
             rejected_sources.push(rejected(&candidate, "max-sources-reached"));
             continue;
         }
-        if candidate.price_usd > remaining_budget + f64::EPSILON {
+        if candidate.price_usd > remaining_budget + USD_TOLERANCE {
             rejected_sources.push(rejected(&candidate, "over-budget"));
             continue;
         }
@@ -447,7 +452,7 @@ pub fn plan(input: PaidResearchPlanInput) -> Result<PaidResearchPlan, String> {
             rail_entry.0 += 1;
             rail_entry.1 += payment.amount_usd;
 
-            if payment.amount_usd > 0.0 && payment.protocol != "near-intents" {
+            if payment.amount_usd > 0.0 && matches!(payment.protocol.as_str(), "mpp" | "x402") {
                 let key = (
                     payment.protocol.clone(),
                     payment.network.clone(),
@@ -549,7 +554,7 @@ pub fn plan(input: PaidResearchPlanInput) -> Result<PaidResearchPlan, String> {
         max_selected_price_usd,
     );
     let ready_for_paid_fetch = !selected_sources.is_empty()
-        && allocated_usd <= budget_usd + f64::EPSILON
+        && allocated_usd <= budget_usd + USD_TOLERANCE
         && policy_gates.iter().all(|gate| gate.status != "fail");
     let ready_for_trade_research = ready_for_paid_fetch
         && selected_sources
@@ -951,7 +956,7 @@ fn policy_gates(
     let mut gates = vec![
         PaidResearchPolicyGate {
             name: "budget-cap".to_string(),
-            status: if allocated_usd <= budget_usd + f64::EPSILON {
+            status: if allocated_usd <= budget_usd + USD_TOLERANCE {
                 "pass"
             } else {
                 "fail"
@@ -1020,7 +1025,7 @@ fn policy_gates(
         });
         gates.push(PaidResearchPolicyGate {
             name: "per-article-cap".to_string(),
-            status: if max_selected_price_usd <= policy.per_article_cap_usd + f64::EPSILON {
+            status: if max_selected_price_usd <= policy.per_article_cap_usd + USD_TOLERANCE {
                 "pass"
             } else {
                 "fail"
@@ -1075,7 +1080,7 @@ fn agent_wallet_policy(
     if balance_usd > max_wallet_balance_usd {
         warnings.push("Agent wallet is over the configured autonomous balance cap.".to_string());
     }
-    if max_selected_price_usd > per_article_cap_usd + f64::EPSILON {
+    if max_selected_price_usd > per_article_cap_usd + USD_TOLERANCE {
         warnings.push("At least one selected source exceeds the per-article cap.".to_string());
     }
     let audit_urls = if input.audit_urls.is_empty() {
@@ -1097,8 +1102,8 @@ fn agent_wallet_policy(
         daily_cap_usd: round4(daily_cap_usd),
         max_wallet_balance_usd: round4(max_wallet_balance_usd),
         safe_to_autopay: balance_usd > 0.0
-            && balance_usd <= max_wallet_balance_usd + f64::EPSILON
-            && max_selected_price_usd <= per_article_cap_usd + f64::EPSILON,
+            && balance_usd <= max_wallet_balance_usd + USD_TOLERANCE
+            && max_selected_price_usd <= per_article_cap_usd + USD_TOLERANCE,
         audit_urls,
         warnings,
     })
@@ -1229,7 +1234,7 @@ fn tokenize(value: &str) -> BTreeSet<String> {
     value
         .split(|ch: char| !ch.is_ascii_alphanumeric())
         .map(normalize)
-        .filter(|token| token.len() > 2 && !is_stopword(token))
+        .filter(|token| token.len() > 1 && !is_stopword(token))
         .collect()
 }
 
@@ -1275,22 +1280,7 @@ fn default_network_for_protocol(protocol: &str) -> String {
 fn is_stopword(token: &str) -> bool {
     matches!(
         token,
-        "the"
-            | "and"
-            | "for"
-            | "with"
-            | "into"
-            | "from"
-            | "that"
-            | "this"
-            | "what"
-            | "when"
-            | "near"
-            | "price"
-            | "trade"
-            | "trading"
-            | "token"
-            | "crypto"
+        "the" | "and" | "for" | "with" | "into" | "from" | "that" | "this" | "what" | "when"
     )
 }
 
@@ -1433,5 +1423,56 @@ mod tests {
             .rejected_sources
             .iter()
             .any(|source| source.reason == "over-budget"));
+    }
+
+    #[test]
+    fn funding_routes_only_include_supported_crypto_native_rails() {
+        let plan = plan(PaidResearchPlanInput {
+            query: "NEAR price crypto research".to_string(),
+            pair: Some("NEAR/USDC".to_string()),
+            budget_usd: 0.09,
+            max_sources: 4,
+            min_relevance: 0.1,
+            min_trust_score: 0.4,
+            max_seo_risk_score: 0.65,
+            max_source_age_days: Some(7),
+            spending_mode: "quote".to_string(),
+            near_funding_asset: "USDC.near".to_string(),
+            preferred_payment_protocols: vec![],
+            default_article_price_usd: 0.01,
+            agent_wallet: None,
+            required_tags: vec![],
+            blocked_publishers: vec![],
+            sources: vec![
+                source("manual-source", 0.02, "manual", 0.95),
+                source("subscription-source", 0.02, "subscription", 0.9),
+                source("mpp-source", 0.02, "mpp", 0.85),
+                source("x402-source", 0.02, "x402", 0.8),
+            ],
+        })
+        .expect("plan");
+
+        let route_protocols: Vec<&str> = plan
+            .near_funding_routes
+            .iter()
+            .map(|route| route.target_protocol.as_str())
+            .collect();
+
+        assert_eq!(route_protocols, vec!["mpp", "x402"]);
+    }
+
+    #[test]
+    fn tokenize_preserves_two_letter_tickers_and_trading_terms() {
+        let tokens = tokenize("NEAR price for OP and AR crypto token trading");
+
+        assert!(tokens.contains("near"));
+        assert!(tokens.contains("price"));
+        assert!(tokens.contains("op"));
+        assert!(tokens.contains("ar"));
+        assert!(tokens.contains("crypto"));
+        assert!(tokens.contains("token"));
+        assert!(tokens.contains("trading"));
+        assert!(!tokens.contains("a"));
+        assert!(!tokens.contains("for"));
     }
 }
