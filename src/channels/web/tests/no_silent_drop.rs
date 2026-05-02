@@ -211,12 +211,22 @@ async fn mission_notification_cross_user_does_not_leak_owner_thread_id() {
         notify_user: Some("other-user".to_string()),
         response: Some("mission result".to_string()),
         is_error: false,
+        gate: None,
     };
 
     let owner_thread_id = notif.thread_id.to_string();
 
-    crate::bridge::handle_mission_notification(&notif, &channels, Some(&sse), Some(&store), None)
-        .await;
+    crate::bridge::handle_mission_notification(
+        &notif,
+        &channels,
+        Some(&sse),
+        Some(&store),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
 
     // The recipient should get an event with a thread_id that is NOT the
     // owner's mission thread — it should be their own assistant thread.
@@ -286,12 +296,22 @@ async fn mission_notification_same_user_attaches_owner_thread_id() {
         notify_user: None, // owner IS the recipient
         response: Some("mission result".to_string()),
         is_error: false,
+        gate: None,
     };
 
     let owner_thread_id = notif.thread_id.to_string();
 
-    crate::bridge::handle_mission_notification(&notif, &channels, Some(&sse), Some(&store), None)
-        .await;
+    crate::bridge::handle_mission_notification(
+        &notif,
+        &channels,
+        Some(&sse),
+        Some(&store),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
 
     // The owner should receive two events:
     // 1. From GatewayChannel::broadcast() (channel path)
@@ -354,12 +374,22 @@ async fn mission_notification_explicit_same_user_attaches_owner_thread_id() {
         notify_user: Some("test-user".to_string()),
         response: Some("mission result".to_string()),
         is_error: false,
+        gate: None,
     };
 
     let owner_thread_id = notif.thread_id.to_string();
 
-    crate::bridge::handle_mission_notification(&notif, &channels, Some(&sse), Some(&store), None)
-        .await;
+    crate::bridge::handle_mission_notification(
+        &notif,
+        &channels,
+        Some(&sse),
+        Some(&store),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
 
     let event = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
         .await

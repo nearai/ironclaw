@@ -914,25 +914,30 @@ impl EffectBridgeAdapter {
                 Err(e) => Err(e),
             },
             "mission_get" => {
-                let id_str = params
-                    .get("id")
-                    .or_else(|| params.get("name"))
-                    .or_else(|| params.get("_args").and_then(|a| a.get(0)))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let id = uuid::Uuid::parse_str(id_str)
-                    .map(ironclaw_engine::MissionId)
-                    .map_err(|e| EngineError::Effect {
-                        reason: format!("invalid mission id: {e}"),
-                    });
+                let id =
+                    resolve_mission_id(mgr.as_ref(), context.project_id, &context.user_id, params)
+                        .await;
                 match id {
                     Ok(id) => match mgr.get_mission(id).await {
                         Ok(Some(mission)) => {
                             // Ownership check: only the mission owner can
                             // retrieve its details (mirrors fire/pause/resume).
+                            //
+                            // Don't echo the foreign mission's id back to the
+                            // LLM — that would confirm the existence of a
+                            // mission the caller has no claim to, and the LLM
+                            // can't act on a UUID it doesn't own. Internal
+                            // diagnostics still get the id via tracing.
                             if mission.user_id != context.user_id {
+                                tracing::debug!(
+                                    target = "bridge::effect_adapter",
+                                    mission_id = %mission.id,
+                                    user_id = %context.user_id,
+                                    owner = %mission.user_id,
+                                    "rejected mission_get for foreign mission",
+                                );
                                 return Some(Err(EngineError::Effect {
-                                    reason: format!("mission {id_str} belongs to another user"),
+                                    reason: "mission belongs to another user".to_string(),
                                 }));
                             }
                             // Load recent threads (last 5) to show results
@@ -975,7 +980,14 @@ impl EffectBridgeAdapter {
                             }))
                         }
                         Ok(None) => Err(EngineError::Effect {
-                            reason: format!("mission not found: {id_str}"),
+                            // Reachable when the caller passed an explicit
+                            // UUID `id` for a mission that was deleted, never
+                            // existed, or belongs to another project. Names
+                            // that didn't match are caught earlier by
+                            // `resolve_mission_id` with a more useful error;
+                            // by the time we hit this arm we have a parsed
+                            // UUID that the store doesn't recognise.
+                            reason: format!("mission not found: {id}"),
                         }),
                         Err(e) => Err(e),
                     },
@@ -983,16 +995,9 @@ impl EffectBridgeAdapter {
                 }
             }
             "mission_fire" => {
-                let id_str = params
-                    .get("id")
-                    .or_else(|| params.get("_args").and_then(|a| a.get(0)))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let id = uuid::Uuid::parse_str(id_str)
-                    .map(ironclaw_engine::MissionId)
-                    .map_err(|e| EngineError::Effect {
-                        reason: format!("invalid mission id: {e}"),
-                    });
+                let id =
+                    resolve_mission_id(mgr.as_ref(), context.project_id, &context.user_id, params)
+                        .await;
                 match id {
                     Ok(id) => match mgr.fire_mission(id, &context.user_id, None).await {
                         Ok(Some(tid)) => {
@@ -1007,16 +1012,9 @@ impl EffectBridgeAdapter {
                 }
             }
             "mission_pause" | "mission_resume" => {
-                let id_str = params
-                    .get("id")
-                    .or_else(|| params.get("_args").and_then(|a| a.get(0)))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let id = uuid::Uuid::parse_str(id_str)
-                    .map(ironclaw_engine::MissionId)
-                    .map_err(|e| EngineError::Effect {
-                        reason: format!("invalid mission id: {e}"),
-                    });
+                let id =
+                    resolve_mission_id(mgr.as_ref(), context.project_id, &context.user_id, params)
+                        .await;
                 match id {
                     Ok(id) => {
                         let res = if action_name == "mission_pause" {
@@ -1033,17 +1031,9 @@ impl EffectBridgeAdapter {
                 }
             }
             "mission_complete" => {
-                let id_str = params
-                    .get("id")
-                    .or_else(|| params.get("name")) // routine_delete uses "name" param
-                    .or_else(|| params.get("_args").and_then(|a| a.get(0)))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let id = uuid::Uuid::parse_str(id_str)
-                    .map(ironclaw_engine::MissionId)
-                    .map_err(|e| EngineError::Effect {
-                        reason: format!("invalid mission id: {e}"),
-                    });
+                let id =
+                    resolve_mission_id(mgr.as_ref(), context.project_id, &context.user_id, params)
+                        .await;
                 match id {
                     Ok(id) => match mgr.complete_mission(id).await {
                         Ok(()) => Ok(serde_json::json!({"status": "completed"})),
@@ -1053,21 +1043,54 @@ impl EffectBridgeAdapter {
                 }
             }
             "mission_update" => {
-                let id_str = params
+                // `mission_update` is the only handler where `name` can
+                // legitimately mean the *new* name rather than the lookup
+                // key. Pre-PR callers used `{id: <uuid>, name: <new>}` to
+                // rename. To keep that shape working without confusing
+                // the resolver's id/name conflict guard, detect the
+                // legacy shape up front and pass the resolver a params
+                // view that only contains the id — the resolver then
+                // never sees the would-be-rename `name` and never
+                // mistakes it for a lookup target.
+                let new_name_param = params.get("new_name").and_then(|v| v.as_str());
+                let id_uuid = params
                     .get("id")
-                    .or_else(|| params.get("_args").and_then(|a| a.get(0)))
                     .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let id = uuid::Uuid::parse_str(id_str)
-                    .map(ironclaw_engine::MissionId)
-                    .map_err(|e| EngineError::Effect {
-                        reason: format!("invalid mission id: {e}"),
-                    });
+                    .filter(|s| !s.is_empty())
+                    .and_then(|s| uuid::Uuid::parse_str(s).ok());
+                let legacy_name_for_rename = match (new_name_param, id_uuid) {
+                    (None, Some(_)) => params.get("name").and_then(|v| v.as_str()),
+                    _ => None,
+                };
+                let resolver_params = if legacy_name_for_rename.is_some()
+                    && let Some(obj) = params.as_object()
+                {
+                    let mut view = obj.clone();
+                    view.remove("name");
+                    serde_json::Value::Object(view)
+                } else {
+                    params.clone()
+                };
+
+                let id = resolve_mission_id(
+                    mgr.as_ref(),
+                    context.project_id,
+                    &context.user_id,
+                    &resolver_params,
+                )
+                .await;
                 match id {
                     Ok(id) => {
                         let mut updates = ironclaw_engine::MissionUpdate::default();
-                        if let Some(name) = params.get("name").and_then(|v| v.as_str()) {
-                            updates.name = Some(name.to_string());
+                        // Rename target priority:
+                        //   1. `new_name` (canonical post-PR field).
+                        //   2. Legacy `{id, name}` shape — `name` was the
+                        //      pre-PR rename target. Preserved only when
+                        //      `id` is a valid UUID and `new_name` is
+                        //      absent (handled above by removing `name`
+                        //      from the resolver view).
+                        if let Some(rename_target) = new_name_param.or(legacy_name_for_rename) {
+                            updates.name = Some(rename_target.to_string());
                         }
                         if let Some(goal) = params.get("goal").and_then(|v| v.as_str()) {
                             updates.goal = Some(goal.to_string());
@@ -2160,6 +2183,144 @@ fn parse_cadence(
              (e.g. '0 9 * * *'), 'event:<channel>:<pattern>' \
              (e.g. 'event:telegram:.*'), or 'webhook:<path>'"
         ))
+    }
+}
+
+/// Resolve a mission identifier from action params.
+///
+/// Mission/routine actions accept either an explicit `id` (a UUID, kept
+/// for backward compatibility and for callers that already hold one) or
+/// a human-readable `name`. The LLM-facing surface is name-first because
+/// the agent rarely has a UUID at hand — forcing it to guess one was the
+/// root cause of #2583, where `routine_fire(name=...)` translated to
+/// `mission_fire` with a `name` field the handler never read, then the
+/// handler parsed an empty `id` as UUID and rejected with
+/// "invalid length 0".
+///
+/// Resolution order (first match wins, then conflict-checked):
+///   1. `params.id` — if present and a valid UUID, the canonical id.
+///   2. `params.name` — looked up via [`MissionManager::find_by_name`]
+///      (typed, indexed lookup; same identifier used at create time).
+///   3. `params.id` *as a name* — backward compat for legacy
+///      `mission_complete({id: "<routine-name>"})` callers that
+///      conflated the slots.
+///   4. `params._args[0]` — Tier-0 positional fallback. Tried as a name
+///      *only*; positional UUIDs aren't honoured here because they
+///      can't carry a typed contract and would silently override an
+///      explicit `name` field. (This was the inversion serrrfirat
+///      flagged on PR #3155.)
+///
+/// **Conflict guard.** If both `id` (UUID) and a `name` are supplied
+/// AND the name resolves to a *different* mission than the id
+/// identifies, this returns an error. Silently preferring the UUID
+/// (the previous behaviour) was a foot-gun: a mistyped name would
+/// rename the wrong mission.
+async fn resolve_mission_id(
+    mgr: &ironclaw_engine::MissionManager,
+    project_id: ironclaw_engine::ProjectId,
+    user_id: &str,
+    params: &serde_json::Value,
+) -> Result<ironclaw_engine::MissionId, EngineError> {
+    // Pull out the explicit id (only if it parses as a UUID).
+    let id_uuid: Option<ironclaw_engine::MissionId> = params
+        .get("id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .and_then(|s| uuid::Uuid::parse_str(s).ok())
+        .map(ironclaw_engine::MissionId);
+
+    // Collect candidate name strings in resolution order. We retain
+    // each candidate so we can emit a useful "tried these names" error
+    // and so the conflict guard knows which name was supplied.
+    let mut name_candidates: Vec<String> = Vec::new();
+    for key in &["name", "id"] {
+        if let Some(s) = params
+            .get(*key)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            // Skip the `id` slot when it's already been consumed as a
+            // UUID by the typed branch above — otherwise we'd double-
+            // try the same UUID-shaped string as a name.
+            if *key == "id" && uuid::Uuid::parse_str(s).is_ok() {
+                continue;
+            }
+            if !name_candidates.iter().any(|c| c == s) {
+                name_candidates.push(s.to_string());
+            }
+        }
+    }
+    if let Some(s) = params
+        .get("_args")
+        .and_then(|a| a.get(0))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        && !name_candidates.iter().any(|c| c == s)
+    {
+        // Positional `_args[0]` is treated as a name — never as a
+        // UUID. A positional UUID would silently override an explicit
+        // `name` field if we honoured it, which is the worst-of-both
+        // ordering serrrfirat flagged.
+        name_candidates.push(s.to_string());
+    }
+
+    // (1) Only id provided.
+    if let Some(id) = id_uuid
+        && name_candidates.is_empty()
+    {
+        return Ok(id);
+    }
+
+    // (2/3/4) Name(s) provided. Resolve via the typed helper.
+    let mut resolved_by_name: Option<ironclaw_engine::MissionId> = None;
+    for candidate in &name_candidates {
+        if let Some(m) = mgr.find_by_name(project_id, user_id, candidate).await? {
+            resolved_by_name = Some(m.id);
+            break;
+        }
+    }
+
+    match (id_uuid, resolved_by_name) {
+        (Some(id), Some(by_name)) if id == by_name => Ok(id),
+        (Some(id), Some(by_name)) => Err(EngineError::Effect {
+            reason: format!(
+                "both id and name provided but they identify different \
+                 missions: id={id} vs name={name_candidates:?} → {by_name}. \
+                 Provide only one — or fix the name to match the id."
+            ),
+        }),
+        (Some(id), None) => {
+            // Name(s) supplied but none resolved. The id is still
+            // valid; warn through the error if name was clearly
+            // intended (non-empty candidate list).
+            if !name_candidates.is_empty() {
+                return Err(EngineError::Effect {
+                    reason: format!(
+                        "name {name_candidates:?} did not match any mission \
+                         (id was also provided as {id}). Remove the stale \
+                         name, or fix it to match the id."
+                    ),
+                });
+            }
+            Ok(id)
+        }
+        (None, Some(by_name)) => Ok(by_name),
+        (None, None) => {
+            if name_candidates.is_empty() {
+                Err(EngineError::Effect {
+                    reason: "mission identifier missing: provide 'name' \
+                             (preferred) or 'id' (UUID)"
+                        .to_string(),
+                })
+            } else {
+                Err(EngineError::Effect {
+                    reason: format!(
+                        "mission not found by name: tried {name_candidates:?}. \
+                         Use mission_list to see available missions."
+                    ),
+                })
+            }
+        }
     }
 }
 
@@ -7510,6 +7671,510 @@ Use this skill to set up a Pika meeting.
         assert!(
             uuid::Uuid::parse_str(thread_id).is_ok(),
             "thread_id must be a valid UUID, got {thread_id:?}",
+        );
+    }
+
+    /// Regression for #2583: `mission_fire` must accept a `name` parameter
+    /// and resolve it to the mission's id internally. Before this fix the
+    /// handler hard-required a UUID `id`, the `routine_fire` alias path
+    /// passed through the agent's `name=...` unchanged, and the resulting
+    /// "invalid mission id: invalid length 0" loop was the actual root
+    /// cause of the bug bash failure (not the budget-rework hypothesis in
+    /// the linked #2843).
+    #[tokio::test]
+    async fn mission_fire_resolves_by_name_when_id_absent() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("name-fire-1"));
+
+        adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "fire-by-name",
+                    "goal": "verify name-based fire",
+                    "cadence": "manual"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("create should succeed");
+
+        let fire = adapter
+            .execute_action(
+                "mission_fire",
+                serde_json::json!({"name": "fire-by-name"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("fire by name should succeed");
+
+        assert!(!fire.is_error, "fire by name failed: {}", fire.output);
+        assert_eq!(
+            fire.output.get("status").and_then(|v| v.as_str()),
+            Some("fired"),
+            "name-based fire should produce 'fired' status, got: {}",
+            fire.output
+        );
+        assert!(
+            fire.output
+                .get("thread_id")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| uuid::Uuid::parse_str(s).is_ok()),
+            "fired response must include a UUID thread_id"
+        );
+    }
+
+    /// Calling the LLM-facing `routine_fire` alias with a `name` parameter
+    /// must resolve through the bridge's mission_fire handler. This is the
+    /// exact path that #2583 reproduces — the agent calls
+    /// `routine_fire(name="bitcoin_price_checker")` and the handler
+    /// previously rejected with "invalid mission id" because it tried to
+    /// parse the routine name as a UUID.
+    #[tokio::test]
+    async fn routine_fire_alias_resolves_by_name_through_mission_fire() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("alias-name-fire-1"));
+
+        adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "bitcoin_price_checker",
+                    "goal": "fetch BTC price",
+                    "cadence": "manual"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("create should succeed");
+
+        let fire = adapter
+            .execute_action(
+                "routine_fire",
+                serde_json::json!({"name": "bitcoin_price_checker"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("routine_fire alias should dispatch through mission_fire");
+
+        assert!(
+            !fire.is_error,
+            "routine_fire by name failed: {}",
+            fire.output
+        );
+        assert_eq!(
+            fire.output.get("status").and_then(|v| v.as_str()),
+            Some("fired"),
+            "routine_fire alias should produce 'fired' status, got: {}",
+            fire.output
+        );
+    }
+
+    /// Calling `mission_fire` with neither `id` nor `name` must surface a
+    /// clear, actionable error rather than an empty-UUID parse failure.
+    /// The previous error message ("invalid mission id: invalid length:
+    /// expected length 32 for simple format, found 0") leaked the internal
+    /// validation noise to the LLM and contributed to retry loops.
+    #[tokio::test]
+    async fn mission_fire_errors_when_neither_id_nor_name_provided() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("no-id-no-name-1"));
+
+        let res = adapter
+            .execute_action("mission_fire", serde_json::json!({}), &lease(), &ctx)
+            .await
+            .expect("missing-id-and-name should produce an ActionResult, not panic");
+        assert!(
+            res.is_error,
+            "ActionResult must be flagged is_error when params are missing: {res:?}"
+        );
+        let s = res
+            .output
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(
+            s.contains("name") && s.contains("id"),
+            "error message must mention both 'name' and 'id' so the LLM knows \
+             what to do; got: {s}"
+        );
+    }
+
+    /// Calling `mission_fire` with a `name` that doesn't exist must error
+    /// with a message that names the missing mission and points at
+    /// `mission_list` for discovery. The previous "invalid mission id" leak
+    /// was actively misleading — the mission existed under a different id.
+    #[tokio::test]
+    async fn mission_fire_errors_with_helpful_message_when_name_not_found() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("name-not-found-1"));
+
+        // Create a mission with a different name so we know the mission
+        // store is reachable; this isolates the failure to "name lookup
+        // didn't match" rather than "no missions exist for user".
+        adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "real-mission",
+                    "goal": "exists",
+                    "cadence": "manual"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("create should succeed");
+
+        let res = adapter
+            .execute_action(
+                "mission_fire",
+                serde_json::json!({"name": "no-such-mission"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("unknown-name fire should produce an ActionResult, not panic");
+        assert!(
+            res.is_error,
+            "ActionResult must be flagged is_error when name lookup fails: {res:?}"
+        );
+        let s = res
+            .output
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(
+            s.contains("no-such-mission"),
+            "error must echo the missing name; got: {s}"
+        );
+        assert!(
+            s.contains("mission_list"),
+            "error should hint at mission_list for discovery; got: {s}"
+        );
+    }
+
+    /// `mission_get` resolves by `name`. Pinning the name path here
+    /// closes the test gap flagged on PR #3155: every migrated
+    /// handler routes through `resolve_mission_id`, but only
+    /// `mission_fire` had a by-name regression before this.
+    #[tokio::test]
+    async fn mission_get_resolves_by_name() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("get-by-name-1"));
+
+        adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "lookup-target-get",
+                    "goal": "exists for mission_get",
+                    "cadence": "manual"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("create should succeed");
+
+        let got = adapter
+            .execute_action(
+                "mission_get",
+                serde_json::json!({"name": "lookup-target-get"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("mission_get by name should succeed");
+        assert!(!got.is_error, "mission_get by name failed: {}", got.output);
+        assert_eq!(
+            got.output.get("name").and_then(|v| v.as_str()),
+            Some("lookup-target-get"),
+            "mission_get must echo the same name back"
+        );
+    }
+
+    /// `mission_complete` resolves by `name`.
+    #[tokio::test]
+    async fn mission_complete_resolves_by_name() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("complete-by-name-1"));
+
+        adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "complete-target",
+                    "goal": "exists for mission_complete",
+                    "cadence": "manual"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("create should succeed");
+
+        let res = adapter
+            .execute_action(
+                "mission_complete",
+                serde_json::json!({"name": "complete-target"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("mission_complete by name should succeed");
+        assert!(!res.is_error, "complete failed: {}", res.output);
+        assert_eq!(
+            res.output.get("status").and_then(|v| v.as_str()),
+            Some("completed")
+        );
+    }
+
+    /// `mission_pause` and `mission_resume` round-trip by `name`.
+    #[tokio::test]
+    async fn mission_pause_and_resume_resolve_by_name() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(
+            ironclaw_engine::ThreadId::new(),
+            Some("pause-resume-name-1"),
+        );
+
+        adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "pause-target",
+                    "goal": "exists for pause/resume",
+                    "cadence": "manual"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("create should succeed");
+
+        let pause = adapter
+            .execute_action(
+                "mission_pause",
+                serde_json::json!({"name": "pause-target"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("pause by name should succeed");
+        assert!(!pause.is_error, "pause failed: {}", pause.output);
+
+        let resume = adapter
+            .execute_action(
+                "mission_resume",
+                serde_json::json!({"name": "pause-target"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("resume by name should succeed");
+        assert!(!resume.is_error, "resume failed: {}", resume.output);
+    }
+
+    /// Conflict guard: if `id` and `name` are both supplied AND they
+    /// identify *different* missions, the resolver must error rather
+    /// than silently preferring one. Silently preferring the UUID was
+    /// the foot-gun serrrfirat flagged on PR #3155 — a mistyped
+    /// `name` would rename the wrong mission.
+    #[tokio::test]
+    async fn mission_resolver_errors_when_id_and_name_disagree() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("conflict-1"));
+
+        // Create two distinct missions: A (the one our id refers to)
+        // and B (the one our `name` refers to). They are different.
+        let create_a = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "mission-A",
+                    "goal": "the real target",
+                    "cadence": "manual"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("create A should succeed");
+        let id_a = create_a
+            .output
+            .get("mission_id")
+            .and_then(|v| v.as_str())
+            .expect("mission_id present")
+            .to_string();
+        adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "mission-B",
+                    "goal": "the wrong target",
+                    "cadence": "manual"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("create B should succeed");
+
+        // mission_fire with id=A but name=B — they identify different
+        // missions. Must error, not silently fire either one.
+        let res = adapter
+            .execute_action(
+                "mission_fire",
+                serde_json::json!({"id": id_a, "name": "mission-B"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("conflict should produce an ActionResult, not panic");
+        assert!(
+            res.is_error,
+            "id/name conflict must be flagged as is_error: {res:?}"
+        );
+        let err_text = res
+            .output
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(
+            err_text.contains("different missions") || err_text.contains("identify different"),
+            "error must explain the conflict; got: {err_text}"
+        );
+    }
+
+    /// Backwards-compat: pre-PR callers renamed via
+    /// `mission_update({id: <uuid>, name: <new>})`. After the PR,
+    /// `name` became the lookup key and `new_name` is the rename
+    /// target — but a caller still passing the old shape must keep
+    /// renaming, not silently no-op. The handler preserves the legacy
+    /// shape only when `id` is the explicit lookup AND `new_name` is
+    /// absent.
+    #[tokio::test]
+    async fn mission_update_preserves_legacy_id_plus_name_rename() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("legacy-rename-1"));
+
+        let create = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "old-name",
+                    "goal": "test legacy rename shape",
+                    "cadence": "manual"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("create should succeed");
+        let mission_id = create
+            .output
+            .get("mission_id")
+            .and_then(|v| v.as_str())
+            .expect("create must return mission_id")
+            .to_string();
+
+        // Legacy shape: id-as-lookup + name-as-rename-target.
+        let update = adapter
+            .execute_action(
+                "mission_update",
+                serde_json::json!({
+                    "id": mission_id,
+                    "name": "new-name-via-legacy-shape"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("legacy mission_update must succeed");
+        assert!(
+            !update.is_error,
+            "legacy update must succeed: {}",
+            update.output
+        );
+
+        // Verify the rename actually happened (not just a returned
+        // status). mission_list reflects the persisted name.
+        let list = adapter
+            .execute_action("mission_list", serde_json::json!({}), &lease(), &ctx)
+            .await
+            .expect("list should succeed");
+        let missions = list.output.as_array().expect("array");
+        let entry = missions
+            .iter()
+            .find(|m| m.get("id").and_then(|v| v.as_str()) == Some(mission_id.as_str()))
+            .expect("renamed mission must still be in list");
+        assert_eq!(
+            entry.get("name").and_then(|v| v.as_str()),
+            Some("new-name-via-legacy-shape"),
+            "legacy {{id, name}} update shape must rename the mission, \
+             not silently no-op"
+        );
+    }
+
+    /// Canonical post-PR rename via `new_name`. Pins that the new
+    /// schema field is honoured and that `name` (when also present
+    /// AND `new_name` is set) acts as the lookup key, NOT a second
+    /// rename source.
+    #[tokio::test]
+    async fn mission_update_renames_via_new_name_and_uses_name_as_lookup() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("new-name-1"));
+
+        adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "lookup-target",
+                    "goal": "test new_name rename",
+                    "cadence": "manual"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("create should succeed");
+
+        let update = adapter
+            .execute_action(
+                "mission_update",
+                serde_json::json!({
+                    "name": "lookup-target",
+                    "new_name": "renamed-via-new_name"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("new_name update should succeed");
+        assert!(!update.is_error, "update failed: {}", update.output);
+
+        let list = adapter
+            .execute_action("mission_list", serde_json::json!({}), &lease(), &ctx)
+            .await
+            .expect("list should succeed");
+        let missions = list.output.as_array().expect("array");
+        // Old name must no longer be present (it was renamed).
+        assert!(
+            !missions
+                .iter()
+                .any(|m| m.get("name").and_then(|v| v.as_str()) == Some("lookup-target")),
+            "old name must not survive a rename"
+        );
+        assert!(
+            missions
+                .iter()
+                .any(|m| m.get("name").and_then(|v| v.as_str()) == Some("renamed-via-new_name")),
+            "renamed mission must appear under its new name in mission_list"
         );
     }
 

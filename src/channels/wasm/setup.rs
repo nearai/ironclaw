@@ -66,7 +66,7 @@ pub async fn setup_wasm_channels(
     extension_manager: Option<&Arc<ExtensionManager>>,
     database: Option<&Arc<dyn Database>>,
     registered_channel_names: &[String],
-    startup_active_channel_names: Option<&HashSet<String>>,
+    startup_active_channel_names: &HashSet<String>,
     ownership_cache: Arc<crate::ownership::OwnershipCache>,
 ) -> Option<WasmChannelSetup> {
     let runtime = match WasmChannelRuntime::new(WasmChannelRuntimeConfig::default()) {
@@ -108,9 +108,11 @@ pub async fn setup_wasm_channels(
         discovered_channels
             .into_iter()
             .filter_map(|(name, discovered)| {
-                startup_active_channel_names
-                    .is_none_or(|active_names| active_names.contains(&name))
-                    .then_some((name, discovered.wasm_path, discovered.capabilities_path))
+                startup_active_channel_names.contains(&name).then_some((
+                    name,
+                    discovered.wasm_path,
+                    discovered.capabilities_path,
+                ))
             })
             .collect();
 
@@ -128,7 +130,7 @@ pub async fn setup_wasm_channels(
                     channel = %name,
                     path = %wasm_path.display(),
                     error = %err,
-                    "Failed to load startup-active WASM channel at startup"
+                    "Failed to load active WASM channel at startup"
                 );
             }
         }

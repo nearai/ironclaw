@@ -484,6 +484,11 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Default user ID for extension operations (single-user mode).
     let ext_user_id = config.owner_id.clone();
+    // Resolve startup-active channels: persisted state is authoritative when
+    // present; otherwise fall back to the setup wizard's `channels.wasm_channels`
+    // so headless installs (no DB, no web UI) still auto-activate channels
+    // listed in the config. Settings-store errors propagate — masking them
+    // would silently re-activate channels the user had deactivated.
     let startup_active_channels: Vec<String> =
         if let Some(ref ext_mgr) = components.extension_manager {
             ext_mgr
@@ -491,7 +496,7 @@ async fn async_main() -> anyhow::Result<()> {
                     &ext_user_id,
                     config.channels.configured_wasm_channels.clone(),
                 )
-                .await
+                .await?
         } else {
             normalize_startup_wasm_channel_names(&config.channels.configured_wasm_channels)
                 .into_iter()
@@ -499,10 +504,9 @@ async fn async_main() -> anyhow::Result<()> {
         };
     let startup_active_wasm_channels: std::collections::HashSet<String> =
         if let Some(ref ext_mgr) = components.extension_manager {
-            startup_active_wasm_channel_names(ext_mgr, &ext_user_id, &startup_active_channels)
-                .await
+            startup_active_wasm_channel_names(ext_mgr, &ext_user_id, &startup_active_channels).await
         } else {
-            normalize_startup_wasm_channel_names(&startup_active_channels)
+            startup_active_channels.iter().cloned().collect()
         };
 
     let channels = ChannelManager::new();
@@ -693,7 +697,7 @@ async fn async_main() -> anyhow::Result<()> {
             components.extension_manager.as_ref(),
             components.db.as_ref(),
             &channel_names,
-            Some(&startup_active_wasm_channels),
+            &startup_active_wasm_channels,
             Arc::clone(&components.ownership_cache),
         )
         .await;
@@ -1123,7 +1127,9 @@ async fn async_main() -> anyhow::Result<()> {
             .await;
         tracing::debug!("Channel runtime wired into extension manager for hot-activation");
 
-        // Auto-activate WASM channels that were active in a previous session.
+        // Auto-activate WASM channels resolved at startup — either persisted
+        // from a prior session or supplied by the setup wizard's
+        // `channels.wasm_channels` config when no settings store is available.
         // Relay channels are handled separately below via restore_relay_channels().
         for name in &startup_active_wasm_channels {
             if active_at_startup.contains(name)
@@ -1146,14 +1152,14 @@ async fn async_main() -> anyhow::Result<()> {
                     tracing::debug!(
                         channel = %name,
                         message = %message,
-                        "Auto-activated persisted WASM channel"
+                        "Auto-activated startup WASM channel"
                     );
                 }
                 Ok(ironclaw::extensions::EnsureReadyOutcome::NeedsAuth { auth, .. }) => {
                     tracing::warn!(
                         channel = %name,
                         instructions = ?auth.instructions(),
-                        "Persisted WASM channel still needs authentication"
+                        "Startup WASM channel still needs authentication"
                     );
                 }
                 Ok(ironclaw::extensions::EnsureReadyOutcome::NeedsSetup {
@@ -1162,14 +1168,14 @@ async fn async_main() -> anyhow::Result<()> {
                     tracing::warn!(
                         channel = %name,
                         instructions = %instructions,
-                        "Persisted WASM channel still needs setup"
+                        "Startup WASM channel still needs setup"
                     );
                 }
                 Err(e) => {
                     tracing::warn!(
                         channel = %name,
                         error = %e,
-                        "Failed to auto-activate persisted WASM channel"
+                        "Failed to auto-activate startup WASM channel"
                     );
                 }
             }
