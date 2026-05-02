@@ -1226,6 +1226,39 @@ impl EffectBridgeAdapter {
             .unwrap_or(canonical_action_name)
             .to_string();
 
+        // ── Schema-guided parameter coercion ──
+        //
+        // Engine actions (`mission_*`, routine aliases, `tool_info`) and
+        // host tools both declare JSON Schemas for their parameters. Run
+        // both kinds through the same coercion the dispatcher path uses
+        // (`prepare_params_for_schema`) so the LLM can pass stringified
+        // scalars (`"120"` for an integer field) without breaking the
+        // handler. Schema sources, in order: orchestrator-populated
+        // action snapshot, bridge-known engine action defs, host tool
+        // registry. Coercion is idempotent for already-typed inputs, so
+        // tools whose downstream path runs `prepare_tool_params` again
+        // see the same shape.
+        let action_schema = context
+            .available_actions_snapshot
+            .as_ref()
+            .and_then(|snapshot| {
+                ActionDiscovery::resolve(snapshot.as_ref(), canonical_action_name)
+                    .map(|action| action.parameters_schema.clone())
+            })
+            .or_else(|| engine_action_schema(canonical_action_name));
+        let action_schema = match action_schema {
+            Some(schema) => Some(schema),
+            None => self
+                .tools
+                .get(&lookup_name)
+                .await
+                .map(|tool| tool.parameters_schema()),
+        };
+        let parameters = match action_schema {
+            Some(schema) => crate::tools::prepare_params_for_schema(&parameters, &schema),
+            None => parameters,
+        };
+
         // ── Per-step call limit (prevent amplification loops) ──
         const MAX_CALLS_PER_STEP: u32 = 50;
         let count = self
@@ -2712,6 +2745,22 @@ fn extract_credential_name(error_msg: &str) -> Option<String> {
             .map(String::from);
     }
     None
+}
+
+/// Look up the parameter schema for a known engine-native action by name.
+///
+/// Engine actions (`mission_*`, `routine_*` aliases, `tool_info`) are not
+/// in the host `ToolRegistry` — they are handled directly inside the
+/// bridge. This helper provides the canonical schema for those actions so
+/// they get the same schema-guided parameter coercion that registered
+/// tools get via `prepare_tool_params`. The orchestrator-populated
+/// `available_actions_snapshot` takes precedence; this is the fallback
+/// for callers (and tests) that do not populate it.
+fn engine_action_schema(action_name: &str) -> Option<serde_json::Value> {
+    crate::bridge::engine_actions::mission_capability_actions()
+        .into_iter()
+        .find(|action| action.matches_name(action_name))
+        .map(|action| action.parameters_schema)
 }
 
 pub(crate) fn is_v1_only_tool(name: &str) -> bool {
@@ -4687,9 +4736,14 @@ mod tests {
 
     #[test]
     fn extract_guardrails_rejects_string_typed_integers() {
-        // Regression: LLMs pass numeric params as strings (e.g. cooldown_secs="0").
-        // The old code silently ignored the wrong type, so mission_update
-        // returned {"status":"updated"} but changed nothing in the database.
+        // Defense-in-depth: this helper is called directly on the raw
+        // params object and is the last line of defense if some future
+        // code path bypasses the schema-guided coercion that
+        // `execute_action_internal` now runs. A string-typed integer
+        // here means coercion didn't happen — fail loudly rather than
+        // silently dropping the value (the bug shape from before #2630).
+        // End-to-end coercion of `cooldown_secs="120"` is covered by
+        // `mission_create_string_guardrails_coerced_via_execute_action`.
         let params = serde_json::json!({"cooldown_secs": "0", "max_concurrent": "2"});
         let mut updates = ironclaw_engine::MissionUpdate::default();
         let err = extract_guardrails(&params, &mut updates).unwrap_err();
@@ -7303,10 +7357,57 @@ Use this skill to set up a Pika meeting.
         );
     }
 
-    /// Regression: mission_create with string-typed guardrails (e.g.
-    /// cooldown_secs="0") must be caught before creating the mission.
+    /// Regression for #3132: string-typed guardrails (e.g.
+    /// `cooldown_secs="120"`) must be coerced to integers per the action's
+    /// JSON Schema before reaching the handler. Previously rejected with
+    /// `'cooldown_secs' must be an integer, got "120"`.
     #[tokio::test]
-    async fn mission_create_string_guardrails_rejected_via_execute_action() {
+    async fn mission_create_string_guardrails_coerced_via_execute_action() {
+        let (adapter, _store, dyn_store) =
+            make_adapter_with_missions_and_store(Arc::new(ToolRegistry::new())).await;
+        let result = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "test",
+                    "goal": "do stuff",
+                    "cadence": "manual",
+                    "cooldown_secs": "120",
+                    "max_concurrent": "2",
+                    "dedup_window_secs": "30",
+                    "max_threads_per_day": "5",
+                }),
+                &lease(),
+                &exec_ctx(ironclaw_engine::ThreadId::new(), Some("c3")),
+            )
+            .await
+            .expect("string-typed guardrails should be coerced and succeed");
+
+        assert!(!result.is_error, "got error: {}", result.output);
+        let mission_id_str = result
+            .output
+            .get("mission_id")
+            .and_then(|v| v.as_str())
+            .expect("should have mission_id");
+        let mission_id =
+            ironclaw_engine::MissionId(uuid::Uuid::parse_str(mission_id_str).expect("uuid"));
+        let mission = dyn_store
+            .load_mission(mission_id)
+            .await
+            .expect("load_mission")
+            .expect("mission persisted");
+        assert_eq!(mission.cooldown_secs, 120);
+        assert_eq!(mission.max_concurrent, 2);
+        assert_eq!(mission.dedup_window_secs, 30);
+        assert_eq!(mission.max_threads_per_day, 5);
+    }
+
+    /// Non-coercible strings (e.g. `cooldown_secs="abc"`) still surface as
+    /// a clean error rather than being silently dropped. Coercion leaves
+    /// the value unchanged when it can't parse to the target type, and
+    /// `extract_guardrails`'s strict check then rejects loudly.
+    #[tokio::test]
+    async fn mission_create_non_coercible_string_guardrail_returns_error() {
         let adapter = make_adapter_with_missions().await;
         let result = adapter
             .execute_action(
@@ -7315,10 +7416,10 @@ Use this skill to set up a Pika meeting.
                     "name": "test",
                     "goal": "do stuff",
                     "cadence": "manual",
-                    "cooldown_secs": "300"
+                    "cooldown_secs": "abc",
                 }),
                 &lease(),
-                &exec_ctx(ironclaw_engine::ThreadId::new(), Some("c3")),
+                &exec_ctx(ironclaw_engine::ThreadId::new(), Some("c3b")),
             )
             .await
             .expect("should return Ok with is_error=true");
@@ -7367,11 +7468,13 @@ Use this skill to set up a Pika meeting.
         );
     }
 
-    /// Regression: mission_update with string-typed guardrails must be
-    /// caught at the execute_action level, not silently ignored.
+    /// Regression for #3132: `mission_update` with string-typed guardrails
+    /// must be coerced (not rejected) so LLM calls passing `"5"` for an
+    /// integer parameter succeed and persist the new value.
     #[tokio::test]
-    async fn mission_update_string_guardrails_rejected_via_execute_action() {
-        let adapter = make_adapter_with_missions().await;
+    async fn mission_update_string_guardrails_coerced_via_execute_action() {
+        let (adapter, _store, dyn_store) =
+            make_adapter_with_missions_and_store(Arc::new(ToolRegistry::new())).await;
         let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("u1"));
 
         // First create a mission to get an ID.
@@ -7389,40 +7492,39 @@ Use this skill to set up a Pika meeting.
             .await
             .expect("create should succeed");
         assert!(!create_result.is_error);
-        let mission_id = create_result
+        let mission_id_str = create_result
             .output
             .get("mission_id")
             .and_then(|v| v.as_str())
             .expect("should have mission_id");
 
-        // Now update with string-typed guardrails — should fail.
+        // Update with a string-typed integer — should be coerced and applied.
         let update_result = adapter
             .execute_action(
                 "mission_update",
                 serde_json::json!({
-                    "id": mission_id,
+                    "id": mission_id_str,
                     "max_concurrent": "5"
                 }),
                 &lease(),
                 &ctx,
             )
             .await
-            .expect("should return Ok with is_error=true");
+            .expect("string-typed guardrails should be coerced and succeed");
 
         assert!(
-            update_result.is_error,
-            "string guardrails should fail: {}",
+            !update_result.is_error,
+            "update should succeed after coercion: {}",
             update_result.output
         );
-        assert!(
-            update_result
-                .output
-                .get("error")
-                .and_then(|v| v.as_str())
-                .is_some_and(|s| s.contains("must be an integer")),
-            "got: {}",
-            update_result.output
-        );
+        let mission_id =
+            ironclaw_engine::MissionId(uuid::Uuid::parse_str(mission_id_str).expect("uuid"));
+        let mission = dyn_store
+            .load_mission(mission_id)
+            .await
+            .expect("load_mission")
+            .expect("mission persisted");
+        assert_eq!(mission.max_concurrent, 5);
     }
 
     /// Verify system_event cadence round-trips through mission_list.
