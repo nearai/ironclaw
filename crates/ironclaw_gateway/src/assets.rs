@@ -172,3 +172,14 @@ pub const ADMIN_CSS: &str = include_str!("../static/admin/admin.css");
 
 /// Admin panel JavaScript.
 pub const ADMIN_JS: &str = include_str!("../static/admin/admin.js");
+
+// ==================== Legal Harness ====================
+
+/// Legal harness SPA HTML shell.
+pub const LEGAL_HTML: &str = include_str!("../static/legal.html");
+
+/// Legal harness stylesheet.
+pub const LEGAL_CSS: &str = include_str!("../static/legal/legal.css");
+
+/// Legal harness JavaScript.
+pub const LEGAL_JS: &str = include_str!("../static/legal/legal.js");

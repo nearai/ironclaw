@@ -61,8 +61,9 @@ use crate::channels::web::platform::static_files::{
     BASE_CSP_HEADER, admin_css_handler, admin_html_handler, admin_js_handler, css_handler,
     debug_init_handler, debug_panel_css_handler, debug_panel_js_handler, favicon_handler,
     health_handler, i18n_app_handler, i18n_en_handler, i18n_index_handler, i18n_ko_handler,
-    i18n_zh_handler, index_handler, js_handler, project_file_handler, project_index_handler,
-    project_redirect_handler, theme_css_handler, theme_init_handler,
+    i18n_zh_handler, index_handler, js_handler, legal_css_handler, legal_html_handler,
+    legal_js_handler, project_file_handler, project_index_handler, project_redirect_handler,
+    theme_css_handler, theme_init_handler,
 };
 
 // Feature slices under `features/<slice>/`. As of ironclaw#2599 stage 4d,
@@ -477,7 +478,13 @@ pub async fn start_server(
         .route("/admin/", get(admin_html_handler))
         .route("/admin/{*path}", get(admin_html_handler))
         .route("/admin.css", get(admin_css_handler))
-        .route("/admin.js", get(admin_js_handler));
+        .route("/admin.js", get(admin_js_handler))
+        // Legal harness SPA (auth handled client-side via bearer token + API layer)
+        .route("/legal", get(legal_html_handler))
+        .route("/legal/", get(legal_html_handler))
+        .route("/legal/{*path}", get(legal_html_handler))
+        .route("/legal.css", get(legal_css_handler))
+        .route("/legal.js", get(legal_js_handler));
 
     // Project file serving (behind auth to prevent unauthorized file access).
     let projects = Router::new()

@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="robots" content="noindex, nofollow">
+  <title>IronClaw Legal</title>
+  <link rel="icon" type="image/x-icon" href="/favicon.ico">
+  <link rel="stylesheet" href="/legal.css">
+</head>
+<body>
+  <div id="auth" class="screen">
+    <div class="card">
+      <h1>IronClaw <span class="badge">Legal</span></h1>
+      <p class="muted">Chat with legal documents. Upload PDFs and DOCX files; ask the agent in plain English; export the conversation as a Word document.</p>
+      <div id="auth-error" class="error" hidden></div>
+      <label for="token">Gateway token</label>
+      <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="bearer token">
+      <button id="connect" class="primary">Connect</button>
+    </div>
+  </div>
+
+  <div id="app" hidden>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-name">IronClaw</span>
+        <span class="badge">Legal</span>
+      </div>
+      <div class="topbar-actions">
+        <button id="back-btn" class="ghost" hidden>← Back</button>
+        <button id="logout-btn" class="ghost">Sign out</button>
+      </div>
+    </header>
+
+    <main id="main">
+      <!-- Project list view -->
+      <section id="view-projects" class="view">
+        <div class="view-header">
+          <h2>Projects</h2>
+          <button id="new-project-btn" class="primary compact">New project</button>
+        </div>
+        <form id="new-project-form" class="inline-form" hidden>
+          <input id="new-project-name" type="text" placeholder="Project name" required maxlength="200">
+          <button type="submit" class="primary compact">Create</button>
+          <button type="button" id="new-project-cancel" class="ghost compact">Cancel</button>
+        </form>
+        <ul id="project-list" class="list"></ul>
+        <p id="projects-empty" class="muted" hidden>No projects yet. Create one above.</p>
+      </section>
+
+      <!-- Project detail (documents + chats) -->
+      <section id="view-project" class="view" hidden>
+        <h2 id="project-title"></h2>
+        <div class="tabs">
+          <button class="tab active" data-tab="documents">Documents</button>
+          <button class="tab" data-tab="chats">Chats</button>
+        </div>
+
+        <div id="tab-documents" class="tab-panel">
+          <form id="upload-form" class="upload-form">
+            <label class="file-pick">
+              <input id="upload-input" type="file" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document">
+              <span>Choose PDF or DOCX</span>
+            </label>
+            <button type="submit" class="primary compact" disabled>Upload</button>
+          </form>
+          <div id="upload-status" class="status" hidden></div>
+          <ul id="document-list" class="list"></ul>
+          <p id="documents-empty" class="muted" hidden>No documents yet. Upload one above to start chatting.</p>
+        </div>
+
+        <div id="tab-chats" class="tab-panel" hidden>
+          <button id="new-chat-btn" class="primary compact">New chat</button>
+          <ul id="chat-list" class="list"></ul>
+          <p id="chats-empty" class="muted" hidden>No chats yet. Create one to ask questions about the project's documents.</p>
+        </div>
+      </section>
+
+      <!-- Chat view -->
+      <section id="view-chat" class="view chat-view" hidden>
+        <div class="chat-header">
+          <h2 id="chat-title">Chat</h2>
+          <button id="export-docx-btn" class="ghost compact">Export DOCX</button>
+        </div>
+        <div id="messages" class="messages"></div>
+        <form id="composer" class="composer">
+          <textarea id="composer-input" rows="2" placeholder="Ask about the project's documents…" required></textarea>
+          <button type="submit" class="primary compact" id="send-btn">Send</button>
+        </form>
+      </section>
+
+      <div id="toast" class="toast" hidden></div>
+    </main>
+  </div>
+
+  <script src="/legal.js"></script>
+</body>
+</html>
