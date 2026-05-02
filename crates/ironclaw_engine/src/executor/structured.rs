@@ -56,7 +56,7 @@ pub async fn execute_action_calls(
     calls: &[ActionCall],
     thread: &Thread,
     effects: &Arc<dyn EffectExecutor>,
-    leases: &LeaseManager,
+    leases: &Arc<LeaseManager>,
     policy: &PolicyEngine,
     context: &ThreadExecutionContext,
     capability_policies: &[crate::types::capability::PolicyRule],
@@ -308,9 +308,17 @@ pub async fn execute_action_calls(
             execution_start.elapsed().as_millis() as u64,
         ));
     } else if runnable_indices.len() > 1 {
-        // Multiple calls: execute in parallel via JoinSet
+        // Multiple calls: execute in parallel via JoinSet. Each task
+        // wraps the call in `execute_with_inline_gate_retry` so a tool
+        // raising `Approval` mid-execution pauses inline through the
+        // shared bridge controller (which serializes concurrent gates
+        // per (user, thread)) and either retries on approval or
+        // surfaces a typed denial — same contract as the single-call
+        // fast path. Without this wrapper, parallel batches reverted
+        // to the legacy `gate_paused` sentinel + thread re-entry path,
+        // re-introducing the double-execution bug for any
+        // already-completed sibling calls in the same batch.
         let mut join_set = tokio::task::JoinSet::new();
-        let effects = effects.clone();
 
         for (idx, lease) in runnable_indices {
             let call = calls[idx].clone();
@@ -320,14 +328,16 @@ pub async fn execute_action_calls(
                 &available_actions,
                 &available_inventory,
             );
-            let effects = effects.clone();
+            let effects = Arc::clone(effects);
+            let leases = Arc::clone(leases);
             let lease = lease.clone();
+            let thread = thread.clone();
 
             join_set.spawn(async move {
                 let execution_start = Instant::now();
-                let result = effects
-                    .execute_action(&call.action_name, call.parameters.clone(), &lease, &ctx)
-                    .await;
+                let result =
+                    execute_with_inline_gate_retry(&effects, &leases, &lease, &call, &ctx, &thread)
+                        .await;
                 (
                     idx,
                     lease.id,

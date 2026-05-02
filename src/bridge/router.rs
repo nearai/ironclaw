@@ -3841,11 +3841,85 @@ async fn handle_with_engine_inner(
     let outcome = await_thread_outcome(agent, state, message, conv_id, thread_id).await;
     // Drop per-execution context. The `PendingGate` row (if a gate
     // fired) carries everything the resolver needs from here on.
-    state
-        .gate_controller
-        .clear_execution_context(&message.user_id, thread_id, conv_id)
-        .await;
+    //
+    // BridgeOutcome::Pending means the request handler hit its deadline
+    // while the engine was still running (typically parked in
+    // `BridgeGateController::pause` waiting for an approval). Clearing
+    // context here would strand the parked thread — its eventual
+    // resolution would call `pause()` for any subsequent gate with no
+    // registered context, surfacing as silent `Cancelled`. Defer the
+    // cleanup to a background task that watches for thread completion
+    // and clears once the engine is actually done.
+    if matches!(outcome, Ok(BridgeOutcome::Pending))
+        && state.thread_manager.is_running(thread_id).await
+    {
+        spawn_deferred_context_cleanup(
+            Arc::clone(&state.gate_controller),
+            Arc::clone(&state.thread_manager),
+            message.user_id.clone(),
+            thread_id,
+            conv_id,
+        );
+    } else {
+        state
+            .gate_controller
+            .clear_execution_context(&message.user_id, thread_id, conv_id)
+            .await;
+    }
     outcome
+}
+
+/// Watch a still-running thread for completion and clear its
+/// per-execution context once the engine task has actually finished.
+///
+/// Used when `await_thread_outcome` returned [`BridgeOutcome::Pending`]
+/// because the request-level deadline fired while the thread was
+/// parked in [`crate::bridge::gate_controller::BridgeGateController::pause`].
+/// The thread is still alive and the (user, thread)-keyed context must
+/// stay registered until the eventual gate resolution drives the engine
+/// to completion — otherwise a follow-up gate from the same execution
+/// surfaces as silent `Cancelled` (no prompt).
+///
+/// Polls `is_running` with a coarse cadence; gate `expires_at` (30 min)
+/// upper-bounds how long the thread can stay parked, so the watcher is
+/// guaranteed to terminate. The cap is a defensive safety against any
+/// future code path that could deadlock the engine task.
+fn spawn_deferred_context_cleanup(
+    gate_controller: Arc<crate::bridge::gate_controller::BridgeGateController>,
+    thread_manager: Arc<ironclaw_engine::ThreadManager>,
+    user_id: String,
+    thread_id: ironclaw_engine::ThreadId,
+    conv_id: ironclaw_engine::ConversationId,
+) {
+    tokio::spawn(async move {
+        // Poll cadence: 30s (cheap; thread completion is on the order
+        // of seconds-to-minutes once the user resolves). Cap at one
+        // hour — well past the 30-min PendingGate expiry that bounds
+        // any pause() call.
+        let poll_interval = std::time::Duration::from_secs(30);
+        let max_wait = std::time::Duration::from_secs(60 * 60);
+        let started = tokio::time::Instant::now();
+        loop {
+            if !thread_manager.is_running(thread_id).await {
+                break;
+            }
+            if started.elapsed() >= max_wait {
+                tracing::warn!(
+                    thread_id = %thread_id,
+                    "deferred context cleanup hit one-hour cap; clearing context anyway"
+                );
+                break;
+            }
+            tokio::time::sleep(poll_interval).await;
+        }
+        gate_controller
+            .clear_execution_context(&user_id, thread_id, conv_id)
+            .await;
+        debug!(
+            thread_id = %thread_id,
+            "engine v2: deferred context cleanup ran"
+        );
+    });
 }
 
 /// Fire active OnEvent missions whose pattern matches the inbound message.
