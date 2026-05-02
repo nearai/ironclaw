@@ -5,7 +5,7 @@
 //! implementation is replay-derived over [`ironclaw_events::DurableEventLog`]
 //! so it stays independent of concrete JSONL/PostgreSQL/libSQL adapters.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -19,6 +19,8 @@ use ironclaw_host_api::{
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+const STATE_REPLAY_PAGE_LIMIT: usize = 256;
 
 /// Scoped projection request authority.
 ///
@@ -268,11 +270,54 @@ impl ReplayEventProjectionService {
         };
         Ok(ProjectedRuntimePage {
             entries,
-            next_cursor: ProjectionCursor {
-                runtime: next_cursor,
-            },
+            next_cursor: ProjectionCursor::new(next_cursor),
             truncated,
         })
+    }
+
+    async fn read_runtime_prefix(
+        &self,
+        scope: &ProjectionScope,
+        until: EventCursor,
+    ) -> Result<Vec<EventLogEntry<RuntimeEvent>>, ProjectionError> {
+        if until == EventCursor::origin() {
+            return Ok(Vec::new());
+        }
+
+        let mut after = None;
+        let mut entries = Vec::new();
+        loop {
+            let replay = self
+                .runtime_log
+                .read_after_cursor(
+                    &scope.stream,
+                    &scope.read_scope,
+                    after,
+                    STATE_REPLAY_PAGE_LIMIT,
+                )
+                .await
+                .map_err(|error| map_projection_error(error, after, "runtime state replay"))?;
+            if replay.entries.is_empty() {
+                break;
+            }
+
+            for entry in replay.entries {
+                if entry.cursor > until {
+                    return Ok(entries);
+                }
+                let cursor = entry.cursor;
+                entries.push(entry);
+                if cursor >= until {
+                    return Ok(entries);
+                }
+            }
+
+            if replay.next_cursor >= until || after == Some(replay.next_cursor) {
+                break;
+            }
+            after = Some(replay.next_cursor);
+        }
+        Ok(entries)
     }
 }
 
@@ -306,10 +351,27 @@ impl EventProjectionService for ReplayEventProjectionService {
         &self,
         request: ProjectionRequest,
     ) -> Result<ProjectionReplay, ProjectionError> {
+        let scope = request.scope.clone();
         let page = self.read_runtime(request).await?;
+        let touched_runs = page
+            .entries
+            .iter()
+            .map(|entry| entry.record.scope.invocation_id)
+            .collect::<HashSet<_>>();
+        let mut runs = if touched_runs.is_empty() {
+            Vec::new()
+        } else {
+            let prefix = self
+                .read_runtime_prefix(&scope, page.next_cursor.runtime)
+                .await?;
+            let mut runs = project_runs(&prefix);
+            runs.retain(|run| touched_runs.contains(&run.invocation_id));
+            runs
+        };
+        sort_runs_for_projection(&mut runs);
         Ok(ProjectionReplay {
             updates: project_timeline(&page.entries).entries,
-            runs: project_runs(&page.entries),
+            runs,
             next_cursor: page.next_cursor,
             truncated: page.truncated,
         })
@@ -352,8 +414,22 @@ fn project_runs(entries: &[EventLogEntry<RuntimeEvent>]) -> Vec<RunStatusProject
         apply_run_event(&mut runs, entry);
     }
     let mut runs = runs.into_values().collect::<Vec<_>>();
-    runs.sort_by_key(|run| run.invocation_id.as_uuid());
+    sort_runs_for_projection(&mut runs);
     runs
+}
+
+fn sort_runs_for_projection(runs: &mut [RunStatusProjection]) {
+    runs.sort_by(|left, right| {
+        right
+            .updated_at
+            .cmp(&left.updated_at)
+            .then_with(|| right.last_cursor.cmp(&left.last_cursor))
+            .then_with(|| {
+                left.invocation_id
+                    .as_uuid()
+                    .cmp(&right.invocation_id.as_uuid())
+            })
+    });
 }
 
 fn apply_run_event(
@@ -435,8 +511,8 @@ fn map_projection_error(
             requested,
             earliest,
         } => ProjectionError::RebaseRequired {
-            requested: ProjectionCursor { runtime: requested },
-            earliest: ProjectionCursor { runtime: earliest },
+            requested: ProjectionCursor::new(requested),
+            earliest: ProjectionCursor::new(earliest),
         },
         EventError::InvalidReplayRequest { .. } => ProjectionError::InvalidRequest {
             reason: "invalid durable replay request",

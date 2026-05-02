@@ -36,6 +36,8 @@ Deferred option: this PR does not add a `ProjectionStore` or persistent projecti
 
 Product adapters should request these projections instead of reading durable event/audit tables or backend files directly.
 
+`ProjectionReplay.updates` contains timeline entries after the supplied cursor. Its `runs` field contains the current status for runs touched by those updates, rebuilt from the scoped log prefix through `next_cursor` so paged consumers do not lose process state that was established before the current page.
+
 ## Cursor And Gap Semantics
 
 Projection cursors wrap durable event cursors so consumers do not treat raw durable cursor internals as a product API. Replay gaps, stale cursors, or cursors from the wrong stream map to `ProjectionError::RebaseRequired` with cursor metadata. Callers must request a fresh scoped snapshot/rebase instead of silently continuing after missing facts.
@@ -57,6 +59,8 @@ Run statuses are intentionally projection-local:
 - process killed -> `killed`
 
 For spawned/background processes, `dispatch_succeeded` is treated as an acknowledgement when a process is already active. The run remains `running` until a process terminal event is replayed.
+
+Run lists are ordered by most recent projected activity first, with cursor ordering as a deterministic tie-breaker.
 
 Approval/auth gates, resource/cost, memory activity, and mission progress are deferred until their source event coverage is stable. In particular, approval resolution audit exists today, but a complete `ApprovalGate` projection also needs a reliable approval-request source event or store integration.
 

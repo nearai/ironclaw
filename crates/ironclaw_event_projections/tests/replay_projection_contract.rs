@@ -188,6 +188,57 @@ async fn replay_projection_updates_resume_after_projection_cursor() {
 }
 
 #[tokio::test]
+async fn replay_projection_updates_preserve_running_process_state_after_checkpoint() {
+    let log = Arc::new(InMemoryDurableEventLog::new());
+    let service = ReplayEventProjectionService::new(Arc::clone(&log));
+    let scope = scope_for_thread(ThreadId::new("thread-a").unwrap());
+    let capability = capability_id();
+    let provider = provider_id();
+    let process_id = ProcessId::new();
+
+    log.append(RuntimeEvent::dispatch_requested(
+        scope.clone(),
+        capability.clone(),
+    ))
+    .await
+    .unwrap();
+    let started = log
+        .append(RuntimeEvent::process_started(
+            scope.clone(),
+            capability.clone(),
+            provider.clone(),
+            RuntimeKind::Script,
+            process_id,
+        ))
+        .await
+        .unwrap();
+    log.append(RuntimeEvent::dispatch_succeeded(
+        scope.clone(),
+        capability,
+        provider,
+        RuntimeKind::Script,
+        0,
+    ))
+    .await
+    .unwrap();
+
+    let replay = service
+        .updates(ProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&scope),
+            after: Some(ProjectionCursor::new(started.cursor)),
+            limit: 16,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(replay.updates.len(), 1);
+    assert_eq!(replay.updates[0].kind, TimelineEntryKind::DispatchSucceeded);
+    assert_eq!(replay.runs.len(), 1);
+    assert_eq!(replay.runs[0].process_id, Some(process_id));
+    assert_eq!(replay.runs[0].status, RunProjectionStatus::Running);
+}
+
+#[tokio::test]
 async fn replay_projection_keeps_spawned_process_run_active_until_terminal_process_event() {
     let log = Arc::new(InMemoryDurableEventLog::new());
     let service = ReplayEventProjectionService::new(Arc::clone(&log));
@@ -233,6 +284,41 @@ async fn replay_projection_keeps_spawned_process_run_active_until_terminal_proce
     assert_eq!(snapshot.runs.len(), 1);
     assert_eq!(snapshot.runs[0].process_id, Some(process_id));
     assert_eq!(snapshot.runs[0].status, RunProjectionStatus::Running);
+}
+
+#[tokio::test]
+async fn replay_projection_orders_runs_by_recent_activity_descending() {
+    let log = Arc::new(InMemoryDurableEventLog::new());
+    let service = ReplayEventProjectionService::new(Arc::clone(&log));
+    let thread = ThreadId::new("thread-a").unwrap();
+    let older_invocation = InvocationId::parse("00000000-0000-4000-8000-000000000001").unwrap();
+    let newer_invocation = InvocationId::parse("ffffffff-ffff-4fff-8fff-ffffffffffff").unwrap();
+    let older_scope = scope_for_thread_with_invocation(thread.clone(), older_invocation);
+    let newer_scope = scope_for_thread_with_invocation(thread, newer_invocation);
+    let capability = capability_id();
+
+    log.append(RuntimeEvent::dispatch_requested(
+        older_scope.clone(),
+        capability.clone(),
+    ))
+    .await
+    .unwrap();
+    log.append(RuntimeEvent::dispatch_requested(newer_scope, capability))
+        .await
+        .unwrap();
+
+    let snapshot = service
+        .snapshot(ProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&older_scope),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.runs.len(), 2);
+    assert_eq!(snapshot.runs[0].invocation_id, newer_invocation);
+    assert_eq!(snapshot.runs[1].invocation_id, older_invocation);
 }
 
 #[tokio::test]
@@ -331,6 +417,13 @@ impl DurableEventLog for FailingDurableEventLog {
 }
 
 fn scope_for_thread(thread_id: ThreadId) -> ResourceScope {
+    scope_for_thread_with_invocation(thread_id, InvocationId::new())
+}
+
+fn scope_for_thread_with_invocation(
+    thread_id: ThreadId,
+    invocation_id: InvocationId,
+) -> ResourceScope {
     ResourceScope {
         tenant_id: TenantId::new("tenant-a").unwrap(),
         user_id: UserId::new("user-a").unwrap(),
@@ -338,7 +431,7 @@ fn scope_for_thread(thread_id: ThreadId) -> ResourceScope {
         project_id: Some(ProjectId::new("project-a").unwrap()),
         mission_id: None,
         thread_id: Some(thread_id),
-        invocation_id: InvocationId::new(),
+        invocation_id,
     }
 }
 
