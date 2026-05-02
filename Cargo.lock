@@ -4219,7 +4219,6 @@ dependencies = [
  "deadpool-postgres",
  "ironclaw_filesystem",
  "ironclaw_host_api",
- "ironclaw_safety",
  "jsonschema",
  "libsql",
  "pgvector",

@@ -12,7 +12,6 @@ use ironclaw_filesystem::{
     DirEntry, FileStat, FileType, FilesystemError, FilesystemOperation, RootFilesystem,
 };
 use ironclaw_host_api::{HostApiError, VirtualPath};
-use ironclaw_safety::{Sanitizer, Severity};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -470,17 +469,6 @@ impl PromptSafetySeverity {
     }
 }
 
-impl From<Severity> for PromptSafetySeverity {
-    fn from(severity: Severity) -> Self {
-        match severity {
-            Severity::Low => Self::Low,
-            Severity::Medium => Self::Medium,
-            Severity::High => Self::High,
-            Severity::Critical => Self::Critical,
-        }
-    }
-}
-
 /// Sanitized finding summary. It never includes raw content, matched text, or detector descriptions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptSafetySummary {
@@ -641,10 +629,193 @@ pub trait PromptWriteSafetyPolicy: Send + Sync {
     ) -> Result<PromptWriteSafetyDecision, PromptWriteSafetyError>;
 }
 
-/// Default prompt-write safety policy preserving current workspace scanner behavior.
+/// Reborn-owned prompt-file scanner seeded from the legacy prompt-injection strategy list.
+///
+/// This stays local to the Reborn memory substrate so protected prompt writes do not depend on
+/// legacy/v1 safety plumbing. The emitted policy surface remains sanitized: callers only see
+/// stable reason codes, severity buckets, and counts.
+struct RebornPromptInjectionScanner;
+
+#[derive(Debug, Clone, Copy)]
+struct RebornPromptInjectionFinding {
+    severity: PromptSafetySeverity,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RebornPromptInjectionPattern {
+    pattern: &'static str,
+    severity: PromptSafetySeverity,
+}
+
+const REBORN_PROMPT_INJECTION_PATTERNS: &[RebornPromptInjectionPattern] = &[
+    // Direct instruction injection.
+    RebornPromptInjectionPattern {
+        pattern: "ignore previous",
+        severity: PromptSafetySeverity::High,
+    },
+    RebornPromptInjectionPattern {
+        pattern: "ignore all previous",
+        severity: PromptSafetySeverity::Critical,
+    },
+    RebornPromptInjectionPattern {
+        pattern: "disregard",
+        severity: PromptSafetySeverity::Medium,
+    },
+    RebornPromptInjectionPattern {
+        pattern: "forget everything",
+        severity: PromptSafetySeverity::High,
+    },
+    // Role manipulation.
+    RebornPromptInjectionPattern {
+        pattern: "you are now",
+        severity: PromptSafetySeverity::High,
+    },
+    RebornPromptInjectionPattern {
+        pattern: "act as",
+        severity: PromptSafetySeverity::Medium,
+    },
+    RebornPromptInjectionPattern {
+        pattern: "pretend to be",
+        severity: PromptSafetySeverity::Medium,
+    },
+    // System message injection.
+    RebornPromptInjectionPattern {
+        pattern: "system:",
+        severity: PromptSafetySeverity::Critical,
+    },
+    RebornPromptInjectionPattern {
+        pattern: "assistant:",
+        severity: PromptSafetySeverity::High,
+    },
+    RebornPromptInjectionPattern {
+        pattern: "user:",
+        severity: PromptSafetySeverity::High,
+    },
+    // Special tokens.
+    RebornPromptInjectionPattern {
+        pattern: "<|",
+        severity: PromptSafetySeverity::Critical,
+    },
+    RebornPromptInjectionPattern {
+        pattern: "|>",
+        severity: PromptSafetySeverity::Critical,
+    },
+    RebornPromptInjectionPattern {
+        pattern: "[inst]",
+        severity: PromptSafetySeverity::Critical,
+    },
+    RebornPromptInjectionPattern {
+        pattern: "[/inst]",
+        severity: PromptSafetySeverity::Critical,
+    },
+    // New instructions.
+    RebornPromptInjectionPattern {
+        pattern: "new instructions",
+        severity: PromptSafetySeverity::High,
+    },
+    RebornPromptInjectionPattern {
+        pattern: "updated instructions",
+        severity: PromptSafetySeverity::High,
+    },
+    // Code/command injection markers.
+    RebornPromptInjectionPattern {
+        pattern: "```system",
+        severity: PromptSafetySeverity::High,
+    },
+    RebornPromptInjectionPattern {
+        pattern: "```bash\nsudo",
+        severity: PromptSafetySeverity::Medium,
+    },
+];
+
+impl RebornPromptInjectionScanner {
+    fn detect(&self, content: &str) -> Vec<RebornPromptInjectionFinding> {
+        let normalized = content.to_ascii_lowercase();
+        let mut findings = Vec::new();
+        for pattern in REBORN_PROMPT_INJECTION_PATTERNS {
+            findings.extend(normalized.match_indices(pattern.pattern).map(|_| {
+                RebornPromptInjectionFinding {
+                    severity: pattern.severity,
+                }
+            }));
+        }
+        if contains_base64_payload(content) {
+            findings.push(RebornPromptInjectionFinding {
+                severity: PromptSafetySeverity::Medium,
+            });
+        }
+        if contains_function_call(&normalized, "eval") {
+            findings.push(RebornPromptInjectionFinding {
+                severity: PromptSafetySeverity::High,
+            });
+        }
+        if contains_function_call(&normalized, "exec") {
+            findings.push(RebornPromptInjectionFinding {
+                severity: PromptSafetySeverity::High,
+            });
+        }
+        if content.contains('\0') {
+            findings.push(RebornPromptInjectionFinding {
+                severity: PromptSafetySeverity::Critical,
+            });
+        }
+        findings.sort_by_key(|finding| std::cmp::Reverse(finding.severity));
+        findings
+    }
+}
+
+fn contains_base64_payload(content: &str) -> bool {
+    let lower = content.to_ascii_lowercase();
+    for marker in ["base64:", "base64 ", "base64\n", "base64\t"] {
+        let mut search_start = 0;
+        while let Some(relative_index) = lower[search_start..].find(marker) {
+            let start = search_start + relative_index + marker.len();
+            let encoded_len = content[start..]
+                .chars()
+                .skip_while(|character| character.is_ascii_whitespace() || *character == ':')
+                .take_while(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '+' | '/' | '=')
+                })
+                .count();
+            if encoded_len >= 50 {
+                return true;
+            }
+            search_start = start;
+        }
+    }
+    false
+}
+
+fn contains_function_call(normalized_content: &str, function_name: &str) -> bool {
+    let mut search_start = 0;
+    while let Some(relative_index) = normalized_content[search_start..].find(function_name) {
+        let name_start = search_start + relative_index;
+        let name_end = name_start + function_name.len();
+        let starts_at_boundary = normalized_content[..name_start]
+            .chars()
+            .next_back()
+            .map(|character| !is_identifier_character(character))
+            .unwrap_or(true);
+        let ends_at_call = normalized_content[name_end..]
+            .chars()
+            .find(|character| !character.is_ascii_whitespace())
+            == Some('(');
+        if starts_at_boundary && ends_at_call {
+            return true;
+        }
+        search_start = name_end;
+    }
+    false
+}
+
+fn is_identifier_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || character == '_'
+}
+
+/// Default prompt-write safety policy preserving the seeded Reborn prompt-file scanner behavior.
 pub struct DefaultPromptWriteSafetyPolicy {
     registry: PromptProtectedPathRegistry,
-    sanitizer: Sanitizer,
+    prompt_injection_scanner: RebornPromptInjectionScanner,
 }
 
 impl DefaultPromptWriteSafetyPolicy {
@@ -655,7 +826,7 @@ impl DefaultPromptWriteSafetyPolicy {
     pub fn with_registry(registry: PromptProtectedPathRegistry) -> Self {
         Self {
             registry,
-            sanitizer: Sanitizer::new(),
+            prompt_injection_scanner: RebornPromptInjectionScanner,
         }
     }
 }
@@ -701,14 +872,13 @@ impl PromptWriteSafetyPolicy for DefaultPromptWriteSafetyPolicy {
             });
         }
 
-        let warnings = self.sanitizer.detect(request.content);
-        let Some(max_severity) = warnings.iter().map(|warning| warning.severity).max() else {
+        let findings = self.prompt_injection_scanner.detect(request.content);
+        let Some(severity) = findings.iter().map(|finding| finding.severity).max() else {
             return Ok(PromptWriteSafetyDecision::Allow);
         };
-        let severity = PromptSafetySeverity::from(max_severity);
-        let finding_count = warnings.len();
+        let finding_count = findings.len();
 
-        if max_severity >= Severity::Critical {
+        if severity >= PromptSafetySeverity::Critical {
             return Ok(PromptWriteSafetyDecision::Reject {
                 reason: PromptSafetyReason::with_findings(
                     PromptSafetyReasonCode::CriticalPromptInjection,
@@ -718,7 +888,7 @@ impl PromptWriteSafetyPolicy for DefaultPromptWriteSafetyPolicy {
                 ),
             });
         }
-        if max_severity >= Severity::High {
+        if severity >= PromptSafetySeverity::High {
             return Ok(PromptWriteSafetyDecision::Reject {
                 reason: PromptSafetyReason::with_findings(
                     PromptSafetyReasonCode::HighRiskPromptInjection,

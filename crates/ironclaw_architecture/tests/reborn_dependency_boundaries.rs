@@ -180,6 +180,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_events",
                 "ironclaw_extensions",
                 "ironclaw_host_runtime",
+                "ironclaw_safety",
                 "ironclaw_secrets",
                 "ironclaw_network",
                 "ironclaw_mcp",
