@@ -1127,7 +1127,9 @@ async fn async_main() -> anyhow::Result<()> {
             .await;
         tracing::debug!("Channel runtime wired into extension manager for hot-activation");
 
-        // Auto-activate WASM channels that were active in a previous session.
+        // Auto-activate WASM channels resolved at startup — either persisted
+        // from a prior session or supplied by the setup wizard's
+        // `channels.wasm_channels` config when no settings store is available.
         // Relay channels are handled separately below via restore_relay_channels().
         for name in &startup_active_wasm_channels {
             if active_at_startup.contains(name)
@@ -1150,14 +1152,14 @@ async fn async_main() -> anyhow::Result<()> {
                     tracing::debug!(
                         channel = %name,
                         message = %message,
-                        "Auto-activated persisted WASM channel"
+                        "Auto-activated startup WASM channel"
                     );
                 }
                 Ok(ironclaw::extensions::EnsureReadyOutcome::NeedsAuth { auth, .. }) => {
                     tracing::warn!(
                         channel = %name,
                         instructions = ?auth.instructions(),
-                        "Persisted WASM channel still needs authentication"
+                        "Startup WASM channel still needs authentication"
                     );
                 }
                 Ok(ironclaw::extensions::EnsureReadyOutcome::NeedsSetup {
@@ -1166,14 +1168,14 @@ async fn async_main() -> anyhow::Result<()> {
                     tracing::warn!(
                         channel = %name,
                         instructions = %instructions,
-                        "Persisted WASM channel still needs setup"
+                        "Startup WASM channel still needs setup"
                     );
                 }
                 Err(e) => {
                     tracing::warn!(
                         channel = %name,
                         error = %e,
-                        "Failed to auto-activate persisted WASM channel"
+                        "Failed to auto-activate startup WASM channel"
                     );
                 }
             }
