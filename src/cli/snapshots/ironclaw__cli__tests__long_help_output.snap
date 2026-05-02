@@ -40,7 +40,7 @@ Commands:
   logs        View and manage gateway logs
   status      Show system status
   completion  Generate completions
-  import      Import from other AI systems
+  import      Import or restore data
   login       Authenticate with a provider (re-login)
   acp         Manage ACP agents
   help        Print this message or the help of the given subcommand(s)
