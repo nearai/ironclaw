@@ -20,7 +20,10 @@ use ironclaw_run_state::{
     InMemoryApprovalRequestStore, InMemoryRunStateStore, RunRecord, RunStart, RunStateError,
     RunStateStore,
 };
-use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
+use ironclaw_trust::{
+    AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
+    HostTrustPolicy, TrustDecision, TrustProvenance,
+};
 use serde_json::json;
 
 #[test]
@@ -56,6 +59,7 @@ async fn default_runtime_returns_completed_outcome_for_authorized_dispatch() {
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy()))
     .with_run_state(run_state.clone())
     .with_approval_requests(approval_requests.clone());
 
@@ -183,14 +187,17 @@ async fn default_runtime_returns_failed_for_unknown_capability() {
     let registry = Arc::new(ExtensionRegistry::new());
     let dispatcher = Arc::new(RecordingDispatcher::default());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
+    let run_state = Arc::new(InMemoryRunStateStore::new());
     let runtime = DefaultHostRuntime::new(
         registry,
-        dispatcher,
+        dispatcher.clone(),
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
-    );
+    )
+    .with_run_state(run_state.clone());
 
     let context = execution_context_with_dispatch_grant();
+    let scope = context.resource_scope.clone();
     let request = RuntimeCapabilityRequest::new(
         context,
         capability_id(),
@@ -211,6 +218,18 @@ async fn default_runtime_returns_failed_for_unknown_capability() {
         }
         other => panic!("expected Failed outcome, got {:?}", other),
     }
+    assert!(
+        !dispatcher.has_request(),
+        "unknown capabilities must fail during trust evaluation before dispatch"
+    );
+    assert!(
+        run_state
+            .records_for_scope(&scope)
+            .await
+            .unwrap()
+            .is_empty(),
+        "unknown capabilities must fail before starting a capability-host run record"
+    );
 }
 
 #[tokio::test]
@@ -267,7 +286,8 @@ async fn default_runtime_idempotency_key_is_advisory_and_does_not_dedupe() {
         dispatcher.clone(),
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
-    );
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy()));
 
     let key = IdempotencyKey::new("turn-1/tool-1").unwrap();
 
@@ -1123,6 +1143,20 @@ fn execution_context_with_dispatch_grant() -> ExecutionContext {
         grants,
         MountView::default(),
     )
+    .unwrap()
+}
+
+fn local_manifest_trust_policy() -> HostTrustPolicy {
+    HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries(vec![
+        AdminEntry::for_local_manifest(
+            PackageId::new("echo").unwrap(),
+            "/system/extensions/echo/manifest.toml".to_string(),
+            None,
+            HostTrustAssignment::user_trusted(),
+            vec![EffectKind::DispatchCapability],
+            None,
+        ),
+    ]))])
     .unwrap()
 }
 

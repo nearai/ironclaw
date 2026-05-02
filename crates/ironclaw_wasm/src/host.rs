@@ -1,9 +1,9 @@
 use std::sync::{Arc, Mutex};
 
 use ironclaw_host_api::{
-    NetworkMethod, NetworkPolicy, ResourceScope, RuntimeCredentialInjection, RuntimeHttpEgress,
-    RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeKind,
-    is_sensitive_runtime_response_header,
+    CapabilityId, NetworkMethod, NetworkPolicy, ResourceScope, RuntimeCredentialInjection,
+    RuntimeCredentialSource, RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError,
+    RuntimeHttpEgressRequest, RuntimeKind, SecretHandle, is_sensitive_runtime_response_header,
 };
 use serde_json::{Map, Value};
 
@@ -103,6 +103,7 @@ impl WasmHostHttp for RecordingWasmHostHttp {
 pub struct WasmRuntimeHttpAdapter<E> {
     egress: E,
     scope: ResourceScope,
+    capability_id: CapabilityId,
     network_policy: NetworkPolicy,
     credential_provider: Arc<dyn WasmRuntimeCredentialProvider>,
     response_body_limit: Option<u64>,
@@ -111,10 +112,10 @@ pub struct WasmRuntimeHttpAdapter<E> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasmRuntimeCredentialRequest {
     pub scope: ResourceScope,
+    pub capability_id: CapabilityId,
     pub method: NetworkMethod,
     pub url: String,
     pub headers: Vec<(String, String)>,
-    pub network_policy: NetworkPolicy,
 }
 
 pub trait WasmRuntimeCredentialProvider: Send + Sync + std::fmt::Debug {
@@ -136,18 +137,125 @@ impl WasmRuntimeCredentialProvider for EmptyWasmRuntimeCredentials {
     }
 }
 
+/// Host-approved staged credential rule for one WASM HTTP request.
+///
+/// This type does not grant secret authority by itself. Host composition should
+/// build it only from already-authorized `InjectSecretOnce` obligations and
+/// destination/injection metadata that was validated outside the guest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WasmStagedRuntimeCredential {
+    pub handle: SecretHandle,
+    pub target: RuntimeCredentialTarget,
+    pub required: bool,
+    exact_url: Option<String>,
+}
+
+impl WasmStagedRuntimeCredential {
+    pub fn for_any_request(
+        handle: SecretHandle,
+        target: RuntimeCredentialTarget,
+        required: bool,
+    ) -> Self {
+        Self {
+            handle,
+            target,
+            required,
+            exact_url: None,
+        }
+    }
+
+    pub fn for_exact_url(
+        handle: SecretHandle,
+        target: RuntimeCredentialTarget,
+        required: bool,
+        exact_url: String,
+    ) -> Self {
+        Self {
+            handle,
+            target,
+            required,
+            exact_url: Some(exact_url),
+        }
+    }
+
+    fn matches_request(&self, request: &WasmRuntimeCredentialRequest) -> bool {
+        match &self.exact_url {
+            Some(exact_url) => exact_url == &request.url,
+            None => true,
+        }
+    }
+}
+
+/// Concrete WASM credential provider for `InjectSecretOnce` handoffs.
+///
+/// The provider converts host-approved rules into staged-obligation runtime
+/// credential injections using the capability id attached to the adapter.
+#[derive(Debug, Clone, Default)]
+pub struct WasmStagedRuntimeCredentials {
+    credentials: Vec<WasmStagedRuntimeCredential>,
+}
+
+impl WasmStagedRuntimeCredentials {
+    pub fn new(credentials: Vec<WasmStagedRuntimeCredential>) -> Self {
+        Self { credentials }
+    }
+
+    pub fn credentials(&self) -> &[WasmStagedRuntimeCredential] {
+        &self.credentials
+    }
+}
+
+impl WasmRuntimeCredentialProvider for WasmStagedRuntimeCredentials {
+    fn credential_injections(
+        &self,
+        request: &WasmRuntimeCredentialRequest,
+    ) -> Result<Vec<RuntimeCredentialInjection>, WasmHostError> {
+        let matched = self
+            .credentials
+            .iter()
+            .filter(|credential| credential.matches_request(request))
+            .collect::<Vec<_>>();
+        if matched.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        Ok(matched
+            .into_iter()
+            .map(|credential| RuntimeCredentialInjection {
+                handle: credential.handle.clone(),
+                source: RuntimeCredentialSource::StagedObligation {
+                    capability_id: request.capability_id.clone(),
+                },
+                target: credential.target.clone(),
+                required: credential.required,
+            })
+            .collect())
+    }
+}
+
 impl<E> WasmRuntimeHttpAdapter<E>
 where
     E: RuntimeHttpEgress,
 {
-    pub fn new(egress: E, scope: ResourceScope, network_policy: NetworkPolicy) -> Self {
+    pub fn new(
+        egress: E,
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+        network_policy: NetworkPolicy,
+    ) -> Self {
         Self {
             egress,
             scope,
+            capability_id,
             network_policy,
             credential_provider: Arc::new(EmptyWasmRuntimeCredentials),
             response_body_limit: None,
         }
+    }
+
+    pub fn with_capability_id(mut self, capability_id: CapabilityId) -> Self {
+        self.capability_id = capability_id;
+        self
     }
 
     pub fn with_credential_provider(
@@ -176,10 +284,10 @@ where
             .credential_provider
             .credential_injections(&WasmRuntimeCredentialRequest {
                 scope: self.scope.clone(),
+                capability_id: self.capability_id.clone(),
                 method,
                 url: request.url.clone(),
                 headers: headers.clone(),
-                network_policy: self.network_policy.clone(),
             })
             .map_err(wasm_credential_provider_error)?;
 
@@ -188,6 +296,7 @@ where
             .execute(RuntimeHttpEgressRequest {
                 runtime: RuntimeKind::Wasm,
                 scope: self.scope.clone(),
+                capability_id: self.capability_id.clone(),
                 method,
                 url: request.url,
                 headers,

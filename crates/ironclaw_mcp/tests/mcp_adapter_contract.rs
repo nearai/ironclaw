@@ -114,6 +114,7 @@ fn mcp_host_http_adapter_returns_sanitized_shared_egress_errors() {
     let error = adapter
         .request(McpHostHttpRequest {
             scope: sample_scope(),
+            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
             method: NetworkMethod::Get,
             url: "https://mcp.example.test/mcp".to_string(),
             headers: vec![],
@@ -1031,6 +1032,7 @@ fn host_http_plan() -> McpHostHttpEgressPlan {
         network_policy: mcp_http_policy(),
         credential_injections: vec![RuntimeCredentialInjection {
             handle: SecretHandle::new("github-token").unwrap(),
+            source: RuntimeCredentialSource::SecretStoreLease,
             target: RuntimeCredentialTarget::Header {
                 name: "Authorization".to_string(),
                 prefix: Some("Bearer ".to_string()),

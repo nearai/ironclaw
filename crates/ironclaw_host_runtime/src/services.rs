@@ -17,7 +17,9 @@ use ironclaw_authorization::{CapabilityLeaseStore, TrustAwareCapabilityDispatchA
 use ironclaw_dispatcher::{
     RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher,
 };
-use ironclaw_events::{AuditSink, EventSink};
+use ironclaw_events::{
+    AuditSink, DurableAuditLog, DurableAuditSink, DurableEventLog, DurableEventSink, EventSink,
+};
 use ironclaw_extensions::{ExtensionRegistry, ExtensionRuntime};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
@@ -27,13 +29,14 @@ use ironclaw_host_api::{
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutor, McpInvocation};
 use ironclaw_processes::{
-    ProcessExecutionError, ProcessExecutionRequest, ProcessExecutionResult, ProcessExecutor,
-    ProcessManager, ProcessResultStore, ProcessServices, ProcessStore,
+    BackgroundFailureStage, ProcessExecutionError, ProcessExecutionRequest, ProcessExecutionResult,
+    ProcessExecutor, ProcessManager, ProcessResultStore, ProcessServices, ProcessStore,
 };
 use ironclaw_resources::ResourceGovernor;
 use ironclaw_run_state::{ApprovalRequestStore, RunStateStore};
 use ironclaw_scripts::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};
 use ironclaw_secrets::SecretStore;
+use ironclaw_trust::{HostTrustPolicy, TrustPolicy};
 use ironclaw_wasm::{
     DenyWasmHostHttp, PreparedWitTool, WasmError, WasmRuntimeHttpAdapter, WitToolHost,
     WitToolRequest, WitToolRuntime, WitToolRuntimeConfig,
@@ -41,7 +44,8 @@ use ironclaw_wasm::{
 
 use crate::{
     BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntimeError,
-    NetworkObligationPolicyStore, RuntimeBackendHealth, RuntimeSecretInjectionStore,
+    NetworkObligationPolicyStore, ProcessObligationLifecycleStore, RuntimeBackendHealth,
+    RuntimeSecretInjectionStore,
 };
 
 type SharedRuntimeHttpEgress = Arc<Mutex<Option<Arc<dyn RuntimeHttpEgress>>>>;
@@ -61,6 +65,7 @@ where
     R: ProcessResultStore + 'static,
 {
     registry: Arc<ExtensionRegistry>,
+    trust_policy: Arc<dyn TrustPolicy>,
     filesystem: Arc<F>,
     governor: Arc<G>,
     authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer>,
@@ -74,6 +79,7 @@ where
     secret_store: Option<Arc<dyn SecretStore>>,
     network_policy_store: Arc<NetworkObligationPolicyStore>,
     secret_injection_store: Arc<RuntimeSecretInjectionStore>,
+    process_lifecycle_store: Arc<ProcessObligationLifecycleStore>,
     runtime_http_egress: SharedRuntimeHttpEgress,
     runtime_health: Option<Arc<dyn RuntimeBackendHealth>>,
     script_runtime: Option<Arc<dyn ScriptExecutor>>,
@@ -96,8 +102,17 @@ where
         process_services: ProcessServices<S, R>,
         surface_version: CapabilitySurfaceVersion,
     ) -> Self {
+        let network_policy_store = Arc::new(NetworkObligationPolicyStore::new());
+        let secret_injection_store = Arc::new(RuntimeSecretInjectionStore::new());
+        let process_lifecycle_store = Arc::new(ProcessObligationLifecycleStore::new(
+            process_services.process_store(),
+            Arc::clone(&network_policy_store),
+            Arc::clone(&secret_injection_store),
+            governor.clone(),
+        ));
         Self {
             registry,
+            trust_policy: Arc::new(HostTrustPolicy::empty()),
             filesystem,
             governor,
             authorizer,
@@ -109,14 +124,31 @@ where
             event_sink: None,
             audit_sink: None,
             secret_store: None,
-            network_policy_store: Arc::new(NetworkObligationPolicyStore::new()),
-            secret_injection_store: Arc::new(RuntimeSecretInjectionStore::new()),
+            network_policy_store,
+            secret_injection_store,
+            process_lifecycle_store,
             runtime_http_egress: Arc::new(Mutex::new(None)),
             runtime_health: None,
             script_runtime: None,
             mcp_runtime: None,
             wasm_runtime: None,
         }
+    }
+
+    /// Attaches the host-owned trust policy used by the produced
+    /// [`DefaultHostRuntime`]. Without this, the service graph keeps the
+    /// default empty policy and capability dispatch fails closed.
+    pub fn with_trust_policy<T>(mut self, trust_policy: Arc<T>) -> Self
+    where
+        T: TrustPolicy + 'static,
+    {
+        self.trust_policy = trust_policy;
+        self
+    }
+
+    pub fn with_trust_policy_dyn(mut self, trust_policy: Arc<dyn TrustPolicy>) -> Self {
+        self.trust_policy = trust_policy;
+        self
     }
 
     pub fn with_run_state<T>(mut self, run_state: Arc<T>) -> Self
@@ -151,12 +183,28 @@ where
         self
     }
 
+    pub fn with_durable_event_log<T>(self, event_log: Arc<T>) -> Self
+    where
+        T: DurableEventLog + 'static,
+    {
+        let event_log: Arc<dyn DurableEventLog> = event_log;
+        self.with_event_sink(Arc::new(DurableEventSink::new(event_log)))
+    }
+
     pub fn with_audit_sink<T>(mut self, audit_sink: Arc<T>) -> Self
     where
         T: AuditSink + 'static,
     {
         self.audit_sink = Some(audit_sink);
         self
+    }
+
+    pub fn with_durable_audit_log<T>(self, audit_log: Arc<T>) -> Self
+    where
+        T: DurableAuditLog + 'static,
+    {
+        let audit_log: Arc<dyn DurableAuditLog> = audit_log;
+        self.with_audit_sink(Arc::new(DurableAuditSink::new(audit_log)))
     }
 
     pub fn with_secret_store<T>(mut self, secret_store: Arc<T>) -> Self
@@ -256,9 +304,40 @@ where
         let dispatcher: Arc<dyn CapabilityDispatcher> = Arc::new(self.runtime_dispatcher());
         let process_executor =
             Arc::new(RuntimeDispatchProcessExecutor::new(Arc::clone(&dispatcher)));
-        let process_manager: Arc<dyn ProcessManager> =
-            Arc::new(self.process_services.background_manager(process_executor));
-        let process_store: Arc<dyn ProcessStore> = self.process_services.process_store();
+        let lifecycle_process_store = Arc::clone(&self.process_lifecycle_store);
+        let process_store: Arc<dyn ProcessStore> = lifecycle_process_store.clone();
+        let result_failure_cleanup_store = Arc::clone(&lifecycle_process_store);
+        let process_manager: Arc<dyn ProcessManager> = Arc::new(
+            ironclaw_processes::BackgroundProcessManager::new(
+                lifecycle_process_store,
+                process_executor,
+            )
+            .with_cancellation_registry(self.process_services.cancellation_registry())
+            .with_result_store(self.process_services.result_store())
+            .with_error_handler(move |failure| {
+                let reconcile = match failure.stage {
+                    BackgroundFailureStage::StoreComplete => true,
+                    BackgroundFailureStage::StoreFail => false,
+                    BackgroundFailureStage::ResultStoreComplete => true,
+                    BackgroundFailureStage::ResultStoreFail => false,
+                    _ => return,
+                };
+                let cleanup_store = Arc::clone(&result_failure_cleanup_store);
+                tokio::spawn(async move {
+                    if let Err(error) = cleanup_store
+                        .cleanup_process_obligations(&failure.scope, failure.process_id, reconcile)
+                        .await
+                    {
+                        tracing::warn!(
+                            process_id = %failure.process_id,
+                            stage = ?failure.stage,
+                            error = %error,
+                            "background process obligation cleanup failed"
+                        );
+                    }
+                });
+            }),
+        );
         let process_result_store: Arc<dyn ProcessResultStore> =
             self.process_services.result_store();
         let runtime_health = self.runtime_health.clone().unwrap_or_else(|| {
@@ -273,6 +352,7 @@ where
             Arc::clone(&self.authorizer),
             self.surface_version.clone(),
         )
+        .with_trust_policy_dyn(Arc::clone(&self.trust_policy))
         .with_process_manager(process_manager)
         .with_process_store(process_store)
         .with_process_result_store(process_result_store)
@@ -551,6 +631,7 @@ impl WasmRuntimeAdapter {
             .with_http(Arc::new(WasmRuntimeHttpAdapter::new(
                 egress,
                 scope.clone(),
+                capability_id.clone(),
                 policy,
             )))
     }

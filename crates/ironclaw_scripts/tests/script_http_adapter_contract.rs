@@ -1,9 +1,10 @@
 use std::sync::{Arc, Mutex};
 
 use ironclaw_host_api::{
-    InvocationId, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, ProjectId,
-    ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-    RuntimeHttpEgressResponse, RuntimeKind, TenantId, UserId,
+    CapabilityId, InvocationId, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern,
+    ProjectId, ResourceScope, RuntimeCredentialInjection, RuntimeCredentialSource,
+    RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+    RuntimeHttpEgressResponse, RuntimeKind, SecretHandle, TenantId, UserId,
 };
 use ironclaw_scripts::{ScriptHostHttpRequest, ScriptRuntimeHttpAdapter};
 
@@ -23,6 +24,7 @@ fn script_host_http_adapter_uses_shared_runtime_egress() {
     let response = adapter
         .request(ScriptHostHttpRequest {
             scope: scope.clone(),
+            capability_id: sample_capability_id(),
             method: NetworkMethod::Post,
             url: "https://script-api.example.test/run".to_string(),
             headers: vec![("content-type".to_string(), "application/json".to_string())],
@@ -43,10 +45,62 @@ fn script_host_http_adapter_uses_shared_runtime_egress() {
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].runtime, RuntimeKind::Script);
     assert_eq!(requests[0].scope, scope);
+    assert_eq!(requests[0].capability_id, sample_capability_id());
     assert_eq!(requests[0].method, NetworkMethod::Post);
     assert_eq!(requests[0].url, "https://script-api.example.test/run");
     assert_eq!(requests[0].body, br#"{"a":1}"#);
     assert_eq!(requests[0].response_body_limit, Some(4096));
+}
+
+#[test]
+fn script_host_http_adapter_forwards_host_supplied_policy_credentials_timeout_and_limits() {
+    let egress = RecordingRuntimeEgress::ok(RuntimeHttpEgressResponse {
+        status: 204,
+        headers: vec![],
+        body: vec![],
+        request_bytes: 13,
+        response_bytes: 0,
+        redaction_applied: false,
+    });
+    let adapter = ScriptRuntimeHttpAdapter::new(Arc::new(egress.clone()));
+    let scope = sample_scope();
+    let policy = sample_policy();
+    let credential_injections = vec![RuntimeCredentialInjection {
+        handle: SecretHandle::new("api_token").unwrap(),
+        source: RuntimeCredentialSource::StagedObligation {
+            capability_id: sample_capability_id(),
+        },
+        target: RuntimeCredentialTarget::Header {
+            name: "x-api-key".to_string(),
+            prefix: Some("Bearer ".to_string()),
+        },
+        required: true,
+    }];
+
+    adapter
+        .request(ScriptHostHttpRequest {
+            scope: scope.clone(),
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Post,
+            url: "https://script-api.example.test/run".to_string(),
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            body: br#"{"payload":1}"#.to_vec(),
+            network_policy: policy.clone(),
+            credential_injections: credential_injections.clone(),
+            response_body_limit: Some(512),
+            timeout_ms: Some(2_500),
+        })
+        .expect("script host-mediated HTTP should succeed");
+
+    let requests = egress.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].runtime, RuntimeKind::Script);
+    assert_eq!(requests[0].scope, scope);
+    assert_eq!(requests[0].capability_id, sample_capability_id());
+    assert_eq!(requests[0].network_policy, policy);
+    assert_eq!(requests[0].credential_injections, credential_injections);
+    assert_eq!(requests[0].response_body_limit, Some(512));
+    assert_eq!(requests[0].timeout_ms, Some(2_500));
 }
 
 #[test]
@@ -62,6 +116,7 @@ fn script_host_http_adapter_returns_sanitized_shared_egress_errors() {
     let error = adapter
         .request(ScriptHostHttpRequest {
             scope: sample_scope(),
+            capability_id: sample_capability_id(),
             method: NetworkMethod::Get,
             url: "https://script-api.example.test/run".to_string(),
             headers: vec![],
@@ -109,6 +164,10 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
         self.requests.lock().unwrap().push(request);
         self.response.clone()
     }
+}
+
+fn sample_capability_id() -> CapabilityId {
+    CapabilityId::new("script.http").unwrap()
 }
 
 fn sample_scope() -> ResourceScope {

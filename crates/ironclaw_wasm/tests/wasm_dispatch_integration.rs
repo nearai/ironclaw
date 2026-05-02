@@ -134,8 +134,13 @@ async fn wasm_lane_execution_failure_reconciles_preserved_usage_from_runtime() {
         redaction_applied: false,
     }));
     let wasm_http = Arc::new(
-        WasmRuntimeHttpAdapter::new(Arc::clone(&http), sample_scope(), wasm_http_policy())
-            .with_response_body_limit(Some(4096)),
+        WasmRuntimeHttpAdapter::new(
+            Arc::clone(&http),
+            sample_scope(),
+            CapabilityId::new("wasm-smoke.httptrap").unwrap(),
+            wasm_http_policy(),
+        )
+        .with_response_body_limit(Some(4096)),
     );
     let adapter = Arc::new(WasmRuntimeAdapter::with_host(
         WitToolHost::deny_all().with_http(wasm_http),

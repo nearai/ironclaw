@@ -26,12 +26,13 @@
 use async_trait::async_trait;
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityDescriptor, CapabilityId, CorrelationId, ExecutionContext,
-    ProcessId, ResourceEstimate, ResourceScope, ResourceUsage, RuntimeKind, SecretHandle,
+    NetworkPolicy, ProcessId, ResourceEstimate, ResourceScope, ResourceUsage, RuntimeKind,
+    SecretHandle,
 };
 use ironclaw_host_api::{
-    RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-    RuntimeHttpEgressResponse, is_sensitive_runtime_request_header,
-    is_sensitive_runtime_response_header,
+    RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
+    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
+    is_sensitive_runtime_request_header, is_sensitive_runtime_response_header,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse,
@@ -41,7 +42,7 @@ use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStoreError};
 use ironclaw_trust::TrustDecision;
 use secrecy::ExposeSecret;
 use serde_json::Value;
-use std::fmt;
+use std::{fmt, sync::Arc};
 use thiserror::Error;
 
 mod obligations;
@@ -50,7 +51,7 @@ mod services;
 
 pub use obligations::{
     BuiltinObligationHandler, BuiltinObligationServices, NetworkObligationPolicyStore,
-    RuntimeSecretInjectionStore, RuntimeSecretInjectionStoreError,
+    ProcessObligationLifecycleStore, RuntimeSecretInjectionStore, RuntimeSecretInjectionStoreError,
 };
 pub use production::DefaultHostRuntime;
 pub use services::{HostRuntimeServices, RegisteredRuntimeHealth};
@@ -259,13 +260,14 @@ pub struct RuntimeCapabilityRequest {
     /// The host runtime still validates and forwards the key into
     /// observability spans for audit/tracing.
     pub idempotency_key: Option<IdempotencyKey>,
-    /// Host-controlled trust decision for the package providing this capability.
+    /// Legacy caller-supplied trust decision kept for transitional request-shape
+    /// compatibility.
     ///
-    /// The host evaluates trust against its own policy before constructing this
-    /// request — callers must not synthesize trust decisions or override the
-    /// host's policy. The decision flows through to the underlying capability
-    /// host so authorization, approval, and authority ceiling are derived from
-    /// the host-validated trust posture, not caller-asserted claims.
+    /// [`DefaultHostRuntime`](crate::DefaultHostRuntime) ignores this value: it
+    /// resolves the capability provider's package identity, evaluates the
+    /// host-owned policy, stamps the resulting effective trust onto the
+    /// execution context, and passes that host-owned decision to the capability
+    /// host. Callers must not rely on this field to widen or narrow authority.
     pub trust_decision: TrustDecision,
 }
 
@@ -279,6 +281,50 @@ impl RuntimeCapabilityRequest {
     ) -> Self {
         Self {
             context,
+            capability_id,
+            estimate,
+            input,
+            idempotency_key: None,
+            trust_decision,
+        }
+    }
+
+    pub fn with_idempotency_key(mut self, key: IdempotencyKey) -> Self {
+        self.idempotency_key = Some(key);
+        self
+    }
+}
+
+/// Request to resume one approval-blocked capability through the composed host runtime.
+///
+/// The shape mirrors [`RuntimeCapabilityRequest`] but additionally carries the
+/// approval request selected by an upper approval workflow. Like invoke requests,
+/// `trust_decision` is transitional compatibility data: the default host runtime
+/// evaluates provider trust itself before delegating to `CapabilityHost`.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct RuntimeCapabilityResumeRequest {
+    pub context: ExecutionContext,
+    pub approval_request_id: ApprovalRequestId,
+    pub capability_id: CapabilityId,
+    pub estimate: ResourceEstimate,
+    pub input: Value,
+    pub idempotency_key: Option<IdempotencyKey>,
+    pub trust_decision: TrustDecision,
+}
+
+impl RuntimeCapabilityResumeRequest {
+    pub fn new(
+        context: ExecutionContext,
+        approval_request_id: ApprovalRequestId,
+        capability_id: CapabilityId,
+        estimate: ResourceEstimate,
+        input: Value,
+        trust_decision: TrustDecision,
+    ) -> Self {
+        Self {
+            context,
+            approval_request_id,
             capability_id,
             estimate,
             input,
@@ -554,6 +600,11 @@ pub trait HostRuntime: Send + Sync {
         request: RuntimeCapabilityRequest,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError>;
 
+    async fn resume_capability(
+        &self,
+        request: RuntimeCapabilityResumeRequest,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError>;
+
     async fn visible_capabilities(
         &self,
         request: VisibleCapabilityRequest,
@@ -596,15 +647,63 @@ impl HostRuntimeError {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NetworkPolicySource {
+    StagedObligation,
+    RequestPolicyFallback,
+}
+
 #[derive(Debug, Clone)]
 pub struct HostHttpEgressService<N, S> {
     network: N,
     secrets: S,
+    secret_injections: Option<Arc<RuntimeSecretInjectionStore>>,
+    network_policy_store: Option<Arc<NetworkObligationPolicyStore>>,
+    network_policy_source: NetworkPolicySource,
 }
 
 impl<N, S> HostHttpEgressService<N, S> {
+    /// Construct host HTTP egress in production fail-closed mode.
+    ///
+    /// Callers must attach a [`NetworkObligationPolicyStore`] with
+    /// [`Self::with_network_policy_store`] before executing network requests.
+    /// Without that store, egress fails before transport rather than trusting a
+    /// caller-supplied policy.
     pub fn new(network: N, secrets: S) -> Self {
-        Self { network, secrets }
+        Self {
+            network,
+            secrets,
+            secret_injections: None,
+            network_policy_store: None,
+            network_policy_source: NetworkPolicySource::StagedObligation,
+        }
+    }
+
+    /// Construct host HTTP egress that uses the policy embedded in each request.
+    ///
+    /// This is intentionally named as a test/legacy seam: production Reborn
+    /// runtime egress must consume staged `ApplyNetworkPolicy` handoffs from
+    /// [`NetworkObligationPolicyStore`] instead of trusting runtime/caller
+    /// request policy fields.
+    pub fn new_with_request_policy_for_tests(network: N, secrets: S) -> Self {
+        Self {
+            network,
+            secrets,
+            secret_injections: None,
+            network_policy_store: None,
+            network_policy_source: NetworkPolicySource::RequestPolicyFallback,
+        }
+    }
+
+    pub fn with_secret_injection_store(mut self, store: Arc<RuntimeSecretInjectionStore>) -> Self {
+        self.secret_injections = Some(store);
+        self
+    }
+
+    pub fn with_network_policy_store(mut self, store: Arc<NetworkObligationPolicyStore>) -> Self {
+        self.network_policy_store = Some(store);
+        self.network_policy_source = NetworkPolicySource::StagedObligation;
+        self
     }
 
     pub fn network(&self) -> &N {
@@ -613,6 +712,32 @@ impl<N, S> HostHttpEgressService<N, S> {
 
     pub fn secrets(&self) -> &S {
         &self.secrets
+    }
+
+    fn network_policy_for_request(
+        &self,
+        request: &mut RuntimeHttpEgressRequest,
+    ) -> Result<NetworkPolicy, RuntimeHttpEgressError> {
+        if let Some(store) = &self.network_policy_store {
+            return store
+                .take(&request.scope, &request.capability_id)
+                .ok_or_else(|| RuntimeHttpEgressError::Network {
+                    reason: "network_policy_missing".to_string(),
+                    request_bytes: 0,
+                    response_bytes: 0,
+                });
+        }
+
+        match self.network_policy_source {
+            NetworkPolicySource::StagedObligation => Err(RuntimeHttpEgressError::Network {
+                reason: "network_policy_missing".to_string(),
+                request_bytes: 0,
+                response_bytes: 0,
+            }),
+            NetworkPolicySource::RequestPolicyFallback => {
+                Ok(std::mem::take(&mut request.network_policy))
+            }
+        }
     }
 }
 
@@ -625,15 +750,23 @@ where
         &self,
         mut request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        let network_policy = self.network_policy_for_request(&mut request)?;
         validate_runtime_request(&request)?;
 
         let mut redaction_values = Vec::new();
-        for injection in request.credential_injections.clone() {
-            let Some(material) = lease_secret_for_injection(&self.secrets, &request, &injection)?
+        let mut credential_materials = Vec::new();
+        let credential_injections = std::mem::take(&mut request.credential_injections);
+        for injection in &credential_injections {
+            let Some(value) = credential_value_for_injection(
+                &mut credential_materials,
+                &self.secrets,
+                self.secret_injections.as_deref(),
+                &request,
+                injection,
+            )?
             else {
                 continue;
             };
-            let value = material.expose_secret().to_string();
             apply_credential_injection(&mut request, &injection.target, &value)?;
             redaction_values.extend(redaction_values_for_secret(&value));
         }
@@ -646,7 +779,7 @@ where
                 url: request.url,
                 headers: request.headers,
                 body: request.body,
-                policy: request.network_policy,
+                policy: network_policy,
                 response_body_limit: request.response_body_limit,
                 timeout_ms: request.timeout_ms,
             })
@@ -660,10 +793,116 @@ where
     }
 }
 
+struct RuntimeCredentialMaterialCacheEntry {
+    key: RuntimeCredentialMaterialKey,
+    value: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum RuntimeCredentialMaterialKey {
+    SecretStoreLease {
+        handle: SecretHandle,
+    },
+    StagedObligation {
+        capability_id: CapabilityId,
+        handle: SecretHandle,
+    },
+}
+
+impl RuntimeCredentialMaterialKey {
+    fn for_injection(injection: &RuntimeCredentialInjection) -> Self {
+        match &injection.source {
+            RuntimeCredentialSource::SecretStoreLease => Self::SecretStoreLease {
+                handle: injection.handle.clone(),
+            },
+            RuntimeCredentialSource::StagedObligation { capability_id } => Self::StagedObligation {
+                capability_id: capability_id.clone(),
+                handle: injection.handle.clone(),
+            },
+        }
+    }
+}
+
+fn credential_value_for_injection<S>(
+    cache: &mut Vec<RuntimeCredentialMaterialCacheEntry>,
+    secrets: &S,
+    secret_injections: Option<&RuntimeSecretInjectionStore>,
+    request: &RuntimeHttpEgressRequest,
+    injection: &RuntimeCredentialInjection,
+) -> Result<Option<String>, RuntimeHttpEgressError>
+where
+    S: SecretStore,
+{
+    let key = RuntimeCredentialMaterialKey::for_injection(injection);
+    if let Some(entry) = cache.iter().find(|entry| entry.key == key) {
+        return match &entry.value {
+            Some(value) => Ok(Some(value.clone())),
+            None => missing_runtime_credential(injection.required).map(|_| None),
+        };
+    }
+
+    let value = secret_material_for_injection(secrets, secret_injections, request, injection)?
+        .map(|material| material.expose_secret().to_string());
+    cache.push(RuntimeCredentialMaterialCacheEntry {
+        key,
+        value: value.clone(),
+    });
+    Ok(value)
+}
+
+fn secret_material_for_injection<S>(
+    secrets: &S,
+    secret_injections: Option<&RuntimeSecretInjectionStore>,
+    request: &RuntimeHttpEgressRequest,
+    injection: &RuntimeCredentialInjection,
+) -> Result<Option<SecretMaterial>, RuntimeHttpEgressError>
+where
+    S: SecretStore,
+{
+    match &injection.source {
+        RuntimeCredentialSource::SecretStoreLease => {
+            lease_secret_for_injection(secrets, request, injection)
+        }
+        RuntimeCredentialSource::StagedObligation { capability_id } => {
+            take_staged_secret_for_injection(secret_injections, request, capability_id, injection)
+        }
+    }
+}
+
+fn take_staged_secret_for_injection(
+    secret_injections: Option<&RuntimeSecretInjectionStore>,
+    request: &RuntimeHttpEgressRequest,
+    capability_id: &CapabilityId,
+    injection: &RuntimeCredentialInjection,
+) -> Result<Option<SecretMaterial>, RuntimeHttpEgressError> {
+    let Some(secret_injections) = secret_injections else {
+        return missing_runtime_credential(injection.required);
+    };
+    match secret_injections.take(&request.scope, capability_id, &injection.handle) {
+        Ok(Some(material)) => Ok(Some(material)),
+        Ok(None) => missing_runtime_credential(injection.required),
+        Err(_) => Err(RuntimeHttpEgressError::Credential {
+            reason: "runtime credential injection store unavailable".to_string(),
+        }),
+    }
+}
+
+fn missing_runtime_credential(
+    required: bool,
+) -> Result<Option<SecretMaterial>, RuntimeHttpEgressError> {
+    if required {
+        Err(RuntimeHttpEgressError::Credential {
+            reason: "required credential is unavailable".to_string(),
+        })
+    } else {
+        Ok(None)
+    }
+}
+
 fn lease_secret_for_injection<S>(
     secrets: &S,
     request: &RuntimeHttpEgressRequest,
-    injection: &ironclaw_host_api::RuntimeCredentialInjection,
+    injection: &RuntimeCredentialInjection,
 ) -> Result<Option<SecretMaterial>, RuntimeHttpEgressError>
 where
     S: SecretStore,
@@ -729,10 +968,20 @@ fn apply_credential_injection(
 ) -> Result<(), RuntimeHttpEgressError> {
     match target {
         RuntimeCredentialTarget::Header { name, prefix } => {
+            if !valid_injected_header_name(name) {
+                return Err(RuntimeHttpEgressError::Credential {
+                    reason: "credential injection header name is invalid".to_string(),
+                });
+            }
             let injected = match prefix {
                 Some(prefix) => format!("{prefix}{value}"),
                 None => value.to_string(),
             };
+            if injected.chars().any(char::is_control) {
+                return Err(RuntimeHttpEgressError::Credential {
+                    reason: "credential injection header value is invalid".to_string(),
+                });
+            }
             request.headers.push((name.clone(), injected));
         }
         RuntimeCredentialTarget::QueryParam { name } => {
@@ -745,6 +994,30 @@ fn apply_credential_injection(
         }
     }
     Ok(())
+}
+
+fn valid_injected_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
 }
 
 fn runtime_network_error(error: NetworkHttpError) -> RuntimeHttpEgressError {
