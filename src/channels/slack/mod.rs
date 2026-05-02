@@ -18,6 +18,8 @@
 
 pub mod manifest;
 pub mod oauth;
+pub mod sig;
 
 pub use manifest::{MINIMAL_BOT_SCOPES, SlackManifest, generate_manifest};
 pub use oauth::{OAuthV2AccessResponse, parse_oauth_v2_access};
+pub use sig::{MAX_TIMESTAMP_SKEW_SECS, SignatureError, VerifyInputs, verify};
