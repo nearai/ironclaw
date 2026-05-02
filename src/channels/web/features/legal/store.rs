@@ -302,6 +302,96 @@ async fn fetch_document_inner(
     }
 }
 
+/// One hit from the per-project FTS search.
+#[derive(Debug, Clone)]
+pub struct LegalDocumentSearchHit {
+    pub document_id: String,
+    pub filename: String,
+    /// FTS5 `snippet()` output: a short slice of `extracted_text` around
+    /// the match with `<mark>...</mark>` highlights. Empty if the match
+    /// hit only the filename.
+    pub snippet: String,
+    /// FTS5 `bm25()` rank. Lower = better match (FTS5 returns negatives
+    /// to enable `ORDER BY rank`). Forwarded to the API consumer so it
+    /// can surface relevance in the UI.
+    pub rank: f64,
+}
+
+/// Default cap on hits per request. Keeps the response small enough
+/// to render without pagination in v1.
+pub const SEARCH_DEFAULT_LIMIT: i64 = 50;
+
+/// Hard cap on hits per request to prevent a malformed `limit` from
+/// pulling thousands of rows.
+pub const SEARCH_MAX_LIMIT: i64 = 200;
+
+/// Search a project's documents via FTS5. Empty queries (whitespace-only)
+/// return no hits — callers should validate before reaching the store
+/// but we double-check here so a stray empty `?q=` doesn't `bm25` the
+/// whole table.
+pub async fn search_project_documents(
+    db: &Arc<dyn Database>,
+    project_id: &str,
+    query: &str,
+    limit: i64,
+) -> Result<Vec<LegalDocumentSearchHit>, DatabaseError> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let limit = limit.clamp(1, SEARCH_MAX_LIMIT);
+
+    let backend = libsql(db)?;
+    let conn = backend.connect().await?;
+
+    // FTS5 wants the user query string in MATCH form. We pass the
+    // user-supplied text verbatim so the FTS5 query parser does the
+    // tokenization (it accepts plain words, AND/OR/NOT, NEAR, prefix
+    // wildcards). Worst case the query parser rejects it and we surface
+    // the error as a 400 in the handler.
+    let mut rows = conn
+        .query(
+            "SELECT f.document_id, f.filename, \
+                    snippet(legal_documents_fts, 3, '<mark>', '</mark>', '…', 32) AS snippet, \
+                    bm25(legal_documents_fts) AS rank \
+               FROM legal_documents_fts AS f \
+              WHERE legal_documents_fts MATCH ?1 \
+                AND f.project_id = ?2 \
+              ORDER BY rank \
+              LIMIT ?3",
+            libsql::params![trimmed, project_id, limit],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(format!("search_project_documents query: {e}")))?;
+
+    let mut out = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|e| DatabaseError::Query(format!("search_project_documents iter: {e}")))?
+    {
+        let document_id: String = row
+            .get(0)
+            .map_err(|e| DatabaseError::Query(format!("search hit document_id: {e}")))?;
+        let filename: String = row
+            .get(1)
+            .map_err(|e| DatabaseError::Query(format!("search hit filename: {e}")))?;
+        let snippet: String = row
+            .get(2)
+            .map_err(|e| DatabaseError::Query(format!("search hit snippet: {e}")))?;
+        let rank: f64 = row
+            .get(3)
+            .map_err(|e| DatabaseError::Query(format!("search hit rank: {e}")))?;
+        out.push(LegalDocumentSearchHit {
+            document_id,
+            filename,
+            snippet,
+            rank,
+        });
+    }
+    Ok(out)
+}
+
 /// All documents in a project, newest first.
 pub async fn list_documents_for_project(
     db: &Arc<dyn Database>,

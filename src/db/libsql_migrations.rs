@@ -1075,6 +1075,69 @@ CREATE TABLE IF NOT EXISTS legal_chat_messages (
 CREATE INDEX IF NOT EXISTS idx_legal_chat_messages_chat ON legal_chat_messages(chat_id);
 "#,
     ),
+    (
+        28,
+        "legal_documents_fts",
+        // FTS5 search over legal_documents.extracted_text. Per-project
+        // queries run against this virtual table. Triggers keep it in
+        // sync with the canonical legal_documents row data — every
+        // INSERT/UPDATE/DELETE on legal_documents is mirrored here.
+        //
+        // We use the `content=''` external-content variant: the index
+        // owns its own copy of the indexable columns rather than reading
+        // them from legal_documents on every query, which keeps reads
+        // fast and lets us bump the schema (e.g. add a column) on
+        // legal_documents without invalidating the index.
+        //
+        // (Stream A's Postgres counterpart will land in a separate
+        // V28__legal_documents_fts.sql with a tsvector + trigger; for
+        // libSQL-only deploys today the gateway returns 501 from the
+        // Postgres backend, same shape as the chat handlers.)
+        r#"
+CREATE VIRTUAL TABLE IF NOT EXISTS legal_documents_fts USING fts5(
+    project_id UNINDEXED,
+    document_id UNINDEXED,
+    filename,
+    extracted_text,
+    tokenize = 'unicode61 remove_diacritics 2'
+);
+
+-- Backfill anything that's already in the table at migration time.
+INSERT INTO legal_documents_fts(rowid, project_id, document_id, filename, extracted_text)
+    SELECT rowid, project_id, id, filename, COALESCE(extracted_text, '')
+      FROM legal_documents
+     WHERE NOT EXISTS (
+        SELECT 1 FROM legal_documents_fts AS f WHERE f.rowid = legal_documents.rowid
+     );
+
+-- Insert: mirror the new row.
+CREATE TRIGGER IF NOT EXISTS legal_documents_fts_ai
+    AFTER INSERT ON legal_documents
+BEGIN
+    INSERT INTO legal_documents_fts(rowid, project_id, document_id, filename, extracted_text)
+        VALUES (new.rowid, new.project_id, new.id, new.filename, COALESCE(new.extracted_text, ''));
+END;
+
+-- Delete: tombstone the old rowid via FTS5's delete-command syntax.
+CREATE TRIGGER IF NOT EXISTS legal_documents_fts_ad
+    AFTER DELETE ON legal_documents
+BEGIN
+    INSERT INTO legal_documents_fts(legal_documents_fts, rowid, project_id, document_id, filename, extracted_text)
+        VALUES ('delete', old.rowid, old.project_id, old.id, old.filename, COALESCE(old.extracted_text, ''));
+END;
+
+-- Update: tombstone old + insert new. Matches the SQLite FTS5 docs'
+-- canonical "external content with synced triggers" pattern.
+CREATE TRIGGER IF NOT EXISTS legal_documents_fts_au
+    AFTER UPDATE ON legal_documents
+BEGIN
+    INSERT INTO legal_documents_fts(legal_documents_fts, rowid, project_id, document_id, filename, extracted_text)
+        VALUES ('delete', old.rowid, old.project_id, old.id, old.filename, COALESCE(old.extracted_text, ''));
+    INSERT INTO legal_documents_fts(rowid, project_id, document_id, filename, extracted_text)
+        VALUES (new.rowid, new.project_id, new.id, new.filename, COALESCE(new.extracted_text, ''));
+END;
+"#,
+    ),
 ];
 
 /// Migrations whose ADD COLUMN should be skipped when the column already

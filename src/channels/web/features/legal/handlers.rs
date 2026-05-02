@@ -15,11 +15,11 @@ use std::sync::Arc;
 use axum::{
     Json,
     body::Body,
-    extract::{Multipart, Path, State},
+    extract::{Multipart, Path, Query, State},
     http::{StatusCode, header},
     response::Response,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::platform::state::GatewayState;
@@ -243,6 +243,109 @@ pub async fn get_project_handler(
         .await
         .map_err(|e| db_err("list_documents", e))?;
     Ok(Json(ProjectDetailResponse { project, documents }))
+}
+
+/// Query parameters for `GET /api/skills/legal/projects/:id/search`.
+#[derive(Debug, Deserialize)]
+pub struct SearchQuery {
+    /// FTS5 MATCH expression. Plain words ("party"), AND/OR/NOT, and
+    /// prefix wildcards (`contract*`) are supported. The user-supplied
+    /// string is forwarded verbatim to FTS5; a malformed query surfaces
+    /// as a 400 from the underlying SQL parser rather than crashing.
+    pub q: Option<String>,
+    /// Cap on hits returned. Clamped to the [1, SEARCH_MAX_LIMIT] range
+    /// in the store layer; missing or zero defaults to
+    /// SEARCH_DEFAULT_LIMIT.
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SearchHitResponse {
+    pub document_id: String,
+    pub filename: String,
+    pub snippet: String,
+    pub rank: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SearchResponse {
+    pub project_id: String,
+    pub query: String,
+    pub hits: Vec<SearchHitResponse>,
+    pub count: usize,
+}
+
+/// `GET /api/skills/legal/projects/:id/search?q=…` — full-text search.
+///
+/// Returns up to `limit` (default 50, max 200) per-document hits ranked
+/// by FTS5 BM25. Each hit includes a snippet around the match with
+/// `<mark>...</mark>` highlights so the UI can render the context
+/// without re-fetching the document body.
+pub async fn search_documents_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(_user): AuthenticatedUser,
+    Path(project_id): Path<String>,
+    Query(params): Query<SearchQuery>,
+) -> Result<Json<SearchResponse>, (StatusCode, Json<ErrorBody>)> {
+    let db = require_db(&state)?;
+
+    // Empty `q` is a 400 — search-all is too expensive to run by accident.
+    let raw = params.q.unwrap_or_default();
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "missing query parameter `q`"));
+    }
+
+    // Confirm the project exists and isn't soft-deleted before issuing
+    // the FTS query — a search against a deleted project would silently
+    // return rows whose parent the API otherwise hides.
+    let project = store::fetch_project(db, &project_id)
+        .await
+        .map_err(|e| db_err("fetch_project", e))?
+        .ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                format!("project {project_id} not found"),
+            )
+        })?;
+    if project.deleted_at.is_some() {
+        return Err(err(
+            StatusCode::NOT_FOUND,
+            format!("project {project_id} has been deleted"),
+        ));
+    }
+
+    let limit = params.limit.unwrap_or(store::SEARCH_DEFAULT_LIMIT);
+    let hits = store::search_project_documents(db, &project_id, trimmed, limit)
+        .await
+        .map_err(|e| match &e {
+            // FTS5 surfaces malformed queries as a query error containing
+            // the substring "fts5: syntax error". Translate to 400 so the
+            // UI can show a useful message rather than a generic 500.
+            DatabaseError::Query(msg) if msg.contains("syntax error") => err(
+                StatusCode::BAD_REQUEST,
+                format!("invalid search query: {msg}"),
+            ),
+            _ => db_err("search_project_documents", e),
+        })?;
+
+    let count = hits.len();
+    let response_hits: Vec<SearchHitResponse> = hits
+        .into_iter()
+        .map(|h| SearchHitResponse {
+            document_id: h.document_id,
+            filename: h.filename,
+            snippet: h.snippet,
+            rank: h.rank,
+        })
+        .collect();
+
+    Ok(Json(SearchResponse {
+        project_id,
+        query: trimmed.to_string(),
+        hits: response_hits,
+        count,
+    }))
 }
 
 /// `DELETE /api/skills/legal/projects/:id` — soft delete.
