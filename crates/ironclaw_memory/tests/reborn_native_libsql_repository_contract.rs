@@ -446,6 +446,74 @@ async fn full_text_search_uses_rrf_when_only_full_text_branch_returns_results() 
     assert!(hits.iter().all(|hit| hit.path.tenant_id() == "tenant-a"));
 }
 
+#[tokio::test]
+async fn concurrent_writes_under_same_scope_and_path_produce_exactly_one_row() {
+    // Production uses `BEGIN IMMEDIATE` plus `list_paths_for_scope` under
+    // the same transaction, which serializes overlapping writers on the
+    // same scope+path. Drive that with two `tokio::join!`-launched writes
+    // and assert the row count is exactly one — proving no duplicate row
+    // is created when writes race.
+    let f = fresh_repository().await;
+    let path = MemoryDocumentPath::new("tenant-a", "alice", None, "race.md").expect("path");
+    let path_a = path.clone();
+    let path_b = path.clone();
+    let repo_a = f.repo.clone();
+    let repo_b = f.repo.clone();
+    let (r1, r2) = tokio::join!(
+        repo_a.write_document(&path_a, b"writer-a"),
+        repo_b.write_document(&path_b, b"writer-b"),
+    );
+    r1.expect("writer-a write");
+    r2.expect("writer-b write");
+
+    let listed = f.repo.list_documents(path.scope()).await.unwrap();
+    let races = listed
+        .iter()
+        .filter(|p| p.relative_path() == "race.md")
+        .count();
+    assert_eq!(races, 1, "concurrent writes must serialize to one row");
+    let stored = f.repo.read_document(&path).await.unwrap();
+    assert!(matches!(
+        stored.as_deref(),
+        Some(b"writer-a") | Some(b"writer-b")
+    ));
+}
+
+#[tokio::test]
+async fn fts_query_with_only_stopwords_does_not_error() {
+    // Common-stopword-only queries (e.g. "the", "and") and bare-phrase
+    // queries with no FTS5 tokens must not propagate parse errors out of
+    // the repository — they should succeed and return zero or all
+    // results. This locks in the empty/stopword-ish FTS contract called
+    // out by issue #3118.
+    let f = fresh_repository().await;
+    let path = MemoryDocumentPath::new("tenant-a", "alice", None, "stop.md").expect("path");
+    f.repo
+        .write_document(&path, b"the quick brown fox")
+        .await
+        .unwrap();
+    let indexer = Arc::new(
+        ChunkingMemoryDocumentIndexer::new(f.repo.clone()).with_chunk_config(ChunkConfig {
+            chunk_size: 4,
+            overlap_percent: 0.0,
+            min_chunk_size: 1,
+        }),
+    );
+    indexer.reindex_document(&path).await.unwrap();
+
+    for query in ["the", "and", "of and the"] {
+        let request = MemorySearchRequest::new(query)
+            .unwrap()
+            .with_vector(false)
+            .with_limit(10);
+        let _ = f
+            .repo
+            .search_documents(path.scope(), &request)
+            .await
+            .unwrap_or_else(|err| panic!("stopword query {query:?} must not error: {err}"));
+    }
+}
+
 // --- helpers --------------------------------------------------------------
 
 async fn count_versions(db: &Arc<libsql::Database>, path: &MemoryDocumentPath) -> i64 {
