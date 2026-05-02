@@ -2878,6 +2878,7 @@ mod tests {
             available_action_inventory_snapshot: None,
             gate_controller: ironclaw_engine::CancellingGateController::arc(),
             call_approval_granted: false,
+            conversation_id: None,
         }
     }
 
@@ -4646,6 +4647,7 @@ mod tests {
             available_action_inventory_snapshot: None,
             gate_controller: ironclaw_engine::CancellingGateController::arc(),
             call_approval_granted: false,
+            conversation_id: None,
         };
 
         assert!(should_reject_immediate_mission_create(&ctx));
@@ -4669,6 +4671,7 @@ mod tests {
             available_action_inventory_snapshot: None,
             gate_controller: ironclaw_engine::CancellingGateController::arc(),
             call_approval_granted: false,
+            conversation_id: None,
         };
 
         assert!(!should_reject_immediate_mission_create(&ctx));
@@ -4690,6 +4693,7 @@ mod tests {
             available_action_inventory_snapshot: None,
             gate_controller: ironclaw_engine::CancellingGateController::arc(),
             call_approval_granted: false,
+            conversation_id: None,
         };
 
         assert!(should_reject_immediate_mission_create(&ctx));
@@ -4711,6 +4715,7 @@ mod tests {
             available_action_inventory_snapshot: None,
             gate_controller: ironclaw_engine::CancellingGateController::arc(),
             call_approval_granted: false,
+            conversation_id: None,
         };
 
         assert!(should_reject_immediate_mission_create(&ctx));
@@ -4735,6 +4740,7 @@ mod tests {
             available_action_inventory_snapshot: None,
             gate_controller: ironclaw_engine::CancellingGateController::arc(),
             call_approval_granted: false,
+            conversation_id: None,
         };
 
         // Should NOT be rejected — "monitoring" implies scheduling intent.
@@ -4757,6 +4763,7 @@ mod tests {
             available_action_inventory_snapshot: None,
             gate_controller: ironclaw_engine::CancellingGateController::arc(),
             call_approval_granted: false,
+            conversation_id: None,
         };
 
         assert!(!should_reject_immediate_mission_create(&ctx));
@@ -4983,6 +4990,7 @@ mod tests {
                 available_action_inventory_snapshot: None,
                 gate_controller: ironclaw_engine::CancellingGateController::arc(),
                 call_approval_granted: false,
+                conversation_id: None,
             }
         }
 
@@ -5314,6 +5322,7 @@ mod tests {
             available_action_inventory_snapshot: None,
             gate_controller: ironclaw_engine::CancellingGateController::arc(),
             call_approval_granted: false,
+            conversation_id: None,
         };
 
         let result = adapter.execute_action("http", params, &lease, &ctx).await;
@@ -5429,6 +5438,7 @@ mod tests {
             available_action_inventory_snapshot: None,
             gate_controller: ironclaw_engine::CancellingGateController::arc(),
             call_approval_granted: false,
+            conversation_id: None,
         };
 
         let result = adapter
@@ -5746,6 +5756,7 @@ mod tests {
             available_action_inventory_snapshot: None,
             gate_controller: ironclaw_engine::CancellingGateController::arc(),
             call_approval_granted: false,
+            conversation_id: None,
         };
 
         let result = adapter
@@ -6345,6 +6356,7 @@ mod tests {
             available_action_inventory_snapshot: None,
             gate_controller: ironclaw_engine::CancellingGateController::arc(),
             call_approval_granted: false,
+            conversation_id: None,
         };
 
         let capabilities = adapter

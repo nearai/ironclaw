@@ -175,6 +175,11 @@ pub struct GatePauseRequest {
     pub call_id: String,
     pub parameters: serde_json::Value,
     pub resume_kind: ResumeKind,
+    /// Originating conversation, if any. Lets the host route an inline
+    /// gate to the right UI surface when the same user has multiple
+    /// concurrent conversations (e.g. two browser tabs). `None` for
+    /// background mission threads.
+    pub conversation_id: Option<crate::types::conversation::ConversationId>,
 }
 
 /// Host-supplied callback that pauses a live engine execution until

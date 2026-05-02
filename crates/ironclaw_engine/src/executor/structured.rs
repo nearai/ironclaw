@@ -218,6 +218,7 @@ pub async fn execute_action_calls(
                         call_id: call.id.clone(),
                         parameters: call.parameters.clone(),
                         resume_kind,
+                        conversation_id: context.conversation_id,
                     })
                     .await;
 
@@ -628,6 +629,7 @@ async fn execute_with_inline_gate_retry(
                 call_id: call_id.clone(),
                 parameters: parameters.clone(),
                 resume_kind,
+                conversation_id: exec_ctx.conversation_id,
             })
             .await;
 
@@ -759,6 +761,7 @@ mod tests {
             available_action_inventory_snapshot: None,
             gate_controller: crate::gate::CancellingGateController::arc(),
             call_approval_granted: false,
+            conversation_id: None,
         }
     }
 

@@ -303,6 +303,16 @@ impl ConversationManager {
                         serde_json::Value::String(tz.to_string()),
                     );
                 }
+                // Stash the originating conversation_id so
+                // `thread_execution_context` can surface it to the host
+                // via `ThreadExecutionContext.conversation_id`. This
+                // lets the bridge match an inline-await gate to the
+                // right UI surface when the same user has multiple
+                // concurrent conversations.
+                initial_metadata.insert(
+                    "conversation_id".into(),
+                    serde_json::Value::String(conversation_id.to_string()),
+                );
 
                 // Spawn new foreground thread with conversation history.
                 // `goal` holds the full message (the orchestrator feeds it as

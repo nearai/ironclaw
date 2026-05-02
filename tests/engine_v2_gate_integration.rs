@@ -1245,6 +1245,7 @@ async fn auth_resolution_retries_same_pending_action_without_second_pause() {
         available_action_inventory_snapshot: None,
         gate_controller: ironclaw_engine::CancellingGateController::arc(),
         call_approval_granted: false,
+        conversation_id: None,
     };
 
     effects.mark_authenticated("http").await;
@@ -1397,6 +1398,7 @@ async fn approval_chains_directly_into_auth_for_install_flow() {
         available_action_inventory_snapshot: None,
         gate_controller: ironclaw_engine::CancellingGateController::arc(),
         call_approval_granted: false,
+        conversation_id: None,
     };
     let install_result = effects
         .execute_action("tool_install", install_params, &lease, &exec_ctx)
@@ -1506,6 +1508,7 @@ async fn install_auth_resume_followed_by_aliased_tool_call_completes_without_han
         available_action_inventory_snapshot: None,
         gate_controller: ironclaw_engine::CancellingGateController::arc(),
         call_approval_granted: false,
+        conversation_id: None,
     };
 
     effects.mark_authenticated("tool_install").await;

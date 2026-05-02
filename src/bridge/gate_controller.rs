@@ -72,6 +72,16 @@ struct ExecutionKey {
     thread_id: ThreadId,
 }
 
+/// Pre-execution registry key. Keyed by `(user_id, conversation_id)`
+/// so two concurrent conversations for the same user (e.g. two browser
+/// tabs) don't clobber each other's pre-execution slot before each
+/// turn has been promoted to its own `(user_id, thread_id)` entry.
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+struct PreExecKey {
+    user_id: String,
+    conversation_id: ConversationId,
+}
+
 /// Process-wide registry of in-flight gate resolution channels.
 ///
 /// One entry per pending in-flight gate. Inserts come from
@@ -126,13 +136,24 @@ pub struct BridgeGateController {
     /// wins when both this map and `pre_execution` carry an entry —
     /// it's the more specific key.
     per_execution: Mutex<HashMap<ExecutionKey, PerExecutionContext>>,
-    /// Per-user pending entry, populated *before* `handle_user_message`
+    /// Pre-execution registry, populated *before* `handle_user_message`
     /// returns the thread_id. Closes the race where a fast tool gate
     /// reaches `pause()` before the bridge has had a chance to register
-    /// the (user, thread)-keyed entry. Each bridge turn is serialized
-    /// per-conversation upstream, so we only need a single slot per
-    /// user-id here; later turns overwrite earlier ones.
-    pre_execution: Mutex<HashMap<String, PerExecutionContext>>,
+    /// the (user, thread)-keyed entry. Keyed by `(user_id,
+    /// conversation_id)` so concurrent conversations for the same user
+    /// (e.g. two browser tabs) don't clobber each other — each turn's
+    /// `pause()` matches its own conversation's slot via
+    /// `GatePauseRequest::conversation_id`.
+    pre_execution: Mutex<HashMap<PreExecKey, PerExecutionContext>>,
+    /// Per-(user, thread) serialization lock for `pause()`. Holding
+    /// this across the `PendingGateStore::insert` + select-await window
+    /// guarantees only one inline gate per `(user, thread)` is in
+    /// flight at a time. Without it, a parallel batch where two tool
+    /// calls both gate concurrently would have the second insert hit
+    /// the (user, thread) uniqueness check and silently surface as
+    /// `GateResolution::Cancelled`. With it, the second `pause()`
+    /// queues until the first resolves.
+    gate_locks: Mutex<HashMap<ExecutionKey, Arc<Mutex<()>>>>,
 }
 
 impl BridgeGateController {
@@ -156,32 +177,56 @@ impl BridgeGateController {
             resolutions,
             per_execution: Mutex::new(HashMap::new()),
             pre_execution: Mutex::new(HashMap::new()),
+            gate_locks: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Bind per-execution data for `user_id` BEFORE the engine spawns
-    /// the thread. Closes the race window where a fast tool gate
-    /// reaches `pause()` before the (user, thread)-keyed entry has
-    /// been written.
+    /// Look up (or create) the per-(user, thread) gate-serialization
+    /// lock. The returned Arc is cloned out so callers can drop the
+    /// outer registry lock before contending on the inner lock.
+    async fn gate_lock_for(&self, key: &ExecutionKey) -> Arc<Mutex<()>> {
+        let mut map = self.gate_locks.lock().await;
+        map.entry(key.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    /// Bind per-execution data for `(user_id, conversation_id)` BEFORE
+    /// the engine spawns the thread. Closes the race window where a
+    /// fast tool gate reaches `pause()` before the (user, thread)-keyed
+    /// entry has been written.
     ///
-    /// Per-conversation lock upstream means at most one bridge turn
-    /// per conversation is active at a time; concurrent threads for
-    /// the same user (background missions) are an accepted edge case
-    /// — the most-recently-set context wins.
-    pub async fn set_pre_execution_context(&self, user_id: String, context: PerExecutionContext) {
-        self.pre_execution.lock().await.insert(user_id, context);
+    /// Keying by `conversation_id` (rather than `user_id` alone) keeps
+    /// concurrent conversations for the same user — multiple browser
+    /// tabs, background missions firing alongside a foreground turn —
+    /// from clobbering each other's slot. Each turn's `pause()` matches
+    /// its own conversation via `GatePauseRequest::conversation_id`.
+    pub async fn set_pre_execution_context(
+        &self,
+        user_id: String,
+        conversation_id: ConversationId,
+        context: PerExecutionContext,
+    ) {
+        self.pre_execution.lock().await.insert(
+            PreExecKey {
+                user_id,
+                conversation_id,
+            },
+            context,
+        );
     }
 
     /// Bind per-execution data for `(user_id, thread_id)` once the
     /// engine has allocated a thread_id. Call after
-    /// [`Self::set_pre_execution_context`]; supersedes the per-user
-    /// entry for subsequent lookups.
+    /// [`Self::set_pre_execution_context`]; supersedes the
+    /// (user, conversation_id)-keyed entry for subsequent lookups.
     pub async fn set_execution_context(
         &self,
         user_id: String,
         thread_id: ThreadId,
         context: PerExecutionContext,
     ) {
+        let conv_id = context.conversation_id;
         self.per_execution.lock().await.insert(
             ExecutionKey {
                 user_id: user_id.clone(),
@@ -189,22 +234,58 @@ impl BridgeGateController {
             },
             context,
         );
-        // Remove the per-user pending entry — the (user, thread)-keyed
-        // entry is now the source of truth for this turn.
-        self.pre_execution.lock().await.remove(&user_id);
+        // Remove the (user, conversation)-keyed pre-execution entry —
+        // the (user, thread)-keyed entry is now the source of truth.
+        self.pre_execution.lock().await.remove(&PreExecKey {
+            user_id,
+            conversation_id: conv_id,
+        });
     }
 
-    /// Drop per-execution data. Idempotent.
-    pub async fn clear_execution_context(&self, user_id: &str, thread_id: ThreadId) {
-        self.per_execution.lock().await.remove(&ExecutionKey {
+    /// Drop the pre-execution `(user, conversation)`-keyed entry
+    /// without touching any `(user, thread)`-keyed entry. Used on the
+    /// bridge error path when `handle_user_message` failed before
+    /// allocating a thread_id — without this the slot would leak and
+    /// could mis-route the next gate prompt for the same conversation.
+    pub async fn clear_pre_execution_context(
+        &self,
+        user_id: &str,
+        conversation_id: ConversationId,
+    ) {
+        self.pre_execution.lock().await.remove(&PreExecKey {
+            user_id: user_id.to_string(),
+            conversation_id,
+        });
+    }
+
+    /// Drop per-execution data. Idempotent. `conversation_id` is the
+    /// originating conversation for this turn so any leftover
+    /// pre-execution slot (e.g. when the bridge bailed before
+    /// promotion) gets cleared too.
+    pub async fn clear_execution_context(
+        &self,
+        user_id: &str,
+        thread_id: ThreadId,
+        conversation_id: ConversationId,
+    ) {
+        let key = ExecutionKey {
             user_id: user_id.to_string(),
             thread_id,
-        });
+        };
+        self.per_execution.lock().await.remove(&key);
         // Defensive: clear any leftover pre-execution entry too. In
         // the happy path `set_execution_context` already removed it,
         // but if the bridge bailed before that promotion (engine spawn
         // failed) the entry would otherwise leak.
-        self.pre_execution.lock().await.remove(user_id);
+        self.pre_execution.lock().await.remove(&PreExecKey {
+            user_id: user_id.to_string(),
+            conversation_id,
+        });
+        // Drop the per-(user, thread) gate-serialization lock entry.
+        // By the time the bridge clears execution context, all `pause`
+        // futures for this thread have resolved, so the inner lock is
+        // idle and removing the registry entry simply bounds the map.
+        self.gate_locks.lock().await.remove(&key);
     }
 
     /// Forward a resolution into the inline-await registry. Returns
@@ -217,17 +298,33 @@ impl BridgeGateController {
         &self,
         user_id: &str,
         thread_id: ThreadId,
+        conversation_id: Option<ConversationId>,
     ) -> Option<PerExecutionContext> {
         // Most specific match first: (user, thread). Falls back to
-        // the pre-execution per-user entry so a gate firing before
-        // `set_execution_context` lands still finds its context.
+        // the (user, conversation)-keyed pre-execution entry so a
+        // gate firing before `set_execution_context` lands still
+        // finds its context. The fallback requires the request to
+        // carry `conversation_id`; gates from threads with no
+        // originating conversation (background missions) only match
+        // via the (user, thread) entry.
         if let Some(ctx) = self.per_execution.lock().await.get(&ExecutionKey {
             user_id: user_id.to_string(),
             thread_id,
         }) {
             return Some(ctx.clone());
         }
-        self.pre_execution.lock().await.get(user_id).cloned()
+        if let Some(conv_id) = conversation_id {
+            return self
+                .pre_execution
+                .lock()
+                .await
+                .get(&PreExecKey {
+                    user_id: user_id.to_string(),
+                    conversation_id: conv_id,
+                })
+                .cloned();
+        }
+        None
     }
 
     async fn build_pending_gate(
@@ -340,7 +437,7 @@ impl GateController for BridgeGateController {
         }
 
         let Some(per_exec) = self
-            .lookup_per_execution(&request.user_id, request.thread_id)
+            .lookup_per_execution(&request.user_id, request.thread_id, request.conversation_id)
             .await
         else {
             // No per-execution context registered. This shouldn't happen
@@ -356,6 +453,20 @@ impl GateController for BridgeGateController {
             return GateResolution::Cancelled;
         };
 
+        // Serialize concurrent inline gates per (user, thread). A
+        // parallel batch where two tool calls both gate would otherwise
+        // race on `PendingGateStore::insert` — the first wins, the
+        // second hits the (user, thread) uniqueness check and silently
+        // becomes `Cancelled` without ever prompting the user. Holding
+        // this lock across insert + select-await queues subsequent
+        // gates behind the current one so each gets its own prompt.
+        let exec_key = ExecutionKey {
+            user_id: request.user_id.clone(),
+            thread_id: request.thread_id,
+        };
+        let gate_lock = self.gate_lock_for(&exec_key).await;
+        let _gate_guard = gate_lock.lock().await;
+
         let request_id = Uuid::new_v4();
         let pending = self
             .build_pending_gate(
@@ -368,9 +479,10 @@ impl GateController for BridgeGateController {
             .await;
 
         if let Err(e) = self.pending_gates.insert(pending.clone()).await {
-            // Insert can fail if a gate already exists for this
-            // (user, thread). Surface as cancel rather than dropping
-            // the prompt silently.
+            // With the per-(user, thread) gate lock held above, a
+            // legitimate concurrent collision can't happen. An insert
+            // failure here means a stale row from a prior turn hadn't
+            // been cleaned up. Surface as cancel.
             debug!(
                 user = %request.user_id,
                 thread = %request.thread_id,

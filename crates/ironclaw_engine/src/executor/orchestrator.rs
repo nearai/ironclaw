@@ -1248,7 +1248,13 @@ async fn handle_execute_action(
                 return ExtFunctionResult::Return(json_to_monty(&result));
             }
             crate::capability::policy::PolicyDecision::RequireApproval { .. } => {
-                let output = serde_json::json!({"status": "gate_paused", "gate_name": "approval"});
+                // Inline gate-await on policy-raised approval. Mirrors
+                // `structured.rs::execute_action_batch_with_results`: emit
+                // the request, pause the executor in place, and either
+                // fall through to lease consume + execute on approval, or
+                // emit ActionFailed and surface a deny-style result on
+                // denial. No more `gate_paused` sentinel + thread re-entry
+                // for this code path.
                 emit_and_record(
                     thread,
                     event_tx,
@@ -1257,26 +1263,59 @@ async fn handle_execute_action(
                         call_id: call_id.clone(),
                         parameters: Some(params.clone()),
                         description: None,
-                        allow_always: None,
-                        gate_name: None,
+                        allow_always: Some(true),
+                        gate_name: Some("approval".into()),
                         params_summary: summarize_params(&name, &params),
                     },
                     &call_id,
                     &name,
-                    &output,
+                    &serde_json::json!({}),
                 );
-                let result = serde_json::json!({
-                    "gate_paused": true,
-                    "gate_name": "approval",
-                    "action_name": name,
-                    "call_id": call_id,
-                    "parameters": params,
-                    "resume_kind": serde_json::to_value(crate::gate::ResumeKind::Approval {
-                        allow_always: true,
+
+                let resume_kind = crate::gate::ResumeKind::Approval { allow_always: true };
+                let resolution = gate_controller
+                    .pause(crate::gate::GatePauseRequest {
+                        thread_id: thread.id,
+                        user_id: thread.user_id.clone(),
+                        gate_name: "approval".into(),
+                        action_name: name.clone(),
+                        call_id: call_id.clone(),
+                        parameters: params.clone(),
+                        resume_kind,
+                        conversation_id: exec_ctx.conversation_id,
                     })
-                    .unwrap_or_default(),
-                });
-                return ExtFunctionResult::Return(json_to_monty(&result));
+                    .await;
+
+                if let Some(reason) =
+                    crate::executor::scripting::denial_reason_for_resolution(&resolution)
+                {
+                    let error = format!("denied: {reason}");
+                    let output = serde_json::json!({"error": &error});
+                    emit_and_record(
+                        thread,
+                        event_tx,
+                        EventKind::ActionFailed {
+                            step_id: exec_ctx.step_id,
+                            action_name: name.clone(),
+                            call_id: call_id.clone(),
+                            error: error.clone(),
+                            duration_ms: 0,
+                            params_summary: summarize_params(&name, &params),
+                        },
+                        &call_id,
+                        &name,
+                        &output,
+                    );
+                    let result = serde_json::json!({
+                        "output": output,
+                        "is_error": true,
+                    });
+                    return ExtFunctionResult::Return(json_to_monty(&result));
+                }
+                // Approved — fall through to lease consume + execute.
+                // The adapter's per-call ApprovalRequirement gate (if
+                // any) is independent of the policy gate and will be
+                // handled inline by the wrapper below if it fires.
             }
             crate::capability::policy::PolicyDecision::Allow => {}
         }
@@ -1317,135 +1356,37 @@ async fn handle_execute_action(
         }
     };
 
-    // 4. Execute
+    // 4. Execute via the inline-await wrapper. Tool-raised
+    // `Err(GatePaused)` from `effects.execute_action` is converted to a
+    // `gate_paused` JSON sentinel by the adapter shim and then handled
+    // inline by `execute_single_action_with_inline_retry`: pause the
+    // user, retry on approval (bounded), surface deny-style results
+    // on denial. No more `gate_paused` sentinel returned to Python
+    // from this path.
     let ps = summarize_params(&canonical_name, &params);
-    let execution_start = std::time::Instant::now();
-    match effects
-        .execute_action(&canonical_name, params, &lease, &exec_ctx)
-        .await
-    {
-        Ok(r) => {
-            // Effect adapters wrap tool errors as `Ok(ActionResult { is_error: true })`
-            // — surface them as `ActionFailed` so traces and observers see the
-            // failure. See `resolve_tool_future` in `scripting.rs` for the same
-            // pattern on the structured-tool path.
-            if r.is_error {
-                let error_msg = r
-                    .output
-                    .get("error")
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-                    .unwrap_or_else(|| r.output.to_string());
-                let duration_ms = r.duration.as_millis() as u64;
-                emit_and_record(
-                    thread,
-                    event_tx,
-                    EventKind::ActionFailed {
-                        step_id: exec_ctx.step_id,
-                        action_name: name.clone(),
-                        call_id: call_id.clone(),
-                        error: error_msg,
-                        duration_ms: if duration_ms > 0 {
-                            duration_ms
-                        } else {
-                            execution_start.elapsed().as_millis() as u64
-                        },
-                        params_summary: ps.clone(),
-                    },
-                    &call_id,
-                    &name,
-                    &r.output,
-                );
-            } else {
-                emit_and_record(
-                    thread,
-                    event_tx,
-                    EventKind::ActionExecuted {
-                        step_id: exec_ctx.step_id,
-                        action_name: name.clone(),
-                        call_id: call_id.clone(),
-                        duration_ms: r.duration.as_millis() as u64,
-                        params_summary: ps.clone(),
-                    },
-                    &call_id,
-                    &name,
-                    &r.output,
-                );
-            }
-            let result = serde_json::json!({
-                "action_name": r.action_name,
-                "output": r.output,
-                "is_error": r.is_error,
-                "duration_ms": r.duration.as_millis(),
-            });
-            ExtFunctionResult::Return(json_to_monty(&result))
-        }
-        Err(EngineError::GatePaused {
-            gate_name,
-            action_name: _,
-            call_id: _,
-            parameters,
-            resume_kind,
-            resume_output,
-            paused_lease,
-        }) => {
-            let _ = leases.refund_use(lease.id).await;
-            let output = serde_json::json!({"status": "gate_paused", "gate_name": gate_name});
-            emit_and_record(
-                thread,
-                event_tx,
-                EventKind::ApprovalRequested {
-                    action_name: name.clone(),
-                    call_id: call_id.clone(),
-                    parameters: Some((*parameters).clone()),
-                    description: None,
-                    allow_always: match resume_kind.as_ref() {
-                        crate::gate::ResumeKind::Approval { allow_always } => Some(*allow_always),
-                        _ => None,
-                    },
-                    gate_name: Some(gate_name.clone()),
-                    params_summary: summarize_params(&name, &parameters),
-                },
-                &call_id,
-                &name,
-                &output,
-            );
-            let result = serde_json::json!({
-                "gate_paused": true,
-                "gate_name": gate_name,
-                "action_name": name,
-                "call_id": call_id,
-                "parameters": parameters,
-                "resume_kind": serde_json::to_value(&*resume_kind).unwrap_or_default(),
-                "resume_output": resume_output,
-                "paused_lease": paused_lease.as_deref().cloned(),
-            });
-            ExtFunctionResult::Return(json_to_monty(&result))
-        }
-        Err(e) => {
-            let output = serde_json::json!({"error": e.to_string()});
-            emit_and_record(
-                thread,
-                event_tx,
-                EventKind::ActionFailed {
-                    step_id: exec_ctx.step_id,
-                    action_name: name.clone(),
-                    call_id: call_id.clone(),
-                    error: e.to_string(),
-                    duration_ms: execution_start.elapsed().as_millis() as u64,
-                    params_summary: ps,
-                },
-                &call_id,
-                &name,
-                &output,
-            );
-            let result = serde_json::json!({
-                "output": output,
-                "is_error": true,
-            });
-            ExtFunctionResult::Return(json_to_monty(&result))
-        }
+    let (result_json, events, _output, _final_lease_id) = execute_single_action_with_inline_retry(
+        effects,
+        leases,
+        &canonical_name,
+        params,
+        &call_id,
+        lease,
+        &exec_ctx,
+        ps,
+        thread,
+    )
+    .await;
+    for event in events {
+        emit_and_record(
+            thread,
+            event_tx,
+            event,
+            &call_id,
+            &name,
+            &serde_json::json!({}),
+        );
     }
+    ExtFunctionResult::Return(json_to_monty(&result_json))
 }
 
 /// Handle `__execute_actions_parallel__(calls)`.
@@ -1650,66 +1591,74 @@ async fn handle_execute_actions_parallel(
                     continue;
                 }
                 crate::capability::policy::PolicyDecision::RequireApproval { .. } => {
-                    // Emit events for earlier errors, then interrupt
-                    let mut results_json = Vec::with_capacity(preflight.len() + 1);
-                    for pf in preflight {
-                        match pf {
-                            Some(PfOutcome::Error {
-                                result_json,
-                                event,
-                                output: _,
-                            }) => {
-                                let ev = ThreadEvent::new(thread.id, event);
-                                if let Some(tx) = event_tx {
-                                    let _ = tx.send(ev.clone());
-                                }
-                                thread.events.push(ev);
-                                results_json.push(result_json);
-                            }
-                            Some(PfOutcome::Runnable { .. }) | None => {
-                                results_json.push(serde_json::json!(null));
-                            }
-                        }
-                    }
-                    // Add the approval entry
-                    let ev = ThreadEvent::new(
+                    // Inline gate-await: pause this preflight call in place
+                    // until the user resolves the gate. On approval, fall
+                    // through to lease consumption + queue for execution.
+                    // On denial, push an ActionFailed result and continue
+                    // preflight so the rest of the batch still runs —
+                    // mirrors `structured.rs::execute_action_batch_with_results`.
+                    //
+                    // The bridge controller serializes concurrent inline
+                    // gates per (user, thread), so two preflight calls that
+                    // both gate get prompted sequentially rather than the
+                    // second silently cancelling.
+                    let approval_ev = ThreadEvent::new(
                         thread.id,
                         EventKind::ApprovalRequested {
                             action_name: pc.name.clone(),
                             call_id: pc.call_id.clone(),
                             parameters: Some(pc.params.clone()),
                             description: None,
-                            allow_always: None,
-                            gate_name: None,
+                            allow_always: Some(true),
+                            gate_name: Some("approval".into()),
                             params_summary: summarize_params(&pc.name, &pc.params),
                         },
                     );
                     if let Some(tx) = event_tx {
-                        let _ = tx.send(ev.clone());
+                        let _ = tx.send(approval_ev.clone());
                     }
-                    thread.events.push(ev);
+                    thread.events.push(approval_ev);
                     thread.updated_at = chrono::Utc::now();
 
-                    results_json.push(serde_json::json!({
-                        "gate_paused": true,
-                        "gate_name": "approval",
-                        "action_name": &pc.name,
-                        "call_id": &pc.call_id,
-                        "parameters": &pc.params,
-                        "resume_kind": serde_json::to_value(crate::gate::ResumeKind::Approval {
-                            allow_always: true,
+                    let resume_kind = crate::gate::ResumeKind::Approval { allow_always: true };
+                    let resolution = gate_controller
+                        .pause(crate::gate::GatePauseRequest {
+                            thread_id: thread.id,
+                            user_id: thread.user_id.clone(),
+                            gate_name: "approval".into(),
+                            action_name: pc.name.clone(),
+                            call_id: pc.call_id.clone(),
+                            parameters: pc.params.clone(),
+                            resume_kind,
+                            conversation_id: exec_ctx.conversation_id,
                         })
-                        .unwrap_or_default(),
-                    }));
-                    // Pad with nulls for calls that weren't reached so the
-                    // Python-side loop can emit ActionResult placeholders for
-                    // every tool call in the assistant message.
-                    while results_json.len() < parsed.len() {
-                        results_json.push(serde_json::json!(null));
+                        .await;
+
+                    if let Some(reason) =
+                        crate::executor::scripting::denial_reason_for_resolution(&resolution)
+                    {
+                        let error = format!("denied: {reason}");
+                        let output = serde_json::json!({"error": &error});
+                        let result_json = serde_json::json!({
+                            "output": &output,
+                            "is_error": true,
+                        });
+                        let event = EventKind::ActionFailed {
+                            step_id,
+                            action_name: action_name.clone(),
+                            call_id: pc.call_id.clone(),
+                            error,
+                            duration_ms: 0,
+                            params_summary: summarize_params(&pc.name, &pc.params),
+                        };
+                        preflight.push(Some(PfOutcome::Error {
+                            result_json,
+                            event,
+                            output,
+                        }));
+                        continue;
                     }
-                    return ExtFunctionResult::Return(json_to_monty(&serde_json::json!(
-                        results_json
-                    )));
+                    // Approved — fall through to lease consume + runnable.
                 }
                 crate::capability::policy::PolicyDecision::Allow => {}
             }
@@ -2115,6 +2064,7 @@ async fn execute_single_action_with_inline_retry(
                 call_id: call_id.to_string(),
                 parameters: params.clone(),
                 resume_kind,
+                conversation_id: exec_ctx.conversation_id,
             })
             .await;
 

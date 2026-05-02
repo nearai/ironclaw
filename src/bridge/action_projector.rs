@@ -656,6 +656,7 @@ mod tests {
             available_action_inventory_snapshot: None,
             gate_controller: ironclaw_engine::CancellingGateController::arc(),
             call_approval_granted: false,
+            conversation_id: None,
         }
     }
 

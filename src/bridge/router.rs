@@ -1097,6 +1097,9 @@ async fn execute_pending_gate_action(
         // directly, so this field is irrelevant for that path. Reset
         // here to keep the default obvious.
         call_approval_granted: false,
+        // Post-resolution replay never triggers a fresh inline gate;
+        // the conversation routing is moot here.
+        conversation_id: None,
     };
     let active_leases = state
         .thread_manager
@@ -3753,11 +3756,16 @@ async fn handle_with_engine_inner(
     };
     state
         .gate_controller
-        .set_pre_execution_context(message.user_id.clone(), per_exec_context.clone())
+        .set_pre_execution_context(message.user_id.clone(), conv_id, per_exec_context.clone())
         .await;
 
-    // Handle the message — spawns a new thread or injects into active one
-    let thread_id = state
+    // Handle the message — spawns a new thread or injects into active one.
+    // On error we must clear the pre-execution slot we just installed:
+    // without this, a failed `handle_user_message` (engine spawn / inject
+    // failed before any thread_id was allocated) leaves a stale entry
+    // keyed by user_id that would mis-route the next gate prompt for
+    // the same user.
+    let thread_id = match state
         .conversation_manager
         .handle_user_message(
             conv_id,
@@ -3768,7 +3776,16 @@ async fn handle_with_engine_inner(
             validated_tz.as_ref().map(|tz| tz.name()),
         )
         .await
-        .map_err(|e| engine_err("thread error", e))?;
+    {
+        Ok(tid) => tid,
+        Err(e) => {
+            state
+                .gate_controller
+                .clear_pre_execution_context(&message.user_id, conv_id)
+                .await;
+            return Err(engine_err("thread error", e));
+        }
+    };
 
     // Promote the pre-execution entry to (user, thread)-keyed. From
     // here on, gates from this thread land on the thread-keyed entry
@@ -3826,7 +3843,7 @@ async fn handle_with_engine_inner(
     // fired) carries everything the resolver needs from here on.
     state
         .gate_controller
-        .clear_execution_context(&message.user_id, thread_id)
+        .clear_execution_context(&message.user_id, thread_id, conv_id)
         .await;
     outcome
 }
@@ -3924,6 +3941,7 @@ async fn await_thread_outcome(
     // break out to avoid hanging the user session forever (e.g. after
     // a denied approval where the thread fails to resume).
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
+    let mut timed_out = false;
 
     loop {
         tokio::select! {
@@ -3971,10 +3989,23 @@ async fn await_thread_outcome(
                         thread_id = %thread_id,
                         "await_thread_outcome timed out after 5 minutes — breaking to avoid hang"
                     );
+                    timed_out = true;
                     break;
                 }
             }
         }
+    }
+
+    // If we hit the deadline and the thread is still running (typically
+    // because it's parked in `BridgeGateController::pause` waiting for
+    // an approval the user hasn't acted on), do NOT call `join_thread`
+    // — that would block the request handler for up to the gate's
+    // `expires_at` (30 min) on the same parked task. Surface as
+    // `Pending`: the live `PendingGate` row stays available, the user
+    // can still resolve it, and the resolver path will deliver the
+    // resolution into the parked oneshot.
+    if timed_out && state.thread_manager.is_running(thread_id).await {
+        return Ok(BridgeOutcome::Pending);
     }
 
     let outcome = state

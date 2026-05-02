@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use crate::gate::GateController;
 use crate::types::capability::{ActionDef, ActionInventory, CapabilityLease, CapabilitySummary};
+use crate::types::conversation::ConversationId;
 use crate::types::error::EngineError;
 use crate::types::project::ProjectId;
 use crate::types::step::{ActionResult, StepId};
@@ -63,6 +64,13 @@ pub struct ThreadExecutionContext {
     /// One-shot: scoped to a single retry call. Reset to `false` on
     /// any context not owned by an inline retry.
     pub call_approval_granted: bool,
+    /// The conversation that originated this thread, if any. Carried
+    /// into [`crate::gate::GatePauseRequest`] so the host can match a
+    /// gate to the originating UI surface even when the same user has
+    /// multiple concurrent conversations (e.g. two browser tabs).
+    /// `None` for background mission threads with no user-facing
+    /// conversation.
+    pub conversation_id: Option<ConversationId>,
 }
 
 // Manual Debug impl: `dyn GateController` is not Debug, but the rest of
@@ -90,6 +98,7 @@ impl std::fmt::Debug for ThreadExecutionContext {
             )
             .field("gate_controller", &"<dyn GateController>")
             .field("call_approval_granted", &self.call_approval_granted)
+            .field("conversation_id", &self.conversation_id)
             .finish()
     }
 }

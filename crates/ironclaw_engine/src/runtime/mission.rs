@@ -2615,6 +2615,7 @@ async fn dispatch_protected_write(
         // a typed denial rather than reproducing the legacy unwind bug.
         gate_controller: crate::gate::CancellingGateController::arc(),
         call_approval_granted: false,
+        conversation_id: None,
     };
 
     effects

@@ -922,6 +922,7 @@ pub async fn execute_code_with_skills(
                                 call_id: gate_call_id.clone(),
                                 parameters: gate_parameters.clone(),
                                 resume_kind: resume_kind.clone(),
+                                conversation_id: execution_context.conversation_id,
                             })
                             .await;
 
@@ -2009,6 +2010,7 @@ async fn drive_inline_gate(
                 call_id: gate.call_id.clone(),
                 parameters: gate.parameters.clone(),
                 resume_kind: gate.resume_kind.clone(),
+                conversation_id: context.conversation_id,
             })
             .await;
 
@@ -2603,6 +2605,7 @@ mod tests {
             available_action_inventory_snapshot: None,
             gate_controller: crate::gate::CancellingGateController::arc(),
             call_approval_granted: false,
+            conversation_id: None,
         }
     }
 
