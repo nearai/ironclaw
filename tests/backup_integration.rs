@@ -11,6 +11,13 @@
 //! exposed by `ironclaw::cli::backup`.
 
 #![cfg(feature = "libsql")]
+// We use a process-wide std::sync::Mutex to serialise env-var mutations
+// across these async integration tests. The lock IS held across `.await`
+// points (that's the whole point — env state must stay pinned for the
+// duration of the test), so silence clippy's reasonable-but-not-applicable
+// warning. The alternative (a tokio Mutex) wouldn't help because env
+// mutation isn't actually async; the contention is between threads.
+#![allow(clippy::await_holding_lock)]
 
 use std::fs;
 use std::io::Read;
@@ -221,7 +228,7 @@ async fn quick_backup_default_output_path_uses_iso8601() {
     let base = tmp.path().join("ironclaw_base");
     fs::create_dir_all(&base).unwrap();
     let db_path = base.join("ironclaw.db");
-    fs::write(&base.join("config.toml"), "").unwrap();
+    fs::write(base.join("config.toml"), "").unwrap();
     make_fake_db(&db_path).await;
 
     // Pin HOME so the default-path computation lands in our temp dir.
