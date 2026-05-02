@@ -15,11 +15,11 @@ use std::sync::Arc;
 use axum::{
     Json,
     body::Body,
-    extract::{Multipart, Path, State},
+    extract::{Multipart, Path, Query, State},
     http::{StatusCode, header},
     response::Response,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::platform::state::GatewayState;
@@ -245,23 +245,116 @@ pub async fn get_project_handler(
     Ok(Json(ProjectDetailResponse { project, documents }))
 }
 
-/// `DELETE /api/skills/legal/projects/:id` — soft delete.
+#[derive(Debug, Deserialize)]
+pub struct DeleteProjectQuery {
+    /// `?hard=true` switches the endpoint from soft-delete (set
+    /// `deleted_at`) to hard-delete (drop the row + its cascade + free
+    /// any orphaned blobs). The default is soft-delete to match the
+    /// pre-existing behaviour. Recognised values: `true`, `1`, `yes`
+    /// (case-insensitive). Anything else is treated as `false`.
+    #[serde(default)]
+    pub hard: Option<String>,
+}
+
+fn parse_hard_flag(raw: Option<&str>) -> bool {
+    matches!(
+        raw.map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        Some("true") | Some("1") | Some("yes") | Some("on")
+    )
+}
+
+/// `DELETE /api/skills/legal/projects/:id[?hard=true]` — soft delete by
+/// default; `?hard=true` drops the row, cascades to documents/chats/
+/// messages, and removes any blobs that are no longer referenced.
 pub async fn delete_project_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(_user): AuthenticatedUser,
+    Path(id): Path<String>,
+    Query(params): Query<DeleteProjectQuery>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
+    let db = require_db(&state)?;
+    let hard = parse_hard_flag(params.hard.as_deref());
+
+    if !hard {
+        let updated = store::soft_delete_project(db, &id, now_unix())
+            .await
+            .map_err(|e| db_err("soft_delete_project", e))?;
+        if !updated {
+            return Err(err(
+                StatusCode::NOT_FOUND,
+                format!("project {id} not found or already deleted"),
+            ));
+        }
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
+    // Hard delete: drop the row, cascade-delete documents/chats/messages
+    // via the FK, then walk the sha256s the project's documents owned
+    // and remove blobs that have no other referrers.
+    let shas = store::hard_delete_project(db, &id)
+        .await
+        .map_err(|e| db_err("hard_delete_project", e))?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, format!("project {id} not found")))?;
+
+    let data_dir = crate::bootstrap::ironclaw_base_dir();
+    free_unreferenced_blobs(db, &data_dir, &shas).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /api/skills/legal/documents/:id` — hard-delete a document.
+/// Frees the underlying blob if no other row references the same sha.
+pub async fn delete_document_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(_user): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
     let db = require_db(&state)?;
-    let updated = store::soft_delete_project(db, &id, now_unix())
+
+    let removed = store::delete_document(db, &id)
         .await
-        .map_err(|e| db_err("soft_delete_project", e))?;
-    if !updated {
-        return Err(err(
-            StatusCode::NOT_FOUND,
-            format!("project {id} not found or already deleted"),
-        ));
-    }
+        .map_err(|e| db_err("delete_document", e))?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, format!("document {id} not found")))?;
+    let (_storage_path, sha256) = removed;
+
+    let data_dir = crate::bootstrap::ironclaw_base_dir();
+    free_unreferenced_blobs(db, &data_dir, std::slice::from_ref(&sha256)).await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Walk the supplied list of `sha256` values and remove the blob for
+/// each one that has no remaining `legal_documents` referrer. Errors
+/// from either the count-query or the filesystem are logged but never
+/// surfaced to the caller — the row is already gone, so a stale blob is
+/// at worst orphaned space, not a correctness issue.
+async fn free_unreferenced_blobs(
+    db: &Arc<dyn crate::db::Database>,
+    data_dir: &std::path::Path,
+    shas: &[String],
+) {
+    use std::collections::HashSet;
+
+    let mut seen: HashSet<&str> = HashSet::new();
+    for sha in shas {
+        if !seen.insert(sha.as_str()) {
+            continue;
+        }
+        match store::count_documents_with_sha(db, sha).await {
+            Ok(0) => match blobs::delete_blob(data_dir, sha).await {
+                Ok(_) => {}
+                Err(e) => tracing::warn!(
+                    sha = %sha,
+                    error = %e,
+                    "legal: blob cleanup failed; row already deleted"
+                ),
+            },
+            Ok(_) => {}
+            Err(e) => tracing::warn!(
+                sha = %sha,
+                error = %e,
+                "legal: count_documents_with_sha failed; skipping blob cleanup"
+            ),
+        }
+    }
 }
 
 /// `POST /api/skills/legal/projects/:id/documents` — multipart upload,

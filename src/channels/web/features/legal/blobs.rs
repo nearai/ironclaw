@@ -153,6 +153,24 @@ pub async fn read_blob(data_dir: &Path, sha256: &str) -> Result<Vec<u8>, BlobErr
     Ok(buf)
 }
 
+/// Best-effort blob removal. Used by the deletion handlers after the
+/// final DB row referencing a sha is gone. Returns `Ok(false)` when the
+/// file was already missing — that's the expected steady state on a
+/// re-delete or after a manual cleanup.
+///
+/// Like the other blob helpers this validates `sha256` against the
+/// 64-lowercase-hex pattern before touching the filesystem so a crafted
+/// row containing a relative-traversal payload bounces with
+/// `BlobError::InvalidSha256` rather than reaching `tokio::fs::remove_file`.
+pub async fn delete_blob(data_dir: &Path, sha256: &str) -> Result<bool, BlobError> {
+    let abs = absolute_path(data_dir, sha256)?;
+    match tokio::fs::remove_file(&abs).await {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(BlobError::from(e)),
+    }
+}
+
 /// Lower-case hex encoding without pulling another dep just for this.
 fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";

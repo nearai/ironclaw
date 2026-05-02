@@ -617,7 +617,8 @@ fn legal_routes() -> LegalRouter {
         )
         .route(
             "/api/skills/legal/documents/{id}",
-            get(legal_handlers::get_document_handler),
+            get(legal_handlers::get_document_handler)
+                .delete(legal_handlers::delete_document_handler),
         )
         .route(
             "/api/skills/legal/documents/{id}/blob",

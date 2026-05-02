@@ -333,6 +333,131 @@ pub async fn list_documents_for_project(
     Ok(out)
 }
 
+/// Hard-delete a document row by id and return its `(storage_path, sha256)`
+/// so the handler can remove the blob from disk when no other row still
+/// references that sha. Returns `None` if no document with that id existed.
+///
+/// We surface the storage path in addition to the sha because callers
+/// already have logic that builds paths from sha; returning both lets us
+/// move the existing helper without a behaviour change later.
+pub async fn delete_document(
+    db: &Arc<dyn Database>,
+    id: &str,
+) -> Result<Option<(String, String)>, DatabaseError> {
+    let backend = libsql(db)?;
+    let conn = backend.connect().await?;
+
+    let mut rows = conn
+        .query(
+            "SELECT storage_path, sha256 FROM legal_documents WHERE id = ?1",
+            libsql::params![id],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(format!("delete_document fetch: {e}")))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|e| DatabaseError::Query(format!("delete_document fetch iter: {e}")))?
+    else {
+        return Ok(None);
+    };
+    let storage_path: String = row
+        .get(0)
+        .map_err(|e| DatabaseError::Query(format!("delete_document storage_path: {e}")))?;
+    let sha256: String = row
+        .get(1)
+        .map_err(|e| DatabaseError::Query(format!("delete_document sha256: {e}")))?;
+    drop(rows);
+
+    let affected = conn
+        .execute(
+            "DELETE FROM legal_documents WHERE id = ?1",
+            libsql::params![id],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(format!("delete_document delete: {e}")))?;
+    if affected == 0 {
+        // Race: row vanished between the SELECT and the DELETE. Treat as
+        // a successful no-op — the caller wanted it gone, it's gone.
+        return Ok(None);
+    }
+    Ok(Some((storage_path, sha256)))
+}
+
+/// Hard-delete a project (and, via `ON DELETE CASCADE`, every document,
+/// chat, and chat-message under it). Returns the list of `sha256`s the
+/// project's documents referenced before deletion so the handler can
+/// reference-count and clean up orphaned blobs.
+pub async fn hard_delete_project(
+    db: &Arc<dyn Database>,
+    id: &str,
+) -> Result<Option<Vec<String>>, DatabaseError> {
+    let backend = libsql(db)?;
+    let conn = backend.connect().await?;
+
+    let mut rows = conn
+        .query(
+            "SELECT sha256 FROM legal_documents WHERE project_id = ?1",
+            libsql::params![id],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(format!("hard_delete_project enum docs: {e}")))?;
+    let mut shas: Vec<String> = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|e| DatabaseError::Query(format!("hard_delete_project iter: {e}")))?
+    {
+        let sha: String = row
+            .get(0)
+            .map_err(|e| DatabaseError::Query(format!("hard_delete_project sha: {e}")))?;
+        shas.push(sha);
+    }
+    drop(rows);
+
+    let affected = conn
+        .execute(
+            "DELETE FROM legal_projects WHERE id = ?1",
+            libsql::params![id],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(format!("hard_delete_project delete: {e}")))?;
+    if affected == 0 {
+        return Ok(None);
+    }
+    Ok(Some(shas))
+}
+
+/// Count the legal_documents rows that still reference a given sha. Used
+/// after a delete to decide whether the underlying blob can be freed.
+/// Zero means the blob is now orphaned and the handler can remove it.
+pub async fn count_documents_with_sha(
+    db: &Arc<dyn Database>,
+    sha256: &str,
+) -> Result<i64, DatabaseError> {
+    let backend = libsql(db)?;
+    let conn = backend.connect().await?;
+
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM legal_documents WHERE sha256 = ?1",
+            libsql::params![sha256],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(format!("count_documents_with_sha: {e}")))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|e| DatabaseError::Query(format!("count_documents_with_sha iter: {e}")))?
+    else {
+        return Ok(0);
+    };
+    let n: i64 = row
+        .get(0)
+        .map_err(|e| DatabaseError::Query(format!("count_documents_with_sha decode: {e}")))?;
+    Ok(n)
+}
+
 // ---- Row decoders ------------------------------------------------------
 
 fn row_to_project(row: &libsql::Row) -> Result<LegalProject, DatabaseError> {
