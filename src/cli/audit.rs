@@ -538,34 +538,12 @@ fn audit_checks(target: &Path, findings: &mut Vec<AuditFinding>) -> ChecksAudit 
         });
     }
 
-    let checks = match run_process(
+    let checks_output = match run_process(
         target,
         "gh",
         &["pr", "checks", "--json", "name,state,bucket,link,workflow"],
     ) {
-        Ok(output) if matches!(output.code, Some(0) | Some(8)) => {
-            match serde_json::from_str::<Vec<GhCheck>>(&output.stdout) {
-                Ok(checks) => checks,
-                Err(error) => {
-                    audit.unavailable = true;
-                    findings.push(AuditFinding {
-                        level: FindingLevel::Warning,
-                        code: "checks_invalid",
-                        message: format!("could not parse gh pr checks output: {error}"),
-                    });
-                    return audit;
-                }
-            }
-        }
-        Ok(output) => {
-            audit.unavailable = true;
-            findings.push(AuditFinding {
-                level: FindingLevel::Warning,
-                code: "checks_unavailable",
-                message: command_failure_message("gh pr checks", &output),
-            });
-            return audit;
-        }
+        Ok(output) => output,
         Err(error) => {
             audit.unavailable = true;
             findings.push(AuditFinding {
@@ -577,6 +555,32 @@ fn audit_checks(target: &Path, findings: &mut Vec<AuditFinding>) -> ChecksAudit 
         }
     };
 
+    let checks = match serde_json::from_str::<Vec<GhCheck>>(&checks_output.stdout) {
+        Ok(checks) => checks,
+        Err(error) => {
+            audit.unavailable = true;
+            findings.push(AuditFinding {
+                level: FindingLevel::Warning,
+                code: "checks_invalid",
+                message: format!(
+                    "could not parse gh pr checks output: {error}; {}",
+                    command_failure_message("gh pr checks", &checks_output)
+                ),
+            });
+            return audit;
+        }
+    };
+
+    audit_check_buckets(&checks, &mut audit, findings);
+
+    audit
+}
+
+fn audit_check_buckets(
+    checks: &[GhCheck],
+    audit: &mut ChecksAudit,
+    findings: &mut Vec<AuditFinding>,
+) {
     audit.total = checks.len();
     let mut unknown = 0;
     for check in checks {
@@ -624,8 +628,6 @@ fn audit_checks(target: &Path, findings: &mut Vec<AuditFinding>) -> ChecksAudit 
             message: format!("{} PR check bucket(s) still pending", audit.pending),
         });
     }
-
-    audit
 }
 
 fn render_output(output: &AuditOutput, compact: bool) -> anyhow::Result<()> {
@@ -854,6 +856,51 @@ mod tests {
             findings
                 .iter()
                 .any(|finding| finding.code == "verify_not_pass")
+        );
+    }
+
+    #[test]
+    fn audit_check_buckets_blocks_failed_checks() {
+        let checks = vec![
+            GhCheck {
+                bucket: Some("pass".to_string()),
+            },
+            GhCheck {
+                bucket: Some("fail".to_string()),
+            },
+        ];
+        let mut audit = ChecksAudit::default();
+        let mut findings = Vec::new();
+
+        audit_check_buckets(&checks, &mut audit, &mut findings);
+
+        assert_eq!(audit.total, 2);
+        assert_eq!(audit.pass, 1);
+        assert_eq!(audit.fail, 1);
+        assert_eq!(decide_verdict(&findings), AuditVerdict::Blocked);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.code == "checks_failed")
+        );
+    }
+
+    #[test]
+    fn audit_check_buckets_warns_on_unknown_status() {
+        let checks = vec![GhCheck {
+            bucket: Some("mystery".to_string()),
+        }];
+        let mut audit = ChecksAudit::default();
+        let mut findings = Vec::new();
+
+        audit_check_buckets(&checks, &mut audit, &mut findings);
+
+        assert!(audit.unavailable);
+        assert_eq!(decide_verdict(&findings), AuditVerdict::NeedsReview);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.code == "checks_unknown")
         );
     }
 }
