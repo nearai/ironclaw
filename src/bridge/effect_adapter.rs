@@ -1989,10 +1989,10 @@ fn strict_u64(params: &serde_json::Value, key: &str) -> Result<Option<u64>, Stri
             // cleanly as a u64. Trim handles `" 120"` from sloppy
             // serialization. We reject `"-1"` (signed), `"12.5"`
             // (decimal), `"abc"`, and `""` because `u64::from_str` does.
-            if let Some(s) = v.as_str() {
-                if let Ok(n) = s.trim().parse::<u64>() {
-                    return Ok(Some(n));
-                }
+            if let Some(s) = v.as_str()
+                && let Ok(n) = s.trim().parse::<u64>()
+            {
+                return Ok(Some(n));
             }
             Err(format!("'{key}' must be an integer, got {v}"))
         }
