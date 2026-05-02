@@ -3,8 +3,11 @@
 //! Extracted from `tests/e2e_live_routine.rs` so additional scenarios
 //! (`tests/e2e_live_mission_gmail.rs`, etc.) can reuse the same approval
 //! responder and notification heuristics without copy-paste drift.
+//!
+//! The `feature = "libsql"` gate lives on the `mod live_mission_helpers;`
+//! line in `tests/support/mod.rs`; declaring it here too triggers
+//! `clippy::duplicated_attributes` under clippy 1.93+.
 
-#![cfg(feature = "libsql")]
 #![allow(dead_code)] // shared API; not every test uses every helper
 
 use std::collections::HashSet;
