@@ -1118,21 +1118,21 @@ BEGIN
         VALUES (new.rowid, new.project_id, new.id, new.filename, COALESCE(new.extracted_text, ''));
 END;
 
--- Delete: tombstone the old rowid via FTS5's delete-command syntax.
+-- Delete: this is a regular (non-contentless) FTS5 table, so we drop
+-- the row with plain DELETE rather than the external-content
+-- 'delete'-command form.
 CREATE TRIGGER IF NOT EXISTS legal_documents_fts_ad
     AFTER DELETE ON legal_documents
 BEGIN
-    INSERT INTO legal_documents_fts(legal_documents_fts, rowid, project_id, document_id, filename, extracted_text)
-        VALUES ('delete', old.rowid, old.project_id, old.id, old.filename, COALESCE(old.extracted_text, ''));
+    DELETE FROM legal_documents_fts WHERE rowid = old.rowid;
 END;
 
--- Update: tombstone old + insert new. Matches the SQLite FTS5 docs'
--- canonical "external content with synced triggers" pattern.
+-- Update: drop the old row + insert the new one. Mirrors the SQLite
+-- FTS5 docs' "synced regular FTS5 table" pattern.
 CREATE TRIGGER IF NOT EXISTS legal_documents_fts_au
     AFTER UPDATE ON legal_documents
 BEGIN
-    INSERT INTO legal_documents_fts(legal_documents_fts, rowid, project_id, document_id, filename, extracted_text)
-        VALUES ('delete', old.rowid, old.project_id, old.id, old.filename, COALESCE(old.extracted_text, ''));
+    DELETE FROM legal_documents_fts WHERE rowid = old.rowid;
     INSERT INTO legal_documents_fts(rowid, project_id, document_id, filename, extracted_text)
         VALUES (new.rowid, new.project_id, new.id, new.filename, COALESCE(new.extracted_text, ''));
 END;
