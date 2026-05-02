@@ -194,10 +194,29 @@ mod libsql_impl {
         move |e| DatabaseError::Query(format!("{context}: {e}"))
     }
 
+    /// Strictly-monotonic epoch helper for the legal store.
+    ///
+    /// We use millisecond resolution and a process-local atomic floor so that
+    /// two consecutive inserts (e.g. user message followed immediately by the
+    /// assistant reply) always get distinct, increasing `created_at` values
+    /// — UUIDv4 ids don't sort by insert time, so the ORDER BY in
+    /// `list_messages_for_chat` relies on this for stable ordering.
     fn now_epoch() -> i64 {
-        match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-            Ok(d) => d.as_secs() as i64,
+        use std::sync::atomic::{AtomicI64, Ordering};
+        static FLOOR: AtomicI64 = AtomicI64::new(0);
+        let raw = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            Ok(d) => d.as_millis() as i64,
             Err(_) => 0,
+        };
+        loop {
+            let prev = FLOOR.load(Ordering::Relaxed);
+            let next = raw.max(prev.saturating_add(1));
+            if FLOOR
+                .compare_exchange(prev, next, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return next;
+            }
         }
     }
 
