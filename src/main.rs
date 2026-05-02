@@ -220,7 +220,11 @@ async fn async_main() -> anyhow::Result<()> {
             init_cli_tracing();
             return completion.run();
         }
-        #[cfg(feature = "import")]
+        // The Import command is always wired now that the `Backup`
+        // variant (always-on, restores `ironclaw backup` archives)
+        // shares the parent subcommand with the feature-gated
+        // `Openclaw` migration. The dispatch into `run_import_command`
+        // ignores Config for the Backup arm.
         Some(Command::Import(import_cmd)) => {
             init_cli_tracing();
             let config = ironclaw::config::Config::from_env().await?;
