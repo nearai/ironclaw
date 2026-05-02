@@ -16,6 +16,7 @@ The `reborn-integration` branch currently exposes Reborn structure primarily thr
 | Architecture dependency guardrails | `crates/ironclaw_architecture/` |
 | Reborn dependency-boundary tests | `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs` |
 | Events substrate | `crates/ironclaw_events/` |
+| Event projection read models | `crates/ironclaw_event_projections/` |
 | Filesystem substrate | `crates/ironclaw_filesystem/` |
 | Network policy and HTTP transport substrate | `crates/ironclaw_network/` |
 | Secrets metadata and one-shot leases | `crates/ironclaw_secrets/` |
