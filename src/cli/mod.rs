@@ -14,9 +14,11 @@
 //! - Active health diagnostics (`doctor`)
 //! - Viewing gateway logs (`logs`)
 //! - Running project verification tiers (`verify`)
+//! - Auditing verification, git diff, and PR checks before shipping (`audit`)
 //! - Checking system health (`status`)
 
 pub mod acp;
+mod audit;
 mod channels;
 mod completion;
 mod config;
@@ -40,6 +42,7 @@ mod tool;
 mod verify;
 
 pub use acp::{AcpCommand, run_acp_command};
+pub use audit::{AuditCommand, run_audit_command};
 pub use channels::{ChannelsCommand, run_channels_command};
 pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
@@ -295,6 +298,17 @@ pub enum Command {
            ironclaw verify --target ../my-project --loop --interval 30 --max 20"
     )]
     Verify(VerifyCommand),
+
+    /// Audit verifier state, git diff, and PR checks before shipping
+    #[command(
+        about = "Audit ship readiness",
+        long_about = "Combines the latest `ironclaw verify` state, git status/diff, and optional GitHub PR checks into a deterministic ship/no-ship verdict.\n\n\
+         Examples:\n  \
+           ironclaw audit --compact\n  \
+           ironclaw audit --strict\n  \
+           ironclaw audit --no-checks --base origin/main"
+    )]
+    Audit(AuditCommand),
 
     /// Probe external dependencies and validate configuration
     #[command(

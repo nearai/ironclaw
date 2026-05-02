@@ -143,6 +143,7 @@ struct VerifyOutput {
     verdict: Verdict,
     target: String,
     config: String,
+    git_head: Option<String>,
     attempt: u32,
     max_attempts: u32,
     tiers_requested: Vec<String>,
@@ -402,6 +403,7 @@ async fn run_once(
         verdict,
         target: target.display().to_string(),
         config: config_path.display().to_string(),
+        git_head: current_git_head(target),
         attempt,
         max_attempts,
         tiers_requested: tiers.iter().map(|tier| tier.name.clone()).collect(),
@@ -410,6 +412,20 @@ async fn run_once(
         started_at: started_at.to_rfc3339(),
         finished_at: chrono::Utc::now().to_rfc3339(),
     }
+}
+
+fn current_git_head(target: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(target)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if head.is_empty() { None } else { Some(head) }
 }
 
 async fn run_command_with_retry(

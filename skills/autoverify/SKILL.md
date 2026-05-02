@@ -35,7 +35,7 @@ Use this skill when autonomous coding work needs evidence before it is called do
 ironclaw verify --target <repo> --tier smoke --compact
 ```
 
-IronClaw reads `.ironclaw-verify.json` first and falls back to Hermes-compatible `.autoverify.json`. The command runs named tiers in order, writes `.autoverify.state.json`, and emits a structured verdict with attempt metadata:
+IronClaw reads `.ironclaw-verify.json` first and falls back to Hermes-compatible `.autoverify.json`. The command runs named tiers in order, writes `.autoverify.state.json`, records the verified `git_head` when available, and emits a structured verdict with attempt metadata:
 
 - `pass`: the requested tiers passed
 - `flaky`: a retry passed after an initial failure; rerun or investigate before trusting it

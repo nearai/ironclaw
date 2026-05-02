@@ -37,6 +37,7 @@ Commands:
   hooks       Manage lifecycle hooks
   models      Manage LLM providers and models
   verify      Run layered project verification
+  audit       Audit ship readiness
   doctor      Run diagnostics (check if everything is configured correctly)
   logs        View and manage gateway logs
   status      Show system status

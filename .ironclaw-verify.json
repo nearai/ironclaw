@@ -12,6 +12,10 @@
         {
           "name": "verify-unit",
           "run": "cargo test -p ironclaw --lib cli::verify::tests"
+        },
+        {
+          "name": "audit-unit",
+          "run": "cargo test -p ironclaw --lib cli::audit::tests"
         }
       ]
     },
