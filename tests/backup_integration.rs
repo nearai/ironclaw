@@ -38,11 +38,15 @@ impl EnvGuard {
         // CLI uses a `LazyLock` so we still set this *before* the first
         // `ironclaw_base_dir()` call. Each test is its own integration
         // binary anyway.
-        unsafe { std::env::set_var(key, val); }
+        unsafe {
+            std::env::set_var(key, val);
+        }
         Self { keys: vec![key] }
     }
     fn add(mut self, key: &'static str, val: &std::path::Path) -> Self {
-        unsafe { std::env::set_var(key, val); }
+        unsafe {
+            std::env::set_var(key, val);
+        }
         self.keys.push(key);
         self
     }
@@ -51,7 +55,9 @@ impl EnvGuard {
 impl Drop for EnvGuard {
     fn drop(&mut self) {
         for k in &self.keys {
-            unsafe { std::env::remove_var(k); }
+            unsafe {
+                std::env::remove_var(k);
+            }
         }
     }
 }
@@ -138,7 +144,9 @@ async fn quick_backup_produces_zip_with_expected_entries_and_manifest() {
     // (c) manifest fields populated.
     let mut manifest_file = zip.by_name("manifest.json").expect("manifest.json");
     let mut buf = String::new();
-    manifest_file.read_to_string(&mut buf).expect("read manifest");
+    manifest_file
+        .read_to_string(&mut buf)
+        .expect("read manifest");
     drop(manifest_file);
     let v: serde_json::Value = serde_json::from_str(&buf).expect("manifest json");
     assert_eq!(v["mode"], "quick");
@@ -155,10 +163,7 @@ async fn quick_backup_produces_zip_with_expected_entries_and_manifest() {
     DateTime::parse_from_rfc3339(created_at)
         .unwrap_or_else(|e| panic!("created_at is not ISO8601: {created_at} ({e})"));
     assert_eq!(
-        v["components"]
-            .as_array()
-            .expect("components array")
-            .len(),
+        v["components"].as_array().expect("components array").len(),
         2
     );
 
@@ -196,7 +201,10 @@ async fn quick_backup_produces_zip_with_expected_entries_and_manifest() {
         .expect("at least one _migrations row in snapshot");
     let version: i64 = row.get(0).expect("version col");
     let name: String = row.get(1).expect("name col");
-    assert_eq!(version, 25_i64, "snapshot preserves seeded migration version");
+    assert_eq!(
+        version, 25_i64,
+        "snapshot preserves seeded migration version"
+    );
     assert_eq!(name, "test_v25", "snapshot preserves seeded migration name");
 
     // Config preserved verbatim.
@@ -257,8 +265,8 @@ async fn quick_backup_fails_when_db_missing() {
     fs::create_dir_all(&base).unwrap();
     // No db file written.
 
-    let _guard = EnvGuard::set("IRONCLAW_BASE_DIR", &base)
-        .add("LIBSQL_PATH", &base.join("ironclaw.db"));
+    let _guard =
+        EnvGuard::set("IRONCLAW_BASE_DIR", &base).add("LIBSQL_PATH", &base.join("ironclaw.db"));
 
     let args = BackupArgs {
         quick: true,

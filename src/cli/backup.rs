@@ -83,9 +83,9 @@ impl QuickSources {
         // Settings::default_toml_path() (LazyLock-cached) so a process-level
         // IRONCLAW_BASE_DIR override is honored at command time. Matches the
         // env-reading behavior of LIBSQL_PATH above for consistency.
-        let config_path = config_override.map(PathBuf::from).unwrap_or_else(|| {
-            crate::bootstrap::compute_ironclaw_base_dir().join("config.toml")
-        });
+        let config_path = config_override
+            .map(PathBuf::from)
+            .unwrap_or_else(|| crate::bootstrap::compute_ironclaw_base_dir().join("config.toml"));
 
         Self {
             db_path,
@@ -132,9 +132,9 @@ pub async fn run_backup_command(
     // tempfile, replacing the older "wal_checkpoint then file-copy"
     // pattern. The snapshot's TempDir auto-cleans on drop after the zip
     // is finalized.
-    let snapshot = snapshot_db(&sources.db_path).await.with_context(|| {
-        format!("VACUUM INTO snapshot of {}", sources.db_path.display())
-    })?;
+    let snapshot = snapshot_db(&sources.db_path)
+        .await
+        .with_context(|| format!("VACUUM INTO snapshot of {}", sources.db_path.display()))?;
 
     let schema_version = read_schema_version(&sources.db_path)
         .await
@@ -175,9 +175,7 @@ fn default_output_path() -> Result<PathBuf> {
     // ISO8601, but with `:` swapped to `-` to keep the filename portable on
     // case-insensitive filesystems (cosmetic; full ISO8601 timestamp is in
     // the manifest).
-    let stamp = Utc::now()
-        .format("%Y-%m-%dT%H-%M-%SZ")
-        .to_string();
+    let stamp = Utc::now().format("%Y-%m-%dT%H-%M-%SZ").to_string();
     Ok(home.join(format!("ironclaw-backup-{stamp}.zip")))
 }
 
@@ -207,8 +205,7 @@ impl DbSnapshot {
 /// temp directory; drop the snapshot to clean it up.
 #[cfg(feature = "libsql")]
 async fn snapshot_db(db_path: &Path) -> Result<DbSnapshot> {
-    let tempdir = tempfile::tempdir()
-        .context("creating tempdir for VACUUM INTO snapshot")?;
+    let tempdir = tempfile::tempdir().context("creating tempdir for VACUUM INTO snapshot")?;
     let snapshot_path = tempdir.path().join("ironclaw_snapshot.db");
 
     let db = libsql::Builder::new_local(db_path)
@@ -312,11 +309,11 @@ fn write_quick_archive(
     sources: &QuickSources,
     manifest: &Manifest,
 ) -> Result<()> {
-    if let Some(parent) = output.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("creating parent dir {}", parent.display()))?;
-        }
+    if let Some(parent) = output.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("creating parent dir {}", parent.display()))?;
     }
 
     // PID + 8 random alphanumerics keeps the staging filename unique per
@@ -334,18 +331,16 @@ fn write_quick_archive(
     let tmp_suffix = format!(".{}.{}.tmp", std::process::id(), rand_tag);
     let tmp = with_extension_suffix(output, &tmp_suffix);
     {
-        let file = File::create(&tmp)
-            .with_context(|| format!("creating {}", tmp.display()))?;
+        let file = File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
         let mut zip = zip::ZipWriter::new(file);
-        let opts = SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
+        let opts =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
         // 1. manifest.json — small, written first so consumers can validate
         //    before paying the deflate cost on the db.
         zip.start_file("manifest.json", opts)
             .context("zip: starting manifest.json")?;
-        let manifest_bytes =
-            serde_json::to_vec_pretty(manifest).context("serializing manifest")?;
+        let manifest_bytes = serde_json::to_vec_pretty(manifest).context("serializing manifest")?;
         zip.write_all(&manifest_bytes)
             .context("zip: writing manifest.json")?;
 
@@ -412,10 +407,9 @@ mod tests {
             mode: "quick".into(),
             components: vec!["db".into(), "config".into()],
         };
-        let v: serde_json::Value = serde_json::from_slice(
-            &serde_json::to_vec(&m).expect("serialize"),
-        )
-        .expect("parse roundtrip");
+        let v: serde_json::Value =
+            serde_json::from_slice(&serde_json::to_vec(&m).expect("serialize"))
+                .expect("parse roundtrip");
         assert_eq!(v["mode"], "quick");
         assert_eq!(v["schema_version"], 25);
         assert_eq!(v["ironclaw_version"], "0.1.2");
@@ -435,7 +429,11 @@ mod tests {
     #[test]
     fn default_output_path_uses_iso8601_stamp() {
         let p = default_output_path().expect("default path");
-        let name = p.file_name().expect("filename").to_string_lossy().into_owned();
+        let name = p
+            .file_name()
+            .expect("filename")
+            .to_string_lossy()
+            .into_owned();
         assert!(
             name.starts_with("ironclaw-backup-") && name.ends_with(".zip"),
             "unexpected default name: {name}"
