@@ -99,7 +99,8 @@ async fn build_archive(
         .compression_method(zip::CompressionMethod::Deflated);
 
     // 1. manifest.json — pinned at index 0 to match the backup writer.
-    zip.start_file("manifest.json", opts).expect("start manifest.json");
+    zip.start_file("manifest.json", opts)
+        .expect("start manifest.json");
     let manifest = serde_json::json!({
         "ironclaw_version": version,
         "schema_version": 25,
@@ -122,8 +123,10 @@ async fn build_archive(
     zip.write_all(&db_bytes).expect("write db bytes");
 
     // 3. config.toml
-    zip.start_file("config.toml", opts).expect("start config.toml");
-    zip.write_all(payload_config.as_bytes()).expect("write config");
+    zip.start_file("config.toml", opts)
+        .expect("start config.toml");
+    zip.write_all(payload_config.as_bytes())
+        .expect("write config");
 
     zip.finish().expect("finalize zip");
 }
@@ -154,10 +157,7 @@ async fn dry_run_validates_and_does_not_write() {
 
     // No write should land at the canonical paths under the base dir.
     assert!(!base.join("ironclaw.db").exists(), "dry run wrote db");
-    assert!(
-        !base.join("config.toml").exists(),
-        "dry run wrote config"
-    );
+    assert!(!base.join("config.toml").exists(), "dry run wrote config");
 }
 
 #[tokio::test]
@@ -187,7 +187,10 @@ async fn restore_lands_db_and_config_when_target_is_empty() {
 
     let restored_db = base.join("ironclaw.db");
     let restored_cfg = base.join("config.toml");
-    assert!(restored_db.exists(), "restored db is missing at expected path");
+    assert!(
+        restored_db.exists(),
+        "restored db is missing at expected path"
+    );
     assert!(
         restored_cfg.exists(),
         "restored config is missing at expected path"
@@ -290,10 +293,7 @@ async fn restore_renames_existing_files_aside() {
         .expect("config pre-import sidecar must exist");
 
     assert_eq!(fs::read(pre_db_sidecar).unwrap(), b"PRIOR DB CONTENT");
-    assert_eq!(
-        fs::read(pre_cfg_sidecar).unwrap(),
-        b"PRIOR CONFIG CONTENT"
-    );
+    assert_eq!(fs::read(pre_cfg_sidecar).unwrap(), b"PRIOR CONFIG CONTENT");
 }
 
 #[tokio::test]
@@ -356,7 +356,10 @@ async fn rejects_non_quick_mode_archive() {
         .await
         .expect_err("must refuse non-quick archive in this commit");
     let msg = format!("{err:#}");
-    assert!(msg.contains("'full'") || msg.contains("only 'quick'"), "{msg}");
+    assert!(
+        msg.contains("'full'") || msg.contains("only 'quick'"),
+        "{msg}"
+    );
 }
 
 #[tokio::test]

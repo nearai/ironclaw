@@ -162,12 +162,14 @@ pub async fn run_import_backup(archive: &Path, force: bool, dry_run: bool) -> Re
     // safe across binary updates: a backup taken on schema_version=25
     // restored onto a binary that expects 26 will catch up cleanly.
     #[cfg(feature = "libsql")]
-    apply_pending_migrations(&db_target).await.with_context(|| {
-        format!(
-            "running pending migrations on restored db {}",
-            db_target.display()
-        )
-    })?;
+    apply_pending_migrations(&db_target)
+        .await
+        .with_context(|| {
+            format!(
+                "running pending migrations on restored db {}",
+                db_target.display()
+            )
+        })?;
 
     println!();
     println!("Restore complete.");
@@ -229,7 +231,9 @@ fn read_manifest_from_zip(archive: &Path) -> Result<ImportManifest> {
         .by_name("manifest.json")
         .context("archive is missing manifest.json — not a recognized ironclaw backup")?;
     let mut buf = String::new();
-    entry.read_to_string(&mut buf).context("reading manifest.json bytes")?;
+    entry
+        .read_to_string(&mut buf)
+        .context("reading manifest.json bytes")?;
     let manifest: ImportManifest =
         serde_json::from_str(&buf).context("parsing manifest.json as JSON")?;
     Ok(manifest)
@@ -241,22 +245,18 @@ fn read_manifest_from_zip(archive: &Path) -> Result<ImportManifest> {
 /// 2. Move any pre-existing target out of the way (`<path>.pre-import-<ts>`).
 /// 3. Rename staging paths into place. If step 3 fails partway through,
 ///    restore the pre-existing files.
-fn extract_with_rollback(
-    archive: &Path,
-    db_target: &Path,
-    config_target: &Path,
-) -> Result<()> {
-    if let Some(parent) = db_target.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating parent dir {}", parent.display()))?;
-        }
+fn extract_with_rollback(archive: &Path, db_target: &Path, config_target: &Path) -> Result<()> {
+    if let Some(parent) = db_target.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating parent dir {}", parent.display()))?;
     }
-    if let Some(parent) = config_target.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating parent dir {}", parent.display()))?;
-        }
+    if let Some(parent) = config_target.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating parent dir {}", parent.display()))?;
     }
 
     let f = std::fs::File::open(archive)
@@ -272,8 +272,7 @@ fn extract_with_rollback(
 
     extract_entry(&mut zip, "data/ironclaw.db", &db_staged)
         .context("extracting data/ironclaw.db")?;
-    extract_entry(&mut zip, "config.toml", &config_staged)
-        .context("extracting config.toml")?;
+    extract_entry(&mut zip, "config.toml", &config_staged).context("extracting config.toml")?;
 
     let db_existed = db_target.exists();
     let config_existed = config_target.exists();
@@ -286,18 +285,16 @@ fn extract_with_rollback(
             )
         })?;
     }
-    if config_existed {
-        if let Err(e) = std::fs::rename(config_target, &config_backup) {
-            // Roll back the db rename to keep the on-disk state coherent.
-            if db_existed {
-                let _ = std::fs::rename(&db_backup, db_target);
-            }
-            return Err(anyhow::Error::from(e).context(format!(
-                "moving existing config aside: {} -> {}",
-                config_target.display(),
-                config_backup.display()
-            )));
+    if config_existed && let Err(e) = std::fs::rename(config_target, &config_backup) {
+        // Roll back the db rename to keep the on-disk state coherent.
+        if db_existed {
+            let _ = std::fs::rename(&db_backup, db_target);
         }
+        return Err(anyhow::Error::from(e).context(format!(
+            "moving existing config aside: {} -> {}",
+            config_target.display(),
+            config_backup.display()
+        )));
     }
 
     let promote = (|| -> std::io::Result<()> {
@@ -342,8 +339,7 @@ fn extract_entry(
     let mut entry = zip
         .by_name(name)
         .with_context(|| format!("archive is missing entry '{name}'"))?;
-    let f = std::fs::File::create(out)
-        .with_context(|| format!("creating {}", out.display()))?;
+    let f = std::fs::File::create(out).with_context(|| format!("creating {}", out.display()))?;
     let mut writer = io::BufWriter::with_capacity(64 * 1024, f);
     let mut buf = [0u8; 64 * 1024];
     loop {
