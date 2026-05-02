@@ -46,7 +46,7 @@ pub const SLACK_API_BASE: &str = "https://slack.com";
 pub fn authorize_url(client_id: &str, redirect_uri: &str, state: &str) -> String {
     let scope = MINIMAL_BOT_SCOPES.join(",");
     let mut url = url::Url::parse(&format!("{SLACK_API_BASE}/oauth/v2/authorize"))
-        .expect("hard-coded URL is well-formed");
+        .expect("hard-coded URL is well-formed"); // safety: SLACK_API_BASE is a hard-coded HTTPS literal — Url::parse cannot fail on this input.
     url.query_pairs_mut()
         .append_pair("client_id", client_id)
         .append_pair("scope", &scope)
@@ -147,8 +147,7 @@ mod tests {
 
     #[test]
     fn oauth_v2_access_form_body_encodes_code_and_redirect() {
-        let body =
-            oauth_v2_access_form_body("0wbg9.abc/cd", "https://ironclaw.example.com/cb?x=y");
+        let body = oauth_v2_access_form_body("0wbg9.abc/cd", "https://ironclaw.example.com/cb?x=y");
         // form-urlencoded encodes `/`, `:`, `?`, `=` etc.
         assert!(body.contains("code=0wbg9.abc%2Fcd"), "got {body}");
         assert!(
