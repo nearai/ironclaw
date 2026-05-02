@@ -685,7 +685,7 @@ impl PromptWriteSafetyPolicy for DefaultPromptWriteSafetyPolicy {
             return Ok(PromptWriteSafetyDecision::Allow);
         };
 
-        if request.content.is_empty() {
+        if request.content.trim().is_empty() {
             if let Some(allowance) = request.allowance
                 && *allowance == PromptSafetyAllowanceId::empty_prompt_file_clear()
             {
@@ -1811,10 +1811,10 @@ impl RootFilesystem for MemoryBackendFilesystemAdapter {
             &document_path,
         )
         .is_some();
+        let backend_capabilities = self.backend.capabilities();
         let adapter_should_enforce_prompt_safety = is_protected
-            && (!self.backend.capabilities().prompt_write_safety
-                || self.prompt_safety_config_overridden);
-        let prompt_safety_allowance = if is_protected {
+            && (!backend_capabilities.prompt_write_safety || self.prompt_safety_config_overridden);
+        let prompt_safety_allowance = if is_protected || backend_capabilities.prompt_write_safety {
             take_prompt_safety_allowance(
                 &self.one_shot_prompt_safety_allowance,
                 path,
@@ -1878,10 +1878,10 @@ impl RootFilesystem for MemoryBackendFilesystemAdapter {
             &document_path,
         )
         .is_some();
+        let backend_capabilities = self.backend.capabilities();
         let adapter_should_enforce_prompt_safety = is_protected
-            && (!self.backend.capabilities().prompt_write_safety
-                || self.prompt_safety_config_overridden);
-        let prompt_safety_allowance = if is_protected {
+            && (!backend_capabilities.prompt_write_safety || self.prompt_safety_config_overridden);
+        let prompt_safety_allowance = if is_protected || backend_capabilities.prompt_write_safety {
             take_prompt_safety_allowance(
                 &self.one_shot_prompt_safety_allowance,
                 path,

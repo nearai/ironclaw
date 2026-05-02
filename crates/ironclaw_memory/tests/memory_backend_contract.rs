@@ -361,6 +361,36 @@ async fn memory_backend_filesystem_one_shot_allowance_reaches_wrapped_repository
 }
 
 #[tokio::test]
+async fn memory_backend_filesystem_one_shot_allowance_reaches_backend_custom_policy_path() {
+    let repository = Arc::new(InMemoryMemoryDocumentRepository::new());
+    let events = Arc::new(RecordingPromptSafetyEventSink::default());
+    let backend = Arc::new(
+        RepositoryMemoryBackend::new(repository.clone())
+            .with_prompt_write_safety_policy(Arc::new(CustomPathEmptyClearPolicy::new(
+                "custom/prompt.md",
+            )))
+            .with_prompt_write_safety_event_sink(events.clone()),
+    );
+    let filesystem = MemoryBackendFilesystemAdapter::new(backend)
+        .with_one_shot_prompt_write_safety_allowance(
+            PromptSafetyAllowanceId::empty_prompt_file_clear(),
+        );
+    let path = VirtualPath::new(
+        "/memory/tenants/tenant-a/users/alice/agents/_none/projects/_none/custom/prompt.md",
+    )
+    .unwrap();
+    let document_path =
+        MemoryDocumentPath::new("tenant-a", "alice", None, "custom/prompt.md").unwrap();
+
+    filesystem.write_file(&path, b"").await.unwrap();
+
+    assert_eq!(
+        repository.read_document(&document_path).await.unwrap(),
+        Some(Vec::new())
+    );
+}
+
+#[tokio::test]
 async fn memory_backend_filesystem_prompt_bypass_reaches_wrapped_repository_backend() {
     let repository = Arc::new(InMemoryMemoryDocumentRepository::new());
     let events = Arc::new(RecordingPromptSafetyEventSink::default());
@@ -577,6 +607,34 @@ async fn protected_prompt_write_without_policy_fails_closed_before_persistence()
 
     assert!(err.to_string().contains("prompt_write_policy_unavailable"));
     assert!(repository.read_document(&path).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn protected_whitespace_only_clear_requires_named_policy_allowance() {
+    let repository = Arc::new(InMemoryMemoryDocumentRepository::new());
+    let backend = RepositoryMemoryBackend::new(repository.clone())
+        .with_prompt_write_safety_event_sink(Arc::new(RecordingPromptSafetyEventSink::default()));
+    let context = MemoryContext::new(MemoryDocumentScope::new("tenant-a", "alice", None).unwrap());
+    let allowed_context = context
+        .clone()
+        .with_prompt_write_safety_allowance(PromptSafetyAllowanceId::empty_prompt_file_clear());
+    let path = MemoryDocumentPath::new("tenant-a", "alice", None, "BOOTSTRAP.md").unwrap();
+
+    let err = backend
+        .write_document(&context, &path, b"\n  \t")
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("prompt_write_bypass_not_allowed"));
+    assert!(repository.read_document(&path).await.unwrap().is_none());
+
+    backend
+        .write_document(&allowed_context, &path, b"\n  \t")
+        .await
+        .unwrap();
+    assert_eq!(
+        repository.read_document(&path).await.unwrap().unwrap(),
+        b"\n  \t"
+    );
 }
 
 #[tokio::test]
@@ -887,6 +945,49 @@ impl PromptWriteSafetyEventSink for FailingPromptSafetyEventSink {
             operation: FilesystemOperation::WriteFile,
             reason: "event sink unavailable".to_string(),
         })
+    }
+}
+
+struct CustomPathEmptyClearPolicy {
+    registry: PromptProtectedPathRegistry,
+}
+
+impl CustomPathEmptyClearPolicy {
+    fn new(path: &str) -> Self {
+        Self {
+            registry: PromptProtectedPathRegistry::default()
+                .with_additional_path(path)
+                .unwrap(),
+        }
+    }
+}
+
+#[async_trait]
+impl PromptWriteSafetyPolicy for CustomPathEmptyClearPolicy {
+    fn protected_path_registry(&self) -> Option<&PromptProtectedPathRegistry> {
+        Some(&self.registry)
+    }
+
+    async fn check_write(
+        &self,
+        request: PromptWriteSafetyRequest<'_>,
+    ) -> Result<PromptWriteSafetyDecision, PromptWriteSafetyError> {
+        if request.content.is_empty()
+            && request.allowance == Some(&PromptSafetyAllowanceId::empty_prompt_file_clear())
+        {
+            return Ok(PromptWriteSafetyDecision::BypassAllowed {
+                allowance: PromptSafetyAllowanceId::empty_prompt_file_clear(),
+            });
+        }
+        if request.content.is_empty() {
+            return Ok(PromptWriteSafetyDecision::Reject {
+                reason: PromptWriteSafetyError::new(
+                    PromptSafetyReasonCode::PromptWriteBypassNotAllowed,
+                )
+                .reason,
+            });
+        }
+        Ok(PromptWriteSafetyDecision::Allow)
     }
 }
 
