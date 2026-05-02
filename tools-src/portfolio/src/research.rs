@@ -1010,9 +1010,9 @@ fn policy_gates(
     if let Some(policy) = wallet_policy {
         gates.push(PaidResearchPolicyGate {
             name: "agent-wallet-funded".to_string(),
-            status: if policy.balance_usd <= 0.0 {
-                "warn"
-            } else if policy.balance_usd > policy.max_wallet_balance_usd {
+            status: if policy.balance_usd <= 0.0
+                || policy.balance_usd > policy.max_wallet_balance_usd
+            {
                 "warn"
             } else {
                 "pass"
