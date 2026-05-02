@@ -158,6 +158,28 @@ async fn repository_memory_backend_records_rejected_prompt_safety_event() {
 }
 
 #[tokio::test]
+async fn configured_prompt_safety_event_sink_failure_blocks_bypass_persistence() {
+    let repository = Arc::new(InMemoryMemoryDocumentRepository::new());
+    let events = Arc::new(FailingPromptSafetyEventSink);
+    let backend = RepositoryMemoryBackend::new(repository.clone())
+        .with_prompt_write_safety_event_sink(events);
+    let context = MemoryContext::new(MemoryDocumentScope::new("tenant-a", "alice", None).unwrap())
+        .with_prompt_write_safety_allowance(PromptSafetyAllowanceId::empty_prompt_file_clear());
+    let path = MemoryDocumentPath::new("tenant-a", "alice", None, "BOOTSTRAP.md").unwrap();
+
+    let err = backend
+        .write_document(&context, &path, b"")
+        .await
+        .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("prompt_write_safety_event_unavailable")
+    );
+    assert!(repository.read_document(&path).await.unwrap().is_none());
+}
+
+#[tokio::test]
 async fn protected_medium_risk_write_warns_allows_and_records_redacted_event() {
     let repository = Arc::new(InMemoryMemoryDocumentRepository::new());
     let events = Arc::new(RecordingPromptSafetyEventSink::default());
@@ -268,11 +290,13 @@ async fn memory_backend_filesystem_write_passes_previous_hash_for_protected_over
 }
 
 #[tokio::test]
-async fn memory_backend_filesystem_configured_allowance_reaches_wrapped_repository_backend() {
+async fn memory_backend_filesystem_one_shot_allowance_reaches_wrapped_repository_backend() {
     let repository = Arc::new(InMemoryMemoryDocumentRepository::new());
     let backend = Arc::new(RepositoryMemoryBackend::new(repository.clone()));
     let filesystem = MemoryBackendFilesystemAdapter::new(backend)
-        .with_prompt_write_safety_allowance(PromptSafetyAllowanceId::empty_prompt_file_clear());
+        .with_one_shot_prompt_write_safety_allowance(
+            PromptSafetyAllowanceId::empty_prompt_file_clear(),
+        );
     let path = VirtualPath::new(
         "/memory/tenants/tenant-a/users/alice/agents/_none/projects/_none/BOOTSTRAP.md",
     )
@@ -285,6 +309,9 @@ async fn memory_backend_filesystem_configured_allowance_reaches_wrapped_reposito
         repository.read_document(&document_path).await.unwrap(),
         Some(Vec::new())
     );
+
+    let err = filesystem.write_file(&path, b"").await.unwrap_err();
+    assert!(err.to_string().contains("prompt_write_bypass_not_allowed"));
 }
 
 #[tokio::test]
@@ -308,10 +335,12 @@ async fn memory_backend_filesystem_prompt_bypass_reaches_wrapped_repository_back
 }
 
 #[tokio::test]
-async fn memory_document_filesystem_empty_clear_uses_configured_allowance() {
+async fn memory_document_filesystem_empty_clear_uses_one_shot_allowance() {
     let repository = Arc::new(InMemoryMemoryDocumentRepository::new());
     let filesystem = MemoryDocumentFilesystem::new(repository.clone())
-        .with_prompt_write_safety_allowance(PromptSafetyAllowanceId::empty_prompt_file_clear());
+        .with_one_shot_prompt_write_safety_allowance(
+            PromptSafetyAllowanceId::empty_prompt_file_clear(),
+        );
     let path = VirtualPath::new(
         "/memory/tenants/tenant-a/users/alice/agents/_none/projects/_none/BOOTSTRAP.md",
     )
@@ -324,6 +353,9 @@ async fn memory_document_filesystem_empty_clear_uses_configured_allowance() {
         repository.read_document(&document_path).await.unwrap(),
         Some(Vec::new())
     );
+
+    let err = filesystem.write_file(&path, b"").await.unwrap_err();
+    assert!(err.to_string().contains("prompt_write_bypass_not_allowed"));
 }
 
 #[tokio::test]
@@ -652,6 +684,22 @@ impl PromptWriteSafetyEventSink for RecordingPromptSafetyEventSink {
     ) -> Result<(), FilesystemError> {
         self.events.lock().unwrap().push(event);
         Ok(())
+    }
+}
+
+struct FailingPromptSafetyEventSink;
+
+#[async_trait]
+impl PromptWriteSafetyEventSink for FailingPromptSafetyEventSink {
+    async fn record_prompt_write_safety_event(
+        &self,
+        _event: PromptWriteSafetyEvent,
+    ) -> Result<(), FilesystemError> {
+        Err(FilesystemError::Backend {
+            path: VirtualPath::new("/memory").unwrap(),
+            operation: FilesystemOperation::WriteFile,
+            reason: "event sink unavailable".to_string(),
+        })
     }
 }
 

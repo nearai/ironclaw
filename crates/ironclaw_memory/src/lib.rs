@@ -360,6 +360,11 @@ fn normalize_prompt_protected_path(path: &str) -> Result<String, HostApiError> {
 }
 
 /// Operation type passed to prompt-write safety policy hooks.
+///
+/// This crate directly wires the hook through memory repository and filesystem write/append
+/// paths. Other host services that implement patch, import, seed, profile, or admin prompt
+/// mutations must pass their final resolved content through the same policy boundary before
+/// persistence; the variants are shared vocabulary for those callers, not self-wiring magic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptWriteOperation {
     Write,
@@ -492,6 +497,7 @@ pub enum PromptSafetyReasonCode {
     PromptWritePolicyMisconfigured,
     ProtectedPathRegistryUnavailable,
     PromptWriteBypassNotAllowed,
+    PromptWriteSafetyEventUnavailable,
 }
 
 impl PromptSafetyReasonCode {
@@ -503,6 +509,7 @@ impl PromptSafetyReasonCode {
             Self::PromptWritePolicyMisconfigured => "prompt_write_policy_misconfigured",
             Self::ProtectedPathRegistryUnavailable => "protected_path_registry_unavailable",
             Self::PromptWriteBypassNotAllowed => "prompt_write_bypass_not_allowed",
+            Self::PromptWriteSafetyEventUnavailable => "prompt_write_safety_event_unavailable",
         }
     }
 }
@@ -1116,7 +1123,7 @@ async fn enforce_prompt_write_safety(
                 allowance: None,
             },
         )
-        .await;
+        .await?;
         return Err(prompt_write_safety_error(
             virtual_path,
             check.filesystem_operation,
@@ -1151,7 +1158,7 @@ async fn enforce_prompt_write_safety(
                     allowance: None,
                 },
             )
-            .await;
+            .await?;
             Ok(PromptWriteSafetyEnforcement::default())
         }
         Ok(PromptWriteSafetyDecision::BypassAllowed { allowance }) => {
@@ -1167,7 +1174,7 @@ async fn enforce_prompt_write_safety(
                     allowance: Some(&allowance),
                 },
             )
-            .await;
+            .await?;
             tracing::debug!(
                 target: "ironclaw::memory::prompt_write_safety",
                 operation = %check.operation,
@@ -1194,7 +1201,7 @@ async fn enforce_prompt_write_safety(
                     allowance: None,
                 },
             )
-            .await;
+            .await?;
             tracing::debug!(
                 target: "ironclaw::memory::prompt_write_safety",
                 operation = %check.operation,
@@ -1220,7 +1227,7 @@ async fn enforce_prompt_write_safety(
                     allowance: None,
                 },
             )
-            .await;
+            .await?;
             Err(prompt_write_safety_error(
                 virtual_path,
                 check.filesystem_operation,
@@ -1241,7 +1248,7 @@ async fn enforce_prompt_write_safety(
                     allowance: None,
                 },
             )
-            .await;
+            .await?;
             Err(prompt_write_safety_error(
                 virtual_path,
                 check.filesystem_operation,
@@ -1264,9 +1271,9 @@ async fn emit_prompt_write_safety_event(
     event_sink: Option<&Arc<dyn PromptWriteSafetyEventSink>>,
     check: &PromptWriteSafetyCheck<'_>,
     parts: PromptWriteSafetyEventParts<'_>,
-) {
+) -> Result<(), FilesystemError> {
     let Some(event_sink) = event_sink else {
-        return;
+        return Ok(());
     };
     let event = PromptWriteSafetyEvent {
         kind: parts.kind,
@@ -1295,7 +1302,16 @@ async fn emit_prompt_write_safety_event(
             source = %check.source,
             "failed to record prompt write safety event"
         );
+        return Err(prompt_write_safety_error(
+            check
+                .path
+                .virtual_path()
+                .unwrap_or_else(|_| valid_memory_path()),
+            check.filesystem_operation,
+            PromptSafetyReason::new(PromptSafetyReasonCode::PromptWriteSafetyEventUnavailable),
+        ));
     }
+    Ok(())
 }
 
 fn prompt_write_safety_error(
@@ -1626,7 +1642,7 @@ pub struct MemoryBackendFilesystemAdapter {
     prompt_safety_policy: Option<Arc<dyn PromptWriteSafetyPolicy>>,
     prompt_safety_event_sink: Option<Arc<dyn PromptWriteSafetyEventSink>>,
     prompt_protected_path_registry: PromptProtectedPathRegistry,
-    prompt_safety_allowance: Option<PromptSafetyAllowanceId>,
+    one_shot_prompt_safety_allowance: Mutex<Option<PromptSafetyAllowanceId>>,
 }
 
 impl MemoryBackendFilesystemAdapter {
@@ -1647,7 +1663,7 @@ impl MemoryBackendFilesystemAdapter {
             ))),
             prompt_safety_event_sink: None,
             prompt_protected_path_registry: registry,
-            prompt_safety_allowance: None,
+            one_shot_prompt_safety_allowance: Mutex::new(None),
         }
     }
 
@@ -1674,11 +1690,17 @@ impl MemoryBackendFilesystemAdapter {
         self
     }
 
-    pub fn with_prompt_write_safety_allowance(
-        mut self,
+    /// Installs an explicit prompt-write safety allowance for the next protected write only.
+    ///
+    /// The allowance is consumed before policy evaluation so shared filesystem adapters cannot
+    /// accidentally retain a bypass for later unrelated callers.
+    pub fn with_one_shot_prompt_write_safety_allowance(
+        self,
         allowance: PromptSafetyAllowanceId,
     ) -> Self {
-        self.prompt_safety_allowance = Some(allowance);
+        if let Ok(mut slot) = self.one_shot_prompt_safety_allowance.lock() {
+            *slot = Some(allowance);
+        }
         self
     }
 
@@ -1742,15 +1764,24 @@ impl RootFilesystem for MemoryBackendFilesystemAdapter {
         self.ensure_file_documents(path, FilesystemOperation::WriteFile)?;
         let document_path = self.parse_file_path(path, FilesystemOperation::WriteFile)?;
         let mut context = MemoryContext::new(document_path.scope().clone());
-        if let Some(allowance) = &self.prompt_safety_allowance {
-            context = context.with_prompt_write_safety_allowance(allowance.clone());
-        }
         let is_protected = prompt_write_protected_classification(
             self.prompt_safety_policy.as_ref(),
             &self.prompt_protected_path_registry,
             &document_path,
         )
         .is_some();
+        let prompt_safety_allowance = if is_protected {
+            take_prompt_safety_allowance(
+                &self.one_shot_prompt_safety_allowance,
+                path,
+                FilesystemOperation::WriteFile,
+            )?
+        } else {
+            None
+        };
+        if let Some(allowance) = &prompt_safety_allowance {
+            context = context.with_prompt_write_safety_allowance(allowance.clone());
+        }
         let mut backend_context = context.clone();
         if is_protected {
             let content = std::str::from_utf8(bytes).map_err(|_| {
@@ -1792,15 +1823,24 @@ impl RootFilesystem for MemoryBackendFilesystemAdapter {
         self.ensure_file_documents(path, FilesystemOperation::AppendFile)?;
         let document_path = self.parse_file_path(path, FilesystemOperation::AppendFile)?;
         let mut context = MemoryContext::new(document_path.scope().clone());
-        if let Some(allowance) = &self.prompt_safety_allowance {
-            context = context.with_prompt_write_safety_allowance(allowance.clone());
-        }
         let is_protected = prompt_write_protected_classification(
             self.prompt_safety_policy.as_ref(),
             &self.prompt_protected_path_registry,
             &document_path,
         )
         .is_some();
+        let prompt_safety_allowance = if is_protected {
+            take_prompt_safety_allowance(
+                &self.one_shot_prompt_safety_allowance,
+                path,
+                FilesystemOperation::AppendFile,
+            )?
+        } else {
+            None
+        };
+        if let Some(allowance) = &prompt_safety_allowance {
+            context = context.with_prompt_write_safety_allowance(allowance.clone());
+        }
 
         for _ in 0..MAX_MEMORY_APPEND_RETRIES {
             let previous = self.backend.read_document(&context, &document_path).await?;
@@ -2383,6 +2423,21 @@ fn memory_context_with_prompt_safety_enforcement(
     context
 }
 
+fn take_prompt_safety_allowance(
+    allowance: &Mutex<Option<PromptSafetyAllowanceId>>,
+    path: &VirtualPath,
+    operation: FilesystemOperation,
+) -> Result<Option<PromptSafetyAllowanceId>, FilesystemError> {
+    let mut allowance = allowance.lock().map_err(|_| {
+        memory_error(
+            path.clone(),
+            operation,
+            "prompt write safety allowance lock poisoned",
+        )
+    })?;
+    Ok(allowance.take())
+}
+
 const MAX_MEMORY_APPEND_RETRIES: usize = 8;
 
 fn memory_append_conflict_error(path: VirtualPath) -> FilesystemError {
@@ -2831,7 +2886,7 @@ pub struct MemoryDocumentFilesystem {
     prompt_safety_policy: Option<Arc<dyn PromptWriteSafetyPolicy>>,
     prompt_safety_event_sink: Option<Arc<dyn PromptWriteSafetyEventSink>>,
     prompt_protected_path_registry: PromptProtectedPathRegistry,
-    prompt_safety_allowance: Option<PromptSafetyAllowanceId>,
+    one_shot_prompt_safety_allowance: Mutex<Option<PromptSafetyAllowanceId>>,
 }
 
 impl MemoryDocumentFilesystem {
@@ -2853,7 +2908,7 @@ impl MemoryDocumentFilesystem {
             ))),
             prompt_safety_event_sink: None,
             prompt_protected_path_registry: registry,
-            prompt_safety_allowance: None,
+            one_shot_prompt_safety_allowance: Mutex::new(None),
         }
     }
 
@@ -2888,11 +2943,17 @@ impl MemoryDocumentFilesystem {
         self
     }
 
-    pub fn with_prompt_write_safety_allowance(
-        mut self,
+    /// Installs an explicit prompt-write safety allowance for the next protected write only.
+    ///
+    /// The allowance is consumed before policy evaluation so shared filesystem adapters cannot
+    /// accidentally retain a bypass for later unrelated callers.
+    pub fn with_one_shot_prompt_write_safety_allowance(
+        self,
         allowance: PromptSafetyAllowanceId,
     ) -> Self {
-        self.prompt_safety_allowance = Some(allowance);
+        if let Ok(mut slot) = self.one_shot_prompt_safety_allowance.lock() {
+            *slot = Some(allowance);
+        }
         self
     }
 
@@ -2949,6 +3010,15 @@ impl RootFilesystem for MemoryDocumentFilesystem {
             &document_path,
         )
         .is_some();
+        let prompt_safety_allowance = if is_protected {
+            take_prompt_safety_allowance(
+                &self.one_shot_prompt_safety_allowance,
+                path,
+                FilesystemOperation::WriteFile,
+            )?
+        } else {
+            None
+        };
         if is_protected {
             let content = std::str::from_utf8(bytes).map_err(|_| {
                 memory_error(
@@ -2973,7 +3043,7 @@ impl RootFilesystem for MemoryDocumentFilesystem {
                     source: PromptWriteSource::MemoryDocumentFilesystem,
                     content,
                     previous_content_hash: previous_hash.as_deref(),
-                    allowance: self.prompt_safety_allowance.as_ref(),
+                    allowance: prompt_safety_allowance.as_ref(),
                     filesystem_operation: FilesystemOperation::WriteFile,
                 },
             )
@@ -2996,6 +3066,15 @@ impl RootFilesystem for MemoryDocumentFilesystem {
             &document_path,
         )
         .is_some();
+        let prompt_safety_allowance = if is_protected {
+            take_prompt_safety_allowance(
+                &self.one_shot_prompt_safety_allowance,
+                path,
+                FilesystemOperation::AppendFile,
+            )?
+        } else {
+            None
+        };
         for _ in 0..MAX_MEMORY_APPEND_RETRIES {
             let previous = self.repository.read_document(&document_path).await?;
             let expected_previous_hash = previous.as_deref().map(content_bytes_sha256);
@@ -3028,7 +3107,7 @@ impl RootFilesystem for MemoryDocumentFilesystem {
                         source: PromptWriteSource::MemoryDocumentFilesystem,
                         content,
                         previous_content_hash: previous_prompt_hash.as_deref(),
-                        allowance: self.prompt_safety_allowance.as_ref(),
+                        allowance: prompt_safety_allowance.as_ref(),
                         filesystem_operation: FilesystemOperation::AppendFile,
                     },
                 )
