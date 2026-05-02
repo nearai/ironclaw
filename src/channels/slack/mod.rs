@@ -29,3 +29,13 @@ pub use sig::{MAX_TIMESTAMP_SKEW_SECS, SignatureError, VerifyInputs, verify};
 pub use slash::{
     SlashCommandRequest, SlashParseError, ack_payload, effective_workspace_id, parse_slash_command,
 };
+
+/// Canonical secret name for the bot User OAuth token (xoxb-…). Mirrors
+/// `channels-src/slack/slack.capabilities.json` so the WASM channel and
+/// the install callback read/write the same row. Single-workspace today;
+/// per-workspace keying lands when the WASM channel's lookup is updated.
+pub const SLACK_BOT_TOKEN_SECRET: &str = "slack_bot_token";
+
+/// Canonical secret name for the app-level signing secret. Same source
+/// of truth as `SLACK_BOT_TOKEN_SECRET`.
+pub const SLACK_SIGNING_SECRET: &str = "slack_signing_secret";

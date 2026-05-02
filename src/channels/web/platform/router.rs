@@ -164,6 +164,17 @@ pub async fn start_server(
             "/api/channels/slack/slash",
             post(crate::channels::web::handlers::slack::slash_command_handler),
         )
+        // Slack workspace-install OAuth flow. Public — the operator's
+        // browser is redirected to Slack and back; CSRF state validated
+        // via `oauth_state_store`. See `crate::channels::slack::install`.
+        .route(
+            "/auth/slack/install",
+            get(crate::channels::web::handlers::auth::slack_install_initiate_handler),
+        )
+        .route(
+            "/auth/slack/install/callback",
+            get(crate::channels::web::handlers::auth::slack_install_callback_handler),
+        )
         // NEAR wallet auth (challenge-response, not OAuth redirect)
         .route(
             "/auth/near/challenge",

@@ -46,15 +46,10 @@ use axum::{
 };
 
 use crate::channels::slack::{
-    SignatureError, SlashParseError, VerifyInputs, ack_payload, effective_workspace_id,
-    parse_slash_command, verify,
+    SLACK_SIGNING_SECRET, SignatureError, SlashParseError, VerifyInputs, ack_payload,
+    effective_workspace_id, parse_slash_command, verify,
 };
 use crate::channels::web::platform::state::GatewayState;
-
-/// Slack secret name. Matches `channels-src/slack/slack.capabilities.json`
-/// (`config.signing_secret_name`) so the WASM channel and the core
-/// surface read from the same row.
-pub const SLACK_SIGNING_SECRET_NAME: &str = "slack_signing_secret";
 
 /// POST `/api/channels/slack/slash` — receives every `/ironclaw <…>`
 /// invocation across every workspace where the IronClaw Slack app is
@@ -160,7 +155,7 @@ async fn read_signing_secret(state: &GatewayState) -> Result<String, &'static st
         .as_ref()
         .ok_or("secrets_store missing")?;
     let decrypted = secrets
-        .get_decrypted(&state.owner_id, SLACK_SIGNING_SECRET_NAME)
+        .get_decrypted(&state.owner_id, SLACK_SIGNING_SECRET)
         .await
         .map_err(|_| "slack_signing_secret not present")?;
     Ok(decrypted.expose().to_string())

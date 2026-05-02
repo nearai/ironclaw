@@ -787,6 +787,236 @@ fn build_identity_record(
     }
 }
 
+// ── Slack workspace install ──────────────────────────────────────────────
+//
+// Slack's bot install is workspace-scoped and uses a different token shape
+// from the user-OAuth flow above. Rather than fork the existing handler
+// (load-bearing for Google + GitHub + NEAR + Apple OIDC), we add two
+// sibling handlers that share the rate limiter and OAuth state store but
+// run their own code path.
+
+/// GET `/auth/slack/install` — start the workspace-install flow.
+///
+/// Reads `slack_oauth_client_id` from the secrets store, issues a CSRF
+/// state via `oauth_state_store`, and redirects the browser to Slack's
+/// authorize URL. The CLI install path (`ironclaw channels install slack
+/// <T0XXX>`) prints this URL when the operator has not yet bound the
+/// app's client_id.
+pub async fn slack_install_initiate_handler(
+    State(state): State<Arc<GatewayState>>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if !state.oauth_rate_limiter.check(&rate_limit_key(&headers)) {
+        return (StatusCode::TOO_MANY_REQUESTS, "Rate limited").into_response();
+    }
+
+    let secrets = match state.secrets_store.as_ref() {
+        Some(s) => s,
+        None => return error_page("Secrets store is not configured."),
+    };
+    let state_store = match state.oauth_state_store.as_ref() {
+        Some(s) => s,
+        None => return error_page("OAuth state store not available."),
+    };
+    let base_url = match state.oauth_base_url.as_deref() {
+        Some(u) => u,
+        None => return error_page("OAuth base URL is not configured."),
+    };
+
+    let client_id = match secrets
+        .get_decrypted(&state.owner_id, SLACK_OAUTH_CLIENT_ID_SECRET)
+        .await
+    {
+        Ok(s) => s.expose().to_string(),
+        Err(_) => {
+            return error_page(
+                "Slack OAuth is not configured. Run `ironclaw secrets create \
+                 slack_oauth_client_id <your client id>` first.",
+            );
+        }
+    };
+
+    let flow = crate::channels::web::oauth::state_store::new_oauth_flow(
+        SLACK_INSTALL_PROVIDER.to_string(),
+        None,
+    );
+    let csrf_state = state_store.insert(flow).await;
+    let redirect_uri = slack_install_redirect_uri(base_url);
+    let auth_url = crate::channels::slack::authorize_url(&client_id, &redirect_uri, &csrf_state);
+
+    Redirect::temporary(&auth_url).into_response()
+}
+
+/// GET `/auth/slack/install/callback` — complete the workspace install.
+///
+/// Slack redirects here with `?code=<auth code>&state=<csrf state>` after
+/// the operator approves the install in their browser. We:
+///   1. Validate the CSRF state via `oauth_state_store.take`.
+///   2. Read `slack_oauth_client_id` + `slack_oauth_client_secret` from
+///      secrets storage.
+///   3. POST to `slack.com/api/oauth.v2.access` to exchange the code for
+///      a bot token (via `crate::channels::slack::exchange_code`).
+///   4. Persist the workspace identity in `channel_identities` keyed on
+///      the workspace id from the response (or enterprise id for
+///      Enterprise Grid installs).
+///   5. Persist the bot token as a secret named `slack_bot_token` so the
+///      WASM channel under `channels-src/slack/` can pick it up.
+///   6. Render a success page so the operator sees the bind succeeded.
+pub async fn slack_install_callback_handler(
+    State(state): State<Arc<GatewayState>>,
+    headers: axum::http::HeaderMap,
+    Query(params): Query<CallbackParams>,
+) -> Response {
+    if !state.oauth_rate_limiter.check(&rate_limit_key(&headers)) {
+        return error_page("Too many requests. Please try again later.");
+    }
+
+    if let Some(ref err) = params.error {
+        let desc = params.error_description.as_deref().unwrap_or(err.as_str());
+        return error_page(desc);
+    }
+
+    let code = match params.code.as_deref() {
+        Some(c) if !c.is_empty() => c,
+        _ => return error_page("Slack did not return an authorization code."),
+    };
+    let csrf_state = match params.state.as_deref() {
+        Some(s) if !s.is_empty() => s,
+        _ => return error_page("Slack callback is missing the state parameter."),
+    };
+
+    let state_store = match state.oauth_state_store.as_ref() {
+        Some(s) => s,
+        None => return error_page("OAuth state store not available."),
+    };
+    let flow = match state_store.take(csrf_state).await {
+        Some(f) if f.provider == SLACK_INSTALL_PROVIDER => f,
+        Some(_) => return error_page("OAuth provider mismatch on Slack callback."),
+        None => {
+            return error_page(
+                "Invalid or expired Slack install state. Please start the install again.",
+            );
+        }
+    };
+    drop(flow); // we don't use the code_verifier (Slack bot OAuth has no PKCE)
+
+    let secrets = match state.secrets_store.as_ref() {
+        Some(s) => s,
+        None => return error_page("Secrets store is not configured."),
+    };
+    let store = match state.store.as_ref() {
+        Some(s) => s,
+        None => return error_page("Database is not available."),
+    };
+    let base_url = match state.oauth_base_url.as_deref() {
+        Some(u) => u,
+        None => return error_page("OAuth base URL is not configured."),
+    };
+
+    let client_id = match secrets
+        .get_decrypted(&state.owner_id, SLACK_OAUTH_CLIENT_ID_SECRET)
+        .await
+    {
+        Ok(s) => s.expose().to_string(),
+        Err(_) => return error_page("Slack OAuth client_id is not configured."),
+    };
+    let client_secret = match secrets
+        .get_decrypted(&state.owner_id, SLACK_OAUTH_CLIENT_SECRET_SECRET)
+        .await
+    {
+        Ok(s) => secrecy::SecretString::from(s.expose().to_string()),
+        Err(_) => return error_page("Slack OAuth client_secret is not configured."),
+    };
+
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    let redirect_uri = slack_install_redirect_uri(base_url);
+    let access = match crate::channels::slack::exchange_code(
+        &http,
+        crate::channels::slack::SLACK_API_BASE,
+        code,
+        &client_id,
+        &client_secret,
+        &redirect_uri,
+    )
+    .await
+    {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::warn!(error = %e, "slack oauth.v2.access exchange failed");
+            return error_page(
+                "Slack rejected the install. Double-check your Slack app's \
+                 client_id / client_secret in IronClaw secrets and try again.",
+            );
+        }
+    };
+
+    let workspace_id = match crate::channels::slack::oauth::workspace_external_id(&access) {
+        Some(id) => id.to_string(),
+        None => {
+            return error_page(
+                "Slack returned an OK response without a workspace id (unexpected).",
+            );
+        }
+    };
+
+    if let Err(e) = store
+        .upsert_channel_identity("slack", &workspace_id, &state.owner_id)
+        .await
+    {
+        tracing::error!(error = %e, "failed to persist Slack workspace identity");
+        return error_page("IronClaw hit a database error persisting the workspace identity.");
+    }
+
+    // Persist the bot token under the canonical name read by the Slack WASM
+    // channel (`channels-src/slack/slack.capabilities.json` →
+    // `setup.required_secrets[].name = "slack_bot_token"`). Multi-workspace
+    // routing — keying the secret on workspace id and adapting the WASM
+    // channel — lands in a follow-up commit.
+    let create = crate::secrets::CreateSecretParams::new(
+        crate::channels::slack::SLACK_BOT_TOKEN_SECRET,
+        access.access_token.clone(),
+    )
+    .with_provider("slack");
+    if let Err(e) = secrets.create(&state.owner_id, create).await {
+        tracing::error!(error = %e, "failed to persist Slack bot token");
+        return error_page(
+            "IronClaw bound the workspace identity but could not persist the \
+             bot token. Re-run the install or paste the token manually.",
+        );
+    }
+
+    slack_install_success_page(&workspace_id)
+}
+
+const SLACK_INSTALL_PROVIDER: &str = "slack-install";
+const SLACK_OAUTH_CLIENT_ID_SECRET: &str = "slack_oauth_client_id";
+const SLACK_OAUTH_CLIENT_SECRET_SECRET: &str = "slack_oauth_client_secret";
+
+fn slack_install_redirect_uri(base_url: &str) -> String {
+    format!(
+        "{}/auth/slack/install/callback",
+        base_url.trim_end_matches('/')
+    )
+}
+
+fn slack_install_success_page(workspace_id: &str) -> Response {
+    let escaped = workspace_id
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    axum::response::Html(format!(
+        "<html><body style='font-family: system-ui; text-align: center; padding: 60px;'>\
+         <h2>IronClaw is installed</h2>\
+         <p>Workspace <code>{escaped}</code> is bound.</p>\
+         <p>Try <code>/ironclaw hello</code> in any channel.</p>\
+         </body></html>"
+    ))
+    .into_response()
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 fn build_session_cookie(token: &str, secure: bool) -> String {
