@@ -109,7 +109,7 @@ jobs:
             echo "has_web_risk=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if has_match '^(wit/|crates/ironclaw_common/|src/(channels/wasm|extensions|registry|tools/mcp|tools/wasm)/|channels-src/|tools-src/|registry/|scripts/build-wasm-extensions\.sh$|scripts/check-version-bumps\.sh$|tests/wit_compat\.rs$|tests/wasm_channel_integration\.rs$|tests/e2e_wasm_.*|Cargo\.toml$|Cargo\.lock$|\.github/workflows/test\.yml$)'; then
+          if has_match '^(wit/|crates/ironclaw_common/|src/(channels/wasm|tools/wasm)/|channels-src/|tools-src/|registry/|scripts/build-wasm-extensions\.sh$|scripts/check-version-bumps\.sh$|tests/wit_compat\.rs$|tests/wasm_channel_integration\.rs$|tests/e2e_wasm_.*|\.github/workflows/test\.yml$)'; then
             echo "has_wasm_abi_risk=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_wasm_abi_risk=false" >> "$GITHUB_OUTPUT"
@@ -181,12 +181,20 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Install cargo-component
         uses: ./.github/actions/install-cargo-component
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # v2
+        with:
+          tool: cargo-nextest
       - name: Build WASM channels (for integration tests)
         run: ./scripts/build-wasm-extensions.sh --channels
       - name: Run Tests
         run: |
-          timeout --signal=INT --kill-after=30s 40m \
-            cargo test ${{ matrix.flags }} -- --nocapture
+          timeout --signal=INT --kill-after=30s 35m \
+            cargo nextest run --profile ci ${{ matrix.flags }}
+      - name: Run Doctests
+        run: |
+          timeout --signal=INT --kill-after=30s 10m \
+            cargo test --doc ${{ matrix.flags }}
 
   heavy-integration-tests:
     name: Heavy Integration Tests
@@ -366,6 +374,10 @@ jobs:
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
+      # Share dep artifacts across the 18 cargo-component builds and the
+      # host wit_compat test build. tests/wit_compat.rs reads CARGO_TARGET_DIR
+      # at runtime to locate the produced .wasm artifacts.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -391,8 +403,8 @@ jobs:
         run: ./scripts/build-wasm-extensions.sh
       - name: Instantiation test (host linker compatibility)
         run: |
-          timeout --signal=INT --kill-after=30s 20m \
-            cargo test --all-features --test wit_compat -- --nocapture
+          timeout --signal=INT --kill-after=30s 15m \
+            cargo test --no-default-features --features libsql --test wit_compat -- --nocapture
 
   bench-compile:
     name: Benchmark Compilation

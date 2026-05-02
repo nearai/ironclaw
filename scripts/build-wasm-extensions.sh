@@ -17,6 +17,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# Share a single target dir across all extension builds so deps like
+# wit-bindgen, anyhow, serde compile once instead of 18 times.
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$(pwd)/target}"
+
 BUILD_TOOLS=true
 BUILD_CHANNELS=true
 FAILED=()
