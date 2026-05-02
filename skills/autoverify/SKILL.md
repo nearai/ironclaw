@@ -35,7 +35,7 @@ Use this skill when autonomous coding work needs evidence before it is called do
 ironclaw verify --target <repo> --tier smoke --compact
 ```
 
-IronClaw reads `.ironclaw-verify.json` first and falls back to Hermes-compatible `.autoverify.json`. The command runs named tiers in order, writes `.autoverify.state.json`, and emits a structured verdict:
+IronClaw reads `.ironclaw-verify.json` first and falls back to Hermes-compatible `.autoverify.json`. The command runs named tiers in order, writes `.autoverify.state.json`, and emits a structured verdict with attempt metadata:
 
 - `pass`: the requested tiers passed
 - `flaky`: a retry passed after an initial failure; rerun or investigate before trusting it
@@ -49,17 +49,23 @@ IronClaw reads `.ironclaw-verify.json` first and falls back to Hermes-compatible
 ironclaw verify --target . --tier smoke --compact
 ```
 
-2. Before shipping a PR, run all tiers needed for the touched surface:
+2. If you are unsure what the repo defines, inspect the plan without running commands:
+
+```bash
+ironclaw verify --target . --list
+```
+
+3. Before shipping a PR, run all tiers needed for the touched surface:
 
 ```bash
 ironclaw verify --target . --upto replay --compact
 ```
 
-3. If `verdict` is `flaky`, do not hand-wave it. Rerun the same tier. If it flakes again, inspect the failing command and either fix the flake or record it as an explicit risk.
+4. If `verdict` is `flaky`, do not hand-wave it. Rerun the same tier. If it flakes again, inspect the failing command and either fix the flake or record it as an explicit risk.
 
-4. If `verdict` is `fail`, fix the cause and rerun the smallest tier that proves the fix. Then rerun the ship tier before committing.
+5. If `verdict` is `fail`, fix the cause and rerun the smallest tier that proves the fix. Then rerun the ship tier before committing.
 
-5. After committing, rerun at least `smoke` against the committed tree so the final state, not an intermediate edit, is what passed.
+6. After committing, rerun at least `smoke` against the committed tree so the final state, not an intermediate edit, is what passed.
 
 ## Config Shape
 

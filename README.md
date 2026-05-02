@@ -143,6 +143,9 @@ cargo test
 
 # Run the layered verification harness
 ironclaw verify --tier smoke
+
+# Inspect configured verification tiers
+ironclaw verify --list
 ```
 
 For **full release** (after modifying channel sources), run `./scripts/build-all.sh` to rebuild channels first.
@@ -320,6 +323,9 @@ cargo test
 
 # Run the repo's autonomous verification tiers
 cargo run --bin ironclaw -- verify --tier smoke
+
+# Inspect the repo verification plan
+cargo run --bin ironclaw -- verify --list
 
 # Run specific test
 cargo test test_name

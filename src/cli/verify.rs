@@ -4,6 +4,8 @@
 //! `.autoverify.json` shape used by Hermes while adding a native Rust runner
 //! and structured state file for IronClaw agents.
 
+use std::collections::HashSet;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -42,6 +44,10 @@ pub struct VerifyCommand {
     #[arg(long)]
     pub compact: bool,
 
+    /// List configured tiers without running commands
+    #[arg(long)]
+    pub list: bool,
+
     /// Repeat verification until it passes or --max attempts is reached
     #[arg(long)]
     pub r#loop: bool,
@@ -59,13 +65,13 @@ pub struct VerifyCommand {
     pub state: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct VerifyConfig {
     version: u32,
     tiers: Vec<VerifyTier>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct VerifyTier {
     name: String,
     #[serde(default = "default_timeout_secs")]
@@ -77,7 +83,7 @@ struct VerifyTier {
     commands: Vec<VerifyCommandSpec>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct VerifyCommandSpec {
     name: String,
     run: String,
@@ -91,11 +97,12 @@ enum Verdict {
     Fail,
 }
 
-impl Verdict {
-    fn exit_code(self) -> i32 {
+impl fmt::Display for Verdict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Verdict::Pass => 0,
-            Verdict::Flaky | Verdict::Fail => 1,
+            Verdict::Pass => f.write_str("pass"),
+            Verdict::Flaky => f.write_str("flaky"),
+            Verdict::Fail => f.write_str("fail"),
         }
     }
 }
@@ -108,6 +115,18 @@ enum CommandStatus {
     Fail,
     Timeout,
     Error,
+}
+
+impl fmt::Display for CommandStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CommandStatus::Pass => f.write_str("pass"),
+            CommandStatus::Flaky => f.write_str("flaky"),
+            CommandStatus::Fail => f.write_str("fail"),
+            CommandStatus::Timeout => f.write_str("timeout"),
+            CommandStatus::Error => f.write_str("error"),
+        }
+    }
 }
 
 impl CommandStatus {
@@ -124,6 +143,8 @@ struct VerifyOutput {
     verdict: Verdict,
     target: String,
     config: String,
+    attempt: u32,
+    max_attempts: u32,
     tiers_requested: Vec<String>,
     commands: Vec<CommandOutcome>,
     summary: VerifySummary,
@@ -153,6 +174,13 @@ struct VerifySummary {
     total_duration_ms: u128,
 }
 
+#[derive(Debug, Serialize)]
+struct VerifyListing<'a> {
+    target: String,
+    config: String,
+    tiers: Vec<&'a VerifyTier>,
+}
+
 fn default_timeout_secs() -> u64 {
     DEFAULT_TIMEOUT_SECS
 }
@@ -167,11 +195,16 @@ pub async fn run_verify_command(cmd: VerifyCommand) -> anyhow::Result<()> {
     let config = load_config(&config_path)?;
     let tiers = select_tiers(&config, cmd.tier.as_deref(), cmd.upto.as_deref())?;
 
+    if cmd.list {
+        render_listing(&target, &config_path, &tiers, cmd.compact)?;
+        return Ok(());
+    }
+
     let max_attempts = if cmd.r#loop { cmd.max.max(1) } else { 1 };
     let mut last_output = None;
 
     for attempt in 1..=max_attempts {
-        let output = run_once(&target, &config_path, &tiers).await;
+        let output = run_once(&target, &config_path, &tiers, attempt, max_attempts).await;
         write_state(&state_path, &output)?;
         render_output(&output, cmd.compact, attempt, max_attempts)?;
 
@@ -187,7 +220,15 @@ pub async fn run_verify_command(cmd: VerifyCommand) -> anyhow::Result<()> {
     if let Some(output) = last_output
         && output.verdict != Verdict::Pass
     {
-        std::process::exit(output.verdict.exit_code());
+        bail!(
+            "verification {} ({} pass, {} flaky, {} fail, {} timeout, {} error)",
+            output.verdict,
+            output.summary.pass,
+            output.summary.flaky,
+            output.summary.fail,
+            output.summary.timeout,
+            output.summary.error
+        );
     }
 
     Ok(())
@@ -243,16 +284,31 @@ fn load_config(path: &Path) -> anyhow::Result<VerifyConfig> {
     if config.tiers.is_empty() {
         bail!("verification config has no tiers");
     }
+    let mut tier_names = HashSet::new();
     for tier in &config.tiers {
         if tier.name.trim().is_empty() {
             bail!("verification tier name may not be empty");
         }
+        if !tier_names.insert(tier.name.as_str()) {
+            bail!("duplicate verification tier '{}'", tier.name);
+        }
+        if tier.timeout_s == 0 {
+            bail!("verification tier '{}' must have timeout_s > 0", tier.name);
+        }
         if tier.commands.is_empty() {
             bail!("verification tier '{}' has no commands", tier.name);
         }
+        let mut command_names = HashSet::new();
         for command in &tier.commands {
             if command.name.trim().is_empty() {
                 bail!("verification tier '{}' has an unnamed command", tier.name);
+            }
+            if !command_names.insert(command.name.as_str()) {
+                bail!(
+                    "duplicate verification command '{}:{}'",
+                    tier.name,
+                    command.name
+                );
             }
             if command.run.trim().is_empty() {
                 bail!(
@@ -277,7 +333,7 @@ fn select_tiers<'a>(
             .tiers
             .iter()
             .find(|candidate| candidate.name == name)
-            .ok_or_else(|| anyhow!("unknown verification tier: {name}"))?;
+            .ok_or_else(|| unknown_tier_error(config, name))?;
         return Ok(vec![selected]);
     }
 
@@ -286,14 +342,32 @@ fn select_tiers<'a>(
             .tiers
             .iter()
             .position(|candidate| candidate.name == name)
-            .ok_or_else(|| anyhow!("unknown verification tier: {name}"))?;
+            .ok_or_else(|| unknown_tier_error(config, name))?;
         return Ok(config.tiers.iter().take(index + 1).collect());
     }
 
     Ok(config.tiers.iter().collect())
 }
 
-async fn run_once(target: &Path, config_path: &Path, tiers: &[&VerifyTier]) -> VerifyOutput {
+fn unknown_tier_error(config: &VerifyConfig, name: &str) -> anyhow::Error {
+    anyhow!(
+        "unknown verification tier: {name} (available: {})",
+        config
+            .tiers
+            .iter()
+            .map(|tier| tier.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+async fn run_once(
+    target: &Path,
+    config_path: &Path,
+    tiers: &[&VerifyTier],
+    attempt: u32,
+    max_attempts: u32,
+) -> VerifyOutput {
     let started_at = chrono::Utc::now();
     let mut commands = Vec::new();
 
@@ -328,6 +402,8 @@ async fn run_once(target: &Path, config_path: &Path, tiers: &[&VerifyTier]) -> V
         verdict,
         target: target.display().to_string(),
         config: config_path.display().to_string(),
+        attempt,
+        max_attempts,
         tiers_requested: tiers.iter().map(|tier| tier.name.clone()).collect(),
         commands,
         summary,
@@ -489,7 +565,7 @@ fn render_output(
     }
 
     println!(
-        "IronClaw verify attempt {attempt}/{max_attempts}: {:?}",
+        "IronClaw verify attempt {attempt}/{max_attempts}: {}",
         output.verdict
     );
     println!("target: {}", output.target);
@@ -508,11 +584,44 @@ fn render_output(
 
     for command in &output.commands {
         println!(
-            "- {}:{} {:?} ({}ms, attempts={})",
+            "- {}:{} {} ({}ms, attempts={})",
             command.tier, command.name, command.status, command.duration_ms, command.attempts
         );
         if command.status != CommandStatus::Pass && !command.tail.trim().is_empty() {
             println!("{}", indent_tail(&command.tail));
+        }
+    }
+
+    Ok(())
+}
+
+fn render_listing(
+    target: &Path,
+    config_path: &Path,
+    tiers: &[&VerifyTier],
+    compact: bool,
+) -> anyhow::Result<()> {
+    let listing = VerifyListing {
+        target: target.display().to_string(),
+        config: config_path.display().to_string(),
+        tiers: tiers.to_vec(),
+    };
+
+    if compact {
+        println!("{}", serde_json::to_string(&listing)?);
+        return Ok(());
+    }
+
+    println!("IronClaw verify tiers");
+    println!("target: {}", listing.target);
+    println!("config: {}", listing.config);
+    for tier in tiers {
+        println!(
+            "- {} (timeout={}s, retry_on_fail={}, continue_on_fail={})",
+            tier.name, tier.timeout_s, tier.retry_on_fail, tier.continue_on_fail
+        );
+        for command in &tier.commands {
+            println!("  - {}: {}", command.name, command.run);
         }
     }
 
@@ -544,6 +653,21 @@ fn indent_tail(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn verify_cmd(target: &Path) -> VerifyCommand {
+        VerifyCommand {
+            target: target.to_path_buf(),
+            config: None,
+            tier: None,
+            upto: None,
+            compact: true,
+            list: false,
+            r#loop: false,
+            interval: DEFAULT_INTERVAL_SECS,
+            max: DEFAULT_MAX_ATTEMPTS,
+            state: None,
+        }
+    }
 
     fn write_config(dir: &Path, body: &str) -> PathBuf {
         let path = dir.join(".autoverify.json");
@@ -599,9 +723,11 @@ mod tests {
         let config = load_config(&config_path).expect("load config");
         let tiers = select_tiers(&config, None, None).expect("select tiers");
 
-        let output = run_once(temp.path(), &config_path, &tiers).await;
+        let output = run_once(temp.path(), &config_path, &tiers, 1, 1).await;
 
         assert_eq!(output.verdict, Verdict::Pass);
+        assert_eq!(output.attempt, 1);
+        assert_eq!(output.max_attempts, 1);
         assert_eq!(output.summary.pass, 1);
         assert_eq!(output.commands[0].tail, "done");
     }
@@ -629,7 +755,7 @@ mod tests {
         let config = load_config(&config_path).expect("load config");
         let tiers = select_tiers(&config, None, None).expect("select tiers");
 
-        let output = run_once(temp.path(), &config_path, &tiers).await;
+        let output = run_once(temp.path(), &config_path, &tiers, 1, 1).await;
 
         assert_eq!(output.verdict, Verdict::Flaky);
         assert_eq!(output.summary.flaky, 1);
@@ -652,10 +778,145 @@ mod tests {
         let config = load_config(&config_path).expect("load config");
         let tiers = select_tiers(&config, None, None).expect("select tiers");
 
-        let output = run_once(temp.path(), &config_path, &tiers).await;
+        let output = run_once(temp.path(), &config_path, &tiers, 1, 1).await;
 
         assert_eq!(output.verdict, Verdict::Fail);
         assert_eq!(output.commands.len(), 1);
         assert_eq!(output.commands[0].exit, Some(9));
+    }
+
+    #[test]
+    fn resolve_config_prefers_ironclaw_verify_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join(".autoverify.json"), "{}").expect("write fallback");
+        std::fs::write(temp.path().join(".ironclaw-verify.json"), "{}")
+            .expect("write native config");
+
+        let selected = resolve_config_path(temp.path(), None).expect("resolve config");
+
+        assert_eq!(selected, temp.path().join(".ironclaw-verify.json"));
+    }
+
+    #[test]
+    fn load_config_rejects_duplicate_tiers() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_path = write_config(
+            temp.path(),
+            r#"{
+              "version": 1,
+              "tiers": [
+                {"name": "smoke", "commands": [{"name": "a", "run": "true"}]},
+                {"name": "smoke", "commands": [{"name": "b", "run": "true"}]}
+              ]
+            }"#,
+        );
+
+        let error = load_config(&config_path).expect_err("duplicate tiers should fail");
+
+        assert!(error.to_string().contains("duplicate verification tier"));
+    }
+
+    #[test]
+    fn load_config_rejects_duplicate_commands() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_path = write_config(
+            temp.path(),
+            r#"{
+              "version": 1,
+              "tiers": [
+                {"name": "smoke", "commands": [
+                  {"name": "same", "run": "true"},
+                  {"name": "same", "run": "true"}
+                ]}
+              ]
+            }"#,
+        );
+
+        let error = load_config(&config_path).expect_err("duplicate commands should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate verification command 'smoke:same'")
+        );
+    }
+
+    #[test]
+    fn select_unknown_tier_lists_available_tiers() {
+        let config = VerifyConfig {
+            version: 1,
+            tiers: vec![VerifyTier {
+                name: "smoke".into(),
+                timeout_s: 1,
+                retry_on_fail: false,
+                continue_on_fail: false,
+                commands: vec![VerifyCommandSpec {
+                    name: "a".into(),
+                    run: "true".into(),
+                }],
+            }],
+        };
+
+        let error = select_tiers(&config, Some("missing"), None).expect_err("unknown tier");
+
+        assert!(
+            error
+                .to_string()
+                .contains("unknown verification tier: missing (available: smoke)")
+        );
+    }
+
+    #[tokio::test]
+    async fn run_verify_command_returns_error_on_failure_without_exiting() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_config(
+            temp.path(),
+            r#"{
+              "version": 1,
+              "tiers": [
+                {"name": "smoke", "timeout_s": 5, "commands": [{"name": "fail", "run": "exit 7"}]}
+              ]
+            }"#,
+        );
+
+        let error = run_verify_command(verify_cmd(temp.path()))
+            .await
+            .expect_err("failing verification should return an error");
+        let state = std::fs::read_to_string(temp.path().join(DEFAULT_STATE_FILE))
+            .expect("state file should be written");
+        let state: serde_json::Value = serde_json::from_str(&state).expect("parse state");
+
+        assert!(error.to_string().contains("verification fail"));
+        assert_eq!(state["verdict"], "fail");
+        assert_eq!(state["attempt"], 1);
+        assert_eq!(state["commands"][0]["exit"], 7);
+    }
+
+    #[tokio::test]
+    async fn list_mode_does_not_run_commands_or_write_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("marker");
+        write_config(
+            temp.path(),
+            &format!(
+                r#"{{
+                  "version": 1,
+                  "tiers": [
+                    {{"name": "smoke", "commands": [{{"name": "touch", "run": "touch {}"}}]}}
+                  ]
+                }}"#,
+                marker.display()
+            ),
+        );
+        let mut cmd = verify_cmd(temp.path());
+        cmd.list = true;
+
+        run_verify_command(cmd).await.expect("list tiers");
+
+        assert!(!marker.exists(), "list mode should not run commands");
+        assert!(
+            !temp.path().join(DEFAULT_STATE_FILE).exists(),
+            "list mode should not write verifier state"
+        );
     }
 }

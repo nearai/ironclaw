@@ -289,6 +289,7 @@ pub enum Command {
         long_about = "Runs machine-readable verification tiers from .ironclaw-verify.json or the Hermes-compatible .autoverify.json.\n\n\
          Use this after code changes and before shipping autonomous work.\n\n\
          Examples:\n  \
+           ironclaw verify --list\n  \
            ironclaw verify --tier smoke --compact\n  \
            ironclaw verify --upto integration\n  \
            ironclaw verify --target ../my-project --loop --interval 30 --max 20"
