@@ -9,6 +9,13 @@
 //! `ENV_LOCK` and prefer test-scoped temp dirs piped through env vars.
 
 #![cfg(feature = "libsql")]
+// ENV_LOCK is a process-wide std::sync::Mutex used to serialise env-var
+// mutations across these async integration tests. The lock IS held
+// across .await points (env state must stay pinned for the duration of
+// the test). An async Mutex wouldn't help because the contention is
+// between threads, not between async tasks. Same shape as the sibling
+// `tests/backup_integration.rs`.
+#![allow(clippy::await_holding_lock)]
 
 use std::ffi::OsString;
 use std::fs;
