@@ -1,7 +1,7 @@
 {
   "version": "0.1.0",
   "wit_version": "0.3.0",
-  "description": "Cross-chain DeFi portfolio discovery, ranked rebalancing proposals, unsigned NEAR Intent construction, deterministic spot strategy backtesting/suite ranking, paid research budgeting/attribution, nominal NEAR trial planning, and NEAR Intents trading widget state.",
+  "description": "Cross-chain DeFi portfolio discovery, ranked rebalancing proposals, unsigned NEAR Intent construction, deterministic spot strategy backtesting/suite ranking, paid research budgeting/attribution, nominal NEAR trial planning, and interactive NEAR Intents trading widget state.",
   "discovery_summary": {
     "always_required": [
       "action"
@@ -17,7 +17,7 @@
       "`fetch_dripstack_catalog` fetches DripStack's free publication catalog or free post-title metadata for one publication. It never calls paid article-body routes.",
       "`prepare_dripstack_paid_fetch` requires one publication slug and post slug. It prepares the explicit confirmation, HTTP 402 challenge, and receipt-backed retry boundary for one paid article; it never signs or reads paid content by itself.",
       "`plan_near_intents_trial` prepares a nominal-NEAR paper/quote rehearsal with wallet/funding setup steps, strategy-menu defaults, risk gates, and an unsigned build_intent request.",
-      "`format_intents_widget` requires a `pair` and optional backtest-suite output, trial plan, paid research plan, risk gates, and unsigned IntentBundle. It returns `intents-trading-widget/1` state for the project widget."
+      "`format_intents_widget` requires a `pair` and optional backtest-suite output, trial plan, paid research plan, risk gates, and unsigned IntentBundle. It returns `intents-trading-widget/1` state for the interactive project widget."
     ],
     "notes": [
       "All operations are read-only and produce no signed payloads. The agent never holds private keys.",

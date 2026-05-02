@@ -499,10 +499,13 @@ Persist the returned JSON exactly as:
 
 `projects/intents-trading-agent/widgets/state.json`
 
-The bundled project widget reads this file and renders ranked strategy
-candidates, nominal NEAR trial status, paid source attribution, risk
-gates, and unsigned NEAR Intents status inside the IronClaw Projects
-view. If the widget files are not installed yet, copy:
+The bundled project widget reads this file and renders an interactive
+IronClaw Projects workflow: trial ticket inputs, funding-path selection,
+ranked/selectable strategies, paper intent status, guarded live-quote
+handoff, paid source attribution, risk gates, and unsigned NEAR Intents
+status. The widget writes precise prompts back into chat; it does not
+hold wallet keys, sign payloads, or submit trades. If the widget files
+are not installed yet, copy:
 
 - `skills/intents-trading-agent/widgets/near-intents-console/manifest.json`
 - `skills/intents-trading-agent/widgets/near-intents-console/index.js`

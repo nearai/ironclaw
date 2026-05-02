@@ -297,6 +297,7 @@ pub struct IntentsTrialSummary {
     pub pair: String,
     pub nominal_near: f64,
     pub max_trade_near: f64,
+    pub assumed_near_usd: f64,
     pub max_trade_usd: f64,
     pub safe_to_quote: bool,
     pub safe_to_execute: bool,
@@ -304,10 +305,24 @@ pub struct IntentsTrialSummary {
     pub recommended_strategy_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_strategy_id: Option<String>,
+    pub strategy_menu: Vec<IntentsTrialStrategy>,
     pub setup_steps: Vec<IntentsTrialStep>,
     pub risk_gates: Vec<IntentsRiskGate>,
+    pub warnings: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_action: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct IntentsTrialStrategy {
+    pub id: String,
+    pub kind: String,
+    pub position_size_pct: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_loss_bps: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub take_profit_bps: Option<f64>,
+    pub note: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -642,6 +657,21 @@ fn paid_research_summary_from_value(value: &serde_json::Value) -> IntentsPaidRes
 }
 
 fn trial_summary_from_value(value: &serde_json::Value) -> IntentsTrialSummary {
+    let strategy_menu = value
+        .get("strategy_menu")
+        .and_then(|strategies| strategies.as_array())
+        .into_iter()
+        .flatten()
+        .take(8)
+        .map(|strategy| IntentsTrialStrategy {
+            id: string_field(strategy, "id", "strategy"),
+            kind: string_field(strategy, "kind", "unknown"),
+            position_size_pct: number_field(strategy, "position_size_pct"),
+            stop_loss_bps: strategy.get("stop_loss_bps").and_then(|v| v.as_f64()),
+            take_profit_bps: strategy.get("take_profit_bps").and_then(|v| v.as_f64()),
+            note: string_field(strategy, "note", ""),
+        })
+        .collect();
     let setup_steps = value
         .get("setup_steps")
         .and_then(|steps| steps.as_array())
@@ -667,6 +697,13 @@ fn trial_summary_from_value(value: &serde_json::Value) -> IntentsTrialSummary {
             detail: Some(string_field(gate, "detail", "")),
         })
         .collect();
+    let warnings = value
+        .get("warnings")
+        .and_then(|warnings| warnings.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|warning| warning.as_str().map(str::to_string))
+        .collect();
 
     IntentsTrialSummary {
         schema_version: string_field(value, "schema_version", "near-intents-trial-plan/1"),
@@ -674,6 +711,7 @@ fn trial_summary_from_value(value: &serde_json::Value) -> IntentsTrialSummary {
         pair: string_field(value, "pair", "NEAR/USDC"),
         nominal_near: number_field(value, "nominal_near"),
         max_trade_near: number_field(value, "max_trade_near"),
+        assumed_near_usd: number_field(value, "assumed_near_usd"),
         max_trade_usd: number_field(value, "max_trade_usd"),
         safe_to_quote: value
             .get("safe_to_quote")
@@ -691,8 +729,10 @@ fn trial_summary_from_value(value: &serde_json::Value) -> IntentsTrialSummary {
             .get("selected_strategy_id")
             .and_then(|v| v.as_str())
             .map(str::to_string),
+        strategy_menu,
         setup_steps,
         risk_gates,
+        warnings,
         next_action: value
             .get("next_action")
             .and_then(|v| v.as_str())
@@ -1129,7 +1169,37 @@ mod tests {
                 }],
                 "warnings": []
             })),
-            trial_plan: None,
+            trial_plan: Some(serde_json::json!({
+                "schema_version": "near-intents-trial-plan/1",
+                "mode": "paper",
+                "pair": "NEAR/USDC",
+                "nominal_near": 0.25,
+                "max_trade_near": 0.05,
+                "assumed_near_usd": 3.0,
+                "max_trade_usd": 0.15,
+                "safe_to_quote": true,
+                "safe_to_execute": false,
+                "recommended_strategy_id": "sma_cross_fast",
+                "strategy_menu": [{
+                    "id": "sma_cross_fast",
+                    "kind": "sma-cross",
+                    "position_size_pct": 0.8,
+                    "stop_loss_bps": 1200.0,
+                    "note": "Trend-following candidate for clean spot rotations."
+                }],
+                "setup_steps": [{
+                    "order": 1,
+                    "name": "Use a small wallet",
+                    "status": "manual",
+                    "detail": "Fund a separate NEAR account."
+                }],
+                "risk_gates": [{
+                    "name": "trade-cap",
+                    "status": "pass",
+                    "detail": "Single trade cap passed."
+                }],
+                "warnings": ["Paper only."]
+            })),
             next_action: Some("Request live quote only after user approval.".to_string()),
         });
 
@@ -1142,6 +1212,10 @@ mod tests {
         assert_eq!(paid_research.selected_count, 1);
         assert_eq!(paid_research.payable_sources[0].protocol, "x402");
         assert_eq!(paid_research.near_funding_routes[0].via, "near-intents");
+        let trial_plan = w.trial_plan.unwrap();
+        assert!(trial_plan.safe_to_quote);
+        assert_eq!(trial_plan.assumed_near_usd, 3.0);
+        assert_eq!(trial_plan.strategy_menu[0].id, "sma_cross_fast");
     }
 
     // ---- only ready proposals in suggestions ----

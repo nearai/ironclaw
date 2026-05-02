@@ -61,10 +61,33 @@
     "pair": "NEAR/USDC",
     "nominal_near": 0.25,
     "max_trade_near": 0.05,
+    "assumed_near_usd": 3.0,
     "max_trade_usd": 0.15,
     "safe_to_quote": true,
     "safe_to_execute": false,
     "recommended_strategy_id": "sma_cross_fast",
+    "strategy_menu": [
+      {
+        "id": "buy_hold_baseline",
+        "kind": "buy-hold",
+        "position_size_pct": 1.0,
+        "note": "Baseline for comparing active signals."
+      },
+      {
+        "id": "sma_cross_fast",
+        "kind": "sma-cross",
+        "position_size_pct": 0.8,
+        "stop_loss_bps": 1200.0,
+        "note": "Trend-following candidate for clean spot rotations."
+      },
+      {
+        "id": "mean_reversion_range",
+        "kind": "mean-reversion",
+        "position_size_pct": 0.5,
+        "stop_loss_bps": 700.0,
+        "note": "Range strategy for pullback entries."
+      }
+    ],
     "setup_steps": [
       {
         "order": 1,
@@ -96,6 +119,9 @@
         "status": "pass",
         "detail": "IronClaw returns unsigned payloads only."
       }
+    ],
+    "warnings": [
+      "This is not financial advice and it is not an execution bot. Treat every quote as experimental."
     ],
     "next_action": "Run backtest_suite with fresh candles before any live quote."
   },

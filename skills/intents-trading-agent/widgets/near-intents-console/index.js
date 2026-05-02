@@ -2,6 +2,8 @@ var root = document.createElement('section');
 root.className = 'ita-console';
 container.appendChild(root);
 
+var itaLastState = null;
+
 function itaEscape(value) {
   var div = document.createElement('div');
   div.textContent = value == null ? '' : String(value);
@@ -27,12 +29,63 @@ function itaScore(value) {
   return n.toFixed(2);
 }
 
+function itaMoney(value) {
+  var n = Number(value || 0);
+  return '$' + n.toFixed(n < 1 ? 4 : 2);
+}
+
+function itaNumber(value, fallback) {
+  if (value === '') return fallback;
+  var n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 function itaStatusClass(status) {
   var s = String(status || 'unknown').toLowerCase();
-  if (s === 'pass' || s === 'paper-built' || s === 'live-quote-built') return 'is-pass';
-  if (s === 'warn' || s === 'awaiting-signature' || s === 'watch') return 'is-warn';
+  if (s === 'pass' || s === 'paper-built' || s === 'live-quote-built' || s === 'ready') return 'is-pass';
+  if (s === 'warn' || s === 'awaiting-signature' || s === 'watch' || s === 'manual') return 'is-warn';
   if (s === 'fail' || s === 'failed' || s === 'blocked') return 'is-fail';
   return 'is-neutral';
+}
+
+function itaStoreKey() {
+  return 'ironclaw.intentsTradingAgent.ticket';
+}
+
+function itaReadPrefs() {
+  if (typeof localStorage === 'undefined') return {};
+  try {
+    return JSON.parse(localStorage.getItem(itaStoreKey()) || '{}') || {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function itaSavePrefs(prefs) {
+  if (typeof localStorage === 'undefined') return;
+  localStorage.setItem(itaStoreKey(), JSON.stringify(prefs || {}));
+}
+
+function itaTrialDefaults(state) {
+  var plan = state && state.trial_plan ? state.trial_plan : {};
+  var prefs = itaReadPrefs();
+  return {
+    pair: prefs.pair || plan.pair || (state && state.pair) || 'NEAR/USDC',
+    mode: prefs.mode || plan.mode || (state && state.mode) || 'paper',
+    nearAccount: prefs.nearAccount || '',
+    nominalNear: itaNumber(prefs.nominalNear, itaNumber(plan.nominal_near, 0.25)),
+    maxTradeNear: itaNumber(prefs.maxTradeNear, itaNumber(plan.max_trade_near, 0.05)),
+    assumedNearUsd: itaNumber(prefs.assumedNearUsd, itaNumber(plan.assumed_near_usd, 3.0)),
+    maxSlippageBps: itaNumber(prefs.maxSlippageBps, 50),
+    selectedStrategyId: prefs.selectedStrategyId || plan.selected_strategy_id || plan.recommended_strategy_id || itaFirstStrategyId(state),
+    fundingPath: prefs.fundingPath || 'managed'
+  };
+}
+
+function itaPersistPref(name, value) {
+  var prefs = itaReadPrefs();
+  prefs[name] = value;
+  itaSavePrefs(prefs);
 }
 
 function itaReadState(slug) {
@@ -61,28 +114,162 @@ function itaLoadProjectSlug() {
     });
 }
 
-function itaCandidateRows(candidates) {
-  if (!Array.isArray(candidates) || candidates.length === 0) {
-    return '<div class="ita-empty-line">No ranked strategies yet.</div>';
-  }
-  return '<div class="ita-table" role="table" aria-label="Ranked strategy candidates">'
-    + candidates.map(function(c) {
-      return '<div class="ita-row" role="row">'
-        + '<div class="ita-rank">#' + itaEscape(c.rank || '-') + '</div>'
-        + '<div class="ita-strategy">'
-        + '<strong>' + itaEscape(c.id || 'candidate') + '</strong>'
-        + '<span>' + itaEscape(c.strategy_kind || 'strategy') + '</span>'
-        + '</div>'
-        + '<div class="ita-metric"><span>Score</span><strong>' + itaScore(c.selection_score) + '</strong></div>'
-        + '<div class="ita-metric"><span>Return</span><strong>' + itaPct(c.total_return_pct) + '</strong></div>'
-        + '<div class="ita-metric"><span>Alpha</span><strong>' + itaPct(c.alpha_vs_buy_hold_pct) + '</strong></div>'
-        + '<div class="ita-metric"><span>DD</span><strong>' + itaPct(-Math.abs(Number(c.max_drawdown_pct || 0))) + '</strong></div>'
-        + '<div class="ita-gate ' + (c.passes_basic_gate ? 'is-pass' : 'is-fail') + '">'
-        + (c.passes_basic_gate ? 'Gate pass' : 'Gate fail')
-        + '</div>'
+function itaAllStrategies(state) {
+  var seen = {};
+  var out = [];
+  var top = Array.isArray(state && state.top_candidates) ? state.top_candidates : [];
+  var menu = state && state.trial_plan && Array.isArray(state.trial_plan.strategy_menu)
+    ? state.trial_plan.strategy_menu
+    : [];
+
+  top.forEach(function(candidate) {
+    if (!candidate || seen[candidate.id]) return;
+    seen[candidate.id] = true;
+    out.push({
+      id: candidate.id,
+      kind: candidate.strategy_kind || 'strategy',
+      rank: candidate.rank,
+      score: candidate.selection_score,
+      returnPct: candidate.total_return_pct,
+      alphaPct: candidate.alpha_vs_buy_hold_pct,
+      drawdownPct: candidate.max_drawdown_pct,
+      trades: candidate.trades,
+      passes: !!candidate.passes_basic_gate,
+      note: 'Backtested candidate'
+    });
+  });
+
+  menu.forEach(function(strategy) {
+    if (!strategy || seen[strategy.id]) return;
+    seen[strategy.id] = true;
+    out.push({
+      id: strategy.id,
+      kind: strategy.kind || 'strategy',
+      rank: null,
+      score: null,
+      returnPct: null,
+      alphaPct: null,
+      drawdownPct: null,
+      trades: null,
+      passes: null,
+      note: strategy.note || '',
+      sizePct: strategy.position_size_pct,
+      stopLossBps: strategy.stop_loss_bps
+    });
+  });
+
+  return out;
+}
+
+function itaFirstStrategyId(state) {
+  var strategies = itaAllStrategies(state || {});
+  return strategies.length ? strategies[0].id : 'sma_cross_fast';
+}
+
+function itaWorkflow(state) {
+  var plan = state && state.trial_plan;
+  var candidates = Array.isArray(state && state.top_candidates) ? state.top_candidates : [];
+  var passing = candidates.some(function(candidate) { return candidate.passes_basic_gate; });
+  var intent = state && state.intent;
+  var paperBuilt = !!intent && (intent.status === 'paper-built' || intent.status === 'live-quote-built');
+  var quoteBuilt = !!intent && intent.status === 'live-quote-built';
+  return [
+    { label: 'Ticket', status: plan ? 'pass' : 'warn', detail: plan ? 'Trial plan ready' : 'Needs plan' },
+    { label: 'Backtest', status: passing ? 'pass' : candidates.length ? 'fail' : 'warn', detail: passing ? 'Passing strategy' : 'Run suite' },
+    { label: 'Paper', status: paperBuilt ? 'pass' : 'warn', detail: paperBuilt ? 'Fixture built' : 'Build fixture' },
+    { label: 'Quote', status: quoteBuilt ? 'pass' : plan && plan.safe_to_quote ? 'ready' : 'blocked', detail: quoteBuilt ? 'Live quote built' : plan && plan.safe_to_quote ? 'Ready' : 'Blocked' }
+  ];
+}
+
+function itaPhaseRail(state) {
+  return '<div class="ita-phases" aria-label="Trial workflow">'
+    + itaWorkflow(state).map(function(phase, index) {
+      return '<div class="ita-phase ' + itaStatusClass(phase.status) + '">'
+        + '<span>' + (index + 1) + '</span>'
+        + '<strong>' + itaEscape(phase.label) + '</strong>'
+        + '<small>' + itaEscape(phase.detail) + '</small>'
         + '</div>';
     }).join('')
     + '</div>';
+}
+
+function itaTicket(state, prefs) {
+  var modeOptions = ['paper', 'quote', 'execution'];
+  var fundingOptions = [
+    { id: 'managed', label: '1Click / Deposit API' },
+    { id: 'direct', label: 'Direct Verifier' }
+  ];
+
+  return '<section class="ita-ticket">'
+    + '<div class="ita-section-head"><div><div class="ita-section-title">Trial Ticket</div><p>Nominal NEAR sizing, route mode, and funding path.</p></div></div>'
+    + '<div class="ita-ticket-grid">'
+    + itaField('Pair', 'pair', prefs.pair, 'text', 'NEAR/USDC')
+    + itaField('NEAR account', 'nearAccount', prefs.nearAccount, 'text', 'small-test.near')
+    + itaField('Budget NEAR', 'nominalNear', prefs.nominalNear, 'number', '0.25', '0.01', '0.01')
+    + itaField('Trade cap NEAR', 'maxTradeNear', prefs.maxTradeNear, 'number', '0.05', '0.01', '0.01')
+    + itaField('NEAR USD', 'assumedNearUsd', prefs.assumedNearUsd, 'number', '3.00', '0.01', '0.01')
+    + itaField('Slippage bps', 'maxSlippageBps', prefs.maxSlippageBps, 'number', '50', '1', '1')
+    + '</div>'
+    + '<div class="ita-segments" role="group" aria-label="Mode">'
+    + modeOptions.map(function(mode) {
+      return '<button type="button" class="' + (prefs.mode === mode ? 'is-selected' : '') + '" data-pref-button="mode" data-value="' + itaEscape(mode) + '">' + itaEscape(mode) + '</button>';
+    }).join('')
+    + '</div>'
+    + '<div class="ita-segments" role="group" aria-label="Funding path">'
+    + fundingOptions.map(function(option) {
+      return '<button type="button" class="' + (prefs.fundingPath === option.id ? 'is-selected' : '') + '" data-pref-button="fundingPath" data-value="' + itaEscape(option.id) + '">' + itaEscape(option.label) + '</button>';
+    }).join('')
+    + '</div>'
+    + '</section>';
+}
+
+function itaField(label, name, value, type, placeholder, step, min) {
+  return '<label class="ita-field">'
+    + '<span>' + itaEscape(label) + '</span>'
+    + '<input data-pref="' + itaEscape(name) + '" type="' + itaEscape(type) + '" value="' + itaEscape(value == null ? '' : value) + '" placeholder="' + itaEscape(placeholder || '') + '"'
+    + (step ? ' step="' + itaEscape(step) + '"' : '')
+    + (min ? ' min="' + itaEscape(min) + '"' : '')
+    + '>'
+    + '</label>';
+}
+
+function itaStrategyLab(state, prefs) {
+  var strategies = itaAllStrategies(state);
+  if (!strategies.length) {
+    strategies = [{
+      id: prefs.selectedStrategyId || 'sma_cross_fast',
+      kind: 'sma-cross',
+      rank: null,
+      score: null,
+      returnPct: null,
+      alphaPct: null,
+      drawdownPct: null,
+      trades: null,
+      passes: null,
+      note: 'Default strategy menu loads after plan_near_intents_trial.'
+    }];
+  }
+
+  return '<section class="ita-strategy-lab">'
+    + '<div class="ita-section-head"><div><div class="ita-section-title">Strategy Lab</div><p>Select a strategy before paper or quote mode.</p></div>'
+    + '<button type="button" data-run="backtest">Run Backtest Suite</button></div>'
+    + '<div class="ita-strategy-list">'
+    + strategies.map(function(strategy) {
+      var selected = prefs.selectedStrategyId === strategy.id;
+      var gate = strategy.passes == null ? 'manual' : strategy.passes ? 'pass' : 'fail';
+      return '<button type="button" class="ita-strategy-row ' + (selected ? 'is-selected ' : '') + itaStatusClass(gate) + '" data-strategy="' + itaEscape(strategy.id) + '">'
+        + '<span class="ita-rank">' + (strategy.rank ? '#' + itaEscape(strategy.rank) : '-') + '</span>'
+        + '<span class="ita-strategy-name"><strong>' + itaEscape(strategy.id) + '</strong><small>' + itaEscape(strategy.kind) + '</small></span>'
+        + '<span><small>Score</small><strong>' + (strategy.score == null ? '-' : itaScore(strategy.score)) + '</strong></span>'
+        + '<span><small>Return</small><strong>' + (strategy.returnPct == null ? '-' : itaPct(strategy.returnPct)) + '</strong></span>'
+        + '<span><small>Alpha</small><strong>' + (strategy.alphaPct == null ? '-' : itaPct(strategy.alphaPct)) + '</strong></span>'
+        + '<span><small>DD</small><strong>' + (strategy.drawdownPct == null ? '-' : itaPct(-Math.abs(Number(strategy.drawdownPct || 0)))) + '</strong></span>'
+        + '<span class="ita-pill ' + itaStatusClass(gate) + '">' + itaEscape(gate) + '</span>'
+        + (strategy.note ? '<em>' + itaEscape(strategy.note) + '</em>' : '')
+        + '</button>';
+    }).join('')
+    + '</div>'
+    + '</section>';
 }
 
 function itaRiskGates(gates) {
@@ -125,9 +312,68 @@ function itaIntent(intent) {
     + '</div>';
 }
 
-function itaMoney(value) {
-  var n = Number(value || 0);
-  return '$' + n.toFixed(n < 1 ? 4 : 2);
+function itaTrialPlan(plan) {
+  if (!plan) {
+    return '<div class="ita-empty-line">No nominal NEAR trial plan recorded.</div>';
+  }
+  return '<div class="ita-trial">'
+    + '<div class="ita-trial-bar">'
+    + '<div><span>Budget</span><strong>' + itaEscape(plan.nominal_near || 0) + ' NEAR</strong></div>'
+    + '<div><span>Trade cap</span><strong>' + itaEscape(plan.max_trade_near || 0) + ' NEAR</strong></div>'
+    + '<div><span>USD est.</span><strong>' + itaMoney(plan.max_trade_usd) + '</strong></div>'
+    + '<div><span>Quote</span><strong>' + (plan.safe_to_quote ? 'Ready' : 'Blocked') + '</strong></div>'
+    + '</div>'
+    + (plan.next_action ? '<div class="ita-trial-next">' + itaEscape(plan.next_action) + '</div>' : '')
+    + '</div>';
+}
+
+function itaSetupPanel(state) {
+  var plan = state && state.trial_plan;
+  var steps = plan && Array.isArray(plan.setup_steps) ? plan.setup_steps : [];
+  var gates = []
+    .concat(Array.isArray(state && state.risk_gates) ? state.risk_gates : [])
+    .concat(plan && Array.isArray(plan.risk_gates) ? plan.risk_gates : []);
+  var warnings = plan && Array.isArray(plan.warnings) ? plan.warnings : [];
+
+  return '<section class="ita-setup">'
+    + '<div class="ita-section-head"><div><div class="ita-section-title">Funding And Gates</div><p>Wallet setup, quote blockers, and signing boundary.</p></div></div>'
+    + (steps.length ? '<div class="ita-steps">'
+      + steps.map(function(step) {
+        return '<div><span>' + itaEscape(step.order || '') + '</span><strong>' + itaEscape(step.name || 'Step') + '</strong><small>' + itaEscape(step.status || 'manual') + '</small><p>' + itaEscape(step.detail || '') + '</p></div>';
+      }).join('')
+      + '</div>' : '<div class="ita-empty-line">No setup steps recorded.</div>')
+    + '<div class="ita-section-title ita-tight-title">Risk Gates</div>'
+    + itaRiskGates(gates)
+    + (warnings.length ? '<div class="ita-warnings">'
+      + warnings.map(function(warning) { return '<span>' + itaEscape(warning) + '</span>'; }).join('')
+      + '</div>' : '')
+    + '</section>';
+}
+
+function itaRunPanel(state, prefs) {
+  var plan = state && state.trial_plan;
+  var quoteReady = !!(plan && plan.safe_to_quote);
+  var hasPlan = !!plan;
+  var intent = state && state.intent;
+  var hasPaperIntent = !!intent && (intent.status === 'paper-built' || intent.status === 'live-quote-built');
+
+  return '<section class="ita-run-panel">'
+    + '<div class="ita-section-head"><div><div class="ita-section-title">Paper And Quote</div><p>Build fixture first, then request an unsigned live quote.</p></div></div>'
+    + '<div class="ita-run-grid">'
+    + '<div><span>Selected</span><strong>' + itaEscape(prefs.selectedStrategyId || '-') + '</strong></div>'
+    + '<div><span>Mode</span><strong>' + itaEscape(prefs.mode) + '</strong></div>'
+    + '<div><span>Funding</span><strong>' + itaEscape(prefs.fundingPath === 'direct' ? 'Direct Verifier' : '1Click / Deposit API') + '</strong></div>'
+    + '<div><span>Live quote</span><strong>' + (quoteReady ? 'Ready' : 'Blocked') + '</strong></div>'
+    + '</div>'
+    + itaTrialPlan(plan)
+    + itaIntent(intent)
+    + '<div class="ita-run-actions">'
+    + '<button type="button" data-run="plan">Plan Trial</button>'
+    + '<button type="button" data-run="paper" ' + (hasPlan ? '' : 'disabled') + '>Build Paper Intent</button>'
+    + '<button type="button" data-run="quote" ' + (quoteReady && hasPaperIntent ? '' : 'disabled') + '>Request Live Quote</button>'
+    + '<button type="button" data-run="paid">Paid Research</button>'
+    + '</div>'
+    + '</section>';
 }
 
 function itaPaidResearch(plan) {
@@ -136,8 +382,6 @@ function itaPaidResearch(plan) {
   }
   var sources = Array.isArray(plan.payable_sources) ? plan.payable_sources : [];
   var rails = Array.isArray(plan.payment_rails) ? plan.payment_rails : [];
-  var routes = Array.isArray(plan.near_funding_routes) ? plan.near_funding_routes : [];
-  var gates = Array.isArray(plan.policy_gates) ? plan.policy_gates : [];
   var wallet = plan.wallet_policy || null;
   return '<div class="ita-paid">'
     + '<div class="ita-paid-bar">'
@@ -153,7 +397,7 @@ function itaPaidResearch(plan) {
     + (sources.length ? sources.map(function(source) {
       return '<div class="ita-source-line">'
         + '<div><strong>' + itaEscape(source.title || source.id) + '</strong>'
-        + '<span>' + itaEscape(source.author || 'Unknown author') + ' · ' + itaEscape(source.protocol || 'manual') + ' / ' + itaEscape(source.network || 'manual') + '</span></div>'
+        + '<span>' + itaEscape(source.author || 'Unknown author') + ' / ' + itaEscape(source.protocol || 'manual') + ' / ' + itaEscape(source.network || 'manual') + '</span></div>'
         + '<div class="ita-source-price">' + itaMoney(source.amount_usd) + '</div>'
         + (source.receipt_required ? '<span class="ita-pill is-warn">Receipt</span>' : '<span class="ita-pill is-pass">Free</span>')
         + '</div>';
@@ -164,127 +408,171 @@ function itaPaidResearch(plan) {
     + (rails.length ? rails.map(function(rail) {
       return '<div class="ita-rail-line"><span>' + itaEscape(rail.protocol || 'manual') + '</span><strong>' + itaMoney(rail.allocated_usd) + '</strong></div>';
     }).join('') : '<div class="ita-empty-line">No payment rails.</div>')
-    + (routes.length ? '<div class="ita-route-note">' + routes.map(function(route) {
-      return itaEscape(route.via || 'near-intents') + ' -> ' + itaEscape(route.target_protocol || 'rail') + ' ' + itaMoney(route.amount_usd);
-    }).join('<br>') + '</div>' : '')
-    + '</div>'
-    + '</div>'
     + (wallet ? '<div class="ita-wallet-line">'
-      + '<div><span>Agent Wallet</span><strong>' + itaEscape(wallet.provider || 'Agent wallet') + ' · ' + itaEscape(wallet.network || 'base') + '</strong></div>'
+      + '<div><span>Agent Wallet</span><strong>' + itaEscape(wallet.provider || 'Agent wallet') + ' / ' + itaEscape(wallet.network || 'base') + '</strong></div>'
       + '<div><span>Balance</span><strong>' + itaMoney(wallet.balance_usd) + '</strong></div>'
-      + '<div><span>Articles</span><strong>' + itaEscape(wallet.max_articles_at_default_price || 0) + '</strong></div>'
       + '<span class="ita-pill ' + (wallet.safe_to_autopay ? 'is-pass' : 'is-warn') + '">' + (wallet.safe_to_autopay ? 'Policy OK' : 'Approval') + '</span>'
-      + '</div>'
-      + (Array.isArray(wallet.audit_urls) && wallet.audit_urls.length ? '<div class="ita-audit-links">'
-        + wallet.audit_urls.map(function(url) {
-          return '<a href="' + itaEscape(url) + '" target="_blank" rel="noreferrer">' + itaEscape(String(url).replace(/^https?:\/\//, '').replace(/\/$/, '')) + '</a>';
-        }).join('')
-        + '</div>' : '') : '')
-    + (gates.length ? '<div class="ita-paid-gates">' + itaRiskGates(gates) + '</div>' : '')
+      + '</div>' : '')
+    + '</div>'
+    + '</div>'
     + '</div>';
 }
 
-function itaTrialPlan(plan) {
-  if (!plan) {
-    return '<div class="ita-empty-line">No nominal NEAR trial plan recorded.</div>';
-  }
-  var steps = Array.isArray(plan.setup_steps) ? plan.setup_steps : [];
-  var gates = Array.isArray(plan.risk_gates) ? plan.risk_gates : [];
-  return '<div class="ita-trial">'
-    + '<div class="ita-trial-bar">'
-    + '<div><span>Budget</span><strong>' + itaEscape(plan.nominal_near || 0) + ' NEAR</strong></div>'
-    + '<div><span>Trade cap</span><strong>' + itaEscape(plan.max_trade_near || 0) + ' NEAR</strong></div>'
-    + '<div><span>USD est.</span><strong>' + itaMoney(plan.max_trade_usd) + '</strong></div>'
-    + '<div><span>Quote</span><strong>' + (plan.safe_to_quote ? 'Ready' : 'Blocked') + '</strong></div>'
-    + '</div>'
-    + '<div class="ita-trial-meta">'
-    + '<span class="ita-pill ' + itaStatusClass(plan.safe_to_quote ? 'pass' : 'blocked') + '">' + itaEscape(plan.mode || 'paper') + '</span>'
-    + (plan.recommended_strategy_id ? '<strong>' + itaEscape(plan.recommended_strategy_id) + '</strong>' : '<strong>No strategy selected</strong>')
-    + '<span>' + itaEscape(plan.pair || 'NEAR/USDC') + '</span>'
-    + '</div>'
-    + (steps.length ? '<div class="ita-trial-steps">'
-      + steps.slice(0, 5).map(function(step) {
-        return '<div><span>' + itaEscape(step.order || '') + '</span><strong>' + itaEscape(step.name || 'Step') + '</strong><small>' + itaEscape(step.status || 'manual') + '</small></div>';
-      }).join('')
-      + '</div>' : '')
-    + (gates.length ? '<div class="ita-trial-gates">' + itaRiskGates(gates.slice(0, 5)) + '</div>' : '')
-    + (plan.next_action ? '<div class="ita-trial-next">' + itaEscape(plan.next_action) + '</div>' : '')
-    + '</div>';
+function itaPaidPanel(state) {
+  return '<section class="ita-paid-panel">'
+    + '<div class="ita-section-head"><div><div class="ita-section-title">Research Budget</div><p>Paid-source spend and receipt readiness.</p></div>'
+    + '<button type="button" data-run="paid">Prepare Paid Research</button></div>'
+    + itaPaidResearch(state && state.paid_research)
+    + '</section>';
+}
+
+function itaCleanPayload(payload) {
+  var out = {};
+  Object.keys(payload).forEach(function(key) {
+    var value = payload[key];
+    if (value === undefined || value === null || value === '') return;
+    out[key] = value;
+  });
+  return out;
+}
+
+function itaTrialPayload(state, prefs, mode) {
+  return itaCleanPayload({
+    action: 'plan_near_intents_trial',
+    near_account_id: prefs.nearAccount,
+    mode: mode || prefs.mode || 'paper',
+    pair: prefs.pair || 'NEAR/USDC',
+    nominal_near: itaNumber(prefs.nominalNear, 0.25),
+    max_trade_near: itaNumber(prefs.maxTradeNear, 0.05),
+    assumed_near_usd: itaNumber(prefs.assumedNearUsd, 3.0),
+    max_slippage_bps: Math.round(itaNumber(prefs.maxSlippageBps, 50)),
+    selected_strategy_id: prefs.selectedStrategyId
+  });
 }
 
 function itaWritePrompt(kind, state) {
   if (api && api.navigate) api.navigate('chat');
   var input = document.getElementById('chat-input');
   if (!input) return;
-  var pair = state && state.pair ? state.pair : 'the watched pair';
-  input.value = kind === 'trial'
-    ? 'For the Intents Trading Agent, prepare a nominal NEAR trial for ' + pair + ': use paper mode first, cap the trial wallet, show the strategy menu, run backtest_suite before any live quote, and keep all NEAR Intents payloads unsigned.'
-    : kind === 'paid'
-    ? 'For the Intents Trading Agent, build a paid research plan for ' + pair + ' first: discover MPP/x402/NEAR payable sources, enforce the source budget, require receipts before use, then run backtest_suite and risk gates before any unsigned NEAR intent.'
-    : kind === 'quote'
-    ? 'For the Intents Trading Agent, request a live NEAR Intents quote for ' + pair + ' only if all current risk gates still pass. Keep it unsigned.'
-    : 'For the Intents Trading Agent, run the paper NEAR Intents workflow for ' + pair + ': research, backtest_suite, risk gates, and unsigned intent preview.';
+
+  var prefs = itaTrialDefaults(state || {});
+  var pair = prefs.pair || 'NEAR/USDC';
+  var payloadMode = kind === 'quote' ? 'quote' : kind === 'paper' ? 'paper' : prefs.mode || 'paper';
+  var funding = prefs.fundingPath === 'direct'
+    ? 'direct Verifier funding: use wNEAR/nep141:wrap.near for direct deposits and keep signing in the wallet'
+    : 'managed 1Click or Deposit/Withdrawal Service funding: let the service route/wrap supported assets where applicable';
+  var trialPayload = itaTrialPayload(state, prefs, payloadMode);
+  var text;
+
+  if (kind === 'plan') {
+    text = 'Build and persist the nominal NEAR Intents trial frontend state.\n\nRun portfolio.plan_near_intents_trial with:\n```json\n'
+      + JSON.stringify(trialPayload, null, 2)
+      + '\n```\nFunding path selected in the UI: ' + funding
+      + '\n\nThen run portfolio.format_intents_widget with the trial_plan, latest backtest_suite if available, and write the result to projects/intents-trading-agent/widgets/state.json.';
+  } else if (kind === 'backtest') {
+    text = 'Run a fresh backtest suite for the Intents Trading Agent on ' + pair + '. Include the default strategy menu plus the selected strategy `'
+      + (prefs.selectedStrategyId || 'sma_cross_fast')
+      + '`, rank by risk-adjusted return, reject lookahead bias, then refresh projects/intents-trading-agent/widgets/state.json with portfolio.format_intents_widget.';
+  } else if (kind === 'paper') {
+    text = 'Build the paper NEAR Intents run for ' + pair + '. Use the latest near-intents-trial-plan/1, selected strategy `'
+      + (prefs.selectedStrategyId || 'sma_cross_fast')
+      + '`, and solver=fixture. Keep the output unsigned, persist the intent preview, and refresh the widget state.';
+  } else if (kind === 'quote') {
+    text = 'Request an unsigned live NEAR Intents quote for ' + pair + ' only if all current trial and strategy gates still pass.\n\nFirst rerun portfolio.plan_near_intents_trial in quote mode with:\n```json\n'
+      + JSON.stringify(trialPayload, null, 2)
+      + '\n```\nThen build_intent with solver=near-intents. Do not sign, submit, or increase the trade size automatically. Funding path: ' + funding + '. Refresh the widget state with the unsigned quote preview.';
+  } else {
+    text = 'Prepare paid research for ' + pair + ' before any live quote. Use free DripStack catalog/title routes first, require explicit user confirmation before paid bodies, require payment receipts, enforce a small spend cap, then refresh the Intents Trading Agent widget.';
+  }
+
+  input.value = text;
   input.focus();
+  input.dispatchEvent(new Event('input', { bubbles: true }));
   if (typeof autoGrow === 'function') autoGrow(input);
 }
 
+function itaWire(state) {
+  root.querySelectorAll('[data-pref]').forEach(function(input) {
+    input.addEventListener('input', function() {
+      var name = input.getAttribute('data-pref');
+      var value = input.type === 'number' && input.value !== '' ? Number(input.value) : input.value;
+      itaPersistPref(name, value);
+    });
+  });
+
+  root.querySelectorAll('[data-pref-button]').forEach(function(button) {
+    button.addEventListener('click', function() {
+      itaPersistPref(button.getAttribute('data-pref-button'), button.getAttribute('data-value'));
+      itaRender(state);
+    });
+  });
+
+  root.querySelectorAll('[data-strategy]').forEach(function(button) {
+    button.addEventListener('click', function() {
+      itaPersistPref('selectedStrategyId', button.getAttribute('data-strategy'));
+      itaRender(state);
+    });
+  });
+
+  root.querySelectorAll('[data-run]').forEach(function(button) {
+    button.addEventListener('click', function() {
+      if (button.disabled) return;
+      itaWritePrompt(button.getAttribute('data-run'), state);
+    });
+  });
+}
+
 function itaRender(state) {
-  var statusClass = itaStatusClass(state.stance);
+  itaLastState = state;
+  var prefs = itaTrialDefaults(state || {});
+  var statusClass = itaStatusClass(state && state.stance);
+  var generatedAt = state && state.generated_at ? state.generated_at : '-';
+  var sourceCount = state && state.paid_research ? state.paid_research.selected_count : state && state.source_count || 0;
+
   root.innerHTML = '<div class="ita-head">'
     + '<div>'
     + '<div class="ita-kicker">NEAR Intents Trading Agent</div>'
-    + '<h3>' + itaEscape(state.pair || 'Watchlist') + '</h3>'
+    + '<h3>' + itaEscape(prefs.pair || state.pair || 'Watchlist') + '</h3>'
     + '</div>'
     + '<div class="ita-head-actions">'
-    + '<span class="ita-pill ' + statusClass + '">' + itaEscape(state.stance || 'watch') + '</span>'
-    + '<button type="button" data-action="ita-refresh">Refresh</button>'
+    + '<span class="ita-pill ' + statusClass + '">' + itaEscape(state && state.stance || 'watch') + '</span>'
+    + '<button type="button" data-action="refresh">Refresh</button>'
     + '</div>'
     + '</div>'
     + '<div class="ita-summary">'
-    + '<div><span>Mode</span><strong>' + itaEscape(state.mode || 'paper') + '</strong></div>'
-    + '<div><span>Confidence</span><strong>' + (state.confidence == null ? '-' : Math.round(Number(state.confidence) * 100) + '%') + '</strong></div>'
-    + '<div><span>Sources</span><strong>' + itaEscape(state.paid_research ? state.paid_research.selected_count : state.source_count || 0) + '</strong></div>'
-    + '<div><span>Updated</span><strong>' + itaEscape(state.generated_at || '-') + '</strong></div>'
+    + '<div><span>Mode</span><strong>' + itaEscape(prefs.mode) + '</strong></div>'
+    + '<div><span>Confidence</span><strong>' + (state && state.confidence == null ? '-' : Math.round(Number(state && state.confidence || 0) * 100) + '%') + '</strong></div>'
+    + '<div><span>Sources</span><strong>' + itaEscape(sourceCount) + '</strong></div>'
+    + '<div><span>Updated</span><strong>' + itaEscape(generatedAt) + '</strong></div>'
     + '</div>'
-    + '<div class="ita-body">'
-    + '<section><div class="ita-section-title">Nominal NEAR Trial</div>' + itaTrialPlan(state.trial_plan) + '</section>'
-    + '<section><div class="ita-section-title">Paid Research</div>' + itaPaidResearch(state.paid_research) + '</section>'
-    + '<section><div class="ita-section-title">Strategy Suite</div>' + itaCandidateRows(state.top_candidates) + '</section>'
-    + '<section><div class="ita-section-title">Risk Gates</div>' + itaRiskGates(state.risk_gates) + '</section>'
-    + '<section><div class="ita-section-title">Unsigned Intent</div>' + itaIntent(state.intent) + '</section>'
+    + itaPhaseRail(state || {})
+    + '<div class="ita-workspace">'
+    + '<div class="ita-primary">'
+    + itaTicket(state || {}, prefs)
+    + itaStrategyLab(state || {}, prefs)
+    + itaRunPanel(state || {}, prefs)
     + '</div>'
-    + (state.next_action ? '<div class="ita-next">' + itaEscape(state.next_action) + '</div>' : '')
-    + '<div class="ita-actions">'
-    + '<button type="button" data-action="ita-trial">Prepare NEAR Trial</button>'
-    + '<button type="button" data-action="ita-paid">Prepare Paid Research</button>'
-    + '<button type="button" data-action="ita-paper">Prepare Paper Run</button>'
-    + '<button type="button" data-action="ita-quote">Prepare Live Quote Request</button>'
-    + '</div>';
+    + '<div class="ita-secondary">'
+    + itaSetupPanel(state || {})
+    + itaPaidPanel(state || {})
+    + '</div>'
+    + '</div>'
+    + (state && state.next_action ? '<div class="ita-next">' + itaEscape(state.next_action) + '</div>' : '');
 
-  root.querySelector('[data-action="ita-refresh"]').addEventListener('click', itaLoad);
-  root.querySelector('[data-action="ita-trial"]').addEventListener('click', function() {
-    itaWritePrompt('trial', state);
-  });
-  root.querySelector('[data-action="ita-paid"]').addEventListener('click', function() {
-    itaWritePrompt('paid', state);
-  });
-  root.querySelector('[data-action="ita-paper"]').addEventListener('click', function() {
-    itaWritePrompt('paper', state);
-  });
-  root.querySelector('[data-action="ita-quote"]').addEventListener('click', function() {
-    itaWritePrompt('quote', state);
-  });
+  var refresh = root.querySelector('[data-action="refresh"]');
+  if (refresh) refresh.addEventListener('click', itaLoad);
+  itaWire(state || {});
 }
 
 function itaRenderEmpty() {
   root.innerHTML = '<div class="ita-empty">'
     + '<div class="ita-kicker">NEAR Intents Trading Agent</div>'
     + '<h3>No console state yet</h3>'
-    + '<p>Run the paper workflow to produce ranked strategies, risk gates, and an unsigned intent preview.</p>'
-    + '<button type="button" data-action="ita-paper-empty">Prepare Paper Run</button>'
+    + '<p>Start with a nominal NEAR trial ticket and fixture-only paper run.</p>'
+    + '<button type="button" data-run="plan">Plan Trial</button>'
     + '</div>';
-  root.querySelector('[data-action="ita-paper-empty"]').addEventListener('click', function() {
-    itaWritePrompt('paper', { pair: 'the configured watchlist' });
+  root.querySelector('[data-run="plan"]').addEventListener('click', function() {
+    itaWritePrompt('plan', { pair: 'NEAR/USDC', mode: 'paper' });
   });
 }
 

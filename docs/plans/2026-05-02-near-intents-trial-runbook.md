@@ -68,6 +68,11 @@ Useful docs:
    `solver="near-intents"` and remains unsigned.
 7. Write widget state with `format_intents_widget`, including
    `trial_plan`.
+8. In the Projects view, use the NEAR Intents Console ticket controls to
+   adjust nominal budget, trade cap, funding path, and selected
+   strategy. Its action buttons write the exact next IronClaw prompt for
+   trial planning, backtesting, fixture intent construction, paid
+   research, or unsigned live quote requests.
 
 ## What To Watch
 
