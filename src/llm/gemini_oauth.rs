@@ -162,6 +162,43 @@ fn supports_modern_features(model: &str) -> bool {
     model.contains("gemini-3")
 }
 
+/// Extract a `functionCall` part from a Cloud Code SSE candidate part,
+/// preserving the sibling `thoughtSignature` when present.
+///
+/// Returns `None` when the part does not contain a `functionCall` key.
+///
+/// **Why this exists:** Cloud Code SSE delivers `thoughtSignature` as a
+/// sibling key in the same part object as `functionCall`:
+///
+/// ```json
+/// {
+///   "functionCall": {"name": "list_dir", "args": {}},
+///   "thoughtSignature": "<base64 token from gemini>"
+/// }
+/// ```
+///
+/// The original SSE handler at the call site copied only `functionCall`,
+/// silently discarding `thoughtSignature`. The prior fixes #1565 + #1752
+/// added a roundtrip plus synthetic fallback at the request-builder layer,
+/// but the upstream SSE parser still dropped the real signature here, so
+/// the synthetic sentinel `"skip_thought_signature_validator"` got
+/// installed on every functionCall part. Gemini 3.x's INVALID_ARGUMENT
+/// validator then rejected the request with
+/// `Function call is missing a thought_signature in functionCall parts.`
+/// (issue #3214).
+///
+/// This helper preserves the real signature when present; the synthetic-
+/// fallback path in `ensure_thought_signatures()` remains for the
+/// no-signature case.
+fn extract_function_call_part(part: &serde_json::Value) -> Option<serde_json::Value> {
+    let fc = part.get("functionCall")?;
+    let mut part_obj = serde_json::json!({ "functionCall": fc });
+    if let Some(sig) = part.get("thoughtSignature") {
+        part_obj["thoughtSignature"] = sig.clone();
+    }
+    Some(part_obj)
+}
+
 /// Invalid stream error types mirroring the Gemini CLI.
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -1438,10 +1475,8 @@ impl GeminiOauthProvider {
                                         combined_text.push_str(text);
                                     }
                                 }
-                                if let Some(fc) = part.get("functionCall") {
-                                    tool_calls_parts.push(serde_json::json!({
-                                        "functionCall": fc
-                                    }));
+                                if let Some(part_obj) = extract_function_call_part(part) {
+                                    tool_calls_parts.push(part_obj);
                                 }
                             }
                         }
@@ -2664,6 +2699,75 @@ mod tests {
         assert_eq!(curated.len(), 2, "Invalid model turn should be dropped");
         assert_eq!(curated[0]["parts"][0]["text"], "hello");
         assert_eq!(curated[1]["parts"][0]["text"], "again");
+    }
+
+    /// Issue #3214 regression: when the Cloud Code SSE stream delivers a
+    /// `functionCall` with a sibling `thoughtSignature`, the SSE handler
+    /// must preserve the signature on the part object — otherwise the
+    /// roundtrip + synthetic fallback installed by #1565 + #1752 has
+    /// nothing real to capture, and the synthetic sentinel ends up on
+    /// every part. Gemini 3.x then 400s with `INVALID_ARGUMENT —
+    /// Function call is missing a thought_signature in functionCall parts.`
+    #[test]
+    fn test_extract_function_call_part_preserves_thought_signature() {
+        let part = serde_json::json!({
+            "functionCall": {
+                "name": "list_dir",
+                "args": { "path": "." }
+            },
+            "thoughtSignature": "REAL-SIG-FROM-GEMINI-abc123"
+        });
+
+        let extracted = super::extract_function_call_part(&part)
+            .expect("functionCall part must be extracted");
+
+        assert_eq!(
+            extracted.get("functionCall").and_then(|v| v.get("name")).and_then(|v| v.as_str()),
+            Some("list_dir"),
+            "functionCall payload must round-trip"
+        );
+        assert_eq!(
+            extracted.get("thoughtSignature").and_then(|v| v.as_str()),
+            Some("REAL-SIG-FROM-GEMINI-abc123"),
+            "thoughtSignature must be preserved on the part — this is the #3214 fix"
+        );
+    }
+
+    /// No regression for the no-signature case: when the SSE part has
+    /// only `functionCall`, the extractor returns the part unchanged
+    /// (no synthetic signature here — that gets injected later by
+    /// `ensure_thought_signatures` on the request side).
+    #[test]
+    fn test_extract_function_call_part_omits_signature_when_absent() {
+        let part = serde_json::json!({
+            "functionCall": {
+                "name": "list_dir",
+                "args": {}
+            }
+        });
+
+        let extracted = super::extract_function_call_part(&part)
+            .expect("functionCall part must be extracted");
+
+        assert!(
+            extracted.get("functionCall").is_some(),
+            "functionCall must round-trip"
+        );
+        assert!(
+            extracted.get("thoughtSignature").is_none(),
+            "no synthetic signature here — the request-side fallback handles that"
+        );
+    }
+
+    /// Defensive: a part without `functionCall` returns None so the
+    /// caller can skip cleanly without injecting an empty record.
+    #[test]
+    fn test_extract_function_call_part_returns_none_for_text_only_part() {
+        let part = serde_json::json!({ "text": "hello" });
+        assert!(
+            super::extract_function_call_part(&part).is_none(),
+            "text-only part must not be extracted as a functionCall"
+        );
     }
 
     #[test]
