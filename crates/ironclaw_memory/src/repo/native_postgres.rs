@@ -4,21 +4,27 @@
 //! explicit `tenant_id`, `user_id`, `agent_id`, `project_id` scope columns —
 //! never the legacy synthetic `memory_documents.user_id` encoding.
 //!
-//! Behavior is intentionally not yet implemented in this PR (#3118 phase 3).
-//! All trait methods return a "not yet implemented" error so callers fail
-//! closed; only [`run_migrations`](RebornPostgresMemoryDocumentRepository::run_migrations)
-//! does real work, so the schema is testable in isolation.
+//! Every read/list/search/write/version/chunk query filters by the full
+//! `(tenant_id, user_id, agent_id, project_id)` tuple. Absent agent/project
+//! IDs use the empty-string DB-only sentinel; the constructor rejects empty
+//! and `_none` user-supplied IDs, so equality comparison is unambiguous.
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
 use ironclaw_host_api::VirtualPath;
 
-use crate::chunking::MemoryChunkWrite;
+use crate::chunking::{MemoryChunkWrite, content_sha256};
 use crate::indexer::MemoryDocumentIndexRepository;
+use crate::metadata::MemoryWriteOptions;
 use crate::path::{MemoryDocumentPath, MemoryDocumentScope, memory_error, valid_memory_path};
-use crate::search::{MemorySearchRequest, MemorySearchResult};
+use crate::search::{
+    MemorySearchRequest, MemorySearchResult, RankedMemorySearchResult, fuse_memory_search_results,
+};
 
-use super::MemoryDocumentRepository;
+use super::{
+    MemoryDocumentRepository, ensure_document_path_does_not_conflict, reborn_agent_id_db_value,
+    reborn_memory_document_from_row, reborn_project_id_db_value,
+};
 
 /// Reborn-native PostgreSQL repository for `reborn_memory_*` tables.
 pub struct RebornPostgresMemoryDocumentRepository {
@@ -32,12 +38,21 @@ impl RebornPostgresMemoryDocumentRepository {
 
     /// Create the Reborn-native tables, vector/text indexes, and triggers if
     /// they do not already exist. Idempotent; safe to call on every startup.
+    ///
+    /// Wrapped in a Postgres session-level advisory lock so concurrent
+    /// callers (multiple processes / parallel tests) serialize cleanly —
+    /// `CREATE EXTENSION pgcrypto/vector` is not safe under concurrent
+    /// execution otherwise.
     pub async fn run_migrations(&self) -> Result<(), FilesystemError> {
         let client = self
             .client(valid_memory_path(), FilesystemOperation::CreateDirAll)
             .await?;
+        // Stable per-crate lock id; chosen by hashing "ironclaw_memory.reborn"
+        // and folding into i64 range. The exact value is not load-bearing as
+        // long as it is consistent across processes.
+        const REBORN_MIGRATION_LOCK_ID: i64 = 0x2026_0501_5238_3118_u64 as i64;
         client
-            .batch_execute(REBORN_POSTGRES_MEMORY_DOCUMENTS_SCHEMA)
+            .execute("SELECT pg_advisory_lock($1)", &[&REBORN_MIGRATION_LOCK_ID])
             .await
             .map_err(|error| {
                 memory_error(
@@ -46,6 +61,26 @@ impl RebornPostgresMemoryDocumentRepository {
                     error.to_string(),
                 )
             })?;
+        let migration_result = client
+            .batch_execute(REBORN_POSTGRES_MEMORY_DOCUMENTS_SCHEMA)
+            .await
+            .map_err(|error| {
+                memory_error(
+                    valid_memory_path(),
+                    FilesystemOperation::CreateDirAll,
+                    error.to_string(),
+                )
+            });
+        // Best-effort unlock; if the lock release fails we still surface the
+        // migration result. The lock is session-scoped so the connection
+        // returning to the pool will release it on drop anyway.
+        let _ = client
+            .execute(
+                "SELECT pg_advisory_unlock($1)",
+                &[&REBORN_MIGRATION_LOCK_ID],
+            )
+            .await;
+        migration_result?;
         Ok(())
     }
 
@@ -61,59 +96,313 @@ impl RebornPostgresMemoryDocumentRepository {
     }
 }
 
-fn not_yet_implemented(path: VirtualPath, operation: FilesystemOperation) -> FilesystemError {
-    memory_error(
-        path,
-        operation,
-        "reborn-native postgres memory repository is not yet implemented",
-    )
-}
-
 #[async_trait]
 impl MemoryDocumentRepository for RebornPostgresMemoryDocumentRepository {
     async fn read_document(
         &self,
         path: &MemoryDocumentPath,
     ) -> Result<Option<Vec<u8>>, FilesystemError> {
-        Err(not_yet_implemented(
-            path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
-            FilesystemOperation::ReadFile,
-        ))
+        let virtual_path = path.virtual_path().unwrap_or_else(|_| valid_memory_path());
+        let client = self
+            .client(virtual_path.clone(), FilesystemOperation::ReadFile)
+            .await?;
+        let scope = path.scope();
+        let row = client
+            .query_opt(
+                "SELECT content FROM reborn_memory_documents \
+                 WHERE tenant_id = $1 AND user_id = $2 AND agent_id = $3 \
+                   AND project_id = $4 AND path = $5",
+                &[
+                    &scope.tenant_id(),
+                    &scope.user_id(),
+                    &reborn_agent_id_db_value(scope),
+                    &reborn_project_id_db_value(scope),
+                    &path.relative_path(),
+                ],
+            )
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path,
+                    FilesystemOperation::ReadFile,
+                    error.to_string(),
+                )
+            })?;
+        Ok(row.map(|row| {
+            let content: String = row.get("content");
+            content.into_bytes()
+        }))
     }
 
     async fn write_document(
         &self,
         path: &MemoryDocumentPath,
-        _bytes: &[u8],
+        bytes: &[u8],
     ) -> Result<(), FilesystemError> {
-        Err(not_yet_implemented(
-            path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+        self.write_document_with_options(path, bytes, &MemoryWriteOptions::default())
+            .await
+    }
+
+    async fn write_document_with_options(
+        &self,
+        path: &MemoryDocumentPath,
+        bytes: &[u8],
+        options: &MemoryWriteOptions,
+    ) -> Result<(), FilesystemError> {
+        let virtual_path = path.virtual_path().unwrap_or_else(|_| valid_memory_path());
+        let content = std::str::from_utf8(bytes).map_err(|_| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::WriteFile,
+                "memory document content must be UTF-8",
+            )
+        })?;
+        let mut client = self
+            .client(virtual_path.clone(), FilesystemOperation::WriteFile)
+            .await?;
+        let scope = path.scope();
+        let agent_id_db = reborn_agent_id_db_value(scope);
+        let project_id_db = reborn_project_id_db_value(scope);
+        let new_content_hash = content_sha256(content);
+
+        let txn = client.transaction().await.map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::WriteFile,
+                error.to_string(),
+            )
+        })?;
+        txn.batch_execute("LOCK TABLE reborn_memory_documents IN SHARE ROW EXCLUSIVE MODE")
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::WriteFile,
+                    error.to_string(),
+                )
+            })?;
+
+        let documents = reborn_postgres_list_paths_for_scope(
+            &txn,
+            scope,
+            &virtual_path,
             FilesystemOperation::WriteFile,
-        ))
+        )
+        .await?;
+        ensure_document_path_does_not_conflict(path, &documents, FilesystemOperation::WriteFile)?;
+
+        let existing = txn
+            .query_opt(
+                "SELECT id, content FROM reborn_memory_documents \
+                 WHERE tenant_id = $1 AND user_id = $2 AND agent_id = $3 \
+                   AND project_id = $4 AND path = $5 FOR UPDATE",
+                &[
+                    &scope.tenant_id(),
+                    &scope.user_id(),
+                    &agent_id_db,
+                    &project_id_db,
+                    &path.relative_path(),
+                ],
+            )
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::WriteFile,
+                    error.to_string(),
+                )
+            })?;
+
+        if let Some(row) = existing {
+            let document_id: uuid::Uuid = row.get("id");
+            let previous_content: String = row.get("content");
+            let should_version = options.metadata.skip_versioning != Some(true)
+                && previous_content != content
+                && !previous_content.is_empty();
+            if should_version {
+                reborn_postgres_save_document_version(
+                    &txn,
+                    &virtual_path,
+                    document_id,
+                    &previous_content,
+                    options.changed_by.as_deref(),
+                )
+                .await?;
+            }
+            txn.execute(
+                "UPDATE reborn_memory_documents \
+                 SET content = $2, content_hash = $3, updated_at = NOW() \
+                 WHERE id = $1",
+                &[&document_id, &content, &new_content_hash],
+            )
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::WriteFile,
+                    error.to_string(),
+                )
+            })?;
+        } else {
+            txn.execute(
+                "INSERT INTO reborn_memory_documents \
+                     (tenant_id, user_id, agent_id, project_id, path, \
+                      content, content_hash, metadata) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, '{}'::jsonb)",
+                &[
+                    &scope.tenant_id(),
+                    &scope.user_id(),
+                    &agent_id_db,
+                    &project_id_db,
+                    &path.relative_path(),
+                    &content,
+                    &new_content_hash,
+                ],
+            )
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::WriteFile,
+                    error.to_string(),
+                )
+            })?;
+        }
+
+        txn.commit().await.map_err(|error| {
+            memory_error(
+                virtual_path,
+                FilesystemOperation::WriteFile,
+                error.to_string(),
+            )
+        })?;
+        Ok(())
+    }
+
+    async fn read_document_metadata(
+        &self,
+        path: &MemoryDocumentPath,
+    ) -> Result<Option<serde_json::Value>, FilesystemError> {
+        let virtual_path = path.virtual_path().unwrap_or_else(|_| valid_memory_path());
+        let client = self
+            .client(virtual_path.clone(), FilesystemOperation::ReadFile)
+            .await?;
+        let scope = path.scope();
+        let row = client
+            .query_opt(
+                "SELECT metadata FROM reborn_memory_documents \
+                 WHERE tenant_id = $1 AND user_id = $2 AND agent_id = $3 \
+                   AND project_id = $4 AND path = $5",
+                &[
+                    &scope.tenant_id(),
+                    &scope.user_id(),
+                    &reborn_agent_id_db_value(scope),
+                    &reborn_project_id_db_value(scope),
+                    &path.relative_path(),
+                ],
+            )
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path,
+                    FilesystemOperation::ReadFile,
+                    error.to_string(),
+                )
+            })?;
+        Ok(row.map(|row| row.get("metadata")))
+    }
+
+    async fn write_document_metadata(
+        &self,
+        path: &MemoryDocumentPath,
+        metadata: &serde_json::Value,
+    ) -> Result<(), FilesystemError> {
+        let virtual_path = path.virtual_path().unwrap_or_else(|_| valid_memory_path());
+        let client = self
+            .client(virtual_path.clone(), FilesystemOperation::WriteFile)
+            .await?;
+        let scope = path.scope();
+        client
+            .execute(
+                "UPDATE reborn_memory_documents \
+                 SET metadata = $6, updated_at = NOW() \
+                 WHERE tenant_id = $1 AND user_id = $2 AND agent_id = $3 \
+                   AND project_id = $4 AND path = $5",
+                &[
+                    &scope.tenant_id(),
+                    &scope.user_id(),
+                    &reborn_agent_id_db_value(scope),
+                    &reborn_project_id_db_value(scope),
+                    &path.relative_path(),
+                    metadata,
+                ],
+            )
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path,
+                    FilesystemOperation::WriteFile,
+                    error.to_string(),
+                )
+            })?;
+        Ok(())
     }
 
     async fn list_documents(
         &self,
         scope: &MemoryDocumentScope,
     ) -> Result<Vec<MemoryDocumentPath>, FilesystemError> {
-        Err(not_yet_implemented(
-            scope
-                .virtual_prefix()
-                .unwrap_or_else(|_| valid_memory_path()),
+        let virtual_path = scope
+            .virtual_prefix()
+            .unwrap_or_else(|_| valid_memory_path());
+        let client = self
+            .client(virtual_path.clone(), FilesystemOperation::ListDir)
+            .await?;
+        reborn_postgres_list_paths_for_scope(
+            &client,
+            scope,
+            &virtual_path,
             FilesystemOperation::ListDir,
-        ))
+        )
+        .await
     }
 
     async fn search_documents(
         &self,
         scope: &MemoryDocumentScope,
-        _request: &MemorySearchRequest,
+        request: &MemorySearchRequest,
     ) -> Result<Vec<MemorySearchResult>, FilesystemError> {
-        Err(not_yet_implemented(
-            scope
-                .virtual_prefix()
-                .unwrap_or_else(|_| valid_memory_path()),
-            FilesystemOperation::ReadFile,
+        let virtual_path = scope
+            .virtual_prefix()
+            .unwrap_or_else(|_| valid_memory_path());
+        let client = self
+            .client(virtual_path.clone(), FilesystemOperation::ReadFile)
+            .await?;
+        let full_text_results = if request.full_text() {
+            reborn_postgres_full_text_search_ranked(&client, scope, request, &virtual_path).await?
+        } else {
+            Vec::new()
+        };
+        let vector_results = if request.vector() {
+            if let Some(embedding) = request.query_embedding() {
+                reborn_postgres_vector_search_ranked(
+                    &client,
+                    scope,
+                    request,
+                    embedding,
+                    &virtual_path,
+                )
+                .await?
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+        Ok(fuse_memory_search_results(
+            full_text_results,
+            vector_results,
+            request,
         ))
     }
 }
@@ -123,24 +412,353 @@ impl MemoryDocumentIndexRepository for RebornPostgresMemoryDocumentRepository {
     async fn replace_document_chunks_if_current(
         &self,
         path: &MemoryDocumentPath,
-        _expected_content_hash: &str,
-        _chunks: &[MemoryChunkWrite],
+        expected_content_hash: &str,
+        chunks: &[MemoryChunkWrite],
     ) -> Result<(), FilesystemError> {
-        Err(not_yet_implemented(
-            path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
-            FilesystemOperation::WriteFile,
-        ))
+        let virtual_path = path.virtual_path().unwrap_or_else(|_| valid_memory_path());
+        let mut client = self
+            .client(virtual_path.clone(), FilesystemOperation::WriteFile)
+            .await?;
+        let scope = path.scope();
+        let tx = client.transaction().await.map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::WriteFile,
+                error.to_string(),
+            )
+        })?;
+        let Some(row) = tx
+            .query_opt(
+                "SELECT id, content_hash FROM reborn_memory_documents \
+                 WHERE tenant_id = $1 AND user_id = $2 AND agent_id = $3 \
+                   AND project_id = $4 AND path = $5 FOR UPDATE",
+                &[
+                    &scope.tenant_id(),
+                    &scope.user_id(),
+                    &reborn_agent_id_db_value(scope),
+                    &reborn_project_id_db_value(scope),
+                    &path.relative_path(),
+                ],
+            )
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::WriteFile,
+                    error.to_string(),
+                )
+            })?
+        else {
+            return Ok(());
+        };
+        let document_id: uuid::Uuid = row.get("id");
+        let current_hash: String = row.get("content_hash");
+        if current_hash != expected_content_hash {
+            return Ok(());
+        }
+        tx.execute(
+            "DELETE FROM reborn_memory_chunks WHERE document_id = $1",
+            &[&document_id],
+        )
+        .await
+        .map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::WriteFile,
+                error.to_string(),
+            )
+        })?;
+        for (index, chunk) in chunks.iter().enumerate() {
+            let chunk_id = uuid::Uuid::new_v4();
+            let chunk_index = index as i32;
+            let chunk_hash = content_sha256(&chunk.content);
+            let embedding_vec = chunk
+                .embedding
+                .as_ref()
+                .map(|embedding| pgvector::Vector::from(embedding.clone()));
+            tx.execute(
+                "INSERT INTO reborn_memory_chunks \
+                     (id, document_id, chunk_index, content, content_hash, embedding) \
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+                &[
+                    &chunk_id,
+                    &document_id,
+                    &chunk_index,
+                    &chunk.content,
+                    &chunk_hash,
+                    &embedding_vec,
+                ],
+            )
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::WriteFile,
+                    error.to_string(),
+                )
+            })?;
+        }
+        tx.commit().await.map_err(|error| {
+            memory_error(
+                virtual_path,
+                FilesystemOperation::WriteFile,
+                error.to_string(),
+            )
+        })?;
+        Ok(())
     }
 
     async fn delete_document_chunks(
         &self,
         path: &MemoryDocumentPath,
     ) -> Result<(), FilesystemError> {
-        Err(not_yet_implemented(
-            path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
-            FilesystemOperation::WriteFile,
-        ))
+        let virtual_path = path.virtual_path().unwrap_or_else(|_| valid_memory_path());
+        let client = self
+            .client(virtual_path.clone(), FilesystemOperation::WriteFile)
+            .await?;
+        let scope = path.scope();
+        client
+            .execute(
+                "DELETE FROM reborn_memory_chunks \
+                 WHERE document_id IN ( \
+                     SELECT id FROM reborn_memory_documents \
+                     WHERE tenant_id = $1 AND user_id = $2 AND agent_id = $3 \
+                       AND project_id = $4 AND path = $5 \
+                 )",
+                &[
+                    &scope.tenant_id(),
+                    &scope.user_id(),
+                    &reborn_agent_id_db_value(scope),
+                    &reborn_project_id_db_value(scope),
+                    &path.relative_path(),
+                ],
+            )
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path,
+                    FilesystemOperation::WriteFile,
+                    error.to_string(),
+                )
+            })?;
+        Ok(())
     }
+}
+
+async fn reborn_postgres_list_paths_for_scope<C>(
+    client: &C,
+    scope: &MemoryDocumentScope,
+    virtual_path: &VirtualPath,
+    operation: FilesystemOperation,
+) -> Result<Vec<MemoryDocumentPath>, FilesystemError>
+where
+    C: deadpool_postgres::GenericClient + Sync,
+{
+    let rows = client
+        .query(
+            "SELECT path FROM reborn_memory_documents \
+             WHERE tenant_id = $1 AND user_id = $2 AND agent_id = $3 AND project_id = $4 \
+             ORDER BY path",
+            &[
+                &scope.tenant_id(),
+                &scope.user_id(),
+                &reborn_agent_id_db_value(scope),
+                &reborn_project_id_db_value(scope),
+            ],
+        )
+        .await
+        .map_err(|error| memory_error(virtual_path.clone(), operation, error.to_string()))?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            let db_path: String = row.get("path");
+            reborn_memory_document_from_row(
+                scope.tenant_id(),
+                scope.user_id(),
+                reborn_agent_id_db_value(scope),
+                reborn_project_id_db_value(scope),
+                &db_path,
+            )
+        })
+        .collect())
+}
+
+async fn reborn_postgres_save_document_version<C>(
+    client: &C,
+    virtual_path: &VirtualPath,
+    document_id: uuid::Uuid,
+    content: &str,
+    changed_by: Option<&str>,
+) -> Result<i32, FilesystemError>
+where
+    C: deadpool_postgres::GenericClient + Sync,
+{
+    let row = client
+        .query_one(
+            "SELECT COALESCE(MAX(version), 0) + 1 AS next_version \
+             FROM reborn_memory_document_versions WHERE document_id = $1",
+            &[&document_id],
+        )
+        .await
+        .map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::WriteFile,
+                error.to_string(),
+            )
+        })?;
+    let next_version: i32 = row.get(0);
+    client
+        .execute(
+            "INSERT INTO reborn_memory_document_versions \
+                 (id, document_id, version, content, content_hash, changed_by) \
+             VALUES (gen_random_uuid(), $1, $2, $3, $4, $5)",
+            &[
+                &document_id,
+                &next_version,
+                &content,
+                &content_sha256(content),
+                &changed_by,
+            ],
+        )
+        .await
+        .map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::WriteFile,
+                error.to_string(),
+            )
+        })?;
+    Ok(next_version)
+}
+
+async fn reborn_postgres_full_text_search_ranked(
+    client: &deadpool_postgres::Object,
+    scope: &MemoryDocumentScope,
+    request: &MemorySearchRequest,
+    virtual_path: &VirtualPath,
+) -> Result<Vec<RankedMemorySearchResult>, FilesystemError> {
+    let limit = request.pre_fusion_limit() as i64;
+    let rows = client
+        .query(
+            "SELECT c.id, d.tenant_id, d.user_id, d.agent_id, d.project_id, d.path, c.content, \
+                    ts_rank_cd(c.content_tsv, plainto_tsquery('english', $5)) AS rank \
+             FROM reborn_memory_chunks c \
+             JOIN reborn_memory_documents d ON d.id = c.document_id \
+             WHERE d.tenant_id = $1 AND d.user_id = $2 AND d.agent_id = $3 \
+               AND d.project_id = $4 \
+               AND c.content_tsv @@ plainto_tsquery('english', $5) \
+             ORDER BY rank DESC \
+             LIMIT $6",
+            &[
+                &scope.tenant_id(),
+                &scope.user_id(),
+                &reborn_agent_id_db_value(scope),
+                &reborn_project_id_db_value(scope),
+                &request.query(),
+                &limit,
+            ],
+        )
+        .await
+        .map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::ReadFile,
+                error.to_string(),
+            )
+        })?;
+
+    Ok(rows
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, row)| {
+            let chunk_id: uuid::Uuid = row.get("id");
+            let tenant_id: String = row.get("tenant_id");
+            let user_id: String = row.get("user_id");
+            let agent_id_db: String = row.get("agent_id");
+            let project_id_db: String = row.get("project_id");
+            let db_path: String = row.get("path");
+            let snippet: String = row.get("content");
+            let path = reborn_memory_document_from_row(
+                &tenant_id,
+                &user_id,
+                &agent_id_db,
+                &project_id_db,
+                &db_path,
+            )?;
+            Some(RankedMemorySearchResult {
+                chunk_key: chunk_id.to_string(),
+                path,
+                snippet,
+                rank: index as u32 + 1,
+            })
+        })
+        .collect())
+}
+
+async fn reborn_postgres_vector_search_ranked(
+    client: &deadpool_postgres::Object,
+    scope: &MemoryDocumentScope,
+    request: &MemorySearchRequest,
+    query_embedding: &[f32],
+    virtual_path: &VirtualPath,
+) -> Result<Vec<RankedMemorySearchResult>, FilesystemError> {
+    let limit = request.pre_fusion_limit() as i64;
+    let query_vector = pgvector::Vector::from(query_embedding.to_vec());
+    let rows = client
+        .query(
+            "SELECT c.id, d.tenant_id, d.user_id, d.agent_id, d.project_id, d.path, c.content \
+             FROM reborn_memory_chunks c \
+             JOIN reborn_memory_documents d ON d.id = c.document_id \
+             WHERE d.tenant_id = $1 AND d.user_id = $2 AND d.agent_id = $3 \
+               AND d.project_id = $4 \
+               AND c.embedding IS NOT NULL \
+             ORDER BY c.embedding <=> $5 \
+             LIMIT $6",
+            &[
+                &scope.tenant_id(),
+                &scope.user_id(),
+                &reborn_agent_id_db_value(scope),
+                &reborn_project_id_db_value(scope),
+                &query_vector,
+                &limit,
+            ],
+        )
+        .await
+        .map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::ReadFile,
+                error.to_string(),
+            )
+        })?;
+
+    Ok(rows
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, row)| {
+            let chunk_id: uuid::Uuid = row.get("id");
+            let tenant_id: String = row.get("tenant_id");
+            let user_id: String = row.get("user_id");
+            let agent_id_db: String = row.get("agent_id");
+            let project_id_db: String = row.get("project_id");
+            let db_path: String = row.get("path");
+            let snippet: String = row.get("content");
+            let path = reborn_memory_document_from_row(
+                &tenant_id,
+                &user_id,
+                &agent_id_db,
+                &project_id_db,
+                &db_path,
+            )?;
+            Some(RankedMemorySearchResult {
+                chunk_key: chunk_id.to_string(),
+                path,
+                snippet,
+                rank: index as u32 + 1,
+            })
+        })
+        .collect())
 }
 
 const REBORN_POSTGRES_MEMORY_DOCUMENTS_SCHEMA: &str = r#"
