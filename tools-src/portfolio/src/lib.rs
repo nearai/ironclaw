@@ -20,6 +20,8 @@
 //!   candle episode before any strategy is selected for paper intent work.
 //! - `plan_paid_research` — rank paid/free research sources, budget a
 //!   premium-source query, and prepare attribution/payment gates.
+//! - `plan_dripstack_browse` — model DripStack's guided topic →
+//!   publication → article purchase flow without fetching paid content.
 //! - `format_intents_widget` — build the NEAR Intents trading console
 //!   view model consumed by the project widget.
 //!
@@ -141,6 +143,13 @@ enum PortfolioAction {
     #[serde(rename = "plan_paid_research")]
     PlanPaidResearch(research::PaidResearchPlanInput),
 
+    /// Plan the DripStack guided-browse flow. Free catalog/post-title
+    /// metadata goes in; a selected article becomes a paid-source
+    /// candidate for `plan_paid_research`. It never buys or fetches
+    /// article bodies.
+    #[serde(rename = "plan_dripstack_browse")]
+    PlanDripstackBrowse(research::DripstackBrowseInput),
+
     /// Build the render-ready view model the web widget consumes.
     /// Writes to `projects/<id>/widgets/state.json`.
     #[serde(rename = "format_widget")]
@@ -223,8 +232,8 @@ impl exports::near::agent::tool::Guest for PortfolioTool {
          classifies them against an embedded protocol registry, generates ranked \
          rebalancing proposals from declarative strategy docs, and builds unsigned \
          NEAR Intent bundles. Operations: scan, propose, build_intent, progress, \
-         backtest, backtest_suite, plan_paid_research, format_suggestion, \
-         format_widget, format_intents_widget. \
+         backtest, backtest_suite, plan_paid_research, plan_dripstack_browse, \
+         format_suggestion, format_widget, format_intents_widget. \
          Read-only and unsigned — the agent never holds private keys."
             .to_string()
     }
@@ -325,6 +334,11 @@ fn execute_inner(params: &str) -> Result<String, String> {
             let output = research::plan(input)?;
             serde_json::to_string(&output)
                 .map_err(|e| format!("Serialize plan_paid_research response: {e}"))
+        }
+        PortfolioAction::PlanDripstackBrowse(input) => {
+            let output = research::plan_dripstack_browse(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize plan_dripstack_browse response: {e}"))
         }
         PortfolioAction::FormatWidget(input) => {
             let output = widget::format_widget(input);

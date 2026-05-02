@@ -349,6 +349,20 @@
           "default": 0.35,
           "description": "Minimum relevance gate after explicit and lexical scoring."
         },
+        "min_trust_score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.45,
+          "description": "Minimum trust gate to reduce agentic-SEO manipulation."
+        },
+        "max_seo_risk_score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.65,
+          "description": "Maximum accepted source-manipulation risk score."
+        },
         "max_source_age_days": {
           "type": "integer",
           "minimum": 0,
@@ -364,6 +378,36 @@
           "type": "string",
           "default": "USDC.near",
           "description": "NEAR-side asset to route from when funding external MPP/x402 rails through NEAR Intents."
+        },
+        "preferred_payment_protocols": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["near-intents", "mpp", "x402", "subscription", "manual", "free"]
+          },
+          "default": ["near-intents", "mpp", "x402", "subscription", "manual", "free"],
+          "description": "Payment rail preference order when a source supports more than one rail."
+        },
+        "default_article_price_usd": {
+          "type": "number",
+          "minimum": 0,
+          "default": 0.01,
+          "description": "Default article price used for wallet-cap math."
+        },
+        "agent_wallet": {
+          "type": "object",
+          "description": "Optional autonomous wallet policy. This is policy metadata only, not signing material.",
+          "properties": {
+            "provider": { "type": "string", "default": "AgentCash" },
+            "address": { "type": "string" },
+            "network": { "type": "string", "default": "base" },
+            "balance_usd": { "type": "number", "minimum": 0 },
+            "default_article_price_usd": { "type": "number", "minimum": 0, "default": 0.01 },
+            "per_article_cap_usd": { "type": "number", "minimum": 0, "default": 0.05 },
+            "daily_cap_usd": { "type": "number", "minimum": 0, "default": 1.0 },
+            "max_wallet_balance_usd": { "type": "number", "minimum": 0, "default": 5.0 },
+            "audit_urls": { "type": "array", "items": { "type": "string" }, "default": [] }
+          }
         },
         "required_tags": {
           "type": "array",
@@ -394,6 +438,7 @@
               "relevance": { "type": "number", "minimum": 0, "maximum": 1 },
               "trust_score": { "type": "number", "minimum": 0, "maximum": 1 },
               "freshness_score": { "type": "number", "minimum": 0, "maximum": 1 },
+              "seo_risk_score": { "type": "number", "minimum": 0, "maximum": 1 },
               "age_days": { "type": "integer", "minimum": 0 },
               "payment": {
                 "type": "object",
@@ -409,6 +454,25 @@
                   "recipient": { "type": "string" },
                   "endpoint": { "type": "string" }
                 }
+              },
+              "payment_options": {
+                "type": "array",
+                "description": "Alternative rails accepted by the same source, for example DripStack supporting both MPP and x402.",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "protocol": {
+                      "type": "string",
+                      "enum": ["near-intents", "mpp", "x402", "subscription", "manual", "free"],
+                      "default": "manual"
+                    },
+                    "network": { "type": "string" },
+                    "asset": { "type": "string" },
+                    "recipient": { "type": "string" },
+                    "endpoint": { "type": "string" }
+                  }
+                },
+                "default": []
               }
             },
             "required": ["id", "title", "author", "url"]
@@ -417,6 +481,64 @@
         }
       },
       "required": ["action", "query"]
+    },
+    {
+      "properties": {
+        "action": { "const": "plan_dripstack_browse" },
+        "topic": {
+          "type": "string",
+          "description": "User topic. If absent, the output checkpoint asks for a topic before any catalog work."
+        },
+        "selected_publication_slug": {
+          "type": "string",
+          "description": "Publication slug selected by the user from a matched shortlist."
+        },
+        "selected_post_slug": {
+          "type": "string",
+          "description": "Post slug selected by the user from post summaries."
+        },
+        "max_results": { "type": "integer", "minimum": 1, "maximum": 10, "default": 5 },
+        "default_price_usd": {
+          "type": "number",
+          "minimum": 0,
+          "default": 0.01,
+          "description": "Default planned article price when a post-specific price is unavailable."
+        },
+        "publications": {
+          "type": "array",
+          "description": "Free DripStack publication catalog rows from GET /api/v1/publications.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "slug": { "type": "string" },
+              "title": { "type": "string" },
+              "description": { "type": "string" },
+              "site_url": { "type": "string" },
+              "last_synced_at": { "type": "string" }
+            },
+            "required": ["slug"]
+          },
+          "default": []
+        },
+        "posts": {
+          "type": "array",
+          "description": "Free post summaries from GET /api/v1/publications/{publicationSlug}.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "slug": { "type": "string" },
+              "title": { "type": "string" },
+              "subtitle": { "type": "string" },
+              "author": { "type": "string" },
+              "published_at": { "type": "string" },
+              "price_usd": { "type": "number", "minimum": 0 }
+            },
+            "required": ["slug", "title"]
+          },
+          "default": []
+        }
+      },
+      "required": ["action"]
     },
     {
       "properties": {

@@ -133,7 +133,11 @@ Minimum framework requirements before a strategy can build an intent:
   candle episode.
 - Added `portfolio.plan_paid_research` to budget and attribute premium
   research sources before using paid newsletter/API content in a trading
-  decision.
+  decision, including source-trust gates, agent-wallet caps, and
+  MPP/x402 payment alternatives.
+- Added `portfolio.plan_dripstack_browse` to model topic →
+  publication → article → purchase-confirmation guided browse before a
+  selected article becomes a paid-source candidate.
 - Added replay scenarios for individual strategies, suite ranking, and
   a swap-shaped unsigned intent bundle.
 - Added the first bundled strategy corpus:

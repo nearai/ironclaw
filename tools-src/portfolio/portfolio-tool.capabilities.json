@@ -12,13 +12,14 @@
       "`build_intent` requires `plan` (a MovementPlan from a Proposal). `config` and `solver` are optional; `solver` defaults to `fixture`.",
       "`backtest` requires oldest-to-newest OHLCV `candles` plus a long-only spot `strategy` (`buy-hold`, `sma-cross`, `breakout`, `mean-reversion`, `momentum`, or `rsi-mean-reversion`). Fees, slippage, position size, stop-loss, and take-profit are optional.",
       "`backtest_suite` requires oldest-to-newest OHLCV `candles` plus a `candidates` menu. It returns ranked strategy results and a basic intent-eligibility gate.",
-      "`plan_paid_research` requires a `query` and optional candidate `sources`. It returns a budgeted paid-source plan with MPP/x402/NEAR rail attribution, policy gates, and NEAR funding-route hints; it does not fetch paywalled content or sign payments.",
+      "`plan_paid_research` requires a `query` and optional candidate `sources`. It returns a budgeted paid-source plan with MPP/x402/NEAR rail attribution, autonomous-wallet policy gates, agentic-SEO trust gates, and NEAR funding-route hints; it does not fetch paywalled content or sign payments.",
+      "`plan_dripstack_browse` models DripStack's guided topic → publication → article flow from free catalog/post metadata. A selected article becomes a paid-source candidate for `plan_paid_research`; the tool never buys or fetches article bodies.",
       "`format_intents_widget` requires a `pair` and optional backtest-suite output, risk gates, and unsigned IntentBundle. It returns `intents-trading-widget/1` state for the project widget."
     ],
     "notes": [
       "All operations are read-only and produce no signed payloads. The agent never holds private keys.",
       "Scan supports historical queries via the optional `at` field (block per chain or timestamp).",
-      "Backtest uses closed-candle signals with next-open execution to avoid lookahead and returns metrics under `intents-backtest/1`; suite ranking returns `intents-backtest-suite/1`; paid research planning returns `paid-research-plan/1`; NEAR Intents trading console state returns `intents-trading-widget/1`.",
+      "Backtest uses closed-candle signals with next-open execution to avoid lookahead and returns metrics under `intents-backtest/1`; suite ranking returns `intents-backtest-suite/1`; paid research planning returns `paid-research-plan/1`; DripStack guided browse planning returns `dripstack-browse-plan/1`; NEAR Intents trading console state returns `intents-trading-widget/1`.",
       "Sources: `fixture` (embedded test data), `dune` (EVM via Dune Sim), `near` (NEAR via FastNEAR+Intear), `auto` (detect per address).",
       "Use `tool_info(name: \"portfolio\", detail: \"schema\")` for the full schema before guessing fields."
     ],
@@ -69,6 +70,17 @@
             "tags": ["near-intents", "btc"],
             "price_usd": 0.02,
             "payment": { "protocol": "x402", "network": "base", "asset": "USDC" }
+          }
+        ]
+      },
+      {
+        "action": "plan_dripstack_browse",
+        "topic": "crypto market structure",
+        "publications": [
+          {
+            "slug": "premiumcrypto.substack.com",
+            "title": "Premium Crypto Notes",
+            "description": "Crypto market structure, liquidity, and onchain trading research."
           }
         ]
       }

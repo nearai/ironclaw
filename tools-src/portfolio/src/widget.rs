@@ -240,6 +240,8 @@ pub struct IntentsPaidResearchSummary {
     pub payable_sources: Vec<IntentsPayableResearchSource>,
     pub near_funding_routes: Vec<IntentsPaidResearchFundingRoute>,
     pub policy_gates: Vec<IntentsRiskGate>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wallet_policy: Option<IntentsPaidResearchWalletPolicy>,
     pub warnings: Vec<String>,
 }
 
@@ -268,6 +270,20 @@ pub struct IntentsPaidResearchFundingRoute {
     pub target_network: String,
     pub amount_usd: f64,
     pub via: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct IntentsPaidResearchWalletPolicy {
+    pub provider: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+    pub network: String,
+    pub balance_usd: f64,
+    pub max_articles_at_default_price: usize,
+    pub per_article_cap_usd: f64,
+    pub daily_cap_usd: f64,
+    pub safe_to_autopay: bool,
+    pub audit_urls: Vec<String>,
 }
 
 fn default_mode() -> String {
@@ -530,6 +546,34 @@ fn paid_research_summary_from_value(value: &serde_json::Value) -> IntentsPaidRes
                 .map(|detail| detail.to_string()),
         })
         .collect();
+    let wallet_policy = value
+        .get("wallet_policy")
+        .map(|wallet| IntentsPaidResearchWalletPolicy {
+            provider: string_field(wallet, "provider", "AgentCash"),
+            address: wallet
+                .get("address")
+                .and_then(|address| address.as_str())
+                .map(|address| address.to_string()),
+            network: string_field(wallet, "network", "base"),
+            balance_usd: number_field(wallet, "balance_usd"),
+            max_articles_at_default_price: wallet
+                .get("max_articles_at_default_price")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize,
+            per_article_cap_usd: number_field(wallet, "per_article_cap_usd"),
+            daily_cap_usd: number_field(wallet, "daily_cap_usd"),
+            safe_to_autopay: wallet
+                .get("safe_to_autopay")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            audit_urls: wallet
+                .get("audit_urls")
+                .and_then(|urls| urls.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|url| url.as_str().map(|url| url.to_string()))
+                .collect(),
+        });
 
     let warnings = value
         .get("warnings")
@@ -558,6 +602,7 @@ fn paid_research_summary_from_value(value: &serde_json::Value) -> IntentsPaidRes
         payable_sources,
         near_funding_routes,
         policy_gates,
+        wallet_policy,
         warnings,
     }
 }

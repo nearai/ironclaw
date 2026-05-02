@@ -17,7 +17,9 @@
     "trading",
     "paid-research",
     "x402",
-    "mpp"
+    "mpp",
+    "dripstack",
+    "agent-wallet"
   ],
   "source": {
     "dir": "tools-src/portfolio",

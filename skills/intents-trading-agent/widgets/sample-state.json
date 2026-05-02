@@ -124,6 +124,23 @@
         "detail": "Premium research does not bypass backtest or risk gates."
       }
     ],
+    "wallet_policy": {
+      "provider": "AgentCash",
+      "address": "0x3333333333333333333333333333333333333333",
+      "network": "base",
+      "balance_usd": 5.0,
+      "default_article_price_usd": 0.01,
+      "max_articles_at_default_price": 500,
+      "per_article_cap_usd": 0.05,
+      "daily_cap_usd": 1.0,
+      "max_wallet_balance_usd": 5.0,
+      "safe_to_autopay": true,
+      "audit_urls": [
+        "https://mppscan.com/",
+        "https://www.x402scan.com/"
+      ],
+      "warnings": []
+    },
     "warnings": []
   },
   "next_action": "Ask the user before requesting a live NEAR Intents quote."

@@ -60,18 +60,34 @@ flowchart LR
     and budget cost,
   - selects sources under a dollar cap,
   - emits source attribution IDs,
+  - supports multiple payment options per source, so a DripStack article
+    can advertise both MPP on Tempo and x402 on Base,
   - summarizes MPP, x402, NEAR-native, subscription, manual, or free
     rails,
+  - applies basic agentic-SEO defenses through trust and source-risk
+    gates,
+  - models a small autonomous wallet policy, including per-article caps,
+    daily caps, default one-cent article math, and audit links,
   - emits `near_funding_routes` so a NEAR treasury can prepare rail
     funding through NEAR Intents before external MPP/x402 payment,
   - emits policy gates for budget, receipts, attribution, payment
     authorization, and the trading risk gate.
 
+- `portfolio.plan_dripstack_browse`
+  - models DripStack's guided browse flow from free metadata,
+  - returns `topic`, `publication`, `article`, or
+    `purchase-confirmation` checkpoints,
+  - shortlists publications from the user topic,
+  - shortlists post summaries for a chosen publication,
+  - converts one user-selected article into a paid-source candidate
+    without fetching the article body,
+  - includes both MPP and x402 payment options for the selected article.
+
 - `portfolio.format_intents_widget`
   - accepts `paid_research_plan`,
   - exposes `paid_research` in the widget state,
-  - shows payable sources, allocated budget, rails, and NEAR funding
-    routes in the project widget.
+  - shows payable sources, allocated budget, rails, NEAR funding routes,
+    autonomous-wallet caps, and audit links in the project widget.
 
 - `intents-trading-agent` skill
   - adds paid research as a formal step before backtesting,

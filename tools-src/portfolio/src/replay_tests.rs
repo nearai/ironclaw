@@ -828,6 +828,58 @@ fn check_expectations(path: &str, step: &Step, response: &Value, prior: &BTreeMa
                     step.name
                 );
             }
+            "dripstack_checkpoint" => {
+                let got = response
+                    .get("checkpoint")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| panic!("[{path}] step '{}': missing checkpoint", step.name));
+                let want = expected.as_str().expect("dripstack_checkpoint: string");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': dripstack checkpoint mismatch",
+                    step.name
+                );
+            }
+            "dripstack_publications_min" => {
+                let len = response
+                    .get("matched_publications")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                let want = expected
+                    .as_u64()
+                    .expect("dripstack_publications_min: number")
+                    as usize;
+                assert!(
+                    len >= want,
+                    "[{path}] step '{}': matched publications {len} < min {want}",
+                    step.name
+                );
+            }
+            "dripstack_posts_min" => {
+                let len = response
+                    .get("post_candidates")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                let want = expected.as_u64().expect("dripstack_posts_min: number") as usize;
+                assert!(
+                    len >= want,
+                    "[{path}] step '{}': post candidates {len} < min {want}",
+                    step.name
+                );
+            }
+            "dripstack_has_paid_source_candidate" => {
+                let got = response.get("paid_source_candidate").is_some();
+                let want = expected
+                    .as_bool()
+                    .expect("dripstack_has_paid_source_candidate: bool");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': paid source candidate presence mismatch",
+                    step.name
+                );
+            }
             other => panic!(
                 "[{path}] step '{}': unknown expectation key '{other}'",
                 step.name
@@ -848,6 +900,15 @@ fn capture_vars(path: &str, step: &Step, response: &Value, vars: &mut BTreeMap<S
                 .cloned()
                 .unwrap_or(Value::Array(Vec::new())),
             "paid_research_plan_var" => response.clone(),
+            "dripstack_paid_source_var" => response
+                .get("paid_source_candidate")
+                .cloned()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "[{path}] step '{}': missing paid_source_candidate to capture",
+                        step.name
+                    )
+                }),
             "first_ready_plan_var" => response
                 .get("proposals")
                 .and_then(|v| v.as_array())

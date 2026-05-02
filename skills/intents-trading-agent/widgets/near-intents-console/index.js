@@ -138,6 +138,7 @@ function itaPaidResearch(plan) {
   var rails = Array.isArray(plan.payment_rails) ? plan.payment_rails : [];
   var routes = Array.isArray(plan.near_funding_routes) ? plan.near_funding_routes : [];
   var gates = Array.isArray(plan.policy_gates) ? plan.policy_gates : [];
+  var wallet = plan.wallet_policy || null;
   return '<div class="ita-paid">'
     + '<div class="ita-paid-bar">'
     + '<div><span>Budget</span><strong>' + itaMoney(plan.budget_usd) + '</strong></div>'
@@ -168,6 +169,17 @@ function itaPaidResearch(plan) {
     }).join('<br>') + '</div>' : '')
     + '</div>'
     + '</div>'
+    + (wallet ? '<div class="ita-wallet-line">'
+      + '<div><span>Agent Wallet</span><strong>' + itaEscape(wallet.provider || 'Agent wallet') + ' · ' + itaEscape(wallet.network || 'base') + '</strong></div>'
+      + '<div><span>Balance</span><strong>' + itaMoney(wallet.balance_usd) + '</strong></div>'
+      + '<div><span>Articles</span><strong>' + itaEscape(wallet.max_articles_at_default_price || 0) + '</strong></div>'
+      + '<span class="ita-pill ' + (wallet.safe_to_autopay ? 'is-pass' : 'is-warn') + '">' + (wallet.safe_to_autopay ? 'Policy OK' : 'Approval') + '</span>'
+      + '</div>'
+      + (Array.isArray(wallet.audit_urls) && wallet.audit_urls.length ? '<div class="ita-audit-links">'
+        + wallet.audit_urls.map(function(url) {
+          return '<a href="' + itaEscape(url) + '" target="_blank" rel="noreferrer">' + itaEscape(String(url).replace(/^https?:\/\//, '').replace(/\/$/, '')) + '</a>';
+        }).join('')
+        + '</div>' : '') : '')
     + (gates.length ? '<div class="ita-paid-gates">' + itaRiskGates(gates) + '</div>' : '')
     + '</div>';
 }
