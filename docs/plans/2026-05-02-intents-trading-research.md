@@ -138,6 +138,13 @@ Minimum framework requirements before a strategy can build an intent:
 - Added `portfolio.plan_dripstack_browse` to model topic →
   publication → article → purchase-confirmation guided browse before a
   selected article becomes a paid-source candidate.
+- Added `portfolio.prepare_dripstack_paid_fetch` to make the one-article
+  DripStack confirmation, 402 challenge, and receipt-backed retry
+  boundary explicit without signing or reading paid text inside the
+  portfolio tool.
+- Added `portfolio.plan_near_intents_trial` so a user can rehearse the
+  workflow with a nominal NEAR wallet, strategy gates, setup steps, and
+  a generated unsigned `build_intent` request.
 - Added replay scenarios for individual strategies, suite ranking, and
   a swap-shaped unsigned intent bundle.
 - Added the first bundled strategy corpus:
@@ -150,6 +157,9 @@ Minimum framework requirements before a strategy can build an intent:
 - Added paid research attribution to the widget so selected sources,
   MPP/x402 rails, and NEAR funding-route hints are visible before any
   unsigned intent is built.
+- Added nominal NEAR trial status to the widget so the operator can see
+  wallet budget, quote readiness, setup steps, and trial gates without
+  reading JSON.
 
 ## Multi-Day Roadmap
 
@@ -157,6 +167,6 @@ Minimum framework requirements before a strategy can build an intent:
 |---|---|---|
 | M1 data ingestion | CoinGecko/CCXT CSV import, Hyperliquid candle snapshot recorder, Dune/NEAR portfolio context. | Backtests can run from saved market-data episodes, not hand-written candles. |
 | M2 strategy lab | Parameter grids, walk-forward splits, regime splits, benchmark comparisons, strategy doc thresholds. | A strategy report shows train/test windows, drawdown, turnover, and rejection reasons. |
-| M3 risk/intent bridge | Map approved suite results to `MovementPlan`, quote replay, solver refusal tests, route expiry tests, widget state updates. | A paper-intent can be rebuilt deterministically from research + backtest + quote fixture and inspected in the Projects UI. |
+| M3 risk/intent bridge | Map approved suite results to `MovementPlan`, quote replay, solver refusal tests, route expiry tests, nominal trial state, widget state updates. | A paper-intent can be rebuilt deterministically from research + backtest + quote fixture and inspected in the Projects UI. |
 | M4 portals and HL signals | Hyperliquid funding/book/candle adapters, DefiLlama risk context, optional CoinGecko fallback. | HL data is used as signal/risk context without pretending to execute perps. |
 | M5 UI/mission | Widget for watchlist, ranked strategies, risk gates, pending intents, and paper PnL journal. | User can inspect the autonomous run without reading JSON. |

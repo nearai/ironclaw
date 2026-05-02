@@ -83,6 +83,20 @@ flowchart LR
     without fetching the article body,
   - includes both MPP and x402 payment options for the selected article.
 
+- `portfolio.fetch_dripstack_catalog`
+  - fetches DripStack's free publication catalog,
+  - fetches free post-title metadata for a chosen publication,
+  - keeps the paid article body route out of automatic discovery.
+
+- `portfolio.prepare_dripstack_paid_fetch`
+  - prepares the one-article paid fetch boundary after a user selects a
+    DripStack post,
+  - separates confirmation, HTTP 402 challenge collection, and
+    receipt-backed retry headers,
+  - supports MPP `Authorization: Payment ...` and x402
+    `PAYMENT-SIGNATURE` handoff metadata,
+  - does not sign payments, mint receipts, or read paid article bodies.
+
 - `portfolio.format_intents_widget`
   - accepts `paid_research_plan`,
   - exposes `paid_research` in the widget state,
@@ -100,8 +114,8 @@ flowchart LR
 
 | Next PR | What to build | Done when |
 |---|---|---|
-| Source discovery adapters | Parse MPP/OpenAPI `x-payment-info`, x402 discovery, DripStack catalogs, and local `sources/paid-research.json`. | Agent can populate candidate sources without manual JSON. |
-| Payment client boundary | Add a wallet/payment-client abstraction for MPP/x402 challenge handling with receipts, never private keys. | Paid content fetch returns receipt metadata and content only after approval. |
+| Source discovery adapters | Extend beyond the DripStack free catalog adapter into generic MPP/OpenAPI `x-payment-info`, x402 discovery, and local `sources/paid-research.json`. | Agent can populate candidate sources without manual JSON. |
+| Payment client boundary | Connect `prepare_dripstack_paid_fetch` to a wallet/payment-client abstraction for live MPP/x402 challenge handling with receipts, never private keys. | Paid content fetch returns receipt metadata and content only after approval. |
 | NEAR funding route builder | Convert `near_funding_routes` into unsigned NEAR Intent funding bundles for rail wallets. | User can inspect/sign a funding intent before MPP/x402 fetch. |
 | Evidence ledger | Persist paid source receipts, content hashes, quote snippets, and answer attribution. | A journal entry can prove which writer/source contributed to which answer. |
 | Research-to-backtest loop | Track whether paid evidence changed candidate strategies and compare outcomes. | Strategy reports show paid-source deltas vs free-source baseline. |

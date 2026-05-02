@@ -129,7 +129,8 @@
 }
 
 .ita-body section:first-child,
-.ita-body section:nth-child(4) {
+.ita-body section:nth-child(2),
+.ita-body section:nth-child(5) {
   grid-column: 1 / -1;
 }
 
@@ -358,6 +359,95 @@
   margin-top: 2px;
 }
 
+.ita-trial {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.ita-trial-bar {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.ita-trial-bar > div {
+  border-top: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+  padding-top: 8px;
+}
+
+.ita-trial-bar span,
+.ita-trial-meta span,
+.ita-trial-steps small,
+.ita-trial-next {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+.ita-trial-bar strong {
+  display: block;
+  font-size: var(--text-sm);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ita-trial-meta {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.ita-trial-meta strong {
+  font-size: var(--text-sm);
+}
+
+.ita-trial-steps {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  margin-top: 12px;
+}
+
+.ita-trial-steps > div {
+  border-top: 1px solid var(--border);
+  min-height: 58px;
+  padding-top: 8px;
+}
+
+.ita-trial-steps span {
+  color: var(--accent);
+  display: block;
+  font-size: var(--text-xs);
+  font-weight: 800;
+}
+
+.ita-trial-steps strong,
+.ita-trial-steps small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ita-trial-steps strong {
+  font-size: var(--text-sm);
+  margin-top: 2px;
+}
+
+.ita-trial-gates {
+  margin-top: 12px;
+}
+
+.ita-trial-next {
+  border-top: 1px solid var(--border);
+  line-height: 1.5;
+  margin-top: 10px;
+  padding-top: 8px;
+}
+
 .ita-audit-links {
   display: flex;
   flex-wrap: wrap;
@@ -395,7 +485,9 @@
   .ita-body,
   .ita-paid-bar,
   .ita-paid-lanes,
-  .ita-intent-grid {
+  .ita-intent-grid,
+  .ita-trial-bar,
+  .ita-trial-steps {
     grid-template-columns: 1fr 1fr;
   }
 
@@ -423,7 +515,9 @@
   .ita-body,
   .ita-paid-bar,
   .ita-paid-lanes,
-  .ita-intent-grid {
+  .ita-intent-grid,
+  .ita-trial-bar,
+  .ita-trial-steps {
     grid-template-columns: 1fr;
   }
 

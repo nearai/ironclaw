@@ -57,6 +57,8 @@ pub struct FormatIntentsTradingWidgetInput {
     #[serde(default)]
     pub paid_research_plan: Option<serde_json::Value>,
     #[serde(default)]
+    pub trial_plan: Option<serde_json::Value>,
+    #[serde(default)]
     pub next_action: Option<String>,
 }
 
@@ -180,6 +182,8 @@ pub struct IntentsTradingWidgetState {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub paid_research: Option<IntentsPaidResearchSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub trial_plan: Option<IntentsTrialSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub next_action: Option<String>,
 }
 
@@ -284,6 +288,34 @@ pub struct IntentsPaidResearchWalletPolicy {
     pub daily_cap_usd: f64,
     pub safe_to_autopay: bool,
     pub audit_urls: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct IntentsTrialSummary {
+    pub schema_version: String,
+    pub mode: String,
+    pub pair: String,
+    pub nominal_near: f64,
+    pub max_trade_near: f64,
+    pub max_trade_usd: f64,
+    pub safe_to_quote: bool,
+    pub safe_to_execute: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recommended_strategy_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_strategy_id: Option<String>,
+    pub setup_steps: Vec<IntentsTrialStep>,
+    pub risk_gates: Vec<IntentsRiskGate>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_action: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct IntentsTrialStep {
+    pub order: usize,
+    pub name: String,
+    pub status: String,
+    pub detail: String,
 }
 
 fn default_mode() -> String {
@@ -419,6 +451,7 @@ pub fn format_intents_trading_widget(
         .paid_research_plan
         .as_ref()
         .map(paid_research_summary_from_value);
+    let trial_plan = input.trial_plan.as_ref().map(trial_summary_from_value);
 
     IntentsTradingWidgetState {
         schema_version: "intents-trading-widget/1",
@@ -434,6 +467,7 @@ pub fn format_intents_trading_widget(
         source_count: input.research_sources.len(),
         research_sources: input.research_sources,
         paid_research,
+        trial_plan,
         next_action: input.next_action,
     }
 }
@@ -604,6 +638,65 @@ fn paid_research_summary_from_value(value: &serde_json::Value) -> IntentsPaidRes
         policy_gates,
         wallet_policy,
         warnings,
+    }
+}
+
+fn trial_summary_from_value(value: &serde_json::Value) -> IntentsTrialSummary {
+    let setup_steps = value
+        .get("setup_steps")
+        .and_then(|steps| steps.as_array())
+        .into_iter()
+        .flatten()
+        .take(6)
+        .map(|step| IntentsTrialStep {
+            order: step.get("order").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+            name: string_field(step, "name", "Step"),
+            status: string_field(step, "status", "manual"),
+            detail: string_field(step, "detail", ""),
+        })
+        .collect();
+    let risk_gates = value
+        .get("risk_gates")
+        .and_then(|gates| gates.as_array())
+        .into_iter()
+        .flatten()
+        .take(8)
+        .map(|gate| IntentsRiskGate {
+            name: string_field(gate, "name", "gate"),
+            status: string_field(gate, "status", "unknown"),
+            detail: Some(string_field(gate, "detail", "")),
+        })
+        .collect();
+
+    IntentsTrialSummary {
+        schema_version: string_field(value, "schema_version", "near-intents-trial-plan/1"),
+        mode: string_field(value, "mode", "paper"),
+        pair: string_field(value, "pair", "NEAR/USDC"),
+        nominal_near: number_field(value, "nominal_near"),
+        max_trade_near: number_field(value, "max_trade_near"),
+        max_trade_usd: number_field(value, "max_trade_usd"),
+        safe_to_quote: value
+            .get("safe_to_quote")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        safe_to_execute: value
+            .get("safe_to_execute")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        recommended_strategy_id: value
+            .get("recommended_strategy_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        selected_strategy_id: value
+            .get("selected_strategy_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        setup_steps,
+        risk_gates,
+        next_action: value
+            .get("next_action")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
     }
 }
 
@@ -1036,6 +1129,7 @@ mod tests {
                 }],
                 "warnings": []
             })),
+            trial_plan: None,
             next_action: Some("Request live quote only after user approval.".to_string()),
         });
 

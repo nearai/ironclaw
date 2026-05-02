@@ -5,7 +5,7 @@
 //! 1. **Production** (`fetch_quote`) — POSTs a quote request to the
 //!    NEAR Intents solver relay via `host::http_request`. Only runs
 //!    in the WASM sandbox. The endpoint is pinned at
-//!    `solver-relay.chaindefuser.com/rpc` by M4. Bumping it is a
+//!    `solver-relay-v2.chaindefuser.com/rpc` by M4. Bumping it is a
 //!    coordinated change: update here, update the capabilities
 //!    allowlist, re-record fixtures.
 //!
@@ -197,7 +197,7 @@ pub fn fetch_quote(plan: &MovementPlan, slippage_bps: u16) -> Result<SolverQuote
 
     let response = crate::near::agent::host::http_request(
         "POST",
-        "https://solver-relay.chaindefuser.com/rpc",
+        "https://solver-relay-v2.chaindefuser.com/rpc",
         &headers.to_string(),
         Some(&body),
         None,
@@ -309,7 +309,7 @@ mod tests {
     /// ```
     ///
     /// Requires:
-    ///   - Network access to `solver-relay.chaindefuser.com`
+    ///   - Network access to `solver-relay-v2.chaindefuser.com`
     ///   - Full WASM toolchain (cargo-component, wasm32-wasip2)
     ///
     /// Any panic here is a signal that the real solver's shape has

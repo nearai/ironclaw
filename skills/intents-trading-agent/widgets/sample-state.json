@@ -55,6 +55,50 @@
     "https://docs.near-intents.org/near-intents/market-makers/bus/solver-relay",
     "https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint"
   ],
+  "trial_plan": {
+    "schema_version": "near-intents-trial-plan/1",
+    "mode": "paper",
+    "pair": "NEAR/USDC",
+    "nominal_near": 0.25,
+    "max_trade_near": 0.05,
+    "max_trade_usd": 0.15,
+    "safe_to_quote": true,
+    "safe_to_execute": false,
+    "recommended_strategy_id": "sma_cross_fast",
+    "setup_steps": [
+      {
+        "order": 1,
+        "name": "Use a small wallet",
+        "status": "manual",
+        "detail": "Fund a separate NEAR account with only the amount you are willing to test."
+      },
+      {
+        "order": 2,
+        "name": "Wrap NEAR",
+        "status": "manual",
+        "detail": "Convert native NEAR into wNEAR before verifier funding."
+      },
+      {
+        "order": 3,
+        "name": "Deposit to verifier",
+        "status": "manual",
+        "detail": "Deposit wNEAR into intents.near; do not transfer raw NEAR directly."
+      }
+    ],
+    "risk_gates": [
+      {
+        "name": "trade-cap",
+        "status": "pass",
+        "detail": "Single trial trade is capped at 0.05 NEAR."
+      },
+      {
+        "name": "signing-boundary",
+        "status": "pass",
+        "detail": "IronClaw returns unsigned payloads only."
+      }
+    ],
+    "next_action": "Run backtest_suite with fresh candles before any live quote."
+  },
   "paid_research": {
     "schema_version": "paid-research-plan/1",
     "query": "Should the NEAR/BTC paper intent use premium route and liquidity research before quoting?",

@@ -1,7 +1,7 @@
 {
   "version": "0.1.0",
   "wit_version": "0.3.0",
-  "description": "Cross-chain DeFi portfolio discovery, ranked rebalancing proposals, unsigned NEAR Intent construction, deterministic spot strategy backtesting/suite ranking, paid research budgeting/attribution, and NEAR Intents trading widget state.",
+  "description": "Cross-chain DeFi portfolio discovery, ranked rebalancing proposals, unsigned NEAR Intent construction, deterministic spot strategy backtesting/suite ranking, paid research budgeting/attribution, nominal NEAR trial planning, and NEAR Intents trading widget state.",
   "discovery_summary": {
     "always_required": [
       "action"
@@ -14,12 +14,15 @@
       "`backtest_suite` requires oldest-to-newest OHLCV `candles` plus a `candidates` menu. It returns ranked strategy results and a basic intent-eligibility gate.",
       "`plan_paid_research` requires a `query` and optional candidate `sources`. It returns a budgeted paid-source plan with MPP/x402/NEAR rail attribution, autonomous-wallet policy gates, agentic-SEO trust gates, and NEAR funding-route hints; it does not fetch paywalled content or sign payments.",
       "`plan_dripstack_browse` models DripStack's guided topic → publication → article flow from free catalog/post metadata. A selected article becomes a paid-source candidate for `plan_paid_research`; the tool never buys or fetches article bodies.",
-      "`format_intents_widget` requires a `pair` and optional backtest-suite output, risk gates, and unsigned IntentBundle. It returns `intents-trading-widget/1` state for the project widget."
+      "`fetch_dripstack_catalog` fetches DripStack's free publication catalog or free post-title metadata for one publication. It never calls paid article-body routes.",
+      "`prepare_dripstack_paid_fetch` requires one publication slug and post slug. It prepares the explicit confirmation, HTTP 402 challenge, and receipt-backed retry boundary for one paid article; it never signs or reads paid content by itself.",
+      "`plan_near_intents_trial` prepares a nominal-NEAR paper/quote rehearsal with wallet/funding setup steps, strategy-menu defaults, risk gates, and an unsigned build_intent request.",
+      "`format_intents_widget` requires a `pair` and optional backtest-suite output, trial plan, paid research plan, risk gates, and unsigned IntentBundle. It returns `intents-trading-widget/1` state for the project widget."
     ],
     "notes": [
       "All operations are read-only and produce no signed payloads. The agent never holds private keys.",
       "Scan supports historical queries via the optional `at` field (block per chain or timestamp).",
-      "Backtest uses closed-candle signals with next-open execution to avoid lookahead and returns metrics under `intents-backtest/1`; suite ranking returns `intents-backtest-suite/1`; paid research planning returns `paid-research-plan/1`; DripStack guided browse planning returns `dripstack-browse-plan/1`; NEAR Intents trading console state returns `intents-trading-widget/1`.",
+      "Backtest uses closed-candle signals with next-open execution to avoid lookahead and returns metrics under `intents-backtest/1`; suite ranking returns `intents-backtest-suite/1`; paid research planning returns `paid-research-plan/1`; DripStack guided browse planning returns `dripstack-browse-plan/1`; free DripStack catalog fetch returns `dripstack-catalog/1`; paid fetch preparation returns `dripstack-paid-fetch-plan/1`; nominal NEAR trial planning returns `near-intents-trial-plan/1`; NEAR Intents trading console state returns `intents-trading-widget/1`.",
       "Sources: `fixture` (embedded test data), `dune` (EVM via Dune Sim), `near` (NEAR via FastNEAR+Intear), `auto` (detect per address).",
       "Use `tool_info(name: \"portfolio\", detail: \"schema\")` for the full schema before guessing fields."
     ],
@@ -45,6 +48,14 @@
         ],
         "fee_bps": 10,
         "slippage_bps": 5
+      },
+      {
+        "action": "plan_near_intents_trial",
+        "mode": "paper",
+        "pair": "NEAR/USDC",
+        "nominal_near": 0.25,
+        "max_trade_near": 0.05,
+        "assumed_near_usd": 3.0
       },
       {
         "action": "format_intents_widget",
@@ -83,6 +94,17 @@
             "description": "Crypto market structure, liquidity, and onchain trading research."
           }
         ]
+      },
+      {
+        "action": "fetch_dripstack_catalog",
+        "publication_slug": "premiumcrypto.substack.com"
+      },
+      {
+        "action": "prepare_dripstack_paid_fetch",
+        "publication_slug": "premiumcrypto.substack.com",
+        "post_slug": "near-intents-liquidity",
+        "payment_protocol": "mpp",
+        "user_confirmed_purchase": false
       }
     ]
   },
@@ -105,9 +127,14 @@
           "methods": ["GET"]
         },
         {
-          "host": "solver-relay.chaindefuser.com",
+          "host": "solver-relay-v2.chaindefuser.com",
           "path_prefix": "/rpc",
           "methods": ["POST"]
+        },
+        {
+          "host": "dripstack.xyz",
+          "path_prefix": "/api/v1/publications",
+          "methods": ["GET"]
         }
       ],
       "credentials": {

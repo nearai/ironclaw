@@ -185,6 +185,10 @@
           "type": "object",
           "description": "Optional output from plan_paid_research. The widget extracts budget, payable sources, rails, policy gates, and NEAR funding routes."
         },
+        "trial_plan": {
+          "type": "object",
+          "description": "Optional output from plan_near_intents_trial. The widget extracts nominal budget, setup steps, trial risk gates, and quote readiness."
+        },
         "next_action": {
           "type": "string",
           "description": "Operator-facing next step shown in the widget."
@@ -484,6 +488,16 @@
     },
     {
       "properties": {
+        "action": { "const": "fetch_dripstack_catalog" },
+        "publication_slug": {
+          "type": "string",
+          "description": "Optional publication slug. Omit to fetch the free publication catalog; provide it to fetch free post-title metadata for one publication."
+        }
+      },
+      "required": ["action"]
+    },
+    {
+      "properties": {
         "action": { "const": "plan_dripstack_browse" },
         "topic": {
           "type": "string",
@@ -536,6 +550,105 @@
             "required": ["slug", "title"]
           },
           "default": []
+        }
+      },
+      "required": ["action"]
+    },
+    {
+      "properties": {
+        "action": { "const": "prepare_dripstack_paid_fetch" },
+        "publication_slug": {
+          "type": "string",
+          "minLength": 1,
+          "description": "DripStack publication slug exactly as returned by the free catalog."
+        },
+        "post_slug": {
+          "type": "string",
+          "minLength": 1,
+          "description": "DripStack post slug exactly as returned by the free publication detail route."
+        },
+        "title": {
+          "type": "string",
+          "description": "Optional display title for confirmation prompts."
+        },
+        "endpoint": {
+          "type": "string",
+          "description": "Optional paid article endpoint. Defaults to https://dripstack.xyz/api/v1/publications/{publication_slug}/{post_slug}."
+        },
+        "price_usd": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Static estimated price. The live HTTP 402 challenge remains authoritative."
+        },
+        "payment_protocol": {
+          "type": "string",
+          "enum": ["mpp", "x402"],
+          "default": "mpp"
+        },
+        "user_confirmed_purchase": {
+          "type": "boolean",
+          "default": false,
+          "description": "Must be true before the agent probes the paid endpoint or prepares receipt-backed retry headers."
+        },
+        "mpp_authorization": {
+          "type": "string",
+          "description": "MPP Authorization credential returned by a payment-aware client. The tool only previews the header; it never signs."
+        },
+        "x402_payment_signature": {
+          "type": "string",
+          "description": "x402 PAYMENT-SIGNATURE returned by a payment-aware client. The tool only previews the header; it never signs."
+        }
+      },
+      "required": ["action", "publication_slug", "post_slug"]
+    },
+    {
+      "properties": {
+        "action": { "const": "plan_near_intents_trial" },
+        "near_account_id": {
+          "type": "string",
+          "description": "Optional NEAR signer account id for the trial wallet."
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["paper", "quote", "execution"],
+          "default": "paper",
+          "description": "Paper builds fixture intents; quote prepares a live NEAR Intents quote request; execution remains manual-wallet only."
+        },
+        "pair": {
+          "type": "string",
+          "default": "NEAR/USDC",
+          "description": "Trial pair. Single-token values are normalized as NEAR/<token>."
+        },
+        "nominal_near": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 0.25,
+          "description": "Total NEAR budget the user intends to keep in the isolated trial wallet."
+        },
+        "max_trade_near": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Maximum NEAR-equivalent size for one trial quote/trade."
+        },
+        "assumed_near_usd": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 3.0,
+          "description": "Fresh NEAR/USD estimate used only for sizing. Recompute before any live quote."
+        },
+        "max_slippage_bps": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000,
+          "default": 50
+        },
+        "selected_strategy_id": {
+          "type": "string",
+          "description": "Optional strategy id selected from backtest_suite ranked results."
+        },
+        "backtest_suite": {
+          "type": "object",
+          "description": "Optional output from backtest_suite, used to gate/recommend the trial strategy."
         }
       },
       "required": ["action"]

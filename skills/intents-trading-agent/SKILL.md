@@ -42,9 +42,12 @@ bundles** that the user can inspect and sign in their own wallet.
 
 This skill is a research and orchestration layer. It does not replace
 the `portfolio` WASM tool. Use `portfolio.scan`, `portfolio.propose`,
-`portfolio.plan_paid_research`, and `portfolio.build_intent` for
-positions, deterministic DeFi proposals, paid-source budgeting, and
-intent bundle construction.
+`portfolio.plan_near_intents_trial`, `portfolio.plan_paid_research`,
+`portfolio.fetch_dripstack_catalog`,
+`portfolio.prepare_dripstack_paid_fetch`, and `portfolio.build_intent`
+for positions, deterministic DeFi proposals, nominal-wallet rehearsals,
+free DripStack catalog access, paid-source budgeting/fetch boundaries,
+and intent bundle construction.
 
 ## Non-negotiables
 
@@ -97,6 +100,9 @@ using workspace writes. Initialize:
   "paid_research_per_article_cap_usd": 0.05,
   "paid_research_daily_cap_usd": 1.0,
   "paid_research_max_wallet_balance_usd": 5.0,
+  "trial_nominal_near": 0.25,
+  "trial_max_trade_near": 0.05,
+  "trial_pair": "NEAR/USDC",
   "require_user_approval": true
 }
 ```
@@ -108,7 +114,7 @@ using workspace writes. Initialize:
   payment metadata discovered from MPP, x402, NEAR-native, newsletter, or
   API catalogs.
 - `research/`, `debates/`, `decisions/`, `risk/`, `intents/`,
-  `journal/`, `paid-research/`, and `widgets/`.
+  `journal/`, `paid-research/`, `trials/`, and `widgets/`.
 - `strategies/` - copy or reference the baseline strategy docs bundled
   with this skill (`sma-cross-spot`, `breakout-spot`,
   `momentum-spot`, `mean-reversion-spot`,
@@ -197,12 +203,29 @@ the guided flow:
 6. Convert that article into a paid-source candidate.
 7. Only then pass the candidate to `plan_paid_research`.
 
-The deterministic helper for this is `portfolio.plan_dripstack_browse`.
-It accepts free publication/post metadata and returns one of these
-checkpoints: `topic`, `publication`, `article`, or
+Use `portfolio.fetch_dripstack_catalog` to fetch only DripStack's free
+publication catalog and free post-title metadata. Then pass that free
+metadata to `portfolio.plan_dripstack_browse`. The planner returns one
+of these checkpoints: `topic`, `publication`, `article`, or
 `purchase-confirmation`. A `purchase-confirmation` output includes a
 `paid_source_candidate` with both MPP and x402 payment options when the
 article came from DripStack.
+
+When the user confirms a specific paid DripStack article, first call
+`portfolio.prepare_dripstack_paid_fetch`. It creates the explicit
+confirmation/challenge/receipt boundary for one article:
+
+- `needs-user-confirmation`: ask the user before touching the paid route.
+- `needs-402-challenge`: probe the paid endpoint only to collect the
+  HTTP 402 payment challenge; do not summarize substitute content.
+- `ready-to-retry-with-receipt`: a payment-aware client supplied an MPP
+  or x402 receipt header and the next GET can unlock that one article.
+
+The live 402 challenge is authoritative for price and payment details.
+Current DripStack OpenAPI describes paid article routes as returning
+MPP `WWW-Authenticate` and x402 `PAYMENT-REQUIRED` challenges, with a
+fallback paid-route minimum around `$0.05` when no per-post price is
+available. Do not assume the old one-cent estimate is final.
 
 Call `portfolio` with:
 
@@ -307,6 +330,48 @@ Reject or downgrade to `watch` if:
 Always run `buy-hold` as a benchmark when enough candles are available.
 Always present the top ranked suite candidates and rejected candidates
 separately so the user can see what was considered.
+
+### 4.5 Nominal NEAR trial mode
+
+If the user wants to try the system with a small amount of NEAR, keep
+the first pass in paper mode and call `portfolio.plan_near_intents_trial`.
+
+Example:
+
+```json
+{
+  "action": "plan_near_intents_trial",
+  "near_account_id": "<optional-user-account.near>",
+  "mode": "paper",
+  "pair": "NEAR/USDC",
+  "nominal_near": 0.25,
+  "max_trade_near": 0.05,
+  "assumed_near_usd": 3.0,
+  "max_slippage_bps": 50,
+  "backtest_suite": {}
+}
+```
+
+Persist the returned `near-intents-trial-plan/1` to
+`projects/intents-trading-agent/trials/<YYYY-MM-DDTHH-MM>-near-trial.json`.
+
+Use the trial plan as the operator runbook:
+
+- The wallet should be a separate small NEAR account, not the user's
+  main wallet.
+- Native NEAR must be wrapped to wNEAR before verifier funding; do not
+  transfer raw native NEAR directly to the verifier.
+- The verifier deposit step is manual/user-wallet controlled.
+- `mode="paper"` means run the returned `build_intent_request` with
+  `solver="fixture"`.
+- `mode="quote"` means all paper gates passed and the user explicitly
+  asked for a live NEAR Intents quote; the output is still unsigned.
+- `mode="execution"` is informational only here. This skill still does
+  not sign or submit trades.
+- If the trial plan has `safe_to_quote=false`, do not request a live
+  quote.
+- Very small route sizes may be refused or dominated by minimums. Warn
+  the user rather than increasing size automatically.
 
 ### 5. Bull/bear debate
 
@@ -424,17 +489,17 @@ Persist returned bundles to
 
 After every run, call `portfolio` with `action="format_intents_widget"`
 and pass the latest pair, stance, confidence, `backtest_suite`, risk
-gates, research sources, optional `paid_research_plan`, and optional
-unsigned `IntentBundle`.
+gates, research sources, optional `trial_plan`, optional
+`paid_research_plan`, and optional unsigned `IntentBundle`.
 
 Persist the returned JSON exactly as:
 
 `projects/intents-trading-agent/widgets/state.json`
 
 The bundled project widget reads this file and renders ranked strategy
-candidates, paid source attribution, risk gates, and unsigned NEAR
-Intents status inside the IronClaw Projects view. If the widget files are
-not installed yet, copy:
+candidates, nominal NEAR trial status, paid source attribution, risk
+gates, and unsigned NEAR Intents status inside the IronClaw Projects
+view. If the widget files are not installed yet, copy:
 
 - `skills/intents-trading-agent/widgets/near-intents-console/manifest.json`
 - `skills/intents-trading-agent/widgets/near-intents-console/index.js`
@@ -452,6 +517,8 @@ Respond with specifics:
 - top supporting and opposing evidence,
 - paid source budget, selected sources, and receipt status if premium
   research was planned or used,
+- nominal NEAR trial budget, setup step status, and whether it is safe
+  to request a live quote,
 - backtest summary versus buy-and-hold when available,
 - top strategy-suite candidates when available,
 - risk gate table,

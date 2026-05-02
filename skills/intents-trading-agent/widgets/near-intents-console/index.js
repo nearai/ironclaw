@@ -184,12 +184,42 @@ function itaPaidResearch(plan) {
     + '</div>';
 }
 
+function itaTrialPlan(plan) {
+  if (!plan) {
+    return '<div class="ita-empty-line">No nominal NEAR trial plan recorded.</div>';
+  }
+  var steps = Array.isArray(plan.setup_steps) ? plan.setup_steps : [];
+  var gates = Array.isArray(plan.risk_gates) ? plan.risk_gates : [];
+  return '<div class="ita-trial">'
+    + '<div class="ita-trial-bar">'
+    + '<div><span>Budget</span><strong>' + itaEscape(plan.nominal_near || 0) + ' NEAR</strong></div>'
+    + '<div><span>Trade cap</span><strong>' + itaEscape(plan.max_trade_near || 0) + ' NEAR</strong></div>'
+    + '<div><span>USD est.</span><strong>' + itaMoney(plan.max_trade_usd) + '</strong></div>'
+    + '<div><span>Quote</span><strong>' + (plan.safe_to_quote ? 'Ready' : 'Blocked') + '</strong></div>'
+    + '</div>'
+    + '<div class="ita-trial-meta">'
+    + '<span class="ita-pill ' + itaStatusClass(plan.safe_to_quote ? 'pass' : 'blocked') + '">' + itaEscape(plan.mode || 'paper') + '</span>'
+    + (plan.recommended_strategy_id ? '<strong>' + itaEscape(plan.recommended_strategy_id) + '</strong>' : '<strong>No strategy selected</strong>')
+    + '<span>' + itaEscape(plan.pair || 'NEAR/USDC') + '</span>'
+    + '</div>'
+    + (steps.length ? '<div class="ita-trial-steps">'
+      + steps.slice(0, 5).map(function(step) {
+        return '<div><span>' + itaEscape(step.order || '') + '</span><strong>' + itaEscape(step.name || 'Step') + '</strong><small>' + itaEscape(step.status || 'manual') + '</small></div>';
+      }).join('')
+      + '</div>' : '')
+    + (gates.length ? '<div class="ita-trial-gates">' + itaRiskGates(gates.slice(0, 5)) + '</div>' : '')
+    + (plan.next_action ? '<div class="ita-trial-next">' + itaEscape(plan.next_action) + '</div>' : '')
+    + '</div>';
+}
+
 function itaWritePrompt(kind, state) {
   if (api && api.navigate) api.navigate('chat');
   var input = document.getElementById('chat-input');
   if (!input) return;
   var pair = state && state.pair ? state.pair : 'the watched pair';
-  input.value = kind === 'paid'
+  input.value = kind === 'trial'
+    ? 'For the Intents Trading Agent, prepare a nominal NEAR trial for ' + pair + ': use paper mode first, cap the trial wallet, show the strategy menu, run backtest_suite before any live quote, and keep all NEAR Intents payloads unsigned.'
+    : kind === 'paid'
     ? 'For the Intents Trading Agent, build a paid research plan for ' + pair + ' first: discover MPP/x402/NEAR payable sources, enforce the source budget, require receipts before use, then run backtest_suite and risk gates before any unsigned NEAR intent.'
     : kind === 'quote'
     ? 'For the Intents Trading Agent, request a live NEAR Intents quote for ' + pair + ' only if all current risk gates still pass. Keep it unsigned.'
@@ -217,6 +247,7 @@ function itaRender(state) {
     + '<div><span>Updated</span><strong>' + itaEscape(state.generated_at || '-') + '</strong></div>'
     + '</div>'
     + '<div class="ita-body">'
+    + '<section><div class="ita-section-title">Nominal NEAR Trial</div>' + itaTrialPlan(state.trial_plan) + '</section>'
     + '<section><div class="ita-section-title">Paid Research</div>' + itaPaidResearch(state.paid_research) + '</section>'
     + '<section><div class="ita-section-title">Strategy Suite</div>' + itaCandidateRows(state.top_candidates) + '</section>'
     + '<section><div class="ita-section-title">Risk Gates</div>' + itaRiskGates(state.risk_gates) + '</section>'
@@ -224,12 +255,16 @@ function itaRender(state) {
     + '</div>'
     + (state.next_action ? '<div class="ita-next">' + itaEscape(state.next_action) + '</div>' : '')
     + '<div class="ita-actions">'
+    + '<button type="button" data-action="ita-trial">Prepare NEAR Trial</button>'
     + '<button type="button" data-action="ita-paid">Prepare Paid Research</button>'
     + '<button type="button" data-action="ita-paper">Prepare Paper Run</button>'
     + '<button type="button" data-action="ita-quote">Prepare Live Quote Request</button>'
     + '</div>';
 
   root.querySelector('[data-action="ita-refresh"]').addEventListener('click', itaLoad);
+  root.querySelector('[data-action="ita-trial"]').addEventListener('click', function() {
+    itaWritePrompt('trial', state);
+  });
   root.querySelector('[data-action="ita-paid"]').addEventListener('click', function() {
     itaWritePrompt('paid', state);
   });
