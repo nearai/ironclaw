@@ -4,7 +4,7 @@
   "kind": "tool",
   "version": "0.1.0",
   "wit_version": "0.3.0",
-  "description": "Cross-chain DeFi portfolio discovery, ranked rebalancing proposals, unsigned NEAR Intent construction, deterministic spot strategy backtesting/suite ranking, and NEAR Intents trading widget state.",
+  "description": "Cross-chain DeFi portfolio discovery, ranked rebalancing proposals, unsigned NEAR Intent construction, deterministic spot strategy backtesting/suite ranking, paid research budgeting/attribution, and NEAR Intents trading widget state.",
   "keywords": [
     "defi",
     "portfolio",
@@ -14,7 +14,12 @@
     "near-intents",
     "crypto",
     "backtesting",
-    "trading"
+    "trading",
+    "paid-research",
+    "x402",
+    "mpp",
+    "dripstack",
+    "agent-wallet"
   ],
   "source": {
     "dir": "tools-src/portfolio",

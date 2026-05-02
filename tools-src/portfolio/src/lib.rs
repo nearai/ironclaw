@@ -18,6 +18,10 @@
 //!   caller-provided OHLCV candles before any intent is built.
 //! - `backtest_suite` — rank several strategy candidates over the same
 //!   candle episode before any strategy is selected for paper intent work.
+//! - `plan_paid_research` — rank paid/free research sources, budget a
+//!   premium-source query, and prepare attribution/payment gates.
+//! - `plan_dripstack_browse` — model DripStack's guided topic →
+//!   publication → article purchase flow without fetching paid content.
 //! - `format_intents_widget` — build the NEAR Intents trading console
 //!   view model consumed by the project widget.
 //!
@@ -35,6 +39,7 @@
 //! ├── strategy/           // propose: parse strategy docs + filter
 //! ├── intents/            // build_intent: solver call + bounded checks
 //! ├── backtest.rs         // paper strategy replay/ranking over OHLCV candles
+//! ├── research.rs         // paid research source budgeting/attribution
 //! └── widget.rs           // web widget state formatters
 //! ```
 
@@ -50,6 +55,7 @@ mod backtest;
 mod format;
 mod indexer;
 mod intents;
+mod research;
 mod strategy;
 mod types;
 mod widget;
@@ -129,6 +135,20 @@ enum PortfolioAction {
     /// menu of choices instead of blindly evaluating one strategy.
     #[serde(rename = "backtest_suite")]
     BacktestSuite(backtest::BacktestSuiteInput),
+
+    /// Plan a premium-source research query before fetching paywalled
+    /// content. This ranks candidate sources, enforces a budget, and
+    /// returns attribution/payment gates for MPP, x402, and NEAR
+    /// Intents-style rails. It never fetches paid content or signs.
+    #[serde(rename = "plan_paid_research")]
+    PlanPaidResearch(research::PaidResearchPlanInput),
+
+    /// Plan the DripStack guided-browse flow. Free catalog/post-title
+    /// metadata goes in; a selected article becomes a paid-source
+    /// candidate for `plan_paid_research`. It never buys or fetches
+    /// article bodies.
+    #[serde(rename = "plan_dripstack_browse")]
+    PlanDripstackBrowse(research::DripstackBrowseInput),
 
     /// Build the render-ready view model the web widget consumes.
     /// Writes to `projects/<id>/widgets/state.json`.
@@ -212,8 +232,8 @@ impl exports::near::agent::tool::Guest for PortfolioTool {
          classifies them against an embedded protocol registry, generates ranked \
          rebalancing proposals from declarative strategy docs, and builds unsigned \
          NEAR Intent bundles. Operations: scan, propose, build_intent, progress, \
-         backtest, backtest_suite, format_suggestion, format_widget, \
-         format_intents_widget. \
+         backtest, backtest_suite, plan_paid_research, plan_dripstack_browse, \
+         format_suggestion, format_widget, format_intents_widget. \
          Read-only and unsigned — the agent never holds private keys."
             .to_string()
     }
@@ -309,6 +329,16 @@ fn execute_inner(params: &str) -> Result<String, String> {
             let output = backtest::run_suite(input)?;
             serde_json::to_string(&output)
                 .map_err(|e| format!("Serialize backtest_suite response: {e}"))
+        }
+        PortfolioAction::PlanPaidResearch(input) => {
+            let output = research::plan(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize plan_paid_research response: {e}"))
+        }
+        PortfolioAction::PlanDripstackBrowse(input) => {
+            let output = research::plan_dripstack_browse(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize plan_dripstack_browse response: {e}"))
         }
         PortfolioAction::FormatWidget(input) => {
             let output = widget::format_widget(input);

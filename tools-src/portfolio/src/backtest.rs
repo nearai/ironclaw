@@ -597,6 +597,7 @@ fn enter_trade(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn exit_trade(
     idx: usize,
     candle: &Candle,
@@ -816,6 +817,7 @@ fn rsi(candles: &[Candle], end_idx: usize, window: usize) -> Option<f64> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compute_metrics(
     initial_cash: f64,
     end_cash: f64,
