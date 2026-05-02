@@ -117,10 +117,7 @@ pub async fn slash_command_handler(
         }
     };
     let workspace_id = effective_workspace_id(&req);
-    let resolved = match store
-        .resolve_channel_identity("slack", workspace_id)
-        .await
-    {
+    let resolved = match store.resolve_channel_identity("slack", workspace_id).await {
         Ok(opt) => opt,
         Err(e) => {
             tracing::error!(error = %e, "resolve_channel_identity failed");
@@ -158,7 +155,10 @@ pub async fn slash_command_handler(
 }
 
 async fn read_signing_secret(state: &GatewayState) -> Result<String, &'static str> {
-    let secrets = state.secrets_store.as_ref().ok_or("secrets_store missing")?;
+    let secrets = state
+        .secrets_store
+        .as_ref()
+        .ok_or("secrets_store missing")?;
     let decrypted = secrets
         .get_decrypted(&state.owner_id, SLACK_SIGNING_SECRET_NAME)
         .await
