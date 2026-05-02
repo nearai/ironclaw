@@ -1015,12 +1015,28 @@ Respond with a JSON plan in this format:
             )
         };
 
-        // Include workspace identity prompt if available
-        let identity_section = if let Some(ref identity) = self.workspace_system_prompt {
-            format!("\n\n---\n\n{}", identity)
-        } else {
-            String::new()
-        };
+        // Identity preamble: when the workspace defines identity files
+        // (AGENTS.md / SOUL.md / USER.md / IDENTITY.md, combined into
+        // `workspace_system_prompt`), use them as the authoritative lead.
+        // Otherwise fall back to the built-in IronClaw default.
+        //
+        // Resolves #3035: the hardcoded `"You are IronClaw Agent"` line
+        // used to lead the prompt unconditionally, then the user's
+        // identity content was appended at the end. The model treated
+        // the first claim as authoritative and answered "My name is
+        // IronClaw…" even when Settings + IDENTITY.md said otherwise.
+        // Putting workspace identity first lets the user's display
+        // name actually take effect; the safety / format / tool
+        // sections below still apply.
+        let identity_preamble = self
+            .workspace_system_prompt
+            .as_deref()
+            .unwrap_or("You are IronClaw Agent, a secure autonomous assistant.")
+            .to_string();
+        // `identity_section` retained as empty so the format string
+        // below stays positionally stable; identity now lives in the
+        // preamble, not as a trailing section.
+        let identity_section = String::new();
 
         // Include active skill context if available
         let skills_section = if let Some(ref skill_ctx) = self.skill_context {
@@ -1098,7 +1114,7 @@ Respond directly with your final answer. Do not wrap your response in any specia
         };
 
         format!(
-            r#"You are IronClaw Agent, a secure autonomous assistant.
+            r#"{identity_preamble}
 
 {response_format}
 
@@ -2889,6 +2905,67 @@ That's my plan."#;
         let first = reasoning.build_system_prompt_with_tools(&tool_defs);
         let second = reasoning.build_system_prompt_with_tools(&tool_defs);
         assert_eq!(first, second, "System prompt should be deterministic");
+    }
+
+    /// Regression: #3035. When no workspace identity is set, the
+    /// hardcoded IronClaw default still leads the prompt — existing
+    /// installs without IDENTITY.md / SOUL.md continue to behave as
+    /// before.
+    #[test]
+    fn test_system_prompt_falls_back_to_ironclaw_default_when_no_workspace_identity() {
+        let reasoning = make_test_reasoning();
+        let prompt = reasoning.build_system_prompt_with_tools(&[]);
+        assert!(
+            prompt.starts_with("You are IronClaw Agent"),
+            "without workspace identity the IronClaw default must lead the prompt; got: {}",
+            &prompt[..prompt.len().min(120)]
+        );
+    }
+
+    /// Regression: #3035. When the workspace defines an identity
+    /// (e.g. user sets IDENTITY.md to "You are Bobby"), that content
+    /// must lead the prompt. Previously the hardcoded "You are
+    /// IronClaw Agent" preamble was emitted first and the user's
+    /// identity was appended at the end as a trailing section, so
+    /// the model treated "IronClaw" as the authoritative name and
+    /// answered "My name is IronClaw…" despite Settings + IDENTITY.md.
+    #[test]
+    fn test_system_prompt_workspace_identity_overrides_ironclaw_default() {
+        let custom = "You are Bobby, a friendly research assistant.\nYour name is Bobby.";
+        let reasoning = make_test_reasoning().with_system_prompt(custom.to_string());
+        let prompt = reasoning.build_system_prompt_with_tools(&[]);
+        assert!(
+            prompt.starts_with(custom),
+            "workspace identity must lead the prompt; got: {}",
+            &prompt[..prompt.len().min(200)]
+        );
+        assert!(
+            !prompt.contains("You are IronClaw Agent"),
+            "the hardcoded IronClaw preamble must NOT appear when the user has set their own identity; full prompt: {prompt}"
+        );
+        // Safety section still applies — user's identity does not
+        // bypass the built-in safety rules.
+        assert!(
+            prompt.contains("## Safety"),
+            "safety section must still appear regardless of identity override"
+        );
+    }
+
+    /// Regression: #3035 fix must not duplicate identity content.
+    /// Before this fix, the workspace identity also appeared as a
+    /// trailing `--- {identity}` block. After the fix, identity
+    /// lives only in the preamble — appearing twice would waste
+    /// tokens and amplify any contradiction with the safety section.
+    #[test]
+    fn test_system_prompt_workspace_identity_appears_exactly_once() {
+        let custom = "UNIQUE_IDENTITY_MARKER_ABC123 — you are a specialized assistant.";
+        let reasoning = make_test_reasoning().with_system_prompt(custom.to_string());
+        let prompt = reasoning.build_system_prompt_with_tools(&[]);
+        assert_eq!(
+            prompt.matches("UNIQUE_IDENTITY_MARKER_ABC123").count(),
+            1,
+            "workspace identity must appear exactly once in the prompt; full prompt: {prompt}"
+        );
     }
 
     #[test]
