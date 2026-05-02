@@ -157,6 +157,13 @@ pub async fn start_server(
             "/auth/logout",
             post(crate::channels::web::handlers::auth::logout_handler),
         )
+        // Slack slash-command surface. Public (Slack hits it directly with
+        // its own signed request); the handler verifies the HMAC before
+        // acting. See `crate::channels::slack::sig`.
+        .route(
+            "/api/channels/slack/slash",
+            post(crate::channels::web::handlers::slack::slash_command_handler),
+        )
         // NEAR wallet auth (challenge-response, not OAuth redirect)
         .route(
             "/auth/near/challenge",

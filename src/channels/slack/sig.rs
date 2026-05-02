@@ -112,8 +112,8 @@ pub fn verify(inputs: VerifyInputs<'_>) -> Result<(), SignatureError> {
     // `new_from_slice` only errors for empty keys, which means the operator
     // never configured the signing secret — surface as Mismatch so we don't
     // crash the gateway on misconfiguration.
-    let mut mac = HmacSha256::new_from_slice(inputs.signing_secret)
-        .map_err(|_| SignatureError::Mismatch)?;
+    let mut mac =
+        HmacSha256::new_from_slice(inputs.signing_secret).map_err(|_| SignatureError::Mismatch)?;
     mac.update(b"v0:");
     mac.update(inputs.timestamp_header.as_bytes());
     mac.update(b":");
