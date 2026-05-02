@@ -109,8 +109,11 @@ pub fn verify(inputs: VerifyInputs<'_>) -> Result<(), SignatureError> {
         hex::decode(hex_sig).map_err(|e| SignatureError::BadSignatureHex(e.to_string()))?;
 
     // Slack's basestring is exactly `v0:<ts>:<raw body>`.
-    let mut mac =
-        HmacSha256::new_from_slice(inputs.signing_secret).expect("HMAC accepts any-length keys");
+    // `new_from_slice` only errors for empty keys, which means the operator
+    // never configured the signing secret — surface as Mismatch so we don't
+    // crash the gateway on misconfiguration.
+    let mut mac = HmacSha256::new_from_slice(inputs.signing_secret)
+        .map_err(|_| SignatureError::Mismatch)?;
     mac.update(b"v0:");
     mac.update(inputs.timestamp_header.as_bytes());
     mac.update(b":");
