@@ -652,6 +652,18 @@ pub struct AuthCapabilitySchema {
     /// Tool can specify an endpoint to call for validation.
     #[serde(default)]
     pub validation_endpoint: Option<ValidationEndpointSchema>,
+
+    /// Mark this auth section as optional — the tool works without
+    /// credentials but is enhanced by them. When set, `check_tool_auth_status`
+    /// returns `Ready` instead of `NeedsSetup` when no token is on file,
+    /// so the Settings UI does not render a misleading "Configure" button
+    /// for a tool that has nothing required to configure.
+    ///
+    /// Example: the Portfolio tool can scan NEAR addresses with no auth;
+    /// the optional Dune API key only enables the EVM scan path.
+    /// Resolves the misleading-Configure-button shape filed in #3081.
+    #[serde(default)]
+    pub optional: bool,
 }
 
 /// OAuth 2.0 configuration for browser-based login.
@@ -1092,6 +1104,31 @@ mod tests {
         assert_eq!(auth.secret_name, "my_api_key");
         assert!(auth.display_name.is_none());
         assert!(auth.setup_url.is_none());
+        // `optional` defaults to false when absent — auth is required
+        // unless the manifest explicitly opts out.
+        assert!(!auth.optional, "auth.optional must default to false");
+    }
+
+    /// Regression: #3081. Tools that mark their auth `optional: true`
+    /// (e.g. Portfolio's Dune API key, which only enables the EVM scan
+    /// path) must round-trip the flag through deserialization. The
+    /// extension-manager honors this in `check_tool_auth_status` to
+    /// avoid the misleading "Configure" button on cards that have
+    /// nothing required to configure.
+    #[test]
+    fn test_parse_auth_optional_flag() {
+        let json = r#"{
+            "auth": {
+                "secret_name": "dune_api_key",
+                "display_name": "Dune Analytics",
+                "instructions": "Optional — only needed for EVM scans.",
+                "optional": true
+            }
+        }"#;
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        let auth = caps.auth.expect("auth should parse");
+        assert_eq!(auth.secret_name, "dune_api_key");
+        assert!(auth.optional, "auth.optional must round-trip as true");
     }
 
     // ── Category 1: Header field name alias ─────────────────────────────

@@ -5404,6 +5404,16 @@ impl ExtensionManager {
                 return ToolAuthState::Ready;
             }
 
+            // Tools that mark their auth section `optional: true` work
+            // without credentials. Treating them as `NeedsSetup` causes
+            // the Settings UI to render a misleading "Configure" button
+            // for a tool that has nothing required to configure. See
+            // #3081 (Portfolio: Dune API key is optional, only enables
+            // the EVM scan path; NEAR scans work without it).
+            if auth.optional {
+                return ToolAuthState::Ready;
+            }
+
             return if auth.oauth.is_some() {
                 ToolAuthState::NeedsAuth
             } else {
