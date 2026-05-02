@@ -1,7 +1,7 @@
 {
   "version": "0.1.0",
   "wit_version": "0.3.0",
-  "description": "Cross-chain DeFi portfolio discovery, ranked rebalancing proposals, and unsigned NEAR Intent construction. Single tool with three operations: scan, propose, build_intent.",
+  "description": "Cross-chain DeFi portfolio discovery, ranked rebalancing proposals, unsigned NEAR Intent construction, deterministic spot strategy backtesting/suite ranking, and NEAR Intents trading widget state.",
   "discovery_summary": {
     "always_required": [
       "action"
@@ -9,11 +9,15 @@
     "conditional_requirements": [
       "`scan` requires `addresses` (list of wallet addresses).",
       "`propose` requires `positions` (output of `scan`). `strategies` is optional — defaults to the bundled strategies (stablecoin-yield-floor, lending-health-guard, lp-impermanent-loss-watch, near-staking-yield, near-lending-yield, near-lp-yield) when omitted or empty. `config` is optional.",
-      "`build_intent` requires `plan` (a MovementPlan from a Proposal). `config` and `solver` are optional; `solver` defaults to `fixture`."
+      "`build_intent` requires `plan` (a MovementPlan from a Proposal). `config` and `solver` are optional; `solver` defaults to `fixture`.",
+      "`backtest` requires oldest-to-newest OHLCV `candles` plus a long-only spot `strategy` (`buy-hold`, `sma-cross`, `breakout`, `mean-reversion`, `momentum`, or `rsi-mean-reversion`). Fees, slippage, position size, stop-loss, and take-profit are optional.",
+      "`backtest_suite` requires oldest-to-newest OHLCV `candles` plus a `candidates` menu. It returns ranked strategy results and a basic intent-eligibility gate.",
+      "`format_intents_widget` requires a `pair` and optional backtest-suite output, risk gates, and unsigned IntentBundle. It returns `intents-trading-widget/1` state for the project widget."
     ],
     "notes": [
       "All operations are read-only and produce no signed payloads. The agent never holds private keys.",
       "Scan supports historical queries via the optional `at` field (block per chain or timestamp).",
+      "Backtest uses closed-candle signals with next-open execution to avoid lookahead and returns metrics under `intents-backtest/1`; suite ranking returns `intents-backtest-suite/1`; NEAR Intents trading console state returns `intents-trading-widget/1`.",
       "Sources: `fixture` (embedded test data), `dune` (EVM via Dune Sim), `near` (NEAR via FastNEAR+Intear), `auto` (detect per address).",
       "Use `tool_info(name: \"portfolio\", detail: \"schema\")` for the full schema before guessing fields."
     ],
@@ -29,6 +33,25 @@
         "positions": [],
         "strategies": [],
         "config": { "floor_apy": 0.04, "max_risk_score": 3 }
+      },
+      {
+        "action": "backtest_suite",
+        "candles": [],
+        "candidates": [
+          { "id": "sma_5_20", "strategy": { "kind": "sma-cross", "fast_window": 5, "slow_window": 20 } },
+          { "id": "buy_hold", "strategy": { "kind": "buy-hold" } }
+        ],
+        "fee_bps": 10,
+        "slippage_bps": 5
+      },
+      {
+        "action": "format_intents_widget",
+        "pair": "NEAR/BTC",
+        "mode": "paper",
+        "stance": "watch",
+        "risk_gates": [
+          { "name": "unsigned-only", "status": "pass", "detail": "Wallet signature required outside the agent." }
+        ]
       }
     ]
   },

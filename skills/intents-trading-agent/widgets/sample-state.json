@@ -1,0 +1,59 @@
+{
+  "schema_version": "intents-trading-widget/1",
+  "generated_at": "2026-05-02T16:30:00Z",
+  "project_id": "intents-trading-agent",
+  "mode": "paper",
+  "pair": "NEAR/BTC",
+  "stance": "paper-intent",
+  "confidence": 0.74,
+  "top_candidates": [
+    {
+      "rank": 1,
+      "id": "sma_cross_fast",
+      "strategy_kind": "sma-cross",
+      "selection_score": 18.5,
+      "passes_basic_gate": true,
+      "total_return_pct": 12.0,
+      "alpha_vs_buy_hold_pct": 3.0,
+      "max_drawdown_pct": 8.0,
+      "trades": 6
+    }
+  ],
+  "risk_gates": [
+    {
+      "name": "unsigned-only",
+      "status": "pass",
+      "detail": "Wallet signature required outside the agent."
+    },
+    {
+      "name": "live-quote",
+      "status": "warn",
+      "detail": "Live NEAR Intents quote requires explicit user approval."
+    }
+  ],
+  "intent": {
+    "id": "intent-widget-fixture",
+    "status": "paper-built",
+    "route_label": "NEAR -> BTC via NEAR Intents",
+    "quote_source": "fixture",
+    "schema_version": "portfolio-intent/1",
+    "legs": 1,
+    "total_cost_usd": "0.42",
+    "expires_at": 1775000000,
+    "signer_placeholder": "<signed-by-user>",
+    "min_out": [
+      {
+        "symbol": "BTC",
+        "chain": "near",
+        "amount": "0.001",
+        "value_usd": "70.00"
+      }
+    ]
+  },
+  "source_count": 2,
+  "research_sources": [
+    "https://docs.near-intents.org/near-intents/market-makers/bus/solver-relay",
+    "https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint"
+  ],
+  "next_action": "Ask the user before requesting a live NEAR Intents quote."
+}

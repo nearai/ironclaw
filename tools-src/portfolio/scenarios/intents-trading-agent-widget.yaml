@@ -1,0 +1,74 @@
+id: intents-trading-agent-widget
+description: |
+  Formats the NEAR Intents trading console state consumed by the
+  project widget. The state is render-ready: ranked strategy choices,
+  risk gates, and unsigned intent preview in one payload.
+steps:
+  - name: format_console_state
+    action: format_intents_widget
+    params:
+      generated_at: "2026-05-02T16:30:00Z"
+      project_id: intents-trading-agent
+      mode: paper
+      pair: NEAR/BTC
+      stance: paper-intent
+      confidence: 0.74
+      backtest_suite:
+        schema_version: intents-backtest-suite/1
+        ranked:
+          - rank: 1
+            id: sma_cross_fast
+            strategy: {kind: sma-cross}
+            selection_score: 18.5
+            passes_basic_gate: true
+            metrics:
+              total_return_pct: 12.0
+              alpha_vs_buy_hold_pct: 3.0
+              max_drawdown_pct: 8.0
+              trades: 6
+          - rank: 2
+            id: buy_hold_baseline
+            strategy: {kind: buy-hold}
+            selection_score: 9.0
+            passes_basic_gate: true
+            metrics:
+              total_return_pct: 9.0
+              alpha_vs_buy_hold_pct: 0.0
+              max_drawdown_pct: 10.0
+              trades: 1
+      risk_gates:
+        - {name: unsigned-only, status: pass, detail: "Wallet signature required outside the agent."}
+        - {name: max-notional, status: pass, detail: "Paper notional is below config ceiling."}
+        - {name: live-quote, status: warn, detail: "Live NEAR Intents quote requires explicit user approval."}
+      intent:
+        status: paper-built
+        route_label: "NEAR -> BTC via NEAR Intents"
+        quote_source: fixture
+        bundle:
+          id: intent-widget-fixture
+          schema_version: portfolio-intent/1
+          total_cost_usd: "0.42"
+          expires_at: 1775000000
+          signer_placeholder: "<signed-by-user>"
+          bounded_checks:
+            max_slippage_bps: 50
+            solver_quote_version: fixture
+            min_out_per_leg:
+              - {symbol: BTC, address: null, chain: near, amount: "0.001", value_usd: "70.00"}
+          legs:
+            - id: leg-1
+              kind: swap
+              chain: near
+              depends_on: null
+              quoted_by: fixture
+              min_out: {symbol: BTC, address: null, chain: near, amount: "0.001", value_usd: "70.00"}
+              near_intent_payload:
+                intent: token_diff
+      research_sources:
+        - https://docs.near-intents.org/near-intents/market-makers/bus/solver-relay
+        - https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint
+      next_action: "Ask the user before requesting a live NEAR Intents quote."
+    expect:
+      intents_widget_schema_version: intents-trading-widget/1
+      intents_widget_top_candidates_min: 2
+      intents_widget_intent_status: paper-built

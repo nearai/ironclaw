@@ -34,9 +34,53 @@ pub struct FormatWidgetInput {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct FormatIntentsTradingWidgetInput {
+    #[serde(default)]
+    pub generated_at: Option<String>,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default = "default_mode")]
+    pub mode: String,
+    pub pair: String,
+    #[serde(default = "default_stance")]
+    pub stance: String,
+    #[serde(default)]
+    pub confidence: Option<f64>,
+    #[serde(default)]
+    pub backtest_suite: Option<serde_json::Value>,
+    #[serde(default)]
+    pub risk_gates: Vec<IntentsRiskGateInput>,
+    #[serde(default)]
+    pub intent: Option<IntentsIntentInput>,
+    #[serde(default)]
+    pub research_sources: Vec<String>,
+    #[serde(default)]
+    pub next_action: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct PendingIntentInput {
     pub bundle: IntentBundle,
     pub status: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct IntentsRiskGateInput {
+    pub name: String,
+    pub status: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct IntentsIntentInput {
+    pub bundle: IntentBundle,
+    #[serde(default = "default_intent_status")]
+    pub status: String,
+    #[serde(default)]
+    pub route_label: Option<String>,
+    #[serde(default)]
+    pub quote_source: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -113,6 +157,83 @@ pub struct WidgetPendingIntent {
     pub expires_at: i64,
 }
 
+#[derive(Debug, Serialize)]
+pub struct IntentsTradingWidgetState {
+    pub schema_version: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generated_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    pub mode: String,
+    pub pair: String,
+    pub stance: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
+    pub top_candidates: Vec<IntentsStrategyCandidate>,
+    pub risk_gates: Vec<IntentsRiskGate>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intent: Option<IntentsIntentPreview>,
+    pub source_count: usize,
+    pub research_sources: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_action: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct IntentsStrategyCandidate {
+    pub rank: usize,
+    pub id: String,
+    pub strategy_kind: String,
+    pub selection_score: f64,
+    pub passes_basic_gate: bool,
+    pub total_return_pct: f64,
+    pub alpha_vs_buy_hold_pct: f64,
+    pub max_drawdown_pct: f64,
+    pub trades: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct IntentsRiskGate {
+    pub name: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct IntentsIntentPreview {
+    pub id: String,
+    pub status: String,
+    pub route_label: String,
+    pub quote_source: String,
+    pub schema_version: String,
+    pub legs: usize,
+    pub total_cost_usd: String,
+    pub expires_at: i64,
+    pub signer_placeholder: String,
+    pub min_out: Vec<IntentMinOutPreview>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct IntentMinOutPreview {
+    pub symbol: String,
+    pub chain: String,
+    pub amount: String,
+    pub value_usd: String,
+}
+
+fn default_mode() -> String {
+    "paper".to_string()
+}
+
+fn default_stance() -> String {
+    "watch".to_string()
+}
+
+fn default_intent_status() -> String {
+    "none".to_string()
+}
+
 pub fn format_widget(input: FormatWidgetInput) -> WidgetState {
     let totals = compute_totals(&input);
 
@@ -175,6 +296,115 @@ pub fn format_widget(input: FormatWidgetInput) -> WidgetState {
         pending_intents,
         next_mission_run: input.next_mission_run.clone(),
         progress_metric: input.progress.clone(),
+    }
+}
+
+pub fn format_intents_trading_widget(
+    input: FormatIntentsTradingWidgetInput,
+) -> IntentsTradingWidgetState {
+    let top_candidates = input
+        .backtest_suite
+        .as_ref()
+        .and_then(|suite| suite.get("ranked"))
+        .and_then(|ranked| ranked.as_array())
+        .into_iter()
+        .flatten()
+        .take(5)
+        .map(strategy_candidate_from_value)
+        .collect();
+
+    let risk_gates = input
+        .risk_gates
+        .into_iter()
+        .map(|gate| IntentsRiskGate {
+            name: gate.name,
+            status: gate.status,
+            detail: gate.detail,
+        })
+        .collect();
+
+    let intent = input.intent.map(|intent| {
+        let min_out = intent
+            .bundle
+            .bounded_checks
+            .min_out_per_leg
+            .iter()
+            .map(|token| IntentMinOutPreview {
+                symbol: token.symbol.clone(),
+                chain: token.chain.clone(),
+                amount: token.amount.clone(),
+                value_usd: token.value_usd.clone(),
+            })
+            .collect();
+        IntentsIntentPreview {
+            id: intent.bundle.id,
+            status: intent.status,
+            route_label: intent
+                .route_label
+                .unwrap_or_else(|| "NEAR Intents route".to_string()),
+            quote_source: intent.quote_source.unwrap_or_else(|| "fixture".to_string()),
+            schema_version: intent.bundle.schema_version,
+            legs: intent.bundle.legs.len(),
+            total_cost_usd: intent.bundle.total_cost_usd,
+            expires_at: intent.bundle.expires_at,
+            signer_placeholder: intent.bundle.signer_placeholder,
+            min_out,
+        }
+    });
+
+    IntentsTradingWidgetState {
+        schema_version: "intents-trading-widget/1",
+        generated_at: input.generated_at,
+        project_id: input.project_id,
+        mode: input.mode,
+        pair: input.pair,
+        stance: input.stance,
+        confidence: input.confidence,
+        top_candidates,
+        risk_gates,
+        intent,
+        source_count: input.research_sources.len(),
+        research_sources: input.research_sources,
+        next_action: input.next_action,
+    }
+}
+
+fn strategy_candidate_from_value(value: &serde_json::Value) -> IntentsStrategyCandidate {
+    let default_metrics = serde_json::Value::Null;
+    let metrics = value.get("metrics").unwrap_or(&default_metrics);
+    IntentsStrategyCandidate {
+        rank: value.get("rank").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+        id: value
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("candidate")
+            .to_string(),
+        strategy_kind: value
+            .pointer("/strategy/kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string(),
+        selection_score: value
+            .get("selection_score")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+        passes_basic_gate: value
+            .get("passes_basic_gate")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        total_return_pct: metrics
+            .get("total_return_pct")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+        alpha_vs_buy_hold_pct: metrics
+            .get("alpha_vs_buy_hold_pct")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+        max_drawdown_pct: metrics
+            .get("max_drawdown_pct")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+        trades: metrics.get("trades").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
     }
 }
 
@@ -486,6 +716,83 @@ mod tests {
         assert_eq!(w.pending_intents[0].legs, 2);
         assert_eq!(w.pending_intents[0].total_cost_usd, "0.50");
         assert_eq!(w.pending_intents[0].expires_at, 1712345678);
+    }
+
+    #[test]
+    fn intents_trading_widget_summarizes_suite_and_intent() {
+        use crate::types::{BoundedChecks, IntentBundle, IntentLeg, TokenAmount};
+
+        let token = TokenAmount {
+            symbol: "BTC".into(),
+            address: None,
+            chain: "near".into(),
+            amount: "0.001".into(),
+            value_usd: "70.00".into(),
+        };
+
+        let w = format_intents_trading_widget(FormatIntentsTradingWidgetInput {
+            generated_at: Some("2026-05-02T16:00:00Z".to_string()),
+            project_id: Some("intents-trading-agent".to_string()),
+            mode: "paper".to_string(),
+            pair: "NEAR/BTC".to_string(),
+            stance: "paper-intent".to_string(),
+            confidence: Some(0.74),
+            backtest_suite: Some(serde_json::json!({
+                "schema_version": "intents-backtest-suite/1",
+                "ranked": [{
+                    "rank": 1,
+                    "id": "sma_cross_fast",
+                    "strategy": { "kind": "sma-cross" },
+                    "selection_score": 18.5,
+                    "passes_basic_gate": true,
+                    "metrics": {
+                        "total_return_pct": 12.0,
+                        "alpha_vs_buy_hold_pct": 3.0,
+                        "max_drawdown_pct": 8.0,
+                        "trades": 6
+                    }
+                }]
+            })),
+            risk_gates: vec![IntentsRiskGateInput {
+                name: "unsigned-only".to_string(),
+                status: "pass".to_string(),
+                detail: Some("Wallet signature required outside the agent.".to_string()),
+            }],
+            intent: Some(IntentsIntentInput {
+                bundle: IntentBundle {
+                    id: "intent-1".to_string(),
+                    legs: vec![IntentLeg {
+                        id: "leg-1".to_string(),
+                        kind: "swap".to_string(),
+                        chain: "near".to_string(),
+                        near_intent_payload: serde_json::json!({ "intent": "token_diff" }),
+                        depends_on: None,
+                        min_out: token.clone(),
+                        quoted_by: "fixture".to_string(),
+                    }],
+                    total_cost_usd: "0.42".to_string(),
+                    bounded_checks: BoundedChecks {
+                        min_out_per_leg: vec![token],
+                        max_slippage_bps: 50,
+                        solver_quote_version: "fixture".to_string(),
+                    },
+                    expires_at: 1_775_000_000,
+                    signer_placeholder: "<signed-by-user>".to_string(),
+                    schema_version: "portfolio-intent/1".to_string(),
+                },
+                status: "paper-built".to_string(),
+                route_label: Some("NEAR -> BTC via NEAR Intents".to_string()),
+                quote_source: Some("fixture".to_string()),
+            }),
+            research_sources: vec!["https://docs.near-intents.org/".to_string()],
+            next_action: Some("Request live quote only after user approval.".to_string()),
+        });
+
+        assert_eq!(w.schema_version, "intents-trading-widget/1");
+        assert_eq!(w.top_candidates.len(), 1);
+        assert!(w.top_candidates[0].passes_basic_gate);
+        assert_eq!(w.intent.unwrap().status, "paper-built");
+        assert_eq!(w.source_count, 1);
     }
 
     // ---- only ready proposals in suggestions ----
