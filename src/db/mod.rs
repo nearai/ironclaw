@@ -1192,6 +1192,28 @@ pub trait ChannelPairingStore: Send + Sync {
         channel: &str,
         external_id: &str,
     ) -> Result<(), DatabaseError>;
+
+    /// Persist a workspace-level channel identity directly, without going
+    /// through per-user pairing. Used by `ironclaw channels install slack
+    /// <team_id>` and equivalent admin-driven workspace installs — the
+    /// install binds the deployment owner to the workspace; per-user
+    /// pairing happens later on first DM (see [`upsert_pairing_request`]
+    /// / [`approve_pairing`]).
+    ///
+    /// Idempotent. If `(channel, external_id)` already exists, the
+    /// existing row's `owner_id` is overwritten (matches the pairing
+    /// approve semantics). Returns `true` if a new row was inserted,
+    /// `false` if an existing row was updated — useful for operator
+    /// output ("registered" vs "owner refreshed").
+    ///
+    /// [`upsert_pairing_request`]: ChannelPairingStore::upsert_pairing_request
+    /// [`approve_pairing`]: ChannelPairingStore::approve_pairing
+    async fn upsert_channel_identity(
+        &self,
+        channel: &str,
+        external_id: &str,
+        owner_id: &str,
+    ) -> Result<bool, DatabaseError>;
 }
 
 /// Generates an 8-character pairing code from an unambiguous alphabet.

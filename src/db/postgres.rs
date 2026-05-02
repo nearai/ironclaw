@@ -1467,6 +1467,43 @@ impl ChannelPairingStore for PgBackend {
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(())
     }
+
+    async fn upsert_channel_identity(
+        &self,
+        channel: &str,
+        external_id: &str,
+        owner_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        let channel = crate::pairing::normalize_channel_name(channel);
+        let mut client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        // `xmax = 0` is true exactly when this row was inserted by THIS statement
+        // (no prior tuple to mark as updated) — the canonical Postgres trick for
+        // detecting INSERT-vs-UPDATE inside an UPSERT. Cheaper than SELECT-then-write.
+        let row = tx
+            .query_one(
+                "INSERT INTO channel_identities (id, owner_id, channel, external_id)
+                 VALUES (gen_random_uuid(), $1, $2, $3)
+                 ON CONFLICT (channel, external_id) DO UPDATE SET owner_id = $1
+                 RETURNING (xmax = 0) AS inserted",
+                &[&owner_id, &channel, &external_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let inserted: bool = row.get("inserted");
+        tx.commit()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(inserted)
+    }
 }
 
 // ==================== IdentityStore ====================

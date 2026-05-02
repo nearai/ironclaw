@@ -34,6 +34,7 @@ mod manager;
 pub mod relay;
 mod repl;
 mod signal;
+pub mod slack;
 #[cfg(feature = "tui")]
 pub mod tui;
 pub mod wasm;
