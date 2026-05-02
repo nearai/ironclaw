@@ -70,6 +70,14 @@ jobs:
         run: |
           echo "sha=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
 
+      # QEMU enables cross-arch emulation on the amd64 runner so the
+      # arm64 image can be rebuilt without provisioning native arm64
+      # hardware. Mirrors the setup in docker.yml.
+      - name: Set up QEMU (multi-arch emulation)
+        uses: docker/setup-qemu-action@49b3bc8e6bdd4a60e6116a5414239cba5943d3cf # v3
+        with:
+          platforms: arm64
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
@@ -96,7 +104,7 @@ jobs:
           push: true
           tags: ${{ env.IMAGE_NAME }}:${{ inputs.tag }}
           target: runtime
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -107,7 +115,7 @@ jobs:
           context: .
           push: true
           tags: ${{ env.IMAGE_NAME }}:${{ inputs.tag }}
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

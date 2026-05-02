@@ -118,6 +118,16 @@ jobs:
           username: ${{ vars.DOCKER_REGISTRY_USER }}
           password: ${{ secrets.DOCKER_REGISTRY_TOKEN }}
 
+      # QEMU enables cross-arch emulation on the amd64 runner so the
+      # arm64 image can be built without provisioning native arm64
+      # hardware. The arm64 build is roughly 2-3x slower than amd64
+      # under emulation; if CI minutes become a concern, swap this for
+      # a native arm64 runner once one is available.
+      - name: Set up QEMU (multi-arch emulation)
+        uses: docker/setup-qemu-action@49b3bc8e6bdd4a60e6116a5414239cba5943d3cf # v3
+        with:
+          platforms: arm64
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
@@ -130,7 +140,7 @@ jobs:
           target: ${{ steps.tags.outputs.target }}
           labels: |
             ironclaw.git.sha=${{ steps.source_sha.outputs.sha }}
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -143,7 +153,7 @@ jobs:
           tags: ${{ steps.tags.outputs.worker_tags }}
           labels: |
             ironclaw.git.sha=${{ steps.source_sha.outputs.sha }}
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           cache-from: type=gha,scope=worker
           cache-to: type=gha,mode=max,scope=worker
 
