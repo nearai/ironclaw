@@ -229,11 +229,13 @@ fn normalise_whitespace(s: &str) -> String {
     for ch in s.chars() {
         if ch == '\n' {
             // Preserve paragraph breaks; collapse adjacent spaces before/after.
+            // Set prev_space=true so any whitespace that follows the newline
+            // is absorbed rather than re-emitted as a leading space.
             while out.ends_with(' ') {
                 out.pop();
             }
             out.push('\n');
-            prev_space = false;
+            prev_space = true;
             continue;
         }
         if ch.is_whitespace() {
