@@ -36,6 +36,7 @@ Commands:
   skills      Manage skills
   hooks       Manage lifecycle hooks
   models      Manage LLM providers and models
+  verify      Run layered project verification
   doctor      Run diagnostics (check if everything is configured correctly)
   logs        View and manage gateway logs
   status      Show system status

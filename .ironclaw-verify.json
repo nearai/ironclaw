@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "tiers": [
+    {
+      "name": "smoke",
+      "timeout_s": 240,
+      "commands": [
+        {
+          "name": "fmt",
+          "run": "cargo fmt --all --check"
+        },
+        {
+          "name": "verify-unit",
+          "run": "cargo test -p ironclaw --lib cli::verify::tests"
+        }
+      ]
+    },
+    {
+      "name": "replay",
+      "timeout_s": 600,
+      "commands": [
+        {
+          "name": "engine-v2-single-tool-replay",
+          "run": "cargo test --test e2e_engine_v2 --features replay -- --list | grep '^engine_v2_tests::snapshot_single_tool_echo: test$' >/dev/null && cargo test --test e2e_engine_v2 --features replay engine_v2_tests::snapshot_single_tool_echo -- --exact"
+        }
+      ]
+    }
+  ]
+}

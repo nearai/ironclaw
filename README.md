@@ -140,6 +140,9 @@ cargo build --release
 
 # Run tests
 cargo test
+
+# Run the layered verification harness
+ironclaw verify --tier smoke
 ```
 
 For **full release** (after modifying channel sources), run `./scripts/build-all.sh` to rebuild channels first.
@@ -314,6 +317,9 @@ cargo clippy --all --benches --tests --examples --all-features
 # Run tests
 createdb ironclaw_test
 cargo test
+
+# Run the repo's autonomous verification tiers
+cargo run --bin ironclaw -- verify --tier smoke
 
 # Run specific test
 cargo test test_name
