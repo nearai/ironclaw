@@ -1121,6 +1121,7 @@ async fn enforce_prompt_write_safety(
                 reason: Some(&reason),
                 findings: None,
                 allowance: None,
+                require_sink: false,
             },
         )
         .await?;
@@ -1156,6 +1157,7 @@ async fn enforce_prompt_write_safety(
                     reason: None,
                     findings: None,
                     allowance: None,
+                    require_sink: false,
                 },
             )
             .await?;
@@ -1172,6 +1174,7 @@ async fn enforce_prompt_write_safety(
                     reason: None,
                     findings: None,
                     allowance: Some(&allowance),
+                    require_sink: true,
                 },
             )
             .await?;
@@ -1199,6 +1202,7 @@ async fn enforce_prompt_write_safety(
                     reason: None,
                     findings: Some(&findings),
                     allowance: None,
+                    require_sink: true,
                 },
             )
             .await?;
@@ -1225,6 +1229,7 @@ async fn enforce_prompt_write_safety(
                     reason: Some(&reason),
                     findings: None,
                     allowance: None,
+                    require_sink: false,
                 },
             )
             .await?;
@@ -1246,6 +1251,7 @@ async fn enforce_prompt_write_safety(
                     reason: Some(&reason),
                     findings: None,
                     allowance: None,
+                    require_sink: false,
                 },
             )
             .await?;
@@ -1265,6 +1271,9 @@ struct PromptWriteSafetyEventParts<'a> {
     reason: Option<&'a PromptSafetyReason>,
     findings: Option<&'a PromptSafetySummary>,
     allowance: Option<&'a PromptSafetyAllowanceId>,
+    // Outcomes that would still persist with a non-clean safety result (warn/bypass)
+    // require a durable redacted audit seam before persistence.
+    require_sink: bool,
 }
 
 async fn emit_prompt_write_safety_event(
@@ -1273,7 +1282,18 @@ async fn emit_prompt_write_safety_event(
     parts: PromptWriteSafetyEventParts<'_>,
 ) -> Result<(), FilesystemError> {
     let Some(event_sink) = event_sink else {
-        return Ok(());
+        return if parts.require_sink {
+            Err(prompt_write_safety_error(
+                check
+                    .path
+                    .virtual_path()
+                    .unwrap_or_else(|_| valid_memory_path()),
+                check.filesystem_operation,
+                PromptSafetyReason::new(PromptSafetyReasonCode::PromptWriteSafetyEventUnavailable),
+            ))
+        } else {
+            Ok(())
+        };
     };
     let event = PromptWriteSafetyEvent {
         kind: parts.kind,
@@ -3019,6 +3039,8 @@ impl RootFilesystem for MemoryDocumentFilesystem {
         } else {
             None
         };
+        let metadata = resolve_document_metadata(self.repository.as_ref(), &document_path).await?;
+        let mut content_for_schema = None;
         if is_protected {
             let content = std::str::from_utf8(bytes).map_err(|_| {
                 memory_error(
@@ -3027,6 +3049,7 @@ impl RootFilesystem for MemoryDocumentFilesystem {
                     "memory document content must be UTF-8",
                 )
             })?;
+            content_for_schema = Some(content);
             let previous_hash = self
                 .repository
                 .read_document(&document_path)
@@ -3049,8 +3072,25 @@ impl RootFilesystem for MemoryDocumentFilesystem {
             )
             .await?;
         }
+        if let Some(schema) = &metadata.schema {
+            let content = match content_for_schema {
+                Some(content) => content,
+                None => std::str::from_utf8(bytes).map_err(|_| {
+                    memory_error(
+                        path.clone(),
+                        FilesystemOperation::WriteFile,
+                        "memory document content must be UTF-8",
+                    )
+                })?,
+            };
+            validate_content_against_schema(&document_path, content, schema)?;
+        }
+        let options = MemoryWriteOptions {
+            metadata,
+            changed_by: Some(scoped_memory_owner_key(document_path.scope())),
+        };
         self.repository
-            .write_document(&document_path, bytes)
+            .write_document_with_options(&document_path, bytes, &options)
             .await?;
         if let Some(indexer) = &self.indexer {
             let _ = indexer.reindex_document(&document_path).await;
@@ -3075,6 +3115,11 @@ impl RootFilesystem for MemoryDocumentFilesystem {
         } else {
             None
         };
+        let metadata = resolve_document_metadata(self.repository.as_ref(), &document_path).await?;
+        let options = MemoryWriteOptions {
+            metadata,
+            changed_by: Some(scoped_memory_owner_key(document_path.scope())),
+        };
         for _ in 0..MAX_MEMORY_APPEND_RETRIES {
             let previous = self.repository.read_document(&document_path).await?;
             let expected_previous_hash = previous.as_deref().map(content_bytes_sha256);
@@ -3088,6 +3133,7 @@ impl RootFilesystem for MemoryDocumentFilesystem {
             };
             let mut combined = previous_bytes;
             combined.extend_from_slice(bytes);
+            let mut content_for_schema = None;
             if is_protected {
                 let content = std::str::from_utf8(&combined).map_err(|_| {
                     memory_error(
@@ -3096,6 +3142,7 @@ impl RootFilesystem for MemoryDocumentFilesystem {
                         "memory document content must be UTF-8",
                     )
                 })?;
+                content_for_schema = Some(content);
                 enforce_prompt_write_safety(
                     self.prompt_safety_policy.as_ref(),
                     self.prompt_safety_event_sink.as_ref(),
@@ -3113,13 +3160,26 @@ impl RootFilesystem for MemoryDocumentFilesystem {
                 )
                 .await?;
             }
+            if let Some(schema) = &options.metadata.schema {
+                let content = match content_for_schema {
+                    Some(content) => content,
+                    None => std::str::from_utf8(&combined).map_err(|_| {
+                        memory_error(
+                            path.clone(),
+                            FilesystemOperation::AppendFile,
+                            "memory document content must be UTF-8",
+                        )
+                    })?,
+                };
+                validate_content_against_schema(&document_path, content, schema)?;
+            }
             match self
                 .repository
                 .compare_and_append_document_with_options(
                     &document_path,
                     expected_previous_hash.as_deref(),
                     bytes,
-                    &MemoryWriteOptions::default(),
+                    &options,
                 )
                 .await?
             {

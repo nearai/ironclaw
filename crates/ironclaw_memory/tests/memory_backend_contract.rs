@@ -100,7 +100,9 @@ async fn repository_memory_backend_keeps_builtin_repository_as_default_plugin() 
 async fn repository_memory_backend_rejects_high_risk_protected_prompt_write_before_persistence() {
     let repository = Arc::new(InMemoryMemoryDocumentRepository::new());
     let indexer = Arc::new(RecordingIndexer::default());
-    let backend = RepositoryMemoryBackend::new(repository.clone()).with_indexer(indexer.clone());
+    let backend = RepositoryMemoryBackend::new(repository.clone())
+        .with_indexer(indexer.clone())
+        .with_prompt_write_safety_event_sink(Arc::new(RecordingPromptSafetyEventSink::default()));
     let context = MemoryContext::new(MemoryDocumentScope::new("tenant-a", "alice", None).unwrap());
     let path = MemoryDocumentPath::new("tenant-a", "alice", None, "SOUL.md").unwrap();
 
@@ -180,6 +182,26 @@ async fn configured_prompt_safety_event_sink_failure_blocks_bypass_persistence()
 }
 
 #[tokio::test]
+async fn missing_prompt_safety_event_sink_blocks_bypass_persistence() {
+    let repository = Arc::new(InMemoryMemoryDocumentRepository::new());
+    let backend = RepositoryMemoryBackend::new(repository.clone());
+    let context = MemoryContext::new(MemoryDocumentScope::new("tenant-a", "alice", None).unwrap())
+        .with_prompt_write_safety_allowance(PromptSafetyAllowanceId::empty_prompt_file_clear());
+    let path = MemoryDocumentPath::new("tenant-a", "alice", None, "BOOTSTRAP.md").unwrap();
+
+    let err = backend
+        .write_document(&context, &path, b"")
+        .await
+        .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("prompt_write_safety_event_unavailable")
+    );
+    assert!(repository.read_document(&path).await.unwrap().is_none());
+}
+
+#[tokio::test]
 async fn protected_medium_risk_write_warns_allows_and_records_redacted_event() {
     let repository = Arc::new(InMemoryMemoryDocumentRepository::new());
     let events = Arc::new(RecordingPromptSafetyEventSink::default());
@@ -209,7 +231,8 @@ async fn protected_medium_risk_write_warns_allows_and_records_redacted_event() {
 #[tokio::test]
 async fn rejected_protected_write_error_is_sanitized() {
     let repository = Arc::new(InMemoryMemoryDocumentRepository::new());
-    let backend = RepositoryMemoryBackend::new(repository.clone());
+    let backend = RepositoryMemoryBackend::new(repository.clone())
+        .with_prompt_write_safety_event_sink(Arc::new(RecordingPromptSafetyEventSink::default()));
     let context = MemoryContext::new(MemoryDocumentScope::new("tenant-a", "alice", None).unwrap());
     let path = MemoryDocumentPath::new("tenant-a", "alice", None, "SOUL.md").unwrap();
 
@@ -292,8 +315,13 @@ async fn memory_backend_filesystem_write_passes_previous_hash_for_protected_over
 #[tokio::test]
 async fn memory_backend_filesystem_one_shot_allowance_reaches_wrapped_repository_backend() {
     let repository = Arc::new(InMemoryMemoryDocumentRepository::new());
-    let backend = Arc::new(RepositoryMemoryBackend::new(repository.clone()));
+    let events = Arc::new(RecordingPromptSafetyEventSink::default());
+    let backend = Arc::new(
+        RepositoryMemoryBackend::new(repository.clone())
+            .with_prompt_write_safety_event_sink(events.clone()),
+    );
     let filesystem = MemoryBackendFilesystemAdapter::new(backend)
+        .with_prompt_write_safety_event_sink(events)
         .with_one_shot_prompt_write_safety_allowance(
             PromptSafetyAllowanceId::empty_prompt_file_clear(),
         );
@@ -317,8 +345,13 @@ async fn memory_backend_filesystem_one_shot_allowance_reaches_wrapped_repository
 #[tokio::test]
 async fn memory_backend_filesystem_prompt_bypass_reaches_wrapped_repository_backend() {
     let repository = Arc::new(InMemoryMemoryDocumentRepository::new());
-    let backend = Arc::new(RepositoryMemoryBackend::new(repository.clone()));
+    let events = Arc::new(RecordingPromptSafetyEventSink::default());
+    let backend = Arc::new(
+        RepositoryMemoryBackend::new(repository.clone())
+            .with_prompt_write_safety_event_sink(events.clone()),
+    );
     let filesystem = MemoryBackendFilesystemAdapter::new(backend)
+        .with_prompt_write_safety_event_sink(events)
         .with_prompt_write_safety_policy(Arc::new(EmptyClearBypassPolicy));
     let path = VirtualPath::new(
         "/memory/tenants/tenant-a/users/alice/agents/_none/projects/_none/BOOTSTRAP.md",
@@ -338,6 +371,7 @@ async fn memory_backend_filesystem_prompt_bypass_reaches_wrapped_repository_back
 async fn memory_document_filesystem_empty_clear_uses_one_shot_allowance() {
     let repository = Arc::new(InMemoryMemoryDocumentRepository::new());
     let filesystem = MemoryDocumentFilesystem::new(repository.clone())
+        .with_prompt_write_safety_event_sink(Arc::new(RecordingPromptSafetyEventSink::default()))
         .with_one_shot_prompt_write_safety_allowance(
             PromptSafetyAllowanceId::empty_prompt_file_clear(),
         );
@@ -359,6 +393,54 @@ async fn memory_document_filesystem_empty_clear_uses_one_shot_allowance() {
 }
 
 #[tokio::test]
+async fn memory_document_filesystem_append_validates_schema_from_config() {
+    let repository = Arc::new(InMemoryMemoryDocumentRepository::new());
+    let filesystem = MemoryDocumentFilesystem::new(repository.clone());
+    let config_path =
+        MemoryDocumentPath::new("tenant-a", "alice", None, "settings/.config").unwrap();
+    let document_path =
+        MemoryDocumentPath::new("tenant-a", "alice", None, "settings/llm.json").unwrap();
+    let virtual_path = VirtualPath::new(
+        "/memory/tenants/tenant-a/users/alice/agents/_none/projects/_none/settings/llm.json",
+    )
+    .unwrap();
+
+    repository.write_document(&config_path, b"").await.unwrap();
+    repository
+        .write_document_metadata(
+            &config_path,
+            &serde_json::json!({
+                "schema": {
+                    "type": "object",
+                    "properties": {"provider": {"type": "string"}},
+                    "required": ["provider"]
+                }
+            }),
+        )
+        .await
+        .unwrap();
+    repository
+        .write_document(&document_path, br#"{"provider":"nearai"}"#)
+        .await
+        .unwrap();
+
+    let err = filesystem
+        .append_file(&virtual_path, b" trailing")
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("schema validation failed"));
+    assert_eq!(
+        repository
+            .read_document(&document_path)
+            .await
+            .unwrap()
+            .unwrap(),
+        br#"{"provider":"nearai"}"#
+    );
+}
+
+#[tokio::test]
 async fn memory_backend_filesystem_append_retries_when_document_changes_between_scan_and_write() {
     let backend = Arc::new(ConflictOnceAppendBackend::new(b"base"));
     let filesystem = MemoryBackendFilesystemAdapter::new(backend.clone());
@@ -375,8 +457,10 @@ async fn memory_backend_filesystem_append_retries_when_document_changes_between_
 #[tokio::test]
 async fn memory_backend_filesystem_append_scans_final_protected_content() {
     let repository = Arc::new(InMemoryMemoryDocumentRepository::new());
+    let events = Arc::new(RecordingPromptSafetyEventSink::default());
     let backend = Arc::new(RepositoryMemoryBackend::new(repository.clone()));
-    let filesystem = MemoryBackendFilesystemAdapter::new(backend);
+    let filesystem =
+        MemoryBackendFilesystemAdapter::new(backend).with_prompt_write_safety_event_sink(events);
     let path = VirtualPath::new(
         "/memory/tenants/tenant-a/users/alice/agents/_none/projects/_none/MEMORY.md",
     )
@@ -407,8 +491,9 @@ async fn custom_policy_registry_protects_paths_when_configured_only_on_policy() 
         .with_additional_path("custom/prompt.md")
         .unwrap();
     let policy = Arc::new(DefaultPromptWriteSafetyPolicy::with_registry(registry));
-    let backend =
-        RepositoryMemoryBackend::new(repository.clone()).with_prompt_write_safety_policy(policy);
+    let backend = RepositoryMemoryBackend::new(repository.clone())
+        .with_prompt_write_safety_policy(policy)
+        .with_prompt_write_safety_event_sink(Arc::new(RecordingPromptSafetyEventSink::default()));
     let context = MemoryContext::new(MemoryDocumentScope::new("tenant-a", "alice", None).unwrap());
     let path = MemoryDocumentPath::new("tenant-a", "alice", None, "custom/prompt.md").unwrap();
 
@@ -443,8 +528,9 @@ async fn non_protected_write_without_policy_does_not_read_or_fail_closed() {
 #[tokio::test]
 async fn protected_prompt_write_without_policy_fails_closed_before_persistence() {
     let repository = Arc::new(InMemoryMemoryDocumentRepository::new());
-    let backend =
-        RepositoryMemoryBackend::new(repository.clone()).without_prompt_write_safety_policy();
+    let backend = RepositoryMemoryBackend::new(repository.clone())
+        .without_prompt_write_safety_policy()
+        .with_prompt_write_safety_event_sink(Arc::new(RecordingPromptSafetyEventSink::default()));
     let context = MemoryContext::new(MemoryDocumentScope::new("tenant-a", "alice", None).unwrap());
     let path = MemoryDocumentPath::new("tenant-a", "alice", None, "SYSTEM.md").unwrap();
 
@@ -460,7 +546,8 @@ async fn protected_prompt_write_without_policy_fails_closed_before_persistence()
 #[tokio::test]
 async fn protected_empty_clear_requires_named_policy_allowance() {
     let repository = Arc::new(InMemoryMemoryDocumentRepository::new());
-    let backend = RepositoryMemoryBackend::new(repository.clone());
+    let backend = RepositoryMemoryBackend::new(repository.clone())
+        .with_prompt_write_safety_event_sink(Arc::new(RecordingPromptSafetyEventSink::default()));
     let context = MemoryContext::new(MemoryDocumentScope::new("tenant-a", "alice", None).unwrap());
     let allowed_context = context
         .clone()
