@@ -151,7 +151,7 @@
     "base_url_env": "MANIFEST_BASE_URL",
     "model_env": "MANIFEST_MODEL",
     "default_model": "auto",
-    "description": "Manifest smart model router (auto-routes to cheapest capable model)",
+    "description": "Manifest open-source LLM router (smart routing to cut inference costs)",
     "setup": {
       "kind": "api_key",
       "secret_name": "llm_manifest_api_key",
