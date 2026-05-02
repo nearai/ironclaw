@@ -1247,17 +1247,12 @@ impl EffectBridgeAdapter {
                     .map(|action| action.discovery_schema().clone())
             })
             .or_else(|| engine_action_schema(canonical_action_name));
-        let action_schema = match action_schema {
-            Some(schema) => Some(schema),
-            None => self
-                .tools
-                .get(&lookup_name)
-                .await
-                .map(|tool| tool.discovery_schema()),
-        };
-        let parameters = match action_schema {
-            Some(schema) => crate::tools::prepare_params_for_schema(&parameters, &schema),
-            None => parameters,
+        let parameters = if let Some(schema) = action_schema {
+            crate::tools::prepare_params_for_schema(&parameters, &schema)
+        } else if let Some(tool) = self.tools.get(&lookup_name).await {
+            crate::tools::prepare_params_for_schema(&parameters, &tool.discovery_schema())
+        } else {
+            parameters
         };
 
         // ── Per-step call limit (prevent amplification loops) ──
@@ -2743,15 +2738,24 @@ fn extract_credential_name(error_msg: &str) -> Option<String> {
     None
 }
 
-/// Look up the parameter schema for a known engine-native action by name.
+/// Look up the bridge-canonical schema for `mission_*` actions, the only
+/// engine-native action category that has no corresponding host `Tool`
+/// registration. `routine_*` (legacy v1 host tools, intercepted by the
+/// alias path before they execute) and `tool_info` (a v1/v2 host tool)
+/// are present in the host `ToolRegistry`, so they reach
+/// `execute_action_internal`'s registry branch directly and don't need
+/// this helper. Used in two places:
 ///
-/// Engine actions (`mission_*`, `routine_*` aliases, `tool_info`) are not
-/// in the host `ToolRegistry` — they are handled directly inside the
-/// bridge. This helper provides the canonical schema for those actions so
-/// they get the same schema-guided parameter coercion that registered
-/// tools get via `prepare_tool_params`. The orchestrator-populated
-/// `available_actions_snapshot` takes precedence; this is the fallback
-/// for callers (and tests) that do not populate it.
+/// 1. As a fallback in `execute_action_internal` when the orchestrator
+///    has not populated `available_actions_snapshot` — primarily tests
+///    that drive `execute_action` without setting up the snapshot.
+/// 2. To stay coupled to the `mission_capability_actions()` definitions
+///    so coercion in #1 always uses the same JSON Schema the engine
+///    advertises to the LLM.
+///
+/// In production paths the orchestrator always populates the snapshot,
+/// so the snapshot branch wins and this helper is a defense-in-depth
+/// fallback.
 fn engine_action_schema(action_name: &str) -> Option<serde_json::Value> {
     crate::bridge::engine_actions::mission_capability_actions()
         .into_iter()
