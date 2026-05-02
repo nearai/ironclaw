@@ -161,10 +161,10 @@ pub fn plan(input: NearTrialPlanInput) -> Result<NearTrialPlan, String> {
                 }),
         },
         TrialRiskGate {
-            name: "native-near-wrap".to_string(),
+            name: "near-funding-path".to_string(),
             status: "warn".to_string(),
             detail:
-                "The verifier does not accept raw native NEAR deposits; wrap NEAR to wNEAR before verifier funding."
+                "1Click or Deposit/Withdrawal Service flows may handle native NEAR wrapping. Direct verifier funding expects wNEAR (nep141:wrap.near), not a raw native NEAR transfer."
                     .to_string(),
         },
         strategy_gate,
@@ -400,10 +400,10 @@ fn setup_steps() -> Vec<TrialSetupStep> {
         },
         TrialSetupStep {
             order: 2,
-            name: "Wrap NEAR".to_string(),
+            name: "Choose funding path".to_string(),
             status: "manual".to_string(),
             detail:
-                "Convert the trial amount from native NEAR into wNEAR before depositing to the verifier."
+                "Use 1Click or the Deposit/Withdrawal Service for managed routing, or wrap native NEAR into wNEAR before a direct verifier deposit."
                     .to_string(),
         },
         TrialSetupStep {
@@ -411,7 +411,7 @@ fn setup_steps() -> Vec<TrialSetupStep> {
             name: "Deposit to verifier".to_string(),
             status: "manual".to_string(),
             detail:
-                "Deposit wNEAR into intents.near using the official verifier deposit flow; do not transfer raw NEAR directly."
+                "For a direct Verifier-contract deposit, deposit wNEAR into intents.near with ft_transfer_call; do not send raw native NEAR directly."
                     .to_string(),
         },
         TrialSetupStep {

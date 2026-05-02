@@ -18,11 +18,17 @@ wallet while keeping every agent-produced artifact unsigned.
 
 ## NEAR Intents Funding Notes
 
-Current NEAR Intents docs say the verifier accepts wrapped/tokenized
-assets, not raw native NEAR transfers. For a native NEAR trial, wrap NEAR
-to wNEAR first, then use the verifier deposit flow. The bridge/deposit
-service is available at `https://bridge.chaindefuser.com/rpc`, and the
-solver relay is at `https://solver-relay-v2.chaindefuser.com/rpc`.
+NEAR Intents supports deposits across supported assets through higher
+level routes such as the 1Click Swap API and the Deposit/Withdrawal
+Service. If you use those routes, native NEAR wrapping can be handled for
+you. The manual warning in this runbook is narrower: when integrating
+directly with the Verifier contract, it accepts NEP-141 token balances,
+so native NEAR is represented as wNEAR (`nep141:wrap.near`) and raw
+native NEAR should not be sent directly to `intents.near`.
+
+The bridge/deposit service is available at
+`https://bridge.chaindefuser.com/rpc`, and the solver relay is at
+`https://solver-relay-v2.chaindefuser.com/rpc`.
 
 Useful docs:
 

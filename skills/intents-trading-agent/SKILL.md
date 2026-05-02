@@ -359,8 +359,11 @@ Use the trial plan as the operator runbook:
 
 - The wallet should be a separate small NEAR account, not the user's
   main wallet.
-- Native NEAR must be wrapped to wNEAR before verifier funding; do not
-  transfer raw native NEAR directly to the verifier.
+- If the user funds through 1Click Swap or the Deposit/Withdrawal
+  Service, native NEAR wrapping/routing may be handled by that service.
+  If funding the Verifier contract directly, use wNEAR
+  (`nep141:wrap.near`) rather than transferring raw native NEAR to
+  `intents.near`.
 - The verifier deposit step is manual/user-wallet controlled.
 - `mode="paper"` means run the returned `build_intent_request` with
   `solver="fixture"`.

@@ -74,15 +74,15 @@
       },
       {
         "order": 2,
-        "name": "Wrap NEAR",
+        "name": "Choose funding path",
         "status": "manual",
-        "detail": "Convert native NEAR into wNEAR before verifier funding."
+        "detail": "Use 1Click or the Deposit/Withdrawal Service for managed routing, or wrap native NEAR into wNEAR before a direct verifier deposit."
       },
       {
         "order": 3,
         "name": "Deposit to verifier",
         "status": "manual",
-        "detail": "Deposit wNEAR into intents.near; do not transfer raw NEAR directly."
+        "detail": "For a direct Verifier-contract deposit, deposit wNEAR into intents.near with ft_transfer_call; do not send raw native NEAR directly."
       }
     ],
     "risk_gates": [
