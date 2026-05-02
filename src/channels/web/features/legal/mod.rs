@@ -295,6 +295,25 @@ async fn resolve_model_override(state: &GatewayState) -> Option<String> {
     }
 }
 
+/// Tabular review's model override. Falls back to `legal.chat.model` when
+/// `legal.tabular.model` is unset, so a single configured model covers
+/// both skills out of the box. Empty strings are treated as "unset".
+async fn resolve_tabular_model_override(state: &GatewayState) -> Option<String> {
+    const SETTING_KEY_TABULAR: &str = "legal.tabular.model";
+    let store = state.store.as_ref()?;
+    if let Ok(Some(raw)) = store
+        .get_setting(SETTINGS_OWNER_SCOPE, SETTING_KEY_TABULAR)
+        .await
+        && let Some(s) = raw.as_str()
+    {
+        let trimmed = s.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    resolve_model_override(state).await
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -319,6 +338,46 @@ pub async fn legal_create_chat_handler(
         .await
         .map_err(|e| db_error("legal_chats insert", e))?;
     Ok(Json(chat.into()))
+}
+
+/// `POST /api/skills/legal/projects/:id/tabular-review`
+///
+/// Runs a multi-document Q&A: every (document, question) pair in the
+/// project produces one cell in the returned table. Documents whose
+/// extraction has not yet completed are surfaced as a row with a
+/// per-cell error rather than silently dropped. Per-cell LLM errors are
+/// captured on the response so a partial run still returns useful data.
+pub async fn legal_tabular_review_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(_user): AuthenticatedUser,
+    Path(project_id): Path<String>,
+    Json(mut req): Json<crate::legal::TabularReviewRequest>,
+) -> Result<Json<crate::legal::TabularReviewResult>, LegalApiError> {
+    let store = store_or_503(&state)?;
+    let llm = llm_or_503(&state)?;
+    require_active_project(store.as_ref(), &project_id).await?;
+
+    // Apply the per-skill model override (`legal.tabular.model` setting,
+    // falling back to `legal.chat.model` so the same configured model
+    // covers both skills) when the request didn't pin one explicitly.
+    if req.model.is_none() {
+        req.model = resolve_tabular_model_override(&state).await;
+    }
+
+    let result = crate::legal::run_tabular_review(store.as_ref(), llm, &project_id, req)
+        .await
+        .map_err(|e| match e {
+            crate::legal::TabularReviewError::NoQuestions
+            | crate::legal::TabularReviewError::TooManyQuestions(_)
+            | crate::legal::TabularReviewError::QuestionTooLong { .. }
+            | crate::legal::TabularReviewError::InvalidContextBudget(_) => {
+                api_error(StatusCode::BAD_REQUEST, e.to_string())
+            }
+            crate::legal::TabularReviewError::Database(db_err) => {
+                db_error("legal tabular_review", db_err)
+            }
+        })?;
+    Ok(Json(result))
 }
 
 pub async fn legal_list_chats_handler(

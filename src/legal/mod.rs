@@ -12,9 +12,14 @@
 //! module owns the storage trait + libSQL implementation only.
 
 pub mod store;
+pub mod tabular;
 
 pub use store::{
     LegalChat, LegalChatMessage, LegalDocumentText, LegalProjectMeta, LegalRole, LegalStore,
+};
+pub use tabular::{
+    DEFAULT_DOC_CONTEXT_CHARS, MAX_QUESTION_CHARS, MAX_QUESTIONS_PER_REQUEST, TabularAnswer,
+    TabularReviewError, TabularReviewRequest, TabularReviewResult, TabularRow, run_tabular_review,
 };
 
 #[cfg(feature = "libsql")]

@@ -83,7 +83,7 @@ use crate::channels::web::features::extensions::{
 };
 use crate::channels::web::features::legal::{
     legal_create_chat_handler, legal_get_chat_handler, legal_list_chats_handler,
-    legal_post_message_handler,
+    legal_post_message_handler, legal_tabular_review_handler,
 };
 use crate::channels::web::features::logs::{
     logs_events_handler, logs_level_get_handler, logs_level_set_handler,
@@ -313,6 +313,10 @@ pub async fn start_server(
         .route(
             "/skills/legal/chats/{id}/messages",
             post(legal_post_message_handler),
+        )
+        .route(
+            "/skills/legal/projects/{id}/tabular-review",
+            post(legal_tabular_review_handler),
         )
         // Settings
         .route("/api/settings", get(settings_list_handler))
