@@ -19,7 +19,7 @@ use axum::{
     http::{StatusCode, header},
     response::Response,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::platform::state::GatewayState;
@@ -31,6 +31,7 @@ use super::models::{
     CreateProjectRequest, DocumentDetailResponse, DocumentResponse, LegalDocument, LegalProject,
     ProjectDetailResponse, ProjectListResponse,
 };
+use super::redline;
 use super::store;
 
 /// Maximum size of an uploaded legal document, in bytes (10 MiB).
@@ -207,6 +208,91 @@ pub async fn create_project_handler(
         .map_err(|e| db_err("create_project", e))?;
 
     Ok(Json(project))
+}
+
+/// Body for `POST /api/skills/legal/projects/:id/redline`.
+#[derive(Debug, Deserialize)]
+pub struct RedlineRequest {
+    pub base_document_id: String,
+    pub candidate_document_id: String,
+}
+
+/// `POST /api/skills/legal/projects/:id/redline` — paragraph-level
+/// tracked-changes between two documents in this project.
+///
+/// Both documents must (a) live in the project named by the path
+/// parameter and (b) have completed text extraction. Anything else
+/// returns 400/404 rather than producing a misleading diff.
+pub async fn redline_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(_user): AuthenticatedUser,
+    Path(project_id): Path<String>,
+    Json(req): Json<RedlineRequest>,
+) -> Result<Json<redline::RedlineResult>, (StatusCode, Json<ErrorBody>)> {
+    if req.base_document_id == req.candidate_document_id {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "base_document_id and candidate_document_id must be different",
+        ));
+    }
+    let db = require_db(&state)?;
+
+    // Confirm the project is active (404 on deleted) so a redline
+    // request against a soft-deleted project doesn't silently work.
+    let project = store::fetch_project(db, &project_id)
+        .await
+        .map_err(|e| db_err("fetch_project", e))?
+        .ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                format!("project {project_id} not found"),
+            )
+        })?;
+    if project.deleted_at.is_some() {
+        return Err(err(
+            StatusCode::NOT_FOUND,
+            format!("project {project_id} has been deleted"),
+        ));
+    }
+
+    let base = require_extracted_in_project(db, &project_id, &req.base_document_id, "base").await?;
+    let candidate =
+        require_extracted_in_project(db, &project_id, &req.candidate_document_id, "candidate")
+            .await?;
+
+    Ok(Json(redline::redline(&base, &candidate)))
+}
+
+/// Fetch a document, confirm it belongs to the named project, and
+/// return its `extracted_text`. Surfaces consistent 404/400/422 on the
+/// failure modes a redline caller can run into.
+async fn require_extracted_in_project(
+    db: &Arc<dyn crate::db::Database>,
+    project_id: &str,
+    document_id: &str,
+    role: &str,
+) -> Result<String, (StatusCode, Json<ErrorBody>)> {
+    let doc = store::fetch_document(db, document_id)
+        .await
+        .map_err(|e| db_err("fetch_document", e))?
+        .ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                format!("{role} document {document_id} not found"),
+            )
+        })?;
+    if doc.project_id != project_id {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            format!("{role} document {document_id} is not in project {project_id}"),
+        ));
+    }
+    doc.extracted_text.ok_or_else(|| {
+        err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("{role} document {document_id} has not finished extraction"),
+        )
+    })
 }
 
 /// `GET /api/skills/legal/projects` — list active projects.

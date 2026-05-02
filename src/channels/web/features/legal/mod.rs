@@ -15,6 +15,7 @@
 pub mod blobs;
 pub mod extract;
 pub mod models;
+pub mod redline;
 
 // Storage and HTTP handlers depend on libSQL-specific types (the libsql
 // crate is feature-gated). Postgres-only builds compile the data

@@ -623,6 +623,10 @@ fn legal_routes() -> LegalRouter {
             "/api/skills/legal/documents/{id}/blob",
             get(legal_handlers::get_document_blob_handler),
         )
+        .route(
+            "/api/skills/legal/projects/{id}/redline",
+            post(legal_handlers::redline_handler),
+        )
 }
 
 #[cfg(not(feature = "libsql"))]
