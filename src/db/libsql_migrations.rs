@@ -1007,6 +1007,32 @@ WHERE key = 'wasm.default_fuel_limit'
   AND CAST(json_extract(value, '$') AS INTEGER) = 10000000;
 "#,
     ),
+    (
+        27,
+        "invitations",
+        r#"
+CREATE TABLE IF NOT EXISTS invitations (
+    id TEXT PRIMARY KEY,
+    token_prefix TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    created_by_admin TEXT NOT NULL,
+    target_email TEXT,
+    target_role TEXT NOT NULL DEFAULT 'user',
+    scopes TEXT NOT NULL DEFAULT '{}',
+    expires_at TEXT NOT NULL,
+    claimed_at TEXT,
+    claimed_by_user_id TEXT,
+    revoked_at TEXT,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_invitations_token_hash ON invitations(token_hash);
+CREATE INDEX IF NOT EXISTS idx_invitations_admin ON invitations(created_by_admin);
+CREATE INDEX IF NOT EXISTS idx_invitations_expires ON invitations(expires_at)
+    WHERE claimed_at IS NULL AND revoked_at IS NULL;
+"#,
+    ),
 ];
 
 /// Migrations whose ADD COLUMN should be skipped when the column already

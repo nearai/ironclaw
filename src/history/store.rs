@@ -2543,7 +2543,7 @@ impl Store {
 // ==================== Users / API Tokens / Invitations ====================
 
 #[cfg(feature = "postgres")]
-use crate::db::{ApiTokenRecord, UserRecord};
+use crate::db::{ApiTokenRecord, InvitationRecord, UserRecord};
 
 #[cfg(feature = "postgres")]
 impl Store {
@@ -2801,6 +2801,60 @@ impl Store {
             created_at: now,
             revoked_at: None,
         })
+    }
+
+    pub async fn create_invitation(
+        &self,
+        invitation: &InvitationRecord,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            r#"
+            INSERT INTO invitations (
+                id, token_prefix, token_hash, created_by_admin, target_email,
+                target_role, scopes, expires_at, claimed_at, claimed_by_user_id,
+                revoked_at, metadata, created_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            "#,
+            &[
+                &invitation.id,
+                &invitation.token_prefix,
+                &invitation.token_hash,
+                &invitation.created_by_admin,
+                &invitation.target_email,
+                &invitation.target_role,
+                &invitation.scopes,
+                &invitation.expires_at,
+                &invitation.claimed_at,
+                &invitation.claimed_by_user_id,
+                &invitation.revoked_at,
+                &invitation.metadata,
+                &invitation.created_at,
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_invitation_by_token_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<InvitationRecord>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                r#"
+                SELECT id, token_prefix, token_hash, created_by_admin, target_email,
+                       target_role, scopes, expires_at, claimed_at, claimed_by_user_id,
+                       revoked_at, metadata, created_at
+                FROM invitations
+                WHERE token_hash = $1
+                "#,
+                &[&token_hash],
+            )
+            .await?;
+        Ok(row.map(|r| row_to_invitation(&r)))
     }
 
     /// List tokens for a user.
@@ -3167,6 +3221,25 @@ fn row_to_api_token(row: &tokio_postgres::Row) -> ApiTokenRecord {
         last_used_at: row.get("last_used_at"),
         created_at: row.get("created_at"),
         revoked_at: row.get("revoked_at"),
+    }
+}
+
+#[cfg(feature = "postgres")]
+fn row_to_invitation(row: &tokio_postgres::Row) -> InvitationRecord {
+    InvitationRecord {
+        id: row.get("id"),
+        token_prefix: row.get("token_prefix"),
+        token_hash: row.get("token_hash"),
+        created_by_admin: row.get("created_by_admin"),
+        target_email: row.get("target_email"),
+        target_role: row.get("target_role"),
+        scopes: row.get("scopes"),
+        expires_at: row.get("expires_at"),
+        claimed_at: row.get("claimed_at"),
+        claimed_by_user_id: row.get("claimed_by_user_id"),
+        revoked_at: row.get("revoked_at"),
+        metadata: row.get("metadata"),
+        created_at: row.get("created_at"),
     }
 }
 

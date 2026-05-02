@@ -7,7 +7,9 @@ use uuid::Uuid;
 
 use super::{fmt_opt_ts, fmt_ts, get_opt_text, get_opt_ts, get_text, get_ts, opt_text};
 use crate::db::libsql::LibSqlBackend;
-use crate::db::{AdminUsageSummary, ApiTokenRecord, DatabaseError, UserRecord, UserStore};
+use crate::db::{
+    AdminUsageSummary, ApiTokenRecord, DatabaseError, InvitationRecord, UserRecord, UserStore,
+};
 use crate::workspace::GREETING_SEED;
 
 fn row_to_user(row: &libsql::Row) -> Result<UserRecord, DatabaseError> {
@@ -42,6 +44,35 @@ fn row_to_api_token(row: &libsql::Row) -> Result<ApiTokenRecord, DatabaseError> 
         last_used_at: get_opt_ts(row, 5),
         created_at: get_ts(row, 6),
         revoked_at: get_opt_ts(row, 7),
+    })
+}
+
+fn row_to_invitation(row: &libsql::Row) -> Result<InvitationRecord, DatabaseError> {
+    let id_str = get_text(row, 0);
+    let id: Uuid = id_str
+        .parse()
+        .map_err(|e| DatabaseError::Serialization(format!("invalid UUID: {e}")))?;
+    let scopes_str = get_text(row, 6);
+    let scopes = serde_json::from_str(&scopes_str)
+        .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+    let metadata_str = get_text(row, 11);
+    let metadata = serde_json::from_str(&metadata_str)
+        .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+
+    Ok(InvitationRecord {
+        id,
+        token_prefix: get_text(row, 1),
+        token_hash: get_text(row, 2),
+        created_by_admin: get_text(row, 3),
+        target_email: get_opt_text(row, 4),
+        target_role: get_text(row, 5),
+        scopes,
+        expires_at: get_ts(row, 7),
+        claimed_at: get_opt_ts(row, 8),
+        claimed_by_user_id: get_opt_text(row, 9),
+        revoked_at: get_opt_ts(row, 10),
+        metadata,
+        created_at: get_ts(row, 12),
     })
 }
 
@@ -783,6 +814,72 @@ impl UserStore for LibSqlBackend {
             created_at: now,
             revoked_at: None,
         })
+    }
+
+    async fn create_invitation(&self, invitation: &InvitationRecord) -> Result<(), DatabaseError> {
+        let conn = self.connect().await?;
+        let scopes_json = serde_json::to_string(&invitation.scopes)
+            .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+        let metadata_json = serde_json::to_string(&invitation.metadata)
+            .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+
+        conn.execute(
+            r#"
+            INSERT INTO invitations (
+                id, token_prefix, token_hash, created_by_admin, target_email,
+                target_role, scopes, expires_at, claimed_at, claimed_by_user_id,
+                revoked_at, metadata, created_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            "#,
+            params![
+                invitation.id.to_string(),
+                invitation.token_prefix.as_str(),
+                invitation.token_hash.as_str(),
+                invitation.created_by_admin.as_str(),
+                opt_text(invitation.target_email.as_deref()),
+                invitation.target_role.as_str(),
+                scopes_json,
+                fmt_ts(&invitation.expires_at),
+                fmt_opt_ts(&invitation.claimed_at),
+                opt_text(invitation.claimed_by_user_id.as_deref()),
+                fmt_opt_ts(&invitation.revoked_at),
+                metadata_json,
+                fmt_ts(&invitation.created_at),
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn get_invitation_by_token_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<InvitationRecord>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT id, token_prefix, token_hash, created_by_admin, target_email,
+                       target_role, scopes, expires_at, claimed_at, claimed_by_user_id,
+                       revoked_at, metadata, created_at
+                FROM invitations
+                WHERE token_hash = ?1
+                "#,
+                params![token_hash],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        match rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            Some(row) => Ok(Some(row_to_invitation(&row)?)),
+            None => Ok(None),
+        }
     }
 
     async fn user_summary_stats(
