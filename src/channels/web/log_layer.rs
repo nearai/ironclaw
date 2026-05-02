@@ -213,21 +213,46 @@ pub fn init_tracing(
         base_filter,
     ));
 
-    let fmt_layer = if suppress_stderr {
-        None
+    // Issue #3011: when the fmt layer was wrapped in `Option<fmt::Layer>`
+    // and composed alongside the reload-wrapped `EnvFilter` and the
+    // `WebLogLayer` in the same registry chain, its `MakeWriter`
+    // (`TruncatingStderr::default()`) was never invoked — `ironclaw run`
+    // produced zero bytes on stderr at any RUST_LOG level even though
+    // events flowed correctly through `WebLogLayer::on_event` (so
+    // `ironclaw logs --follow` still worked). The diagnosis is in #3011
+    // (commit 983a95cc): an interaction between `Option<L>`'s blanket
+    // `Layer` impl and the `Layered` builder under tracing-subscriber
+    // 0.3.x dropped the writer call without dropping the event.
+    //
+    // Splitting the registry chain into two explicit paths — one with a
+    // concrete fmt layer for the foreground / systemd / CloudWatch
+    // case, one without for TUI mode — sidesteps the `Option` interaction
+    // entirely. The fmt layer in the non-TUI path is now a fully-typed
+    // `fmt::Layer<S, _, _, W>`, so its writer is invoked on every event
+    // that passes the filter.
+    if suppress_stderr {
+        // TUI mode: stderr formatter omitted so logs don't interleave
+        // with the alternate screen. Logs flow only through the
+        // WebLogLayer to the dedicated Logs tab.
+        tracing_subscriber::registry()
+            .with(reload_layer)
+            .with(WebLogLayer::new(log_broadcaster))
+            .init();
     } else {
-        Some(
-            tracing_subscriber::fmt::layer()
-                .with_target(false)
-                .with_writer(crate::tracing_fmt::TruncatingStderr::default()),
-        )
-    };
-
-    tracing_subscriber::registry()
-        .with(reload_layer)
-        .with(fmt_layer)
-        .with(WebLogLayer::new(log_broadcaster))
-        .init();
+        // Foreground / daemonized / systemd mode: emit formatted events
+        // to stderr so `ironclaw run` produces visible startup output and
+        // a useful systemd-journal / CloudWatch / file-redirected log
+        // stream. The WebLogLayer continues to power
+        // `ironclaw logs --follow` over SSE.
+        let fmt_layer = tracing_subscriber::fmt::layer()
+            .with_target(false)
+            .with_writer(crate::tracing_fmt::TruncatingStderr::default());
+        tracing_subscriber::registry()
+            .with(reload_layer)
+            .with(fmt_layer)
+            .with(WebLogLayer::new(log_broadcaster))
+            .init();
+    }
 
     handle
 }
