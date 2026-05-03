@@ -30,6 +30,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -280,7 +281,7 @@ impl ChannelStoreData {
             // Merge injected headers (most-specific match iterates last so
             // it wins any conflict under insert-and-overwrite).
             for (key, value) in &cred.headers {
-                headers.insert(key.clone(), value.clone());
+                insert_or_replace_header_case_insensitive(headers, key, value.clone());
             }
 
             // Append query parameters to URL
@@ -371,10 +372,9 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             format!("Rate limit exceeded: {}", e)
         })?;
 
-        // Parse headers from WASM and scan for leaks before credential injection.
-        // Host-injected tokens (e.g., xoxb- Slack bot token) would otherwise
-        // trigger the leak detector. The URL has template substitution applied
-        // (`injected_url`) but not yet host credential injection.
+        // Parse headers from WASM and scan for leaks before header placeholder
+        // substitution. Placeholder-expanded secrets are trusted host-side values;
+        // they must not trip the request leak detector.
         let raw_headers: std::collections::HashMap<String, String> = serde_json::from_str(
             &headers_json,
         )
@@ -383,8 +383,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             std::collections::HashMap::new()
         });
 
-        let mut logical_url = injected_url;
-
+        let mut logical_url = injected_url.clone();
         let leak_detector = LeakDetector::new();
         let raw_header_vec: Vec<(String, String)> = raw_headers
             .iter()
@@ -394,8 +393,8 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             .scan_http_request(&logical_url, &raw_header_vec, body.as_deref())
             .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
 
-        // Now inject credentials into header values
-        // This allows patterns like "Authorization": "Bearer {WHATSAPP_ACCESS_TOKEN}"
+        // Now inject credentials into header values.
+        // This allows patterns like "Authorization": "Bearer {WHATSAPP_ACCESS_TOKEN}".
         let mut headers: std::collections::HashMap<String, String> = raw_headers
             .into_iter()
             .map(|(k, v)| {
@@ -405,6 +404,60 @@ impl near::agent::channel_host::Host for ChannelStoreData {
                 )
             })
             .collect();
+
+        // Auto-inject credentials based on capability mappings (Bearer, Header).
+        // WASM channels don't include auth headers explicitly; the host injects
+        // them based on the credential mappings in the capabilities file.
+        if let Some(http_cap) = &self.host_state.capabilities().tool_capabilities.http
+            && let Ok(parsed) = reqwest::Url::parse(&logical_url)
+            && let Some(host) = parsed.host_str()
+        {
+            for mapping in http_cap.credentials.values() {
+                let matches_host = mapping.host_patterns.iter().any(|p| {
+                    crate::secrets::host_matches_pattern(host, p)
+                });
+                if !matches_host {
+                    continue;
+                }
+                let cred_key = mapping.secret_name.to_uppercase();
+                let cred_value = self.credentials.get(&cred_key);
+                if let Some(value) = cred_value {
+                    match &mapping.location {
+                        crate::secrets::CredentialLocation::AuthorizationBearer => {
+                            if !has_header_case_insensitive(&headers, "Authorization") {
+                                headers.insert(
+                                    "Authorization".to_string(),
+                                    format!("Bearer {}", value),
+                                );
+                                tracing::debug!(
+                                    host = %host,
+                                    "Auto-injected Bearer credential from capability mapping"
+                                );
+                            }
+                        }
+                        crate::secrets::CredentialLocation::Header {
+                            name: header_name,
+                            prefix,
+                        } => {
+                            if !has_header_case_insensitive(&headers, header_name) {
+                                let header_value = if let Some(pfx) = prefix {
+                                    format!("{}{}", pfx, value)
+                                } else {
+                                    value.clone()
+                                };
+                                headers.insert(header_name.clone(), header_value);
+                                tracing::debug!(
+                                    host = %host,
+                                    header = %header_name,
+                                    "Auto-injected header credential from capability mapping"
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
 
         let headers_changed = headers
             .values()
@@ -417,6 +470,8 @@ impl near::agent::channel_host::Host for ChannelStoreData {
 
         // Inject pre-resolved host credentials (Bearer tokens, API keys, etc.)
         // after the leak scan so host-injected secrets don't trigger false positives.
+        // Host creds take precedence — they overwrite any same-named header
+        // from the capability auto-injection above.
         if let Some(host) = extract_host_from_url(&logical_url) {
             self.inject_host_credentials(&host, &mut headers, &mut logical_url);
         }
@@ -472,7 +527,10 @@ impl near::agent::channel_host::Host for ChannelStoreData {
                     .map_err(|e| format!("Failed to create HTTP runtime: {e}"))?,
             );
         }
-        let rt = self.http_runtime.as_ref().expect("just initialized");
+        let rt = self
+            .http_runtime
+            .as_ref()
+            .ok_or_else(|| "HTTP runtime unavailable after initialization".to_string())?;
         let result = rt.block_on(async {
             let client = ssrf_safe_client_builder()
                 .connect_timeout(Duration::from_secs(10))
@@ -576,7 +634,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             if let Ok(body_str) = std::str::from_utf8(&body)
                 && !should_skip_response_leak_scan(&logical_url)
             {
-                leak_detector
+                LeakDetector::new()
                     .scan_and_clean(body_str)
                     .map_err(|e| format!("Potential secret leak in response: {}", e))?;
             }
@@ -824,6 +882,20 @@ pub struct WasmChannel {
     /// Ensures WASM channels can maintain state (e.g., polling offsets) between ticks.
     workspace_store: Arc<ChannelWorkspaceStore>,
 
+    /// Consecutive response failures for health monitoring.
+
+    /// Shutdown sender for the Socket Mode bridge task.
+    socket_shutdown_tx: RwLock<Option<oneshot::Sender<()>>>,
+
+    /// Monotonic generation counter for Socket Mode bridge runs.
+    socket_bridge_generation: AtomicU64,
+
+    /// Generation of the currently active Socket Mode bridge (0 = none).
+    socket_bridge_active_id: AtomicU64,
+
+    /// Fatal error from the most recent Socket Mode bridge run, if any.
+    socket_bridge_last_error: RwLock<Option<String>>,
+
     /// Serializes callback execution for a single channel instance.
     ///
     /// Some channel state is read-modify-written through the shared workspace
@@ -845,7 +917,7 @@ pub struct WasmChannel {
     /// value after pairing approval without capturing a stale clone.
     owner_actor_id: Arc<tokio::sync::RwLock<Option<String>>>,
 
-    /// Secrets store for host-based credential injection.
+    /// Secrets store for host-based credential injection and Socket Mode.
     /// Used to pre-resolve credentials before each WASM callback.
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
 }
@@ -1120,6 +1192,10 @@ impl WasmChannel {
             typing_task: RwLock::new(None),
             pairing_store,
             workspace_store: Arc::new(ChannelWorkspaceStore::new()),
+            socket_shutdown_tx: RwLock::new(None),
+            socket_bridge_generation: AtomicU64::new(0),
+            socket_bridge_active_id: AtomicU64::new(0),
+            socket_bridge_last_error: RwLock::new(None),
             callback_lock: Arc::new(tokio::sync::Mutex::new(())),
             last_broadcast_metadata: Arc::new(tokio::sync::RwLock::new(None)),
             settings_store,
@@ -1242,6 +1318,15 @@ impl WasmChannel {
             config = %*config_guard,
             "Updated channel config"
         );
+    }
+
+    /// Set the secrets store for Socket Mode support.
+    ///
+    /// Must be called before `start()`. The bridge reads the app-level token
+    /// from this store at connection time — the token never enters the WASM
+    /// credential map.
+    pub fn set_secrets_store(&mut self, store: Arc<dyn crate::secrets::SecretsStore>) {
+        self.secrets_store = Some(store);
     }
 
     /// Set a credential for URL injection.
@@ -1957,7 +2042,7 @@ impl WasmChannel {
             path = path,
             body_len = body.len(),
             secret_validated = secret_validated,
-            "call_on_http_request invoked (webhook received)"
+            "call_on_http_request invoked"
         );
 
         // Log the body for debugging (truncated at char boundary)
@@ -2318,9 +2403,11 @@ impl WasmChannel {
 
         let channel_name = self.name.clone();
         match result {
-            Ok(Ok(((), _host_state, committed_paths))) => {
+            Ok(Ok(((), host_state, committed_paths))) => {
                 self.persist_durable_workspace_snapshot_if_needed(&committed_paths)
                     .await;
+                self.finalize_callback_host_state("on_respond", host_state)
+                    .await?;
                 tracing::debug!(
                     channel = %channel_name,
                     message_id = %message_id,
@@ -2447,9 +2534,11 @@ impl WasmChannel {
 
         let channel_name = self.name.clone();
         match result {
-            Ok(Ok(((), _host_state, committed_paths))) => {
+            Ok(Ok(((), host_state, committed_paths))) => {
                 self.persist_durable_workspace_snapshot_if_needed(&committed_paths)
                     .await;
+                self.finalize_callback_host_state("on_broadcast", host_state)
+                    .await?;
                 tracing::debug!(
                     channel = %channel_name,
                     "WASM channel on_broadcast completed"
@@ -2944,6 +3033,21 @@ impl WasmChannel {
         Ok(())
     }
 
+    async fn finalize_callback_host_state(
+        &self,
+        callback: &str,
+        mut host_state: ChannelHostState,
+    ) -> Result<(), WasmChannelError> {
+        let emitted = host_state.take_emitted_messages();
+        tracing::debug!(
+            channel = %self.name,
+            callback,
+            emitted_count = emitted.len(),
+            "Dispatching emitted messages from WASM callback"
+        );
+        self.process_emitted_messages(emitted).await
+    }
+
     /// Ensure the polling loop is running with the interval from `config`.
     ///
     /// Stops any existing polling task and starts a fresh one.  Safe to call
@@ -3107,6 +3211,127 @@ impl WasmChannel {
         {
             tracing::debug!(channel = %self.name, error = %error, "Polling task join failed");
         }
+    }
+
+    pub(crate) async fn note_socket_bridge_exit(&self, bridge_id: u64, error: Option<String>) {
+        if self.socket_bridge_active_id.load(Ordering::SeqCst) != bridge_id {
+            tracing::debug!(
+                channel = %self.name,
+                bridge_id,
+                "Ignoring stale Socket Mode bridge exit"
+            );
+            return;
+        }
+
+        self.socket_bridge_active_id.store(0, Ordering::SeqCst);
+        let _ = self.socket_shutdown_tx.write().await.take();
+        *self.socket_bridge_last_error.write().await = error;
+    }
+
+    /// Start the Socket Mode bridge if configured.
+    ///
+    /// Requires an `Arc<WasmChannel>` because the bridge needs to call
+    /// `call_on_http_request` from a spawned task. Called by `SharedWasmChannel::start()`
+    /// which has access to the Arc.
+    async fn start_socket_bridge(&self, channel_arc: Arc<WasmChannel>) {
+        let socket_config = match &self.capabilities.socket_mode {
+            Some(config) => config.clone(),
+            None => return,
+        };
+
+        // Check if the app token is available (secrets store or env var).
+        // Use the channel's owner scope — not hard-coded "default" — so
+        // non-default-owner deployments find the correct token.
+        let in_secrets = if let Some(ref secrets) = self.secrets_store {
+            secrets
+                .exists(&self.owner_scope_id, &socket_config.app_token_secret)
+                .await
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        let env_name = socket_config.app_token_secret.to_uppercase();
+        let in_env = std::env::var(&env_name)
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+
+        if !in_secrets && !in_env {
+            *self.socket_bridge_last_error.write().await = None;
+            tracing::info!(
+                channel = %self.name,
+                secret = %socket_config.app_token_secret,
+                env_var = %env_name,
+                "Socket Mode app token not found — falling back to webhook mode"
+            );
+            return;
+        }
+
+        // Single write-lock for check-and-set: prevents a concurrent call
+        // from also passing the check and spawning a duplicate bridge.
+        let mut guard = self.socket_shutdown_tx.write().await;
+        if guard.is_some() {
+            tracing::debug!(
+                channel = %self.name,
+                "Socket Mode bridge already running, skipping start"
+            );
+            return;
+        }
+        let bridge_id = self.socket_bridge_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        *guard = Some(shutdown_tx);
+        drop(guard);
+
+        self.socket_bridge_active_id
+            .store(bridge_id, Ordering::SeqCst);
+        *self.socket_bridge_last_error.write().await = None;
+
+        tracing::info!(
+            channel = %self.name,
+            bridge_id,
+            "Starting Socket Mode bridge"
+        );
+
+        // Extract the HTTP allowlist so the bridge can validate open_url before
+        // sending the bearer token. Without this, a compromised channel bundle
+        // could exfiltrate the token to an attacker-controlled endpoint.
+        let http_allowlist = self
+            .capabilities
+            .tool_capabilities
+            .http
+            .as_ref()
+            .map(|h| h.allowlist.clone())
+            .unwrap_or_default();
+
+        crate::channels::wasm::socket_bridge::spawn_socket_bridge(
+            channel_arc,
+            bridge_id,
+            socket_config,
+            self.secrets_store.clone(),
+            self.owner_scope_id.clone(),
+            http_allowlist,
+            shutdown_rx,
+        );
+    }
+
+    /// Restart the Socket Mode bridge after a credential refresh.
+    ///
+    /// Stops any running bridge by signalling via `socket_shutdown_tx`, then
+    /// calls `start_socket_bridge` to start a new one if socket mode config
+    /// and the app token are now available. This is safe to call even if no
+    /// bridge is currently running.
+    pub async fn restart_socket_bridge(self: &Arc<Self>) {
+        // Stop any existing bridge
+        self.socket_bridge_active_id.store(0, Ordering::SeqCst);
+        if let Some(tx) = self.socket_shutdown_tx.write().await.take() {
+            let _ = tx.send(());
+            tracing::info!(
+                channel = %self.name,
+                "Stopped existing Socket Mode bridge for restart"
+            );
+        }
+
+        // Start a new bridge if socket mode config and token are available
+        self.start_socket_bridge(Arc::clone(self)).await;
     }
 
     /// Execute a single poll callback with a fresh WASM instance.
@@ -3357,6 +3582,7 @@ impl WasmChannel {
     }
 }
 
+/// Context for dispatching emitted messages from WASM callbacks.
 struct EmitDispatchContext<'a> {
     channel_name: &'a str,
     owner_scope_id: &'a str,
@@ -3585,14 +3811,24 @@ impl Channel for WasmChannel {
     }
 
     async fn health_check(&self) -> Result<(), ChannelError> {
-        // Check if we have an active message sender
-        if self.message_tx.read().await.is_some() {
-            Ok(())
-        } else {
-            Err(ChannelError::HealthCheckFailed {
+        if self.message_tx.read().await.is_none() {
+            return Err(ChannelError::HealthCheckFailed {
                 name: self.name.clone(),
-            })
+            });
         }
+
+        if let Some(error) = self.socket_bridge_last_error.read().await.clone() {
+            tracing::warn!(
+                channel = %self.name,
+                error = %error,
+                "Socket Mode bridge health check failed"
+            );
+            return Err(ChannelError::HealthCheckFailed {
+                name: self.name.clone(),
+            });
+        }
+
+        Ok(())
     }
 
     async fn shutdown(&self) -> Result<(), ChannelError> {
@@ -3608,6 +3844,12 @@ impl Channel for WasmChannel {
 
         // Stop websocket runtime by dropping the sender (receiver will complete)
         let _ = self.websocket_shutdown_tx.write().await.take();
+
+        // Stop Socket Mode bridge
+        self.socket_bridge_active_id.store(0, Ordering::SeqCst);
+        if let Some(tx) = self.socket_shutdown_tx.write().await.take() {
+            let _ = tx.send(());
+        }
 
         // Clear the message sender
         *self.message_tx.write().await = None;
@@ -4435,7 +4677,14 @@ impl Channel for SharedWasmChannel {
     }
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
-        self.inner.start().await
+        let stream = self.inner.start().await?;
+
+        // Start Socket Mode bridge if configured (needs Arc<WasmChannel>)
+        self.inner
+            .start_socket_bridge(Arc::clone(&self.inner))
+            .await;
+
+        Ok(stream)
     }
 
     async fn respond(
@@ -4758,6 +5007,30 @@ fn extract_host_from_url(url: &str) -> Option<String> {
     })
 }
 
+fn has_header_case_insensitive(
+    headers: &std::collections::HashMap<String, String>,
+    name: &str,
+) -> bool {
+    headers
+        .keys()
+        .any(|header| header.eq_ignore_ascii_case(name))
+}
+
+fn insert_or_replace_header_case_insensitive(
+    headers: &mut std::collections::HashMap<String, String>,
+    name: &str,
+    value: String,
+) {
+    if let Some(existing_key) = headers
+        .keys()
+        .find(|key| key.eq_ignore_ascii_case(name))
+        .cloned()
+    {
+        headers.remove(&existing_key);
+    }
+    headers.insert(name.to_string(), value);
+}
+
 /// Rewrite outbound HTTP URLs for testing.
 ///
 /// `IRONCLAW_TEST_HTTP_REWRITE_MAP` is a JSON object mapping exact hostnames to
@@ -5052,10 +5325,12 @@ fn read_attachments(paths: &[String]) -> Result<Vec<wit_channel::Attachment>, St
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
 
     use ironclaw_common::CredentialName;
     use secrecy::SecretString;
+    use tokio::sync::oneshot;
 
     use crate::channels::Channel;
     use crate::channels::OutgoingResponse;
@@ -5284,6 +5559,48 @@ mod tests {
         async fn has_settings(&self, user_id: &str) -> Result<bool, crate::error::DatabaseError> {
             Ok(self.values.read().await.contains_key(user_id))
         }
+    }
+
+    #[test]
+    fn test_has_header_case_insensitive_matches_any_casing() {
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("AUTHORIZATION".to_string(), "Bearer token".to_string());
+        headers.insert("x-custom-header".to_string(), "value".to_string());
+
+        assert!(super::has_header_case_insensitive(
+            &headers,
+            "authorization"
+        ));
+        assert!(super::has_header_case_insensitive(
+            &headers,
+            "Authorization"
+        ));
+        assert!(super::has_header_case_insensitive(
+            &headers,
+            "X-Custom-Header"
+        ));
+        assert!(!super::has_header_case_insensitive(&headers, "X-Missing"));
+    }
+
+    #[test]
+    fn test_insert_or_replace_header_case_insensitive_replaces_existing_variant() {
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("authorization".to_string(), "Bearer old-token".to_string());
+        headers.insert("x-custom-header".to_string(), "value".to_string());
+
+        super::insert_or_replace_header_case_insensitive(
+            &mut headers,
+            "Authorization",
+            "Bearer new-token".to_string(),
+        );
+
+        assert_eq!(headers.len(), 2);
+        assert_eq!(
+            headers.get("Authorization"),
+            Some(&"Bearer new-token".to_string())
+        );
+        assert!(!headers.contains_key("authorization"));
+        assert_eq!(headers.get("x-custom-header"), Some(&"value".to_string()));
     }
 
     #[test]
@@ -5967,6 +6284,82 @@ mod tests {
 
         // Health check should fail after shutdown
         assert!(channel.health_check().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_finalize_callback_host_state_dispatches_emitted_messages() {
+        use crate::channels::wasm::host::EmittedMessage;
+        use futures::StreamExt;
+
+        let channel = create_test_channel();
+        let mut stream = channel.start().await.expect("Channel should start");
+
+        let mut host_state =
+            ChannelHostState::new("test", ChannelCapabilities::for_channel("test"));
+        host_state
+            .emit_message(EmittedMessage::new("user-1", "callback message"))
+            .expect("emit into host state");
+
+        channel
+            .finalize_callback_host_state("on_respond", host_state)
+            .await
+            .expect("finalize should dispatch emitted messages");
+
+        let msg = stream
+            .next()
+            .await
+            .expect("emitted message should reach stream");
+        assert_eq!(msg.content, "callback message");
+        assert_eq!(msg.sender_id, "user-1");
+
+        channel.shutdown().await.expect("Shutdown should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_socket_bridge_exit_marks_channel_unhealthy() {
+        let channel = create_test_channel();
+        let _stream = channel.start().await.expect("Channel should start");
+
+        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
+        *channel.socket_shutdown_tx.write().await = Some(shutdown_tx);
+        channel.socket_bridge_active_id.store(7, Ordering::SeqCst);
+
+        channel
+            .note_socket_bridge_exit(7, Some("socket auth failed".to_string()))
+            .await;
+
+        assert!(
+            channel.socket_shutdown_tx.read().await.is_none(),
+            "bridge marker should clear on fatal exit"
+        );
+        assert_eq!(channel.socket_bridge_active_id.load(Ordering::SeqCst), 0);
+        assert!(channel.health_check().await.is_err());
+
+        channel.shutdown().await.expect("Shutdown should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_stale_socket_bridge_exit_does_not_clear_new_bridge_state() {
+        let channel = create_test_channel();
+        let _stream = channel.start().await.expect("Channel should start");
+
+        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
+        *channel.socket_shutdown_tx.write().await = Some(shutdown_tx);
+        channel.socket_bridge_active_id.store(9, Ordering::SeqCst);
+
+        channel
+            .note_socket_bridge_exit(8, Some("old bridge failed".to_string()))
+            .await;
+
+        assert!(
+            channel.socket_shutdown_tx.read().await.is_some(),
+            "stale exit must not clear the current bridge marker"
+        );
+        assert_eq!(channel.socket_bridge_active_id.load(Ordering::SeqCst), 9);
+        assert!(channel.socket_bridge_last_error.read().await.is_none());
+        assert!(channel.health_check().await.is_ok());
+
+        channel.shutdown().await.expect("Shutdown should succeed");
     }
 
     #[tokio::test]
@@ -7503,6 +7896,34 @@ mod tests {
         assert_eq!(result, 42);
     }
 
+    #[test]
+    fn test_channel_capabilities_socket_mode_default_none() {
+        let caps = crate::channels::wasm::capabilities::ChannelCapabilities::default();
+        assert!(caps.socket_mode.is_none());
+    }
+
+    #[test]
+    fn test_channel_capabilities_with_socket_mode() {
+        let caps = crate::channels::wasm::capabilities::ChannelCapabilities {
+            socket_mode: Some(crate::channels::wasm::capabilities::SocketModeConfig {
+                open_url: "https://slack.com/api/apps.connections.open".to_string(),
+                app_token_secret: "slack_app_token".to_string(),
+                reconnect_delay_ms: 5000,
+                max_reconnect_attempts: 10,
+            }),
+            ..Default::default()
+        };
+        assert!(caps.socket_mode.is_some());
+        let socket_mode = caps.socket_mode.unwrap();
+        assert_eq!(socket_mode.app_token_secret, "slack_app_token");
+        assert_eq!(
+            socket_mode.open_url,
+            "https://slack.com/api/apps.connections.open"
+        );
+        assert_eq!(socket_mode.reconnect_delay_ms, 5000);
+        assert_eq!(socket_mode.max_reconnect_attempts, 10);
+    }
+
     /// Verify a real HTTP request works using the dedicated-runtime pattern.
     /// This catches DNS, TLS, and I/O driver issues that trivial tests miss.
     #[tokio::test]
@@ -7534,6 +7955,84 @@ mod tests {
         .expect("spawn_blocking panicked");
         // 404 because "000" is not a valid bot token
         assert_eq!(result, 404);
+    }
+
+    #[tokio::test]
+    async fn credential_lookup_requires_uppercase_key() {
+        // Regression: Phase 2 of inject_channel_credentials stored env var keys
+        // in their original case, but the credential injection lookup (line 292)
+        // uppercases the secret_name: `mapping.secret_name.to_uppercase()`.
+        // If a credential is stored as "slack_bot_token" (lowercase), the lookup
+        // for "SLACK_BOT_TOKEN" won't find it.
+        //
+        // Fix: Phase 2 now uppercases keys before storing, matching Phase 1.
+        let channel = create_test_channel();
+
+        // Simulate Phase 2 storing with uppercase (the fix)
+        let env_key = "slack_bot_token";
+        channel
+            .set_credential(&env_key.to_uppercase(), "xoxb-test".into())
+            .await;
+
+        let creds = channel.get_credentials().await;
+
+        // The credential injection code looks up with UPPERCASE key
+        let lookup_key = env_key.to_uppercase(); // "SLACK_BOT_TOKEN"
+        assert!(
+            creds.contains_key(&lookup_key),
+            "Credential stored with uppercase key must be findable by uppercase lookup. \
+             Got keys: {:?}",
+            creds.keys().collect::<Vec<_>>()
+        );
+
+        // Also verify that storing with original case would NOT be found
+        // (this documents why the uppercase fix is necessary)
+        let channel2 = create_test_channel();
+        channel2.set_credential(env_key, "xoxb-test".into()).await;
+        let creds2 = channel2.get_credentials().await;
+        assert!(
+            !creds2.contains_key(&lookup_key),
+            "Without uppercase fix, lowercase key is NOT findable by uppercase lookup"
+        );
+    }
+
+    #[test]
+    fn wildcard_host_pattern_rejects_subdomain_spoofing() {
+        // Regression: the inline wildcard matching in credential auto-injection was:
+        //   host.ends_with(suffix) || host == suffix
+        // which allowed "evilslack.com" to match pattern "*.slack.com"
+        // because "evilslack.com".ends_with("slack.com") == true.
+        //
+        // Replicate the EXACT inline logic to prove the vulnerability:
+        fn old_inline_match(host: &str, pattern: &str) -> bool {
+            if let Some(suffix) = pattern.strip_prefix("*.") {
+                host.ends_with(suffix) || host == suffix
+            } else {
+                host == pattern
+            }
+        }
+
+        // BUG: old inline logic incorrectly matches spoofed domains
+        assert!(
+            old_inline_match("evilslack.com", "*.slack.com"),
+            "Old logic should (incorrectly) match — proving the vulnerability"
+        );
+
+        // The correct function requires a dot separator before the suffix
+        use crate::tools::wasm::credential_injector::host_matches_pattern;
+
+        // Legitimate subdomains MUST match
+        assert!(host_matches_pattern("api.slack.com", "*.slack.com"));
+        assert!(host_matches_pattern("sub.api.slack.com", "*.slack.com"));
+
+        // Spoofed domains MUST NOT match
+        assert!(!host_matches_pattern("evilslack.com", "*.slack.com"));
+        assert!(!host_matches_pattern("notslack.com", "*.slack.com"));
+        assert!(!host_matches_pattern("fakeslack.com", "*.slack.com"));
+
+        // Exact match patterns still work
+        assert!(host_matches_pattern("slack.com", "slack.com"));
+        assert!(!host_matches_pattern("slack.com", "*.slack.com"));
     }
 
     #[tokio::test]

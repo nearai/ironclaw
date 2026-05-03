@@ -108,12 +108,17 @@ pub(crate) fn truncate_for_preview(output: &str, max_chars: usize) -> String {
 /// approval or downgraded to regular user input.
 ///
 /// Returns `true` when the message should be routed as an approval (there IS
-/// a pending approval or it's an explicit slash command). Returns `false`
-/// when the message should be treated as regular `UserInput`.
+/// an awaiting approval in the current thread or elsewhere in the session, or
+/// it's an explicit slash command). Returns `false` when the message should be
+/// treated as regular `UserInput`.
 ///
 /// Used by the legacy routing path; the engine_v2 path performs an equivalent
 /// check earlier (before the BeforeInbound hook).
 fn should_route_as_approval(thread_state: ThreadState, raw_content: &str) -> bool {
+    // Bare approval keywords (yes/no/always) are thread-local only.
+    // Cross-thread approval requires an explicit request ID or slash command.
+    // This prevents an unrelated "yes" in thread B from approving a
+    // destructive tool call pending in thread A.
     thread_state == ThreadState::AwaitingApproval || raw_content.trim().starts_with('/')
 }
 
@@ -2514,6 +2519,41 @@ mod tests {
         assert!(should_route_as_approval(ThreadState::Idle, "/deny"));
         assert!(should_route_as_approval(ThreadState::Idle, "/yes"));
         assert!(should_route_as_approval(ThreadState::Processing, "/always"));
+    }
+
+    #[test]
+    fn bare_keywords_do_not_route_cross_thread() {
+        // Bare "yes"/"no"/"always" must stay thread-local. Cross-thread
+        // approval requires an explicit request ID or slash command.
+        // Prevents an unrelated "yes" in thread B from approving a
+        // destructive tool call pending in thread A.
+        use super::should_route_as_approval;
+        use crate::agent::session::ThreadState;
+
+        assert!(!should_route_as_approval(ThreadState::Idle, "yes"));
+        assert!(!should_route_as_approval(ThreadState::Completed, "no"));
+        assert!(!should_route_as_approval(
+            ThreadState::Interrupted,
+            "always"
+        ));
+        // Slash commands still route cross-thread
+        assert!(should_route_as_approval(ThreadState::Idle, "/approve"));
+    }
+
+    #[test]
+    fn idle_thread_does_not_route_bare_keywords_as_approval() {
+        use super::should_route_as_approval;
+        use crate::agent::session::ThreadState;
+
+        // Bare "yes" in an Idle thread is regular user input, not an approval.
+        assert!(
+            !should_route_as_approval(ThreadState::Idle, "yes"),
+            "bare keywords in Idle thread must not route as approval"
+        );
+        assert!(
+            !should_route_as_approval(ThreadState::Interrupted, "yes"),
+            "bare keywords in Interrupted thread must not route as approval"
+        );
     }
 
     /// The thread-resolution guard must only early-reject `ExecApproval`

@@ -279,13 +279,61 @@ async fn register_channel(
         None
     };
 
+    let has_socket_mode = loaded
+        .capabilities_file
+        .as_ref()
+        .and_then(|f| f.capabilities.channel.as_ref())
+        .and_then(|c| c.socket_mode.as_ref())
+        .is_some();
+
+    let has_signature_key = if let Some(ref sig_key_name) = sig_key_secret_name {
+        if let Some(secrets) = secrets_store {
+            secrets
+                .get_decrypted(&config.owner_id, sig_key_name)
+                .await
+                .is_ok()
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    let has_hmac_secret = if let Some(ref hmac_key_name) = hmac_secret_name {
+        if let Some(secrets) = secrets_store {
+            secrets
+                .get_decrypted(&config.owner_id, hmac_key_name)
+                .await
+                .is_ok()
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    // If Socket Mode is the sole transport and no webhook auth material is
+    // configured, do NOT register the webhook endpoint — it would be an
+    // unauthenticated ingress path. If host webhook secrets, Ed25519
+    // signature keys, or HMAC signing secrets are present, keep the webhook
+    // endpoint registered because the channel still has an authenticated
+    // webhook transport.
+    let has_webhook_auth = host_webhook_secret.is_some() || has_signature_key || has_hmac_secret;
     let webhook_path = format!("/webhook/{}", channel_name);
-    let endpoints = vec![RegisteredEndpoint {
-        channel_name: channel_name.clone(),
-        path: webhook_path,
-        methods: vec!["POST".to_string()],
-        require_secret: host_webhook_secret.is_some(),
-    }];
+    let endpoints = if !has_webhook_auth && has_socket_mode {
+        tracing::info!(
+            channel = %channel_name,
+            "Skipping webhook registration: no webhook auth configured and Socket Mode enabled"
+        );
+        vec![]
+    } else {
+        vec![RegisteredEndpoint {
+            channel_name: channel_name.clone(),
+            path: webhook_path,
+            methods: vec!["POST".to_string()],
+            require_secret: host_webhook_secret.is_some(),
+        }]
+    };
 
     let channel_arc = Arc::new(loaded.channel.with_owner_actor_id(owner_actor_id.clone()));
 
@@ -1015,6 +1063,92 @@ mod tests {
             registered.owner_actor_id_for_test().await,
             None,
             "null owner_id from capabilities should not resolve"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_channel_keeps_webhook_when_socket_mode_uses_hmac_auth() {
+        let (config, _temp_dir) = test_config();
+        let crypto =
+            Arc::new(SecretsCrypto::new(SecretString::from(TEST_CRYPTO_KEY.to_string())).unwrap());
+        let secrets: Arc<dyn SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(crypto));
+        secrets
+            .create(
+                &config.owner_id,
+                CreateSecretParams {
+                    name: "slack_signing_secret".to_string(),
+                    value: SecretString::from("signing-secret".to_string()),
+                    provider: None,
+                    expires_at: None,
+                },
+            )
+            .await
+            .unwrap();
+        let cap_file = ChannelCapabilitiesFile::from_json(
+            &serde_json::json!({
+                "type": "channel",
+                "name": "slack",
+                "capabilities": {
+                    "channel": {
+                        "allowed_paths": ["/webhook/slack"],
+                        "socket_mode": {
+                            "open_url": "https://slack.com/api/apps.connections.open",
+                            "app_token_secret": "slack_app_token"
+                        },
+                        "webhook": {
+                            "hmac_secret_name": "slack_signing_secret"
+                        }
+                    }
+                },
+                "config": {}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let runtime =
+            Arc::new(WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing()).unwrap());
+        let prepared = Arc::new(PreparedChannelModule {
+            name: "slack".to_string(),
+            description: "Test channel: slack".to_string(),
+            component: None,
+            limits: ResourceLimits::default(),
+        });
+        let loaded = LoadedChannel {
+            channel: WasmChannel::new(
+                runtime,
+                prepared,
+                ChannelCapabilities::for_channel("slack"),
+                "owner-scope",
+                cap_file.config_json(),
+                Arc::new(PairingStore::new_noop()),
+                None,
+            ),
+            capabilities_file: Some(cap_file),
+        };
+        let wasm_router = Arc::new(WasmChannelRouter::new());
+        let pairing_store = Arc::new(PairingStore::new_noop());
+
+        let (_name, _channel) = super::register_channel(
+            loaded,
+            &config,
+            &Some(Arc::clone(&secrets)),
+            None,
+            &pairing_store,
+            &wasm_router,
+        )
+        .await;
+
+        assert!(
+            wasm_router.get_hmac_secret("slack").await.is_some(),
+            "Slack HMAC secret should be registered for the channel"
+        );
+        assert!(
+            wasm_router
+                .get_channel_for_path("/webhook/slack")
+                .await
+                .is_some(),
+            "Slack webhook route must remain registered when HMAC auth protects it"
         );
     }
 

@@ -4206,26 +4206,42 @@ impl ExtensionManager {
             return ToolAuthState::NoAuth;
         };
 
+        // Auth-related secrets (webhook, HMAC, signature keys) are only loaded
+        // from the encrypted store during activation — env vars don't flow into
+        // the router's verification material. Only allow env fallback for
+        // non-auth secrets (API tokens, Socket Mode app tokens, etc.).
+        let mut auth_secret_names = std::collections::HashSet::new();
+        auth_secret_names.insert(cap_file.webhook_secret_name().to_ascii_lowercase());
+        if let Some(hmac) = cap_file.hmac_secret_name() {
+            auth_secret_names.insert(hmac.to_ascii_lowercase());
+        }
+        if let Some(sig) = cap_file.signature_key_secret_name() {
+            auth_secret_names.insert(sig.to_ascii_lowercase());
+        }
+
         let required: Vec<_> = cap_file
             .setup
             .required_secrets
             .iter()
             .filter(|s| !s.optional)
             .collect();
-        if required.is_empty() {
-            return ToolAuthState::NoAuth;
+
+        let mut all_provided = true;
+        for secret in &required {
+            let allow_env_fallback = !auth_secret_names.contains(&secret.name.to_ascii_lowercase());
+            if self
+                .channel_secret_available_for_auth_status(user_id, &secret.name, allow_env_fallback)
+                .await
+            {
+                continue;
+            }
+            all_provided = false;
+            break;
         }
 
-        let all_provided = futures::future::join_all(
-            required
-                .iter()
-                .map(|s| self.secrets.exists(user_id, &s.name)),
-        )
-        .await
-        .into_iter()
-        .all(|r| r.unwrap_or(false));
-
-        if all_provided {
+        let base_state = if required.is_empty() {
+            ToolAuthState::NoAuth
+        } else if all_provided {
             ToolAuthState::Ready
         } else if futures::future::join_all(
             required
@@ -4239,7 +4255,83 @@ impl ExtensionManager {
             ToolAuthState::NeedsAuth
         } else {
             ToolAuthState::NeedsSetup
+        };
+
+        if matches!(base_state, ToolAuthState::Ready | ToolAuthState::NoAuth)
+            && !self
+                .channel_has_usable_ingress_transport(&cap_file, user_id)
+                .await
+        {
+            ToolAuthState::NeedsSetup
+        } else {
+            base_state
         }
+    }
+
+    async fn channel_secret_available_for_auth_status(
+        &self,
+        user_id: &str,
+        secret_name: &str,
+        allow_env_fallback: bool,
+    ) -> bool {
+        if self
+            .secrets
+            .exists(user_id, secret_name)
+            .await
+            .unwrap_or(false)
+        {
+            return true;
+        }
+
+        allow_env_fallback
+            && std::env::var(secret_name.to_uppercase())
+                .map(|v| !v.is_empty())
+                .unwrap_or(false)
+    }
+
+    async fn channel_has_usable_ingress_transport(
+        &self,
+        cap_file: &crate::channels::wasm::ChannelCapabilitiesFile,
+        user_id: &str,
+    ) -> bool {
+        let Some(socket_mode) = cap_file
+            .capabilities
+            .channel
+            .as_ref()
+            .and_then(|channel| channel.socket_mode.as_ref())
+        else {
+            return true;
+        };
+
+        let host_webhook_secret_available = if cap_file.webhook_secret_managed_by_host() {
+            let webhook_secret_name = cap_file.webhook_secret_name();
+            self.channel_secret_available_for_auth_status(user_id, &webhook_secret_name, false)
+                .await
+        } else {
+            false
+        };
+
+        let signature_key_available =
+            if let Some(secret_name) = cap_file.signature_key_secret_name() {
+                self.channel_secret_available_for_auth_status(user_id, secret_name, false)
+                    .await
+            } else {
+                false
+            };
+
+        let hmac_secret_available = if let Some(secret_name) = cap_file.hmac_secret_name() {
+            self.channel_secret_available_for_auth_status(user_id, secret_name, false)
+                .await
+        } else {
+            false
+        };
+
+        if host_webhook_secret_available || signature_key_available || hmac_secret_available {
+            return true;
+        }
+
+        self.channel_secret_available_for_auth_status(user_id, &socket_mode.app_token_secret, true)
+            .await
     }
 
     async fn secret_supports_oauth(&self, user_id: &str, secret_name: &str) -> bool {
@@ -5960,6 +6052,12 @@ impl ExtensionManager {
         let webhook_secret_managed_by_host = loaded.webhook_secret_managed_by_host();
         let sig_key_secret_name = loaded.signature_key_secret_name();
         let hmac_secret_name = loaded.hmac_secret_name();
+        let has_socket_mode = loaded
+            .capabilities_file
+            .as_ref()
+            .and_then(|f| f.capabilities.channel.as_ref())
+            .and_then(|c| c.socket_mode.as_ref())
+            .is_some();
         let secret_config_mappings = loaded
             .capabilities_file
             .as_ref()
@@ -6007,20 +6105,47 @@ impl ExtensionManager {
             }
         }
 
-        // Register with webhook router
+        // Register with webhook router — mirror startup guard from setup.rs:
+        // skip webhook when Socket Mode is configured and no signing secret exists.
         {
             let host_webhook_secret = if webhook_secret_managed_by_host {
                 webhook_secret.clone()
             } else {
                 None
             };
+            let has_signature_key = if let Some(ref sig_key_name) = sig_key_secret_name {
+                self.secrets
+                    .get_decrypted(&self.user_id, sig_key_name)
+                    .await
+                    .is_ok()
+            } else {
+                false
+            };
+            let has_hmac_secret = if let Some(ref hmac_secret_name) = hmac_secret_name {
+                self.secrets
+                    .get_decrypted(&self.user_id, hmac_secret_name)
+                    .await
+                    .is_ok()
+            } else {
+                false
+            };
+            let has_webhook_auth =
+                host_webhook_secret.is_some() || has_signature_key || has_hmac_secret;
             let webhook_path = format!("/webhook/{}", channel_name);
-            let endpoints = vec![RegisteredEndpoint {
-                channel_name: channel_name.clone(),
-                path: webhook_path,
-                methods: vec!["POST".to_string()],
-                require_secret: host_webhook_secret.is_some(),
-            }];
+            let endpoints = if !has_webhook_auth && has_socket_mode {
+                tracing::info!(
+                    channel = %channel_name,
+                    "Skipping webhook registration: no webhook auth configured and Socket Mode enabled"
+                );
+                vec![]
+            } else {
+                vec![RegisteredEndpoint {
+                    channel_name: channel_name.clone(),
+                    path: webhook_path,
+                    methods: vec!["POST".to_string()],
+                    require_secret: host_webhook_secret.is_some(),
+                }]
+            };
 
             wasm_channel_router
                 .register(
@@ -6145,16 +6270,17 @@ impl ExtensionManager {
         };
 
         let webhook_path = format!("/webhook/{}", name);
-        let existing_channel = match router.get_channel_for_path(&webhook_path).await {
-            Some(ch) => ch,
-            None => {
-                return Ok(ActivateResult {
-                    name: name.to_string(),
-                    kind: ExtensionKind::WasmChannel,
-                    tools_loaded: Vec::new(),
-                    message: format!("Channel '{}' is already active", name),
-                });
-            }
+        let existing_channel = if let Some(ch) = router.get_channel_for_path(&webhook_path).await {
+            ch
+        } else if let Some(ch) = router.get_channel(name).await {
+            ch
+        } else {
+            return Ok(ActivateResult {
+                name: name.to_string(),
+                kind: ExtensionKind::WasmChannel,
+                tools_loaded: Vec::new(),
+                message: format!("Channel '{}' is already active", name),
+            });
         };
 
         // Re-inject credentials from secrets store into the running channel
@@ -6192,6 +6318,14 @@ impl ExtensionManager {
             .as_ref()
             .map(|f| f.webhook_secret_managed_by_host())
             .unwrap_or(true);
+        let secret_header = capabilities_file
+            .as_ref()
+            .and_then(|f| f.webhook_secret_header().map(|s| s.to_string()));
+        let has_socket_mode = capabilities_file
+            .as_ref()
+            .and_then(|f| f.capabilities.channel.as_ref())
+            .and_then(|c| c.socket_mode.as_ref())
+            .is_some();
 
         let sig_key_secret_name = capabilities_file
             .as_ref()
@@ -6224,37 +6358,51 @@ impl ExtensionManager {
         )
         .await;
         let mut should_rerun_on_start = false;
+        let mut host_webhook_secret = None;
+        let mut has_signature_key = false;
+        let mut has_hmac_secret = false;
 
-        // Refresh webhook secret
+        // Refresh webhook secret — only register with router if host-managed.
         if webhook_secret_managed_by_host
             && let Ok(secret) = self
                 .secrets
                 .get_decrypted(user_id, &webhook_secret_name)
                 .await
         {
-            router
-                .update_secret(name, secret.expose().to_string())
-                .await;
+            let secret_value = secret.expose().to_string();
+            router.update_secret(name, secret_value.clone()).await;
             config_updates.insert(
                 RUNTIME_CONFIG_KEY_WEBHOOK_SECRET.to_string(),
-                serde_json::Value::String(secret.expose().to_string()),
+                serde_json::Value::String(secret_value.clone()),
             );
+            host_webhook_secret = Some(secret_value);
             should_rerun_on_start = true;
         }
 
         // Refresh signature key
-        if let Some(ref sig_key_name) = sig_key_secret_name
-            && let Ok(key_secret) = self.secrets.get_decrypted(user_id, sig_key_name).await
-        {
-            match router
-                .register_signature_key(name, key_secret.expose())
-                .await
-            {
-                Ok(()) => {
-                    tracing::info!(channel = %name, "Refreshed signature verification key")
-                }
+        if let Some(ref sig_key_name) = sig_key_secret_name {
+            match self.secrets.get_decrypted(user_id, sig_key_name).await {
+                Ok(key_secret) => match router
+                    .register_signature_key(name, key_secret.expose())
+                    .await
+                {
+                    Ok(()) => {
+                        has_signature_key = true;
+                        tracing::info!(channel = %name, "Refreshed signature verification key")
+                    }
+                    Err(e) => {
+                        tracing::error!(channel = %name, error = %e, "Failed to refresh signature key")
+                    }
+                },
                 Err(e) => {
-                    tracing::error!(channel = %name, error = %e, "Failed to refresh signature key")
+                    if router.get_signature_key(name).await.is_some() {
+                        router.clear_signature_key(name).await;
+                    }
+                    tracing::warn!(
+                        channel = %name,
+                        error = %e,
+                        "Signature verification key not found during refresh"
+                    );
                 }
             }
         }
@@ -6267,11 +6415,19 @@ impl ExtensionManager {
                 .await
             {
                 Ok(secret) => {
+                    has_hmac_secret = true;
                     router.register_hmac_secret(name, secret.expose()).await;
                     tracing::info!(channel = %name, "Refreshed HMAC signing secret");
                 }
                 Err(e) => {
-                    tracing::warn!(channel = %name, error = %e, "HMAC secret not found");
+                    if router.get_hmac_secret(name).await.is_some() {
+                        router.clear_hmac_secret(name).await;
+                    }
+                    tracing::warn!(
+                        channel = %name,
+                        error = %e,
+                        "HMAC secret not found during refresh"
+                    );
                 }
             }
         }
@@ -6286,7 +6442,38 @@ impl ExtensionManager {
             existing_channel.set_owner_actor_id(Some(owner_id)).await;
         }
 
-        // Re-call on_start() to trigger webhook registration with the
+        let has_webhook_auth =
+            host_webhook_secret.is_some() || has_signature_key || has_hmac_secret;
+        let refreshed_endpoints = if !has_webhook_auth && has_socket_mode {
+            tracing::info!(
+                channel = %name,
+                "Keeping webhook route unregistered: Socket Mode enabled without webhook auth"
+            );
+            vec![]
+        } else {
+            vec![RegisteredEndpoint {
+                channel_name: name.to_string(),
+                path: webhook_path,
+                methods: vec!["POST".to_string()],
+                require_secret: host_webhook_secret.is_some(),
+            }]
+        };
+        router
+            .register(
+                Arc::clone(&existing_channel),
+                refreshed_endpoints,
+                host_webhook_secret.clone(),
+                secret_header,
+            )
+            .await;
+        tracing::info!(
+            channel = %name,
+            has_webhook_auth,
+            has_socket_mode,
+            "Refreshed webhook router registration for already-active channel"
+        );
+
+        // Re-call on_start() to trigger provider-side setup with the
         // now-available credentials (e.g., setWebhook for Telegram).
         if cred_count > 0 || should_rerun_on_start {
             match existing_channel.call_on_start().await {
@@ -6332,6 +6519,10 @@ impl ExtensionManager {
                     );
                 }
             }
+
+            // Restart Socket Mode bridge — credentials may now include the
+            // app token that was missing at initial startup.
+            existing_channel.restart_socket_bridge().await;
         }
 
         tracing::info!(
@@ -10061,6 +10252,223 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_activate_refreshes_webhook_route_for_active_socket_mode_channel_with_hmac_auth()
+    -> Result<(), String> {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let channels_dir = write_test_channel(
+            dir.path(),
+            "slack",
+            r#"{
+                "version": "0.2.0",
+                "type": "channel",
+                "name": "slack",
+                "description": "test slack channel",
+                "setup": {
+                    "required_secrets": [
+                        { "name": "slack_signing_secret", "prompt": "signing secret" }
+                    ]
+                },
+                "capabilities": {
+                    "channel": {
+                        "allowed_paths": ["/webhook/slack"],
+                        "socket_mode": {
+                            "app_token_secret": "slack_app_token",
+                            "open_url": "https://slack.com/api/apps.connections.open",
+                            "max_reconnect_attempts": 3,
+                            "reconnect_delay_ms": 1000
+                        },
+                        "webhook": {
+                            "hmac_secret_name": "slack_signing_secret"
+                        }
+                    }
+                }
+            }"#,
+        );
+        let manager =
+            make_test_manager_with_dirs(None, dir.path().join("tools"), channels_dir, None);
+
+        let channel_manager = Arc::new(ChannelManager::new());
+        let runtime = Arc::new(
+            WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing())
+                .map_err(|err| format!("runtime: {err}"))?,
+        );
+        let pairing_store = Arc::new(PairingStore::new_noop());
+        let router = Arc::new(WasmChannelRouter::new());
+        manager
+            .set_channel_runtime(
+                Arc::clone(&channel_manager),
+                Arc::clone(&runtime),
+                Arc::clone(&pairing_store),
+                Arc::clone(&router),
+                std::collections::HashMap::new(),
+            )
+            .await;
+
+        manager
+            .active_channel_names
+            .write()
+            .await
+            .insert("slack".to_string());
+
+        let loaded = make_test_loaded_channel_with_capabilities(
+            Arc::clone(&runtime),
+            "slack",
+            Arc::clone(&pairing_store),
+            serde_json::json!({}),
+        );
+        let existing_channel = Arc::new(loaded.channel);
+        router
+            .register(Arc::clone(&existing_channel), vec![], None, None)
+            .await;
+
+        require(
+            router
+                .get_channel_for_path("/webhook/slack")
+                .await
+                .is_none(),
+            "socket-mode-only active channel should start without webhook path".to_string(),
+        )?;
+
+        store_test_secret(&manager, "slack_signing_secret", "signing-secret").await;
+
+        let result = manager
+            .activate("slack", "test")
+            .await
+            .map_err(|e| format!("activate: {e}"))?;
+
+        require_eq(
+            result.name,
+            "slack".to_string(),
+            "activation result name for refreshed channel",
+        )?;
+        require(
+            router
+                .get_channel_for_path("/webhook/slack")
+                .await
+                .is_some(),
+            "refresh should re-register webhook path once hmac auth is present".to_string(),
+        )?;
+        require_eq(
+            router.get_hmac_secret("slack").await,
+            Some("signing-secret".to_string()),
+            "router should cache refreshed hmac secret",
+        )
+    }
+
+    #[tokio::test]
+    async fn test_refresh_active_channel_revokes_stale_socket_mode_webhook_auth()
+    -> Result<(), String> {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let channels_dir = write_test_channel(
+            dir.path(),
+            "slack",
+            r#"{
+                "version": "0.2.0",
+                "type": "channel",
+                "name": "slack",
+                "description": "test slack channel",
+                "setup": {
+                    "required_secrets": [
+                        { "name": "slack_signing_secret", "prompt": "signing secret" }
+                    ]
+                },
+                "capabilities": {
+                    "channel": {
+                        "allowed_paths": ["/webhook/slack"],
+                        "socket_mode": {
+                            "app_token_secret": "slack_app_token",
+                            "open_url": "https://slack.com/api/apps.connections.open",
+                            "max_reconnect_attempts": 3,
+                            "reconnect_delay_ms": 1000
+                        },
+                        "webhook": {
+                            "hmac_secret_name": "slack_signing_secret"
+                        }
+                    }
+                }
+            }"#,
+        );
+        let manager =
+            make_test_manager_with_dirs(None, dir.path().join("tools"), channels_dir, None);
+
+        let channel_manager = Arc::new(ChannelManager::new());
+        let runtime = Arc::new(
+            WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing())
+                .map_err(|err| format!("runtime: {err}"))?,
+        );
+        let pairing_store = Arc::new(PairingStore::new_noop());
+        let router = Arc::new(WasmChannelRouter::new());
+        manager
+            .set_channel_runtime(
+                Arc::clone(&channel_manager),
+                Arc::clone(&runtime),
+                Arc::clone(&pairing_store),
+                Arc::clone(&router),
+                std::collections::HashMap::new(),
+            )
+            .await;
+
+        manager
+            .active_channel_names
+            .write()
+            .await
+            .insert("slack".to_string());
+
+        let loaded = make_test_loaded_channel_with_capabilities(
+            Arc::clone(&runtime),
+            "slack",
+            Arc::clone(&pairing_store),
+            serde_json::json!({}),
+        );
+        let existing_channel = Arc::new(loaded.channel);
+        router
+            .register(Arc::clone(&existing_channel), vec![], None, None)
+            .await;
+
+        store_test_secret(&manager, "slack_signing_secret", "signing-secret").await;
+        manager
+            .activate("slack", "test")
+            .await
+            .map_err(|e| format!("activate: {e}"))?;
+        require(
+            router
+                .get_channel_for_path("/webhook/slack")
+                .await
+                .is_some(),
+            "webhook route should exist before revocation".to_string(),
+        )?;
+        require_eq(
+            router.get_hmac_secret("slack").await,
+            Some("signing-secret".to_string()),
+            "hmac secret should be present before revocation",
+        )?;
+
+        manager
+            .secrets
+            .delete("test", "slack_signing_secret")
+            .await
+            .map_err(|e| format!("delete secret: {e}"))?;
+
+        manager
+            .refresh_active_channel("slack", "test")
+            .await
+            .map_err(|e| format!("refresh: {e}"))?;
+
+        require(
+            router
+                .get_channel_for_path("/webhook/slack")
+                .await
+                .is_none(),
+            "refresh should remove the webhook route after auth revocation".to_string(),
+        )?;
+        require_eq(
+            router.get_hmac_secret("slack").await,
+            None,
+            "refresh should clear the stale hmac secret",
+        )
+    }
+
+    #[tokio::test]
     async fn test_current_channel_owner_id_uses_runtime_state() -> Result<(), String> {
         let manager = make_manager_with_temp_dirs();
         if manager.current_channel_owner_id("telegram").await.is_some() {
@@ -12762,6 +13170,192 @@ mod tests {
         Ok(())
     }
 
+    // ── Channel auth status: env var exclusion for auth secrets ──────────
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // env mutex must span the async calls
+    async fn channel_auth_status_excludes_signing_secret_from_env_fallback() {
+        // Auth secrets (HMAC, webhook, signature key) must NOT count as
+        // present via env vars — the router only loads them from the
+        // encrypted store, so an env-only deployment would have no
+        // signature verification.
+        let _guard = crate::config::helpers::lock_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let channels_dir = write_test_channel(
+            tmp.path(),
+            "slack",
+            r#"{
+                "version": "0.2.0",
+                "type": "channel",
+                "name": "slack",
+                "description": "test",
+                "setup": {
+                    "required_secrets": [
+                        { "name": "slack_bot_token", "prompt": "bot token", "optional": false },
+                        { "name": "slack_signing_secret", "prompt": "signing", "optional": false }
+                    ]
+                },
+                "capabilities": {
+                    "channel": {
+                        "allowed_paths": ["/webhook/slack"],
+                        "webhook": {
+                            "hmac_secret_name": "slack_signing_secret"
+                        }
+                    }
+                }
+            }"#,
+        );
+        let tools_dir = tmp.path().join("tools");
+        std::fs::create_dir_all(&tools_dir).expect("tools dir");
+
+        let mgr = make_test_manager_with_dirs(None, tools_dir, channels_dir, None);
+
+        // Both secrets in env only — signing secret should NOT satisfy readiness.
+        unsafe {
+            std::env::set_var("SLACK_BOT_TOKEN", "xoxb-fake");
+            std::env::set_var("SLACK_SIGNING_SECRET", "abc123");
+        }
+
+        assert_eq!(
+            mgr.check_channel_auth_status("slack", "test").await,
+            ToolAuthState::NeedsSetup,
+            "auth secrets in env vars must not produce Ready"
+        );
+
+        // Store the signing secret in the encrypted store — now Ready.
+        store_test_secret(&mgr, "slack_signing_secret", "abc123").await;
+
+        assert_eq!(
+            mgr.check_channel_auth_status("slack", "test").await,
+            ToolAuthState::Ready,
+            "bot token via env + signing secret in store should be Ready"
+        );
+
+        unsafe {
+            std::env::remove_var("SLACK_BOT_TOKEN");
+            std::env::remove_var("SLACK_SIGNING_SECRET");
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // env mutex must span the async calls
+    async fn channel_auth_status_requires_usable_transport_for_socket_mode_channels() {
+        let _guard = crate::config::helpers::lock_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let channels_dir = write_test_channel(
+            tmp.path(),
+            "slack",
+            r#"{
+                "version": "0.2.0",
+                "type": "channel",
+                "name": "slack",
+                "description": "test",
+                "setup": {
+                    "required_secrets": [
+                        { "name": "slack_bot_token", "prompt": "bot token", "optional": false },
+                        { "name": "slack_signing_secret", "prompt": "signing", "optional": true },
+                        { "name": "slack_app_token", "prompt": "app token", "optional": true }
+                    ]
+                },
+                "capabilities": {
+                    "channel": {
+                        "allowed_paths": ["/webhook/slack"],
+                        "socket_mode": {
+                            "app_token_secret": "slack_app_token",
+                            "open_url": "https://slack.com/api/apps.connections.open",
+                            "max_reconnect_attempts": 3,
+                            "reconnect_delay_ms": 1000
+                        },
+                        "webhook": {
+                            "hmac_secret_name": "slack_signing_secret"
+                        }
+                    }
+                }
+            }"#,
+        );
+        let tools_dir = tmp.path().join("tools");
+        std::fs::create_dir_all(&tools_dir).expect("tools dir");
+
+        let mgr = make_test_manager_with_dirs(None, tools_dir, channels_dir, None);
+
+        unsafe {
+            std::env::set_var("SLACK_BOT_TOKEN", "xoxb-fake");
+            std::env::remove_var("SLACK_APP_TOKEN");
+            std::env::remove_var("SLACK_SIGNING_SECRET");
+        }
+
+        assert_eq!(
+            mgr.check_channel_auth_status("slack", "test").await,
+            ToolAuthState::NeedsSetup,
+            "socket-mode channels must not be Ready without either webhook auth or app token"
+        );
+
+        unsafe {
+            std::env::set_var("SLACK_APP_TOKEN", "xapp-fake");
+        }
+
+        assert_eq!(
+            mgr.check_channel_auth_status("slack", "test").await,
+            ToolAuthState::Ready,
+            "env-backed Socket Mode app token should satisfy ingress readiness"
+        );
+
+        unsafe {
+            std::env::remove_var("SLACK_BOT_TOKEN");
+            std::env::remove_var("SLACK_APP_TOKEN");
+            std::env::remove_var("SLACK_SIGNING_SECRET");
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // env mutex must span the async calls
+    async fn channel_auth_status_allows_env_fallback_for_non_auth_secrets() {
+        // Non-auth secrets (API tokens) should still be satisfiable via env vars.
+        let _guard = crate::config::helpers::lock_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let channels_dir = write_test_channel(
+            tmp.path(),
+            "simple-bot",
+            r#"{
+                "version": "0.2.0",
+                "type": "channel",
+                "name": "simple-bot",
+                "description": "test",
+                "setup": {
+                    "required_secrets": [
+                        { "name": "bot_api_key", "prompt": "key", "optional": false }
+                    ]
+                },
+                "capabilities": {
+                    "channel": {
+                        "allowed_paths": ["/webhook/simple-bot"]
+                    }
+                }
+            }"#,
+        );
+        let tools_dir = tmp.path().join("tools");
+        std::fs::create_dir_all(&tools_dir).expect("tools dir");
+
+        let mgr = make_test_manager_with_dirs(None, tools_dir, channels_dir, None);
+
+        unsafe {
+            std::env::set_var("BOT_API_KEY", "key-123");
+        }
+
+        assert_eq!(
+            mgr.check_channel_auth_status("simple-bot", "test").await,
+            ToolAuthState::Ready,
+            "non-auth secrets should be satisfiable via env vars"
+        );
+
+        unsafe {
+            std::env::remove_var("BOT_API_KEY");
+        }
+    }
+
     // ── find_local_tool_source_in ──────────────────────────────────────
 
     #[test]
@@ -12805,7 +13399,6 @@ mod tests {
         )
         .unwrap();
 
-        // Search with underscored name should find hyphenated directory
         let result = find_local_tool_source_in("my_portfolio", dir.path());
         assert_eq!(result, Some(tool_dir));
     }
@@ -12830,7 +13423,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tool_dir = dir.path().join("tools-src").join("portfolio");
         std::fs::create_dir_all(&tool_dir).unwrap();
-        // No Cargo.toml
 
         let result = find_local_tool_source_in("portfolio", dir.path());
         assert_eq!(result, None);
@@ -12838,8 +13430,6 @@ mod tests {
 
     #[test]
     fn find_local_tool_source_ignores_cargo_toml_directory() {
-        // Regression: a directory named `Cargo.toml` must not satisfy the
-        // manifest check — only a real file should qualify the candidate.
         let dir = tempfile::tempdir().unwrap();
         let tool_dir = dir.path().join("tools-src").join("portfolio");
         std::fs::create_dir_all(tool_dir.join("Cargo.toml")).unwrap();
@@ -12859,7 +13449,6 @@ mod tests {
     #[test]
     fn find_local_tool_source_strips_tool_suffix() {
         let dir = tempfile::tempdir().unwrap();
-        // Name is "portfolio_tool" but directory is just "portfolio"
         let tool_dir = dir.path().join("tools-src").join("portfolio");
         std::fs::create_dir_all(&tool_dir).unwrap();
         std::fs::write(
@@ -12874,10 +13463,6 @@ mod tests {
 
     #[test]
     fn find_local_tool_source_strips_hyphen_tool_suffix() {
-        // Regression: input `portfolio-tool` (hyphen form) must still match
-        // `tools-src/portfolio/` after suffix stripping. Internally the
-        // candidate list is built from the underscore-normalized name, so a
-        // single `_tool` strip must cover both `_tool` and `-tool` inputs.
         let dir = tempfile::tempdir().unwrap();
         let tool_dir = dir.path().join("tools-src").join("portfolio");
         std::fs::create_dir_all(&tool_dir).unwrap();
@@ -12910,7 +13495,6 @@ mod tests {
         .unwrap();
 
         let result = find_local_tool_source_in("portfolio", dir.path());
-        // tools-src/ should be preferred since it's checked first
         assert_eq!(result, Some(tools_src_dir));
     }
 
@@ -12934,16 +13518,10 @@ mod tests {
         assert!(!kind_allows_local_discovery(Some(ExtensionKind::AcpAgent)));
     }
 
-    // ── install_from_local_source (caller-level) ───────────────────────
-
-    /// Stage a buildable WASM source layout and return (source_dir, tools_dir).
     fn stage_buildable_source(dir: &std::path::Path, crate_name: &str) -> std::path::PathBuf {
         stage_buildable_source_at(dir, "portfolio", crate_name)
     }
 
-    /// Stage a buildable WASM source layout under `<dir>/<source_subdir>/`
-    /// with a `Cargo.toml` declaring `[package] name = <crate_name>` and a
-    /// `<crate_name>.wasm` artifact. Returns the source directory.
     fn stage_buildable_source_at(
         dir: &std::path::Path,
         source_subdir: &str,
@@ -12953,7 +13531,6 @@ mod tests {
         let artifact_dir = source_dir.join("target/wasm32-wasip2/release");
         std::fs::create_dir_all(&artifact_dir).expect("artifact dir");
         let wasm_path = artifact_dir.join(format!("{}.wasm", crate_name));
-        // Minimal valid wasm header (`\x00asm` + version 1).
         std::fs::write(&wasm_path, b"\x00asm\x01\x00\x00\x00").expect("write wasm");
         let caps_path = source_dir.join(format!("{}.capabilities.json", crate_name));
         std::fs::write(&caps_path, "{}").expect("write capabilities");
@@ -12965,10 +13542,6 @@ mod tests {
         source_dir
     }
 
-    /// Caller-level test: driving `install_from_local_source` end-to-end
-    /// verifies the wrapper logic (kind defaulting, target_dir selection,
-    /// source_str conversion, message annotation) — none of which is
-    /// exercised by unit tests on `find_local_tool_source_in`.
     #[tokio::test]
     async fn install_from_local_source_installs_wasm_tool_with_provenance_message() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -12985,22 +13558,9 @@ mod tests {
 
         assert_eq!(result.name, "portfolio");
         assert_eq!(result.kind, ExtensionKind::WasmTool);
-        // Message must include "LOCAL" and the source path so provenance is visible.
-        assert!(
-            result.message.contains("LOCAL"),
-            "message should mark source as LOCAL: {}",
-            result.message
-        );
-        assert!(
-            result.message.contains(&source_dir.display().to_string()),
-            "message should include source path: {}",
-            result.message
-        );
-        // Wasm artifact must have been copied to the tools dir.
-        assert!(
-            tools_dir.join("portfolio.wasm").exists(),
-            "install should copy wasm to tools dir"
-        );
+        assert!(result.message.contains("LOCAL"));
+        assert!(result.message.contains(&source_dir.display().to_string()));
+        assert!(tools_dir.join("portfolio.wasm").exists());
     }
 
     #[tokio::test]
@@ -13019,31 +13579,15 @@ mod tests {
             .expect("install from local source");
 
         assert_eq!(result.kind, ExtensionKind::WasmChannel);
-        // Channel kind must install into the channels dir, not the tools dir.
-        assert!(
-            channels_dir.join("portfolio.wasm").exists(),
-            "wasm channel should land in channels dir"
-        );
-        assert!(
-            !tools_dir.join("portfolio.wasm").exists(),
-            "wasm channel should NOT land in tools dir"
-        );
+        assert!(channels_dir.join("portfolio.wasm").exists());
+        assert!(!tools_dir.join("portfolio.wasm").exists());
     }
 
-    /// Regression test for the suffix-stripping name-mismatch bug: when
-    /// `find_local_tool_source` matches a directory via suffix stripping
-    /// (input `portfolio_tool` -> dir `portfolio/`), the compiled binary
-    /// on disk is named after the Cargo crate (`portfolio.wasm`), not the
-    /// extension name (`portfolio_tool.wasm`). `install_from_local_source`
-    /// must parse `Cargo.toml` and pass the real crate name to the artifact
-    /// lookup, otherwise every suffix-matched install fails.
     #[tokio::test]
     async fn install_from_local_source_resolves_artifact_via_crate_name() {
         let dir = tempfile::tempdir().expect("temp dir");
         let tools_dir = dir.path().join("tools");
         let channels_dir = dir.path().join("channels");
-        // Crate name differs from the requested install name: crate is
-        // `portfolio`, install is requested as `portfolio_tool`.
         let source_dir = stage_buildable_source_at(dir.path(), "portfolio", "portfolio");
 
         let manager = make_test_manager_with_dirs(None, tools_dir.clone(), channels_dir, None);
@@ -13054,16 +13598,9 @@ mod tests {
             .expect("install should resolve artifact via Cargo.toml crate name");
 
         assert_eq!(result.name, "portfolio_tool");
-        // The installed wasm is named after the install name, not the crate.
-        assert!(
-            tools_dir.join("portfolio_tool.wasm").exists(),
-            "install should copy wasm under the requested extension name"
-        );
+        assert!(tools_dir.join("portfolio_tool.wasm").exists());
     }
 
-    /// Regression test: a non-UTF-8 source path must produce a clear
-    /// `InstallFailed` error rather than being silently lossy-converted into
-    /// a build dir that does not exist.
     #[cfg(unix)]
     #[tokio::test]
     async fn install_from_local_source_rejects_non_utf8_path() {
@@ -13073,7 +13610,6 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let tools_dir = dir.path().join("tools");
         let channels_dir = dir.path().join("channels");
-        // 0x80 is an invalid UTF-8 start byte.
         let bad: &OsStr = OsStr::from_bytes(b"/tmp/\x80not-utf8");
         let bad_path = std::path::Path::new(bad);
 
@@ -13117,9 +13653,6 @@ mod tests {
 
     #[test]
     fn find_local_tool_source_prefers_underscore_over_hyphen() {
-        // Determinism regression: when both underscore and hyphen variants
-        // exist as real directories in the same search dir, the underscore
-        // (canonical) form must win on every run.
         let dir = tempfile::tempdir().unwrap();
         let underscore_dir = dir.path().join("tools-src").join("my_tool");
         let hyphen_dir = dir.path().join("tools-src").join("my-tool");
@@ -13138,11 +13671,7 @@ mod tests {
 
         for _ in 0..5 {
             let result = find_local_tool_source_in("my_tool", dir.path());
-            assert_eq!(
-                result,
-                Some(underscore_dir.clone()),
-                "underscore variant must win deterministically"
-            );
+            assert_eq!(result, Some(underscore_dir.clone()));
         }
     }
 }

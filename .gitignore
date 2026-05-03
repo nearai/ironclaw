@@ -17,6 +17,7 @@ integrations/abound/tests/source_env_vars.sh
 
 # Claude Code worktrees and lock files
 .claude/worktrees/
+.claude/docs/
 .claude/scheduled_tasks.lock
 
 # Sidecar tool data
