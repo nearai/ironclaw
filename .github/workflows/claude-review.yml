@@ -50,7 +50,7 @@ jobs:
 
       - name: Run Claude Code review
         if: steps.pr_metadata.outputs.is_cross_repository != 'true'
-        uses: anthropics/claude-code-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1
+        uses: anthropics/claude-code-action@fefa07e9c665b7320f08c3b525980457f22f58aa # v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           allowed_bots: "ironclaw-ci[bot]"
