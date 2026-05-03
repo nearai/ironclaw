@@ -532,6 +532,56 @@
     },
     {
       "properties": {
+        "action": { "const": "backtest_dca" },
+        "candles": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "ts": { "type": "string" },
+              "open": { "type": "number", "exclusiveMinimum": 0 },
+              "high": { "type": "number", "exclusiveMinimum": 0 },
+              "low": { "type": "number", "exclusiveMinimum": 0 },
+              "close": { "type": "number", "exclusiveMinimum": 0 },
+              "volume": { "type": "number" }
+            },
+            "required": ["ts", "open", "high", "low", "close"]
+          },
+          "minItems": 2
+        },
+        "notional_per_period_usd": { "type": "number", "exclusiveMinimum": 0 },
+        "period_candles": { "type": "integer", "minimum": 1, "default": 1 },
+        "offset": { "type": "integer", "minimum": 0, "default": 0 },
+        "skip_above_premium_bps": { "type": "number", "minimum": 0 },
+        "opportunistic_below_discount_bps": { "type": "number", "minimum": 0 },
+        "fee_bps": { "type": "number", "minimum": 0, "default": 10 },
+        "slippage_bps": { "type": "number", "minimum": 0, "default": 5 },
+        "initial_cash_usd": { "type": "number", "exclusiveMinimum": 0, "default": 10000 }
+      },
+      "required": ["action", "candles", "notional_per_period_usd"]
+    },
+    {
+      "properties": {
+        "action": { "const": "plan_dca_schedule" },
+        "pair": { "type": "string", "minLength": 1 },
+        "source_asset": { "type": "string", "minLength": 1 },
+        "destination_asset": { "type": "string", "minLength": 1 },
+        "source_chain": { "type": "string", "minLength": 1 },
+        "destination_chain": { "type": "string", "minLength": 1 },
+        "notional_per_period_usd": { "type": "number", "exclusiveMinimum": 0 },
+        "cadence": { "type": "string", "description": "daily | weekly | biweekly | monthly | raw 5-or-6-field cron" },
+        "total_periods": { "type": "integer", "minimum": 1 },
+        "max_slippage_bps": { "type": "number", "minimum": 0, "default": 50 },
+        "start_at": { "type": "string" },
+        "assumed_price_usd": { "type": "number", "exclusiveMinimum": 0 },
+        "mode": { "type": "string", "enum": ["paper", "quote"], "default": "paper" },
+        "notional_currency": { "type": "string", "default": "USDC" },
+        "solver": { "type": "string" }
+      },
+      "required": ["action", "pair", "source_asset", "destination_asset", "source_chain", "destination_chain", "notional_per_period_usd", "cadence", "total_periods"]
+    },
+    {
+      "properties": {
         "action": { "const": "plan_paid_research" },
         "query": {
           "type": "string",

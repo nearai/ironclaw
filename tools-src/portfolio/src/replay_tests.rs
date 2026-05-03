@@ -1110,6 +1110,120 @@ fn check_expectations(path: &str, step: &Step, response: &Value, prior: &BTreeMa
                     step.name
                 );
             }
+            "dca_periods_executed" => {
+                let got = response
+                    .get("periods_executed")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let want = expected.as_u64().expect("dca_periods_executed: number");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': dca executed {got} != {want}",
+                    step.name
+                );
+            }
+            "dca_periods_skipped_band_min" => {
+                let got = response
+                    .get("periods_skipped_band")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let want = expected
+                    .as_u64()
+                    .expect("dca_periods_skipped_band_min: number");
+                assert!(
+                    got >= want,
+                    "[{path}] step '{}': dca skipped-band {got} < {want}",
+                    step.name
+                );
+            }
+            "dca_total_invested_lt" => {
+                let invested = response
+                    .get("total_invested_usd")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0);
+                let want = expected.as_f64().expect("dca_total_invested_lt: number");
+                assert!(
+                    invested < want,
+                    "[{path}] step '{}': dca total invested {invested} >= {want}",
+                    step.name
+                );
+            }
+            "dca_breakeven_within" => {
+                let bounds = expected
+                    .as_array()
+                    .expect("dca_breakeven_within: [low, high]");
+                let low = bounds[0].as_f64().expect("low");
+                let high = bounds[1].as_f64().expect("high");
+                let got = response
+                    .get("breakeven_price_usd")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0);
+                assert!(
+                    got >= low && got <= high,
+                    "[{path}] step '{}': dca breakeven {got} not in [{low}, {high}]",
+                    step.name
+                );
+            }
+            "dca_schedule_cron" => {
+                let got = response
+                    .get("cron")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| panic!("[{path}] step '{}': missing cron", step.name));
+                let want = expected.as_str().expect("dca_schedule_cron: string");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': dca cron mismatch",
+                    step.name
+                );
+            }
+            "dca_schedule_safe_to_quote" => {
+                let got = response
+                    .get("safe_to_quote")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let want = expected
+                    .as_bool()
+                    .expect("dca_schedule_safe_to_quote: bool");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': dca safe_to_quote mismatch",
+                    step.name
+                );
+            }
+            "dca_schedule_periods_len" => {
+                let len = response
+                    .get("schedule")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                let want = expected.as_u64().expect("dca_schedule_periods_len: number") as usize;
+                assert_eq!(
+                    len, want,
+                    "[{path}] step '{}': dca schedule periods {len} != {want}",
+                    step.name
+                );
+            }
+            "dca_schedule_template_action" => {
+                let got = response
+                    .pointer("/build_intent_request_template/action")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "[{path}] step '{}': missing build_intent_request_template/action",
+                            step.name
+                        )
+                    });
+                let want = expected
+                    .as_str()
+                    .expect("dca_schedule_template_action: string");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': dca template action mismatch",
+                    step.name
+                );
+            }
             other => panic!(
                 "[{path}] step '{}': unknown expectation key '{other}'",
                 step.name

@@ -33,6 +33,11 @@
 //! - `replay_episode` — validate then replay an episode through
 //!   `backtest_suite`, surfacing the embedded solver fixture and
 //!   news context.
+//! - `backtest_dca` — replay a fixed-cadence dollar-cost-averaging
+//!   buy schedule with optional symmetric price-band variants.
+//! - `plan_dca_schedule` — emit a recurring DCA schedule (cron + per
+//!   period plan + `build_intent` template + risk gates) for a
+//!   NEAR-Intents-supported destination asset; unsigned only.
 //! - `plan_paid_research` — rank paid/free research sources, budget a
 //!   premium-source query, and prepare attribution/payment gates.
 //! - `plan_dripstack_browse` — model DripStack's guided topic →
@@ -74,6 +79,7 @@ use serde::{Deserialize, Serialize};
 
 mod analyzer;
 mod backtest;
+mod dca;
 mod episode;
 mod format;
 mod indexer;
@@ -198,6 +204,21 @@ enum PortfolioAction {
     #[serde(rename = "replay_episode")]
     ReplayEpisode(episode::ReplayEpisodeInput),
 
+    /// Replay a fixed-cadence dollar-cost-averaging schedule over a
+    /// candle series. Reports lots, breakeven, mark-to-market, and
+    /// alpha vs lump-sum buy-and-hold. Optional symmetric price band
+    /// turns the schedule into "skip when stretched, double-up when
+    /// discounted" without breaking determinism.
+    #[serde(rename = "backtest_dca")]
+    BacktestDca(dca::DcaBacktestInput),
+
+    /// Plan a recurring DCA schedule into a NEAR-Intents-supported
+    /// destination asset. Emits a cron expression, per-period plans,
+    /// risk gates, and a `build_intent` template the caller uses per
+    /// period. All output is unsigned; signing remains user-only.
+    #[serde(rename = "plan_dca_schedule")]
+    PlanDcaSchedule(dca::DcaScheduleInput),
+
     /// Plan a premium-source research query before fetching paywalled
     /// content. This ranks candidate sources, enforces a budget, and
     /// returns attribution/payment gates for MPP, x402, and NEAR
@@ -314,7 +335,7 @@ impl exports::near::agent::tool::Guest for PortfolioTool {
          rebalancing proposals from declarative strategy docs, and builds unsigned \
          NEAR Intent bundles. Operations: scan, propose, build_intent, progress, \
          backtest, backtest_suite, backtest_walkforward, backtest_montecarlo, \
-         backtest_grid, validate_episode, replay_episode, plan_paid_research, \
+         backtest_grid, backtest_dca, plan_dca_schedule, validate_episode, replay_episode, plan_paid_research, \
          plan_dripstack_browse, fetch_dripstack_catalog, prepare_dripstack_paid_fetch, \
          plan_near_intents_trial, format_suggestion, format_widget, format_intents_widget. \
          Read-only and unsigned — the agent never holds private keys."
@@ -437,6 +458,16 @@ fn execute_inner(params: &str) -> Result<String, String> {
             let output = episode::replay(input)?;
             serde_json::to_string(&output)
                 .map_err(|e| format!("Serialize replay_episode response: {e}"))
+        }
+        PortfolioAction::BacktestDca(input) => {
+            let output = dca::run_backtest(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize backtest_dca response: {e}"))
+        }
+        PortfolioAction::PlanDcaSchedule(input) => {
+            let output = dca::plan_schedule(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize plan_dca_schedule response: {e}"))
         }
         PortfolioAction::PlanPaidResearch(input) => {
             let output = research::plan(input)?;
