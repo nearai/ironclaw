@@ -582,6 +582,20 @@
     },
     {
       "properties": {
+        "action": { "const": "compile_intent_prompt" },
+        "prompt": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Natural-language trade prompt. Examples: 'DCA $100 weekly into NEAR for 6 months', 'swap 0.5 BTC to USDC on near', 'backtest sma 5/20 on NEAR/USDC', 'watch BTC for breakout above 70000'."
+        },
+        "default_chain": { "type": "string", "default": "near" },
+        "default_funding_asset": { "type": "string", "default": "USDC" },
+        "focus_pair": { "type": "string" }
+      },
+      "required": ["action", "prompt"]
+    },
+    {
+      "properties": {
         "action": { "const": "plan_paid_research" },
         "query": {
           "type": "string",

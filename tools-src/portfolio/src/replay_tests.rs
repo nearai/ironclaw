@@ -1224,6 +1224,66 @@ fn check_expectations(path: &str, step: &Step, response: &Value, prior: &BTreeMa
                     step.name
                 );
             }
+            "nl_intent_kind" => {
+                let got = response
+                    .get("intent_kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| {
+                        panic!("[{path}] step '{}': missing intent_kind", step.name)
+                    });
+                let want = expected.as_str().expect("nl_intent_kind: string");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': nl intent_kind mismatch",
+                    step.name
+                );
+            }
+            "nl_recommended_action" => {
+                let got = response
+                    .get("recommended_action")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| {
+                        panic!("[{path}] step '{}': missing recommended_action", step.name)
+                    });
+                let want = expected.as_str().expect("nl_recommended_action: string");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': nl recommended_action mismatch",
+                    step.name
+                );
+            }
+            "nl_param_eq" => {
+                let pairs = expected
+                    .as_object()
+                    .expect("nl_param_eq: object of {pointer: expected}");
+                for (pointer, want) in pairs {
+                    let got = response
+                        .pointer(&format!("/recommended_params/{pointer}"))
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "[{path}] step '{}': missing recommended_params/{pointer}",
+                                step.name
+                            )
+                        });
+                    assert_eq!(
+                        got, want,
+                        "[{path}] step '{}': nl_param_eq[{pointer}] mismatch",
+                        step.name
+                    );
+                }
+            }
+            "nl_confidence_min" => {
+                let got = response
+                    .get("confidence")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                let want = expected.as_f64().expect("nl_confidence_min: number");
+                assert!(
+                    got >= want,
+                    "[{path}] step '{}': nl confidence {got} < {want}",
+                    step.name
+                );
+            }
             other => panic!(
                 "[{path}] step '{}': unknown expectation key '{other}'",
                 step.name

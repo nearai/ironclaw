@@ -38,6 +38,11 @@
 //! - `plan_dca_schedule` — emit a recurring DCA schedule (cron + per
 //!   period plan + `build_intent` template + risk gates) for a
 //!   NEAR-Intents-supported destination asset; unsigned only.
+//! - `compile_intent_prompt` — turn a natural-language trade prompt
+//!   ("DCA $100 weekly into NEAR for 6 months") into a structured
+//!   recommended action plus extracted fields, assumptions,
+//!   clarifications, and gates. Deterministic pattern matching, no
+//!   LLM call.
 //! - `plan_paid_research` — rank paid/free research sources, budget a
 //!   premium-source query, and prepare attribution/payment gates.
 //! - `plan_dripstack_browse` — model DripStack's guided topic →
@@ -85,6 +90,7 @@ mod format;
 mod indexer;
 mod intents;
 mod lab;
+mod nl;
 mod research;
 mod strategy;
 mod trial;
@@ -219,6 +225,15 @@ enum PortfolioAction {
     #[serde(rename = "plan_dca_schedule")]
     PlanDcaSchedule(dca::DcaScheduleInput),
 
+    /// Compile a natural-language trade prompt into a structured
+    /// recommended action (one of `plan_dca_schedule`, `build_intent`,
+    /// `backtest_suite`, `plan_paid_research`, `format_intents_widget`,
+    /// or `noop`). Deterministic pattern matching, no LLM call. The
+    /// caller invokes the recommended action separately after risk
+    /// gating; this compiler never executes anything.
+    #[serde(rename = "compile_intent_prompt")]
+    CompileIntentPrompt(nl::CompileInput),
+
     /// Plan a premium-source research query before fetching paywalled
     /// content. This ranks candidate sources, enforces a budget, and
     /// returns attribution/payment gates for MPP, x402, and NEAR
@@ -335,7 +350,8 @@ impl exports::near::agent::tool::Guest for PortfolioTool {
          rebalancing proposals from declarative strategy docs, and builds unsigned \
          NEAR Intent bundles. Operations: scan, propose, build_intent, progress, \
          backtest, backtest_suite, backtest_walkforward, backtest_montecarlo, \
-         backtest_grid, backtest_dca, plan_dca_schedule, validate_episode, replay_episode, plan_paid_research, \
+         backtest_grid, backtest_dca, plan_dca_schedule, compile_intent_prompt, \
+         validate_episode, replay_episode, plan_paid_research, \
          plan_dripstack_browse, fetch_dripstack_catalog, prepare_dripstack_paid_fetch, \
          plan_near_intents_trial, format_suggestion, format_widget, format_intents_widget. \
          Read-only and unsigned — the agent never holds private keys."
@@ -468,6 +484,11 @@ fn execute_inner(params: &str) -> Result<String, String> {
             let output = dca::plan_schedule(input)?;
             serde_json::to_string(&output)
                 .map_err(|e| format!("Serialize plan_dca_schedule response: {e}"))
+        }
+        PortfolioAction::CompileIntentPrompt(input) => {
+            let output = nl::compile(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize compile_intent_prompt response: {e}"))
         }
         PortfolioAction::PlanPaidResearch(input) => {
             let output = research::plan(input)?;
