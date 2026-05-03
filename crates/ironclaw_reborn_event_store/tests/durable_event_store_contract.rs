@@ -528,3 +528,229 @@ fn collect_file_bytes_inner(path: &Path, bytes: &mut Vec<u8>) {
         collect_file_bytes_inner(&entry.path(), bytes);
     }
 }
+
+// Regression for review comment 3178548646: when a record matches the filter
+// but the *next* record is filtered out, `next_cursor` must advance past the
+// filtered tail so the caller does not rescan it indefinitely.
+#[tokio::test]
+async fn jsonl_replay_advances_next_cursor_past_trailing_filtered_records() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("event-store");
+    let scope_a = scope_for("alice", "project-a");
+    let scope_b = scope_for("alice", "project-b");
+    let stream = EventStreamKey::from_scope(&scope_a);
+
+    let stores = build_reborn_event_stores(
+        RebornProfile::LocalDev,
+        RebornEventStoreConfig::Jsonl {
+            root,
+            accept_single_node_durable: false,
+        },
+    )
+    .await
+    .expect("jsonl stores");
+
+    // Cursor 1 matches filter (project-a), cursor 2 does not (project-b).
+    stores
+        .events
+        .append(RuntimeEvent::dispatch_requested(
+            scope_a.clone(),
+            capability_id(),
+        ))
+        .await
+        .expect("append a1");
+    stores
+        .events
+        .append(RuntimeEvent::dispatch_requested(
+            scope_b.clone(),
+            capability_id(),
+        ))
+        .await
+        .expect("append b1");
+
+    let project_a = ReadScope {
+        project_id: scope_a.project_id.clone(),
+        ..ReadScope::default()
+    };
+    let replay = stores
+        .events
+        .read_after_cursor(&stream, &project_a, None, 10)
+        .await
+        .expect("replay");
+    assert_eq!(replay.entries.len(), 1);
+    assert_eq!(replay.entries[0].cursor, EventCursor::new(1));
+    // `next_cursor` must be the highest scanned cursor (2), not the last
+    // matched cursor (1), otherwise the next replay would rescan cursor 2.
+    assert_eq!(
+        replay.next_cursor,
+        EventCursor::new(2),
+        "next_cursor must advance past trailing filtered record"
+    );
+
+    // Confirm the next call does not return the filtered-out record again.
+    let follow_up = stores
+        .events
+        .read_after_cursor(&stream, &project_a, Some(replay.next_cursor), 10)
+        .await
+        .expect("follow up replay");
+    assert!(follow_up.entries.is_empty());
+}
+
+// Regression for review comment 3178548701: two `JsonlStore` instances
+// pointing at the same root must serialise cursor assignment via the OS-level
+// file lock, even though they hold independent in-process Tokio mutexes.
+#[tokio::test]
+async fn jsonl_concurrent_appenders_emit_monotonic_cursors_through_file_lock() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("event-store");
+    let scope = scope_for("alice", "project-a");
+    let stream = EventStreamKey::from_scope(&scope);
+
+    // Two independent store instances simulate two processes sharing the
+    // same JSONL root. They do NOT share an in-process Tokio mutex.
+    let stores_one = build_reborn_event_stores(
+        RebornProfile::LocalDev,
+        RebornEventStoreConfig::Jsonl {
+            root: root.clone(),
+            accept_single_node_durable: false,
+        },
+    )
+    .await
+    .expect("stores one");
+    let stores_two = build_reborn_event_stores(
+        RebornProfile::LocalDev,
+        RebornEventStoreConfig::Jsonl {
+            root: root.clone(),
+            accept_single_node_durable: false,
+        },
+    )
+    .await
+    .expect("stores two");
+
+    let mut handles = Vec::new();
+    for stores in [stores_one, stores_two] {
+        let scope = scope.clone();
+        let events = stores.events.clone();
+        handles.push(tokio::spawn(async move {
+            for _ in 0..16 {
+                events
+                    .append(RuntimeEvent::dispatch_requested(
+                        scope.clone(),
+                        capability_id(),
+                    ))
+                    .await
+                    .expect("append");
+            }
+        }));
+    }
+    for handle in handles {
+        handle.await.expect("join");
+    }
+
+    // Open a fresh reader. If the two appenders raced and both observed the
+    // same prior tail, the JSONL file would contain duplicate cursors and
+    // `parse_jsonl_entries` would error out via `read_after_cursor` with an
+    // "invalid cursor sequence" durable-log error.
+    let reader = build_reborn_event_stores(
+        RebornProfile::LocalDev,
+        RebornEventStoreConfig::Jsonl {
+            root,
+            accept_single_node_durable: false,
+        },
+    )
+    .await
+    .expect("reader");
+    let replay = reader
+        .events
+        .read_after_cursor(&stream, &ReadScope::any(), None, 100)
+        .await
+        .expect("replay must observe a monotonically-sequenced stream");
+    assert_eq!(replay.entries.len(), 32, "all 32 appends must be visible");
+    for (index, entry) in replay.entries.iter().enumerate() {
+        assert_eq!(entry.cursor, EventCursor::new((index + 1) as u64));
+    }
+}
+
+// Regression for review comment 3178548670: a small `limit` against a large
+// JSONL stream must not load or parse the entire file. We assert this by
+// truncating the JSONL file after a known prefix and confirming that the
+// reader still returns the requested limited prefix without erroring on the
+// truncated-tail garbage that follows.
+#[tokio::test]
+async fn jsonl_bounded_replay_does_not_parse_the_whole_file() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("event-store");
+    let scope = scope_for("alice", "project-a");
+    let stream = EventStreamKey::from_scope(&scope);
+
+    let stores = build_reborn_event_stores(
+        RebornProfile::LocalDev,
+        RebornEventStoreConfig::Jsonl {
+            root: root.clone(),
+            accept_single_node_durable: false,
+        },
+    )
+    .await
+    .expect("stores");
+    for _ in 0..3 {
+        stores
+            .events
+            .append(RuntimeEvent::dispatch_requested(
+                scope.clone(),
+                capability_id(),
+            ))
+            .await
+            .expect("append");
+    }
+    drop(stores);
+
+    // Append garbage that would fail JSON parsing if the reader scanned past
+    // its first matched record. With streaming + early-exit on `limit`,
+    // a `limit = 1` request returns successfully without ever touching the
+    // garbage line.
+    let stream_path = std::fs::read_dir(root.join("events"))
+        .expect("events dir")
+        .next()
+        .expect("tenant dir")
+        .expect("dir entry")
+        .path();
+    let stream_path = std::fs::read_dir(&stream_path)
+        .expect("user dir")
+        .next()
+        .expect("user")
+        .expect("user entry")
+        .path();
+    let file = std::fs::read_dir(&stream_path)
+        .expect("agent dir")
+        .next()
+        .expect("agent")
+        .expect("agent entry")
+        .path();
+    use std::io::Write;
+    let mut handle = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&file)
+        .expect("open jsonl");
+    handle
+        .write_all(b"{\"cursor\":4,\"record\": THIS IS NOT JSON\n")
+        .expect("write garbage");
+    handle.flush().expect("flush");
+    drop(handle);
+
+    let stores = build_reborn_event_stores(
+        RebornProfile::LocalDev,
+        RebornEventStoreConfig::Jsonl {
+            root,
+            accept_single_node_durable: false,
+        },
+    )
+    .await
+    .expect("reopen");
+    let bounded = stores
+        .events
+        .read_after_cursor(&stream, &ReadScope::any(), None, 1)
+        .await
+        .expect("bounded replay must not parse trailing garbage");
+    assert_eq!(bounded.entries.len(), 1);
+    assert_eq!(bounded.entries[0].cursor, EventCursor::new(1));
+}

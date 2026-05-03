@@ -404,6 +404,7 @@ impl LibSqlStore {
             .await
             .map_err(|_| durable_error("libsql event store failed to read entries"))?;
         let mut entries = Vec::new();
+        let mut last_scanned: Option<EventCursor> = None;
         while let Some(row) = rows
             .next()
             .await
@@ -425,6 +426,7 @@ impl LibSqlStore {
                 })?;
             let (record, matches) = decode_and_match(value)?;
             let cursor = EventCursor::new(cursor);
+            last_scanned = Some(cursor);
             if !matches {
                 continue;
             }
@@ -433,10 +435,17 @@ impl LibSqlStore {
                 break;
             }
         }
-        let next_cursor = entries
-            .last()
-            .map(|entry| entry.cursor)
-            .unwrap_or_else(|| EventCursor::new(next_cursor));
+        // Track the highest cursor we scanned so callers can advance past
+        // records that were filtered out at the application layer. Without
+        // this, a filtered-out record at the head of the stream would be
+        // rescanned indefinitely on every replay.
+        let last_matched = entries.last().map(|entry| entry.cursor);
+        let next_cursor = match (last_matched, last_scanned) {
+            (Some(matched), Some(scanned)) if scanned.as_u64() > matched.as_u64() => scanned,
+            (Some(matched), _) => matched,
+            (None, Some(scanned)) => scanned,
+            (None, None) => EventCursor::new(next_cursor),
+        };
         Ok(EventReplay {
             entries,
             next_cursor,

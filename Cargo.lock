@@ -4271,6 +4271,8 @@ dependencies = [
  "ironclaw_events",
  "ironclaw_host_api",
  "libsql",
+ "rustls 0.23.37",
+ "rustls-native-certs 0.8.3",
  "secrecy",
  "serde",
  "serde_json",
@@ -4278,9 +4280,12 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-postgres",
+ "tokio-postgres-rustls",
  "tracing",
+ "url",
  "urlencoding",
  "uuid",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]

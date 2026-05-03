@@ -21,7 +21,7 @@ use ironclaw_host_api::{AgentId, AuditEnvelope};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
-use tokio::{fs::OpenOptions, io::AsyncWriteExt, sync::Mutex};
+use tokio::sync::Mutex;
 
 #[cfg(feature = "libsql")]
 mod libsql_store;
@@ -204,10 +204,16 @@ impl DurableEventLog for JsonlDurableEventLog {
         after: Option<EventCursor>,
         limit: usize,
     ) -> Result<EventReplay<RuntimeEvent>, EventError> {
+        let owned_filter = filter.clone();
         self.store
-            .read_after(StreamKind::Runtime, stream, filter, after, limit, |event| {
-                filter.matches_event(event)
-            })
+            .read_after(
+                StreamKind::Runtime,
+                stream,
+                filter,
+                after,
+                limit,
+                move |event| owned_filter.matches_event(event),
+            )
             .await
     }
 }
@@ -260,10 +266,16 @@ impl DurableAuditLog for JsonlDurableAuditLog {
         after: Option<EventCursor>,
         limit: usize,
     ) -> Result<EventReplay<AuditEnvelope>, EventError> {
+        let owned_filter = filter.clone();
         self.store
-            .read_after(StreamKind::Audit, stream, filter, after, limit, |record| {
-                filter.matches_audit(record)
-            })
+            .read_after(
+                StreamKind::Audit,
+                stream,
+                filter,
+                after,
+                limit,
+                move |record| owned_filter.matches_audit(record),
+            )
             .await
     }
 }
@@ -289,26 +301,38 @@ impl JsonlStore {
         record: T,
     ) -> Result<EventLogEntry<T>, EventError>
     where
-        T: Clone + Serialize + DeserializeOwned,
+        T: Clone + Serialize + DeserializeOwned + Send + 'static,
     {
         let lock = self.stream_lock(kind, stream).await;
         let _guard = lock.lock().await;
-        let next_cursor = self
-            .last_cursor(kind, stream)
-            .await?
-            .unwrap_or(0)
-            .checked_add(1)
-            .ok_or_else(|| durable_error("jsonl event cursor overflowed u64"))?;
-        let entry = EventLogEntry {
-            cursor: EventCursor::new(next_cursor),
+        let path = self.stream_path(kind, stream);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|_| durable_error("jsonl event store failed to prepare stream"))?;
+        }
+        // Serialise the record outside the blocking section.
+        let record_for_envelope = record.clone();
+        let assigned_cursor = tokio::task::spawn_blocking(move || -> Result<u64, EventError> {
+            // The OS-level exclusive lock spans both reading the prior tail
+            // cursor and appending the new record so two processes cannot
+            // both observe the same last cursor and emit duplicates.
+            append_with_cursor_assignment(&path, |next_cursor| {
+                let envelope = JsonlEntry {
+                    cursor: EventCursor::new(next_cursor),
+                    record: record_for_envelope,
+                };
+                serde_json::to_string(&envelope).map_err(|error| EventError::Serialize {
+                    reason: error.to_string(),
+                })
+            })
+        })
+        .await
+        .map_err(|_| durable_error("jsonl event store failed to append record"))??;
+        Ok(EventLogEntry {
+            cursor: EventCursor::new(assigned_cursor),
             record,
-        };
-        let envelope = JsonlEntry {
-            cursor: entry.cursor,
-            record: entry.record.clone(),
-        };
-        self.append_envelope(kind, stream, &envelope).await?;
-        Ok(entry)
+        })
     }
 
     async fn read_after<T>(
@@ -318,10 +342,10 @@ impl JsonlStore {
         _filter: &ReadScope,
         after: Option<EventCursor>,
         limit: usize,
-        is_match: impl Fn(&T) -> bool,
+        is_match: impl Fn(&T) -> bool + Send + 'static,
     ) -> Result<EventReplay<T>, EventError>
     where
-        T: Clone + DeserializeOwned,
+        T: Clone + DeserializeOwned + Send + 'static,
     {
         if limit == 0 {
             return Err(EventError::InvalidReplayRequest {
@@ -329,110 +353,19 @@ impl JsonlStore {
             });
         }
         let after = after.unwrap_or_default();
+        // We hold the in-process stream lock while we *read* purely so that
+        // a concurrent in-process append cannot interleave a partial line
+        // mid-read. Cross-process safety is provided by the OS-level
+        // exclusive file lock taken by `append_envelope`; readers do not
+        // need the OS lock.
         let lock = self.stream_lock(kind, stream).await;
         let _guard = lock.lock().await;
-        let entries = self.read_entries::<T>(kind, stream).await?;
-        let head = entries
-            .last()
-            .map(|entry| entry.cursor)
-            .unwrap_or_else(EventCursor::origin);
-        if after.as_u64() > head.as_u64() {
-            return Err(EventError::ReplayGap {
-                requested: after,
-                earliest: head,
-            });
-        }
-
-        let mut replay_entries = Vec::new();
-        let mut last_scanned = after;
-        for entry in entries {
-            if entry.cursor.as_u64() <= after.as_u64() {
-                continue;
-            }
-            last_scanned = entry.cursor;
-            if !is_match(&entry.record) {
-                continue;
-            }
-            replay_entries.push(entry);
-            if replay_entries.len() >= limit {
-                break;
-            }
-        }
-        let next_cursor = replay_entries
-            .last()
-            .map(|entry| entry.cursor)
-            .unwrap_or(last_scanned);
-        Ok(EventReplay {
-            entries: replay_entries,
-            next_cursor,
+        let path = self.stream_path(kind, stream);
+        tokio::task::spawn_blocking(move || {
+            stream_read_after::<T, _>(&path, after, limit, is_match)
         })
-    }
-
-    async fn append_envelope<T>(
-        &self,
-        kind: StreamKind,
-        stream: &EventStreamKey,
-        envelope: &JsonlEntry<T>,
-    ) -> Result<(), EventError>
-    where
-        T: Serialize,
-    {
-        let path = self.stream_path(kind, stream);
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|_| durable_error("jsonl event store failed to prepare stream"))?;
-        }
-        let line = serde_json::to_string(envelope).map_err(|error| EventError::Serialize {
-            reason: error.to_string(),
-        })?;
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .await
-            .map_err(|_| durable_error("jsonl event store failed to open stream"))?;
-        file.write_all(line.as_bytes())
-            .await
-            .map_err(|_| durable_error("jsonl event store failed to append record"))?;
-        file.write_all(b"\n")
-            .await
-            .map_err(|_| durable_error("jsonl event store failed to append record"))?;
-        file.flush()
-            .await
-            .map_err(|_| durable_error("jsonl event store failed to flush record"))?;
-        file.sync_data()
-            .await
-            .map_err(|_| durable_error("jsonl event store failed to sync record"))?;
-        Ok(())
-    }
-
-    async fn read_entries<T>(
-        &self,
-        kind: StreamKind,
-        stream: &EventStreamKey,
-    ) -> Result<Vec<EventLogEntry<T>>, EventError>
-    where
-        T: DeserializeOwned,
-    {
-        let path = self.stream_path(kind, stream);
-        let bytes = match tokio::fs::read(&path).await {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(_) => return Err(durable_error("jsonl event store failed to read stream")),
-        };
-        parse_jsonl_entries(&bytes)
-    }
-
-    async fn last_cursor(
-        &self,
-        kind: StreamKind,
-        stream: &EventStreamKey,
-    ) -> Result<Option<u64>, EventError> {
-        let path = self.stream_path(kind, stream);
-        tokio::task::spawn_blocking(move || read_last_jsonl_cursor(&path))
-            .await
-            .map_err(|_| durable_error("jsonl event store failed to read stream"))?
+        .await
+        .map_err(|_| durable_error("jsonl event store failed to read stream"))?
     }
 
     async fn stream_lock(&self, kind: StreamKind, stream: &EventStreamKey) -> Arc<Mutex<()>> {
@@ -557,34 +490,167 @@ fn parse_jsonl_cursor(line: &[u8]) -> Result<Option<u64>, EventError> {
     Ok(Some(envelope.cursor.as_u64()))
 }
 
-fn parse_jsonl_entries<T>(bytes: &[u8]) -> Result<Vec<EventLogEntry<T>>, EventError>
+/// Stream a JSONL stream line-by-line, applying the cursor `after` filter,
+/// the predicate, and the `limit`. Stops as soon as `limit` matches are
+/// collected, so a `limit = 1` request on a multi-gigabyte JSONL never reads
+/// or parses the whole file.
+fn stream_read_after<T, F>(
+    path: &Path,
+    after: EventCursor,
+    limit: usize,
+    is_match: F,
+) -> Result<EventReplay<T>, EventError>
 where
     T: DeserializeOwned,
+    F: Fn(&T) -> bool,
 {
-    let text = std::str::from_utf8(bytes).map_err(|error| EventError::Serialize {
-        reason: error.to_string(),
-    })?;
-    let mut entries = Vec::new();
+    use std::io::{BufRead, BufReader};
+
+    let file = match std::fs::File::open(path) {
+        Ok(file) => {
+            // Take a shared advisory lock so we never observe a partially
+            // written line from a concurrent appender in another process.
+            file.lock_shared()
+                .map_err(|_| durable_error("jsonl event store failed to acquire read lock"))?;
+            file
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // No file means no entries yet; treat the head as the origin.
+            if after.as_u64() > 0 {
+                return Err(EventError::ReplayGap {
+                    requested: after,
+                    earliest: EventCursor::origin(),
+                });
+            }
+            return Ok(EventReplay {
+                entries: Vec::new(),
+                next_cursor: after,
+            });
+        }
+        Err(_) => return Err(durable_error("jsonl event store failed to read stream")),
+    };
+    let reader = BufReader::new(file);
+
+    let mut replay_entries = Vec::new();
+    let mut last_scanned = after;
+    let mut head_cursor = EventCursor::origin();
     let mut expected_cursor = 1u64;
-    for line in text.lines().filter(|line| !line.trim().is_empty()) {
-        let envelope =
-            serde_json::from_str::<JsonlEntry<T>>(line).map_err(|error| EventError::Serialize {
+    let mut after_validated = after.as_u64() == 0;
+
+    for line in reader.lines() {
+        let line = line.map_err(|_| durable_error("jsonl event store failed to read stream"))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        // Decode just the cursor first to validate sequencing cheaply and to
+        // skip records we do not need to materialise into `T`.
+        let envelope_cursor = serde_json::from_str::<JsonlCursor>(&line)
+            .map_err(|error| EventError::Serialize {
                 reason: error.to_string(),
-            })?;
-        if envelope.cursor.as_u64() != expected_cursor {
+            })?
+            .cursor;
+        if envelope_cursor.as_u64() != expected_cursor {
             return Err(durable_error(
                 "jsonl event stream cursor sequence is invalid",
             ));
         }
-        entries.push(EventLogEntry {
-            cursor: envelope.cursor,
-            record: envelope.record,
-        });
+        head_cursor = envelope_cursor;
         expected_cursor = expected_cursor
             .checked_add(1)
             .ok_or_else(|| durable_error("jsonl event cursor overflowed u64"))?;
+        if envelope_cursor.as_u64() <= after.as_u64() {
+            // We have proven the stream contains at least one record at or
+            // beyond `after`, so a future-cursor `ReplayGap` cannot apply.
+            if envelope_cursor.as_u64() == after.as_u64() {
+                after_validated = true;
+            }
+            continue;
+        }
+        // Crossing past `after` also validates it, since the head is now
+        // strictly greater than `after`.
+        after_validated = true;
+        last_scanned = envelope_cursor;
+        let envelope = serde_json::from_str::<JsonlEntry<T>>(&line).map_err(|error| {
+            EventError::Serialize {
+                reason: error.to_string(),
+            }
+        })?;
+        if !is_match(&envelope.record) {
+            continue;
+        }
+        replay_entries.push(EventLogEntry {
+            cursor: envelope.cursor,
+            record: envelope.record,
+        });
+        if replay_entries.len() >= limit {
+            // Stop streaming as soon as we have `limit` matches so that a
+            // small `limit` against a large file does not pay full-stream
+            // parse latency. `next_cursor` correctly equals the last match
+            // here; the caller can detect any future-cursor gap on the
+            // subsequent call.
+            break;
+        }
     }
-    Ok(entries)
+
+    if !after_validated && after.as_u64() > head_cursor.as_u64() {
+        return Err(EventError::ReplayGap {
+            requested: after,
+            earliest: head_cursor,
+        });
+    }
+
+    let last_matched = replay_entries.last().map(|entry| entry.cursor);
+    let next_cursor = match last_matched {
+        Some(matched) if matched.as_u64() >= last_scanned.as_u64() => matched,
+        Some(_) => last_scanned,
+        None => last_scanned,
+    };
+    Ok(EventReplay {
+        entries: replay_entries,
+        next_cursor,
+    })
+}
+
+/// Acquire an OS-level exclusive advisory lock on `path` (creating the file
+/// if needed), determine the current tail cursor by reading the file's last
+/// JSONL line under the lock, then invoke `serialise` to produce the next
+/// envelope's serialised line and append + fsync it. Releases the lock when
+/// the function returns. Cross-process safe: two IronClaw processes that race
+/// to append against the same file will block on this lock and emit
+/// monotonically-sequenced cursors.
+fn append_with_cursor_assignment<F>(path: &Path, serialise: F) -> Result<u64, EventError>
+where
+    F: FnOnce(u64) -> Result<String, EventError>,
+{
+    use std::io::Write;
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(path)
+        .map_err(|_| durable_error("jsonl event store failed to open stream"))?;
+    file.lock()
+        .map_err(|_| durable_error("jsonl event store failed to acquire append lock"))?;
+
+    // Re-read the prior tail under the lock so we observe writes from any
+    // other process that just finished appending.
+    let prior_tail = read_last_jsonl_cursor(path)?.unwrap_or(0);
+    let next_cursor = prior_tail
+        .checked_add(1)
+        .ok_or_else(|| durable_error("jsonl event cursor overflowed u64"))?;
+    let line = serialise(next_cursor)?;
+
+    file.write_all(line.as_bytes())
+        .map_err(|_| durable_error("jsonl event store failed to append record"))?;
+    file.write_all(b"\n")
+        .map_err(|_| durable_error("jsonl event store failed to append record"))?;
+    file.flush()
+        .map_err(|_| durable_error("jsonl event store failed to flush record"))?;
+    file.sync_data()
+        .map_err(|_| durable_error("jsonl event store failed to sync record"))?;
+    // Lock releases when `file` drops at end of scope.
+    Ok(next_cursor)
 }
 
 fn durable_error(reason: impl Into<String>) -> EventError {
