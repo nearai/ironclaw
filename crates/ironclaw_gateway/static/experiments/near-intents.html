@@ -3,41 +3,41 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>NEAR Intents Strategy Lab</title>
-  <link rel="stylesheet" href="/experiments/near-intents.css">
+  <title>NEAR Intents Strategy Studio</title>
+  <link rel="stylesheet" href="near-intents.css">
 </head>
 <body>
-  <main class="lab-shell">
-    <section class="hero">
-      <div class="hero-copy">
-        <p class="eyebrow">Public experiment</p>
-        <h1>NEAR Intents Strategy Lab</h1>
-        <p class="lede">Run live-data paper strategies, inspect the signal, and produce an unsigned direct NEAR Intents trial payload.</p>
-        <div class="hero-actions">
-          <button id="runLiveBtn" class="primary-action" type="button">Run live strategy</button>
-          <a class="secondary-action" href="#paper">View paper intent</a>
-        </div>
+  <main class="studio-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">NEAR Intents</p>
+        <h1>Strategy Studio</h1>
       </div>
-      <div class="market-strip" aria-label="Market snapshot">
-        <div>
-          <span>Source</span>
-          <strong id="sourceLabel">Waiting</strong>
+      <div class="topbar-controls">
+        <div class="topbar-status" aria-label="Run status">
+          <span id="dataSourceLabel">No data</span>
+          <strong id="runStateLabel">Ready</strong>
         </div>
-        <div>
-          <span id="priceCaption">Last price</span>
-          <strong id="priceLabel">-</strong>
-        </div>
-        <div>
-          <span>Signal</span>
-          <strong id="signalLabel">Idle</strong>
-        </div>
+        <button id="topRunBtn" class="top-run" type="button">Run backtest</button>
       </div>
-    </section>
+    </header>
 
-    <section class="workspace" aria-label="Strategy workspace">
-      <aside class="controls" aria-label="Experiment controls">
-        <div class="control-block">
-          <p class="section-kicker">Market</p>
+    <section class="studio-grid" aria-label="Trading strategy workspace">
+      <aside class="left-rail" aria-label="Strategy controls">
+        <section class="rail-section">
+          <div class="section-heading">
+            <span>1</span>
+            <h2>Strategy</h2>
+          </div>
+          <textarea id="strategyPrompt" rows="5" spellcheck="false">NEAR spot momentum using SMA confirmation, RSI guardrail, 1.0% take profit, 0.6% stop, and small paper sizing.</textarea>
+          <div id="strategyDeck" class="strategy-deck" role="radiogroup" aria-label="Strategy template"></div>
+        </section>
+
+        <section class="rail-section">
+          <div class="section-heading">
+            <span>2</span>
+            <h2>Market</h2>
+          </div>
           <label>
             Pair
             <select id="pairSelect">
@@ -50,99 +50,179 @@
           <label>
             Lookback
             <select id="lookbackSelect">
-              <option value="30" selected>30 days</option>
-              <option value="14">14 days</option>
               <option value="7">7 days</option>
+              <option value="14">14 days</option>
+              <option value="30" selected>30 days</option>
+              <option value="60">60 days</option>
             </select>
           </label>
-        </div>
-
-        <div class="control-block">
-          <p class="section-kicker">Strategy</p>
-          <div id="strategyList" class="strategy-list" role="radiogroup" aria-label="Strategy"></div>
-        </div>
-
-        <div class="control-block">
-          <p class="section-kicker">Trial ticket</p>
+          <label>
+            Starting cash, USD
+            <input id="balanceInput" type="number" min="10" step="10" value="1000">
+          </label>
           <label>
             NEAR account
-            <input id="accountInput" type="text" placeholder="small-test.near" autocomplete="off">
+            <input id="accountInput" type="text" placeholder="viewer.near" autocomplete="off">
           </label>
-          <label>
-            Paper budget, USD
-            <input id="budgetInput" type="number" min="0.01" step="0.01" value="0.25">
-          </label>
+        </section>
+
+        <section class="rail-section">
+          <div class="section-heading">
+            <span>3</span>
+            <h2>Risk</h2>
+          </div>
           <label>
             Max trade, USD
-            <input id="tradeCapInput" type="number" min="0.01" step="0.01" value="0.05">
+            <input id="maxTradeInput" type="number" min="0.01" step="0.01" value="25">
           </label>
           <label>
-            Slippage, bps
-            <input id="slippageInput" type="number" min="1" max="500" step="1" value="50">
+            Risk per signal, %
+            <input id="riskPctInput" type="number" min="0.1" max="100" step="0.1" value="5">
           </label>
-        </div>
+          <div class="dual-input">
+            <label>
+              Fee, bps
+              <input id="feeBpsInput" type="number" min="0" max="200" step="1" value="8">
+            </label>
+            <label>
+              Slippage, bps
+              <input id="slippageInput" type="number" min="0" max="500" step="1" value="12">
+            </label>
+          </div>
+        </section>
+
+        <section class="rail-section action-section">
+          <button id="runBacktestBtn" class="primary-action" type="button">Run backtest</button>
+          <button id="buildIntentBtn" class="secondary-action" type="button">Build intent draft</button>
+        </section>
       </aside>
 
-      <section class="live-panel" aria-label="Live strategy output">
-        <div class="panel-header">
-          <div>
-            <p class="section-kicker">Live paper run</p>
-            <h2 id="strategyTitle">SMA Cross</h2>
+      <section class="main-stage" aria-label="Backtest output">
+        <div class="pipeline" aria-label="Pipeline">
+          <div class="pipeline-step is-active" data-phase="describe">
+            <span>Describe</span>
+            <strong id="describeStatus">Prompt ready</strong>
           </div>
-          <div id="statusPill" class="status-pill">Idle</div>
+          <div class="pipeline-step" data-phase="validate">
+            <span>Validate</span>
+            <strong id="validateStatus">Pending</strong>
+          </div>
+          <div class="pipeline-step" data-phase="backtest">
+            <span>Backtest</span>
+            <strong id="backtestStatus">Pending</strong>
+          </div>
+          <div class="pipeline-step" data-phase="intent">
+            <span>Intent</span>
+            <strong id="intentStatus">Unsigned</strong>
+          </div>
         </div>
 
-        <div class="chart-wrap">
-          <canvas id="priceCanvas" width="1200" height="520" aria-label="Price chart"></canvas>
-        </div>
-
-        <div class="metrics-row" aria-label="Backtest metrics">
+        <section class="metric-strip" aria-label="Backtest metrics">
           <div>
-            <span>Return</span>
+            <span>Total return</span>
             <strong id="returnMetric">-</strong>
+          </div>
+          <div>
+            <span>Sharpe</span>
+            <strong id="sharpeMetric">-</strong>
           </div>
           <div>
             <span>Max drawdown</span>
             <strong id="drawdownMetric">-</strong>
           </div>
           <div>
-            <span>Trades</span>
-            <strong id="tradesMetric">-</strong>
+            <span>Win rate</span>
+            <strong id="winRateMetric">-</strong>
           </div>
           <div>
-            <span>Confidence</span>
-            <strong id="confidenceMetric">-</strong>
+            <span>Profit factor</span>
+            <strong id="profitMetric">-</strong>
           </div>
-        </div>
+          <div>
+            <span>Latest signal</span>
+            <strong id="signalMetric">-</strong>
+          </div>
+        </section>
 
-        <div class="decision-grid">
-          <div>
-            <p class="section-kicker">Signal note</p>
-            <p id="signalNote" class="decision-copy">Run the strategy to load recent candles and generate a paper decision.</p>
+        <section class="chart-section" aria-label="Equity and price chart">
+          <div class="chart-header">
+            <div>
+              <p class="eyebrow">Paper simulation</p>
+              <h2 id="chartTitle">Awaiting run</h2>
+            </div>
+            <div class="chart-legend" aria-label="Chart legend">
+              <span class="legend-price">Price</span>
+              <span class="legend-equity">Equity</span>
+              <span class="legend-trades">Trades</span>
+            </div>
           </div>
-          <div>
-            <p class="section-kicker">Risk boundary</p>
-            <p class="decision-copy">This page never signs or broadcasts. It only creates an unsigned trial payload for review.</p>
+          <canvas id="chartCanvas" width="1600" height="760" aria-label="Backtest chart"></canvas>
+        </section>
+
+        <section class="lower-grid">
+          <div class="trade-table-wrap" aria-label="Trade blotter">
+            <div class="table-heading">
+              <h2>Trades</h2>
+              <span id="tradeCountLabel">0 fills</span>
+            </div>
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Side</th>
+                  <th>Price</th>
+                  <th>Size</th>
+                  <th>PnL</th>
+                </tr>
+              </thead>
+              <tbody id="tradeTableBody"></tbody>
+            </table>
           </div>
-        </div>
+
+          <div class="event-log" aria-label="Strategy event log">
+            <div class="table-heading">
+              <h2>Run Tape</h2>
+              <span id="tapeSummary">Idle</span>
+            </div>
+            <ol id="eventTape"></ol>
+          </div>
+        </section>
       </section>
-    </section>
 
-    <section id="paper" class="paper-band" aria-label="Paper intent">
-      <div class="paper-copy">
-        <p class="section-kicker">Unsigned NEAR Intents draft</p>
-        <h2>Show the strategy, not a custody flow.</h2>
-        <p>External viewers can see live data, the strategy decision, sizing, and the exact unsigned direct-intent payload. A wallet signature remains a separate explicit step.</p>
-      </div>
-      <div class="intent-console">
-        <div class="console-toolbar">
-          <button id="buildIntentBtn" type="button">Build paper intent</button>
-          <button id="copyIntentBtn" type="button">Copy JSON</button>
-        </div>
-        <pre id="intentOutput">Run a strategy to prepare an unsigned payload.</pre>
-      </div>
+      <aside class="right-rail" aria-label="Intent inspector">
+        <section class="rail-section inspector-top">
+          <p class="eyebrow">Signal</p>
+          <h2 id="signalTitle">No run yet</h2>
+          <p id="signalSummary">Select a strategy and run a paper backtest.</p>
+        </section>
+
+        <section class="rail-section">
+          <div class="section-heading">
+            <span>4</span>
+            <h2>Validation</h2>
+          </div>
+          <ul id="validationList" class="validation-list"></ul>
+        </section>
+
+        <section class="rail-section">
+          <div class="section-heading">
+            <span>5</span>
+            <h2>Generated Strategy</h2>
+          </div>
+          <pre id="strategyCode" class="code-pane">Run a strategy to generate code.</pre>
+        </section>
+
+        <section class="rail-section">
+          <div class="section-heading">
+            <span>6</span>
+            <h2>Unsigned Intent</h2>
+          </div>
+          <pre id="intentOutput" class="code-pane">Run a strategy to prepare a NEAR Intents draft.</pre>
+          <button id="copyIntentBtn" class="secondary-action copy-action" type="button">Copy JSON</button>
+        </section>
+      </aside>
     </section>
   </main>
-  <script src="/experiments/near-intents.js"></script>
+  <script src="near-intents.js"></script>
 </body>
 </html>
