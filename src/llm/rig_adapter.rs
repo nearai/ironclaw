@@ -243,12 +243,12 @@ fn convert_messages(
                         )
                         .with_call_id(tool_call_id);
 
-                        if context.requires_gemini_thought_signatures() {
-                            if let Some(signature) = tc.thought_signature.as_deref() {
-                                tool_call.additional_params = Some(serde_json::json!({
-                                    "thoughtSignature": signature,
-                                }));
-                            }
+                        if context.requires_gemini_thought_signatures()
+                            && let Some(signature) = tc.thought_signature.as_deref()
+                        {
+                            tool_call.additional_params = Some(serde_json::json!({
+                                "thoughtSignature": signature,
+                            }));
                         }
 
                         contents.push(AssistantContent::ToolCall(tool_call));
