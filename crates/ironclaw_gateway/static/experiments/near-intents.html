@@ -1,0 +1,439 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IronClaw Intents Trading Agent</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="near-intents.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="vibe-nav">
+      <a class="brand-lockup" href="#studio" aria-label="IronClaw Intents">
+        <span class="brand-mark">IC</span>
+        <span>IronClaw Intents</span>
+      </a>
+      <nav aria-label="Experiment navigation">
+        <a href="#signals">Signals</a>
+        <a href="#studio">Studio</a>
+        <a href="#live">Live</a>
+      </nav>
+      <div class="nav-actions">
+        <span id="walletPill" class="wallet-pill">Wallet offline</span>
+        <button id="connectWalletBtn" class="connect-btn" type="button">Connect</button>
+      </div>
+    </header>
+
+    <section class="hero" id="live" aria-label="Live trading agent">
+      <div class="hero-copy">
+        <p class="eyebrow">NEAR Intents strategy agent</p>
+        <h1>Run autonomous trading strategies through intents.</h1>
+        <p class="hero-subtitle">Pick a strategy, preview the next move, then connect your wallet only when you are ready to try a tiny live run.</p>
+        <div class="hero-actions">
+          <button id="heroRunBtn" class="hero-primary" type="button">Preview strategy</button>
+          <button id="heroConnectBtn" class="hero-secondary" type="button">Connect wallet</button>
+        </div>
+        <div class="feature-strip" aria-label="Agent capabilities">
+          <div>
+            <strong>Try first</strong>
+            <span>No wallet for previews</span>
+          </div>
+          <div>
+            <strong>Tiny by default</strong>
+            <span>$5 live cap</span>
+          </div>
+          <div>
+            <strong>Manual send</strong>
+            <span>Wallet signs every run</span>
+          </div>
+        </div>
+      </div>
+
+      <section class="agent-console" aria-label="Wallet and live execution">
+        <div class="console-header">
+          <div>
+            <span>Live execution</span>
+            <strong id="liveModeLabel">Dry run ready</strong>
+          </div>
+          <button id="runLiveBtn" class="console-run" type="button">Run tiny live trade</button>
+        </div>
+        <div class="starter-steps" aria-label="Guided setup">
+          <div id="guideStepPreview" class="is-active">
+            <span>1</span>
+            <strong>Preview</strong>
+            <p>Run the strategy with live market data.</p>
+          </div>
+          <div id="guideStepWallet">
+            <span>2</span>
+            <strong>Connect</strong>
+            <p>Use your NEAR wallet when you want to try it.</p>
+          </div>
+          <div id="guideStepRun">
+            <span>3</span>
+            <strong>Run</strong>
+            <p>Sign one tiny intent, then submit.</p>
+          </div>
+        </div>
+        <div class="wallet-card">
+          <div>
+            <span>Wallet</span>
+            <strong id="walletStatusLabel">Not connected</strong>
+          </div>
+          <div>
+            <span>Account</span>
+            <strong id="walletAccountLabel">-</strong>
+          </div>
+          <div>
+            <span>Intents balance</span>
+            <strong id="walletBalanceLabel">Connect to query</strong>
+          </div>
+        </div>
+        <div class="live-steps" aria-label="Execution phases">
+          <span id="liveStepBacktest" class="is-active">Preview</span>
+          <span id="liveStepQuote">Quote</span>
+          <span id="liveStepSign">Sign</span>
+          <span id="liveStepPublish">Submit</span>
+        </div>
+        <p id="liveSummaryText" class="live-summary">Start with a strategy preview. Nothing is signed or submitted until you connect a wallet and approve it.</p>
+        <details class="receipt-drawer">
+          <summary>Technical receipt</summary>
+          <pre id="liveExecutionOutput" class="terminal-pane">Strategy receipts, quote requests, and signed payloads will appear here.</pre>
+        </details>
+      </section>
+    </section>
+
+    <section class="core-preview" aria-label="Simple workflow">
+      <article>
+        <div class="preview-copy">
+          <span>Step 1</span>
+          <h2>Choose</h2>
+          <p>Select a strategy and market. Defaults are already filled in for NEAR.</p>
+        </div>
+      </article>
+      <article>
+        <div class="preview-copy">
+          <span>Step 2</span>
+          <h2>Preview</h2>
+          <p>See return, drawdown, latest signal, and a quote preview before using funds.</p>
+        </div>
+      </article>
+      <article>
+        <div class="preview-copy">
+          <span>Step 3</span>
+          <h2>Run</h2>
+          <p>Connect a wallet and approve one tiny intent when the preview looks good.</p>
+        </div>
+      </article>
+    </section>
+
+    <section class="studio-grid" id="studio" aria-label="Trading strategy workspace">
+      <aside class="control-panel" aria-label="Strategy controls">
+        <section class="panel-section">
+          <div class="section-heading">
+            <span>01</span>
+            <h2>Choose a strategy</h2>
+          </div>
+          <div id="strategyDeck" class="strategy-deck" role="radiogroup" aria-label="Strategy template"></div>
+          <details class="inline-advanced">
+            <summary>Edit strategy prompt</summary>
+            <textarea id="strategyPrompt" rows="5" spellcheck="false">NEAR spot momentum using SMA confirmation, RSI guardrail, 1.0% take profit, 0.6% stop, and small paper sizing.</textarea>
+          </details>
+        </section>
+
+        <section class="panel-section">
+          <div class="section-heading">
+            <span>02</span>
+            <h2>Set up the run</h2>
+          </div>
+          <label>
+            Pair
+            <select id="pairSelect">
+              <option value="NEAR-USD" selected>NEAR / USD</option>
+              <option value="BTC-USD">BTC / USD</option>
+              <option value="ETH-USD">ETH / USD</option>
+              <option value="SOL-USD">SOL / USD</option>
+            </select>
+          </label>
+          <label class="live-cap-label">
+            Tiny live cap, USD
+            <input id="liveAmountUsdInput" type="number" min="0.01" step="0.01" value="5">
+          </label>
+          <label>
+            NEAR account for previews
+            <input id="accountInput" type="text" placeholder="optional: viewer.near" autocomplete="off">
+          </label>
+          <div class="action-grid action-grid-simple">
+            <button id="runBacktestBtn" class="primary-action" type="button">Preview strategy</button>
+            <button id="dryQuoteBtn" class="secondary-action" type="button">Preview quote</button>
+          </div>
+        </section>
+
+        <section class="panel-section simple-safety">
+          <div class="section-heading">
+            <span>03</span>
+            <h2>Safety defaults</h2>
+          </div>
+          <div class="safety-list">
+            <div>
+              <strong>$5</strong>
+              <span>Default live cap</span>
+            </div>
+            <div>
+              <strong>Manual</strong>
+              <span>Wallet approval required</span>
+            </div>
+            <div>
+              <strong>Quote preview</strong>
+              <span>Preview before signing</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel-section">
+          <details class="advanced-settings">
+            <summary>
+              <span>Advanced settings</span>
+              <small>Risk, asset routes, and developer keys</small>
+            </summary>
+            <div class="advanced-body">
+              <h3>Backtest assumptions</h3>
+              <label>
+                Lookback
+                <select id="lookbackSelect">
+                  <option value="7">7 days</option>
+                  <option value="14">14 days</option>
+                  <option value="30" selected>30 days</option>
+                  <option value="60">60 days</option>
+                </select>
+              </label>
+              <div class="dual-input">
+                <label>
+                  Starting cash, USD
+                  <input id="balanceInput" type="number" min="10" step="10" value="1000">
+                </label>
+                <label>
+                  Max trade, USD
+                  <input id="maxTradeInput" type="number" min="0.01" step="0.01" value="25">
+                </label>
+              </div>
+              <div class="dual-input">
+                <label>
+                  Risk per signal, %
+                  <input id="riskPctInput" type="number" min="0.1" max="100" step="0.1" value="5">
+                </label>
+                <label>
+                  Slippage, bps
+                  <input id="slippageInput" type="number" min="0" max="500" step="1" value="12">
+                </label>
+              </div>
+              <label>
+                Fee, bps
+                <input id="feeBpsInput" type="number" min="0" max="200" step="1" value="8">
+              </label>
+
+              <h3>Intent route</h3>
+              <label>
+                Base asset ID
+                <input id="baseAssetInput" list="assetIdList" type="text" value="nep141:wrap.near" autocomplete="off">
+              </label>
+              <label>
+                Quote / funding asset ID
+                <input id="quoteAssetInput" list="assetIdList" type="text" value="nep141:usdt.tether-token.near" autocomplete="off">
+              </label>
+              <datalist id="assetIdList"></datalist>
+              <div class="dual-input">
+                <label>
+                  Base decimals
+                  <input id="baseDecimalsInput" type="number" min="0" max="30" step="1" value="24">
+                </label>
+                <label>
+                  Quote decimals
+                  <input id="quoteDecimalsInput" type="number" min="0" max="30" step="1" value="6">
+                </label>
+              </div>
+
+              <h3>Live execution</h3>
+              <label>
+                Network
+                <select id="networkSelect">
+                  <option value="mainnet" selected>Mainnet</option>
+                  <option value="testnet">Testnet wallet only</option>
+                </select>
+              </label>
+              <label>
+                Side override
+                <select id="sideOverrideSelect">
+                  <option value="auto" selected>Use latest signal</option>
+                  <option value="buy">Force tiny buy</option>
+                  <option value="sell">Force tiny sell</option>
+                  <option value="hold">Force hold</option>
+                </select>
+              </label>
+              <form class="key-form" autocomplete="off">
+                <label>
+                  Solver relay JWT
+                  <input id="solverApiKeyInput" type="password" placeholder="Required to publish signed token_diff" autocomplete="off">
+                </label>
+                <label>
+                  1Click JWT (optional)
+                  <input id="oneClickApiKeyInput" type="password" placeholder="Optional quote auth" autocomplete="off">
+                </label>
+              </form>
+            </div>
+          </details>
+        </section>
+
+        <section class="panel-section">
+          <div class="action-grid">
+            <button id="fetchBalancesBtn" class="secondary-action" type="button">Check balances</button>
+            <button id="buildIntentBtn" class="secondary-action" type="button">Build receipt</button>
+          </div>
+        </section>
+
+      </aside>
+
+      <section class="main-stage" id="signals" aria-label="Backtest output">
+        <div class="stage-toolbar">
+          <div>
+            <p class="eyebrow">Agent run</p>
+            <h2>Preview result</h2>
+          </div>
+          <div class="topbar-status" aria-label="Run status">
+            <span id="dataSourceLabel">No data</span>
+            <strong id="runStateLabel">Ready</strong>
+          </div>
+          <button id="topRunBtn" class="top-run" type="button">Refresh preview</button>
+        </div>
+
+        <div class="pipeline" aria-label="Pipeline">
+          <div class="pipeline-step is-active" data-phase="describe">
+            <span>Describe</span>
+            <strong id="describeStatus">Prompt ready</strong>
+          </div>
+          <div class="pipeline-step" data-phase="validate">
+            <span>Validate</span>
+            <strong id="validateStatus">Pending</strong>
+          </div>
+          <div class="pipeline-step" data-phase="backtest">
+            <span>Backtest</span>
+            <strong id="backtestStatus">Pending</strong>
+          </div>
+          <div class="pipeline-step" data-phase="intent">
+            <span>Intent</span>
+            <strong id="intentStatus">Unsigned</strong>
+          </div>
+        </div>
+
+        <section class="metric-strip" aria-label="Backtest metrics">
+          <div>
+            <span>Total return</span>
+            <strong id="returnMetric">-</strong>
+          </div>
+          <div>
+            <span>Sharpe</span>
+            <strong id="sharpeMetric">-</strong>
+          </div>
+          <div>
+            <span>Max drawdown</span>
+            <strong id="drawdownMetric">-</strong>
+          </div>
+          <div>
+            <span>Win rate</span>
+            <strong id="winRateMetric">-</strong>
+          </div>
+          <div>
+            <span>Profit factor</span>
+            <strong id="profitMetric">-</strong>
+          </div>
+          <div>
+            <span>Latest signal</span>
+            <strong id="signalMetric">-</strong>
+          </div>
+        </section>
+
+        <section class="chart-section" aria-label="Equity and price chart">
+          <div class="chart-header">
+            <div>
+              <p class="eyebrow">Paper simulation</p>
+              <h2 id="chartTitle">Awaiting run</h2>
+            </div>
+            <div class="chart-legend" aria-label="Chart legend">
+              <span class="legend-price">Price</span>
+              <span class="legend-equity">Equity</span>
+              <span class="legend-trades">Trades</span>
+            </div>
+          </div>
+          <canvas id="chartCanvas" width="1600" height="760" aria-label="Backtest chart"></canvas>
+        </section>
+
+        <section class="lower-grid">
+          <div class="trade-table-wrap" aria-label="Trade blotter">
+            <div class="table-heading">
+              <h2>Trades</h2>
+              <span id="tradeCountLabel">0 fills</span>
+            </div>
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Side</th>
+                  <th>Price</th>
+                  <th>Size</th>
+                  <th>PnL</th>
+                </tr>
+              </thead>
+              <tbody id="tradeTableBody"></tbody>
+            </table>
+          </div>
+
+          <div class="event-log" aria-label="Strategy event log">
+            <div class="table-heading">
+              <h2>Run Tape</h2>
+              <span id="tapeSummary">Idle</span>
+            </div>
+            <ol id="eventTape"></ol>
+          </div>
+        </section>
+      </section>
+
+      <aside class="inspector-rail" aria-label="Intent inspector">
+        <section class="panel-section inspector-top">
+          <p class="eyebrow">Signal</p>
+          <h2 id="signalTitle">No run yet</h2>
+          <p id="signalSummary">Select a strategy and run a paper backtest.</p>
+        </section>
+
+        <section class="panel-section">
+          <div class="section-heading">
+            <span>06</span>
+            <h2>Validation</h2>
+          </div>
+          <ul id="validationList" class="validation-list"></ul>
+        </section>
+
+        <section class="panel-section">
+          <div class="section-heading">
+            <span>07</span>
+            <h2>Generated Strategy</h2>
+          </div>
+          <pre id="strategyCode" class="code-pane">Run a strategy to generate code.</pre>
+        </section>
+
+        <section class="panel-section">
+          <div class="section-heading">
+            <span>08</span>
+            <h2>Signed / Draft Intent</h2>
+          </div>
+          <pre id="intentOutput" class="code-pane">Run a strategy to prepare a NEAR Intents draft.</pre>
+          <div class="copy-row">
+            <button id="copyIntentBtn" class="secondary-action copy-action" type="button">Copy JSON</button>
+            <button id="copySignedBtn" class="secondary-action copy-action" type="button">Copy signed</button>
+          </div>
+        </section>
+      </aside>
+    </section>
+  </main>
+  <script src="near-intents.js"></script>
+</body>
+</html>

@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 // non-settlement ranking, budgeting, and policy hints. Settlement remains with
 // the payment rails; this tolerance avoids machine-epsilon threshold mistakes.
 const USD_TOLERANCE: f64 = 1e-6;
+const DRIPSTACK_FALLBACK_PRICE_USD: f64 = 0.05;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PaidResearchPlanInput {
@@ -134,6 +135,32 @@ pub struct DripstackBrowseInput {
     pub publications: Vec<DripstackPublicationInput>,
     #[serde(default)]
     pub posts: Vec<DripstackPostInput>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DripstackCatalogInput {
+    #[serde(default)]
+    pub publication_slug: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DripstackPaidFetchInput {
+    pub publication_slug: String,
+    pub post_slug: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    #[serde(default)]
+    pub price_usd: Option<f64>,
+    #[serde(default)]
+    pub payment_protocol: Option<String>,
+    #[serde(default)]
+    pub user_confirmed_purchase: bool,
+    #[serde(default)]
+    pub mpp_authorization: Option<String>,
+    #[serde(default)]
+    pub x402_payment_signature: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -310,6 +337,15 @@ pub struct DripstackBrowsePlan {
 }
 
 #[derive(Debug, Serialize)]
+pub struct DripstackCatalogResult {
+    pub schema_version: &'static str,
+    pub endpoint: String,
+    pub publications: Vec<DripstackPublicationInput>,
+    pub posts: Vec<DripstackPostInput>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct DripstackPublicationMatch {
     pub rank: usize,
     pub slug: String,
@@ -334,6 +370,28 @@ pub struct DripstackPostCandidate {
     pub published_at: Option<String>,
     pub price_usd: f64,
     pub endpoint: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DripstackPaidFetchPlan {
+    pub schema_version: &'static str,
+    pub endpoint: String,
+    pub method: String,
+    pub status: String,
+    pub payment_protocol: String,
+    pub estimated_price_usd: f64,
+    pub expected_unpaid_status: u16,
+    pub request_headers: Vec<DripstackFetchHeader>,
+    pub supported_protocols: Vec<String>,
+    pub guardrails: Vec<String>,
+    pub warnings: Vec<String>,
+    pub next_action: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DripstackFetchHeader {
+    pub name: String,
+    pub value_preview: String,
 }
 
 pub fn plan(input: PaidResearchPlanInput) -> Result<PaidResearchPlan, String> {
@@ -792,6 +850,216 @@ pub fn plan_dripstack_browse(input: DripstackBrowseInput) -> Result<DripstackBro
         guardrails,
         warnings,
     })
+}
+
+pub fn fetch_dripstack_catalog(
+    input: DripstackCatalogInput,
+) -> Result<DripstackCatalogResult, String> {
+    let publication_slug = input
+        .publication_slug
+        .as_deref()
+        .map(str::trim)
+        .filter(|slug| !slug.is_empty());
+    let endpoint = if let Some(slug) = publication_slug {
+        format!("https://dripstack.xyz/api/v1/publications/{slug}")
+    } else {
+        "https://dripstack.xyz/api/v1/publications".to_string()
+    };
+    let raw = http_get_text(&endpoint)?;
+    if publication_slug.is_some() {
+        parse_dripstack_publication_detail(&endpoint, &raw)
+    } else {
+        parse_dripstack_publications(&endpoint, &raw)
+    }
+}
+
+fn parse_dripstack_publications(
+    endpoint: &str,
+    json: &str,
+) -> Result<DripstackCatalogResult, String> {
+    #[derive(Deserialize)]
+    struct ListResponse {
+        #[serde(default)]
+        publications: Vec<DripstackPublicationInput>,
+    }
+
+    let response: ListResponse = serde_json::from_str(json)
+        .map_err(|e| format!("DripStack publications JSON parse: {e}"))?;
+    Ok(DripstackCatalogResult {
+        schema_version: "dripstack-catalog/1",
+        endpoint: endpoint.to_string(),
+        publications: response.publications,
+        posts: Vec::new(),
+        warnings: Vec::new(),
+    })
+}
+
+fn parse_dripstack_publication_detail(
+    endpoint: &str,
+    json: &str,
+) -> Result<DripstackCatalogResult, String> {
+    #[derive(Deserialize)]
+    struct DetailResponse {
+        slug: String,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(default, alias = "siteUrl")]
+        site_url: Option<String>,
+        #[serde(default, alias = "lastSyncedAt")]
+        last_synced_at: Option<String>,
+        #[serde(default)]
+        posts: Vec<DripstackPostInput>,
+    }
+
+    let response: DetailResponse = serde_json::from_str(json)
+        .map_err(|e| format!("DripStack publication detail JSON parse: {e}"))?;
+    Ok(DripstackCatalogResult {
+        schema_version: "dripstack-catalog/1",
+        endpoint: endpoint.to_string(),
+        publications: vec![DripstackPublicationInput {
+            slug: response.slug,
+            title: response.title,
+            description: response.description,
+            site_url: response.site_url,
+            last_synced_at: response.last_synced_at,
+        }],
+        posts: response.posts,
+        warnings: Vec::new(),
+    })
+}
+
+pub fn prepare_dripstack_paid_fetch(
+    input: DripstackPaidFetchInput,
+) -> Result<DripstackPaidFetchPlan, String> {
+    let publication_slug = input.publication_slug.trim();
+    let post_slug = input.post_slug.trim();
+    if publication_slug.is_empty() {
+        return Err("publication_slug is required for prepare_dripstack_paid_fetch".to_string());
+    }
+    if post_slug.is_empty() {
+        return Err("post_slug is required for prepare_dripstack_paid_fetch".to_string());
+    }
+
+    let endpoint = input.endpoint.unwrap_or_else(|| {
+        format!("https://dripstack.xyz/api/v1/publications/{publication_slug}/{post_slug}")
+    });
+    let payment_protocol = normalize_protocol(
+        input.payment_protocol.as_deref().unwrap_or("mpp"),
+        input.price_usd.unwrap_or(DRIPSTACK_FALLBACK_PRICE_USD),
+    );
+    if !matches!(payment_protocol.as_str(), "mpp" | "x402") {
+        return Err(
+            "prepare_dripstack_paid_fetch payment_protocol must be mpp or x402".to_string(),
+        );
+    }
+
+    let estimated_price_usd =
+        clean_nonnegative(input.price_usd.unwrap_or(DRIPSTACK_FALLBACK_PRICE_USD))
+            .max(DRIPSTACK_FALLBACK_PRICE_USD);
+    let guardrails = vec![
+        "Paid article body fetch is one article at a time.".to_string(),
+        "The live HTTP 402 challenge is authoritative for amount, network, and receipt format."
+            .to_string(),
+        "The agent may prepare headers from a receipt but must not create the receipt with hidden keys."
+            .to_string(),
+        "Fetched article text can be summarized only after the receipt-backed retry succeeds."
+            .to_string(),
+    ];
+    let mut warnings = Vec::new();
+    if input.price_usd.unwrap_or(0.0) < DRIPSTACK_FALLBACK_PRICE_USD {
+        warnings.push(
+            "Static catalog price is below the current DripStack fallback; live 402 may require at least $0.05."
+                .to_string(),
+        );
+    }
+
+    let mut request_headers = Vec::new();
+    let status;
+    let next_action;
+    if !input.user_confirmed_purchase {
+        status = "needs-user-confirmation".to_string();
+        next_action = format!(
+            "Ask the user to confirm buying '{}' before probing the paid endpoint.",
+            input.title.unwrap_or_else(|| post_slug.to_string())
+        );
+    } else if payment_protocol == "mpp" {
+        if let Some(auth) = input
+            .mpp_authorization
+            .filter(|value| !value.trim().is_empty())
+        {
+            request_headers.push(DripstackFetchHeader {
+                name: "Authorization".to_string(),
+                value_preview: preview_secret_header("Payment", &auth),
+            });
+            status = "ready-to-retry-with-receipt".to_string();
+            next_action =
+                "Retry the paid GET with the MPP Authorization header, then summarize only the returned article."
+                    .to_string();
+        } else {
+            status = "needs-402-challenge".to_string();
+            next_action =
+                "GET the paid endpoint without content synthesis, collect the HTTP 402 WWW-Authenticate challenge, then pass it to the payment client."
+                    .to_string();
+        }
+    } else if let Some(sig) = input
+        .x402_payment_signature
+        .filter(|value| !value.trim().is_empty())
+    {
+        request_headers.push(DripstackFetchHeader {
+            name: "PAYMENT-SIGNATURE".to_string(),
+            value_preview: preview_secret_header("x402", &sig),
+        });
+        status = "ready-to-retry-with-receipt".to_string();
+        next_action =
+            "Retry the paid GET with PAYMENT-SIGNATURE, then summarize only the returned article."
+                .to_string();
+    } else {
+        status = "needs-402-challenge".to_string();
+        next_action =
+            "GET the paid endpoint without content synthesis, collect the HTTP 402 PAYMENT-REQUIRED challenge, then pass it to the x402 payment client."
+                .to_string();
+    }
+
+    Ok(DripstackPaidFetchPlan {
+        schema_version: "dripstack-paid-fetch-plan/1",
+        endpoint,
+        method: "GET".to_string(),
+        status,
+        payment_protocol,
+        estimated_price_usd: round4(estimated_price_usd),
+        expected_unpaid_status: 402,
+        request_headers,
+        supported_protocols: vec!["mpp".to_string(), "x402".to_string()],
+        guardrails,
+        warnings,
+        next_action,
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn http_get_text(endpoint: &str) -> Result<String, String> {
+    let headers = serde_json::json!({
+        "Accept": "application/json",
+        "User-Agent": "IronClaw-Portfolio-Tool/0.1"
+    });
+    let response =
+        crate::near::agent::host::http_request("GET", endpoint, &headers.to_string(), None, None)
+            .map_err(|e| format!("DripStack HTTP error: {e}"))?;
+    if response.status < 200 || response.status >= 300 {
+        let body = String::from_utf8_lossy(&response.body);
+        return Err(format!("DripStack {}: {body}", response.status));
+    }
+    String::from_utf8(response.body).map_err(|e| format!("DripStack response not UTF-8: {e}"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn http_get_text(_endpoint: &str) -> Result<String, String> {
+    Err(
+        "DripStack live catalog fetch only works inside the WASM sandbox; use plan_dripstack_browse with supplied free metadata in replay tests."
+            .to_string(),
+    )
 }
 
 fn score_source(
@@ -1303,6 +1571,16 @@ fn round4(value: f64) -> f64 {
     (value * 10_000.0).round() / 10_000.0
 }
 
+fn preview_secret_header(prefix: &str, value: &str) -> String {
+    let trimmed = value.trim();
+    let visible: String = trimmed.chars().take(10).collect();
+    if trimmed.len() <= visible.len() {
+        format!("{prefix} {visible}")
+    } else {
+        format!("{prefix} {visible}...")
+    }
+}
+
 fn default_budget_usd() -> f64 {
     5.0
 }
@@ -1474,5 +1752,47 @@ mod tests {
         assert!(tokens.contains("trading"));
         assert!(!tokens.contains("a"));
         assert!(!tokens.contains("for"));
+    }
+
+    #[test]
+    fn parses_dripstack_publication_catalog() {
+        let parsed = parse_dripstack_publications(
+            "https://dripstack.xyz/api/v1/publications",
+            r#"{
+              "publications": [{
+                "slug": "premiumcrypto.substack.com",
+                "title": "Premium Crypto Notes",
+                "description": "Crypto and market structure.",
+                "siteUrl": "https://premiumcrypto.substack.com",
+                "lastSyncedAt": "2026-05-02T00:00:00Z"
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.schema_version, "dripstack-catalog/1");
+        assert_eq!(parsed.publications.len(), 1);
+        assert_eq!(parsed.publications[0].slug, "premiumcrypto.substack.com");
+        assert!(parsed.posts.is_empty());
+    }
+
+    #[test]
+    fn prepares_mpp_paid_fetch_receipt_boundary() {
+        let plan = prepare_dripstack_paid_fetch(DripstackPaidFetchInput {
+            publication_slug: "premiumcrypto.substack.com".to_string(),
+            post_slug: "near-intents-liquidity".to_string(),
+            title: Some("NEAR Intents liquidity".to_string()),
+            endpoint: None,
+            price_usd: Some(0.05),
+            payment_protocol: Some("mpp".to_string()),
+            user_confirmed_purchase: true,
+            mpp_authorization: Some("signed-payment-credential-placeholder".to_string()),
+            x402_payment_signature: None,
+        })
+        .unwrap();
+
+        assert_eq!(plan.schema_version, "dripstack-paid-fetch-plan/1");
+        assert_eq!(plan.status, "ready-to-retry-with-receipt");
+        assert_eq!(plan.request_headers[0].name, "Authorization");
     }
 }

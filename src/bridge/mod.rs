@@ -68,6 +68,7 @@ pub use router::{
     list_engine_thread_steps,
     list_engine_threads,
     pause_engine_mission,
+    register_engine_project_for_workspace_path,
     resolve_engine_auth_callback,
     resolve_gate,
     resume_engine_mission,

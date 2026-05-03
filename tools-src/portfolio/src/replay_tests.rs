@@ -880,6 +880,95 @@ fn check_expectations(path: &str, step: &Step, response: &Value, prior: &BTreeMa
                     step.name
                 );
             }
+            "dripstack_paid_fetch_status" => {
+                let got = response
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| panic!("[{path}] step '{}': missing status", step.name));
+                let want = expected
+                    .as_str()
+                    .expect("dripstack_paid_fetch_status: string");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': paid fetch status mismatch",
+                    step.name
+                );
+            }
+            "dripstack_paid_fetch_headers_min" => {
+                let len = response
+                    .get("request_headers")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                let want = expected
+                    .as_u64()
+                    .expect("dripstack_paid_fetch_headers_min: number")
+                    as usize;
+                assert!(
+                    len >= want,
+                    "[{path}] step '{}': paid fetch headers {len} < min {want}",
+                    step.name
+                );
+            }
+            "near_trial_schema_version" => {
+                let got = response
+                    .get("schema_version")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| {
+                        panic!("[{path}] step '{}': missing schema_version", step.name)
+                    });
+                let want = expected
+                    .as_str()
+                    .expect("near_trial_schema_version: string");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': near trial schema mismatch",
+                    step.name
+                );
+            }
+            "near_trial_safe_to_quote" => {
+                let got = response
+                    .get("safe_to_quote")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let want = expected.as_bool().expect("near_trial_safe_to_quote: bool");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': near trial quote readiness mismatch",
+                    step.name
+                );
+            }
+            "near_trial_build_solver" => {
+                let got = response
+                    .pointer("/build_intent_request/solver")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "[{path}] step '{}': missing /build_intent_request/solver",
+                            step.name
+                        )
+                    });
+                let want = expected.as_str().expect("near_trial_build_solver: string");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': near trial build solver mismatch",
+                    step.name
+                );
+            }
+            "intents_widget_trial_safe_to_quote" => {
+                let got = response
+                    .pointer("/trial_plan/safe_to_quote")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let want = expected
+                    .as_bool()
+                    .expect("intents_widget_trial_safe_to_quote: bool");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': widget trial quote readiness mismatch",
+                    step.name
+                );
+            }
             other => panic!(
                 "[{path}] step '{}': unknown expectation key '{other}'",
                 step.name
@@ -899,7 +988,9 @@ fn capture_vars(path: &str, step: &Step, response: &Value, vars: &mut BTreeMap<S
                 .get("proposals")
                 .cloned()
                 .unwrap_or(Value::Array(Vec::new())),
+            "backtest_suite_var" => response.clone(),
             "paid_research_plan_var" => response.clone(),
+            "trial_plan_var" => response.clone(),
             "dripstack_paid_source_var" => response
                 .get("paid_source_candidate")
                 .cloned()

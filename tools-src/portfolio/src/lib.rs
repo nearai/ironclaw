@@ -22,6 +22,12 @@
 //!   premium-source query, and prepare attribution/payment gates.
 //! - `plan_dripstack_browse` — model DripStack's guided topic →
 //!   publication → article purchase flow without fetching paid content.
+//! - `fetch_dripstack_catalog` — fetch DripStack's free publication or
+//!   publication-post metadata routes for guided browse.
+//! - `prepare_dripstack_paid_fetch` — prepare the explicit
+//!   confirmation/receipt boundary for a single paid DripStack article.
+//! - `plan_near_intents_trial` — prepare a nominal-NEAR paper/quote
+//!   rehearsal with strategy gates and unsigned intent build requests.
 //! - `format_intents_widget` — build the NEAR Intents trading console
 //!   view model consumed by the project widget.
 //!
@@ -40,6 +46,7 @@
 //! ├── intents/            // build_intent: solver call + bounded checks
 //! ├── backtest.rs         // paper strategy replay/ranking over OHLCV candles
 //! ├── research.rs         // paid research source budgeting/attribution
+//! ├── trial.rs            // nominal NEAR rehearsal planning
 //! └── widget.rs           // web widget state formatters
 //! ```
 
@@ -57,6 +64,7 @@ mod indexer;
 mod intents;
 mod research;
 mod strategy;
+mod trial;
 mod types;
 mod widget;
 
@@ -150,6 +158,25 @@ enum PortfolioAction {
     #[serde(rename = "plan_dripstack_browse")]
     PlanDripstackBrowse(research::DripstackBrowseInput),
 
+    /// Fetch DripStack's free catalog routes. This may return
+    /// publication metadata or post-title metadata; it does not fetch
+    /// paid article bodies.
+    #[serde(rename = "fetch_dripstack_catalog")]
+    FetchDripstackCatalog(research::DripstackCatalogInput),
+
+    /// Prepare the paid article fetch boundary for one DripStack post:
+    /// confirmation, 402 challenge probe, and receipt-backed retry
+    /// headers. It never creates a payment receipt or reads article
+    /// content by itself.
+    #[serde(rename = "prepare_dripstack_paid_fetch")]
+    PrepareDripstackPaidFetch(research::DripstackPaidFetchInput),
+
+    /// Plan a nominal-NEAR trial run. This returns setup guardrails,
+    /// strategy menu defaults, and a paper/live-quote `build_intent`
+    /// request without signing or moving funds.
+    #[serde(rename = "plan_near_intents_trial")]
+    PlanNearIntentsTrial(trial::NearTrialPlanInput),
+
     /// Build the render-ready view model the web widget consumes.
     /// Writes to `projects/<id>/widgets/state.json`.
     #[serde(rename = "format_widget")]
@@ -233,6 +260,7 @@ impl exports::near::agent::tool::Guest for PortfolioTool {
          rebalancing proposals from declarative strategy docs, and builds unsigned \
          NEAR Intent bundles. Operations: scan, propose, build_intent, progress, \
          backtest, backtest_suite, plan_paid_research, plan_dripstack_browse, \
+         fetch_dripstack_catalog, prepare_dripstack_paid_fetch, plan_near_intents_trial, \
          format_suggestion, format_widget, format_intents_widget. \
          Read-only and unsigned — the agent never holds private keys."
             .to_string()
@@ -339,6 +367,21 @@ fn execute_inner(params: &str) -> Result<String, String> {
             let output = research::plan_dripstack_browse(input)?;
             serde_json::to_string(&output)
                 .map_err(|e| format!("Serialize plan_dripstack_browse response: {e}"))
+        }
+        PortfolioAction::FetchDripstackCatalog(input) => {
+            let output = research::fetch_dripstack_catalog(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize fetch_dripstack_catalog response: {e}"))
+        }
+        PortfolioAction::PrepareDripstackPaidFetch(input) => {
+            let output = research::prepare_dripstack_paid_fetch(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize prepare_dripstack_paid_fetch response: {e}"))
+        }
+        PortfolioAction::PlanNearIntentsTrial(input) => {
+            let output = trial::plan(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize plan_near_intents_trial response: {e}"))
         }
         PortfolioAction::FormatWidget(input) => {
             let output = widget::format_widget(input);

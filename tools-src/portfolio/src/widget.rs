@@ -57,6 +57,8 @@ pub struct FormatIntentsTradingWidgetInput {
     #[serde(default)]
     pub paid_research_plan: Option<serde_json::Value>,
     #[serde(default)]
+    pub trial_plan: Option<serde_json::Value>,
+    #[serde(default)]
     pub next_action: Option<String>,
 }
 
@@ -180,6 +182,8 @@ pub struct IntentsTradingWidgetState {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub paid_research: Option<IntentsPaidResearchSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub trial_plan: Option<IntentsTrialSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub next_action: Option<String>,
 }
 
@@ -284,6 +288,49 @@ pub struct IntentsPaidResearchWalletPolicy {
     pub daily_cap_usd: f64,
     pub safe_to_autopay: bool,
     pub audit_urls: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct IntentsTrialSummary {
+    pub schema_version: String,
+    pub mode: String,
+    pub pair: String,
+    pub nominal_near: f64,
+    pub max_trade_near: f64,
+    pub assumed_near_usd: f64,
+    pub max_trade_usd: f64,
+    pub safe_to_quote: bool,
+    pub safe_to_execute: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recommended_strategy_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_strategy_id: Option<String>,
+    pub strategy_menu: Vec<IntentsTrialStrategy>,
+    pub setup_steps: Vec<IntentsTrialStep>,
+    pub risk_gates: Vec<IntentsRiskGate>,
+    pub warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_action: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct IntentsTrialStrategy {
+    pub id: String,
+    pub kind: String,
+    pub position_size_pct: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_loss_bps: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub take_profit_bps: Option<f64>,
+    pub note: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct IntentsTrialStep {
+    pub order: usize,
+    pub name: String,
+    pub status: String,
+    pub detail: String,
 }
 
 fn default_mode() -> String {
@@ -419,6 +466,7 @@ pub fn format_intents_trading_widget(
         .paid_research_plan
         .as_ref()
         .map(paid_research_summary_from_value);
+    let trial_plan = input.trial_plan.as_ref().map(trial_summary_from_value);
 
     IntentsTradingWidgetState {
         schema_version: "intents-trading-widget/1",
@@ -434,6 +482,7 @@ pub fn format_intents_trading_widget(
         source_count: input.research_sources.len(),
         research_sources: input.research_sources,
         paid_research,
+        trial_plan,
         next_action: input.next_action,
     }
 }
@@ -604,6 +653,90 @@ fn paid_research_summary_from_value(value: &serde_json::Value) -> IntentsPaidRes
         policy_gates,
         wallet_policy,
         warnings,
+    }
+}
+
+fn trial_summary_from_value(value: &serde_json::Value) -> IntentsTrialSummary {
+    let strategy_menu = value
+        .get("strategy_menu")
+        .and_then(|strategies| strategies.as_array())
+        .into_iter()
+        .flatten()
+        .take(8)
+        .map(|strategy| IntentsTrialStrategy {
+            id: string_field(strategy, "id", "strategy"),
+            kind: string_field(strategy, "kind", "unknown"),
+            position_size_pct: number_field(strategy, "position_size_pct"),
+            stop_loss_bps: strategy.get("stop_loss_bps").and_then(|v| v.as_f64()),
+            take_profit_bps: strategy.get("take_profit_bps").and_then(|v| v.as_f64()),
+            note: string_field(strategy, "note", ""),
+        })
+        .collect();
+    let setup_steps = value
+        .get("setup_steps")
+        .and_then(|steps| steps.as_array())
+        .into_iter()
+        .flatten()
+        .take(6)
+        .map(|step| IntentsTrialStep {
+            order: step.get("order").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+            name: string_field(step, "name", "Step"),
+            status: string_field(step, "status", "manual"),
+            detail: string_field(step, "detail", ""),
+        })
+        .collect();
+    let risk_gates = value
+        .get("risk_gates")
+        .and_then(|gates| gates.as_array())
+        .into_iter()
+        .flatten()
+        .take(8)
+        .map(|gate| IntentsRiskGate {
+            name: string_field(gate, "name", "gate"),
+            status: string_field(gate, "status", "unknown"),
+            detail: Some(string_field(gate, "detail", "")),
+        })
+        .collect();
+    let warnings = value
+        .get("warnings")
+        .and_then(|warnings| warnings.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|warning| warning.as_str().map(str::to_string))
+        .collect();
+
+    IntentsTrialSummary {
+        schema_version: string_field(value, "schema_version", "near-intents-trial-plan/1"),
+        mode: string_field(value, "mode", "paper"),
+        pair: string_field(value, "pair", "NEAR/USDC"),
+        nominal_near: number_field(value, "nominal_near"),
+        max_trade_near: number_field(value, "max_trade_near"),
+        assumed_near_usd: number_field(value, "assumed_near_usd"),
+        max_trade_usd: number_field(value, "max_trade_usd"),
+        safe_to_quote: value
+            .get("safe_to_quote")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        safe_to_execute: value
+            .get("safe_to_execute")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        recommended_strategy_id: value
+            .get("recommended_strategy_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        selected_strategy_id: value
+            .get("selected_strategy_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        strategy_menu,
+        setup_steps,
+        risk_gates,
+        warnings,
+        next_action: value
+            .get("next_action")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
     }
 }
 
@@ -1036,6 +1169,37 @@ mod tests {
                 }],
                 "warnings": []
             })),
+            trial_plan: Some(serde_json::json!({
+                "schema_version": "near-intents-trial-plan/1",
+                "mode": "paper",
+                "pair": "NEAR/USDC",
+                "nominal_near": 0.25,
+                "max_trade_near": 0.05,
+                "assumed_near_usd": 3.0,
+                "max_trade_usd": 0.15,
+                "safe_to_quote": true,
+                "safe_to_execute": false,
+                "recommended_strategy_id": "sma_cross_fast",
+                "strategy_menu": [{
+                    "id": "sma_cross_fast",
+                    "kind": "sma-cross",
+                    "position_size_pct": 0.8,
+                    "stop_loss_bps": 1200.0,
+                    "note": "Trend-following candidate for clean spot rotations."
+                }],
+                "setup_steps": [{
+                    "order": 1,
+                    "name": "Use a small wallet",
+                    "status": "manual",
+                    "detail": "Fund a separate NEAR account."
+                }],
+                "risk_gates": [{
+                    "name": "trade-cap",
+                    "status": "pass",
+                    "detail": "Single trade cap passed."
+                }],
+                "warnings": ["Paper only."]
+            })),
             next_action: Some("Request live quote only after user approval.".to_string()),
         });
 
@@ -1048,6 +1212,10 @@ mod tests {
         assert_eq!(paid_research.selected_count, 1);
         assert_eq!(paid_research.payable_sources[0].protocol, "x402");
         assert_eq!(paid_research.near_funding_routes[0].via, "near-intents");
+        let trial_plan = w.trial_plan.unwrap();
+        assert!(trial_plan.safe_to_quote);
+        assert_eq!(trial_plan.assumed_near_usd, 3.0);
+        assert_eq!(trial_plan.strategy_menu[0].id, "sma_cross_fast");
     }
 
     // ---- only ready proposals in suggestions ----
