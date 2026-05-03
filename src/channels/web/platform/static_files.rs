@@ -60,8 +60,9 @@ const SCRIPT_SRC_EXTRAS: &str =
     "https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://esm.sh blob:";
 const STYLE_SRC: &str = "'self' 'unsafe-inline' https://fonts.googleapis.com";
 const FONT_SRC: &str = "https://fonts.gstatic.com data:";
-const CONNECT_SRC: &str =
-    "'self' https://esm.sh https://rpc.mainnet.near.org https://rpc.testnet.near.org";
+const CONNECT_SRC: &str = "'self' https://esm.sh https://rpc.mainnet.near.org https://rpc.testnet.near.org \
+     https://api.exchange.coinbase.com https://api.coingecko.com https://api.hyperliquid.xyz \
+     https://solver-relay-v2.chaindefuser.com";
 const IMG_SRC: &str =
     "'self' data: blob: https://*.googleusercontent.com https://avatars.githubusercontent.com";
 const FRAME_SRC: &str = "https://accounts.google.com https://appleid.apple.com";
@@ -847,6 +848,36 @@ pub(crate) async fn admin_js_handler() -> impl IntoResponse {
             (header::CACHE_CONTROL, "no-cache"),
         ],
         assets::ADMIN_JS,
+    )
+}
+
+pub(crate) async fn near_intents_experiment_html_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        assets::NEAR_INTENTS_EXPERIMENT_HTML,
+    )
+}
+
+pub(crate) async fn near_intents_experiment_css_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/css"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        assets::NEAR_INTENTS_EXPERIMENT_CSS,
+    )
+}
+
+pub(crate) async fn near_intents_experiment_js_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        assets::NEAR_INTENTS_EXPERIMENT_JS,
     )
 }
 
