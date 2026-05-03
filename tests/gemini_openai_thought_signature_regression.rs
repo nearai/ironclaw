@@ -50,7 +50,8 @@ async fn gemini_provider_replays_thought_signature_in_second_turn_tool_history()
                     "type": "function",
                     "function": {
                         "name": "memory_search",
-                        "arguments": "{\"query\":\"telegram\"}"
+                        "arguments": "{\"query\":\"telegram\"}",
+                        "thoughtSignature": "sig_from_gemini"
                     }
                 }]
             },

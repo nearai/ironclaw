@@ -404,12 +404,36 @@ fn extract_response(
             }
             AssistantContent::Text(_) => {}
             AssistantContent::ToolCall(tc) => {
+                let parsed_thought_signature = if context.requires_gemini_thought_signatures() {
+                    let tc_value = serde_json::to_value(tc).unwrap_or_default();
+                    tc_value
+                        .get("additional_params")
+                        .and_then(|v| {
+                            v.get("thoughtSignature")
+                                .or_else(|| v.get("thought_signature"))
+                        })
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToString::to_string)
+                        .or_else(|| {
+                            tc_value
+                                .get("function")
+                                .and_then(|v| {
+                                    v.get("thoughtSignature")
+                                        .or_else(|| v.get("thought_signature"))
+                                })
+                                .and_then(serde_json::Value::as_str)
+                                .map(ToString::to_string)
+                        })
+                } else {
+                    None
+                };
+
                 tool_calls.push(IronToolCall {
                     id: tc.id.clone(),
                     name: tc.function.name.clone(),
                     arguments: tc.function.arguments.clone(),
                     reasoning: None,
-                    thought_signature: None,
+                    thought_signature: parsed_thought_signature,
                 });
             }
             // Reasoning and Image variants are not mapped to IronClaw types
