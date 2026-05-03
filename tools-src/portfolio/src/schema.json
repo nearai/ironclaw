@@ -642,6 +642,37 @@
     },
     {
       "properties": {
+        "action": { "const": "plan_basket_dca_schedule" },
+        "allocations": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "object",
+            "properties": {
+              "destination_asset": { "type": "string", "minLength": 1 },
+              "destination_chain": { "type": "string", "minLength": 1 },
+              "weight_pct": { "type": "number", "exclusiveMinimum": 0, "maximum": 100 }
+            },
+            "required": ["destination_asset", "destination_chain", "weight_pct"]
+          }
+        },
+        "source_asset": { "type": "string", "minLength": 1 },
+        "source_chain": { "type": "string", "minLength": 1 },
+        "notional_per_period_usd": { "type": "number", "exclusiveMinimum": 0 },
+        "cadence": { "type": "string" },
+        "total_periods": { "type": "integer", "minimum": 1 },
+        "max_slippage_bps": { "type": "number", "minimum": 0, "default": 50 },
+        "assumed_prices_usd": { "type": "object", "description": "Map of destination asset → assumed price USD." },
+        "mode": { "type": "string", "enum": ["paper", "quote"], "default": "paper" },
+        "notional_currency": { "type": "string", "default": "USDC" },
+        "solver": { "type": "string" },
+        "start_at": { "type": "string" }
+      },
+      "required": ["action", "allocations", "source_asset", "source_chain", "notional_per_period_usd", "cadence", "total_periods"]
+    },
+    {
+      "properties": {
         "action": { "const": "plan_paid_research" },
         "query": {
           "type": "string",

@@ -1401,6 +1401,32 @@ fn check_expectations(path: &str, step: &Step, response: &Value, prior: &BTreeMa
                     step.name
                 );
             }
+            "basket_legs_len" => {
+                let len = response
+                    .get("legs")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                let want = expected.as_u64().expect("basket_legs_len: number") as usize;
+                assert_eq!(
+                    len, want,
+                    "[{path}] step '{}': basket legs {len} != {want}",
+                    step.name
+                );
+            }
+            "basket_template_legs_len" => {
+                let len = response
+                    .pointer("/build_intent_request_template/plan/legs")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                let want = expected.as_u64().expect("basket_template_legs_len: number") as usize;
+                assert_eq!(
+                    len, want,
+                    "[{path}] step '{}': basket template legs {len} != {want}",
+                    step.name
+                );
+            }
             other => panic!(
                 "[{path}] step '{}': unknown expectation key '{other}'",
                 step.name

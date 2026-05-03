@@ -1,0 +1,40 @@
+id: intents-trading-agent-basket-dca
+description: |
+  Plans a multi-asset (basket) DCA schedule and verifies the per-period
+  build_intent template carries one swap leg per allocation.
+steps:
+  - name: weekly_60_30_10_basket
+    action: plan_basket_dca_schedule
+    params:
+      source_asset: USDC
+      source_chain: near
+      notional_per_period_usd: 300
+      cadence: weekly
+      total_periods: 26
+      max_slippage_bps: 50
+      mode: paper
+      assumed_prices_usd:
+        NEAR: 3.0
+        BTC: 110000.0
+        ETH: 3000.0
+      allocations:
+        - destination_asset: NEAR
+          destination_chain: near
+          weight_pct: 60.0
+        - destination_asset: BTC
+          destination_chain: bitcoin
+          weight_pct: 30.0
+        - destination_asset: ETH
+          destination_chain: ethereum
+          weight_pct: 10.0
+    expect:
+      backtest_schema_version: intents-basket-dca-schedule/1
+      basket_legs_len: 3
+      basket_template_legs_len: 3
+  - name: nl_routes_to_basket
+    action: compile_intent_prompt
+    params:
+      prompt: "DCA $300 weekly into 60% NEAR / 30% BTC / 10% ETH for 6 months"
+    expect:
+      nl_intent_kind: dca-schedule
+      nl_recommended_action: plan_basket_dca_schedule

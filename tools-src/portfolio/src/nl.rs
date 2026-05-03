@@ -297,6 +297,19 @@ fn build_dca(
     extracted.amount = Some(format!("{amount:.2}"));
     extracted.amount_unit = Some("USD".to_string());
 
+    if let Some(allocations) = parse_basket_allocations(prompt, trace) {
+        return build_basket_dca(
+            prompt,
+            input,
+            amount,
+            allocations,
+            extracted,
+            assumptions,
+            clarifications,
+            trace,
+        );
+    }
+
     let dest = find_destination(prompt, trace).unwrap_or_else(|| {
         assumptions.push(
             "no destination asset detected; defaulted to NEAR (primary intents asset)".to_string(),
@@ -814,6 +827,199 @@ fn prompt_mentions_money(prompt: &str) -> bool {
         )
 }
 
+fn parse_basket_allocations(prompt: &str, trace: &mut Vec<String>) -> Option<Vec<(String, f64)>> {
+    // Look for "<weight>% <asset>" pairs separated by `/`, `,`, `+`, or
+    // " and ". Two or more pairs are required for a basket.
+    let bytes = prompt.as_bytes();
+    let mut pairs: Vec<(String, f64)> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if !bytes[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] as char == '.') {
+            i += 1;
+        }
+        let raw: String = prompt[start..i].to_string();
+        let n = match raw.parse::<f64>() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let after = prompt[i..].trim_start();
+        if !after.starts_with('%') && !after.starts_with("pct") {
+            continue;
+        }
+        let after = after
+            .trim_start_matches('%')
+            .trim_start_matches("pct")
+            .trim_start();
+        let asset_token: String = after
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect();
+        if let Some(asset) = match_asset(&asset_token) {
+            pairs.push((asset, n));
+        }
+    }
+    if pairs.len() < 2 {
+        return None;
+    }
+    let sum: f64 = pairs.iter().map(|p| p.1).sum();
+    if (sum - 100.0).abs() > 0.5 {
+        trace.push(format!(
+            "basket allocations summed to {sum:.1} (not 100); ignoring as a basket"
+        ));
+        return None;
+    }
+    trace.push(format!(
+        "basket allocations: {} legs summing to 100",
+        pairs.len()
+    ));
+    Some(pairs)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_basket_dca(
+    prompt: &str,
+    input: &CompileInput,
+    amount: f64,
+    allocations: Vec<(String, f64)>,
+    extracted: &mut Extracted,
+    assumptions: &mut Vec<String>,
+    clarifications: &mut Vec<String>,
+    trace: &mut Vec<String>,
+) -> (String, Value, f64, Vec<NlGate>) {
+    let cadence = parse_cadence(prompt, trace).unwrap_or_else(|| {
+        assumptions.push("assumed weekly cadence (no cadence in prompt)".to_string());
+        "weekly".to_string()
+    });
+    extracted.cadence = Some(cadence.clone());
+
+    let total_periods = parse_total_periods(prompt, &cadence, trace).unwrap_or_else(|| {
+        let default = match cadence.as_str() {
+            "daily" => 30,
+            "weekly" => 26,
+            "biweekly" => 13,
+            "monthly" => 12,
+            _ => 12,
+        };
+        assumptions.push(format!(
+            "assumed {default} periods (no duration in prompt; cadence={cadence})"
+        ));
+        default
+    });
+    extracted.total_periods = Some(total_periods);
+
+    let src = find_source(prompt, trace).unwrap_or_else(|| {
+        assumptions.push(format!(
+            "assumed source asset {} (typical funding stable)",
+            input.default_funding_asset
+        ));
+        input.default_funding_asset.clone()
+    });
+    extracted.source_asset = Some(src.clone());
+
+    let chain = parse_chain(prompt).unwrap_or_else(|| {
+        assumptions.push(format!("assumed chain {} (default)", input.default_chain));
+        input.default_chain.clone()
+    });
+    extracted.source_chain = Some(chain.clone());
+
+    let dest_chain_for = |asset: &str| -> String {
+        match asset.to_uppercase().as_str() {
+            "BTC" | "WBTC" => "bitcoin".to_string(),
+            "ETH" | "WETH" => "ethereum".to_string(),
+            "SOL" => "solana".to_string(),
+            "NEAR" | "USDC" | "USDT" => "near".to_string(),
+            _ => chain.clone(),
+        }
+    };
+
+    let alloc_json: Vec<Value> = allocations
+        .iter()
+        .map(|(asset, weight)| {
+            json!({
+                "destination_asset": asset,
+                "destination_chain": dest_chain_for(asset),
+                "weight_pct": weight,
+            })
+        })
+        .collect();
+
+    extracted.destination_asset = Some(
+        allocations
+            .iter()
+            .map(|(a, _)| a.as_str())
+            .collect::<Vec<_>>()
+            .join("+"),
+    );
+
+    let dst_summary = allocations
+        .iter()
+        .map(|(a, w)| format!("{w:.0}% {a}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut gates = vec![
+        NlGate {
+            name: "weights_sum_to_100".to_string(),
+            status: "pass".to_string(),
+            detail: format!("{} legs", allocations.len()),
+        },
+        NlGate {
+            name: "unsigned_only".to_string(),
+            status: "pass".to_string(),
+            detail: "agent never signs; per-period intents must be re-quoted".to_string(),
+        },
+    ];
+    let all_supported = allocations.iter().all(|(a, _)| {
+        ["NEAR", "USDC", "USDT", "BTC", "WBTC", "ETH", "WETH"]
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case(a))
+    });
+    gates.push(NlGate {
+        name: "intents_supported".to_string(),
+        status: if all_supported { "pass" } else { "warn" }.to_string(),
+        detail: format!("all assets in NEAR Intents allowlist: {all_supported}"),
+    });
+    if !all_supported {
+        clarifications.push(
+            "one or more basket assets are outside the default NEAR Intents allowlist; verify route"
+                .to_string(),
+        );
+    }
+
+    let params = json!({
+        "action": "plan_basket_dca_schedule",
+        "allocations": alloc_json,
+        "source_asset": src,
+        "source_chain": chain,
+        "notional_per_period_usd": amount,
+        "cadence": cadence,
+        "total_periods": total_periods,
+        "max_slippage_bps": 50.0,
+        "mode": "paper",
+        "notional_currency": input.default_funding_asset,
+    });
+
+    let confidence = match assumptions.len() {
+        0 => 0.95,
+        1..=2 => 0.85,
+        3..=4 => 0.7,
+        _ => 0.5,
+    };
+    trace.push(format!("basket dca: {dst_summary}"));
+    let _ = trace;
+    (
+        "plan_basket_dca_schedule".to_string(),
+        params,
+        confidence,
+        gates,
+    )
+}
+
 fn parse_amount(prompt: &str, trace: &mut Vec<String>) -> Option<f64> {
     let bytes = prompt.as_bytes();
     let mut i = 0;
@@ -1170,6 +1376,36 @@ mod tests {
         assert_eq!(out.intent_kind, "dca-schedule");
         assert!(out.assumptions.len() >= 2);
         assert_eq!(out.recommended_params["destination_asset"], "ETH");
+    }
+
+    #[test]
+    fn basket_dca_routes_to_basket_action() {
+        let out = compile_str("DCA $300 weekly into 60% NEAR / 30% BTC / 10% ETH for 6 months");
+        assert_eq!(out.intent_kind, "dca-schedule");
+        assert_eq!(out.recommended_action, "plan_basket_dca_schedule");
+        let allocs = out.recommended_params["allocations"].as_array().unwrap();
+        assert_eq!(allocs.len(), 3);
+        assert_eq!(allocs[0]["destination_asset"], "NEAR");
+        assert_eq!(allocs[0]["weight_pct"], 60.0);
+        assert_eq!(allocs[1]["destination_asset"], "BTC");
+        assert_eq!(allocs[1]["destination_chain"], "bitcoin");
+        assert_eq!(allocs[2]["destination_asset"], "ETH");
+        assert_eq!(allocs[2]["destination_chain"], "ethereum");
+        assert_eq!(out.recommended_params["cadence"], "weekly");
+        assert_eq!(
+            out.recommended_params["notional_per_period_usd"]
+                .as_f64()
+                .unwrap(),
+            300.0
+        );
+    }
+
+    #[test]
+    fn basket_dca_falls_back_when_weights_dont_sum() {
+        let out = compile_str("DCA $300 weekly into 50% NEAR and 30% BTC");
+        // Weights total 80, not 100 — should NOT route to basket.
+        assert_eq!(out.intent_kind, "dca-schedule");
+        assert_eq!(out.recommended_action, "plan_dca_schedule");
     }
 
     #[test]

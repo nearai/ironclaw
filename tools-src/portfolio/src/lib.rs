@@ -53,6 +53,10 @@
 //! - `format_dca_mission` — turn a DCA schedule into an IronClaw
 //!   mission scaffold (cron + goal + per-tick bridge calls + YAML)
 //!   so a one-shot DCA plan can be promoted to autopilot.
+//! - `plan_basket_dca_schedule` — fixed-proportion accumulation
+//!   across multiple destinations (e.g. 60% NEAR / 30% BTC / 10% ETH);
+//!   per-period total notional splits across N legs by weight, each
+//!   leg becomes one swap in the per-period `build_intent` template.
 //! - `plan_paid_research` — rank paid/free research sources, budget a
 //!   premium-source query, and prepare attribution/payment gates.
 //! - `plan_dripstack_browse` — model DripStack's guided topic →
@@ -94,6 +98,7 @@ use serde::{Deserialize, Serialize};
 
 mod analyzer;
 mod backtest;
+mod basket;
 mod dca;
 mod episode;
 mod format;
@@ -268,6 +273,13 @@ enum PortfolioAction {
     #[serde(rename = "format_dca_mission")]
     FormatDcaMission(mission::DcaMissionInput),
 
+    /// Plan a multi-asset (basket) DCA schedule. Per-period total
+    /// notional splits across N legs by weight; each leg becomes one
+    /// swap in the per-period `build_intent` template. Weights must
+    /// sum to 100; supports up to 12 destinations.
+    #[serde(rename = "plan_basket_dca_schedule")]
+    PlanBasketDcaSchedule(basket::BasketDcaScheduleInput),
+
     /// Plan a premium-source research query before fetching paywalled
     /// content. This ranks candidate sources, enforces a budget, and
     /// returns attribution/payment gates for MPP, x402, and NEAR
@@ -384,9 +396,9 @@ impl exports::near::agent::tool::Guest for PortfolioTool {
          rebalancing proposals from declarative strategy docs, and builds unsigned \
          NEAR Intent bundles. Operations: scan, propose, build_intent, progress, \
          backtest, backtest_suite, backtest_walkforward, backtest_montecarlo, \
-         backtest_grid, backtest_dca, plan_dca_schedule, compile_intent_prompt, \
-         validate_strategy, format_strategy_doc, format_dca_mission, \
-         validate_episode, replay_episode, plan_paid_research, \
+         backtest_grid, backtest_dca, plan_dca_schedule, plan_basket_dca_schedule, \
+         compile_intent_prompt, validate_strategy, format_strategy_doc, \
+         format_dca_mission, validate_episode, replay_episode, plan_paid_research, \
          plan_dripstack_browse, fetch_dripstack_catalog, prepare_dripstack_paid_fetch, \
          plan_near_intents_trial, format_suggestion, format_widget, format_intents_widget. \
          Read-only and unsigned — the agent never holds private keys."
@@ -539,6 +551,11 @@ fn execute_inner(params: &str) -> Result<String, String> {
             let output = mission::format_dca_mission(input)?;
             serde_json::to_string(&output)
                 .map_err(|e| format!("Serialize format_dca_mission response: {e}"))
+        }
+        PortfolioAction::PlanBasketDcaSchedule(input) => {
+            let output = basket::plan(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize plan_basket_dca_schedule response: {e}"))
         }
         PortfolioAction::PlanPaidResearch(input) => {
             let output = research::plan(input)?;
