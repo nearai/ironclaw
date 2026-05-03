@@ -57,7 +57,7 @@ use crate::workspace::Workspace;
 
 /// `script-src` sources other than `'self'` and the per-response nonce.
 const SCRIPT_SRC_EXTRAS: &str =
-    "https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://esm.sh";
+    "https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://esm.sh blob:";
 const STYLE_SRC: &str = "'self' 'unsafe-inline' https://fonts.googleapis.com";
 const FONT_SRC: &str = "https://fonts.gstatic.com data:";
 const CONNECT_SRC: &str =
@@ -1080,6 +1080,10 @@ mod tests {
         assert!(
             csp.contains("script-src 'self' 'nonce-deadbeefcafebabe' https://cdn.jsdelivr.net"),
             "nonce source must appear immediately after 'self' in script-src; got: {csp}"
+        );
+        assert!(
+            csp.contains(" blob:"),
+            "project widget blob scripts must stay allowed by script-src; got: {csp}"
         );
         // The other directives must match the static BASE_CSP so the
         // per-response value never accidentally relaxes anything else.
