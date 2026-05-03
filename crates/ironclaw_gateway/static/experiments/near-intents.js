@@ -120,7 +120,11 @@
     walletAccountLabel: document.getElementById('walletAccountLabel'),
     walletBalanceLabel: document.getElementById('walletBalanceLabel'),
     liveModeLabel: document.getElementById('liveModeLabel'),
+    liveSummaryText: document.getElementById('liveSummaryText'),
     liveExecutionOutput: document.getElementById('liveExecutionOutput'),
+    guideStepPreview: document.getElementById('guideStepPreview'),
+    guideStepWallet: document.getElementById('guideStepWallet'),
+    guideStepRun: document.getElementById('guideStepRun'),
     liveStepBacktest: document.getElementById('liveStepBacktest'),
     liveStepQuote: document.getElementById('liveStepQuote'),
     liveStepSign: document.getElementById('liveStepSign'),
@@ -356,6 +360,34 @@
     els.liveModeLabel.textContent = text;
   }
 
+  function setLiveSummary(text, tone) {
+    els.liveSummaryText.textContent = text;
+    els.liveSummaryText.className = 'live-summary' + (tone ? ' is-' + tone : '');
+  }
+
+  function updateGuideState(activeStep) {
+    var hasPreview = Boolean(state.result && !state.isStale);
+    var hasWallet = Boolean(state.wallet.accountId);
+    [
+      els.guideStepPreview,
+      els.guideStepWallet,
+      els.guideStepRun
+    ].forEach(function (el) {
+      el.classList.remove('is-active', 'is-done');
+    });
+    if (hasPreview) els.guideStepPreview.classList.add('is-done');
+    if (hasWallet) els.guideStepWallet.classList.add('is-done');
+    if (activeStep === 'sign' || activeStep === 'publish') {
+      els.guideStepRun.classList.add('is-active');
+    } else if (!hasPreview) {
+      els.guideStepPreview.classList.add('is-active');
+    } else if (!hasWallet) {
+      els.guideStepWallet.classList.add('is-active');
+    } else {
+      els.guideStepRun.classList.add('is-active');
+    }
+  }
+
   function setLiveStep(activeStep, tone) {
     var steps = {
       backtest: els.liveStepBacktest,
@@ -369,10 +401,34 @@
       el.classList.toggle('is-warn', key === activeStep && tone === 'warn');
       el.classList.toggle('is-error', key === activeStep && tone === 'error');
     });
+    updateGuideState(activeStep);
   }
 
   function writeLiveOutput(value) {
     els.liveExecutionOutput.textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+    if (typeof value === 'string') {
+      if (value.toLowerCase().indexOf('failed') >= 0) {
+        setLiveSummary(value, 'error');
+      } else if (value.toLowerCase().indexOf('connect') >= 0) {
+        setLiveSummary(value);
+      }
+      return;
+    }
+    if (value && value.status === 'hold') {
+      setLiveSummary('The strategy says HOLD right now. You can still preview a tiny buy or sell from Advanced settings.', 'warn');
+    } else if (value && value.mode === 'one_click_dry_quote') {
+      setLiveSummary('Quote preview is ready. No wallet signature was requested and no trade was submitted.');
+    } else if (value && value.mode === 'dry_quote_only') {
+      setLiveSummary('Quote preview is ready. Add a solver relay JWT in Advanced settings when you want to sign and submit.', 'warn');
+    } else if (value && value.mode === 'signed_nep413') {
+      setLiveSummary('Wallet signature captured. Submitting the signed intent through the solver relay.');
+    } else if (value && value.mode === 'published') {
+      setLiveSummary('Intent submitted. Check balances again after settlement.');
+    } else if (value && value.balances) {
+      setLiveSummary('Balances loaded from intents.near for the selected assets.');
+    } else if (value && value.status === 'ready_to_quote') {
+      setLiveSummary('Execution plan is ready. Preview a quote before signing.');
+    }
   }
 
   function updateWalletUi() {
@@ -384,6 +440,7 @@
     els.connectWalletBtn.textContent = accountId ? 'Connected' : 'Connect';
     els.heroConnectBtn.textContent = accountId ? 'Wallet connected' : 'Connect wallet';
     if (accountId) els.accountInput.value = accountId;
+    updateGuideState('wallet');
   }
 
   function renderStrategies() {
@@ -536,7 +593,7 @@
       state.wallet.accountId = state.wallet.accounts[0].accountId;
       updateWalletUi();
       setLiveMode('Wallet connected');
-      writeLiveOutput('Wallet connected: ' + state.wallet.accountId + '\nRun a backtest, then click Run live once to quote and sign.');
+      writeLiveOutput('Wallet connected: ' + state.wallet.accountId + '\nPreview the strategy, then use Run tiny live trade when you want to sign.');
       fetchBalances();
       return state.wallet.accountId;
     } catch (err) {
@@ -1487,7 +1544,7 @@
     if (!result || !result.equity.length) {
       ctx.fillStyle = '#9da59f';
       ctx.font = '28px system-ui';
-      ctx.fillText('Run backtest to render price, equity, and fills', pad.left, height / 2);
+      ctx.fillText('Preview a strategy to render price, equity, and fills', pad.left, height / 2);
       return;
     }
 
@@ -1580,6 +1637,8 @@
     els.intentOutput.textContent = 'Run a strategy to prepare a NEAR Intents draft.';
     els.strategyCode.textContent = 'Run a strategy to generate code.';
     setLiveMode('Dry run ready');
+    setLiveSummary('Start with a strategy preview. Nothing is signed or submitted until you connect a wallet and approve it.');
+    els.liveExecutionOutput.textContent = 'Strategy receipts, quote requests, and signed payloads will appear here.';
     setLiveStep('backtest');
     updateWalletUi();
     drawChart(null);
@@ -1590,6 +1649,7 @@
     setRunState('Ready');
     setPhase('describe');
     setLiveMode('Strategy edited');
+    setLiveSummary('Strategy settings changed. Preview again before requesting a quote.');
     setLiveStep('backtest');
     els.describeStatus.textContent = 'Edited';
     els.validateStatus.textContent = 'Pending';
@@ -1634,6 +1694,7 @@
   async function runDryQuote() {
     setLiveStep('quote');
     setLiveMode('Preparing quote');
+    setLiveSummary('Building a quote preview. This does not require a wallet signature.');
     els.dryQuoteBtn.disabled = true;
     try {
       var result = await ensureBacktest();
@@ -1649,7 +1710,7 @@
         mode: 'one_click_dry_quote',
         plan: plan,
         quote: dryQuote,
-        note: 'This validates a deposited Intents-balance swap path. Use Run live once with a solver relay JWT to sign/publish token_diff.'
+        note: 'This validates a deposited Intents-balance swap path. Use Run tiny live trade with a solver relay JWT to sign and submit.'
       });
     } catch (err) {
       setLiveStep('quote', 'error');
@@ -1663,6 +1724,7 @@
   async function runLiveOnce() {
     els.runLiveBtn.disabled = true;
     setLiveMode('Running live once');
+    setLiveSummary('Preparing one tiny live run. Your wallet will still ask before anything is signed.');
     setLiveStep('backtest');
     try {
       if (!state.wallet.accountId) {
@@ -1744,6 +1806,7 @@
     var validations = validateRun(input);
     renderValidation(validations);
     setRunState('Loading data');
+    setLiveSummary('Loading market data and checking the strategy.');
     setPhase('validate');
     els.validateStatus.textContent = validations.some(function (item) { return item.tone === 'warn'; }) ? 'Warnings' : 'Valid';
     els.describeStatus.textContent = 'Captured';
@@ -1774,6 +1837,7 @@
       setPhase('intent', state.dataSource === 'Sample fallback' ? { backtest: 'warn' } : {});
       setRunState(state.dataSource === 'Sample fallback' ? 'Sample run' : 'Live data run');
       setLiveMode('Strategy ready');
+      setLiveSummary('Preview ready. Review the latest signal, then preview a quote or connect your wallet for a tiny live run.');
       setLiveStep('quote');
     } catch (err) {
       setRunState('Run failed');
@@ -1855,6 +1919,12 @@
     els.buildIntentBtn.addEventListener('click', buildIntentFromCurrent);
     els.copyIntentBtn.addEventListener('click', copyIntent);
     els.copySignedBtn.addEventListener('click', copySigned);
+    var keyForm = document.querySelector('.key-form');
+    if (keyForm) {
+      keyForm.addEventListener('submit', function (event) {
+        event.preventDefault();
+      });
+    }
     els.pairSelect.addEventListener('change', function () {
       updateAssetDefaults();
       markStale();
