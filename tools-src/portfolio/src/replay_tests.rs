@@ -1355,6 +1355,52 @@ fn check_expectations(path: &str, step: &Step, response: &Value, prior: &BTreeMa
                     );
                 }
             }
+            "mission_cron" => {
+                let got = response
+                    .get("cadence_cron")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| {
+                        panic!("[{path}] step '{}': missing cadence_cron", step.name)
+                    });
+                let want = expected.as_str().expect("mission_cron: string");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': mission cron mismatch",
+                    step.name
+                );
+            }
+            "mission_yaml_contains" => {
+                let needles: Vec<String> = expected
+                    .as_array()
+                    .expect("mission_yaml_contains: array")
+                    .iter()
+                    .map(|v| v.as_str().expect("string").to_string())
+                    .collect();
+                let yaml = response
+                    .get("yaml")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| panic!("[{path}] step '{}': missing yaml", step.name));
+                for needle in &needles {
+                    assert!(
+                        yaml.contains(needle.as_str()),
+                        "[{path}] step '{}': yaml missing '{needle}'",
+                        step.name
+                    );
+                }
+            }
+            "mission_per_tick_calls" => {
+                let len = response
+                    .get("per_tick_bridge_calls")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                let want = expected.as_u64().expect("mission_per_tick_calls: number") as usize;
+                assert_eq!(
+                    len, want,
+                    "[{path}] step '{}': mission per-tick calls {len} != {want}",
+                    step.name
+                );
+            }
             other => panic!(
                 "[{path}] step '{}': unknown expectation key '{other}'",
                 step.name

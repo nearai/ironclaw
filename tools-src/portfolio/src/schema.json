@@ -631,6 +631,17 @@
     },
     {
       "properties": {
+        "action": { "const": "format_dca_mission" },
+        "schedule": { "type": "object", "description": "intents-dca-schedule/1 document from plan_dca_schedule" },
+        "project_id": { "type": "string", "default": "intents-trading-agent" },
+        "name": { "type": "string" },
+        "timezone": { "type": "string", "default": "UTC" },
+        "cooldown_minutes": { "type": "integer", "minimum": 0, "default": 15 }
+      },
+      "required": ["action", "schedule"]
+    },
+    {
+      "properties": {
         "action": { "const": "plan_paid_research" },
         "query": {
           "type": "string",

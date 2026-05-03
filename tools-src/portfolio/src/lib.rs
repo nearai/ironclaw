@@ -50,6 +50,9 @@
 //! - `format_strategy_doc` — Markdown formatter for any of the
 //!   backtest-family schemas; produces a journal-ready document the
 //!   agent persists after a run.
+//! - `format_dca_mission` — turn a DCA schedule into an IronClaw
+//!   mission scaffold (cron + goal + per-tick bridge calls + YAML)
+//!   so a one-shot DCA plan can be promoted to autopilot.
 //! - `plan_paid_research` — rank paid/free research sources, budget a
 //!   premium-source query, and prepare attribution/payment gates.
 //! - `plan_dripstack_browse` — model DripStack's guided topic →
@@ -97,6 +100,7 @@ mod format;
 mod indexer;
 mod intents;
 mod lab;
+mod mission;
 mod nl;
 mod research;
 mod strategy;
@@ -257,6 +261,13 @@ enum PortfolioAction {
     #[serde(rename = "format_strategy_doc")]
     FormatStrategyDoc(validate::FormatStrategyDocInput),
 
+    /// Turn a `intents-dca-schedule/1` document into an IronClaw
+    /// mission scaffold (YAML + structured bridge calls + cron) so
+    /// the DCA loop can be promoted from a one-shot plan to an
+    /// autopilot mission. The scaffold is advisory and unsigned.
+    #[serde(rename = "format_dca_mission")]
+    FormatDcaMission(mission::DcaMissionInput),
+
     /// Plan a premium-source research query before fetching paywalled
     /// content. This ranks candidate sources, enforces a budget, and
     /// returns attribution/payment gates for MPP, x402, and NEAR
@@ -374,8 +385,8 @@ impl exports::near::agent::tool::Guest for PortfolioTool {
          NEAR Intent bundles. Operations: scan, propose, build_intent, progress, \
          backtest, backtest_suite, backtest_walkforward, backtest_montecarlo, \
          backtest_grid, backtest_dca, plan_dca_schedule, compile_intent_prompt, \
-         validate_strategy, format_strategy_doc, validate_episode, replay_episode, \
-         plan_paid_research, \
+         validate_strategy, format_strategy_doc, format_dca_mission, \
+         validate_episode, replay_episode, plan_paid_research, \
          plan_dripstack_browse, fetch_dripstack_catalog, prepare_dripstack_paid_fetch, \
          plan_near_intents_trial, format_suggestion, format_widget, format_intents_widget. \
          Read-only and unsigned — the agent never holds private keys."
@@ -523,6 +534,11 @@ fn execute_inner(params: &str) -> Result<String, String> {
             let output = validate::format(input)?;
             serde_json::to_string(&output)
                 .map_err(|e| format!("Serialize format_strategy_doc response: {e}"))
+        }
+        PortfolioAction::FormatDcaMission(input) => {
+            let output = mission::format_dca_mission(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize format_dca_mission response: {e}"))
         }
         PortfolioAction::PlanPaidResearch(input) => {
             let output = research::plan(input)?;
