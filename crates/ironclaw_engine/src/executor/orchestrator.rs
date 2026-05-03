@@ -1373,7 +1373,8 @@ async fn handle_execute_action(
         lease,
         &exec_ctx,
         ps,
-        thread,
+        thread.id,
+        &thread.user_id,
     )
     .await;
     for event in events {
@@ -1756,7 +1757,8 @@ async fn handle_execute_actions_parallel(
                 lease,
                 &exec_ctx,
                 ps,
-                thread,
+                thread.id,
+                &thread.user_id,
             )
             .await;
         slot_results[idx] = Some(result_json);
@@ -1770,9 +1772,14 @@ async fn handle_execute_actions_parallel(
         let mut join_set = tokio::task::JoinSet::new();
         let effects = effects.clone();
         let leases_arc = Arc::clone(leases);
-        // Capture once outside the loop — the thread's metadata is stable
-        // for the duration of the parallel batch.
-        let thread_snapshot = thread.clone();
+        // Build the base execution context once from the live thread.
+        // Per-task contexts clone this and overwrite `current_call_id`
+        // and the action snapshots — far cheaper than cloning the full
+        // `Thread` (which carries message/event transcripts) per task.
+        let base_exec_ctx =
+            thread_execution_context(thread, step_id, None, gate_controller.clone());
+        let thread_id = thread.id;
+        let user_id = thread.user_id.clone();
         for (idx, lease) in runnable {
             let pc_name = available_actions
                 .iter()
@@ -1783,14 +1790,10 @@ async fn handle_execute_actions_parallel(
             let pc_call_id = parsed[idx].call_id.clone();
             let effects = effects.clone();
             let leases = Arc::clone(&leases_arc);
-            let thread_snapshot = thread_snapshot.clone();
+            let user_id = user_id.clone();
             let lease = lease.clone();
-            let mut exec_ctx = thread_execution_context(
-                &thread_snapshot,
-                step_id,
-                Some(pc_call_id.clone()),
-                gate_controller.clone(),
-            );
+            let mut exec_ctx = base_exec_ctx.clone();
+            exec_ctx.current_call_id = Some(pc_call_id.clone());
             if let Some(ref inventory) = inventory {
                 exec_ctx.available_actions_snapshot = Some(Arc::clone(&available_actions));
                 exec_ctx.available_action_inventory_snapshot = Some(Arc::clone(inventory));
@@ -1808,7 +1811,8 @@ async fn handle_execute_actions_parallel(
                         lease,
                         &exec_ctx,
                         ps,
-                        &thread_snapshot,
+                        thread_id,
+                        &user_id,
                     )
                     .await;
                 (idx, final_lease_id, result_json, events, output)
@@ -1990,7 +1994,8 @@ async fn execute_single_action_with_inline_retry(
     initial_lease: crate::types::capability::CapabilityLease,
     exec_ctx: &ThreadExecutionContext,
     params_summary: Option<String>,
-    thread: &Thread,
+    thread_id: crate::types::thread::ThreadId,
+    user_id: &str,
 ) -> (
     serde_json::Value,
     Vec<EventKind>,
@@ -2050,11 +2055,20 @@ async fn execute_single_action_with_inline_retry(
         // on retry if the user approves.
         let _ = leases.refund_use(current_lease.id).await;
 
+        // Use the gate-provided parameters from the GatePaused payload,
+        // not the original caller `params`: the safety layer may have
+        // transformed/redacted them, and the prompt the user sees must
+        // match what the tool actually wanted to run with. Mirrors the
+        // contract in `structured::execute_with_inline_gate_retry`.
+        let gate_parameters = result_json
+            .get("parameters")
+            .cloned()
+            .unwrap_or_else(|| params.clone());
         let resolution = exec_ctx
             .gate_controller
             .pause(crate::gate::GatePauseRequest {
-                thread_id: thread.id,
-                user_id: thread.user_id.clone(),
+                thread_id,
+                user_id: user_id.to_string(),
                 gate_name: result_json
                     .get("gate_name")
                     .and_then(|v| v.as_str())
@@ -2062,7 +2076,7 @@ async fn execute_single_action_with_inline_retry(
                     .to_string(),
                 action_name: name.to_string(),
                 call_id: call_id.to_string(),
-                parameters: params.clone(),
+                parameters: gate_parameters,
                 resume_kind,
                 conversation_id: exec_ctx.conversation_id,
             })
@@ -2091,7 +2105,7 @@ async fn execute_single_action_with_inline_retry(
 
         // Approved. Re-consume a lease use and mark the next call as
         // pre-approved.
-        match leases.find_and_consume(thread.id, name).await {
+        match leases.find_and_consume(thread_id, name).await {
             Ok(new_lease) => {
                 current_lease = new_lease;
                 call_ctx.call_approval_granted = true;

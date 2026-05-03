@@ -296,8 +296,16 @@ pub async fn execute_action_calls(
         let exec_ctx =
             stamp_execution_context(context, &call.id, &available_actions, &available_inventory);
         let execution_start = Instant::now();
-        let exec_result =
-            execute_with_inline_gate_retry(effects, leases, &lease, call, &exec_ctx, thread).await;
+        let exec_result = execute_with_inline_gate_retry(
+            effects,
+            leases,
+            &lease,
+            call,
+            &exec_ctx,
+            thread.id,
+            &thread.user_id,
+        )
+        .await;
         if interrupted_call_needs_refund(&exec_result) {
             let _ = leases.refund_use(lease.id).await;
         }
@@ -320,6 +328,11 @@ pub async fn execute_action_calls(
         // already-completed sibling calls in the same batch.
         let mut join_set = tokio::task::JoinSet::new();
 
+        // Capture thread metadata once outside the spawn loop. Avoids
+        // cloning the full `Thread` (with message/event transcripts)
+        // per task — the helper only needs the id + user_id.
+        let thread_id = thread.id;
+        let user_id = thread.user_id.clone();
         for (idx, lease) in runnable_indices {
             let call = calls[idx].clone();
             let ctx = stamp_execution_context(
@@ -331,13 +344,14 @@ pub async fn execute_action_calls(
             let effects = Arc::clone(effects);
             let leases = Arc::clone(leases);
             let lease = lease.clone();
-            let thread = thread.clone();
+            let user_id = user_id.clone();
 
             join_set.spawn(async move {
                 let execution_start = Instant::now();
-                let result =
-                    execute_with_inline_gate_retry(&effects, &leases, &lease, &call, &ctx, &thread)
-                        .await;
+                let result = execute_with_inline_gate_retry(
+                    &effects, &leases, &lease, &call, &ctx, thread_id, &user_id,
+                )
+                .await;
                 (
                     idx,
                     lease.id,
@@ -591,7 +605,8 @@ async fn execute_with_inline_gate_retry(
     lease: &CapabilityLease,
     call: &ActionCall,
     exec_ctx: &ThreadExecutionContext,
-    thread: &Thread,
+    thread_id: crate::types::thread::ThreadId,
+    user_id: &str,
 ) -> Result<ActionResult, EngineError> {
     let mut current_lease = lease.clone();
     // `call_ctx` carries the one-shot approval flag across retries.
@@ -632,8 +647,8 @@ async fn execute_with_inline_gate_retry(
         let resolution = exec_ctx
             .gate_controller
             .pause(crate::gate::GatePauseRequest {
-                thread_id: thread.id,
-                user_id: thread.user_id.clone(),
+                thread_id,
+                user_id: user_id.to_string(),
                 gate_name: gate_name.clone(),
                 action_name: action_name.clone(),
                 call_id: call_id.clone(),
@@ -653,7 +668,7 @@ async fn execute_with_inline_gate_retry(
         // Approved: re-consume a lease use and mark the next call as
         // pre-approved so the host's `EffectExecutor` skips its
         // approval check.
-        match leases.find_and_consume(thread.id, &call.action_name).await {
+        match leases.find_and_consume(thread_id, &call.action_name).await {
             Ok(new_lease) => {
                 current_lease = new_lease;
                 call_ctx.call_approval_granted = true;
