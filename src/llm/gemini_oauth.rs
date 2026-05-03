@@ -1939,6 +1939,7 @@ impl GeminiOauthProvider {
                         name,
                         arguments: args,
                         reasoning: None,
+                        thought_signature: None,
                     });
                 }
             }
@@ -2763,6 +2764,7 @@ mod tests {
                     name: "read_file".to_string(),
                     arguments: serde_json::json!({"path": "/tmp/x"}),
                     reasoning: None,
+                    thought_signature: None,
                 }],
             ),
             ChatMessage::tool_result("call_1", "read_file", r#"{"output":"hello"}"#),
@@ -2802,6 +2804,7 @@ mod tests {
                     name: "echo".to_string(),
                     arguments: serde_json::json!({}),
                     reasoning: None,
+                    thought_signature: None,
                 }],
             ),
             ChatMessage::tool_result("call_1", "echo", r#"{"output":"ok"}"#),

@@ -75,7 +75,7 @@ pub use recording::RecordingLlm;
 pub use registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};
 pub use response_cache::{CachedProvider, ResponseCacheConfig};
 pub use retry::{RetryConfig, RetryProvider};
-pub use rig_adapter::RigAdapter;
+pub use rig_adapter::{RigAdapter, RigAdapterContext};
 pub use runtime::{LlmReloadHandle, SwappableLlmProvider};
 pub use session::{SessionConfig, SessionManager, create_session_manager};
 pub use smart_routing::{SmartRoutingConfig, SmartRoutingProvider, TaskComplexity};
@@ -316,6 +316,9 @@ fn create_openai_compat_from_registry(
     );
 
     let adapter = RigAdapter::new(model, &config.model)
+        .with_context(RigAdapterContext {
+            provider_id: config.provider_id.clone(),
+        })
         .with_unsupported_params(config.unsupported_params.clone());
     Ok(Arc::new(adapter))
 }
@@ -386,6 +389,9 @@ fn create_anthropic_from_registry(
 
     Ok(Arc::new(
         RigAdapter::new(model, &config.model)
+            .with_context(RigAdapterContext {
+                provider_id: config.provider_id.clone(),
+            })
             .with_cache_retention(cache_retention)
             .with_unsupported_params(config.unsupported_params.clone()),
     ))
@@ -419,6 +425,9 @@ fn create_ollama_from_registry(
     // reasoning for thinking models (Qwen3, DeepSeek-R1, Gemma 4, etc.).
     // Non-thinking models ignore the parameter harmlessly.
     let adapter = RigAdapter::new(model, &config.model)
+        .with_context(RigAdapterContext {
+            provider_id: config.provider_id.clone(),
+        })
         .with_unsupported_params(config.unsupported_params.clone())
         .with_additional_params(serde_json::json!({ "think": true }));
     Ok(Arc::new(adapter))

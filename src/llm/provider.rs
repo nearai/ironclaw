@@ -262,6 +262,8 @@ pub struct ToolCall {
     /// or derived from the shared response content as a fallback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
 }
 
 /// Generate a tool-call ID that satisfies all providers.
@@ -805,6 +807,7 @@ mod tests {
             name: "echo".to_string(),
             arguments: serde_json::json!({}),
             reasoning: None,
+            thought_signature: None,
         };
         let mut messages = vec![
             ChatMessage::user("hello"),
@@ -849,6 +852,7 @@ mod tests {
             name: "echo".to_string(),
             arguments: serde_json::json!({}),
             reasoning: None,
+            thought_signature: None,
         };
         let mut messages = vec![
             ChatMessage::user("test"),
@@ -875,12 +879,14 @@ mod tests {
             name: "search".to_string(),
             arguments: serde_json::json!({"q": "test"}),
             reasoning: None,
+            thought_signature: None,
         };
         let tc2 = ToolCall {
             id: "call_sel_2".to_string(),
             name: "http".to_string(),
             arguments: serde_json::json!({"url": "https://example.com"}),
             reasoning: None,
+            thought_signature: None,
         };
         let mut messages = vec![
             ChatMessage::system("You are a helpful assistant."),
@@ -939,5 +945,23 @@ mod tests {
         strip_unsupported_tool_params(&unsupported, &mut req);
 
         assert!(req.stop_sequences.is_none()); // safety: test assertion for explicit strip behavior
+    }
+
+    #[test]
+    fn test_tool_call_serializes_and_deserializes_thought_signature() {
+        let call = ToolCall {
+            id: "call_1".to_string(),
+            name: "tool_search".to_string(),
+            arguments: serde_json::json!({"q": "telegram"}),
+            reasoning: None,
+            thought_signature: Some("sig_abc".to_string()),
+        };
+
+        let value = serde_json::to_value(&call).expect("tool call serializes");
+        assert_eq!(value["thought_signature"], "sig_abc");
+
+        let decoded: ToolCall =
+            serde_json::from_value(value).expect("tool call deserializes with thought signature");
+        assert_eq!(decoded.thought_signature.as_deref(), Some("sig_abc"));
     }
 }

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- *(llm)* preserve and replay Gemini `thought_signature` in API-key OpenAI-compatible tool-call loops to prevent second-turn `400 INVALID_ARGUMENT` failures.
+
 ## [0.27.0](https://github.com/nearai/ironclaw/compare/ironclaw-v0.26.0...ironclaw-v0.27.0) - 2026-04-29
 
 ### Added

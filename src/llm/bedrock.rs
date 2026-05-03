@@ -578,6 +578,7 @@ fn extract_content_blocks(
                     name: tu.name().to_string(),
                     arguments: document_to_json(tu.input()),
                     reasoning: None,
+                    thought_signature: None,
                 });
             }
             // Ignore reasoning, citations, images, etc.
@@ -816,12 +817,14 @@ mod tests {
             name: "echo".to_string(),
             arguments: serde_json::json!({"text": "hi"}),
             reasoning: None,
+            thought_signature: None,
         };
         let tc2 = crate::llm::provider::ToolCall {
             id: "call_2".to_string(),
             name: "time".to_string(),
             arguments: serde_json::json!({}),
             reasoning: None,
+            thought_signature: None,
         };
 
         let messages = vec![
@@ -861,6 +864,7 @@ mod tests {
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "test"}),
             reasoning: None,
+            thought_signature: None,
         };
 
         let messages = vec![
@@ -885,6 +889,7 @@ mod tests {
             name: "echo".to_string(),
             arguments: serde_json::json!({}),
             reasoning: None,
+            thought_signature: None,
         };
 
         let messages = vec![
@@ -1050,12 +1055,14 @@ mod tests {
             name: "get_weather".to_string(),
             arguments: serde_json::json!({"city": "NYC"}),
             reasoning: None,
+            thought_signature: None,
         };
         let tc2 = crate::llm::provider::ToolCall {
             id: "call_def".to_string(),
             name: "get_time".to_string(),
             arguments: serde_json::json!({"tz": "EST"}),
             reasoning: None,
+            thought_signature: None,
         };
 
         let messages = vec![
@@ -1218,6 +1225,7 @@ mod tests {
             name: "echo".to_string(),
             arguments: serde_json::json!({"text": "hi"}),
             reasoning: None,
+            thought_signature: None,
         };
 
         let mut messages = vec![
@@ -1262,6 +1270,7 @@ mod tests {
             name: "get_weather".to_string(),
             arguments: serde_json::json!({"city": "NYC"}),
             reasoning: None,
+            thought_signature: None,
         };
 
         let mut messages = vec![
@@ -1299,6 +1308,7 @@ mod tests {
             name: "time".to_string(),
             arguments: serde_json::json!({}),
             reasoning: None,
+            thought_signature: None,
         };
 
         let mut messages = vec![
@@ -1336,6 +1346,7 @@ mod tests {
             name: "search".to_string(),
             arguments: serde_json::json!({"q": "test"}),
             reasoning: None,
+            thought_signature: None,
         };
 
         let mut messages = vec![
@@ -1391,6 +1402,7 @@ mod tests {
             name: "echo".to_string(),
             arguments: serde_json::json!({}),
             reasoning: None,
+            thought_signature: None,
         };
 
         let mut messages = vec![

@@ -53,6 +53,18 @@ pub struct RigAdapter<M: CompletionModel> {
     /// Default additional parameters merged into every request.
     /// Used by providers that need extra top-level fields (e.g., Ollama `think: true`).
     default_additional_params: Option<serde_json::Value>,
+    context: RigAdapterContext,
+}
+
+#[derive(Debug, Clone)]
+pub struct RigAdapterContext {
+    pub provider_id: String,
+}
+
+impl RigAdapterContext {
+    pub fn requires_gemini_thought_signatures(&self) -> bool {
+        self.provider_id == "gemini"
+    }
 }
 
 impl<M: CompletionModel> RigAdapter<M> {
@@ -69,7 +81,15 @@ impl<M: CompletionModel> RigAdapter<M> {
             cache_retention: CacheRetention::None,
             unsupported_params: HashSet::new(),
             default_additional_params: None,
+            context: RigAdapterContext {
+                provider_id: "unknown".to_string(),
+            },
         }
+    }
+
+    pub fn with_context(mut self, context: RigAdapterContext) -> Self {
+        self.context = context;
+        self
     }
 
     /// Set Anthropic prompt cache retention policy.
@@ -144,7 +164,10 @@ fn round_f32_to_f64(val: f32) -> f64 {
 ///
 /// Returns `(preamble, chat_history)` where preamble is extracted from
 /// any System message and chat_history contains the rest.
-fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage>) {
+fn convert_messages(
+    messages: &[ChatMessage],
+    context: &RigAdapterContext,
+) -> (Option<String>, Vec<RigMessage>) {
     let mut preamble: Option<String> = None;
     let mut history = Vec::new();
 
@@ -214,13 +237,21 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
                     for (idx, tc) in tool_calls.iter().enumerate() {
                         let tool_call_id =
                             normalized_tool_call_id(Some(tc.id.as_str()), history.len() + idx);
-                        contents.push(AssistantContent::ToolCall(
-                            rig::message::ToolCall::new(
-                                tool_call_id.clone(),
-                                ToolFunction::new(tc.name.clone(), tc.arguments.clone()),
-                            )
-                            .with_call_id(tool_call_id),
-                        ));
+                        let mut tool_call = rig::message::ToolCall::new(
+                            tool_call_id.clone(),
+                            ToolFunction::new(tc.name.clone(), tc.arguments.clone()),
+                        )
+                        .with_call_id(tool_call_id);
+
+                        if context.requires_gemini_thought_signatures() {
+                            if let Some(signature) = tc.thought_signature.as_deref() {
+                                tool_call.additional_params = Some(serde_json::json!({
+                                    "thoughtSignature": signature,
+                                }));
+                            }
+                        }
+
+                        contents.push(AssistantContent::ToolCall(tool_call));
                     }
                     if let Ok(many) = OneOrMany::many(contents) {
                         history.push(RigMessage::Assistant {
@@ -360,6 +391,8 @@ fn convert_tool_choice(choice: Option<&str>) -> Option<RigToolChoice> {
 fn extract_response(
     choice: &OneOrMany<AssistantContent>,
     _usage: &RigUsage,
+    context: &RigAdapterContext,
+    raw_response: &serde_json::Value,
 ) -> (Option<String>, Vec<IronToolCall>, FinishReason) {
     let mut text_parts: Vec<String> = Vec::new();
     let mut tool_calls: Vec<IronToolCall> = Vec::new();
@@ -376,6 +409,7 @@ fn extract_response(
                     name: tc.function.name.clone(),
                     arguments: tc.function.arguments.clone(),
                     reasoning: None,
+                    thought_signature: None,
                 });
             }
             // Reasoning and Image variants are not mapped to IronClaw types
@@ -395,7 +429,50 @@ fn extract_response(
         FinishReason::Stop
     };
 
+    if context.requires_gemini_thought_signatures() && !tool_calls.is_empty() {
+        let signatures = extract_gemini_thought_signatures(raw_response);
+        for (idx, tool_call) in tool_calls.iter_mut().enumerate() {
+            if let Some(Some(signature)) = signatures.get(idx) {
+                tool_call.thought_signature = Some(signature.clone());
+            }
+        }
+    }
+
     (text, tool_calls, finish)
+}
+
+fn extract_gemini_thought_signatures(raw: &serde_json::Value) -> Vec<Option<String>> {
+    fn maybe_part_signature(part: &serde_json::Value) -> Option<Option<String>> {
+        let fc = part.get("functionCall")?;
+        if let Some(sig) = fc.get("thoughtSignature").and_then(serde_json::Value::as_str) {
+            return Some(Some(sig.to_string()));
+        }
+        if let Some(sig) = fc.get("thought_signature").and_then(serde_json::Value::as_str) {
+            return Some(Some(sig.to_string()));
+        }
+        Some(None)
+    }
+
+    let mut signatures = Vec::new();
+    let candidates = raw
+        .get("candidates")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for candidate in candidates {
+        let parts = candidate
+            .get("content")
+            .and_then(|v| v.get("parts"))
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for part in parts {
+            if let Some(sig) = maybe_part_signature(&part) {
+                signatures.push(sig);
+            }
+        }
+    }
+    signatures
 }
 
 /// Saturate u64 to u32 for token counts.
@@ -574,7 +651,7 @@ where
 
         let mut messages = request.messages;
         crate::llm::provider::sanitize_tool_messages(&mut messages);
-        let (preamble, history) = convert_messages(&messages);
+        let (preamble, history) = convert_messages(&messages, &self.context);
 
         let mut rig_req = build_rig_request(
             preamble,
@@ -595,7 +672,9 @@ where
             .await
             .map_err(|e| map_rig_error(&self.model_name, e))?;
 
-        let (text, _tool_calls, finish) = extract_response(&response.choice, &response.usage);
+        let raw_value = serde_json::to_value(&response.raw_response).unwrap_or_default();
+        let (text, _tool_calls, finish) =
+            extract_response(&response.choice, &response.usage, &self.context, &raw_value);
 
         let resp = CompletionResponse {
             content: text.unwrap_or_default(),
@@ -632,7 +711,7 @@ where
 
         let mut messages = request.messages;
         crate::llm::provider::sanitize_tool_messages(&mut messages);
-        let (preamble, history) = convert_messages(&messages);
+        let (preamble, history) = convert_messages(&messages, &self.context);
         let tools = convert_tools(&request.tools);
         let tool_choice = convert_tool_choice(request.tool_choice.as_deref());
 
@@ -655,7 +734,13 @@ where
             .await
             .map_err(|e| map_rig_error(&self.model_name, e))?;
 
-        let (text, mut tool_calls, finish) = extract_response(&response.choice, &response.usage);
+        let raw_value = serde_json::to_value(&response.raw_response).unwrap_or_default();
+        let (text, mut tool_calls, finish) = extract_response(
+            &response.choice,
+            &response.usage,
+            &self.context,
+            &raw_value,
+        );
 
         // Normalize tool call names: some proxies prepend "proxy_" prefixes.
         for tc in &mut tool_calls {
@@ -785,6 +870,12 @@ fn normalize_tool_name(name: &str, known_tools: &HashSet<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn openai_context() -> RigAdapterContext {
+        RigAdapterContext {
+            provider_id: "openai".to_string(),
+        }
+    }
 
     #[test]
     fn test_round_f32_to_f64_no_precision_artifacts() {
@@ -1491,7 +1582,7 @@ mod tests {
             ChatMessage::system("You are a helpful assistant."),
             ChatMessage::user("Hello"),
         ];
-        let (preamble, history) = convert_messages(&messages);
+        let (preamble, history) = convert_messages(&messages, &openai_context());
         assert_eq!(preamble, Some("You are a helpful assistant.".to_string()));
         assert_eq!(history.len(), 1);
     }
@@ -1503,7 +1594,7 @@ mod tests {
             ChatMessage::system("System 2"),
             ChatMessage::user("Hi"),
         ];
-        let (preamble, history) = convert_messages(&messages);
+        let (preamble, history) = convert_messages(&messages, &openai_context());
         assert_eq!(preamble, Some("System 1\nSystem 2".to_string()));
         assert_eq!(history.len(), 1);
     }
@@ -1516,7 +1607,7 @@ mod tests {
             "search",
             "result text",
         )];
-        let (preamble, history) = convert_messages(&messages);
+        let (preamble, history) = convert_messages(&messages, &openai_context());
         assert!(preamble.is_none());
         assert_eq!(history.len(), 1);
         // Tool results become User messages in rig-core
@@ -1540,10 +1631,11 @@ mod tests {
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "test"}),
             reasoning: None,
+            thought_signature: None,
         };
         let msg = ChatMessage::assistant_with_tool_calls(Some("thinking".to_string()), vec![tc]);
         let messages = vec![msg];
-        let (_preamble, history) = convert_messages(&messages);
+        let (_preamble, history) = convert_messages(&messages, &openai_context());
         assert_eq!(history.len(), 1);
         match &history[0] {
             RigMessage::Assistant { content, .. } => {
@@ -1569,7 +1661,7 @@ mod tests {
             name: Some("search".to_string()),
             tool_calls: None,
         }];
-        let (_preamble, history) = convert_messages(&messages);
+        let (_preamble, history) = convert_messages(&messages, &openai_context());
         match &history[0] {
             RigMessage::User { content } => match content.first() {
                 UserContent::ToolResult(r) => {
@@ -1601,7 +1693,7 @@ mod tests {
             }],
         )];
 
-        let (_preamble, history) = convert_messages(&messages);
+        let (_preamble, history) = convert_messages(&messages, &openai_context());
         match &history[0] {
             RigMessage::User { content } => {
                 let image = content
@@ -1638,8 +1730,8 @@ mod tests {
             }],
         )];
 
-        let (_, low_history) = convert_messages(&low_messages);
-        let (_, high_history) = convert_messages(&high_messages);
+        let (_, low_history) = convert_messages(&low_messages, &openai_context());
+        let (_, high_history) = convert_messages(&high_messages, &openai_context());
 
         for (history, expected) in [
             (&low_history, ImageDetail::Low),
@@ -1705,7 +1797,12 @@ mod tests {
     fn test_extract_response_text_only() {
         let content = OneOrMany::one(AssistantContent::text("Hello world"));
         let usage = RigUsage::new();
-        let (text, calls, finish) = extract_response(&content, &usage);
+        let (text, calls, finish) = extract_response(
+            &content,
+            &usage,
+            &openai_context(),
+            &serde_json::json!({}),
+        );
         assert_eq!(text, Some("Hello world".to_string()));
         assert!(calls.is_empty());
         assert_eq!(finish, FinishReason::Stop);
@@ -1716,11 +1813,114 @@ mod tests {
         let tc = AssistantContent::tool_call("call_1", "search", serde_json::json!({"q": "test"}));
         let content = OneOrMany::one(tc);
         let usage = RigUsage::new();
-        let (text, calls, finish) = extract_response(&content, &usage);
+        let (text, calls, finish) = extract_response(
+            &content,
+            &usage,
+            &openai_context(),
+            &serde_json::json!({}),
+        );
         assert!(text.is_none());
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "search");
         assert_eq!(finish, FinishReason::ToolUse);
+    }
+
+    #[test]
+    fn test_adapter_context_marks_gemini_provider() {
+        let ctx = RigAdapterContext {
+            provider_id: "gemini".to_string(),
+        };
+        assert!(ctx.requires_gemini_thought_signatures());
+    }
+
+    #[test]
+    fn test_extract_response_captures_gemini_thought_signature() {
+        let tc = AssistantContent::tool_call("call_1", "tool_search", serde_json::json!({"q": "telegram"}));
+        let content = OneOrMany::one(tc);
+        let usage = RigUsage::new();
+        let raw = serde_json::json!({
+            "candidates": [{
+                "content": {
+                    "parts": [{
+                        "functionCall": {
+                            "name": "tool_search",
+                            "thoughtSignature": "sig_from_gemini"
+                        }
+                    }]
+                }
+            }]
+        });
+        let ctx = RigAdapterContext {
+            provider_id: "gemini".to_string(),
+        };
+
+        let (_text, calls, _finish) = extract_response(&content, &usage, &ctx, &raw);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].thought_signature.as_deref(),
+            Some("sig_from_gemini")
+        );
+    }
+
+    #[test]
+    fn test_convert_messages_replays_thought_signature_for_gemini() {
+        let tc = IronToolCall {
+            id: "call_1".to_string(),
+            name: "tool_search".to_string(),
+            arguments: serde_json::json!({"q": "telegram"}),
+            reasoning: None,
+            thought_signature: Some("sig_from_gemini".to_string()),
+        };
+        let message = ChatMessage::assistant_with_tool_calls(None, vec![tc]);
+        let ctx = RigAdapterContext {
+            provider_id: "gemini".to_string(),
+        };
+        let (_preamble, history) = convert_messages(&[message], &ctx);
+
+        match &history[0] {
+            RigMessage::Assistant { content, .. } => {
+                let tool_call = content
+                    .iter()
+                    .find_map(|item| match item {
+                        AssistantContent::ToolCall(tool_call) => Some(tool_call),
+                        _ => None,
+                    })
+                    .expect("assistant must contain tool call");
+                let additional = tool_call
+                    .additional_params
+                    .as_ref()
+                    .expect("gemini tool call must include thought signature");
+                assert_eq!(additional["thoughtSignature"], "sig_from_gemini");
+            }
+            other => panic!("expected assistant message, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_convert_messages_does_not_replay_signature_for_non_gemini() {
+        let tc = IronToolCall {
+            id: "call_1".to_string(),
+            name: "tool_search".to_string(),
+            arguments: serde_json::json!({"q": "telegram"}),
+            reasoning: None,
+            thought_signature: Some("sig_from_gemini".to_string()),
+        };
+        let message = ChatMessage::assistant_with_tool_calls(None, vec![tc]);
+        let (_preamble, history) = convert_messages(&[message], &openai_context());
+
+        match &history[0] {
+            RigMessage::Assistant { content, .. } => {
+                let tool_call = content
+                    .iter()
+                    .find_map(|item| match item {
+                        AssistantContent::ToolCall(tool_call) => Some(tool_call),
+                        _ => None,
+                    })
+                    .expect("assistant must contain tool call");
+                assert!(tool_call.additional_params.is_none());
+            }
+            other => panic!("expected assistant message, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -1730,9 +1930,10 @@ mod tests {
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "test"}),
             reasoning: None,
+            thought_signature: None,
         };
         let messages = vec![ChatMessage::assistant_with_tool_calls(None, vec![tc])];
-        let (_preamble, history) = convert_messages(&messages);
+        let (_preamble, history) = convert_messages(&messages, &openai_context());
 
         match &history[0] {
             RigMessage::Assistant { content, .. } => {
@@ -1762,9 +1963,10 @@ mod tests {
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "test"}),
             reasoning: None,
+            thought_signature: None,
         };
         let messages = vec![ChatMessage::assistant_with_tool_calls(None, vec![tc])];
-        let (_preamble, history) = convert_messages(&messages);
+        let (_preamble, history) = convert_messages(&messages, &openai_context());
 
         match &history[0] {
             RigMessage::Assistant { content, .. } => {
@@ -1796,6 +1998,7 @@ mod tests {
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "test"}),
             reasoning: None,
+            thought_signature: None,
         };
         let assistant_msg = ChatMessage::assistant_with_tool_calls(None, vec![tc]);
         let tool_result_msg = ChatMessage {
@@ -1807,7 +2010,7 @@ mod tests {
             tool_calls: None,
         };
         let messages = vec![assistant_msg, tool_result_msg];
-        let (_preamble, history) = convert_messages(&messages);
+        let (_preamble, history) = convert_messages(&messages, &openai_context());
 
         // Extract the generated call_id from the assistant tool call
         let assistant_call_id = match &history[0] {
@@ -2116,19 +2319,21 @@ mod tests {
             name: "search".to_string(),
             arguments: serde_json::json!({"q": "rust"}),
             reasoning: None,
+            thought_signature: None,
         };
         let tc2 = IronToolCall {
             id: "call_b".to_string(),
             name: "fetch".to_string(),
             arguments: serde_json::json!({"url": "https://example.com"}),
             reasoning: None,
+            thought_signature: None,
         };
         let assistant = ChatMessage::assistant_with_tool_calls(None, vec![tc1, tc2]);
         let result_a = ChatMessage::tool_result("call_a", "search", "search results");
         let result_b = ChatMessage::tool_result("call_b", "fetch", "fetch results");
 
         let messages = vec![assistant, result_a, result_b];
-        let (_preamble, history) = convert_messages(&messages);
+        let (_preamble, history) = convert_messages(&messages, &openai_context());
 
         // Should be: 1 assistant + 1 merged user (not 1 assistant + 2 users)
         assert_eq!(
@@ -2165,7 +2370,7 @@ mod tests {
         let tool_msg = ChatMessage::tool_result("call_1", "search", "results");
 
         let messages = vec![user_msg, tool_msg];
-        let (_preamble, history) = convert_messages(&messages);
+        let (_preamble, history) = convert_messages(&messages, &openai_context());
 
         // Should be 2 separate User messages (text user + tool result user)
         assert_eq!(history.len(), 2);
@@ -2178,7 +2383,7 @@ mod tests {
         let empty = ChatMessage::user("");
         let non_empty = ChatMessage::user("hello");
         let messages = vec![empty, non_empty];
-        let (_preamble, history) = convert_messages(&messages);
+        let (_preamble, history) = convert_messages(&messages, &openai_context());
 
         assert_eq!(history.len(), 1, "empty user message must be dropped");
         match &history[0] {
@@ -2207,7 +2412,7 @@ mod tests {
         };
         let non_empty = ChatMessage::user("hi");
         let messages = vec![empty_asst, non_empty];
-        let (_preamble, history) = convert_messages(&messages);
+        let (_preamble, history) = convert_messages(&messages, &openai_context());
 
         assert_eq!(history.len(), 1, "empty assistant message must be dropped");
         assert!(matches!(history[0], RigMessage::User { .. }));
@@ -2228,7 +2433,7 @@ mod tests {
         let user2 = ChatMessage::user("");
         let asst = ChatMessage::assistant("response");
         let messages = vec![user1, empty_asst, user2, asst];
-        let (_preamble, history) = convert_messages(&messages);
+        let (_preamble, history) = convert_messages(&messages, &openai_context());
 
         assert_eq!(history.len(), 2, "only non-empty messages should survive");
         assert!(matches!(history[0], RigMessage::User { .. }));

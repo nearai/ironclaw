@@ -233,6 +233,7 @@ Raw provider
 - **Tool call IDs** are generated (`generated_tool_call_{seed}`) if the provider returns empty/whitespace IDs.
 - **Tool name normalization**: strips `proxy_` prefix if it matches a known tool (handles some proxy implementations).
 - **OpenAI uses Chat Completions API** (`completions_api()`), not the newer Responses API — the Responses API path panics when tool results are sent back (rig-core doesn't thread `call_id` through `ToolCall`).
+- **Gemini API-key (OpenAI-compatible) thought signatures:** when `provider_id=gemini`, `RigAdapter` captures `functionCall.thoughtSignature` metadata from raw provider responses and replays it on outbound assistant tool calls in follow-up turns. This replay is strictly gated to `provider_id == "gemini"` and does not affect `gemini_oauth` or other OpenAI-compatible providers.
 
 ## Streaming Support
 
