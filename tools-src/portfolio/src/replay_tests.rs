@@ -969,6 +969,147 @@ fn check_expectations(path: &str, step: &Step, response: &Value, prior: &BTreeMa
                     step.name
                 );
             }
+            "walkforward_folds_len" => {
+                let len = response
+                    .get("folds")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                let want = expected.as_u64().expect("walkforward_folds_len: number") as usize;
+                assert_eq!(
+                    len, want,
+                    "[{path}] step '{}': walkforward folds {len} != {want}",
+                    step.name
+                );
+            }
+            "walkforward_robustness_in" => {
+                let got = response
+                    .pointer("/aggregate/robustness")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "[{path}] step '{}': missing /aggregate/robustness",
+                            step.name
+                        )
+                    });
+                let allowed: Vec<String> = expected
+                    .as_array()
+                    .expect("walkforward_robustness_in: array")
+                    .iter()
+                    .map(|v| v.as_str().expect("string").to_string())
+                    .collect();
+                assert!(
+                    allowed.iter().any(|v| v == got),
+                    "[{path}] step '{}': robustness '{got}' not in {:?}",
+                    step.name,
+                    allowed
+                );
+            }
+            "montecarlo_iterations" => {
+                let got = response
+                    .get("iterations")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let want = expected.as_u64().expect("montecarlo_iterations: number");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': montecarlo iterations mismatch",
+                    step.name
+                );
+            }
+            "montecarlo_p50_within" => {
+                let bounds = expected
+                    .as_array()
+                    .expect("montecarlo_p50_within: [low, high]");
+                let low = bounds[0].as_f64().expect("low number");
+                let high = bounds[1].as_f64().expect("high number");
+                let got = response
+                    .pointer("/return_distribution/p50")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "[{path}] step '{}': missing /return_distribution/p50",
+                            step.name
+                        )
+                    });
+                assert!(
+                    got >= low && got <= high,
+                    "[{path}] step '{}': montecarlo p50 {got} not in [{low}, {high}]",
+                    step.name
+                );
+            }
+            "grid_cells_len" => {
+                let len = response
+                    .get("cells")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                let want = expected.as_u64().expect("grid_cells_len: number") as usize;
+                assert_eq!(
+                    len, want,
+                    "[{path}] step '{}': grid cells {len} != {want}",
+                    step.name
+                );
+            }
+            "grid_top_passes_basic_gate" => {
+                let got = response
+                    .pointer("/ranked/0/passes_basic_gate")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let want = expected
+                    .as_bool()
+                    .expect("grid_top_passes_basic_gate: bool");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': grid top passes_basic_gate mismatch",
+                    step.name
+                );
+            }
+            "episode_summary_candles" => {
+                let got = response
+                    .get("candles")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let want = expected.as_u64().expect("episode_summary_candles: number");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': episode candles count mismatch",
+                    step.name
+                );
+            }
+            "episode_replay_top_trades_min" => {
+                let trades = response
+                    .pointer("/backtest_suite/ranked/0/metrics/trades")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let want = expected
+                    .as_u64()
+                    .expect("episode_replay_top_trades_min: number");
+                assert!(
+                    trades >= want,
+                    "[{path}] step '{}': episode replay top trades {trades} < {want}",
+                    step.name
+                );
+            }
+            "episode_replay_solver_kind" => {
+                let got = response
+                    .pointer("/episode/solver_fixture_kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "[{path}] step '{}': missing /episode/solver_fixture_kind",
+                            step.name
+                        )
+                    });
+                let want = expected
+                    .as_str()
+                    .expect("episode_replay_solver_kind: string");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': episode solver kind mismatch",
+                    step.name
+                );
+            }
             other => panic!(
                 "[{path}] step '{}': unknown expectation key '{other}'",
                 step.name

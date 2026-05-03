@@ -12,6 +12,11 @@
       "`build_intent` requires `plan` (a MovementPlan from a Proposal). `config` and `solver` are optional; `solver` defaults to `fixture`.",
       "`backtest` requires oldest-to-newest OHLCV `candles` plus a long-only spot `strategy` (`buy-hold`, `sma-cross`, `breakout`, `mean-reversion`, `momentum`, or `rsi-mean-reversion`). Fees, slippage, position size, stop-loss, and take-profit are optional.",
       "`backtest_suite` requires oldest-to-newest OHLCV `candles` plus a `candidates` menu. It returns ranked strategy results and a basic intent-eligibility gate.",
+      "`backtest_walkforward` requires `candles`, a `strategy`, and `n_folds` >= 2. It splits the series into contiguous, non-overlapping fold windows, runs the same strategy on each fold's in-sample and out-of-sample ranges, and returns per-fold metrics plus an aggregate robustness verdict (`robust`, `fragile`, or `overfit`). Parameters are not refit.",
+      "`backtest_montecarlo` requires `trade_returns_pct` (per-trade percent returns from a prior backtest). It uses a seeded xorshift64* PRNG to resample (`shuffle`) or rearrange (`permute`) the trade order across `iterations` paths and returns return / drawdown / terminal-equity distributions plus loss probabilities.",
+      "`backtest_grid` requires `candles`, a `base` strategy, and at least one `axes` entry or sizing/stop/take-profit options. It enumerates the cartesian product, hands the resulting candidates to `backtest_suite`, and returns a ranked grid plus a flat cell table. The `max_cells` cap defaults to 1024.",
+      "`validate_episode` requires an `episode` (id, pair, candles; optional solver_fixture, news_context, timeframe, generated_at, source). It returns a deterministic summary; no backtest runs.",
+      "`replay_episode` requires an `episode` and `candidates` menu. It validates the episode, runs `backtest_suite` against the embedded candles, and surfaces the solver fixture and news context for the caller to route into `build_intent` and analyst memos.",
       "`plan_paid_research` requires a `query` and optional candidate `sources`. It returns a budgeted paid-source plan with MPP/x402/NEAR rail attribution, autonomous-wallet policy gates, agentic-SEO trust gates, and NEAR funding-route hints; it does not fetch paywalled content or sign payments.",
       "`plan_dripstack_browse` models DripStack's guided topic → publication → article flow from free catalog/post metadata. A selected article becomes a paid-source candidate for `plan_paid_research`; the tool never buys or fetches article bodies.",
       "`fetch_dripstack_catalog` fetches DripStack's free publication catalog or free post-title metadata for one publication. It never calls paid article-body routes.",
@@ -22,7 +27,7 @@
     "notes": [
       "All operations are read-only and produce no signed payloads. The agent never holds private keys.",
       "Scan supports historical queries via the optional `at` field (block per chain or timestamp).",
-      "Backtest uses closed-candle signals with next-open execution to avoid lookahead and returns metrics under `intents-backtest/1`; suite ranking returns `intents-backtest-suite/1`; paid research planning returns `paid-research-plan/1`; DripStack guided browse planning returns `dripstack-browse-plan/1`; free DripStack catalog fetch returns `dripstack-catalog/1`; paid fetch preparation returns `dripstack-paid-fetch-plan/1`; nominal NEAR trial planning returns `near-intents-trial-plan/1`; NEAR Intents trading console state returns `intents-trading-widget/1`.",
+      "Backtest uses closed-candle signals with next-open execution to avoid lookahead and returns metrics under `intents-backtest/1`; suite ranking returns `intents-backtest-suite/1`; walk-forward returns `intents-walkforward/1`; Monte Carlo returns `intents-montecarlo/1`; grid sweeps return `intents-grid/1`; episode validation returns `intents-episode/1`; episode replay returns `intents-episode-replay/1`; paid research planning returns `paid-research-plan/1`; DripStack guided browse planning returns `dripstack-browse-plan/1`; free DripStack catalog fetch returns `dripstack-catalog/1`; paid fetch preparation returns `dripstack-paid-fetch-plan/1`; nominal NEAR trial planning returns `near-intents-trial-plan/1`; NEAR Intents trading console state returns `intents-trading-widget/1`.",
       "Sources: `fixture` (embedded test data), `dune` (EVM via Dune Sim), `near` (NEAR via FastNEAR+Intear), `auto` (detect per address).",
       "Use `tool_info(name: \"portfolio\", detail: \"schema\")` for the full schema before guessing fields."
     ],
@@ -105,6 +110,46 @@
         "post_slug": "near-intents-liquidity",
         "payment_protocol": "mpp",
         "user_confirmed_purchase": false
+      },
+      {
+        "action": "backtest_walkforward",
+        "candles": [],
+        "strategy": { "kind": "sma-cross", "fast_window": 5, "slow_window": 20 },
+        "n_folds": 4,
+        "train_pct": 0.7,
+        "embargo": 1
+      },
+      {
+        "action": "backtest_montecarlo",
+        "trade_returns_pct": [1.5, -0.5, 2.0, -1.0, 0.8],
+        "initial_cash_usd": 1000,
+        "iterations": 1000,
+        "seed": 42,
+        "method": "shuffle"
+      },
+      {
+        "action": "backtest_grid",
+        "candles": [],
+        "base": { "kind": "sma-cross", "fast_window": 5, "slow_window": 20 },
+        "axes": [
+          { "param": "fast_window", "values": [3, 5, 8] },
+          { "param": "slow_window", "values": [15, 20, 30] }
+        ],
+        "max_cells": 32
+      },
+      {
+        "action": "replay_episode",
+        "episode": {
+          "id": "near-usdc-q1",
+          "pair": "NEAR/USDC",
+          "timeframe": "1d",
+          "candles": [],
+          "solver_fixture": null,
+          "news_context": []
+        },
+        "candidates": [
+          { "id": "buy_hold", "strategy": { "kind": "buy-hold" } }
+        ]
       }
     ]
   },

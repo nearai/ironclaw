@@ -324,6 +324,214 @@
     },
     {
       "properties": {
+        "action": { "const": "backtest_walkforward" },
+        "candles": {
+          "type": "array",
+          "description": "OHLCV candles sorted oldest to newest. Split into N contiguous, non-overlapping fold windows.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "ts": { "type": "string" },
+              "open": { "type": "number", "exclusiveMinimum": 0 },
+              "high": { "type": "number", "exclusiveMinimum": 0 },
+              "low": { "type": "number", "exclusiveMinimum": 0 },
+              "close": { "type": "number", "exclusiveMinimum": 0 },
+              "volume": { "type": "number" }
+            },
+            "required": ["ts", "open", "high", "low", "close"]
+          },
+          "minItems": 8
+        },
+        "strategy": {
+          "type": "object",
+          "description": "Long-only spot strategy config. Same kinds as 'backtest'.",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["buy-hold", "sma-cross", "breakout", "mean-reversion", "momentum", "rsi-mean-reversion"]
+            },
+            "fast_window": { "type": "integer", "minimum": 1 },
+            "slow_window": { "type": "integer", "minimum": 1 },
+            "lookback_window": { "type": "integer", "minimum": 1 },
+            "threshold_bps": { "type": "number", "minimum": 0 },
+            "entry_threshold": { "type": "number", "minimum": 0 },
+            "exit_threshold": { "type": "number", "minimum": 0 }
+          },
+          "required": ["kind"]
+        },
+        "n_folds": { "type": "integer", "minimum": 2 },
+        "train_pct": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1, "default": 0.7 },
+        "embargo": { "type": "integer", "minimum": 0, "default": 0 },
+        "initial_cash_usd": { "type": "number", "exclusiveMinimum": 0, "default": 10000 },
+        "fee_bps": { "type": "number", "minimum": 0, "default": 10 },
+        "slippage_bps": { "type": "number", "minimum": 0, "default": 5 },
+        "max_position_pct": { "type": "number", "exclusiveMinimum": 0, "maximum": 1, "default": 1 },
+        "stop_loss_bps": { "type": "number", "minimum": 0 },
+        "take_profit_bps": { "type": "number", "minimum": 0 }
+      },
+      "required": ["action", "candles", "strategy", "n_folds"]
+    },
+    {
+      "properties": {
+        "action": { "const": "backtest_montecarlo" },
+        "trade_returns_pct": {
+          "type": "array",
+          "items": { "type": "number" },
+          "minItems": 1,
+          "description": "Per-trade percent returns. Typically the trades[].return_pct array from a prior backtest."
+        },
+        "initial_cash_usd": { "type": "number", "exclusiveMinimum": 0, "default": 10000 },
+        "iterations": { "type": "integer", "minimum": 1, "default": 1000 },
+        "seed": { "type": "integer", "default": 13888280946577510895 },
+        "method": { "type": "string", "enum": ["shuffle", "permute"], "default": "shuffle" }
+      },
+      "required": ["action", "trade_returns_pct"]
+    },
+    {
+      "properties": {
+        "action": { "const": "backtest_grid" },
+        "candles": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "ts": { "type": "string" },
+              "open": { "type": "number", "exclusiveMinimum": 0 },
+              "high": { "type": "number", "exclusiveMinimum": 0 },
+              "low": { "type": "number", "exclusiveMinimum": 0 },
+              "close": { "type": "number", "exclusiveMinimum": 0 },
+              "volume": { "type": "number" }
+            },
+            "required": ["ts", "open", "high", "low", "close"]
+          },
+          "minItems": 2
+        },
+        "base": {
+          "type": "object",
+          "description": "Base strategy config; axes override these fields per cell.",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["buy-hold", "sma-cross", "breakout", "mean-reversion", "momentum", "rsi-mean-reversion"]
+            },
+            "fast_window": { "type": "integer", "minimum": 1 },
+            "slow_window": { "type": "integer", "minimum": 1 },
+            "lookback_window": { "type": "integer", "minimum": 1 },
+            "threshold_bps": { "type": "number", "minimum": 0 },
+            "entry_threshold": { "type": "number", "minimum": 0 },
+            "exit_threshold": { "type": "number", "minimum": 0 }
+          },
+          "required": ["kind"]
+        },
+        "axes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "param": {
+                "type": "string",
+                "enum": ["fast_window", "slow_window", "lookback_window", "threshold_bps", "entry_threshold", "exit_threshold"]
+              },
+              "values": {
+                "type": "array",
+                "items": { "type": "number" },
+                "minItems": 1
+              }
+            },
+            "required": ["param", "values"]
+          }
+        },
+        "max_position_pct_options": { "type": "array", "items": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 } },
+        "stop_loss_bps_options": { "type": "array", "items": { "type": "number", "minimum": 0 } },
+        "take_profit_bps_options": { "type": "array", "items": { "type": "number", "minimum": 0 } },
+        "initial_cash_usd": { "type": "number", "exclusiveMinimum": 0, "default": 10000 },
+        "fee_bps": { "type": "number", "minimum": 0, "default": 10 },
+        "slippage_bps": { "type": "number", "minimum": 0, "default": 5 },
+        "max_cells": { "type": "integer", "minimum": 1, "default": 1024 }
+      },
+      "required": ["action", "candles", "base"]
+    },
+    {
+      "properties": {
+        "action": { "const": "validate_episode" },
+        "episode": {
+          "type": "object",
+          "description": "Multi-surface episode bundling candles, optional solver fixture, and optional news context.",
+          "properties": {
+            "id": { "type": "string", "minLength": 1 },
+            "pair": { "type": "string", "minLength": 1 },
+            "timeframe": { "type": "string" },
+            "candles": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "ts": { "type": "string" },
+                  "open": { "type": "number", "exclusiveMinimum": 0 },
+                  "high": { "type": "number", "exclusiveMinimum": 0 },
+                  "low": { "type": "number", "exclusiveMinimum": 0 },
+                  "close": { "type": "number", "exclusiveMinimum": 0 },
+                  "volume": { "type": "number" }
+                },
+                "required": ["ts", "open", "high", "low", "close"]
+              },
+              "minItems": 2
+            },
+            "solver_fixture": {},
+            "news_context": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "ts": { "type": "string" },
+                  "headline": { "type": "string" },
+                  "url": { "type": "string" },
+                  "source": { "type": "string" },
+                  "kind": { "type": "string" }
+                },
+                "required": ["ts", "headline"]
+              }
+            },
+            "generated_at": { "type": "string" },
+            "source": { "type": "string" },
+            "notes": { "type": "string" }
+          },
+          "required": ["id", "pair", "candles"]
+        }
+      },
+      "required": ["action", "episode"]
+    },
+    {
+      "properties": {
+        "action": { "const": "replay_episode" },
+        "episode": {
+          "type": "object",
+          "description": "Same shape as validate_episode.",
+          "required": ["id", "pair", "candles"]
+        },
+        "candidates": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "strategy": { "type": "object", "required": ["kind"] },
+              "max_position_pct": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
+              "stop_loss_bps": { "type": "number", "minimum": 0 },
+              "take_profit_bps": { "type": "number", "minimum": 0 }
+            },
+            "required": ["id", "strategy"]
+          }
+        },
+        "initial_cash_usd": { "type": "number", "exclusiveMinimum": 0, "default": 10000 },
+        "fee_bps": { "type": "number", "minimum": 0, "default": 10 },
+        "slippage_bps": { "type": "number", "minimum": 0, "default": 5 }
+      },
+      "required": ["action", "episode", "candidates"]
+    },
+    {
+      "properties": {
         "action": { "const": "plan_paid_research" },
         "query": {
           "type": "string",

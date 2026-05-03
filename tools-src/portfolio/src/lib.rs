@@ -18,6 +18,21 @@
 //!   caller-provided OHLCV candles before any intent is built.
 //! - `backtest_suite` — rank several strategy candidates over the same
 //!   candle episode before any strategy is selected for paper intent work.
+//! - `backtest_walkforward` — fixed-strategy walk-forward across N
+//!   contiguous, non-overlapping fold windows; reports per-fold
+//!   IS/OOS gap and an aggregate robustness verdict.
+//! - `backtest_montecarlo` — seeded resample/permute over a per-trade
+//!   return series; reports return / drawdown / terminal-equity
+//!   distributions and loss probabilities.
+//! - `backtest_grid` — cartesian sweep over strategy parameter axes
+//!   plus optional sizing/stop/take-profit options; ranked through
+//!   `backtest_suite`.
+//! - `validate_episode` — structural check for the shared episode
+//!   format (candles + optional solver fixture + optional news
+//!   context).
+//! - `replay_episode` — validate then replay an episode through
+//!   `backtest_suite`, surfacing the embedded solver fixture and
+//!   news context.
 //! - `plan_paid_research` — rank paid/free research sources, budget a
 //!   premium-source query, and prepare attribution/payment gates.
 //! - `plan_dripstack_browse` — model DripStack's guided topic →
@@ -59,9 +74,11 @@ use serde::{Deserialize, Serialize};
 
 mod analyzer;
 mod backtest;
+mod episode;
 mod format;
 mod indexer;
 mod intents;
+mod lab;
 mod research;
 mod strategy;
 mod trial;
@@ -143,6 +160,43 @@ enum PortfolioAction {
     /// menu of choices instead of blindly evaluating one strategy.
     #[serde(rename = "backtest_suite")]
     BacktestSuite(backtest::BacktestSuiteInput),
+
+    /// Run a fixed-strategy walk-forward across N contiguous,
+    /// non-overlapping fold windows, splitting each fold into
+    /// in-sample (train) and out-of-sample (test) ranges with an
+    /// optional embargo. Reports per-fold IS/OOS gap and an
+    /// aggregate robustness verdict. Does not refit parameters.
+    #[serde(rename = "backtest_walkforward")]
+    BacktestWalkForward(lab::WalkForwardInput),
+
+    /// Run a deterministic Monte Carlo on a per-trade return series
+    /// (typically `trades[].return_pct` from a prior backtest). Uses
+    /// a seeded xorshift64* PRNG to resample or permute the trade
+    /// order and reports return / drawdown / terminal-equity
+    /// distributions plus loss probabilities.
+    #[serde(rename = "backtest_montecarlo")]
+    BacktestMonteCarlo(lab::MonteCarloInput),
+
+    /// Cartesian sweep over strategy parameter axes plus optional
+    /// sizing/stop/take-profit options. Materializes candidates,
+    /// runs `backtest_suite`, and returns the ranked grid plus a
+    /// flat cell table. Enforces a `max_cells` cap so the WASM
+    /// sandbox can't be DOSed by an oversized request.
+    #[serde(rename = "backtest_grid")]
+    BacktestGrid(lab::GridInput),
+
+    /// Validate a multi-surface episode (candles + optional solver
+    /// fixture + optional news context) and return a deterministic
+    /// summary. No backtest is run.
+    #[serde(rename = "validate_episode")]
+    ValidateEpisode(episode::ValidateEpisodeInput),
+
+    /// Validate an episode and replay it through `backtest_suite`,
+    /// surfacing the embedded solver fixture and news context so the
+    /// caller can route them into `build_intent` and the analyst
+    /// memos.
+    #[serde(rename = "replay_episode")]
+    ReplayEpisode(episode::ReplayEpisodeInput),
 
     /// Plan a premium-source research query before fetching paywalled
     /// content. This ranks candidate sources, enforces a budget, and
@@ -259,9 +313,10 @@ impl exports::near::agent::tool::Guest for PortfolioTool {
          classifies them against an embedded protocol registry, generates ranked \
          rebalancing proposals from declarative strategy docs, and builds unsigned \
          NEAR Intent bundles. Operations: scan, propose, build_intent, progress, \
-         backtest, backtest_suite, plan_paid_research, plan_dripstack_browse, \
-         fetch_dripstack_catalog, prepare_dripstack_paid_fetch, plan_near_intents_trial, \
-         format_suggestion, format_widget, format_intents_widget. \
+         backtest, backtest_suite, backtest_walkforward, backtest_montecarlo, \
+         backtest_grid, validate_episode, replay_episode, plan_paid_research, \
+         plan_dripstack_browse, fetch_dripstack_catalog, prepare_dripstack_paid_fetch, \
+         plan_near_intents_trial, format_suggestion, format_widget, format_intents_widget. \
          Read-only and unsigned — the agent never holds private keys."
             .to_string()
     }
@@ -357,6 +412,31 @@ fn execute_inner(params: &str) -> Result<String, String> {
             let output = backtest::run_suite(input)?;
             serde_json::to_string(&output)
                 .map_err(|e| format!("Serialize backtest_suite response: {e}"))
+        }
+        PortfolioAction::BacktestWalkForward(input) => {
+            let output = lab::run_walkforward(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize backtest_walkforward response: {e}"))
+        }
+        PortfolioAction::BacktestMonteCarlo(input) => {
+            let output = lab::run_montecarlo(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize backtest_montecarlo response: {e}"))
+        }
+        PortfolioAction::BacktestGrid(input) => {
+            let output = lab::run_grid(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize backtest_grid response: {e}"))
+        }
+        PortfolioAction::ValidateEpisode(input) => {
+            let output = episode::validate(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize validate_episode response: {e}"))
+        }
+        PortfolioAction::ReplayEpisode(input) => {
+            let output = episode::replay(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize replay_episode response: {e}"))
         }
         PortfolioAction::PlanPaidResearch(input) => {
             let output = research::plan(input)?;
