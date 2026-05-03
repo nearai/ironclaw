@@ -20,6 +20,8 @@
       "`backtest_dca` requires `candles` and `notional_per_period_usd`. It replays a fixed-cadence buy schedule, optionally with a symmetric price band (`skip_above_premium_bps` / `opportunistic_below_discount_bps`). Reports lots, breakeven, mark-to-market, max underlying drawdown, and alpha vs lump-sum buy-and-hold.",
       "`plan_dca_schedule` requires a `pair`, source/destination asset+chain, `notional_per_period_usd`, `cadence`, and `total_periods`. It emits a cron expression, per-period plans, deterministic risk gates, and a `build_intent` template the caller uses per period. All output is unsigned.",
       "`compile_intent_prompt` requires a natural-language `prompt` and returns the recommended next portfolio action (`plan_dca_schedule`, `build_intent`, `backtest_suite`, `plan_paid_research`, `format_intents_widget`, or `noop`) plus its params, extracted fields, assumptions, clarifications, and gates. Deterministic pattern matching, no LLM call. The caller invokes the recommended action separately after risk gating.",
+      "`validate_strategy` requires `candles` and a `strategy` config. It runs the base backtest plus optional walk-forward and Monte Carlo passes (Monte Carlo skipped if the base backtest produced no trades). Caller-tunable thresholds drive an `approved` / `watch` / `rejected` verdict and a per-gate pass/fail table. Use this as the single check before promoting a strategy to paper-intent construction.",
+      "`format_strategy_doc` requires a `report` field that contains any of the new backtest-family responses (`intents-backtest/1`, `intents-walkforward/1`, `intents-montecarlo/1`, `intents-grid/1`, `intents-dca-backtest/1`, `intents-dca-schedule/1`, `intents-strategy-validation/1`). It returns a journal-ready Markdown document; deterministic.",
       "`plan_paid_research` requires a `query` and optional candidate `sources`. It returns a budgeted paid-source plan with MPP/x402/NEAR rail attribution, autonomous-wallet policy gates, agentic-SEO trust gates, and NEAR funding-route hints; it does not fetch paywalled content or sign payments.",
       "`plan_dripstack_browse` models DripStack's guided topic → publication → article flow from free catalog/post metadata. A selected article becomes a paid-source candidate for `plan_paid_research`; the tool never buys or fetches article bodies.",
       "`fetch_dripstack_catalog` fetches DripStack's free publication catalog or free post-title metadata for one publication. It never calls paid article-body routes.",
@@ -30,7 +32,7 @@
     "notes": [
       "All operations are read-only and produce no signed payloads. The agent never holds private keys.",
       "Scan supports historical queries via the optional `at` field (block per chain or timestamp).",
-      "Backtest uses closed-candle signals with next-open execution to avoid lookahead and returns metrics under `intents-backtest/1`; suite ranking returns `intents-backtest-suite/1`; walk-forward returns `intents-walkforward/1`; Monte Carlo returns `intents-montecarlo/1`; grid sweeps return `intents-grid/1`; episode validation returns `intents-episode/1`; episode replay returns `intents-episode-replay/1`; DCA backtest returns `intents-dca-backtest/1`; DCA schedule planning returns `intents-dca-schedule/1`; natural-language compile returns `intents-nl-compile/1`; paid research planning returns `paid-research-plan/1`; DripStack guided browse planning returns `dripstack-browse-plan/1`; free DripStack catalog fetch returns `dripstack-catalog/1`; paid fetch preparation returns `dripstack-paid-fetch-plan/1`; nominal NEAR trial planning returns `near-intents-trial-plan/1`; NEAR Intents trading console state returns `intents-trading-widget/1`.",
+      "Backtest uses closed-candle signals with next-open execution to avoid lookahead and returns metrics under `intents-backtest/1`; suite ranking returns `intents-backtest-suite/1`; walk-forward returns `intents-walkforward/1`; Monte Carlo returns `intents-montecarlo/1`; grid sweeps return `intents-grid/1`; episode validation returns `intents-episode/1`; episode replay returns `intents-episode-replay/1`; DCA backtest returns `intents-dca-backtest/1`; DCA schedule planning returns `intents-dca-schedule/1`; natural-language compile returns `intents-nl-compile/1`; strategy validation returns `intents-strategy-validation/1`; strategy doc formatting returns `intents-strategy-doc/1`; paid research planning returns `paid-research-plan/1`; DripStack guided browse planning returns `dripstack-browse-plan/1`; free DripStack catalog fetch returns `dripstack-catalog/1`; paid fetch preparation returns `dripstack-paid-fetch-plan/1`; nominal NEAR trial planning returns `near-intents-trial-plan/1`; NEAR Intents trading console state returns `intents-trading-widget/1`.",
       "Sources: `fixture` (embedded test data), `dune` (EVM via Dune Sim), `near` (NEAR via FastNEAR+Intear), `auto` (detect per address).",
       "Use `tool_info(name: \"portfolio\", detail: \"schema\")` for the full schema before guessing fields."
     ],
@@ -184,6 +186,19 @@
         "prompt": "DCA $100 weekly into NEAR for 6 months",
         "default_chain": "near",
         "default_funding_asset": "USDC"
+      },
+      {
+        "action": "validate_strategy",
+        "candles": [],
+        "strategy": { "kind": "sma-cross", "fast_window": 5, "slow_window": 20 },
+        "walkforward_n_folds": 4,
+        "montecarlo_iterations": 500
+      },
+      {
+        "action": "format_strategy_doc",
+        "report": { "schema_version": "intents-backtest/1" },
+        "title": "NEAR/USDC SMA 5/20 — Q1 paper test",
+        "pair": "NEAR/USDC"
       }
     ]
   },

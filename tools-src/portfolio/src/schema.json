@@ -596,6 +596,41 @@
     },
     {
       "properties": {
+        "action": { "const": "validate_strategy" },
+        "candles": { "type": "array", "minItems": 2 },
+        "strategy": { "type": "object", "required": ["kind"] },
+        "initial_cash_usd": { "type": "number", "exclusiveMinimum": 0, "default": 10000 },
+        "fee_bps": { "type": "number", "minimum": 0, "default": 10 },
+        "slippage_bps": { "type": "number", "minimum": 0, "default": 5 },
+        "max_position_pct": { "type": "number", "exclusiveMinimum": 0, "maximum": 1, "default": 1 },
+        "stop_loss_bps": { "type": "number", "minimum": 0 },
+        "take_profit_bps": { "type": "number", "minimum": 0 },
+        "walkforward_n_folds": { "type": "integer", "minimum": 0, "default": 4 },
+        "walkforward_train_pct": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1, "default": 0.7 },
+        "walkforward_embargo": { "type": "integer", "minimum": 0, "default": 0 },
+        "montecarlo_iterations": { "type": "integer", "minimum": 0, "default": 1000 },
+        "montecarlo_seed": { "type": "integer" },
+        "montecarlo_method": { "type": "string", "enum": ["shuffle", "permute"], "default": "shuffle" },
+        "min_trades": { "type": "integer", "minimum": 0, "default": 5 },
+        "min_total_return_pct": { "type": "number", "default": 0 },
+        "max_drawdown_pct": { "type": "number", "minimum": 0, "default": 35 },
+        "min_profit_factor": { "type": "number", "minimum": 0, "default": 1 },
+        "max_loss_probability": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.4 },
+        "max_is_oos_gap_pct": { "type": "number", "minimum": 0, "default": 25 }
+      },
+      "required": ["action", "candles", "strategy"]
+    },
+    {
+      "properties": {
+        "action": { "const": "format_strategy_doc" },
+        "report": { "type": "object", "description": "Any of the new backtest-family responses; the formatter dispatches on `schema_version`." },
+        "title": { "type": "string" },
+        "pair": { "type": "string" }
+      },
+      "required": ["action", "report"]
+    },
+    {
+      "properties": {
         "action": { "const": "plan_paid_research" },
         "query": {
           "type": "string",

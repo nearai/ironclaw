@@ -43,6 +43,13 @@
 //!   recommended action plus extracted fields, assumptions,
 //!   clarifications, and gates. Deterministic pattern matching, no
 //!   LLM call.
+//! - `validate_strategy` — composed base backtest + walk-forward +
+//!   Monte Carlo against caller-tunable thresholds; returns an
+//!   `approved` / `watch` / `rejected` verdict with a per-gate
+//!   pass/fail table.
+//! - `format_strategy_doc` — Markdown formatter for any of the
+//!   backtest-family schemas; produces a journal-ready document the
+//!   agent persists after a run.
 //! - `plan_paid_research` — rank paid/free research sources, budget a
 //!   premium-source query, and prepare attribution/payment gates.
 //! - `plan_dripstack_browse` — model DripStack's guided topic →
@@ -95,6 +102,7 @@ mod research;
 mod strategy;
 mod trial;
 mod types;
+mod validate;
 mod widget;
 
 #[cfg(test)]
@@ -234,6 +242,21 @@ enum PortfolioAction {
     #[serde(rename = "compile_intent_prompt")]
     CompileIntentPrompt(nl::CompileInput),
 
+    /// Composed strategy validation: runs the base backtest plus
+    /// optional walk-forward and Monte Carlo passes against a single
+    /// candidate, applies caller-tunable eligibility thresholds, and
+    /// returns an `approved` / `watch` / `rejected` verdict with a
+    /// per-gate pass/fail table.
+    #[serde(rename = "validate_strategy")]
+    ValidateStrategy(validate::ValidateStrategyInput),
+
+    /// Format any of the new backtest-family responses (base
+    /// backtest, walk-forward, Monte Carlo, grid, DCA backtest, DCA
+    /// schedule, validation) as a journal-ready Markdown document.
+    /// Deterministic; the caller persists the output.
+    #[serde(rename = "format_strategy_doc")]
+    FormatStrategyDoc(validate::FormatStrategyDocInput),
+
     /// Plan a premium-source research query before fetching paywalled
     /// content. This ranks candidate sources, enforces a budget, and
     /// returns attribution/payment gates for MPP, x402, and NEAR
@@ -351,7 +374,8 @@ impl exports::near::agent::tool::Guest for PortfolioTool {
          NEAR Intent bundles. Operations: scan, propose, build_intent, progress, \
          backtest, backtest_suite, backtest_walkforward, backtest_montecarlo, \
          backtest_grid, backtest_dca, plan_dca_schedule, compile_intent_prompt, \
-         validate_episode, replay_episode, plan_paid_research, \
+         validate_strategy, format_strategy_doc, validate_episode, replay_episode, \
+         plan_paid_research, \
          plan_dripstack_browse, fetch_dripstack_catalog, prepare_dripstack_paid_fetch, \
          plan_near_intents_trial, format_suggestion, format_widget, format_intents_widget. \
          Read-only and unsigned — the agent never holds private keys."
@@ -489,6 +513,16 @@ fn execute_inner(params: &str) -> Result<String, String> {
             let output = nl::compile(input)?;
             serde_json::to_string(&output)
                 .map_err(|e| format!("Serialize compile_intent_prompt response: {e}"))
+        }
+        PortfolioAction::ValidateStrategy(input) => {
+            let output = validate::run(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize validate_strategy response: {e}"))
+        }
+        PortfolioAction::FormatStrategyDoc(input) => {
+            let output = validate::format(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize format_strategy_doc response: {e}"))
         }
         PortfolioAction::PlanPaidResearch(input) => {
             let output = research::plan(input)?;

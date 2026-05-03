@@ -1284,6 +1284,77 @@ fn check_expectations(path: &str, step: &Step, response: &Value, prior: &BTreeMa
                     step.name
                 );
             }
+            "validation_eligibility" => {
+                let got = response
+                    .get("eligibility")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| {
+                        panic!("[{path}] step '{}': missing eligibility", step.name)
+                    });
+                let want = expected.as_str().expect("validation_eligibility: string");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': validation eligibility mismatch",
+                    step.name
+                );
+            }
+            "validation_has_walkforward" => {
+                let got = response
+                    .get("walkforward")
+                    .map(|v| !v.is_null())
+                    .unwrap_or(false);
+                let want = expected
+                    .as_bool()
+                    .expect("validation_has_walkforward: bool");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': validation walkforward presence mismatch",
+                    step.name
+                );
+            }
+            "validation_has_montecarlo" => {
+                let got = response
+                    .get("montecarlo")
+                    .map(|v| !v.is_null())
+                    .unwrap_or(false);
+                let want = expected.as_bool().expect("validation_has_montecarlo: bool");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': validation montecarlo presence mismatch",
+                    step.name
+                );
+            }
+            "doc_kind" => {
+                let got = response
+                    .get("kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| panic!("[{path}] step '{}': missing kind", step.name));
+                let want = expected.as_str().expect("doc_kind: string");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': doc kind mismatch",
+                    step.name
+                );
+            }
+            "doc_markdown_contains" => {
+                let needles: Vec<String> = expected
+                    .as_array()
+                    .expect("doc_markdown_contains: array")
+                    .iter()
+                    .map(|v| v.as_str().expect("string").to_string())
+                    .collect();
+                let md = response
+                    .get("markdown")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                for needle in &needles {
+                    assert!(
+                        md.contains(needle.as_str()),
+                        "[{path}] step '{}': markdown missing '{needle}'",
+                        step.name
+                    );
+                }
+            }
             other => panic!(
                 "[{path}] step '{}': unknown expectation key '{other}'",
                 step.name
