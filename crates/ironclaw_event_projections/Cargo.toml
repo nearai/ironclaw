@@ -12,5 +12,6 @@ serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 
 [dev-dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt"] }

@@ -1,13 +1,15 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use ironclaw_event_projections::{
     EventProjectionService, ProjectionCursor, ProjectionError, ProjectionRequest, ProjectionScope,
     ReplayEventProjectionService, RunProjectionStatus, TimelineEntryKind,
 };
 use ironclaw_events::{
     DurableEventLog, EventCursor, EventError, EventLogEntry, EventReplay, EventStreamKey,
-    InMemoryDurableEventLog, ReadScope, RuntimeEvent,
+    InMemoryDurableEventLog, ReadScope, RuntimeEvent, RuntimeEventId, RuntimeEventKind,
+    UNCLASSIFIED_ERROR_KIND,
 };
 use ironclaw_host_api::{
     AgentId, CapabilityId, ExtensionId, InvocationId, ProcessId, ProjectId, ResourceScope,
@@ -441,4 +443,275 @@ fn capability_id() -> CapabilityId {
 
 fn provider_id() -> ExtensionId {
     ExtensionId::new("script").unwrap()
+}
+
+// -----------------------------------------------------------------------------
+// Regression: PR #3212 review feedback (serrrfirat, 2026-05-03)
+// -----------------------------------------------------------------------------
+
+/// Regression for review comment 3178562797: a custom `DurableEventLog`
+/// backend can return a `RuntimeEvent` whose `error_kind` was never run
+/// through `sanitize_error_kind` (the typed constructors always sanitize, but
+/// the struct fields are `pub` so direct construction or a future backend can
+/// bypass them). The projection layer must re-sanitize at the projection
+/// boundary so leaked paths/secrets cannot reach product DTOs.
+#[tokio::test]
+async fn replay_projection_re_sanitizes_unsanitized_runtime_events_from_custom_backend() {
+    let scope = scope_for_thread(ThreadId::new("thread-a").unwrap());
+    let raw = "raw failure /tmp/private-host-path SECRET_PROJECTION_SENTINEL_sk_live";
+    let unsanitized = RuntimeEvent {
+        event_id: RuntimeEventId::new(),
+        timestamp: Utc::now(),
+        kind: RuntimeEventKind::ProcessFailed,
+        scope: scope.clone(),
+        capability_id: capability_id(),
+        provider: Some(provider_id()),
+        runtime: Some(RuntimeKind::Script),
+        process_id: Some(ProcessId::new()),
+        output_bytes: None,
+        error_kind: Some(raw.to_string()),
+    };
+    let backend = Arc::new(StaticDurableEventLog {
+        entries: vec![EventLogEntry {
+            cursor: EventCursor::new(1),
+            record: unsanitized,
+        }],
+    });
+    let service = ReplayEventProjectionService::new(Arc::clone(&backend));
+
+    let snapshot = service
+        .snapshot(ProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&scope),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.timeline.entries.len(), 1);
+    assert_eq!(
+        snapshot.timeline.entries[0].error_kind.as_deref(),
+        Some(UNCLASSIFIED_ERROR_KIND)
+    );
+    assert_eq!(snapshot.runs.len(), 1);
+    assert_eq!(
+        snapshot.runs[0].error_kind.as_deref(),
+        Some(UNCLASSIFIED_ERROR_KIND)
+    );
+    let serialized = serde_json::to_string(&snapshot).unwrap();
+    for forbidden in [
+        "/tmp/private-host-path",
+        "SECRET_PROJECTION_SENTINEL",
+        "sk_live",
+        "raw failure",
+    ] {
+        assert!(
+            !serialized.contains(forbidden),
+            "projection leaked {forbidden}: {serialized}"
+        );
+    }
+}
+
+/// Regression for review comment 3178562826: for a process-backed run, a
+/// late `DispatchSucceeded` event must NOT clobber a terminal `Failed` /
+/// `Killed` status produced by an earlier `process_failed` /
+/// `process_killed` event. The previous guard only preserved `Running`; the
+/// `process_started -> process_failed -> dispatch_succeeded` ordering would
+/// silently mark the run `Completed` and hide the failure.
+#[tokio::test]
+async fn replay_projection_dispatch_succeeded_does_not_clobber_terminal_process_failure() {
+    let log = Arc::new(InMemoryDurableEventLog::new());
+    let service = ReplayEventProjectionService::new(Arc::clone(&log));
+    let scope = scope_for_thread(ThreadId::new("thread-a").unwrap());
+    let capability = capability_id();
+    let provider = provider_id();
+    let process_id = ProcessId::new();
+
+    log.append(RuntimeEvent::process_started(
+        scope.clone(),
+        capability.clone(),
+        provider.clone(),
+        RuntimeKind::Script,
+        process_id,
+    ))
+    .await
+    .unwrap();
+    log.append(RuntimeEvent::process_failed(
+        scope.clone(),
+        capability.clone(),
+        provider.clone(),
+        RuntimeKind::Script,
+        process_id,
+        "process_crashed",
+    ))
+    .await
+    .unwrap();
+    log.append(RuntimeEvent::dispatch_succeeded(
+        scope.clone(),
+        capability,
+        provider,
+        RuntimeKind::Script,
+        0,
+    ))
+    .await
+    .unwrap();
+
+    let snapshot = service
+        .snapshot(ProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&scope),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.runs.len(), 1);
+    assert_eq!(snapshot.runs[0].status, RunProjectionStatus::Failed);
+    assert_eq!(
+        snapshot.runs[0].error_kind.as_deref(),
+        Some("process_crashed")
+    );
+}
+
+/// Same regression, but for `process_killed` followed by
+/// `dispatch_succeeded`.
+#[tokio::test]
+async fn replay_projection_dispatch_succeeded_does_not_clobber_terminal_process_killed() {
+    let log = Arc::new(InMemoryDurableEventLog::new());
+    let service = ReplayEventProjectionService::new(Arc::clone(&log));
+    let scope = scope_for_thread(ThreadId::new("thread-a").unwrap());
+    let capability = capability_id();
+    let provider = provider_id();
+    let process_id = ProcessId::new();
+
+    log.append(RuntimeEvent::process_started(
+        scope.clone(),
+        capability.clone(),
+        provider.clone(),
+        RuntimeKind::Script,
+        process_id,
+    ))
+    .await
+    .unwrap();
+    log.append(RuntimeEvent::process_killed(
+        scope.clone(),
+        capability.clone(),
+        provider.clone(),
+        RuntimeKind::Script,
+        process_id,
+    ))
+    .await
+    .unwrap();
+    log.append(RuntimeEvent::dispatch_succeeded(
+        scope.clone(),
+        capability,
+        provider,
+        RuntimeKind::Script,
+        0,
+    ))
+    .await
+    .unwrap();
+
+    let snapshot = service
+        .snapshot(ProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&scope),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.runs.len(), 1);
+    assert_eq!(snapshot.runs[0].status, RunProjectionStatus::Killed);
+}
+
+/// Regression for review comment 3178562852: `updates(limit=1)` on a
+/// long-lived thread used to read the full prefix into a `Vec` (via the
+/// removed `read_runtime_prefix`) before projecting runs. After the fix it
+/// folds the prefix incrementally with `O(touched_runs)` allocation, and a
+/// hard cap surfaces `RebaseRequired` rather than allocating without
+/// bound. This test seeds many prefix events and asserts the bounded-page
+/// contract.
+#[tokio::test]
+async fn replay_projection_updates_with_small_limit_handles_long_prefix() {
+    let log = Arc::new(InMemoryDurableEventLog::new());
+    let service = ReplayEventProjectionService::new(Arc::clone(&log));
+    let scope = scope_for_thread(ThreadId::new("thread-a").unwrap());
+    let capability = capability_id();
+
+    // Seed many prefix entries (smaller than the rebase cap, larger than the
+    // internal page limit so we exercise the paging fold path).
+    let prefix_len: usize = 600;
+    for _ in 0..prefix_len {
+        log.append(RuntimeEvent::dispatch_requested(
+            scope.clone(),
+            capability.clone(),
+        ))
+        .await
+        .unwrap();
+    }
+
+    // Resume from "just before the tail" so `updates(limit=1)` returns one
+    // new event and must fold the prefix to reconstruct the touched run.
+    let resume_after = ProjectionCursor::new(EventCursor::new(prefix_len as u64 - 1));
+    let replay = service
+        .updates(ProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&scope),
+            after: Some(resume_after),
+            limit: 1,
+        })
+        .await
+        .unwrap();
+
+    // The page is bounded to `limit=1`, regardless of prefix length.
+    assert_eq!(replay.updates.len(), 1);
+    // The single touched run is reconstructed from the folded prefix.
+    assert_eq!(replay.runs.len(), 1);
+    assert_eq!(replay.runs[0].status, RunProjectionStatus::Running);
+    assert_eq!(
+        replay.next_cursor.runtime,
+        EventCursor::new(prefix_len as u64)
+    );
+}
+
+/// A custom backend that returns a fixed set of (cursor, record) entries on
+/// the first `read_after_cursor(after=None, ..)` call and an empty page
+/// otherwise. Used for regressions that need to inject hand-built
+/// `RuntimeEvent`s that bypass the typed sanitizing constructors.
+struct StaticDurableEventLog {
+    entries: Vec<EventLogEntry<RuntimeEvent>>,
+}
+
+#[async_trait]
+impl DurableEventLog for StaticDurableEventLog {
+    async fn append(
+        &self,
+        _event: RuntimeEvent,
+    ) -> Result<EventLogEntry<RuntimeEvent>, EventError> {
+        Err(EventError::DurableLog {
+            reason: "static-log:append-not-supported".to_string(),
+        })
+    }
+
+    async fn read_after_cursor(
+        &self,
+        _stream: &EventStreamKey,
+        _filter: &ReadScope,
+        after: Option<EventCursor>,
+        limit: usize,
+    ) -> Result<EventReplay<RuntimeEvent>, EventError> {
+        let cutoff = after.unwrap_or_else(EventCursor::origin);
+        let visible: Vec<EventLogEntry<RuntimeEvent>> = self
+            .entries
+            .iter()
+            .filter(|entry| entry.cursor > cutoff)
+            .take(limit)
+            .cloned()
+            .collect();
+        let next_cursor = visible.last().map(|entry| entry.cursor).unwrap_or(cutoff);
+        Ok(EventReplay {
+            entries: visible,
+            next_cursor,
+        })
+    }
 }

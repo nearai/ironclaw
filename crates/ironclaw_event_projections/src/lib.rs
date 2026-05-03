@@ -11,7 +11,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_events::{
     DurableEventLog, EventCursor, EventError, EventLogEntry, EventStreamKey, ReadScope,
-    RuntimeEvent, RuntimeEventKind,
+    RuntimeEvent, RuntimeEventKind, sanitize_error_kind,
 };
 use ironclaw_host_api::{
     CapabilityId, ExtensionId, InvocationId, ProcessId, ResourceScope, RuntimeKind, ThreadId,
@@ -21,6 +21,19 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 const STATE_REPLAY_PAGE_LIMIT: usize = 256;
+
+/// Hard ceiling on how many runtime-prefix events `updates()` will fold while
+/// reconstructing run state for touched invocations on a single call.
+///
+/// `updates()` does not collect the prefix into a `Vec`; it folds each page
+/// incrementally so memory stays `O(touched_runs)` regardless of stream
+/// length. This cap is a defense-in-depth against pathological streams (e.g.
+/// a long-lived thread with millions of runtime events) where even paging
+/// through the prefix would burn unbounded CPU on every poll. When the cap
+/// is hit, the call surfaces [`ProjectionError::RebaseRequired`] so the
+/// caller knows it must re-snapshot rather than silently see a partial
+/// run-state view.
+const STATE_REPLAY_MAX_EVENTS: usize = 100_000;
 
 /// Scoped projection request authority.
 ///
@@ -275,17 +288,29 @@ impl ReplayEventProjectionService {
         })
     }
 
-    async fn read_runtime_prefix(
+    /// Fold the runtime-event prefix `(origin, until]` for `scope` into the
+    /// run-state projection for the invocations identified by `touched`.
+    ///
+    /// This is the bounded-memory replacement for collecting the entire
+    /// prefix into a `Vec`. The fold visits each page in sequence and only
+    /// retains state for invocations the caller already saw in the current
+    /// page, so allocation is `O(touched.len())` regardless of how many
+    /// runtime events the stream has produced. A hard cap of
+    /// [`STATE_REPLAY_MAX_EVENTS`] events scanned per call protects against
+    /// pathological histories — when exceeded, the caller is told to rebase.
+    async fn fold_runtime_prefix(
         &self,
         scope: &ProjectionScope,
         until: EventCursor,
-    ) -> Result<Vec<EventLogEntry<RuntimeEvent>>, ProjectionError> {
-        if until == EventCursor::origin() {
-            return Ok(Vec::new());
+        touched: &HashSet<InvocationId>,
+    ) -> Result<HashMap<InvocationId, RunStatusProjection>, ProjectionError> {
+        let mut runs = HashMap::<InvocationId, RunStatusProjection>::new();
+        if touched.is_empty() || until == EventCursor::origin() {
+            return Ok(runs);
         }
 
         let mut after = None;
-        let mut entries = Vec::new();
+        let mut scanned: usize = 0;
         loop {
             let replay = self
                 .runtime_log
@@ -301,14 +326,22 @@ impl ReplayEventProjectionService {
                 break;
             }
 
-            for entry in replay.entries {
+            for entry in &replay.entries {
                 if entry.cursor > until {
-                    return Ok(entries);
+                    return Ok(runs);
                 }
-                let cursor = entry.cursor;
-                entries.push(entry);
-                if cursor >= until {
-                    return Ok(entries);
+                scanned = scanned.saturating_add(1);
+                if scanned > STATE_REPLAY_MAX_EVENTS {
+                    return Err(ProjectionError::RebaseRequired {
+                        requested: ProjectionCursor::new(until),
+                        earliest: ProjectionCursor::new(entry.cursor),
+                    });
+                }
+                if touched.contains(&entry.record.scope.invocation_id) {
+                    apply_run_event(&mut runs, entry);
+                }
+                if entry.cursor >= until {
+                    return Ok(runs);
                 }
             }
 
@@ -317,7 +350,7 @@ impl ReplayEventProjectionService {
             }
             after = Some(replay.next_cursor);
         }
-        Ok(entries)
+        Ok(runs)
     }
 }
 
@@ -361,12 +394,10 @@ impl EventProjectionService for ReplayEventProjectionService {
         let mut runs = if touched_runs.is_empty() {
             Vec::new()
         } else {
-            let prefix = self
-                .read_runtime_prefix(&scope, page.next_cursor.runtime)
+            let folded = self
+                .fold_runtime_prefix(&scope, page.next_cursor.runtime, &touched_runs)
                 .await?;
-            let mut runs = project_runs(&prefix);
-            runs.retain(|run| touched_runs.contains(&run.invocation_id));
-            runs
+            folded.into_values().collect::<Vec<_>>()
         };
         sort_runs_for_projection(&mut runs);
         Ok(ProjectionReplay {
@@ -404,7 +435,7 @@ fn project_timeline_entry(entry: &EventLogEntry<RuntimeEvent>) -> TimelineEntry 
         runtime: event.runtime,
         process_id: event.process_id,
         output_bytes: event.output_bytes,
-        error_kind: event.error_kind.clone(),
+        error_kind: event.error_kind.clone().map(sanitize_error_kind),
     }
 }
 
@@ -443,6 +474,7 @@ fn apply_run_event(
         existing.map(|run| run.status),
         existing.and_then(|run| run.process_id).is_some(),
     );
+    let sanitized_error_kind = event.error_kind.clone().map(sanitize_error_kind);
     let run = runs
         .entry(event.scope.invocation_id)
         .or_insert_with(|| RunStatusProjection {
@@ -453,7 +485,7 @@ fn apply_run_event(
             provider: event.provider.clone(),
             runtime: event.runtime,
             process_id: event.process_id,
-            error_kind: event.error_kind.clone(),
+            error_kind: sanitized_error_kind.clone(),
             last_cursor: entry.cursor,
             updated_at: event.timestamp,
         });
@@ -470,8 +502,8 @@ fn apply_run_event(
     if event.process_id.is_some() {
         run.process_id = event.process_id;
     }
-    if event.error_kind.is_some() {
-        run.error_kind = event.error_kind.clone();
+    if sanitized_error_kind.is_some() {
+        run.error_kind = sanitized_error_kind;
     }
     run.last_cursor = entry.cursor;
     run.updated_at = event.timestamp;
@@ -490,6 +522,20 @@ fn run_status_for_event(
             if has_active_process && current_status == Some(RunProjectionStatus::Running) =>
         {
             RunProjectionStatus::Running
+        }
+        // For process-backed runs, `DispatchSucceeded` may simply acknowledge
+        // that a background process was spawned. If the process trail has
+        // already terminated (`Failed` or `Killed`), a late `DispatchSucceeded`
+        // must NOT overwrite that terminal status — doing so would silently
+        // hide failures from product consumers.
+        RuntimeEventKind::DispatchSucceeded
+            if has_active_process
+                && matches!(
+                    current_status,
+                    Some(RunProjectionStatus::Failed) | Some(RunProjectionStatus::Killed)
+                ) =>
+        {
+            current_status.unwrap_or(RunProjectionStatus::Failed)
         }
         RuntimeEventKind::DispatchSucceeded | RuntimeEventKind::ProcessCompleted => {
             RunProjectionStatus::Completed
