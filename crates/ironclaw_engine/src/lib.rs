@@ -86,7 +86,7 @@ pub use runtime::conversation::ConversationManager;
 pub use runtime::manager::ThreadManager;
 pub use runtime::messaging::ThreadOutcome;
 pub use runtime::mission::{
-    BudgetGate, FireRateLimit, MissionManager, MissionNotification, MissionUpdate,
+    BudgetGate, FireRateLimit, MissionGateInfo, MissionManager, MissionNotification, MissionUpdate,
 };
 pub use runtime::tree::ThreadTree;
 

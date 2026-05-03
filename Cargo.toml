@@ -274,7 +274,7 @@ lto = "thin"
 # Config for 'dist'
 [workspace.metadata.dist]
 # The preferred dist version to use in CI (Cargo.toml SemVer syntax)
-cargo-dist-version = "0.30.3"
+cargo-dist-version = "0.31.0"
 # Ignore out-of-date generated CI so custom release.yml jobs are allowed
 allow-dirty = ["ci"]
 # CI backends to support
