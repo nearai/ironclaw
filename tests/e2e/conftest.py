@@ -505,6 +505,9 @@ async def ironclaw_server(
         "IRONCLAW_OAUTH_EXCHANGE_URL": mock_llm_server,
     }
     _forward_coverage_env(env)
+    env["SECRETS_MASTER_KEY"] = (
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    )
     proc = await asyncio.create_subprocess_exec(
         ironclaw_binary, "--no-onboard",
         stdin=asyncio.subprocess.DEVNULL,
