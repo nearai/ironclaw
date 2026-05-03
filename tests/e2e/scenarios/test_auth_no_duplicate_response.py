@@ -170,6 +170,7 @@ async def auth_sse_server(ironclaw_binary, mock_llm_server, mock_api):
         "CLI_ENABLED": "false",
         "LLM_BACKEND": "openai_compatible",
         "LLM_BASE_URL": mock_llm_server,
+        "LLM_API_KEY": "mock-api-key",
         "LLM_MODEL": "mock-model",
         "DATABASE_BACKEND": "libsql",
         "LIBSQL_PATH": os.path.join(_DB_TMPDIR.name, "auth-sse-e2e.db"),
