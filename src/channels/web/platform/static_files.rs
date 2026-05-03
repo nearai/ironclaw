@@ -62,7 +62,7 @@ const STYLE_SRC: &str = "'self' 'unsafe-inline' https://fonts.googleapis.com";
 const FONT_SRC: &str = "https://fonts.gstatic.com data:";
 const CONNECT_SRC: &str = "'self' https://esm.sh https://rpc.mainnet.near.org https://rpc.testnet.near.org \
      https://api.exchange.coinbase.com https://api.coingecko.com https://api.hyperliquid.xyz \
-     https://solver-relay-v2.chaindefuser.com";
+     https://solver-relay-v2.chaindefuser.com https://1click.chaindefuser.com";
 const IMG_SRC: &str =
     "'self' data: blob: https://*.googleusercontent.com https://avatars.githubusercontent.com";
 const FRAME_SRC: &str = "https://accounts.google.com https://appleid.apple.com";

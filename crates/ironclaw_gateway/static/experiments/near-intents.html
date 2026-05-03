@@ -3,39 +3,130 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>NEAR Intents Strategy Studio</title>
+  <title>IronClaw Intents Trading Agent</title>
+  <link rel="icon" href="data:,">
   <link rel="stylesheet" href="near-intents.css">
 </head>
 <body>
-  <main class="studio-shell">
-    <header class="topbar">
-      <div>
-        <p class="eyebrow">NEAR Intents</p>
-        <h1>Strategy Studio</h1>
-      </div>
-      <div class="topbar-controls">
-        <div class="topbar-status" aria-label="Run status">
-          <span id="dataSourceLabel">No data</span>
-          <strong id="runStateLabel">Ready</strong>
-        </div>
-        <button id="topRunBtn" class="top-run" type="button">Run backtest</button>
+  <main class="app-shell">
+    <header class="vibe-nav">
+      <a class="brand-lockup" href="#studio" aria-label="IronClaw Intents">
+        <span class="brand-mark">IC</span>
+        <span>IronClaw Intents</span>
+      </a>
+      <nav aria-label="Experiment navigation">
+        <a href="#signals">Signals</a>
+        <a href="#studio">Studio</a>
+        <a href="#live">Live</a>
+      </nav>
+      <div class="nav-actions">
+        <span id="walletPill" class="wallet-pill">Wallet offline</span>
+        <button id="connectWalletBtn" class="connect-btn" type="button">Connect</button>
       </div>
     </header>
 
-    <section class="studio-grid" aria-label="Trading strategy workspace">
-      <aside class="left-rail" aria-label="Strategy controls">
-        <section class="rail-section">
+    <section class="hero" id="live" aria-label="Live trading agent">
+      <div class="hero-copy">
+        <p class="eyebrow">NEAR Intents strategy agent</p>
+        <h1>Run autonomous trading strategies through intents.</h1>
+        <p class="hero-subtitle">Backtest on live market data, ask solvers for a quote, sign with your NEAR wallet, and only publish when you explicitly run the live step.</p>
+        <div class="hero-actions">
+          <button id="heroRunBtn" class="hero-primary" type="button">Start Vibe Trading</button>
+          <button id="heroConnectBtn" class="hero-secondary" type="button">Connect wallet</button>
+        </div>
+        <div class="feature-strip" aria-label="Agent capabilities">
+          <div>
+            <strong>Risk-aware</strong>
+            <span>Caps every live signal</span>
+          </div>
+          <div>
+            <strong>Data-driven</strong>
+            <span>CoinGecko + strategy tape</span>
+          </div>
+          <div>
+            <strong>Intent-native</strong>
+            <span>Quote, sign, publish</span>
+          </div>
+        </div>
+      </div>
+
+      <section class="agent-console" aria-label="Wallet and live execution">
+        <div class="console-header">
+          <div>
+            <span>Live execution</span>
+            <strong id="liveModeLabel">Dry run ready</strong>
+          </div>
+          <button id="runLiveBtn" class="console-run" type="button">Run live once</button>
+        </div>
+        <div class="wallet-card">
+          <div>
+            <span>Wallet</span>
+            <strong id="walletStatusLabel">Not connected</strong>
+          </div>
+          <div>
+            <span>Account</span>
+            <strong id="walletAccountLabel">-</strong>
+          </div>
+          <div>
+            <span>Intents balance</span>
+            <strong id="walletBalanceLabel">Connect to query</strong>
+          </div>
+        </div>
+        <div class="live-steps" aria-label="Execution phases">
+          <span id="liveStepBacktest" class="is-active">Backtest</span>
+          <span id="liveStepQuote">Quote</span>
+          <span id="liveStepSign">Sign</span>
+          <span id="liveStepPublish">Publish</span>
+        </div>
+        <pre id="liveExecutionOutput" class="terminal-pane">Connect a NEAR wallet, run a strategy, then execute a tiny signed intent when you are ready.</pre>
+      </section>
+    </section>
+
+    <section class="core-preview" aria-label="Core features">
+      <article>
+        <div class="preview-copy">
+          <span>Vibe Agent</span>
+          <h2>Strategy agent</h2>
+          <p>Pick a strategy, tune risk, and let the agent turn the latest signal into an execution plan.</p>
+        </div>
+        <pre>signal = agent.evaluate("NEAR", "1h")
+if signal.side != "hold":
+    intent = build_token_diff(signal)</pre>
+      </article>
+      <article>
+        <div class="preview-copy">
+          <span>Vibe Studio</span>
+          <h2>NEAR Intents</h2>
+          <p>Use deposited Intents balances directly. Edit asset IDs and decimals instead of forcing one wrapped route.</p>
+        </div>
+        <pre>quote -> nep413_sign -> publish_intent
+venue = "intents.near"</pre>
+      </article>
+      <article>
+        <div class="preview-copy">
+          <span>Backtest</span>
+          <h2>Live guardrails</h2>
+          <p>Every live run inherits the same caps, slippage, and confidence checks that shaped the paper run.</p>
+        </div>
+        <pre>max_trade_usd = 5.00
+mode = "manual_signature_required"</pre>
+      </article>
+    </section>
+
+    <section class="studio-grid" id="studio" aria-label="Trading strategy workspace">
+      <aside class="control-panel" aria-label="Strategy controls">
+        <section class="panel-section">
           <div class="section-heading">
-            <span>1</span>
+            <span>01</span>
             <h2>Strategy</h2>
           </div>
           <textarea id="strategyPrompt" rows="5" spellcheck="false">NEAR spot momentum using SMA confirmation, RSI guardrail, 1.0% take profit, 0.6% stop, and small paper sizing.</textarea>
           <div id="strategyDeck" class="strategy-deck" role="radiogroup" aria-label="Strategy template"></div>
         </section>
 
-        <section class="rail-section">
+        <section class="panel-section">
           <div class="section-heading">
-            <span>2</span>
+            <span>02</span>
             <h2>Market</h2>
           </div>
           <label>
@@ -56,19 +147,25 @@
               <option value="60">60 days</option>
             </select>
           </label>
-          <label>
-            Starting cash, USD
-            <input id="balanceInput" type="number" min="10" step="10" value="1000">
-          </label>
+          <div class="dual-input">
+            <label>
+              Starting cash, USD
+              <input id="balanceInput" type="number" min="10" step="10" value="1000">
+            </label>
+            <label>
+              Live cap, USD
+              <input id="liveAmountUsdInput" type="number" min="0.01" step="0.01" value="5">
+            </label>
+          </div>
           <label>
             NEAR account
             <input id="accountInput" type="text" placeholder="viewer.near" autocomplete="off">
           </label>
         </section>
 
-        <section class="rail-section">
+        <section class="panel-section">
           <div class="section-heading">
-            <span>3</span>
+            <span>03</span>
             <h2>Risk</h2>
           </div>
           <label>
@@ -91,13 +188,83 @@
           </div>
         </section>
 
-        <section class="rail-section action-section">
-          <button id="runBacktestBtn" class="primary-action" type="button">Run backtest</button>
-          <button id="buildIntentBtn" class="secondary-action" type="button">Build intent draft</button>
+        <section class="panel-section">
+          <div class="section-heading">
+            <span>04</span>
+            <h2>Assets</h2>
+          </div>
+          <label>
+            Base asset ID
+            <input id="baseAssetInput" list="assetIdList" type="text" value="nep141:wrap.near" autocomplete="off">
+          </label>
+          <label>
+            Quote / funding asset ID
+            <input id="quoteAssetInput" list="assetIdList" type="text" value="nep141:usdt.tether-token.near" autocomplete="off">
+          </label>
+          <datalist id="assetIdList"></datalist>
+          <div class="dual-input">
+            <label>
+              Base decimals
+              <input id="baseDecimalsInput" type="number" min="0" max="30" step="1" value="24">
+            </label>
+            <label>
+              Quote decimals
+              <input id="quoteDecimalsInput" type="number" min="0" max="30" step="1" value="6">
+            </label>
+          </div>
+        </section>
+
+        <section class="panel-section">
+          <div class="section-heading">
+            <span>05</span>
+            <h2>Execution</h2>
+          </div>
+          <label>
+            Network
+            <select id="networkSelect">
+              <option value="mainnet" selected>Mainnet</option>
+              <option value="testnet">Testnet wallet only</option>
+            </select>
+          </label>
+          <label>
+            Side override
+            <select id="sideOverrideSelect">
+              <option value="auto" selected>Use latest signal</option>
+              <option value="buy">Force tiny buy</option>
+              <option value="sell">Force tiny sell</option>
+              <option value="hold">Force hold</option>
+            </select>
+          </label>
+          <label>
+            Solver relay JWT
+            <input id="solverApiKeyInput" type="password" placeholder="Required to publish signed token_diff">
+          </label>
+          <label>
+            1Click JWT (optional)
+            <input id="oneClickApiKeyInput" type="password" placeholder="Optional quote auth">
+          </label>
+          <div class="action-grid">
+            <button id="runBacktestBtn" class="primary-action" type="button">Run backtest</button>
+            <button id="dryQuoteBtn" class="secondary-action" type="button">Dry quote</button>
+            <button id="buildIntentBtn" class="secondary-action" type="button">Build intent</button>
+            <button id="fetchBalancesBtn" class="secondary-action" type="button">Balances</button>
+          </div>
         </section>
       </aside>
 
-      <section class="main-stage" aria-label="Backtest output">
+      <section class="main-stage" id="signals" aria-label="Backtest output">
+        <div class="stage-toolbar">
+          <div>
+            <p class="eyebrow">Agent run</p>
+            <h2>Signals, fills, and intent guardrails</h2>
+          </div>
+          <div class="topbar-status" aria-label="Run status">
+            <span id="dataSourceLabel">No data</span>
+            <strong id="runStateLabel">Ready</strong>
+          </div>
+          <button id="topRunBtn" class="top-run" type="button">Run backtest</button>
+        </div>
+
         <div class="pipeline" aria-label="Pipeline">
           <div class="pipeline-step is-active" data-phase="describe">
             <span>Describe</span>
@@ -189,36 +356,39 @@
         </section>
       </section>
 
-      <aside class="right-rail" aria-label="Intent inspector">
-        <section class="rail-section inspector-top">
+      <aside class="inspector-rail" aria-label="Intent inspector">
+        <section class="panel-section inspector-top">
           <p class="eyebrow">Signal</p>
           <h2 id="signalTitle">No run yet</h2>
           <p id="signalSummary">Select a strategy and run a paper backtest.</p>
         </section>
 
-        <section class="rail-section">
+        <section class="panel-section">
           <div class="section-heading">
-            <span>4</span>
+            <span>06</span>
             <h2>Validation</h2>
           </div>
           <ul id="validationList" class="validation-list"></ul>
         </section>
 
-        <section class="rail-section">
+        <section class="panel-section">
           <div class="section-heading">
-            <span>5</span>
+            <span>07</span>
             <h2>Generated Strategy</h2>
           </div>
           <pre id="strategyCode" class="code-pane">Run a strategy to generate code.</pre>
         </section>
 
-        <section class="rail-section">
+        <section class="panel-section">
           <div class="section-heading">
-            <span>6</span>
-            <h2>Unsigned Intent</h2>
+            <span>08</span>
+            <h2>Signed / Draft Intent</h2>
           </div>
           <pre id="intentOutput" class="code-pane">Run a strategy to prepare a NEAR Intents draft.</pre>
-          <button id="copyIntentBtn" class="secondary-action copy-action" type="button">Copy JSON</button>
+          <div class="copy-row">
+            <button id="copyIntentBtn" class="secondary-action copy-action" type="button">Copy JSON</button>
+            <button id="copySignedBtn" class="secondary-action copy-action" type="button">Copy signed</button>
+          </div>
         </section>
       </aside>
     </section>
