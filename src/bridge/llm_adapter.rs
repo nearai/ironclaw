@@ -415,6 +415,7 @@ fn thread_msg_to_chat(msg: &ThreadMessage) -> ChatMessage {
                     name: c.action_name.clone(),
                     arguments: c.parameters.clone(),
                     reasoning: None,
+                    thought_signature: None,
                 })
                 .collect(),
         );
@@ -1576,6 +1577,7 @@ And also check the token price:\n\
                         "project_id": "{{call-1.project_id}}"
                     }),
                     reasoning: None,
+                    thought_signature: None,
                 }],
                 input_tokens: 10,
                 output_tokens: 10,

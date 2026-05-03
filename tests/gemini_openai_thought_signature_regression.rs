@@ -154,8 +154,7 @@ async fn gemini_provider_replays_thought_signature_in_second_turn_tool_history()
     assert!(requests.len() >= 2, "expected two outbound requests");
     let second_payload = serde_json::to_string(&requests[1]).expect("serialize second payload");
     assert!(
-        second_payload.contains("thoughtSignature")
-            && second_payload.contains("sig_from_gemini"),
+        second_payload.contains("thoughtSignature") && second_payload.contains("sig_from_gemini"),
         "expected replayed Gemini thought signature in second turn payload: {second_payload}"
     );
 

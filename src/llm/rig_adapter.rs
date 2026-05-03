@@ -444,10 +444,16 @@ fn extract_response(
 fn extract_gemini_thought_signatures(raw: &serde_json::Value) -> Vec<Option<String>> {
     fn maybe_part_signature(part: &serde_json::Value) -> Option<Option<String>> {
         let fc = part.get("functionCall")?;
-        if let Some(sig) = fc.get("thoughtSignature").and_then(serde_json::Value::as_str) {
+        if let Some(sig) = fc
+            .get("thoughtSignature")
+            .and_then(serde_json::Value::as_str)
+        {
             return Some(Some(sig.to_string()));
         }
-        if let Some(sig) = fc.get("thought_signature").and_then(serde_json::Value::as_str) {
+        if let Some(sig) = fc
+            .get("thought_signature")
+            .and_then(serde_json::Value::as_str)
+        {
             return Some(Some(sig.to_string()));
         }
         Some(None)
@@ -735,12 +741,8 @@ where
             .map_err(|e| map_rig_error(&self.model_name, e))?;
 
         let raw_value = serde_json::to_value(&response.raw_response).unwrap_or_default();
-        let (text, mut tool_calls, finish) = extract_response(
-            &response.choice,
-            &response.usage,
-            &self.context,
-            &raw_value,
-        );
+        let (text, mut tool_calls, finish) =
+            extract_response(&response.choice, &response.usage, &self.context, &raw_value);
 
         // Normalize tool call names: some proxies prepend "proxy_" prefixes.
         for tc in &mut tool_calls {
@@ -1797,12 +1799,8 @@ mod tests {
     fn test_extract_response_text_only() {
         let content = OneOrMany::one(AssistantContent::text("Hello world"));
         let usage = RigUsage::new();
-        let (text, calls, finish) = extract_response(
-            &content,
-            &usage,
-            &openai_context(),
-            &serde_json::json!({}),
-        );
+        let (text, calls, finish) =
+            extract_response(&content, &usage, &openai_context(), &serde_json::json!({}));
         assert_eq!(text, Some("Hello world".to_string()));
         assert!(calls.is_empty());
         assert_eq!(finish, FinishReason::Stop);
@@ -1813,12 +1811,8 @@ mod tests {
         let tc = AssistantContent::tool_call("call_1", "search", serde_json::json!({"q": "test"}));
         let content = OneOrMany::one(tc);
         let usage = RigUsage::new();
-        let (text, calls, finish) = extract_response(
-            &content,
-            &usage,
-            &openai_context(),
-            &serde_json::json!({}),
-        );
+        let (text, calls, finish) =
+            extract_response(&content, &usage, &openai_context(), &serde_json::json!({}));
         assert!(text.is_none());
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "search");
@@ -1835,7 +1829,11 @@ mod tests {
 
     #[test]
     fn test_extract_response_captures_gemini_thought_signature() {
-        let tc = AssistantContent::tool_call("call_1", "tool_search", serde_json::json!({"q": "telegram"}));
+        let tc = AssistantContent::tool_call(
+            "call_1",
+            "tool_search",
+            serde_json::json!({"q": "telegram"}),
+        );
         let content = OneOrMany::one(tc);
         let usage = RigUsage::new();
         let raw = serde_json::json!({
