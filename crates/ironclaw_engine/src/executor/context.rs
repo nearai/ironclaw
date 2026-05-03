@@ -6,12 +6,11 @@
 use std::sync::Arc;
 
 use crate::memory::RetrievalEngine;
-use crate::traits::effect::EffectExecutor;
+use crate::traits::effect::{EffectExecutor, ThreadExecutionContext};
 use crate::types::capability::{ActionDef, CapabilityLease};
 use crate::types::error::EngineError;
 use crate::types::memory::MemoryDoc;
 use crate::types::message::ThreadMessage;
-use crate::types::project::ProjectId;
 
 /// Maximum number of memory docs to inject into context.
 const MAX_CONTEXT_DOCS: usize = 5;
@@ -26,16 +25,19 @@ pub async fn build_step_context(
     leases: &[CapabilityLease],
     effects: &Arc<dyn EffectExecutor>,
     retrieval: Option<&RetrievalEngine>,
-    project_id: ProjectId,
-    user_id: &str,
-    goal: &str,
+    context: &ThreadExecutionContext,
 ) -> Result<(Vec<ThreadMessage>, Vec<ActionDef>), EngineError> {
     // Fetch actions and memory docs in parallel — they are independent.
-    let actions_fut = effects.available_actions(leases);
+    let actions_fut = effects.available_actions(leases, context);
     let docs_fut = async {
         if let Some(engine) = retrieval {
             engine
-                .retrieve_context(project_id, user_id, goal, MAX_CONTEXT_DOCS)
+                .retrieve_context(
+                    context.project_id,
+                    &context.user_id,
+                    context.thread_goal.as_deref().unwrap_or(""),
+                    MAX_CONTEXT_DOCS,
+                )
                 .await
         } else {
             Ok(Vec::new())
@@ -130,7 +132,16 @@ mod tests {
         async fn available_actions(
             &self,
             _: &[CapabilityLease],
+            _: &crate::traits::effect::ThreadExecutionContext,
         ) -> Result<Vec<ActionDef>, EngineError> {
+            Ok(vec![])
+        }
+
+        async fn available_capabilities(
+            &self,
+            _: &[CapabilityLease],
+            _: &crate::traits::effect::ThreadExecutionContext,
+        ) -> Result<Vec<crate::types::capability::CapabilitySummary>, EngineError> {
             Ok(vec![])
         }
     }
@@ -161,9 +172,19 @@ mod tests {
             &[],
             &effects,
             Some(&retrieval),
-            project,
-            "test-user",
-            "search the web",
+            &crate::traits::effect::ThreadExecutionContext {
+                thread_id: crate::types::thread::ThreadId::new(),
+                thread_type: crate::types::thread::ThreadType::Foreground,
+                project_id: project,
+                user_id: "test-user".into(),
+                step_id: crate::types::step::StepId::new(),
+                current_call_id: None,
+                source_channel: None,
+                user_timezone: None,
+                thread_goal: Some("search the web".into()),
+                available_actions_snapshot: None,
+                available_action_inventory_snapshot: None,
+            },
         )
         .await
         .unwrap();
@@ -191,9 +212,19 @@ mod tests {
             &[],
             &effects,
             None,
-            ProjectId::new(),
-            "test-user",
-            "hello",
+            &crate::traits::effect::ThreadExecutionContext {
+                thread_id: crate::types::thread::ThreadId::new(),
+                thread_type: crate::types::thread::ThreadType::Foreground,
+                project_id: ProjectId::new(),
+                user_id: "test-user".into(),
+                step_id: crate::types::step::StepId::new(),
+                current_call_id: None,
+                source_channel: None,
+                user_timezone: None,
+                thread_goal: Some("hello".into()),
+                available_actions_snapshot: None,
+                available_action_inventory_snapshot: None,
+            },
         )
         .await
         .unwrap();
@@ -217,9 +248,19 @@ mod tests {
             &[],
             &effects,
             Some(&retrieval),
-            project,
-            "test-user",
-            "hello",
+            &crate::traits::effect::ThreadExecutionContext {
+                thread_id: crate::types::thread::ThreadId::new(),
+                thread_type: crate::types::thread::ThreadType::Foreground,
+                project_id: project,
+                user_id: "test-user".into(),
+                step_id: crate::types::step::StepId::new(),
+                current_call_id: None,
+                source_channel: None,
+                user_timezone: None,
+                thread_goal: Some("hello".into()),
+                available_actions_snapshot: None,
+                available_action_inventory_snapshot: None,
+            },
         )
         .await
         .unwrap();

@@ -76,7 +76,7 @@ use self::types::AppEvent;
 
 fn build_gateway_auth_manager(
     state: &GatewayState,
-) -> Option<Arc<crate::bridge::auth_manager::AuthManager>> {
+) -> Option<Arc<crate::auth::extension::AuthManager>> {
     state
         .tool_registry
         .as_ref()
@@ -89,7 +89,7 @@ fn build_gateway_auth_manager(
                 .map(|em| Arc::clone(em.secrets()))
         })
         .map(|secrets| {
-            Arc::new(crate::bridge::auth_manager::AuthManager::new(
+            Arc::new(crate::auth::extension::AuthManager::new(
                 secrets,
                 state.skill_registry.clone(),
                 state.extension_manager.clone(),
@@ -627,10 +627,18 @@ impl GatewayChannel {
     }
 }
 
+/// Canonical channel name for the web gateway.
+///
+/// Exported so cross-module call sites (e.g. `bridge::router`) can
+/// compare against this constant instead of duplicating the string
+/// literal — the `Channel::name()` impl below references this same
+/// constant, so the value is compile-time-pinned in both places.
+pub const GATEWAY_CHANNEL_NAME: &str = "gateway";
+
 #[async_trait]
 impl Channel for GatewayChannel {
     fn name(&self) -> &str {
-        "gateway"
+        GATEWAY_CHANNEL_NAME
     }
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
@@ -646,6 +654,35 @@ impl Channel for GatewayChannel {
                     self.config.host, self.config.port, e
                 ),
             })?;
+
+        // The warning bridge forwards WARN/ERROR log lines into the
+        // shared SSE stream as verbose-only `AppEvent::Warning` frames.
+        // The `tracing` layer that feeds it captures log context at the
+        // global subscriber scope, not at request scope — a WARN
+        // emitted inside tenant A's request handler is indistinguishable
+        // from a global gateway warning. Scoping the whole bridge to
+        // the gateway `owner_id` in multi-tenant mode would deliver
+        // tenant A's warnings to the admin/owner account instead of
+        // tenant A, misrouting per-request diagnostics across
+        // accounts. Until per-request provenance is threaded through
+        // every `warn!` / `error!` call site, keep the bridge off in
+        // multi-tenant deployments entirely.
+        if let Some(log_broadcaster) = self.state.log_broadcaster.as_ref() {
+            if self.state.multi_tenant_mode {
+                tracing::debug!(
+                    "warning bridge disabled in multi-tenant mode: \
+                     WARN/ERROR log forwarding to debug panel requires \
+                     per-request tenant provenance that is not yet \
+                     wired through the tracing layer"
+                );
+            } else {
+                log_layer::spawn_warning_bridge(
+                    Arc::clone(log_broadcaster),
+                    Arc::clone(&self.state.sse),
+                    None,
+                );
+            }
+        }
 
         platform::router::start_server(addr, self.state.clone(), self.auth.clone()).await?;
 

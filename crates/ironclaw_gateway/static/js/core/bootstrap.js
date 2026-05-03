@@ -80,7 +80,6 @@ let currentTab = 'chat';
 let currentThreadId = null;
 let currentThreadIsReadOnly = false;
 const threadChannelHints = new Map();
-let assistantThreadId = null;
 let hasMore = false;
 let oldestTimestamp = null;
 let loadingOlder = false;
@@ -122,6 +121,10 @@ const GENERATED_IMAGE_THREAD_CACHE_CAP = 20;
 const GENERATED_IMAGES_PER_THREAD_CAP = 8;
 let engineV2Enabled = false;
 let engineModeApplied = false;
+// True when the user has at least one v1 routine in the database. Set
+// from /api/routines/summary so the Routines tab stays visible after
+// an engine v1 → v2 upgrade for users with pre-existing routines (#2982).
+let userHasLegacyRoutines = false;
 let currentMissionData = null;
 let currentEngineThreadDetail = null;
 let currentMissionList = [];

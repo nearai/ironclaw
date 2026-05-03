@@ -207,6 +207,15 @@ impl SafetyLayer {
     pub fn policy(&self) -> &Policy {
         &self.policy
     }
+
+    /// Get the leak detector for direct access.
+    ///
+    /// Used by the bridge layer to redact verbose-only observability
+    /// events (e.g. `CodeExecuted`) that never flow through
+    /// `sanitize_tool_output` but still reach SSE subscribers.
+    pub fn leak_detector(&self) -> &LeakDetector {
+        &self.leak_detector
+    }
 }
 
 /// Wrap external, untrusted content with a security notice for the LLM.

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/nearai/ironclaw/compare/ironclaw_common-v0.3.0...ironclaw_common-v0.4.0) - 2026-04-29
+
+### Added
+
+- *(debug-panel)* expand Activity tab coverage with CodeAct + warnings ([#2850](https://github.com/nearai/ironclaw/pull/2850))
+- *(bridge)* project 7 more engine events to AppEvents ([#2844](https://github.com/nearai/ironclaw/pull/2844))
+- *(bridge)* project 3 dropped engine events to AppEvents ([#2797](https://github.com/nearai/ironclaw/pull/2797))
+
+### Fixed
+
+- bug bash 4/16 triage — error boundary, TEE secrets, pairing, rehydration ([#2753](https://github.com/nearai/ironclaw/pull/2753))
+
+### Other
+
+- Merge pull request #3002 from nearai/main
+
 ## [0.3.0](https://github.com/nearai/ironclaw/compare/ironclaw_common-v0.2.0...ironclaw_common-v0.3.0) - 2026-04-21
 
 ### Added

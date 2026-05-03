@@ -143,54 +143,62 @@ fn interpret_chat_response(
     result: Result<reqwest::Response, reqwest::Error>,
 ) -> TestConnectionResponse {
     match result {
-        Ok(r) => {
-            let status = r.status();
-            if status.is_success() {
-                TestConnectionResponse {
-                    ok: true,
-                    message: format!("Connected ({})", status),
-                }
-            } else if status == reqwest::StatusCode::UNAUTHORIZED
-                || status == reqwest::StatusCode::FORBIDDEN
-            {
-                TestConnectionResponse {
-                    ok: false,
-                    message: format!("Authentication failed ({})", status),
-                }
-            } else if status == reqwest::StatusCode::BAD_REQUEST
-                || status == reqwest::StatusCode::UNPROCESSABLE_ENTITY
-            {
-                // 400/422 = server reachable, likely wrong endpoint variant — connectivity OK
-                TestConnectionResponse {
-                    ok: true,
-                    message: format!("Server reachable ({})", status),
-                }
-            } else if status == reqwest::StatusCode::NOT_FOUND {
-                // 404 = /models endpoint not found — server reachable but not OpenAI-compatible
-                TestConnectionResponse {
-                    ok: false,
-                    message: format!(
-                        "Server reachable but /models endpoint not found ({}). \
-                         Check the base URL and adapter type.",
-                        status
-                    ),
-                }
-            } else if status.is_client_error() {
-                TestConnectionResponse {
-                    ok: false,
-                    message: format!("Client error ({})", status),
-                }
-            } else {
-                TestConnectionResponse {
-                    ok: false,
-                    message: format!("Server error ({})", status),
-                }
-            }
-        }
+        Ok(r) => interpret_chat_status(r.status()),
         Err(e) => TestConnectionResponse {
             ok: false,
             message: format!("Connection failed: {e}"),
         },
+    }
+}
+
+/// Pure status-code interpretation, extracted for testability.
+fn interpret_chat_status(status: reqwest::StatusCode) -> TestConnectionResponse {
+    if status.is_success() {
+        TestConnectionResponse {
+            ok: true,
+            message: format!("Connected ({})", status),
+        }
+    } else if status == reqwest::StatusCode::UNAUTHORIZED
+        || status == reqwest::StatusCode::FORBIDDEN
+    {
+        TestConnectionResponse {
+            ok: false,
+            message: format!("Authentication failed ({})", status),
+        }
+    } else if status == reqwest::StatusCode::BAD_REQUEST
+        || status == reqwest::StatusCode::UNPROCESSABLE_ENTITY
+    {
+        // 400/422 = server reachable but the request was rejected, likely a
+        // wrong model name or endpoint variant.  Report as not-ok so the UI
+        // doesn't mislead the user with a green badge.
+        TestConnectionResponse {
+            ok: false,
+            message: format!(
+                "Server reachable but returned an error ({}). \
+                 Check the model name and adapter type.",
+                status
+            ),
+        }
+    } else if status == reqwest::StatusCode::NOT_FOUND {
+        // 404 = /models endpoint not found — server reachable but not OpenAI-compatible
+        TestConnectionResponse {
+            ok: false,
+            message: format!(
+                "Server reachable but /models endpoint not found ({}). \
+                 Check the base URL and adapter type.",
+                status
+            ),
+        }
+    } else if status.is_client_error() {
+        TestConnectionResponse {
+            ok: false,
+            message: format!("Client error ({})", status),
+        }
+    } else {
+        TestConnectionResponse {
+            ok: false,
+            message: format!("Server error ({})", status),
+        }
     }
 }
 
@@ -302,13 +310,7 @@ async fn fetch_provider_models(req: ListModelsRequest) -> ListModelsResponse {
         _ => {
             // OpenAI-compatible, Anthropic, and NEAR AI all support GET /models.
             // NEAR AI private endpoints and Anthropic need a /v1 prefix.
-            let effective_base = if (req.adapter == "nearai" && is_nearai_private_endpoint(base))
-                || (req.adapter == "anthropic" && !base.ends_with("/v1") && !base.contains("/v1/"))
-            {
-                format!("{base}/v1")
-            } else {
-                base.to_string()
-            };
+            let effective_base = models_endpoint_base(&req.adapter, base);
             let url = format!("{effective_base}/models");
             let mut builder = client.get(&url);
             if req.adapter == "anthropic" {
@@ -373,12 +375,23 @@ async fn fetch_provider_models(req: ListModelsRequest) -> ListModelsResponse {
 /// (has_api_key presence flag, model override, base_url override).
 /// API keys are never returned — only a boolean `has_api_key`.
 pub async fn llm_providers_handler(
+    State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(_user): AuthenticatedUser,
 ) -> Json<serde_json::Value> {
-    Json(build_llm_providers())
+    // For NEAR AI, the OAuth onboarding writes a session token into
+    // `SessionManager` (loaded from `~/.ironclaw/session.json` or the
+    // `NEARAI_SESSION_TOKEN` env var) and never populates `NEARAI_API_KEY`.
+    // The configure surface treats `has_api_key` as the credential gate, so
+    // a host configured with only a session token would otherwise show NEAR
+    // AI as "Not Configured" and hide the Use button.
+    let nearai_has_session_token = match state.llm_session_manager.as_ref() {
+        Some(session) => session.has_token().await,
+        None => false,
+    };
+    Json(build_llm_providers(nearai_has_session_token))
 }
 
-fn build_llm_providers() -> serde_json::Value {
+fn build_llm_providers(nearai_has_session_token: bool) -> serde_json::Value {
     use crate::config::helpers::optional_env;
     use crate::llm::registry::ProviderRegistry;
 
@@ -404,11 +417,14 @@ fn build_llm_providers() -> serde_json::Value {
             serde_json::Value::String(crate::llm::DEFAULT_MODEL.to_string()),
         );
         entry.insert("api_key_required".into(), true.into());
+        entry.insert("base_url_required".into(), false.into());
         entry.insert("can_list_models".into(), true.into());
-        // Env defaults
+        // Env defaults — true if either an env API key OR a loaded session
+        // token is present; the frontend treats either as "credentials
+        // configured" because both reach NEAR AI as `Bearer <token>`.
         entry.insert(
             "has_api_key".into(),
-            read_env("NEARAI_API_KEY").is_some().into(),
+            (read_env("NEARAI_API_KEY").is_some() || nearai_has_session_token).into(),
         );
         if let Some(model) = read_env("NEARAI_MODEL") {
             entry.insert("env_model".into(), serde_json::Value::String(model));
@@ -446,6 +462,7 @@ fn build_llm_providers() -> serde_json::Value {
             serde_json::Value::String(def.default_model.clone()),
         );
         entry.insert("api_key_required".into(), def.api_key_required.into());
+        entry.insert("base_url_required".into(), def.base_url_required.into());
         let can_list = def.setup.as_ref().is_some_and(|s| s.can_list_models());
         entry.insert("can_list_models".into(), can_list.into());
         // Env defaults
@@ -476,6 +493,7 @@ fn build_llm_providers() -> serde_json::Value {
             "anthropic.claude-3-sonnet-20240229-v1:0".into(),
         );
         entry.insert("api_key_required".into(), false.into());
+        entry.insert("base_url_required".into(), false.into());
         entry.insert("can_list_models".into(), false.into());
         providers.push(serde_json::Value::Object(entry));
     }
@@ -487,8 +505,22 @@ fn build_llm_providers() -> serde_json::Value {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-/// When the frontend doesn't supply an `api_key` (because it was already vaulted),
-/// look it up from the encrypted secrets store using `provider_id` + `provider_type`.
+/// When the frontend doesn't supply an `api_key` (because it was already
+/// configured), resolve it from:
+/// 1. the encrypted secrets store (per-user vaulted key), then
+/// 2. for built-in providers, the environment variable declared by the
+///    registry (e.g. `NEARAI_API_KEY`, `OPENAI_API_KEY`), then
+/// 3. for NEAR AI specifically, the live `SessionManager` token (loaded
+///    from `~/.ironclaw/session.json` or set via `NEARAI_SESSION_TOKEN`).
+///
+/// Fallback (2) matters because the default onboarding flow
+/// (`api_key_login()` in `llm/session.rs`) writes the key to the
+/// `NEARAI_API_KEY` env var + `~/.ironclaw/.env`, not to the secrets
+/// vault. Fallback (3) covers the OAuth path: the session-token onboarding
+/// writes only `~/.ironclaw/session.json`, so a host that has neither
+/// `NEARAI_API_KEY` nor a vaulted secret would otherwise hit the configure
+/// dialog with no Authorization header even though `has_api_key`
+/// (surfaced by `build_llm_providers`) is true.
 async fn resolve_api_key_from_secrets(
     state: &GatewayState,
     user_id: &str,
@@ -504,29 +536,96 @@ async fn resolve_api_key_from_secrets(
         Some(id) => id,
         None => return,
     };
-    let secrets = match state.secrets_store.as_ref() {
-        Some(s) => s,
-        None => return,
-    };
-    let secret_name = match provider_type.as_deref() {
-        Some("custom") => crate::settings::custom_secret_name(pid),
-        _ => crate::settings::builtin_secret_name(pid),
-    };
-    if let Ok(decrypted) = secrets.get_decrypted(user_id, &secret_name).await {
-        *api_key = Some(decrypted.expose().to_string());
+
+    // 1. Encrypted secrets store (vaulted per-user key).
+    if let Some(secrets) = state.secrets_store.as_ref() {
+        let secret_name = match provider_type.as_deref() {
+            Some("custom") => crate::settings::custom_secret_name(pid),
+            _ => crate::settings::builtin_secret_name(pid),
+        };
+        if let Ok(decrypted) = secrets.get_decrypted(user_id, &secret_name).await {
+            *api_key = Some(decrypted.expose().to_string());
+            return;
+        }
+    }
+
+    // 2. Env var fallback for built-in providers.
+    if !matches!(provider_type.as_deref(), Some("custom"))
+        && let Some(env_name) = builtin_api_key_env_var(pid)
+        && let Some(val) = crate::config::helpers::env_or_override(&env_name)
+    {
+        *api_key = Some(val);
+        return;
+    }
+
+    // 3. NEAR AI session-token fallback. The OAuth onboarding path and the
+    //    `NEARAI_SESSION_TOKEN` env var both end up in `SessionManager` but
+    //    write nothing to `NEARAI_API_KEY` or the secrets vault, so a host
+    //    where only a session token is configured (the default
+    //    `~/.ironclaw/session.json` setup) would otherwise hit the configure
+    //    dialog with no Authorization header. NEAR AI accepts the session
+    //    token as `Bearer <token>` exactly like an API key — same wire shape
+    //    used by `NearAiChatProvider::resolve_bearer_token`.
+    if pid == "nearai"
+        && !matches!(provider_type.as_deref(), Some("custom"))
+        && let Some(session) = state.llm_session_manager.as_ref()
+        && session.has_token().await
+        && let Ok(token) = session.get_token().await
+    {
+        use secrecy::ExposeSecret;
+        *api_key = Some(token.expose_secret().to_string());
+    }
+}
+
+/// Env var name carrying the API key for a built-in provider, or `None`
+/// if the provider has no declared env var (e.g. `bedrock` uses the AWS
+/// credential chain). Mirrors the env names surfaced to the frontend by
+/// `build_llm_providers()`.
+fn builtin_api_key_env_var(provider_id: &str) -> Option<String> {
+    // NEAR AI is a hardcoded special case and not in the registry.
+    if provider_id == "nearai" {
+        return Some("NEARAI_API_KEY".to_string());
+    }
+    crate::llm::registry::ProviderRegistry::load()
+        .find(provider_id)
+        .and_then(|def| def.api_key_env.clone())
+}
+
+/// Compute the effective base URL for a provider's `/models` endpoint.
+///
+/// Adapters that expose `/models` under `/v1` (Anthropic, NEAR AI private)
+/// need a `/v1` segment injected — but only when the operator-supplied base
+/// URL doesn't already include one. Operators commonly configure the base
+/// with or without the suffix (`https://us.private-chat-stg.near.ai` vs
+/// `https://us.private-chat-stg.near.ai/v1`) and both shapes must resolve
+/// to the same `/v1/models` URL without producing `/v1/v1/models`.
+fn models_endpoint_base(adapter: &str, base: &str) -> String {
+    let has_v1 = base.ends_with("/v1") || base.contains("/v1/");
+    let requires_v1 =
+        (adapter == "nearai" && is_nearai_private_endpoint(base)) || adapter == "anthropic";
+    if requires_v1 && !has_v1 {
+        format!("{base}/v1")
+    } else {
+        base.to_string()
     }
 }
 
 /// Check if a base URL belongs to a NEAR AI private endpoint.
 ///
-/// Matches `private.near.ai` exactly or any subdomain of it
-/// (e.g. `us.private.near.ai`). Rejects lookalikes like
+/// Matches `private.near.ai` and `private-chat-stg.near.ai` exactly,
+/// or any subdomain of either (e.g. `us.private.near.ai`,
+/// `us.private-chat-stg.near.ai`). Rejects lookalikes like
 /// `private-evil.near.ai` or `myprivate.near.ai`.
 fn is_nearai_private_endpoint(base_url: &str) -> bool {
+    const PRIVATE_HOSTS: &[&str] = &["private.near.ai", "private-chat-stg.near.ai"];
     url::Url::parse(base_url)
         .ok()
         .and_then(|u| u.host_str().map(|h| h.to_lowercase()))
-        .is_some_and(|host| host == "private.near.ai" || host.ends_with(".private.near.ai"))
+        .is_some_and(|host| {
+            PRIVATE_HOSTS
+                .iter()
+                .any(|root| host == *root || host.ends_with(&format!(".{root}")))
+        })
 }
 
 #[cfg(test)]
@@ -556,15 +655,20 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_llm_providers_returns_nearai_with_env_vars() {
-        // SAFETY: test-only; tokio::test runs single-threaded by default.
+        // Serialize with other tests in this module that mutate
+        // NEARAI_* env vars (e.g.
+        // `test_llm_list_models_falls_back_to_env_api_key_for_nearai`).
+        let _env_lock = crate::config::helpers::lock_env();
+        // SAFETY: test-only; lock_env() serializes concurrent mutators.
         unsafe {
             std::env::set_var("NEARAI_API_KEY", "test-key-123");
             std::env::set_var("NEARAI_MODEL", "test-model");
             std::env::set_var("NEARAI_BASE_URL", "https://test.near.ai/v1");
         }
 
-        let result = build_llm_providers();
+        let result = build_llm_providers(false);
         let arr = result.as_array().expect("should be an array");
 
         let nearai = find_provider(arr, "nearai").expect("nearai entry");
@@ -593,6 +697,7 @@ mod tests {
         assert_eq!(nearai.get("builtin").and_then(|v| v.as_bool()), Some(true));
 
         // Clean up
+        // SAFETY: serialized via ENV_MUTEX.
         unsafe {
             std::env::remove_var("NEARAI_API_KEY");
             std::env::remove_var("NEARAI_MODEL");
@@ -601,8 +706,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_llm_providers_nearai_has_api_key_true_when_only_session_token() {
+        // Regression: a host with no `NEARAI_API_KEY` but a loaded session
+        // token (the default `~/.ironclaw/session.json` setup) was reported
+        // with `has_api_key: false`, so `isProviderConfigured` in
+        // `static/js/surfaces/config.js` hid the Use button and rendered a
+        // "Not Configured" badge — even though NEAR AI authenticates fine
+        // with the session token via `Bearer <token>`.
+        let result = build_llm_providers(true);
+        let arr = result.as_array().expect("should be an array");
+        let nearai = find_provider(arr, "nearai").expect("nearai entry");
+        assert_eq!(
+            nearai.get("has_api_key").and_then(|v| v.as_bool()),
+            Some(true),
+            "session-token-only NEAR AI must surface as configured"
+        );
+    }
+
+    #[tokio::test]
     async fn test_llm_providers_includes_registry_and_special_providers() {
-        let result = build_llm_providers();
+        let result = build_llm_providers(false);
         let arr = result.as_array().expect("should be an array");
 
         // Registry providers should be present
@@ -639,7 +762,32 @@ mod tests {
                 p.get("default_model").is_some(),
                 "{id} missing default_model"
             );
+            // api_key_required and base_url_required gate frontend activation —
+            // both must be present so isProviderConfigured() can reason about them.
+            assert!(
+                p.get("api_key_required").is_some(),
+                "{id} missing api_key_required"
+            );
+            assert!(
+                p.get("base_url_required").is_some(),
+                "{id} missing base_url_required"
+            );
         }
+    }
+
+    #[tokio::test]
+    async fn test_openai_compatible_exposes_base_url_required_true() {
+        // Regression: openai_compatible has base_url_required=true (no default).
+        // The frontend needs this flag to gate activation on a configured URL.
+        let result = build_llm_providers(false);
+        let arr = result.as_array().expect("should be an array");
+        let oc =
+            find_provider(arr, "openai_compatible").expect("openai_compatible should be present");
+        assert_eq!(
+            oc.get("base_url_required").and_then(|v| v.as_bool()),
+            Some(true),
+            "openai_compatible must advertise base_url_required=true so the UI gates activation"
+        );
     }
 
     // --- is_nearai_private_endpoint tests ---
@@ -652,6 +800,20 @@ mod tests {
     #[test]
     fn test_nearai_private_subdomain() {
         assert!(is_nearai_private_endpoint("https://us.private.near.ai/v1"));
+    }
+
+    #[test]
+    fn test_nearai_private_stg_exact_match() {
+        assert!(is_nearai_private_endpoint(
+            "https://private-chat-stg.near.ai/"
+        ));
+    }
+
+    #[test]
+    fn test_nearai_private_stg_subdomain() {
+        assert!(is_nearai_private_endpoint(
+            "https://us.private-chat-stg.near.ai/v1"
+        ));
     }
 
     #[test]
@@ -672,6 +834,121 @@ mod tests {
     fn test_nearai_private_non_near_ai_rejected() {
         assert!(!is_nearai_private_endpoint("https://private.evil.com/v1"));
     }
+
+    // --- models_endpoint_base tests (URL-construction path in fetch_provider_models) ---
+    //
+    // These exercise the URL-construction gate the list-models handler uses,
+    // so a future refactor that drops the /v1 guard on the NEAR AI branch
+    // fails here — not just in the is_nearai_private_endpoint unit tests.
+
+    #[test]
+    fn test_models_endpoint_base_nearai_private_stg_adds_v1() {
+        assert_eq!(
+            models_endpoint_base("nearai", "https://us.private-chat-stg.near.ai"),
+            "https://us.private-chat-stg.near.ai/v1"
+        );
+    }
+
+    #[test]
+    fn test_models_endpoint_base_nearai_private_stg_with_v1_suffix_no_double() {
+        // Regression: operators who include /v1 in the base URL must not get
+        // /v1/v1/models (404). Before the fix, the NEAR AI branch appended
+        // /v1 unconditionally for any private host.
+        assert_eq!(
+            models_endpoint_base("nearai", "https://us.private-chat-stg.near.ai/v1"),
+            "https://us.private-chat-stg.near.ai/v1"
+        );
+    }
+
+    #[test]
+    fn test_models_endpoint_base_nearai_private_exact_with_v1_no_double() {
+        assert_eq!(
+            models_endpoint_base("nearai", "https://private.near.ai/v1"),
+            "https://private.near.ai/v1"
+        );
+    }
+
+    #[test]
+    fn test_models_endpoint_base_nearai_public_unchanged() {
+        // Public NEAR AI already embeds /v1 and doesn't need the private-host
+        // treatment at all.
+        assert_eq!(
+            models_endpoint_base("nearai", "https://cloud-api.near.ai/v1"),
+            "https://cloud-api.near.ai/v1"
+        );
+    }
+
+    #[test]
+    fn test_models_endpoint_base_anthropic_adds_v1_when_missing() {
+        assert_eq!(
+            models_endpoint_base("anthropic", "https://api.anthropic.com"),
+            "https://api.anthropic.com/v1"
+        );
+    }
+
+    #[test]
+    fn test_models_endpoint_base_anthropic_with_v1_suffix_no_double() {
+        assert_eq!(
+            models_endpoint_base("anthropic", "https://api.anthropic.com/v1"),
+            "https://api.anthropic.com/v1"
+        );
+    }
+
+    #[test]
+    fn test_models_endpoint_base_openai_compatible_unchanged() {
+        // OpenAI-compatible providers don't take the /v1 injection —
+        // operators configure the full base URL themselves.
+        assert_eq!(
+            models_endpoint_base("open_ai_completions", "https://api.openai.com/v1"),
+            "https://api.openai.com/v1"
+        );
+        assert_eq!(
+            models_endpoint_base("open_ai_completions", "https://example.test"),
+            "https://example.test"
+        );
+    }
+
+    // --- interpret_chat_status tests ---
+
+    #[test]
+    fn test_interpret_chat_status_400_reports_not_ok() {
+        // Regression: 400 was previously reported as ok:true ("Server reachable"),
+        // which misled the UI into showing a green "connected" badge when the
+        // model name or endpoint was actually wrong.
+        let result = interpret_chat_status(reqwest::StatusCode::BAD_REQUEST);
+        assert!(!result.ok, "400 must not be reported as ok");
+        assert!(
+            result.message.contains("400"),
+            "message should include status code"
+        );
+        assert!(
+            result.message.contains("model name") || result.message.contains("adapter"),
+            "message should hint at model/adapter mismatch, got: {}",
+            result.message
+        );
+    }
+
+    #[test]
+    fn test_interpret_chat_status_422_reports_not_ok() {
+        let result = interpret_chat_status(reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(!result.ok, "422 must not be reported as ok");
+        assert!(result.message.contains("422"));
+    }
+
+    #[test]
+    fn test_interpret_chat_status_200_reports_ok() {
+        let result = interpret_chat_status(reqwest::StatusCode::OK);
+        assert!(result.ok, "200 should be reported as ok");
+    }
+
+    #[test]
+    fn test_interpret_chat_status_401_reports_auth_failed() {
+        let result = interpret_chat_status(reqwest::StatusCode::UNAUTHORIZED);
+        assert!(!result.ok);
+        assert!(result.message.contains("Authentication"));
+    }
+
+    // --- Admin role + private base URL tests (staging) ---
 
     #[tokio::test]
     async fn test_llm_test_connection_allows_admin_private_base_url() {
@@ -786,5 +1063,254 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    // --- Env-var fallback for builtin provider API key ---
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_llm_list_models_falls_back_to_env_api_key_for_nearai() {
+        // Regression: default onboarding (`api_key_login`) writes
+        // `NEARAI_API_KEY` to env, not to the secrets vault. Without the
+        // fallback in `resolve_api_key_from_secrets`, the configure dialog's
+        // "Fetch available models" button sends no `api_key` (UI shows
+        // "Key configured"), the handler skips Authorization, and NEAR AI
+        // returns 401.
+        use std::sync::{Arc, Mutex};
+
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        // Serialize against other tests in this module that mutate
+        // NEARAI_API_KEY (e.g. `test_llm_providers_returns_nearai_with_env_vars`).
+        // `std::env::set_var` is UB under concurrent access; the codebase uses
+        // `lock_env()` as the canonical mutex for this hazard.
+        let _env_lock = crate::config::helpers::lock_env();
+
+        let captured_auth: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let captured_auth_clone = Arc::clone(&captured_auth);
+        let mock = axum::Router::new().route(
+            "/models",
+            axum::routing::get(move |headers: axum::http::HeaderMap| {
+                let auth = headers
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .map(String::from);
+                *captured_auth_clone.lock().unwrap() = auth;
+                async move {
+                    axum::Json(serde_json::json!({
+                        "data": [{"id": "mock-model"}]
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock server");
+        let addr = listener.local_addr().expect("mock server addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, mock).await;
+        });
+
+        // SAFETY: test-only; tokio::test runs single-threaded by default.
+        // Mirrors the existing env-set pattern in this file (see
+        // `test_llm_providers_returns_nearai_with_env_vars`).
+        //
+        // `NO_PROXY` is set so reqwest bypasses any developer-machine
+        // system proxy for the 127.0.0.1 mock server. CI runners
+        // without a proxy ignore it; without it, a local HTTP proxy
+        // (e.g. ClashX on macOS) returns 502 before reaching the mock.
+        let test_key = "test-env-api-key-nearai";
+        unsafe {
+            std::env::set_var("NEARAI_API_KEY", test_key);
+            std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
+        }
+
+        let state = test_gateway_state(None);
+        let app = Router::new()
+            .route("/api/llm/list_models", post(llm_list_models_handler))
+            .with_state(state);
+
+        let req_body = serde_json::json!({
+            "adapter": "nearai",
+            "base_url": format!("http://{addr}"),
+            "provider_id": "nearai",
+            "provider_type": "builtin",
+            // intentionally no api_key — models what the UI sends when the
+            // key is "already configured" via NEARAI_API_KEY.
+        });
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/llm/list_models")
+            .header("content-type", "application/json")
+            .body(Body::from(req_body.to_string()))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "admin-user".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        let status = resp.status();
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+
+        unsafe {
+            std::env::remove_var("NEARAI_API_KEY");
+            std::env::remove_var("NO_PROXY");
+        }
+
+        assert_eq!(status, StatusCode::OK);
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json response");
+        assert_eq!(
+            parsed["ok"],
+            serde_json::Value::Bool(true),
+            "handler must report success: {parsed}"
+        );
+
+        let auth_header = captured_auth.lock().unwrap().clone();
+        assert_eq!(
+            auth_header.as_deref(),
+            Some(format!("Bearer {test_key}").as_str()),
+            "handler must forward NEARAI_API_KEY env var as Authorization header"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_llm_list_models_falls_back_to_session_token_for_nearai() {
+        // Regression: OAuth onboarding writes the session token to
+        // ~/.ironclaw/session.json (loaded into `SessionManager`) but never
+        // populates `NEARAI_API_KEY` or the secrets vault. Without the
+        // session-token fallback in `resolve_api_key_from_secrets`, a host
+        // configured with only the session token (the canonical
+        // `NEARAI_BASE_URL=https://private.near.ai` setup) would send no
+        // Authorization header and NEAR AI would respond 401 — even though
+        // the running provider authenticates fine.
+        use std::sync::{Arc, Mutex};
+
+        use axum::body::Body;
+        use secrecy::SecretString;
+        use tower::ServiceExt;
+
+        // The env-var fallback runs before the session-token fallback, so
+        // `NEARAI_API_KEY` must be unset for this test to exercise the new
+        // path. Take `lock_env()` to serialize against the env-var test in
+        // this module that sets/unsets `NEARAI_API_KEY`.
+        let _env_lock = crate::config::helpers::lock_env();
+        // SAFETY: serialized via the lock above; mirrors the surrounding
+        // test pattern.
+        unsafe {
+            std::env::remove_var("NEARAI_API_KEY");
+            std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
+        }
+
+        let captured_auth: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let captured_auth_clone = Arc::clone(&captured_auth);
+        let mock = axum::Router::new().route(
+            "/v1/models",
+            axum::routing::get(move |headers: axum::http::HeaderMap| {
+                let auth = headers
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .map(String::from);
+                *captured_auth_clone.lock().unwrap() = auth;
+                async move {
+                    axum::Json(serde_json::json!({
+                        "data": [{"id": "mock-model"}]
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock server");
+        let addr = listener.local_addr().expect("mock server addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, mock).await;
+        });
+
+        // Build a `SessionManager` with a token seeded directly — same shape
+        // as `~/.ironclaw/session.json` having been loaded at startup.
+        let session = crate::llm::SessionManager::new_async(crate::llm::SessionConfig {
+            auth_base_url: "https://private.near.ai".to_string(),
+            session_path: std::env::temp_dir().join("ironclaw-test-no-such-file.json"),
+        })
+        .await;
+        let test_token = "sess_test_session_token_xyz";
+        session
+            .set_token(SecretString::from(test_token.to_string()))
+            .await;
+        let session = Arc::new(session);
+
+        // Build a state that exposes the session manager. `test_gateway_state`
+        // doesn't take a session manager argument; the Arc it returns is
+        // unique here so we can mutate the field in place rather than
+        // re-creating the whole struct.
+        let mut base = test_gateway_state(None);
+        Arc::get_mut(&mut base)
+            .expect("unique Arc returned by test_gateway_state")
+            .llm_session_manager = Some(session);
+        let state = base;
+
+        let app = Router::new()
+            .route("/api/llm/list_models", post(llm_list_models_handler))
+            .with_state(state);
+
+        // The session-token fallback is independent of the URL shape; use
+        // a 127.0.0.1 mock with `/v1` already on the base so
+        // `models_endpoint_base` returns it unchanged and the handler hits
+        // `/v1/models` on the mock.
+        let req_body = serde_json::json!({
+            "adapter": "nearai",
+            "base_url": format!("http://{addr}/v1"),
+            "provider_id": "nearai",
+            "provider_type": "builtin",
+        });
+
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/llm/list_models")
+            .header("content-type", "application/json")
+            .body(Body::from(req_body.to_string()))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "admin-user".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        let status = resp.status();
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+
+        // SAFETY: serialized via `lock_env()`.
+        unsafe {
+            std::env::remove_var("NO_PROXY");
+        }
+
+        assert_eq!(status, StatusCode::OK);
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json response");
+        assert_eq!(
+            parsed["ok"],
+            serde_json::Value::Bool(true),
+            "handler must report success: {parsed}"
+        );
+
+        let auth_header = captured_auth.lock().unwrap().clone();
+        assert_eq!(
+            auth_header.as_deref(),
+            Some(format!("Bearer {test_token}").as_str()),
+            "handler must forward the SessionManager token as Authorization header \
+             when no NEARAI_API_KEY / vaulted secret is available"
+        );
     }
 }

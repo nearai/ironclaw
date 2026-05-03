@@ -7,18 +7,20 @@ use tokio::sync::RwLock;
 use tracing::debug;
 
 use ironclaw_engine::{
-    Capability, CapabilityRegistry, ConversationManager, LeaseManager, MissionManager,
-    PolicyEngine, Project, Store, ThreadConfig, ThreadManager, ThreadOutcome,
+    Capability, CapabilityRegistry, ConversationManager, EffectExecutor, LeaseManager,
+    MissionManager, PolicyEngine, Project, Store, ThreadConfig, ThreadManager, ThreadOutcome,
 };
 
 use ironclaw_common::AppEvent;
 use ironclaw_engine::types::{is_shared_owner, shared_owner_id};
 
 use crate::agent::Agent;
-use crate::bridge::auth_manager::AuthManager;
+use crate::auth::extension::AuthManager;
 use crate::bridge::effect_adapter::EffectBridgeAdapter;
+use crate::bridge::engine_actions::mission_capability_actions;
 use crate::bridge::llm_adapter::LlmBridgeAdapter;
 use crate::bridge::store_adapter::HybridStore;
+use crate::channels::web::GATEWAY_CHANNEL_NAME;
 use crate::channels::web::sse::SseManager;
 use crate::channels::{IncomingMessage, OutgoingResponse, StatusUpdate};
 use crate::db::Database;
@@ -68,17 +70,54 @@ fn engine_err(context: &str, e: impl std::fmt::Display) -> Error {
 /// in the server-side logs and returns a short, user-facing summary
 /// derived from the error's shape.
 ///
+/// `sse_will_deliver_to_user` signals that the caller already broadcast
+/// an `AppEvent::Error` on a per-user SSE stream that the originating
+/// channel renders to the user (today: the web gateway). In that case
+/// returning `Respond(sanitized)` would double-render the same failed
+/// turn — once as the SSE error card and again as a normal `response`
+/// frame emitted by `GatewayChannel::respond()`. When set we return
+/// `NoResponse`; otherwise we return `Respond(sanitized)` so channels
+/// without an SSE-as-primary-surface (telegram, relay, cli) still
+/// deliver the sanitized failure to the user.
+///
 /// Extracted into a named function so the sanitization flow (log + map to
 /// user-friendly text + wrap in `BridgeOutcome`) can be exercised end-to-end
 /// by unit tests without spinning up the full engine.
-fn bridge_outcome_for_failed_thread(error: &str, user_id: &str, channel: &str) -> BridgeOutcome {
+fn bridge_outcome_for_failed_thread(
+    error: &str,
+    debug_detail: Option<&str>,
+    user_id: &str,
+    channel: &str,
+    sse_will_deliver_to_user: bool,
+) -> BridgeOutcome {
+    // `warn!` carries only the size of `debug_detail`, not its contents —
+    // a full Python traceback or upstream HTTP body can be multi-KB and
+    // would flood higher-severity logs with internal text that's already
+    // available at `debug!` level. Operators who need the full detail
+    // flip `RUST_LOG=ironclaw::bridge::router=debug`. The chat reply
+    // stays sanitized per `.claude/rules/error-handling.md`, and
+    // `debug_detail` is deliberately NOT broadcast on the SSE `error`
+    // event — that payload reaches every authenticated consumer.
     tracing::warn!(
         user_id = %user_id,
         channel = %channel,
         error = %error,
+        debug_detail_bytes = debug_detail.map(|d| d.len()),
         "engine v2: thread failed; showing user-friendly summary",
     );
-    BridgeOutcome::Respond(crate::bridge::user_facing_errors::user_facing_thread_failure(error))
+    if let Some(detail) = debug_detail {
+        tracing::debug!(
+            user_id = %user_id,
+            channel = %channel,
+            detail,
+            "engine v2: thread failure debug detail",
+        );
+    }
+    if sse_will_deliver_to_user {
+        BridgeOutcome::NoResponse
+    } else {
+        BridgeOutcome::Respond(crate::bridge::user_facing_errors::user_facing_thread_failure(error))
+    }
 }
 
 const PROJECT_ATTACHMENT_DIR: &str = ".ironclaw/attachments";
@@ -360,7 +399,7 @@ async fn resolve_extension_for_action(
     // test harness): delegate to the same canonical resolver used by the
     // auth-manager path so the extension-manager branch of the precedence
     // still runs instead of falling through to a stringly credential name.
-    crate::bridge::auth_manager::resolve_auth_flow_extension_name(
+    crate::auth::extension::resolve_auth_flow_extension_name(
         action_name,
         parameters,
         credential_fallback,
@@ -1032,7 +1071,7 @@ async fn execute_pending_gate_action(
             )
         })?;
 
-    let exec_ctx = ironclaw_engine::ThreadExecutionContext {
+    let mut exec_ctx = ironclaw_engine::ThreadExecutionContext {
         thread_id: pending.thread_id,
         thread_type: thread.thread_type,
         project_id: thread.project_id,
@@ -1046,7 +1085,34 @@ async fn execute_pending_gate_action(
             .and_then(|v| v.as_str())
             .and_then(ironclaw_engine::ValidTimezone::parse),
         thread_goal: Some(thread.goal.clone()),
+        available_actions_snapshot: None,
+        available_action_inventory_snapshot: None,
     };
+    let active_leases = state
+        .thread_manager
+        .leases
+        .active_for_thread(thread.id)
+        .await;
+    match state
+        .effect_adapter
+        .available_action_inventory(&active_leases, &exec_ctx)
+        .await
+    {
+        Ok(inventory) => {
+            let inventory = Arc::new(inventory);
+            let available_actions: Arc<[ironclaw_engine::ActionDef]> =
+                inventory.inline.clone().into();
+            exec_ctx.available_actions_snapshot = Some(available_actions);
+            exec_ctx.available_action_inventory_snapshot = Some(inventory);
+        }
+        Err(error) => {
+            debug!(
+                thread_id = %thread.id,
+                action = %pending.action_name,
+                "failed to load action inventory for pending gate resume: {error}"
+            );
+        }
+    }
 
     state.effect_adapter.reset_call_count();
     match state
@@ -1563,126 +1629,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
     capabilities.register(Capability {
         name: "missions".into(),
         description: "Mission and routine lifecycle management".into(),
-        actions: vec![
-            ironclaw_engine::ActionDef {
-                name: "mission_create".into(),
-                description: "Create a new mission (routine). Use only when the user explicitly wants to set up a recurring task, scheduled check, automation, monitor, or persistent manual mission. Do not use for immediate one-shot requests like 'do it now', 'right now', or 'immediately'; complete those in the current thread. Results are delivered to the current channel by default.".into(),
-                parameters_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string", "description": "Short name for the mission/routine"},
-                        "goal": {"type": "string", "description": "What this mission should accomplish each run"},
-                        "cadence": {"type": "string", "description": "Required. How to trigger: 'manual', a cron expression (e.g. '0 9 * * *'), 'event:<channel>:<regex_pattern>' (e.g. 'event:telegram:.*', use 'event:*:<pattern>' for any channel), or 'webhook:<path>'"},
-                        "timezone": {"type": "string", "description": "IANA timezone for cron scheduling (e.g. 'America/New_York'). Defaults to the user's channel timezone."},
-                        "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Channels to deliver results to (e.g. ['gateway', 'repl']). Defaults to current channel."},
-                        "project_id": {"type": "string", "description": "Project ID to scope this mission to. If omitted, uses the current thread's project."},
-                        "cooldown_secs": {"type": "integer", "minimum": 0, "description": "Minimum seconds between triggers (default: 300 for event/webhook, 0 for cron/manual)"},
-                        "max_concurrent": {"type": "integer", "minimum": 0, "description": "Max simultaneous running threads (default: 1 for event/webhook, unlimited for cron/manual)"},
-                        "dedup_window_secs": {"type": "integer", "minimum": 0, "description": "Suppress duplicate event triggers within this window in seconds (default: 0)"},
-                        "max_threads_per_day": {"type": "integer", "minimum": 0, "description": "Daily thread budget (default: 24 for event/webhook, 10 for cron/manual)"},
-                        "success_criteria": {"type": "string", "description": "Criteria for declaring mission complete"}
-                    },
-                    "required": ["name", "goal", "cadence"]
-                }),
-                effects: vec![],
-                requires_approval: false,
-            },
-            ironclaw_engine::ActionDef {
-                name: "mission_list".into(),
-                description: "List all missions and routines in the current project.".into(),
-                parameters_schema: serde_json::json!({"type": "object"}),
-                effects: vec![],
-                requires_approval: false,
-            },
-            ironclaw_engine::ActionDef {
-                name: "mission_get".into(),
-                description: "Get detailed status and results of a specific mission or routine. Returns the mission state, approach history, and recent thread outputs. Use when the user asks about mission results, outcome, or progress.".into(),
-                parameters_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "string", "description": "Mission/routine ID to retrieve"}
-                    },
-                    "required": ["id"]
-                }),
-                effects: vec![],
-                requires_approval: false,
-            },
-            ironclaw_engine::ActionDef {
-                name: "mission_fire".into(),
-                description: "Manually trigger a mission or routine to run immediately.".into(),
-                parameters_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "string", "description": "Mission/routine ID to trigger"}
-                    },
-                    "required": ["id"]
-                }),
-                effects: vec![],
-                requires_approval: false,
-            },
-            ironclaw_engine::ActionDef {
-                name: "mission_pause".into(),
-                description: "Pause a running mission or routine.".into(),
-                parameters_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "string", "description": "Mission/routine ID to pause"}
-                    },
-                    "required": ["id"]
-                }),
-                effects: vec![],
-                requires_approval: false,
-            },
-            ironclaw_engine::ActionDef {
-                name: "mission_resume".into(),
-                description: "Resume a paused mission or routine.".into(),
-                parameters_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "string", "description": "Mission/routine ID to resume"}
-                    },
-                    "required": ["id"]
-                }),
-                effects: vec![],
-                requires_approval: false,
-            },
-            ironclaw_engine::ActionDef {
-                name: "mission_update".into(),
-                description: "Update a mission/routine. Change name, goal, cadence, guardrails, notification channels, daily budget, or success criteria. Only provided fields are changed.".into(),
-                parameters_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "string", "description": "Mission/routine ID to update"},
-                        "name": {"type": "string", "description": "New name"},
-                        "goal": {"type": "string", "description": "New goal"},
-                        "cadence": {"type": "string", "description": "New cadence: 'manual', cron expression (e.g. '0 9 * * *'), 'event:<channel>:<regex_pattern>' (e.g. 'event:telegram:.*', use 'event:*:<pattern>' for any channel), or 'webhook:<path>'"},
-                        "timezone": {"type": "string", "description": "IANA timezone for cron scheduling (e.g. 'America/New_York'). Defaults to the user's channel timezone."},
-                        "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Channels to deliver results to (e.g. ['gateway', 'repl'])"},
-                        "max_threads_per_day": {"type": "integer", "minimum": 0, "description": "Max threads per day (0 = unlimited)"},
-                        "cooldown_secs": {"type": "integer", "minimum": 0, "description": "Minimum seconds between triggers"},
-                        "max_concurrent": {"type": "integer", "minimum": 0, "description": "Max simultaneous running threads"},
-                        "dedup_window_secs": {"type": "integer", "minimum": 0, "description": "Suppress duplicate event triggers within this window in seconds"},
-                        "success_criteria": {"type": "string", "description": "Criteria for declaring mission complete"}
-                    },
-                    "required": ["id"]
-                }),
-                effects: vec![],
-                requires_approval: false,
-            },
-            ironclaw_engine::ActionDef {
-                name: "mission_complete".into(),
-                description: "Mark a mission or routine as completed (sets status to completed).".into(),
-                parameters_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "string", "description": "Mission/routine ID to mark completed"}
-                    },
-                    "required": ["id"]
-                }),
-                effects: vec![],
-                requires_approval: false,
-            },
-        ],
+        actions: mission_capability_actions(),
         knowledge: vec![],
         policies: vec![],
     });
@@ -1813,6 +1760,9 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         let sse_ref = agent.deps.sse_tx.clone();
         let db_ref = agent.deps.store.clone();
         let conv_mgr_ref = Arc::clone(&conversation_manager);
+        let auth_mgr_ref = agent.deps.auth_manager.clone();
+        let tools_ref = Arc::clone(&agent.deps.tools);
+        let ext_mgr_ref = agent.deps.extension_manager.clone();
         tokio::spawn(async move {
             loop {
                 match notification_rx.recv().await {
@@ -1823,6 +1773,9 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
                             sse_ref.as_ref(),
                             db_ref.as_ref(),
                             Some(conv_mgr_ref.as_ref()),
+                            auth_mgr_ref.as_deref(),
+                            Some(&tools_ref),
+                            ext_mgr_ref.as_deref(),
                         )
                         .await;
                     }
@@ -2571,8 +2524,17 @@ pub async fn resolve_gate(
                 )
                 .await;
 
+            // Word the deny message carefully: the resume handler treats
+            // certain imperative verb phrases ("execute it", "run it", "send
+            // it", …) as fresh execution intent and re-arms the
+            // require_action_attempt obligation, which then nudges the LLM
+            // to issue another tool call — exactly the opposite of what a
+            // denial should produce. Avoid every phrase in
+            // `crate::llm::user_signals_execution_intent`'s list (the
+            // helper is defined in `src/llm/reasoning.rs` and re-exported
+            // from `crate::llm`).
             let deny_msg = ironclaw_engine::ThreadMessage::user(format!(
-                "User denied action '{}'. Do not execute it; choose an alternative approach.{}",
+                "User denied action '{}'. Do not retry; choose a different approach.{}",
                 pending.action_name,
                 reason
                     .as_deref()
@@ -3759,7 +3721,28 @@ async fn await_thread_outcome(
                     Ok(ref evt) if evt.thread_id == thread_id => {
                         forward_event_to_channel(evt, channels, channel_name, metadata).await;
                         if let Some(sse) = sse {
-                            for app_event in thread_event_to_app_events(evt, &tid_str) {
+                            // Mirror the `send_status` gate: verbose-only
+                            // events (e.g. `CodeExecuted`, `Warning`) are
+                            // only useful when a debug subscriber is
+                            // actually listening. Skipping here avoids
+                            // flooding the shared SSE broadcast buffer
+                            // and the per-event clone cost for normal
+                            // (non-debug) browser tabs.
+                            let skip_verbose = !sse.has_verbose_receivers();
+                            let leak_detector = state.effect_adapter.safety().leak_detector();
+                            for mut app_event in thread_event_to_app_events(evt, &tid_str) {
+                                if skip_verbose && app_event.is_verbose_only() {
+                                    continue;
+                                }
+                                // The engine crate emits CodeExecuted
+                                // raw — it has no dependency on
+                                // `ironclaw_safety`. Scrub secrets
+                                // (bearer tokens, API keys, etc.) out
+                                // of the code/stdout/return_value
+                                // payload here, at the bridge boundary,
+                                // before the event reaches any SSE
+                                // subscriber.
+                                redact_code_executed_secrets(&mut app_event, leak_detector);
                                 sse.broadcast_for_user(&message.user_id, app_event);
                             }
                         }
@@ -3963,11 +3946,46 @@ async fn await_thread_outcome(
         ThreadOutcome::MaxIterations => Ok(BridgeOutcome::Respond(
             "Reached maximum iterations without completing.".into(),
         )),
-        ThreadOutcome::Failed { error } => Ok(bridge_outcome_for_failed_thread(
-            &error,
-            &message.user_id,
-            &message.channel,
-        )),
+        ThreadOutcome::Failed {
+            error,
+            debug_detail,
+        } => {
+            // Emit the sanitized failure on SSE so the web gateway's
+            // chat surface (and the Debug Inspector) renders a structured
+            // error card with activity cleanup + input re-enable. The
+            // raw `debug_detail` is deliberately NOT broadcast — SSE
+            // error frames reach every authenticated consumer, so raw
+            // tracebacks and upstream HTTP bodies must stay server-side
+            // only (logged at `debug!` inside
+            // `bridge_outcome_for_failed_thread`).
+            //
+            // When the originating channel is the gateway itself, that
+            // SSE frame IS the user-visible surface — returning
+            // `Respond(sanitized)` on top of it would double-render the
+            // same failure. For non-gateway channels the SSE frame is
+            // only a secondary per-user stream, so we still return
+            // `Respond(sanitized)` so the primary channel (telegram,
+            // relay, …) delivers the sanitized failure.
+            let sanitized = crate::bridge::user_facing_errors::user_facing_thread_failure(&error);
+            let sse_will_deliver_to_user =
+                state.sse.is_some() && message.channel == GATEWAY_CHANNEL_NAME;
+            if let Some(ref sse) = state.sse {
+                sse.broadcast_for_user(
+                    &message.user_id,
+                    AppEvent::Error {
+                        message: sanitized,
+                        thread_id: Some(thread_id.to_string()),
+                    },
+                );
+            }
+            Ok(bridge_outcome_for_failed_thread(
+                &error,
+                debug_detail.as_deref(),
+                &message.user_id,
+                &message.channel,
+                sse_will_deliver_to_user,
+            ))
+        }
         ThreadOutcome::GatePaused {
             gate_name,
             action_name,
@@ -4116,18 +4134,104 @@ fn interpret_message_event(role: &str, content_preview: &str) -> Option<&'static
 ///    consistent with what the user actually saw.
 // pub(crate) for #[cfg(test)] re-export in mod.rs; the module itself
 // is private so this has no production visibility beyond router.rs.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_mission_notification(
     notif: &ironclaw_engine::MissionNotification,
     channels: &std::sync::Arc<crate::channels::ChannelManager>,
     sse: Option<&Arc<SseManager>>,
     db: Option<&Arc<dyn Database>>,
     conv_mgr: Option<&ironclaw_engine::ConversationManager>,
+    auth_manager: Option<&AuthManager>,
+    tools: Option<&Arc<crate::tools::ToolRegistry>>,
+    extension_manager: Option<&crate::extensions::ExtensionManager>,
 ) {
     let Some(ref text) = notif.response else {
         return;
     };
 
     let full_text = format!("**[{}]** {text}", notif.mission_name);
+
+    // If the mission paused on a gate (auth, approval, external), surface
+    // the gate on every notify_channel via a structured StatusUpdate. This
+    // is what lights up the gateway UI's auth tray (or the equivalent in
+    // chat-only channels). The friendly text response below is still
+    // delivered alongside so the user sees the prompt in chat history.
+    //
+    // Pinned by issue #3133: previously a mission's child thread that
+    // paused on Gmail OAuth would emit no channel signal at all — the
+    // user got nothing actionable, the cron would re-fire on the same
+    // gate, and the LLM eventually narrated "Status: None Error: None"
+    // when its `http` fallback failed. The mission is now Paused
+    // (engine-side) AND the user gets an auth-tray entry to resolve.
+    if let Some(gate) = &notif.gate
+        && let Some(tools) = tools
+    {
+        for channel_name in &notif.notify_channels {
+            let metadata = serde_json::json!({"user_id": notif.user_id});
+            let status = match &gate.resume_kind {
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name,
+                    instructions,
+                    auth_url,
+                } => {
+                    let extension_name = resolve_extension_for_action(
+                        auth_manager,
+                        extension_manager,
+                        tools,
+                        &gate.action_name,
+                        &gate.parameters,
+                        credential_name.as_str(),
+                        &notif.user_id,
+                    )
+                    .await;
+                    // Forward `gate_request_id` (a freshly-generated
+                    // UUID), NOT the engine `call_id`. The gateway's
+                    // gate-resolve handler at
+                    // `channels/web/features/chat/mod.rs:183` (and the
+                    // WS handler at `platform/ws.rs:236`) call
+                    // `Uuid::parse_str` on the inbound `request_id` and
+                    // 400 on non-UUIDs — `call_id` ("call_xyz...") would
+                    // make the auth-tray entry unresolvable. Engine
+                    // `call_id` is preserved on `MissionGateInfo` for
+                    // half-2 auto-resume (#3166).
+                    StatusUpdate::AuthRequired {
+                        extension_name,
+                        instructions: Some(instructions.clone()),
+                        auth_url: auth_url.clone(),
+                        setup_url: None,
+                        request_id: Some(gate.gate_request_id.to_string()),
+                    }
+                }
+                ironclaw_engine::ResumeKind::Approval { allow_always } => {
+                    StatusUpdate::ApprovalNeeded {
+                        // See the AuthRequired arm above for why we
+                        // forward `gate_request_id` rather than the
+                        // engine `call_id`.
+                        request_id: gate.gate_request_id.to_string(),
+                        tool_name: gate.action_name.clone(),
+                        description: format!(
+                            "Mission '{}' is waiting for approval to run '{}'.",
+                            notif.mission_name, gate.action_name
+                        ),
+                        parameters: gate.parameters.clone(),
+                        allow_always: *allow_always,
+                    }
+                }
+                // External callbacks (webhooks etc.) don't have a
+                // user-facing tray entry — there's nothing the user can do
+                // beyond wait for the external system to reply. The text
+                // response still tells them what's pending.
+                ironclaw_engine::ResumeKind::External { .. } => continue,
+            };
+            if let Err(e) = channels.send_status(channel_name, status, &metadata).await {
+                debug!(
+                    channel = %channel_name,
+                    mission = %notif.mission_name,
+                    "failed to surface mission gate status: {e}"
+                );
+            }
+        }
+    }
 
     // `notify_user` takes precedence over the mission owner's user_id when
     // set — it lets a routine/mission deliver to a specific recipient
@@ -4480,9 +4584,127 @@ async fn forward_event_to_channel(
     }
 }
 
-/// Convert a ThreadEvent to AppEvents for the web gateway SSE stream.
+/// Bridge engine-side `CodeExecutionFailure` to its wire mirror
+/// `CodeExecutionFailureCategory` in `ironclaw_common`.
 ///
-/// Returns multiple events when needed (e.g., ToolStarted + ToolCompleted
+/// Exhaustive on purpose: if the engine enum gains a variant, this must
+/// fail to compile so both enums stay in lockstep. Per
+/// `.claude/rules/types.md` "Wire-stable enums" — do not reach for
+/// `format!("{:?}", ...)` or `.to_string()` here; the serde rename rules
+/// on the two enums independently produce snake_case, and a `Debug`
+/// detour would silently drift.
+fn code_execution_category_to_wire(
+    category: &ironclaw_engine::CodeExecutionFailure,
+) -> ironclaw_common::CodeExecutionFailureCategory {
+    use ironclaw_common::CodeExecutionFailureCategory as Wire;
+    use ironclaw_engine::CodeExecutionFailure as Src;
+    match category {
+        Src::SyntaxError => Wire::SyntaxError,
+        Src::RuntimeError => Wire::RuntimeError,
+        Src::NameLookup => Wire::NameLookup,
+        Src::VmPanic => Wire::VmPanic,
+        Src::ResourceLimit => Wire::ResourceLimit,
+        Src::ToolError => Wire::ToolError,
+        Src::OsDenied => Wire::OsDenied,
+    }
+}
+
+/// Scrub secrets (bearer tokens, API keys, etc.) out of the payload of
+/// an `AppEvent::CodeExecuted` before it is broadcast on SSE.
+///
+/// The engine crate (`ironclaw_engine`) emits `CodeExecuted` with raw
+/// `code` / `stdout` / `return_value` because it does not depend on
+/// `ironclaw_safety`. Verbose-only SSE subscribers would otherwise see
+/// model-authored Python snippets that printed credentials, API
+/// responses echoed to stdout, or credential-shaped return values —
+/// material that `sanitize_tool_output` would normally catch on the
+/// tool-output path but that never flows through that pipeline.
+///
+/// Redaction is no-op for any other `AppEvent` variant.
+fn redact_code_executed_secrets(
+    event: &mut AppEvent,
+    leak_detector: &ironclaw_safety::LeakDetector,
+) {
+    let AppEvent::CodeExecuted {
+        code,
+        stdout,
+        return_value,
+        ..
+    } = event
+    else {
+        return;
+    };
+
+    *code = redact_leaks_in_string(code, leak_detector);
+    *stdout = redact_leaks_in_string(stdout, leak_detector);
+
+    if let Some(value) = return_value {
+        redact_secrets_in_json(value, leak_detector);
+    }
+}
+
+/// Return `content` with every `LeakDetector` match replaced by
+/// `[REDACTED]`. Unlike `scan_and_clean`, this redacts matches under
+/// *any* action (`Block`, `Redact`, or `Warn`) — for a verbose-only
+/// observability event, a leak-carrying field is never appropriate to
+/// keep verbatim, regardless of what the detector's policy would say
+/// for tool output. `Block`-action patterns in particular were only
+/// flagging `should_block` before, which `scan()`'s `redacted_content`
+/// leaves `None` for — so a `ghp_…` token would have flowed through
+/// unchanged without this path.
+fn redact_leaks_in_string(content: &str, leak_detector: &ironclaw_safety::LeakDetector) -> String {
+    let scan = leak_detector.scan(content);
+    if scan.matches.is_empty() {
+        return content.to_string();
+    }
+    let mut ranges: Vec<_> = scan.matches.iter().map(|m| m.location.clone()).collect();
+    ranges.sort_by_key(|r| r.start);
+
+    let mut out = String::with_capacity(content.len());
+    let mut cursor = 0usize;
+    for range in ranges {
+        // Overlapping / duplicate ranges — skip any already covered.
+        if range.start < cursor {
+            continue;
+        }
+        out.push_str(&content[cursor..range.start]);
+        out.push_str("[REDACTED]");
+        cursor = range.end;
+    }
+    if cursor < content.len() {
+        out.push_str(&content[cursor..]);
+    }
+    out
+}
+
+/// Walk a `serde_json::Value` and replace leak-detector matches inside
+/// string values with `[REDACTED]`. Structural positions (object keys,
+/// numeric values, null/bool) pass through unchanged.
+fn redact_secrets_in_json(
+    value: &mut serde_json::Value,
+    leak_detector: &ironclaw_safety::LeakDetector,
+) {
+    match value {
+        serde_json::Value::String(s) => {
+            *s = redact_leaks_in_string(s, leak_detector);
+        }
+        serde_json::Value::Array(items) => {
+            for item in items.iter_mut() {
+                redact_secrets_in_json(item, leak_detector);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (_, v) in map.iter_mut() {
+                redact_secrets_in_json(v, leak_detector);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Convert a `ThreadEvent` to `AppEvent`s for the web gateway SSE stream.
+///
+/// Returns multiple events when needed (e.g., `ToolStarted` + `ToolCompleted`
 /// so the frontend creates the card then resolves it).
 fn thread_event_to_app_events(
     event: &ironclaw_engine::ThreadEvent,
@@ -4514,7 +4736,7 @@ fn thread_event_to_app_events(
                     name: display_name,
                     success: true,
                     error: None,
-                    parameters: None,
+                    parameters: params_summary.clone(),
                     call_id: Some(call_id.clone()),
                     duration_ms: Some(*duration_ms),
                     thread_id: Some(thread_id.into()),
@@ -4541,7 +4763,7 @@ fn thread_event_to_app_events(
                     name: display_name,
                     success: false,
                     error: Some(error.clone()),
-                    parameters: None,
+                    parameters: params_summary.clone(),
                     call_id: Some(call_id.clone()),
                     duration_ms: Some(*duration_ms),
                     thread_id: Some(thread_id.into()),
@@ -4578,12 +4800,129 @@ fn thread_event_to_app_events(
             child_thread_id: child_id.to_string(),
             goal: goal.clone(),
         }],
+        EventKind::ChildCompleted { child_id } => vec![AppEvent::ChildThreadCompleted {
+            parent_thread_id: thread_id.into(),
+            child_thread_id: child_id.to_string(),
+        }],
+        EventKind::StepFailed { error, .. } => vec![AppEvent::Error {
+            message: format!("Step failed: {error}"),
+            thread_id: Some(thread_id.into()),
+        }],
+        EventKind::CodeExecutionFailed {
+            category,
+            error,
+            code_hash,
+            duration_ms,
+            ..
+        } => vec![AppEvent::CodeExecutionFailed {
+            category: code_execution_category_to_wire(category),
+            error: error.clone(),
+            duration_ms: *duration_ms,
+            code_hash: code_hash.clone(),
+            thread_id: Some(thread_id.into()),
+        }],
         EventKind::SkillActivated { skill_names } => vec![AppEvent::SkillActivated {
             skill_names: skill_names.clone(),
             thread_id: Some(thread_id.into()),
             feedback: Vec::new(),
         }],
-        _ => vec![],
+        EventKind::CodeExecuted {
+            code,
+            stdout,
+            return_value,
+            duration_ms,
+            ..
+        } => vec![AppEvent::CodeExecuted {
+            code: code.clone(),
+            stdout: stdout.clone(),
+            return_value: return_value.clone(),
+            duration_ms: *duration_ms,
+            thread_id: Some(thread_id.into()),
+        }],
+        EventKind::LeaseGranted {
+            lease_id,
+            capability_name,
+        } => vec![AppEvent::LeaseGranted {
+            lease_id: lease_id.to_string(),
+            capability_name: capability_name.clone(),
+            thread_id: Some(thread_id.into()),
+        }],
+        EventKind::LeaseRevoked { lease_id, reason } => vec![AppEvent::LeaseRevoked {
+            lease_id: lease_id.to_string(),
+            reason: reason.clone(),
+            thread_id: Some(thread_id.into()),
+        }],
+        EventKind::LeaseExpired { lease_id } => vec![AppEvent::LeaseExpired {
+            lease_id: lease_id.to_string(),
+            thread_id: Some(thread_id.into()),
+        }],
+        EventKind::SelfImprovementStarted => vec![AppEvent::SelfImprovement {
+            phase: ironclaw_common::SelfImprovementPhase::Started,
+            thread_id: Some(thread_id.into()),
+        }],
+        EventKind::SelfImprovementComplete {
+            prompt_updated,
+            patterns_added,
+        } => vec![AppEvent::SelfImprovement {
+            phase: ironclaw_common::SelfImprovementPhase::Complete {
+                prompt_updated: *prompt_updated,
+                patterns_added: *patterns_added,
+            },
+            thread_id: Some(thread_id.into()),
+        }],
+        EventKind::SelfImprovementFailed { error } => vec![AppEvent::SelfImprovement {
+            phase: ironclaw_common::SelfImprovementPhase::Failed {
+                error: error.clone(),
+            },
+            thread_id: Some(thread_id.into()),
+        }],
+        EventKind::OrchestratorRollback {
+            from_version,
+            to_version,
+            reason,
+        } => {
+            // `reason` originates from `format!("execution failed: {e}")`
+            // in the engine's rollback path, where `e: EngineError` can
+            // render DB connection strings, file paths, or raw upstream
+            // HTTP bodies. SSE error-adjacent frames reach every
+            // authenticated consumer, so the wire carries a classified
+            // operator-facing message and the raw text stays in the log.
+            tracing::debug!(
+                from_version = *from_version,
+                to_version = *to_version,
+                raw_reason = %reason,
+                "orchestrator rollback event"
+            );
+            vec![AppEvent::OrchestratorRollback {
+                from_version: *from_version,
+                to_version: *to_version,
+                reason: crate::bridge::user_facing_errors::user_facing_rollback_reason(reason)
+                    .to_string(),
+                thread_id: Some(thread_id.into()),
+            }]
+        }
+
+        // Temporarily-suppressed engine variants. These are NOT bridged
+        // to `AppEvent` today because equivalent gate events are still
+        // emitted directly by the gate manager, and forwarding them
+        // here as well would make the UI render the same state twice.
+        // Migration plan per #2792 Phase 1 PR 3:
+        //
+        // - `ApprovalRequested` / `ApprovalReceived` are suppressed
+        //   only until the gate manager stops broadcasting direct
+        //   `AppEvent::GateRequired` / `GateResolved` events.
+        // - Once that migration lands, this function remains the
+        //   bridge: map these engine variants to the corresponding
+        //   `AppEvent`s here (or remove the direct emits), rather
+        //   than treating them as permanently dropped.
+        EventKind::ApprovalRequested { .. } => vec![],
+        EventKind::ApprovalReceived { .. } => vec![],
+
+        // Forward-compat catch-all in the engine enum (see
+        // `#[serde(other)] Unknown` in `ironclaw_engine::EventKind`).
+        // Nothing useful to show; the unknown variant would have been
+        // written by a newer binary during a rolling deploy.
+        EventKind::Unknown => vec![],
     }
 }
 
@@ -4594,6 +4933,8 @@ fn thread_event_to_app_events(
 pub struct EngineThreadInfo {
     pub id: String,
     pub goal: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub thread_type: String,
     pub state: String,
     pub project_id: String,
@@ -4840,9 +5181,18 @@ fn describe_cron(expression: &str) -> Option<String> {
 }
 
 fn thread_to_info(t: &ironclaw_engine::Thread) -> EngineThreadInfo {
+    // Fall back to a derived short label from `goal` for legacy threads
+    // persisted before the `title` field existed. Without this, frontend
+    // consumers of `EngineThreadInfo` (TUI, mission detail views) render
+    // a UUID prefix since the DTO lacks `turn_count`.
+    let title = t
+        .title
+        .clone()
+        .or_else(|| ironclaw_engine::Thread::derive_title_from_message(&t.goal));
     EngineThreadInfo {
         id: t.id.to_string(),
         goal: t.goal.clone(),
+        title,
         thread_type: format!("{:?}", t.thread_type),
         state: format!("{:?}", t.state),
         project_id: t.project_id.to_string(),
@@ -5473,6 +5823,27 @@ pub async fn reset_engine_state() {
     }
 }
 
+/// Test-only override for `EngineState::project_root`.
+///
+/// Attachment persistence resolves paths through the cached
+/// `bootstrap::ironclaw_base_dir()`; in tests that want to assert on a
+/// tempdir this override lets the test redirect writes to a known
+/// location after `init_engine` has populated `ENGINE_STATE`. Returns
+/// `true` if the override was applied.
+#[doc(hidden)]
+#[cfg(feature = "libsql")]
+pub async fn override_engine_project_root_for_test(path: PathBuf) -> bool {
+    let Some(lock) = ENGINE_STATE.get() else {
+        return false;
+    };
+    let mut guard = lock.write().await;
+    let Some(state) = guard.as_mut() else {
+        return false;
+    };
+    state.project_root = path;
+    true
+}
+
 /// Build retrospective `ExecutionTrace`s for every currently-known engine
 /// thread. Returns an empty vector when engine v2 is not initialized.
 ///
@@ -5712,10 +6083,24 @@ pub(crate) mod test_support {
             async fn available_actions(
                 &self,
                 _: &[CapabilityLease],
+                _: &ironclaw_engine::ThreadExecutionContext,
             ) -> Result<Vec<ironclaw_engine::ActionDef>, EngineError> {
                 Ok(vec![])
             }
+
+            async fn available_capabilities(
+                &self,
+                _: &[CapabilityLease],
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<Vec<ironclaw_engine::CapabilitySummary>, EngineError> {
+                Ok(vec![])
+            }
         }
+
+        let project_id = threads
+            .first()
+            .map(|thread| thread.project_id)
+            .unwrap_or_default();
 
         let store = Arc::new(ThreadTestStore::new());
         for thread in threads {
@@ -5744,7 +6129,6 @@ pub(crate) mod test_support {
         ));
         let cm = Arc::new(ConversationManager::new(Arc::clone(&tm), store_dyn.clone()));
 
-        let project_id = ProjectId::new();
         let state = EngineState {
             thread_manager: tm,
             conversation_manager: cm,
@@ -5924,11 +6308,16 @@ mod tests {
     use crate::hooks::HookRegistry;
     use crate::testing::{StubChannel, StubLlm};
     use crate::tools::ToolRegistry;
-    use futures::{StreamExt, stream};
+    use futures::{FutureExt, StreamExt, stream};
     use ironclaw_safety::SafetyLayer;
     use rust_decimal::Decimal;
 
-    static ENGINE_STATE_TEST_LOCK: LazyLock<TokioMutex<()>> = LazyLock::new(|| TokioMutex::new(()));
+    // Share the `test_support::ENGINE_STATE_TEST_LOCK` declared for the rest of
+    // the crate instead of a sibling copy — a private duplicate here would only
+    // serialize against tests in this module and would race against tests in
+    // other modules that already hold `test_support::ENGINE_STATE_TEST_LOCK`,
+    // letting concurrent tests overwrite the shared `ENGINE_STATE` `OnceLock`.
+    use super::test_support::ENGINE_STATE_TEST_LOCK;
     static CWD_TEST_LOCK: LazyLock<TokioMutex<()>> = LazyLock::new(|| TokioMutex::new(()));
 
     // ──────────────────────────────────────────────────────────────────
@@ -5950,7 +6339,9 @@ mod tests {
              File \"orchestrator.py\", line 907, in  \
              File \"orchestrator.py\", line 548, in run_loop \
              RuntimeError: LLM call failed: Provider nearai_chat request failed: HTTP 502 Bad Gateway";
-        let outcome = bridge_outcome_for_failed_thread(raw, "alice", "web");
+        // Non-gateway channel: SSE is not the primary surface, so the
+        // user-visible delivery comes through `Respond(sanitized)`.
+        let outcome = bridge_outcome_for_failed_thread(raw, None, "alice", "telegram", false);
         let BridgeOutcome::Respond(text) = outcome else {
             panic!("expected Respond, got {outcome:?}");
         };
@@ -5967,8 +6358,13 @@ mod tests {
 
     #[test]
     fn failed_thread_outcome_maps_unknown_error_to_generic_message() {
-        let outcome =
-            bridge_outcome_for_failed_thread("some unexpected internal failure", "alice", "web");
+        let outcome = bridge_outcome_for_failed_thread(
+            "some unexpected internal failure",
+            None,
+            "alice",
+            "telegram",
+            false,
+        );
         let BridgeOutcome::Respond(text) = outcome else {
             panic!("expected Respond, got {outcome:?}");
         };
@@ -5982,13 +6378,29 @@ mod tests {
     #[test]
     fn failed_thread_outcome_maps_context_too_large() {
         let raw = "Orchestrator error: Llm { reason: \"Context length exceeded: 200000 tokens used, 128000 allowed\" }";
-        let outcome = bridge_outcome_for_failed_thread(raw, "alice", "web");
+        let outcome = bridge_outcome_for_failed_thread(raw, None, "alice", "telegram", false);
         let BridgeOutcome::Respond(text) = outcome else {
             panic!("expected Respond, got {outcome:?}");
         };
         assert!(
             text.starts_with("The request was too large"),
             "unexpected text: {text}"
+        );
+    }
+
+    /// When the SSE stream is already rendering the failure to the
+    /// originating channel (gateway web UI), the helper must return
+    /// `NoResponse` so `channel.respond()` does not broadcast a second
+    /// SSE `response` frame for the same turn. Regression fence for the
+    /// double-render bug flagged on PR #2753 by serrrfirat.
+    #[test]
+    fn failed_thread_outcome_is_no_response_when_sse_will_deliver() {
+        let raw = "Orchestrator error: Llm { reason: \"HTTP 502 Bad Gateway\" }";
+        let outcome =
+            bridge_outcome_for_failed_thread(raw, Some("debug only"), "alice", "gateway", true);
+        assert!(
+            matches!(outcome, BridgeOutcome::NoResponse),
+            "expected NoResponse to avoid double-rendering an SSE-delivered failure, got {outcome:?}",
         );
     }
 
@@ -6968,6 +7380,400 @@ mod tests {
     }
 
     #[test]
+    fn redact_code_executed_scrubs_secrets_from_code_stdout_and_return_value() {
+        // Regression: PR #2850 review — `AppEvent::CodeExecuted` carried
+        // raw code / stdout / return_value to verbose SSE subscribers
+        // without passing through any leak-detection layer, so a model
+        // snippet that printed a bearer token or returned an API key
+        // would surface that material to every debug client.
+        let detector = ironclaw_safety::LeakDetector::new();
+
+        // GitHub personal access token pattern (`ghp_` + 36+
+        // alphanumerics) is in the default LeakDetector patterns.
+        let fake_secret = "ghp_aAbBcCdDeEfFgGhHiIjJkKlLmMnNoOpPqQrR";
+
+        let code = format!("headers = {{ 'X-Auth-Token': '{fake_secret}' }}");
+        let stdout = format!("response: token={fake_secret}");
+        let mut event = AppEvent::CodeExecuted {
+            code: code.clone(),
+            stdout: stdout.clone(),
+            return_value: Some(serde_json::json!({
+                "token": fake_secret,
+                "count": 42,
+            })),
+            duration_ms: 12,
+            thread_id: Some("thread-x".into()),
+        };
+
+        redact_code_executed_secrets(&mut event, &detector);
+
+        let AppEvent::CodeExecuted {
+            code: redacted_code,
+            stdout: redacted_stdout,
+            return_value,
+            ..
+        } = event
+        else {
+            panic!("expected CodeExecuted after redaction");
+        };
+
+        assert!(
+            !redacted_code.contains(fake_secret),
+            "leaked key in code: {redacted_code}"
+        );
+        assert!(
+            !redacted_stdout.contains(fake_secret),
+            "leaked key in stdout: {redacted_stdout}"
+        );
+        let rv = return_value.expect("return_value preserved");
+        let token = rv.get("token").and_then(|v| v.as_str()).unwrap_or_default();
+        assert!(
+            !token.contains(fake_secret),
+            "leaked key in return_value: {token}"
+        );
+        // Numeric sibling fields survive untouched.
+        assert_eq!(rv.get("count").and_then(|v| v.as_u64()), Some(42));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_step_failed_to_error() {
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::StepFailed {
+                step_id: ironclaw_engine::StepId::new(),
+                error: "llm provider returned 502".to_string(),
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-step-fail");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::Error { message, thread_id } = &app_events[0] else {
+            panic!("expected AppEvent::Error, got {:?}", app_events[0]);
+        };
+        assert!(
+            message.contains("llm provider returned 502"),
+            "error message should carry the engine error text, got {message:?}"
+        );
+        assert_eq!(thread_id.as_deref(), Some("thread-step-fail"));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_child_completed() {
+        let child = ironclaw_engine::ThreadId::new();
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::ChildCompleted { child_id: child },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-parent");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::ChildThreadCompleted {
+            parent_thread_id,
+            child_thread_id,
+        } = &app_events[0]
+        else {
+            panic!(
+                "expected AppEvent::ChildThreadCompleted, got {:?}",
+                app_events[0]
+            );
+        };
+        assert_eq!(parent_thread_id, "thread-parent");
+        assert_eq!(child_thread_id, &child.to_string());
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_code_execution_failed() {
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::CodeExecutionFailed {
+                step_id: ironclaw_engine::StepId::new(),
+                category: ironclaw_engine::CodeExecutionFailure::RuntimeError,
+                error: "NameError: 'foo' is not defined".to_string(),
+                code_hash: Some("abc123".to_string()),
+                duration_ms: 42,
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-codeact");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::CodeExecutionFailed {
+            category,
+            error,
+            duration_ms,
+            code_hash,
+            thread_id,
+        } = &app_events[0]
+        else {
+            panic!(
+                "expected AppEvent::CodeExecutionFailed, got {:?}",
+                app_events[0]
+            );
+        };
+        assert_eq!(
+            *category,
+            ironclaw_common::CodeExecutionFailureCategory::RuntimeError
+        );
+        assert_eq!(error, "NameError: 'foo' is not defined");
+        assert_eq!(*duration_ms, 42);
+        assert_eq!(code_hash.as_deref(), Some("abc123"));
+        assert_eq!(thread_id.as_deref(), Some("thread-codeact"));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_lease_granted() {
+        let lease = ironclaw_engine::LeaseId::new();
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::LeaseGranted {
+                lease_id: lease,
+                capability_name: "http_fetch".to_string(),
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-lease");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::LeaseGranted {
+            lease_id,
+            capability_name,
+            thread_id,
+        } = &app_events[0]
+        else {
+            panic!("expected AppEvent::LeaseGranted, got {:?}", app_events[0]);
+        };
+        assert_eq!(lease_id, &lease.to_string());
+        assert_eq!(capability_name, "http_fetch");
+        assert_eq!(thread_id.as_deref(), Some("thread-lease"));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_lease_revoked() {
+        let lease = ironclaw_engine::LeaseId::new();
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::LeaseRevoked {
+                lease_id: lease,
+                reason: "policy check failed".to_string(),
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-revoke");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::LeaseRevoked {
+            lease_id,
+            reason,
+            thread_id,
+        } = &app_events[0]
+        else {
+            panic!("expected AppEvent::LeaseRevoked, got {:?}", app_events[0]);
+        };
+        assert_eq!(lease_id, &lease.to_string());
+        assert_eq!(reason, "policy check failed");
+        assert_eq!(thread_id.as_deref(), Some("thread-revoke"));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_lease_expired() {
+        let lease = ironclaw_engine::LeaseId::new();
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::LeaseExpired { lease_id: lease },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-expire");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::LeaseExpired {
+            lease_id,
+            thread_id,
+        } = &app_events[0]
+        else {
+            panic!("expected AppEvent::LeaseExpired, got {:?}", app_events[0]);
+        };
+        assert_eq!(lease_id, &lease.to_string());
+        assert_eq!(thread_id.as_deref(), Some("thread-expire"));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_self_improvement_started() {
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::SelfImprovementStarted,
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-improve-start");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::SelfImprovement { phase, thread_id } = &app_events[0] else {
+            panic!(
+                "expected AppEvent::SelfImprovement, got {:?}",
+                app_events[0]
+            );
+        };
+        assert_eq!(phase, &ironclaw_common::SelfImprovementPhase::Started);
+        assert_eq!(thread_id.as_deref(), Some("thread-improve-start"));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_self_improvement_failed() {
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::SelfImprovementFailed {
+                error: "diagnosis prompt timed out".to_string(),
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-improve-fail");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::SelfImprovement { phase, thread_id } = &app_events[0] else {
+            panic!(
+                "expected AppEvent::SelfImprovement, got {:?}",
+                app_events[0]
+            );
+        };
+        let ironclaw_common::SelfImprovementPhase::Failed { error } = phase else {
+            panic!("expected SelfImprovementPhase::Failed, got {phase:?}");
+        };
+        assert_eq!(error, "diagnosis prompt timed out");
+        assert_eq!(thread_id.as_deref(), Some("thread-improve-fail"));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_self_improvement_complete() {
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::SelfImprovementComplete {
+                prompt_updated: true,
+                patterns_added: 3,
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-improve");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::SelfImprovement { phase, thread_id } = &app_events[0] else {
+            panic!(
+                "expected AppEvent::SelfImprovement, got {:?}",
+                app_events[0]
+            );
+        };
+        let ironclaw_common::SelfImprovementPhase::Complete {
+            prompt_updated,
+            patterns_added,
+        } = phase
+        else {
+            panic!("expected SelfImprovementPhase::Complete, got {phase:?}");
+        };
+        assert!(*prompt_updated);
+        assert_eq!(*patterns_added, 3);
+        assert_eq!(thread_id.as_deref(), Some("thread-improve"));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_bridges_orchestrator_rollback() {
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::OrchestratorRollback {
+                from_version: 7,
+                to_version: 6,
+                reason: "health probe failed after upgrade".to_string(),
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-rollback");
+
+        assert_eq!(app_events.len(), 1);
+        let AppEvent::OrchestratorRollback {
+            from_version,
+            to_version,
+            reason,
+            thread_id,
+        } = &app_events[0]
+        else {
+            panic!(
+                "expected AppEvent::OrchestratorRollback, got {:?}",
+                app_events[0]
+            );
+        };
+        assert_eq!(*from_version, 7);
+        assert_eq!(*to_version, 6);
+        // Unknown-shape reasons collapse to the safe generic classification.
+        assert_eq!(reason, "execution failed");
+        assert_eq!(thread_id.as_deref(), Some("thread-rollback"));
+    }
+
+    #[test]
+    fn orchestrator_rollback_does_not_leak_engine_error_detail() {
+        // Regression for PR #2844 review: the engine rollback path emits
+        // `format!("execution failed: {e}")` where `e: EngineError`.
+        // Variants like `Store { reason }` / `Llm { reason }` can render
+        // DB connection strings, file paths, and raw upstream HTTP bodies.
+        // The bridge must sanitize before broadcasting to SSE consumers.
+        let leaky = "execution failed: store error: connection string \
+            'postgres://bob:hunter2@db.internal:5432/ironclaw' refused: \
+            File \"/home/runner/.ironclaw/state.db\" not found";
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::OrchestratorRollback {
+                from_version: 3,
+                to_version: 2,
+                reason: leaky.to_string(),
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-leak");
+
+        let AppEvent::OrchestratorRollback { reason, .. } = &app_events[0] else {
+            panic!("expected AppEvent::OrchestratorRollback");
+        };
+        assert!(
+            !reason.contains("postgres://"),
+            "leaked connection string: {reason}"
+        );
+        assert!(!reason.contains("hunter2"), "leaked password: {reason}");
+        assert!(
+            !reason.contains("/home/runner"),
+            "leaked filesystem path: {reason}"
+        );
+        assert!(
+            !reason.contains("store error"),
+            "leaked internal wrap: {reason}"
+        );
+        assert!(
+            !reason.contains("state.db"),
+            "leaked internal filename: {reason}"
+        );
+    }
+
+    #[test]
+    fn orchestrator_rollback_classifies_known_upstream_failures() {
+        // A 502 in the rollback reason should still render a classified
+        // operator-facing message, not the bare "execution failed" fallback.
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::OrchestratorRollback {
+                from_version: 4,
+                to_version: 3,
+                reason: "execution failed: LLM error: Provider nearai request failed: \
+                     HTTP 502 Bad Gateway"
+                    .to_string(),
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-502");
+
+        let AppEvent::OrchestratorRollback { reason, .. } = &app_events[0] else {
+            panic!("expected AppEvent::OrchestratorRollback");
+        };
+        assert_eq!(reason, "LLM provider unavailable");
+    }
+
+    #[test]
     fn resolved_call_id_legacy_fallback_uses_last_unresolved_parallel_call() {
         let mut thread = ironclaw_engine::Thread::new(
             "goal",
@@ -7381,7 +8187,17 @@ mod tests {
             async fn available_actions(
                 &self,
                 _: &[ironclaw_engine::CapabilityLease],
+                _: &ironclaw_engine::ThreadExecutionContext,
             ) -> Result<Vec<ironclaw_engine::ActionDef>, ironclaw_engine::EngineError> {
+                Ok(vec![])
+            }
+
+            async fn available_capabilities(
+                &self,
+                _: &[ironclaw_engine::CapabilityLease],
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<Vec<ironclaw_engine::CapabilitySummary>, ironclaw_engine::EngineError>
+            {
                 Ok(vec![])
             }
         }
@@ -7521,7 +8337,17 @@ mod tests {
             async fn available_actions(
                 &self,
                 _: &[ironclaw_engine::CapabilityLease],
+                _: &ironclaw_engine::ThreadExecutionContext,
             ) -> Result<Vec<ironclaw_engine::ActionDef>, ironclaw_engine::EngineError> {
+                Ok(vec![])
+            }
+
+            async fn available_capabilities(
+                &self,
+                _: &[ironclaw_engine::CapabilityLease],
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<Vec<ironclaw_engine::CapabilitySummary>, ironclaw_engine::EngineError>
+            {
                 Ok(vec![])
             }
         }
@@ -7886,6 +8712,142 @@ mod tests {
 
         *lock.write().await = None;
         outcome.expect("router auth resume_output call-id repair test");
+    }
+
+    #[tokio::test]
+    async fn execute_pending_gate_action_populates_snapshots_for_tool_info_resume() {
+        struct SnapshotInspectingLlm {
+            expected_call_id: String,
+        }
+
+        #[async_trait::async_trait]
+        impl ironclaw_engine::LlmBackend for SnapshotInspectingLlm {
+            async fn complete(
+                &self,
+                messages: &[ironclaw_engine::ThreadMessage],
+                _: &[ironclaw_engine::ActionDef],
+                _: &ironclaw_engine::LlmCallConfig,
+            ) -> Result<ironclaw_engine::LlmOutput, ironclaw_engine::EngineError> {
+                let matched = messages.iter().any(|message| {
+                    message.role == ironclaw_engine::MessageRole::ActionResult
+                        && message.action_name.as_deref() == Some("tool_info")
+                        && message.action_call_id.as_deref() == Some(self.expected_call_id.as_str())
+                        && message.content.contains("mission_create")
+                });
+
+                Ok(ironclaw_engine::LlmOutput {
+                    response: ironclaw_engine::LlmResponse::Text(if matched {
+                        "snapshot-used".into()
+                    } else {
+                        "snapshot-missing".into()
+                    }),
+                    usage: ironclaw_engine::TokenUsage::default(),
+                })
+            }
+
+            fn model_name(&self) -> &str {
+                "inspect-snapshot"
+            }
+        }
+
+        let store = Arc::new(TestStore::new());
+        let llm: Arc<dyn ironclaw_engine::LlmBackend> = Arc::new(SnapshotInspectingLlm {
+            expected_call_id: "call-tool-info".to_string(),
+        });
+
+        let mut thread = ironclaw_engine::Thread::new(
+            "goal",
+            ironclaw_engine::ThreadType::Foreground,
+            ironclaw_engine::ProjectId::new(),
+            "alice",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread.add_message(ironclaw_engine::ThreadMessage::assistant_with_actions(
+            Some("inspect tool_info".to_string()),
+            vec![ironclaw_engine::ActionCall {
+                id: "call-tool-info".to_string(),
+                action_name: "tool_info".to_string(),
+                parameters: serde_json::json!({
+                    "name": "mission_create",
+                    "detail": "summary"
+                }),
+            }],
+        ));
+        thread.state = ironclaw_engine::ThreadState::Waiting;
+        store
+            .save_thread(&thread)
+            .await
+            .expect("save waiting thread");
+
+        let mut conversation = ironclaw_engine::ConversationSurface::new("web", "alice");
+        conversation.track_thread(thread.id);
+        let conversation_id = conversation.id;
+        store
+            .save_conversation(&conversation)
+            .await
+            .expect("save conversation");
+
+        let state = make_expected_test_state_with_llm(store.clone(), llm);
+        state
+            .conversation_manager
+            .bootstrap_user("alice")
+            .await
+            .expect("bootstrap conversations");
+        state.effect_adapter.tools().register_tool_info();
+        let mut capabilities = CapabilityRegistry::new();
+        capabilities.register(Capability {
+            name: "missions".into(),
+            description: "Mission and routine lifecycle management".into(),
+            actions: mission_capability_actions(),
+            knowledge: vec![],
+            policies: vec![],
+        });
+        state
+            .effect_adapter
+            .set_capability_registry(Arc::new(capabilities))
+            .await;
+        state
+            .thread_manager
+            .leases
+            .grant(
+                thread.id,
+                "tools",
+                ironclaw_engine::GrantedActions::All,
+                None,
+                None,
+            )
+            .await
+            .expect("grant lease");
+
+        let pending = PendingGate {
+            conversation_id,
+            action_name: "tool_info".into(),
+            parameters: serde_json::json!({
+                "name": "mission_create",
+                "detail": "summary"
+            }),
+            call_id: String::new(),
+            ..sample_pending_gate(
+                "alice",
+                thread.id,
+                ironclaw_engine::ResumeKind::Approval {
+                    allow_always: false,
+                },
+            )
+        };
+
+        let (agent, _statuses) = make_router_test_agent(None).await;
+        let message =
+            IncomingMessage::new("web", "alice", "approve").with_thread(thread.id.to_string());
+
+        let result = execute_pending_gate_action(&agent, &state, &message, &pending, true, None)
+            .await
+            .expect("execute pending gate action");
+
+        assert!(
+            matches!(result, BridgeOutcome::Respond(ref text) if text == "snapshot-used"),
+            "unexpected result: {result:?}"
+        );
     }
 
     /// Hosted instance path: no `AuthManager`, but the `ExtensionManager`
@@ -8438,6 +9400,203 @@ mod tests {
         assert_eq!(result.unwrap().id, tid);
     }
 
+    struct CompletedTextLlm {
+        text: String,
+    }
+
+    #[async_trait::async_trait]
+    impl ironclaw_engine::LlmBackend for CompletedTextLlm {
+        async fn complete(
+            &self,
+            _messages: &[ironclaw_engine::ThreadMessage],
+            _actions: &[ironclaw_engine::ActionDef],
+            _config: &ironclaw_engine::LlmCallConfig,
+        ) -> Result<ironclaw_engine::LlmOutput, ironclaw_engine::EngineError> {
+            Ok(ironclaw_engine::LlmOutput {
+                response: ironclaw_engine::LlmResponse::Text(self.text.clone()),
+                usage: ironclaw_engine::TokenUsage::default(),
+            })
+        }
+
+        fn model_name(&self) -> &str {
+            "completed-text-llm"
+        }
+    }
+
+    async fn with_installed_engine_state<T, F>(state: EngineState, future: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        let lock = ENGINE_STATE.get_or_init(|| TokioRwLock::new(None));
+        *lock.write().await = Some(state);
+
+        let outcome = std::panic::AssertUnwindSafe(future).catch_unwind().await;
+
+        *lock.write().await = None;
+        match outcome {
+            Ok(value) => value,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    /// Caller-level regression: the text-based auth fallback inside
+    /// `handle_with_engine_inner()` must convert a completed thread
+    /// response containing `authentication_required` into a pending auth
+    /// gate **only when** the parsed credential name survives both the
+    /// helper parse and the credential-registry trust check.
+    #[tokio::test]
+    async fn handle_with_engine_text_auth_fallback_emits_pending_gate_for_registered_credential() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+
+        let store = Arc::new(TestStore::new());
+        let llm: Arc<dyn ironclaw_engine::LlmBackend> = Arc::new(CompletedTextLlm {
+            text: r#"{"error":"authentication_required","credential_name":"github_pat"}"#
+                .to_string(),
+        });
+        let state = make_expected_test_state_with_llm(store, llm);
+        let pending_gates = Arc::clone(&state.pending_gates);
+
+        let outcome = with_installed_engine_state(state, async move {
+            let (mut agent, statuses) = make_test_agent_with_status_channel("web").await;
+
+            let credential_registry = Arc::new(crate::tools::wasm::SharedCredentialRegistry::new());
+            credential_registry.add_mappings([crate::secrets::CredentialMapping::bearer(
+                "github_pat",
+                "api.github.com",
+            )]);
+            let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+                Arc::new(crate::testing::credentials::test_secrets_store());
+            agent.deps.tools = Arc::new(
+                crate::tools::ToolRegistry::new().with_credentials(credential_registry, secrets),
+            );
+
+            let message = IncomingMessage::new("web", "alice", "call the github api");
+            let result = handle_with_engine_inner(&agent, &message, &message.content, 0)
+                .await
+                .expect("handle_with_engine_inner");
+
+            assert!(matches!(result, BridgeOutcome::Pending));
+
+            let statuses = statuses.lock().expect("poisoned").clone();
+            assert!(
+                statuses.iter().any(|status| matches!(
+                    status,
+                    StatusUpdate::AuthRequired {
+                        extension_name,
+                        request_id: Some(_),
+                        ..
+                    } if extension_name.as_str() == "github_pat"
+                )),
+                "expected AuthRequired with request_id, got: {statuses:?}"
+            );
+
+            let pending = pending_gates.list_for_user("alice").await;
+            assert_eq!(pending.len(), 1, "expected one pending auth gate");
+            assert_eq!(pending[0].action_name, "authentication_fallback");
+            assert_eq!(pending[0].parameters["credential_name"], "github_pat");
+
+            Ok::<(), crate::error::Error>(())
+        })
+        .await;
+
+        outcome.expect("registered auth fallback should create pending gate");
+    }
+
+    /// Negative caller-level branch: if the parsed credential name is not
+    /// registered, `handle_with_engine_inner()` must NOT surface an auth
+    /// card. It must hand the original response text back to the caller.
+    #[tokio::test]
+    async fn handle_with_engine_text_auth_fallback_passthrough_for_unregistered_credential() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+
+        let store = Arc::new(TestStore::new());
+        let raw = r#"{"error":"authentication_required","credential_name":"github_pat"}"#;
+        let llm: Arc<dyn ironclaw_engine::LlmBackend> = Arc::new(CompletedTextLlm {
+            text: raw.to_string(),
+        });
+        let state = make_expected_test_state_with_llm(store, llm);
+        let pending_gates = Arc::clone(&state.pending_gates);
+
+        let outcome = with_installed_engine_state(state, async move {
+            let (agent, statuses) = make_test_agent_with_status_channel("web").await;
+            let message = IncomingMessage::new("web", "alice", "call the github api");
+            let result = handle_with_engine_inner(&agent, &message, &message.content, 0)
+                .await
+                .expect("handle_with_engine_inner");
+
+            let BridgeOutcome::Respond(text) = result else {
+                panic!("expected Respond passthrough, got {result:?}");
+            };
+            assert_eq!(text, raw);
+            let seen_auth_required = statuses
+                .lock()
+                .expect("poisoned")
+                .iter()
+                .any(|status| matches!(status, StatusUpdate::AuthRequired { .. }));
+            assert!(
+                !seen_auth_required,
+                "no AuthRequired should be emitted when credential is unregistered"
+            );
+            assert!(
+                pending_gates.list_for_user("alice").await.is_empty(),
+                "no pending gate should be inserted for unregistered credentials"
+            );
+
+            Ok::<(), crate::error::Error>(())
+        })
+        .await;
+
+        outcome.expect("unregistered auth fallback should pass through raw text");
+    }
+
+    /// Security-focused negative branch: invalid credential names must be
+    /// rejected by the helper parse and therefore never become a real auth
+    /// gate, even when the surrounding response otherwise matches the
+    /// `authentication_required` shape.
+    #[tokio::test]
+    async fn handle_with_engine_text_auth_fallback_rejects_invalid_credential_name() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+
+        let store = Arc::new(TestStore::new());
+        let raw = r#"{"error":"authentication_required","credential_name":"github-pat"}"#;
+        let llm: Arc<dyn ironclaw_engine::LlmBackend> = Arc::new(CompletedTextLlm {
+            text: raw.to_string(),
+        });
+        let state = make_expected_test_state_with_llm(store, llm);
+        let pending_gates = Arc::clone(&state.pending_gates);
+
+        let outcome = with_installed_engine_state(state, async move {
+            let (agent, statuses) = make_test_agent_with_status_channel("web").await;
+            let message = IncomingMessage::new("web", "alice", "call the github api");
+            let result = handle_with_engine_inner(&agent, &message, &message.content, 0)
+                .await
+                .expect("handle_with_engine_inner");
+
+            let BridgeOutcome::Respond(text) = result else {
+                panic!("expected Respond passthrough, got {result:?}");
+            };
+            assert_eq!(text, raw);
+            let seen_auth_required = statuses
+                .lock()
+                .expect("poisoned")
+                .iter()
+                .any(|status| matches!(status, StatusUpdate::AuthRequired { .. }));
+            assert!(
+                !seen_auth_required,
+                "invalid credential names must not emit AuthRequired"
+            );
+            assert!(
+                pending_gates.list_for_user("alice").await.is_empty(),
+                "invalid credential names must not create pending gates"
+            );
+
+            Ok::<(), crate::error::Error>(())
+        })
+        .await;
+
+        outcome.expect("invalid credential names should be rejected by caller path");
+    }
+
     #[test]
     fn parse_credential_name_full_json() {
         let text = r#"{"error":"authentication_required","credential_name":"github_pat"}"#;
@@ -8846,7 +10005,17 @@ mod tests {
             async fn available_actions(
                 &self,
                 _: &[ironclaw_engine::CapabilityLease],
+                _: &ironclaw_engine::ThreadExecutionContext,
             ) -> Result<Vec<ironclaw_engine::ActionDef>, ironclaw_engine::EngineError> {
+                Ok(vec![])
+            }
+
+            async fn available_capabilities(
+                &self,
+                _: &[ironclaw_engine::CapabilityLease],
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<Vec<ironclaw_engine::CapabilitySummary>, ironclaw_engine::EngineError>
+            {
                 Ok(vec![])
             }
         }
@@ -9605,5 +10774,61 @@ mod tests {
                 .await
                 .is_none()
         );
+    }
+
+    #[test]
+    fn thread_to_info_carries_title_and_goal_separately() {
+        // Regression: mission-spawned threads put `mission.name` in
+        // `title` and the multi-paragraph meta-prompt in `goal`. The
+        // DTO must carry both through so UI callers can render the
+        // short label without reading the full goal.
+        let long_goal = "a".repeat(500);
+        let mut thread = ironclaw_engine::Thread::new(
+            &long_goal,
+            ironclaw_engine::ThreadType::Mission,
+            ironclaw_engine::ProjectId::new(),
+            "user-1",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread.title = Some("Daily summary".to_string());
+
+        let info = thread_to_info(&thread);
+        assert_eq!(info.title.as_deref(), Some("Daily summary"));
+        assert_eq!(info.goal.len(), 500);
+    }
+
+    #[test]
+    fn thread_to_info_derives_title_from_goal_when_absent() {
+        // Regression: legacy engine threads persisted before the `title`
+        // field existed deserialize as `title = None`. The DTO must
+        // derive a short label from `goal` so frontend consumers don't
+        // fall through `threadTitle()` to rendering a UUID prefix.
+        let thread = ironclaw_engine::Thread::new(
+            "plain goal",
+            ironclaw_engine::ThreadType::Foreground,
+            ironclaw_engine::ProjectId::new(),
+            "user-1",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        let info = thread_to_info(&thread);
+        assert_eq!(info.title.as_deref(), Some("plain goal"));
+        assert_eq!(info.goal, "plain goal");
+    }
+
+    #[test]
+    fn thread_to_info_derives_from_first_line_of_long_goal() {
+        // Multi-paragraph meta-prompt (mission pattern without explicit
+        // title set): derive from first non-empty line, truncated to
+        // the helper's char limit.
+        let long_goal = format!("Short first line\n\n{}\n", "x".repeat(500));
+        let thread = ironclaw_engine::Thread::new(
+            long_goal,
+            ironclaw_engine::ThreadType::Mission,
+            ironclaw_engine::ProjectId::new(),
+            "user-1",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        let info = thread_to_info(&thread);
+        assert_eq!(info.title.as_deref(), Some("Short first line"));
     }
 }

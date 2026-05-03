@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::Client;
@@ -22,7 +23,8 @@ use crate::llm::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role, ToolCall,
     ToolCompletionRequest, ToolCompletionResponse,
 };
-use crate::llm::{costs, rig_adapter::normalize_schema_strict, session::SessionManager};
+use crate::llm::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
+use crate::llm::{costs, session::SessionManager};
 
 /// Information about an available model from NEAR AI API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -258,9 +260,16 @@ impl NearAiChatProvider {
 
         let status = response.status();
         // Extract Retry-After header before consuming the response body.
-        let retry_after_header = Some(crate::llm::retry::parse_retry_after(
-            response.headers().get("retry-after"),
-        ));
+        // `retry_after_header` is `Some(parsed_or_60s_fallback)` only when the
+        // header was actually present on the response — `None` otherwise, so
+        // that 5xx retries fall back to `retry_backoff_delay`'s exponential
+        // schedule instead of the 60s default `parse_retry_after` applies to
+        // missing headers. The 60s floor for 429 (rate limit) is re-added
+        // explicitly at the 429 call site below via `.or(Some(...))`.
+        let retry_after_header: Option<Duration> = response
+            .headers()
+            .get("retry-after")
+            .map(crate::llm::retry::parse_retry_after_value);
         let response_text = response.text().await.map_err(|e| LlmError::RequestFailed {
             provider: "nearai_chat".to_string(),
             reason: format!("Failed to read response body: {}", e),
@@ -293,9 +302,12 @@ impl NearAiChatProvider {
             }
 
             if status_code == 429 {
+                // Preserve existing rate-limit behavior: fall back to a 60s
+                // default when the server omits Retry-After. Long sleeps are
+                // appropriate for rate-limit backpressure.
                 return Err(LlmError::RateLimited {
                     provider: "nearai_chat".to_string(),
-                    retry_after: retry_after_header,
+                    retry_after: retry_after_header.or(Some(Duration::from_secs(60))),
                 });
             }
 
@@ -322,6 +334,29 @@ impl NearAiChatProvider {
                     let (used, limit) = crate::llm::rig_adapter::parse_token_counts(&lower);
                     return Err(LlmError::ContextLengthExceeded { used, limit });
                 }
+            }
+
+            // Any HTTP 5xx from the upstream LLM gateway — map to BadGateway
+            // so the retry layer backs off, the circuit breaker counts a
+            // transient failure, and the channel boundary produces a user-safe
+            // message. HTTP 500 is the most important case for the #2546
+            // traceback-leak report: upstream application errors frequently
+            // return 500 with a Python traceback in the body. 502/503/504 are
+            // the proxy-layer variants. The `status` field preserves the
+            // specific code for operators; the body is logged at debug and
+            // never carried on the error.
+            if matches!(status_code, 500..=599) {
+                tracing::debug!(
+                    provider = "nearai_chat",
+                    status = status_code,
+                    body_preview = crate::agent::truncate_for_preview(&response_text, 512).as_str(),
+                    "NEAR AI Chat upstream 5xx response"
+                );
+                return Err(LlmError::BadGateway {
+                    provider: "nearai_chat".to_string(),
+                    status: status_code,
+                    retry_after: retry_after_header,
+                });
             }
 
             let truncated = crate::agent::truncate_for_preview(&response_text, 512);
@@ -529,9 +564,11 @@ impl LlmProvider for NearAiChatProvider {
             reasoning,
             ..
         } = choice.message;
-        let content = content
-            .or(reasoning_content.or(reasoning))
-            .unwrap_or_default();
+        let reasoning_fallback = reasoning_content
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| reasoning.filter(|s| !s.trim().is_empty()));
+        emit_reasoning_trace(reasoning_fallback.as_deref());
+        let content = content.or(reasoning_fallback).unwrap_or_default();
         let finish_reason = match choice.finish_reason.as_deref() {
             Some("stop") => FinishReason::Stop,
             Some("length") => FinishReason::Length,
@@ -600,7 +637,10 @@ impl LlmProvider for NearAiChatProvider {
             tool_calls: message_tool_calls,
             ..
         } = choice.message;
-        let reasoning_fallback = reasoning_content.or(reasoning);
+        let reasoning_fallback = reasoning_content
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| reasoning.filter(|s| !s.trim().is_empty()));
+        emit_reasoning_trace(reasoning_fallback.as_deref());
 
         let tool_calls: Vec<ToolCall> = message_tool_calls
             .unwrap_or_default()
@@ -1054,12 +1094,15 @@ struct ChatCompletionFunction {
 
 /// Convert a `ToolDefinition` to NEAR AI Chat Completions tool format.
 ///
-/// Applies the same strict schema normalization used by the other OpenAI-compatible
-/// provider adapters so that top-level `oneOf`/`anyOf`/`allOf`/`enum`/`not` schemas
-/// are flattened before request serialization.
+/// Chat Completions is non-strict by default, but this boundary still flattens
+/// top-level combinators that OpenAI-compatible tool APIs reject.
 fn convert_tool_definition(tool: crate::llm::provider::ToolDefinition) -> ChatCompletionTool {
     let mut description = tool.description.clone();
-    let parameters = normalize_schema_strict(&tool.parameters, &mut description);
+    let parameters = shape_tool_schema(
+        ToolSchemaPolicy::FlattenOnly,
+        &tool.parameters,
+        &mut description,
+    );
 
     ChatCompletionTool {
         tool_type: "function".to_string(),
@@ -1151,6 +1194,22 @@ struct ChatCompletionUsage {
 
 fn saturate_u32(val: u64) -> u32 {
     val.min(u32::MAX as u64) as u32
+}
+
+/// Emit reasoning content (chain-of-thought from reasoning models — GLM-5,
+/// DeepSeek, OpenAI o-series, Qwen reasoning variants) on a dedicated tracing
+/// target so observability layers can capture it without coupling to the
+/// response type.
+///
+/// Subscribers attach a `tracing_subscriber::Layer` filtered on target
+/// `ironclaw::llm::reasoning`. Emitted at `TRACE` level so default loggers
+/// don't surface potentially large chain-of-thought traces.
+///
+/// No-op when reasoning is `None` or empty.
+fn emit_reasoning_trace(reasoning: Option<&str>) {
+    if let Some(rc) = reasoning.filter(|s| !s.is_empty()) {
+        tracing::trace!(target: "ironclaw::llm::reasoning", "{rc}");
+    }
 }
 
 fn parse_usage(usage: Option<&ChatCompletionUsage>) -> (u32, u32) {
@@ -1329,27 +1388,62 @@ mod tests {
     }
 
     #[test]
-    fn test_convert_tool_definition_normalizes_top_level_oneof() {
+    fn test_convert_tool_definition_preserves_optional_fields() {
         use crate::llm::provider::ToolDefinition;
 
         let tool = ToolDefinition {
-            name: "github".to_string(),
-            description: "Search GitHub".to_string(),
+            name: "message".to_string(),
+            description: "Send a message".to_string(),
             parameters: serde_json::json!({
-                "oneOf": [
-                    {
-                        "type": "object",
-                        "properties": {
-                            "repo": { "type": "string" }
-                        }
+                "type": "object",
+                "properties": {
+                    "content": { "type": "string" },
+                    "channel": { "type": "string" },
+                    "target": { "type": "string" },
+                    "attachments": { "type": "array" }
+                },
+                "required": ["content"]
+            }),
+        };
+
+        let converted = convert_tool_definition(tool);
+        let params = converted.function.parameters.expect("parameters");
+
+        assert_eq!(params["required"], serde_json::json!(["content"]));
+        assert_eq!(params["properties"]["channel"]["type"], "string");
+        assert_eq!(params["properties"]["target"]["type"], "string");
+        assert_eq!(params["properties"]["attachments"]["type"], "array");
+        assert_eq!(
+            converted.function.description.as_deref(),
+            Some("Send a message")
+        );
+    }
+
+    #[test]
+    fn test_convert_tool_definition_flattens_top_level_oneof_without_strictifying() {
+        use crate::llm::provider::ToolDefinition;
+
+        let tool = ToolDefinition {
+            name: "lookup".to_string(),
+            description: "Resolve a user".to_string(),
+            parameters: serde_json::json!({
+            "type": "object",
+            "oneOf": [
+                {
+                    "properties": {
+                        "mode": { "const": "by_name" },
+                        "name": { "type": "string" }
                     },
-                    {
-                        "type": "object",
-                        "properties": {
-                            "owner": { "type": "string" }
-                        }
-                    }
-                ]
+                    "required": ["mode", "name"]
+                },
+                {
+                    "properties": {
+                        "mode": { "const": "by_id" },
+                        "id": { "type": "string" }
+                    },
+                    "required": ["mode", "id"]
+                }
+            ]
             }),
         };
 
@@ -1357,13 +1451,20 @@ mod tests {
         let params = converted.function.parameters.expect("parameters");
 
         assert_eq!(params["type"], "object");
-        assert!(params.get("oneOf").is_none());
-        let description = converted
-            .function
-            .description
-            .expect("description")
-            .to_lowercase();
-        assert!(description.contains("oneof"));
+        assert!(
+            params.get("oneOf").is_none(),
+            "top-level oneOf should still be flattened for OpenAI-compatible requests"
+        );
+        assert_eq!(params["additionalProperties"], true);
+        assert_eq!(params["required"], serde_json::json!([]));
+        assert_eq!(params["properties"]["mode"]["const"], "by_name");
+        assert_eq!(params["properties"]["name"]["type"], "string");
+        assert_eq!(params["properties"]["id"]["type"], "string");
+        let description = converted.function.description.expect("description");
+        assert!(
+            description.contains("Upstream JSON schema"),
+            "flattened schemas should preserve the advisory hint"
+        );
     }
 
     #[test]
@@ -1800,6 +1901,44 @@ mod tests {
         assert_eq!(tool_calls.len(), 1);
     }
 
+    /// Smoke test: non-empty reasoning content produces a trace event on the
+    /// dedicated `ironclaw::llm::reasoning` target.
+    #[test]
+    #[tracing_test::traced_test]
+    fn reasoning_content_emits_trace_event() {
+        emit_reasoning_trace(Some("step 1: weigh the options carefully"));
+        assert!(
+            logs_contain("step 1: weigh the options carefully"),
+            "expected reasoning emission to appear in captured logs"
+        );
+    }
+
+    /// Empty and absent reasoning emit nothing — subscribers shouldn't see
+    /// noise events for responses where no reasoning was returned.
+    #[test]
+    #[tracing_test::traced_test]
+    fn empty_reasoning_emits_no_event() {
+        emit_reasoning_trace(None);
+        emit_reasoning_trace(Some(""));
+        assert!(
+            !logs_contain("ironclaw::llm::reasoning"),
+            "empty/absent reasoning should not emit any event"
+        );
+    }
+
+    /// The dedicated target is what subscribers filter on; verify the
+    /// emission carries the right target metadata, not just the right body.
+    #[test]
+    #[tracing_test::traced_test]
+    fn reasoning_emission_uses_dedicated_target() {
+        emit_reasoning_trace(Some("trace-target-marker"));
+        assert!(
+            logs_contain("ironclaw::llm::reasoning"),
+            "emission should use ironclaw::llm::reasoning target"
+        );
+        assert!(logs_contain("trace-target-marker"));
+    }
+
     /// Regression: payloads that include BOTH reasoning fields must parse
     /// successfully and honor fallback precedence:
     /// content -> reasoning_content -> reasoning.
@@ -1891,6 +2030,34 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_bearer_token_session_beats_env_var() {
+        struct EnvLockGuard {
+            _guard: std::sync::MutexGuard<'static, ()>,
+        }
+        impl EnvLockGuard {
+            fn new() -> Self {
+                Self {
+                    _guard: crate::config::helpers::lock_env(),
+                }
+            }
+        }
+        struct EnvVarGuard {
+            key: &'static str,
+            original: Option<std::ffi::OsString>,
+        }
+        impl Drop for EnvVarGuard {
+            fn drop(&mut self) {
+                #[allow(unused_unsafe)]
+                // SAFETY: serialized via ENV_MUTEX.
+                unsafe {
+                    match &self.original {
+                        Some(value) => std::env::set_var(self.key, value),
+                        None => std::env::remove_var(self.key),
+                    }
+                }
+            }
+        }
+
+        let _guard = EnvLockGuard::new();
         // Session token takes priority over NEARAI_API_KEY env var.
         // This prevents unexpected auth mode switches mid-run.
         let mut cfg = test_nearai_config("http://localhost:8318");
@@ -1901,10 +2068,16 @@ mod tests {
             .await;
 
         // Set env var that should NOT be used when session token exists
+        let original = std::env::var_os("NEARAI_API_KEY");
         #[allow(unused_unsafe)]
+        // SAFETY: serialized via ENV_MUTEX.
         unsafe {
             std::env::set_var("NEARAI_API_KEY", "env-api-key-should-not-win");
         }
+        let _env_guard = EnvVarGuard {
+            key: "NEARAI_API_KEY",
+            original,
+        };
 
         let provider = NearAiChatProvider::new(cfg, session).expect("provider");
         let token = provider
@@ -1915,15 +2088,38 @@ mod tests {
             token, "oauth-token",
             "session token must take priority over env var"
         );
-
-        #[allow(unused_unsafe)]
-        unsafe {
-            std::env::remove_var("NEARAI_API_KEY");
-        }
     }
 
     #[tokio::test]
     async fn test_resolve_bearer_token_config_beats_session_and_env() {
+        struct EnvLockGuard {
+            _guard: std::sync::MutexGuard<'static, ()>,
+        }
+        impl EnvLockGuard {
+            fn new() -> Self {
+                Self {
+                    _guard: crate::config::helpers::lock_env(),
+                }
+            }
+        }
+        struct EnvVarGuard {
+            key: &'static str,
+            original: Option<std::ffi::OsString>,
+        }
+        impl Drop for EnvVarGuard {
+            fn drop(&mut self) {
+                #[allow(unused_unsafe)]
+                // SAFETY: serialized via ENV_MUTEX.
+                unsafe {
+                    match &self.original {
+                        Some(value) => std::env::set_var(self.key, value),
+                        None => std::env::remove_var(self.key),
+                    }
+                }
+            }
+        }
+
+        let _guard = EnvLockGuard::new();
         // Config API key should win even when session token AND env var are set.
         let cfg = test_nearai_config("http://localhost:8318");
         let session = test_session();
@@ -1931,10 +2127,16 @@ mod tests {
             .set_token(secrecy::SecretString::from("session-tok".to_string()))
             .await;
 
+        let original = std::env::var_os("NEARAI_API_KEY");
         #[allow(unused_unsafe)]
+        // SAFETY: serialized via ENV_MUTEX.
         unsafe {
             std::env::set_var("NEARAI_API_KEY", "env-key");
         }
+        let _env_guard = EnvVarGuard {
+            key: "NEARAI_API_KEY",
+            original,
+        };
 
         let provider = NearAiChatProvider::new(cfg, session).expect("provider");
         let token = provider
@@ -1945,11 +2147,6 @@ mod tests {
             token, "test-key",
             "config api_key must win over session token and env var"
         );
-
-        #[allow(unused_unsafe)]
-        unsafe {
-            std::env::remove_var("NEARAI_API_KEY");
-        }
     }
 
     #[test]
