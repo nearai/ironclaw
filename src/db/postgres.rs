@@ -299,6 +299,17 @@ impl ConversationStore for PgBackend {
             .get_conversation_source_channel(conversation_id)
             .await
     }
+
+    async fn find_conversation_by_scope(
+        &self,
+        user_id: &str,
+        channel: &str,
+        thread_id: &str,
+    ) -> Result<Option<Uuid>, DatabaseError> {
+        self.store
+            .find_conversation_by_scope(user_id, channel, thread_id)
+            .await
+    }
 }
 
 // ==================== JobStore ====================
