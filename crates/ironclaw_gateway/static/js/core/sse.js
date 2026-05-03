@@ -177,7 +177,15 @@ function connectSSE(lastEventIdOverride) {
       _doneWithoutResponseTimer = null;
     }
     finalizeActivityGroup();
-    addMessage('assistant', data.content);
+    // Streamed responses already accumulated `data.content` into the
+    // bubble we just finalized. Adding another would render the same
+    // text twice — visible after a thread switch where history rehydrates
+    // an empty turn, then stream_chunks repopulate one bubble, then this
+    // handler used to append a second. Only create a new bubble when we
+    // never streamed (non-streaming response).
+    if (!streamingMsg) {
+      addMessage('assistant', data.content);
+    }
     pruneOldMessages();
     enableChatInput();
     // Refresh thread list so new titles appear after first message
