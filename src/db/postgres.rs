@@ -1651,3 +1651,223 @@ impl IdentityStore for PgBackend {
         Ok(())
     }
 }
+
+// ==================== XBookmarkStore ====================
+
+#[async_trait]
+impl crate::db::XBookmarkStore for PgBackend {
+    async fn insert_x_bookmarks(
+        &self,
+        user_id: &str,
+        items: &[crate::x_bookmarks::NormalizedIngestItem],
+    ) -> Result<(u64, u64), DatabaseError> {
+        if items.is_empty() {
+            return Ok((0, 0));
+        }
+        let mut client = self.pool().get().await?;
+        let tx = client.transaction().await?;
+        let mut inserted: u64 = 0;
+        for item in items {
+            let id = Uuid::new_v4();
+            let media_urls = serde_json::to_value(&item.media_urls)
+                .map_err(|e| DatabaseError::Query(format!("media_urls json: {e}")))?;
+            let changed = tx
+                .execute(
+                    r#"
+INSERT INTO x_bookmarks (
+    id, user_id, tweet_id, author_handle, author_name,
+    text, url, media_urls, quoted_tweet, thread_id,
+    posted_at
+) VALUES ($1, $2, $3, $4, $5,
+          $6, $7, $8, $9, $10, $11)
+ON CONFLICT (user_id, tweet_id) DO NOTHING
+"#,
+                    &[
+                        &id,
+                        &user_id,
+                        &item.tweet_id,
+                        &item.author_handle,
+                        &item.author_name,
+                        &item.text,
+                        &item.url,
+                        &media_urls,
+                        &item.quoted_tweet,
+                        &item.thread_id,
+                        &item.posted_at,
+                    ],
+                )
+                .await?;
+            inserted += changed;
+        }
+        tx.commit().await?;
+        let total = items.len() as u64;
+        Ok((inserted, total - inserted))
+    }
+
+    async fn list_untriaged_x_bookmarks(
+        &self,
+        user_id: &str,
+        limit: u32,
+    ) -> Result<Vec<crate::x_bookmarks::Bookmark>, DatabaseError> {
+        let conn = self.pool().get().await?;
+        let rows = conn
+            .query(
+                r#"
+SELECT id, user_id, tweet_id, author_handle, author_name, text, url,
+       media_urls, quoted_tweet, thread_id, posted_at, scraped_at,
+       status, rationale, project_slug, tags, triaged_at, triage_model
+FROM x_bookmarks
+WHERE user_id = $1 AND status = 'untriaged'
+ORDER BY COALESCE(posted_at, scraped_at) DESC
+LIMIT $2
+"#,
+                &[&user_id, &(limit as i64)],
+            )
+            .await?;
+        rows.iter().map(pg_row_to_bookmark).collect()
+    }
+
+    async fn apply_x_bookmark_triage(
+        &self,
+        user_id: &str,
+        decisions: &[(Uuid, crate::db::ResolvedTriageDecision)],
+        triage_model: &str,
+    ) -> Result<u64, DatabaseError> {
+        if decisions.is_empty() {
+            return Ok(0);
+        }
+        let mut client = self.pool().get().await?;
+        let tx = client.transaction().await?;
+        let now = Utc::now();
+        let mut updated: u64 = 0;
+        for (id, decision) in decisions {
+            let tags = serde_json::to_value(&decision.tags)
+                .map_err(|e| DatabaseError::Query(format!("tags json: {e}")))?;
+            let changed = tx
+                .execute(
+                    // Codex review fix: only overwrite rows that are still
+                    // `untriaged`. If a concurrent triage request already
+                    // committed, the second writer affects zero rows and
+                    // the existing decision is preserved.
+                    r#"
+UPDATE x_bookmarks
+SET status        = $1,
+    rationale     = $2,
+    project_slug  = $3,
+    tags          = $4,
+    triaged_at    = $5,
+    triage_model  = $6
+WHERE id = $7 AND user_id = $8 AND status = 'untriaged'
+"#,
+                    &[
+                        &decision.status,
+                        &decision.rationale,
+                        &decision.project_slug,
+                        &tags,
+                        &now,
+                        &triage_model,
+                        id,
+                        &user_id,
+                    ],
+                )
+                .await?;
+            updated += changed;
+        }
+        tx.commit().await?;
+        Ok(updated)
+    }
+
+    async fn list_x_bookmarks_by_status(
+        &self,
+        user_id: &str,
+        status: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<crate::x_bookmarks::Bookmark>, DatabaseError> {
+        let conn = self.pool().get().await?;
+        let normalized_status = status
+            .map(|s| s.to_ascii_lowercase())
+            .filter(|s| crate::x_bookmarks::BookmarkStatus::parse(s).is_some());
+        let rows = if let Some(s) = normalized_status.as_deref() {
+            conn.query(
+                r#"
+SELECT id, user_id, tweet_id, author_handle, author_name, text, url,
+       media_urls, quoted_tweet, thread_id, posted_at, scraped_at,
+       status, rationale, project_slug, tags, triaged_at, triage_model
+FROM x_bookmarks
+WHERE user_id = $1 AND status = $2
+ORDER BY COALESCE(posted_at, scraped_at) DESC
+LIMIT $3
+"#,
+                &[&user_id, &s, &(limit as i64)],
+            )
+            .await?
+        } else {
+            conn.query(
+                r#"
+SELECT id, user_id, tweet_id, author_handle, author_name, text, url,
+       media_urls, quoted_tweet, thread_id, posted_at, scraped_at,
+       status, rationale, project_slug, tags, triaged_at, triage_model
+FROM x_bookmarks
+WHERE user_id = $1
+ORDER BY COALESCE(posted_at, scraped_at) DESC
+LIMIT $2
+"#,
+                &[&user_id, &(limit as i64)],
+            )
+            .await?
+        };
+        rows.iter().map(pg_row_to_bookmark).collect()
+    }
+
+    async fn x_bookmark_counts_by_status(
+        &self,
+        user_id: &str,
+    ) -> Result<HashMap<String, u64>, DatabaseError> {
+        let conn = self.pool().get().await?;
+        let rows = conn
+            .query(
+                "SELECT status, COUNT(*)::BIGINT AS cnt FROM x_bookmarks WHERE user_id = $1 GROUP BY status",
+                &[&user_id],
+            )
+            .await?;
+        let mut map = HashMap::new();
+        for r in rows {
+            let status: String = r.get("status");
+            let count: i64 = r.get("cnt");
+            map.insert(status, count.max(0) as u64);
+        }
+        Ok(map)
+    }
+}
+
+fn pg_row_to_bookmark(
+    r: &tokio_postgres::Row,
+) -> Result<crate::x_bookmarks::Bookmark, DatabaseError> {
+    let media_urls: serde_json::Value = r.get("media_urls");
+    let media_urls: Vec<String> = serde_json::from_value(media_urls).unwrap_or_default();
+    let tags: serde_json::Value = r.get("tags");
+    let tags: Vec<String> = serde_json::from_value(tags).unwrap_or_default();
+    let status_raw: String = r.get("status");
+    let status = crate::x_bookmarks::BookmarkStatus::parse(&status_raw)
+        .unwrap_or(crate::x_bookmarks::BookmarkStatus::Untriaged);
+    Ok(crate::x_bookmarks::Bookmark {
+        id: r.get("id"),
+        user_id: r.get("user_id"),
+        tweet_id: r.get("tweet_id"),
+        author_handle: r.get("author_handle"),
+        author_name: r.get("author_name"),
+        text: r.get("text"),
+        url: r.get("url"),
+        media_urls,
+        quoted_tweet: r.get("quoted_tweet"),
+        thread_id: r.get("thread_id"),
+        posted_at: r.get("posted_at"),
+        scraped_at: r.get("scraped_at"),
+        status,
+        rationale: r.get("rationale"),
+        project_slug: r.get("project_slug"),
+        tags,
+        triaged_at: r.get("triaged_at"),
+        triage_model: r.get("triage_model"),
+    })
+}
