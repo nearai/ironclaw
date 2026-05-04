@@ -62,6 +62,7 @@ pub mod hooks;
 pub mod http_intercept;
 #[cfg(feature = "import")]
 pub mod import;
+pub mod legal;
 pub mod llm;
 pub mod observability;
 pub mod orchestrator;

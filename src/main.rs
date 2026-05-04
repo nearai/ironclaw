@@ -884,6 +884,9 @@ async fn async_main() -> anyhow::Result<()> {
                 gw = gw.with_settings_cache(Arc::clone(sc));
             }
             gw = gw.with_db_auth(Arc::clone(d));
+            if let Some(ref legal) = components.legal_store {
+                gw = gw.with_legal_store(Arc::clone(legal));
+            }
             let pairing_store = Arc::new(ironclaw::pairing::PairingStore::new(
                 Arc::clone(d),
                 Arc::clone(&components.ownership_cache),
