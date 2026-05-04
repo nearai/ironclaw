@@ -850,6 +850,58 @@ pub(crate) async fn admin_js_handler() -> impl IntoResponse {
     )
 }
 
+// --- Legal harness static handlers ---
+
+pub(crate) async fn legal_html_handler() -> impl IntoResponse {
+    // Same fully-same-origin CSP as the admin SPA. The legal UI ships only
+    // self-hosted JS/CSS and talks exclusively to the gateway origin.
+    const LEGAL_CSP: &str = "default-src 'self'; \
+        script-src 'self'; \
+        style-src 'self' 'unsafe-inline'; \
+        font-src 'self'; \
+        connect-src 'self'; \
+        img-src 'self' data:; \
+        object-src 'none'; \
+        frame-ancestors 'none'; \
+        base-uri 'self'; \
+        form-action 'self'";
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-cache"),
+    );
+    headers.insert(
+        header::HeaderName::from_static("content-security-policy"),
+        header::HeaderValue::from_static(LEGAL_CSP),
+    );
+    (headers, assets::LEGAL_HTML)
+}
+
+pub(crate) async fn legal_css_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/css"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        assets::LEGAL_CSS,
+    )
+}
+
+pub(crate) async fn legal_js_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        assets::LEGAL_JS,
+    )
+}
+
 // --- Health ---
 
 pub(crate) async fn health_handler() -> Json<HealthResponse> {

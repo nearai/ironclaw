@@ -61,8 +61,9 @@ use crate::channels::web::platform::static_files::{
     BASE_CSP_HEADER, admin_css_handler, admin_html_handler, admin_js_handler, css_handler,
     debug_init_handler, debug_panel_css_handler, debug_panel_js_handler, favicon_handler,
     health_handler, i18n_app_handler, i18n_en_handler, i18n_index_handler, i18n_ko_handler,
-    i18n_zh_handler, index_handler, js_handler, project_file_handler, project_index_handler,
-    project_redirect_handler, theme_css_handler, theme_init_handler,
+    i18n_zh_handler, index_handler, js_handler, legal_css_handler, legal_html_handler,
+    legal_js_handler, project_file_handler, project_index_handler, project_redirect_handler,
+    theme_css_handler, theme_init_handler,
 };
 
 // Feature slices under `features/<slice>/`. As of ironclaw#2599 stage 4d,
@@ -298,6 +299,11 @@ pub async fn start_server(
             "/api/skills/{name}",
             axum::routing::delete(skills_remove_handler),
         )
+        // Legal harness skill — projects, documents, ingestion.
+        // Companion streams (chat-with-docs, DOCX export) layer chats and
+        // export endpoints onto the same `/api/skills/legal/` prefix.
+        // libSQL-only today; the Postgres-only build skips these routes.
+        .merge(legal_routes())
         // Settings
         .route("/api/settings", get(settings_list_handler))
         .route("/api/settings/export", get(settings_export_handler))
@@ -472,7 +478,13 @@ pub async fn start_server(
         .route("/admin/", get(admin_html_handler))
         .route("/admin/{*path}", get(admin_html_handler))
         .route("/admin.css", get(admin_css_handler))
-        .route("/admin.js", get(admin_js_handler));
+        .route("/admin.js", get(admin_js_handler))
+        // Legal harness SPA (auth handled client-side via bearer token + API layer)
+        .route("/legal", get(legal_html_handler))
+        .route("/legal/", get(legal_html_handler))
+        .route("/legal/{*path}", get(legal_html_handler))
+        .route("/legal.css", get(legal_css_handler))
+        .route("/legal.js", get(legal_js_handler));
 
     // Project file serving (behind auth to prevent unauthorized file access).
     let projects = Router::new()
@@ -584,4 +596,43 @@ pub async fn start_server(
     });
 
     Ok(bound_addr)
+}
+
+/// Routes for the legal harness skill (Stream A).
+///
+/// Mounted under `/api/skills/legal/`. The libSQL build wires all five
+/// endpoints; the Postgres-only build returns an empty router so the
+/// /api/skills/legal/* surface 404s until the Postgres query layer ships.
+type LegalRouter =
+    axum::Router<std::sync::Arc<crate::channels::web::platform::state::GatewayState>>;
+
+#[cfg(feature = "libsql")]
+fn legal_routes() -> LegalRouter {
+    use crate::channels::web::features::legal::handlers as legal_handlers;
+    axum::Router::new()
+        .route(
+            "/api/skills/legal/projects",
+            get(legal_handlers::list_projects_handler).post(legal_handlers::create_project_handler),
+        )
+        .route(
+            "/api/skills/legal/projects/{id}",
+            get(legal_handlers::get_project_handler).delete(legal_handlers::delete_project_handler),
+        )
+        .route(
+            "/api/skills/legal/projects/{id}/documents",
+            post(legal_handlers::upload_document_handler),
+        )
+        .route(
+            "/api/skills/legal/documents/{id}",
+            get(legal_handlers::get_document_handler),
+        )
+        .route(
+            "/api/skills/legal/documents/{id}/blob",
+            get(legal_handlers::get_document_blob_handler),
+        )
+}
+
+#[cfg(not(feature = "libsql"))]
+fn legal_routes() -> LegalRouter {
+    axum::Router::new()
 }
