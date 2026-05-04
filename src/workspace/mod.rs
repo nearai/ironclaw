@@ -2230,12 +2230,20 @@ impl Workspace {
     /// so user edits are never overwritten. Returns the number of files
     /// created (0 if all core files already existed).
     pub async fn seed_if_empty(&self) -> Result<usize, WorkspaceError> {
+        // Allow deployments to override the default AGENTS.md seed via env var.
+        let custom_agents = std::env::var("AGENTS_SEED_PATH")
+            .ok()
+            .and_then(|p| std::fs::read_to_string(&p).ok());
+        let agents_seed = custom_agents
+            .as_deref()
+            .unwrap_or(include_str!("seeds/AGENTS.md"));
+
         let seed_files: &[(&str, &str)] = &[
             (paths::README, include_str!("seeds/README.md")),
             (paths::MEMORY, include_str!("seeds/MEMORY.md")),
             (paths::IDENTITY, include_str!("seeds/IDENTITY.md")),
             (paths::SOUL, include_str!("seeds/SOUL.md")),
-            (paths::AGENTS, include_str!("seeds/AGENTS.md")),
+            (paths::AGENTS, agents_seed),
             (paths::USER, include_str!("seeds/USER.md")),
             (paths::HEARTBEAT, HEARTBEAT_SEED),
             (paths::TOOLS, TOOLS_SEED),
