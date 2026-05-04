@@ -57,6 +57,12 @@ impl MemorySearchRequest {
 
     pub fn with_limit(mut self, limit: usize) -> Self {
         self.limit = limit.max(1);
+        // Re-clamp pre_fusion_limit so the invariant `pre_fusion_limit >= limit`
+        // holds regardless of builder call order: if the caller sets
+        // `with_pre_fusion_limit(2).with_limit(5)`, the pre-fusion candidate
+        // budget must also widen to at least 5, otherwise the per-branch SQL
+        // `LIMIT` would silently be smaller than the requested final limit.
+        self.pre_fusion_limit = self.pre_fusion_limit.max(self.limit);
         self
     }
 

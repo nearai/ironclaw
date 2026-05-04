@@ -586,6 +586,35 @@ fn pre_fusion_limit_is_clamped_up_to_limit() {
         20,
         "pre_fusion_limit above limit must be preserved"
     );
+
+    // Reverse-order regression: a small `pre_fusion_limit` set while `limit`
+    // is small, followed by a *larger* `with_limit`, must re-clamp
+    // `pre_fusion_limit` up. Before this fix `with_limit` did not touch
+    // `pre_fusion_limit`, so the per-branch SQL `LIMIT` could be smaller than
+    // the requested final limit.
+    let request = MemorySearchRequest::new("x")
+        .unwrap()
+        .with_limit(2)
+        .with_pre_fusion_limit(2)
+        .with_limit(5);
+    assert_eq!(
+        request.pre_fusion_limit(),
+        5,
+        "pre_fusion_limit must clamp up when a later with_limit raises the floor"
+    );
+
+    // Raising limit must never narrow a pre_fusion_limit that is already above
+    // the new limit.
+    let request = MemorySearchRequest::new("x")
+        .unwrap()
+        .with_limit(2)
+        .with_pre_fusion_limit(20)
+        .with_limit(5);
+    assert_eq!(
+        request.pre_fusion_limit(),
+        20,
+        "pre_fusion_limit above limit must be preserved across with_limit"
+    );
 }
 
 #[cfg(feature = "libsql")]

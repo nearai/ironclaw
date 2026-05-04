@@ -32,7 +32,7 @@ use ironclaw_memory::{
     MemoryDocumentScope, MemorySearchRequest, RepositoryMemoryBackend,
 };
 
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_memory::{ChunkConfig, ChunkingMemoryDocumentIndexer};
 
 #[cfg(feature = "libsql")]
@@ -332,13 +332,35 @@ fn pg_pool() -> deadpool_postgres::Pool {
         .expect("build deadpool")
 }
 
+/// Explicit opt-in to skip the Postgres vertical tests. Without this set,
+/// a connection failure must fail loud — the previous "silent skip + green
+/// pass" pattern violated the `ironclaw_memory` guardrail that Postgres
+/// behavioral coverage must be real.
 #[cfg(feature = "postgres")]
-async fn pg_try_connect(pool: &deadpool_postgres::Pool) -> Option<()> {
+const POSTGRES_SKIP_ENV: &str = "IRONCLAW_SKIP_POSTGRES_TESTS";
+
+#[cfg(feature = "postgres")]
+fn pg_skip_requested() -> bool {
+    std::env::var(POSTGRES_SKIP_ENV).is_ok_and(|value| value == "1" || value == "true")
+}
+
+#[cfg(feature = "postgres")]
+async fn pg_require_connection(pool: &deadpool_postgres::Pool) -> Option<()> {
     match pool.get().await {
         Ok(_) => Some(()),
         Err(error) => {
-            eprintln!("skipping reborn-postgres vertical test: {error}");
-            None
+            if pg_skip_requested() {
+                eprintln!(
+                    "skipping reborn-postgres vertical test ({POSTGRES_SKIP_ENV}=1): {error}"
+                );
+                None
+            } else {
+                panic!(
+                    "reborn-postgres vertical test could not reach Postgres ({error}); \
+                     set DATABASE_URL to a reachable Postgres+pgvector instance, or set \
+                     {POSTGRES_SKIP_ENV}=1 to explicitly skip."
+                );
+            }
         }
     }
 }
@@ -363,13 +385,25 @@ async fn pg_compose(
     Arc<RepositoryMemoryBackend<RebornPostgresMemoryDocumentRepository>>,
 )> {
     let pool = pg_pool();
-    pg_try_connect(&pool).await?;
+    pg_require_connection(&pool).await?;
     let repository = Arc::new(RebornPostgresMemoryDocumentRepository::new(pool.clone()));
     repository.run_migrations().await.expect("run_migrations");
     pg_cleanup_tenant(&pool, tenant_id).await;
+    // Wire the same chunking indexer the libSQL vertical stack uses so writes
+    // through `CompositeRootFilesystem` populate `reborn_memory_chunks`.
+    // Without it, FTS search has nothing to match and the search assertion
+    // would be vacuously true on an empty result set.
+    let indexer = Arc::new(
+        ChunkingMemoryDocumentIndexer::new(repository.clone()).with_chunk_config(ChunkConfig {
+            chunk_size: 4,
+            overlap_percent: 0.0,
+            min_chunk_size: 1,
+        }),
+    );
     let backend = Arc::new(
-        RepositoryMemoryBackend::new(repository.clone()).with_capabilities(
-            MemoryBackendCapabilities {
+        RepositoryMemoryBackend::new(repository.clone())
+            .with_indexer(indexer)
+            .with_capabilities(MemoryBackendCapabilities {
                 file_documents: true,
                 metadata: true,
                 versioning: true,
@@ -377,8 +411,7 @@ async fn pg_compose(
                 vector_search: false,
                 embeddings: false,
                 ..MemoryBackendCapabilities::default()
-            },
-        ),
+            }),
     );
     let adapter = Arc::new(MemoryBackendFilesystemAdapter::new(backend.clone()));
     let mut composite = CompositeRootFilesystem::new();
@@ -447,6 +480,15 @@ async fn postgres_search_through_composite_mount_returns_only_same_scope_results
         .iter()
         .map(|r| r.path.relative_path().to_string())
         .collect::<Vec<_>>();
+    // Require non-empty results so a missing indexer wiring (the previous
+    // failure mode where writes never populated `reborn_memory_chunks` and
+    // search returned []) is caught — `iter().all(...)` was vacuously true on
+    // an empty Vec.
+    assert!(
+        !paths.is_empty(),
+        "expected at least one search hit; empty results would mean writes did \
+         not flow through the indexer to populate reborn_memory_chunks"
+    );
     assert!(
         paths.iter().all(|p| p == "visible.md"),
         "scope leak: got paths = {paths:?}"
