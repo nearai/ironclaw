@@ -32,7 +32,10 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::secrets::{CredentialLocation, CredentialMapping};
+use crate::secrets::{
+    BodyJsonOutput, CredentialLocation, CredentialMapping, Eip712Domain, Eip712StructDef,
+    FieldSource, HeaderOutput,
+};
 use crate::tools::tool::ToolDiscoverySummary;
 use crate::tools::wasm::{
     Capabilities, EndpointPattern, HttpCapability, RateLimitConfig, SecretsCapability,
@@ -447,6 +450,31 @@ pub enum CredentialLocationSchema {
 
     /// URL/path placeholder replacement.
     UrlPath { placeholder: String },
+
+    /// HMAC-SHA256 of the request, emitted as two headers.
+    HmacSignedHeader {
+        signature_header: String,
+        timestamp_header: String,
+    },
+
+    /// EIP-712 typed structured data signing with secp256k1.
+    Eip712SignedHeader {
+        domain: Eip712Domain,
+        primary_type: String,
+        structs: Vec<Eip712StructDef>,
+        output_headers: Vec<HeaderOutput>,
+        #[serde(default)]
+        output_body_fields: Vec<BodyJsonOutput>,
+    },
+
+    /// NEP-413 NEAR signed message with ed25519.
+    Nep413SignedHeader {
+        recipient_source: FieldSource,
+        message_source: FieldSource,
+        #[serde(default)]
+        callback_url_source: Option<FieldSource>,
+        output_headers: Vec<HeaderOutput>,
+    },
 }
 
 impl CredentialLocationSchema {
@@ -467,6 +495,37 @@ impl CredentialLocationSchema {
             }
             CredentialLocationSchema::UrlPath { placeholder } => CredentialLocation::UrlPath {
                 placeholder: placeholder.clone(),
+            },
+            CredentialLocationSchema::HmacSignedHeader {
+                signature_header,
+                timestamp_header,
+            } => CredentialLocation::HmacSignedHeader {
+                signature_header: signature_header.clone(),
+                timestamp_header: timestamp_header.clone(),
+            },
+            CredentialLocationSchema::Eip712SignedHeader {
+                domain,
+                primary_type,
+                structs,
+                output_headers,
+                output_body_fields,
+            } => CredentialLocation::Eip712SignedHeader {
+                domain: domain.clone(),
+                primary_type: primary_type.clone(),
+                structs: structs.clone(),
+                output_headers: output_headers.clone(),
+                output_body_fields: output_body_fields.clone(),
+            },
+            CredentialLocationSchema::Nep413SignedHeader {
+                recipient_source,
+                message_source,
+                callback_url_source,
+                output_headers,
+            } => CredentialLocation::Nep413SignedHeader {
+                recipient_source: recipient_source.clone(),
+                message_source: message_source.clone(),
+                callback_url_source: callback_url_source.clone(),
+                output_headers: output_headers.clone(),
             },
         }
     }
@@ -914,6 +973,283 @@ mod tests {
                 assert_eq!(placeholder, "{TELEGRAM_BOT_TOKEN}");
             }
             _ => panic!("Expected UrlPath location"),
+        }
+    }
+
+    #[test]
+    fn test_parse_hmac_signed_header_credential() {
+        use crate::secrets::CredentialLocation;
+
+        let json = r#"{
+            "http": {
+                "allowlist": [{ "host": "clob.polymarket.com" }],
+                "credentials": {
+                    "polymarket_l2": {
+                        "secret_name": "polymarket_api_secret",
+                        "location": {
+                            "type": "hmac_signed_header",
+                            "signature_header": "POLY-SIGNATURE",
+                            "timestamp_header": "POLY-TIMESTAMP"
+                        },
+                        "host_patterns": ["clob.polymarket.com"]
+                    }
+                }
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        let http = caps.http.unwrap();
+        let cred = http.credentials.get("polymarket_l2").unwrap();
+        match &cred.location {
+            CredentialLocationSchema::HmacSignedHeader {
+                signature_header,
+                timestamp_header,
+            } => {
+                assert_eq!(signature_header, "POLY-SIGNATURE");
+                assert_eq!(timestamp_header, "POLY-TIMESTAMP");
+            }
+            _ => panic!("Expected HmacSignedHeader location"),
+        }
+
+        let runtime = http.to_http_capability();
+        let mapping = runtime.credentials.get("polymarket_api_secret").unwrap();
+        match &mapping.location {
+            CredentialLocation::HmacSignedHeader {
+                signature_header,
+                timestamp_header,
+            } => {
+                assert_eq!(signature_header, "POLY-SIGNATURE");
+                assert_eq!(timestamp_header, "POLY-TIMESTAMP");
+            }
+            _ => panic!("Expected HmacSignedHeader after schema -> runtime conversion"),
+        }
+    }
+
+    #[test]
+    fn test_parse_eip712_signed_header_credential() {
+        use crate::secrets::{CredentialLocation, FieldSource, OutputSource};
+
+        let json = r#"{
+            "http": {
+                "allowlist": [{ "host": "clob.polymarket.com" }],
+                "credentials": {
+                    "polymarket_l1": {
+                        "secret_name": "polymarket_eth_key",
+                        "location": {
+                            "type": "eip712_signed_header",
+                            "domain": {
+                                "name": "ClobAuthDomain",
+                                "version": "1",
+                                "chain_id": 137
+                            },
+                            "primary_type": "ClobAuth",
+                            "structs": [
+                                {
+                                    "name": "ClobAuth",
+                                    "fields": [
+                                        { "name": "address", "type": "address",
+                                          "source": { "source": "signer_address" } },
+                                        { "name": "timestamp", "type": "string",
+                                          "source": { "source": "request_timestamp_secs" } },
+                                        { "name": "nonce", "type": "uint256",
+                                          "source": { "source": "literal", "value": "0" } },
+                                        { "name": "message", "type": "string",
+                                          "source": { "source": "literal",
+                                                      "value": "This message attests that I control the given wallet" } }
+                                    ]
+                                }
+                            ],
+                            "output_headers": [
+                                { "header_name": "POLY_ADDRESS",
+                                  "value": { "source": "signer_address" } },
+                                { "header_name": "POLY_SIGNATURE",
+                                  "value": { "source": "signature_hex" } },
+                                { "header_name": "POLY_TIMESTAMP",
+                                  "value": { "source": "request_timestamp_secs" } },
+                                { "header_name": "POLY_NONCE",
+                                  "value": { "source": "literal", "value": "0" } }
+                            ]
+                        },
+                        "host_patterns": ["clob.polymarket.com"]
+                    }
+                }
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        let runtime = caps.http.unwrap().to_http_capability();
+        let mapping = runtime.credentials.get("polymarket_eth_key").unwrap();
+        match &mapping.location {
+            CredentialLocation::Eip712SignedHeader {
+                domain,
+                primary_type,
+                structs,
+                output_headers,
+                output_body_fields: _,
+            } => {
+                assert_eq!(domain.name, "ClobAuthDomain");
+                assert_eq!(domain.version, "1");
+                assert_eq!(domain.chain_id, 137);
+                assert_eq!(primary_type, "ClobAuth");
+                assert_eq!(structs.len(), 1);
+                assert_eq!(structs[0].fields.len(), 4);
+                assert_eq!(structs[0].fields[0].type_name, "address");
+                assert!(matches!(structs[0].fields[0].source, FieldSource::SignerAddress));
+                assert_eq!(output_headers.len(), 4);
+                assert_eq!(output_headers[1].header_name, "POLY_SIGNATURE");
+                assert!(matches!(output_headers[1].value, OutputSource::SignatureHex));
+            }
+            _ => panic!("Expected Eip712SignedHeader"),
+        }
+    }
+
+    #[test]
+    fn test_parse_eip712_signed_header_with_body_outputs() {
+        use crate::secrets::{BodyValue, BytesPart, CredentialLocation, FieldSource};
+
+        let json = r#"{
+            "http": {
+                "allowlist": [{ "host": "api.hyperliquid.xyz" }],
+                "credentials": {
+                    "hyperliquid_l1": {
+                        "secret_name": "hyperliquid_eth_key",
+                        "location": {
+                            "type": "eip712_signed_header",
+                            "domain": {
+                                "name": "Exchange",
+                                "version": "1",
+                                "chain_id": 1337,
+                                "verifying_contract": "0x0000000000000000000000000000000000000000"
+                            },
+                            "primary_type": "Agent",
+                            "structs": [
+                                {
+                                    "name": "Agent",
+                                    "fields": [
+                                        { "name": "source", "type": "string",
+                                          "source": { "source": "literal", "value": "a" } },
+                                        { "name": "connectionId", "type": "bytes32",
+                                          "source": {
+                                              "source": "bytes32_keccak256_of_bytes",
+                                              "parts": [
+                                                  { "kind": "body_field_msgpack", "path": "action" },
+                                                  { "kind": "body_field_be_u64", "path": "nonce" },
+                                                  { "kind": "body_field_eth_address_optional_prefixed",
+                                                    "path": "vaultAddress" }
+                                              ]
+                                          } }
+                                    ]
+                                }
+                            ],
+                            "output_headers": [],
+                            "output_body_fields": [
+                                { "json_path": "signature.r", "value": { "source": "signature_r_hex" } },
+                                { "json_path": "signature.s", "value": { "source": "signature_s_hex" } },
+                                { "json_path": "signature.v", "value": { "source": "signature_v" } }
+                            ]
+                        },
+                        "host_patterns": ["api.hyperliquid.xyz"]
+                    }
+                }
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        let runtime = caps.http.unwrap().to_http_capability();
+        let mapping = runtime.credentials.get("hyperliquid_eth_key").unwrap();
+        match &mapping.location {
+            CredentialLocation::Eip712SignedHeader {
+                domain,
+                primary_type,
+                structs,
+                output_headers,
+                output_body_fields,
+            } => {
+                assert_eq!(domain.name, "Exchange");
+                assert_eq!(domain.chain_id, 1337);
+                assert_eq!(domain.verifying_contract.as_deref(), Some("0x0000000000000000000000000000000000000000"));
+                assert_eq!(primary_type, "Agent");
+                assert_eq!(structs.len(), 1);
+                assert_eq!(structs[0].fields.len(), 2);
+                let connection_field = &structs[0].fields[1];
+                assert_eq!(connection_field.type_name, "bytes32");
+                match &connection_field.source {
+                    FieldSource::Bytes32Keccak256OfBytes { parts } => {
+                        assert_eq!(parts.len(), 3);
+                        assert!(matches!(parts[0], BytesPart::BodyFieldMsgpack { .. }));
+                        assert!(matches!(parts[1], BytesPart::BodyFieldBeU64 { .. }));
+                        assert!(matches!(
+                            parts[2],
+                            BytesPart::BodyFieldEthAddressOptionalPrefixed { .. }
+                        ));
+                    }
+                    _ => panic!("expected Bytes32Keccak256OfBytes"),
+                }
+                assert!(output_headers.is_empty());
+                assert_eq!(output_body_fields.len(), 3);
+                assert_eq!(output_body_fields[0].json_path, "signature.r");
+                assert!(matches!(output_body_fields[0].value, BodyValue::SignatureRHex));
+                assert!(matches!(output_body_fields[1].value, BodyValue::SignatureSHex));
+                assert!(matches!(output_body_fields[2].value, BodyValue::SignatureV));
+            }
+            _ => panic!("Expected Eip712SignedHeader"),
+        }
+    }
+
+    #[test]
+    fn test_parse_nep413_signed_header_credential() {
+        use crate::secrets::{CredentialLocation, FieldSource, OutputSource};
+
+        let json = r#"{
+            "http": {
+                "allowlist": [{ "host": "api.trezu.example" }],
+                "credentials": {
+                    "trezu": {
+                        "secret_name": "near_account_key",
+                        "location": {
+                            "type": "nep413_signed_header",
+                            "recipient_source": { "source": "literal", "value": "trezu.near" },
+                            "message_source": { "source": "literal", "value": "auth-challenge" },
+                            "output_headers": [
+                                { "header_name": "X-NEAR-PUBLIC-KEY",
+                                  "value": { "source": "signer_public_key" } },
+                                { "header_name": "X-NEAR-SIGNATURE",
+                                  "value": { "source": "signature_base64" } },
+                                { "header_name": "X-NEAR-NONCE",
+                                  "value": { "source": "request_random_nonce_b64" } }
+                            ]
+                        },
+                        "host_patterns": ["api.trezu.example"]
+                    }
+                }
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        let runtime = caps.http.unwrap().to_http_capability();
+        let mapping = runtime.credentials.get("near_account_key").unwrap();
+        match &mapping.location {
+            CredentialLocation::Nep413SignedHeader {
+                recipient_source,
+                message_source,
+                callback_url_source,
+                output_headers,
+            } => {
+                match recipient_source {
+                    FieldSource::Literal { value } => assert_eq!(value, "trezu.near"),
+                    _ => panic!("recipient_source must be literal"),
+                }
+                match message_source {
+                    FieldSource::Literal { value } => assert_eq!(value, "auth-challenge"),
+                    _ => panic!("message_source must be literal"),
+                }
+                assert!(callback_url_source.is_none());
+                assert_eq!(output_headers.len(), 3);
+                assert!(matches!(output_headers[0].value, OutputSource::SignerPublicKey));
+                assert!(matches!(output_headers[1].value, OutputSource::SignatureBase64));
+                assert!(matches!(output_headers[2].value, OutputSource::RequestRandomNonceB64));
+            }
+            _ => panic!("Expected Nep413SignedHeader"),
         }
     }
 
