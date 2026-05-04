@@ -273,12 +273,12 @@ impl LeakDetector {
             });
         }
 
-        // Log warn-action matches at debug level (not warn!) to avoid
-        // corrupting REPL/TUI output. These are informational — real leaks
-        // use LeakAction::Redact which modifies the content silently.
+        // Warn-action matches are informational only. Keep them at trace so
+        // ordinary debug/server logging does not get flooded by common
+        // high-entropy values that are not actually secrets.
         for m in &result.matches {
             if m.action == LeakAction::Warn {
-                tracing::debug!(
+                tracing::trace!(
                     pattern = %m.pattern_name,
                     severity = %m.severity,
                     preview = %m.masked_preview,
