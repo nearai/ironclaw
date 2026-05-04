@@ -78,6 +78,12 @@ pub struct AppComponents {
     /// Populated by the pairing flow (Task 8). Pre-allocated here so all
     /// subsystems can hold an `Arc` to the same cache instance.
     pub ownership_cache: Arc<crate::ownership::OwnershipCache>,
+    /// Raw libSQL database handle, when ironclaw is running with the
+    /// libsql backend. Subsystems that need a typed handle (legal-harness
+    /// store, secrets store) hold a clone of this `Arc`. Postgres-only
+    /// builds keep this `None`.
+    #[cfg(feature = "libsql")]
+    pub libsql_db: Option<Arc<::libsql::Database>>,
 }
 
 /// Options that control optional init phases.
@@ -1334,6 +1340,11 @@ impl AppBuilder {
             dev_loaded_tool_names,
             builder,
             ownership_cache: Arc::new(crate::ownership::OwnershipCache::new()),
+            // Surface the libSQL handle so the gateway can wire up
+            // legal-harness wiring (DOCX export read store) without
+            // re-resolving the database backend.
+            #[cfg(feature = "libsql")]
+            libsql_db: self.handles.as_ref().and_then(|h| h.libsql_db.clone()),
         })
     }
 }

@@ -893,6 +893,17 @@ async fn async_main() -> anyhow::Result<()> {
                 gw = gw.with_secrets_store(Arc::clone(ss));
             }
 
+            // Legal-harness DOCX export — Stream C scope. The chat-read
+            // store wraps the same libSQL handle the rest of the
+            // gateway already shares; postgres-only builds skip this
+            // (the export endpoint returns 503 there).
+            #[cfg(feature = "libsql")]
+            if let Some(ref ldb) = components.libsql_db {
+                let legal_store =
+                    Arc::new(ironclaw::legal::store::LegalChatStore::new(Arc::clone(ldb)));
+                gw = gw.with_legal_chat_store(legal_store);
+            }
+
             // Bootstrap: create the first admin user from single-user config
             // so the owner appears in the Users admin panel immediately.
             if let Ok(false) = d.has_any_users().await {

@@ -464,6 +464,19 @@ pub struct GatewayState {
     /// Channel-agnostic tool dispatcher for routing handler operations through
     /// the tool pipeline with audit trail.
     pub tool_dispatcher: Option<Arc<crate::tools::dispatch::ToolDispatcher>>,
+    /// Read-side store for the legal-harness DOCX export endpoint.
+    ///
+    /// Populated when ironclaw is configured with the libsql backend; left
+    /// `None` for postgres-only deployments. The export endpoint returns
+    /// `503 Service Unavailable` when this is absent so the surface degrades
+    /// gracefully rather than 500ing.
+    #[cfg(feature = "libsql")]
+    pub legal_chat_store: Option<Arc<crate::legal::store::LegalChatStore>>,
+    /// Postgres builds keep an inhabited slot so the gateway compiles
+    /// without `cfg!()` at every call site, but the option is always
+    /// `None` and the export handler fails closed.
+    #[cfg(not(feature = "libsql"))]
+    pub legal_chat_store: Option<()>,
 }
 
 /// Cached result of `build_frontend_html()`, keyed by a cheap workspace
