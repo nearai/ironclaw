@@ -499,6 +499,7 @@ CREATE TABLE IF NOT EXISTS routine_runs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_routine_runs_routine ON routine_runs(routine_id);
+CREATE INDEX IF NOT EXISTS idx_routine_runs_created ON routine_runs(created_at);
 
 -- ==================== Settings ====================
 
@@ -1005,6 +1006,19 @@ CREATE INDEX IF NOT EXISTS idx_llm_calls_created_at ON llm_calls(created_at);
 DELETE FROM settings
 WHERE key = 'wasm.default_fuel_limit'
   AND CAST(json_extract(value, '$') AS INTEGER) = 10000000;
+"#,
+    ),
+    (
+        26,
+        "routine_runs_created_at_index",
+        // The `ironclaw insights` aggregation filters routine_runs by
+        // created_at over the [since, until) window. V6 created indexes
+        // on routine_id and status but not created_at, so the insights
+        // query was a full-table scan on busy deployments. Add the
+        // missing index here for existing libSQL databases; fresh
+        // databases pick it up via the consolidated SCHEMA above.
+        r#"
+CREATE INDEX IF NOT EXISTS idx_routine_runs_created ON routine_runs(created_at);
 "#,
     ),
 ];

@@ -1246,6 +1246,63 @@ pub trait IdentityStore: Send + Sync {
     ) -> Result<(), DatabaseError>;
 }
 
+/// Aggregate usage metrics over a time window for the `ironclaw insights` CLI.
+///
+/// All counts cover the half-open interval `[since, now)` where `since` is the
+/// `created_at` lower bound. The struct is deliberately additive — new fields
+/// must be appended (not reordered) so JSON output stays backward compatible.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct InsightsAggregate {
+    /// Total agent_jobs rows with `created_at >= since`. Includes all sources
+    /// (`direct`, `sandbox`, `system`) so the operator sees full activity.
+    pub total_jobs: u64,
+    /// Total routine_runs rows with `created_at >= since`.
+    pub total_routine_runs: u64,
+    /// Sum of `agent_jobs.total_tokens_used` over the window.
+    pub total_tokens_used: u64,
+    /// Top tools by invocation count from `job_actions`, joined to `agent_jobs`
+    /// so the time window is enforced via `agent_jobs.created_at`.
+    /// Already truncated to the requested limit, ordered desc.
+    pub top_tools: Vec<ToolFrequency>,
+    /// Daily activity buckets ordered ascending by date (UTC, `YYYY-MM-DD`).
+    /// One row per calendar day that has at least one job; empty days are
+    /// omitted to keep the payload bounded.
+    pub daily_activity: Vec<DailyActivity>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ToolFrequency {
+    pub tool_name: String,
+    pub invocations: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DailyActivity {
+    /// UTC calendar day formatted as `YYYY-MM-DD`.
+    pub date: String,
+    pub jobs: u64,
+}
+
+#[async_trait]
+pub trait InsightsStore: Send + Sync {
+    /// Aggregate usage stats over the window `[since, until)`.
+    ///
+    /// The closed-open `[since, until)` interval is enforced in SQL so
+    /// future-dated rows (clock skew, manual seeds, replay tooling) and
+    /// rows committed mid-aggregation cannot leak into the totals. The
+    /// caller is expected to pass `until = Utc::now()` for the live CLI
+    /// path; tests pin a fixed `until` to make assertions deterministic.
+    ///
+    /// `top_tools_limit` caps the number of tool rows returned. Backends must
+    /// compute aggregates server-side (no streaming all rows to the CLI).
+    async fn aggregate_insights(
+        &self,
+        since: DateTime<Utc>,
+        until: DateTime<Utc>,
+        top_tools_limit: i64,
+    ) -> Result<InsightsAggregate, DatabaseError>;
+}
+
 /// Backend-agnostic database supertrait.
 ///
 /// Combines all sub-traits into one. Existing `Arc<dyn Database>` consumers
@@ -1262,6 +1319,7 @@ pub trait Database:
     + UserStore
     + ChannelPairingStore
     + IdentityStore
+    + InsightsStore
     + Send
     + Sync
 {

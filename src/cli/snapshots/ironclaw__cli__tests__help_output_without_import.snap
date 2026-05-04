@@ -20,6 +20,7 @@ Commands:
   profile     Manage deployment profiles
   service     Manage OS service
   skills      Manage skills
+  insights    Show usage analytics for the local agent
   hooks       Manage lifecycle hooks
   models      Manage LLM providers and models
   doctor      Run diagnostics (check if everything is configured correctly)

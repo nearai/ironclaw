@@ -24,6 +24,7 @@ pub mod fmt;
 mod hooks;
 #[cfg(feature = "import")]
 pub mod import;
+pub mod insights;
 mod logs;
 mod mcp;
 pub mod memory;
@@ -45,6 +46,7 @@ pub use doctor::run_doctor_command;
 pub use hooks::{HooksCommand, run_hooks_command};
 #[cfg(feature = "import")]
 pub use import::{ImportCommand, run_import_command};
+pub use insights::{InsightsArgs, run_insights_command, run_insights_with_db};
 pub use logs::{LogsCommand, run_logs_command};
 pub use mcp::{McpCommand, run_mcp_command};
 pub use memory::MemoryCommand;
@@ -255,6 +257,20 @@ pub enum Command {
         long_about = "List, search, and inspect SKILL.md-based skills.\nExamples:\n  ironclaw skills list\n  ironclaw skills search 'writing'\n  ironclaw skills info my-skill"
     )]
     Skills(SkillsCommand),
+
+    /// Show usage analytics (jobs, tokens, top tools)
+    #[command(
+        about = "Show usage analytics for the local agent",
+        long_about = "Aggregates agent_jobs, routine_runs, and job_actions over a time \
+                      window so operators can track adoption without tailing logs.\n\n\
+                      Default window is 30 days. Capped at 90 days; larger requests are \
+                      clamped with a warning.\n\n\
+                      Examples:\n  \
+                        ironclaw insights                # last 30 days, table\n  \
+                        ironclaw insights --days 7       # last week\n  \
+                        ironclaw insights --json         # machine-readable JSON"
+    )]
+    Insights(InsightsArgs),
 
     /// Manage lifecycle hooks
     #[command(
