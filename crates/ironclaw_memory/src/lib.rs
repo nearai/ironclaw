@@ -31,6 +31,10 @@ pub use path::{MemoryDocumentPath, MemoryDocumentScope};
 pub use repo::LibSqlMemoryDocumentRepository;
 #[cfg(feature = "postgres")]
 pub use repo::PostgresMemoryDocumentRepository;
+#[cfg(feature = "libsql")]
+pub use repo::RebornLibSqlMemoryDocumentRepository;
+#[cfg(feature = "postgres")]
+pub use repo::RebornPostgresMemoryDocumentRepository;
 pub use repo::{InMemoryMemoryDocumentRepository, MemoryAppendOutcome, MemoryDocumentRepository};
 pub use safety::{
     DefaultPromptWriteSafetyPolicy, PromptProtectedPathClass, PromptProtectedPathRegistry,
