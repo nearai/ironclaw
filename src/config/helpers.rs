@@ -200,12 +200,13 @@ pub(crate) const ADMIN_ONLY_LLM_SETTING_KEYS: &[&str] = &[
     "llm_custom_providers",
     "ollama_base_url",
     "openai_compatible_base_url",
-    // Provider-selection keys — every member shares one LLM provider chain,
-    // so the choice of backend and the provider-specific endpoint knobs
-    // (Bedrock region / cross-region prefix / AWS profile) must be gated
-    // to admins. Members can still pick their own model via `selected_model`,
-    // which is intentionally NOT in this list.
+    // Provider-selection / smart-routing keys — every member shares one LLM
+    // provider chain, so the choice of backend and any cheap-model / cascade
+    // behavior must be gated to admins. Members can still pick their own model
+    // via `selected_model`, which is intentionally NOT in this list.
     "llm_backend",
+    "cheap_model",
+    "smart_routing_cascade",
     "bedrock_region",
     "bedrock_cross_region",
     "bedrock_profile",

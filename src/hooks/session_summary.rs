@@ -130,7 +130,7 @@ impl Hook for SessionSummaryHook {
 
         // Truncate to avoid sending too much to the LLM.
         let truncated = if transcript.len() > 8000 {
-            &transcript[..transcript.floor_char_boundary(8000)]
+            &transcript[..transcript.floor_char_boundary(8000)] // safety: floor_char_boundary keeps the byte index on a UTF-8 boundary
         } else {
             &transcript
         };
@@ -525,7 +525,7 @@ mod tests {
             session_id: "sess1".into(),
         };
         let ctx = HookContext::default();
-        let outcome = hook.execute(&event, &ctx).await.unwrap();
+        let outcome = hook.execute(&event, &ctx).await.unwrap(); // safety: test-only hook execution; no transaction boundary involved
         assert!(matches!(outcome, HookOutcome::Continue { modified: None }));
     }
 
@@ -547,7 +547,7 @@ mod tests {
             thread_ids: vec![],
         };
         let ctx = HookContext::default();
-        let outcome = hook.execute(&event, &ctx).await.unwrap();
+        let outcome = hook.execute(&event, &ctx).await.unwrap(); // safety: test-only hook execution; no transaction boundary involved
         assert!(matches!(outcome, HookOutcome::Continue { modified: None }));
     }
 
@@ -593,7 +593,7 @@ mod tests {
             thread_ids: vec![conv_id],
         };
         let ctx = HookContext::default();
-        let outcome = hook.execute(&event, &ctx).await.unwrap();
+        let outcome = hook.execute(&event, &ctx).await.unwrap(); // safety: test-only hook execution; no transaction boundary involved
         assert!(matches!(outcome, HookOutcome::Continue { modified: None }));
     }
 
@@ -662,7 +662,7 @@ mod tests {
             thread_ids: vec![conv_id],
         };
         let ctx = HookContext::default();
-        let outcome = hook.execute(&event, &ctx).await.unwrap();
+        let outcome = hook.execute(&event, &ctx).await.unwrap(); // safety: test-only hook execution; no transaction boundary involved
         assert!(matches!(outcome, HookOutcome::Continue { modified: None }));
 
         // Verify the summary was written to workspace.

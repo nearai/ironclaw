@@ -5,8 +5,8 @@ use secrecy::SecretString;
 
 use crate::bootstrap::ironclaw_base_dir;
 use crate::config::helpers::{
-    db_first_bool, db_first_or_default, optional_env, parse_optional_env, validate_base_url,
-    validate_operator_base_url,
+    db_first_bool, db_first_option, db_first_optional_string, db_first_or_default, optional_env,
+    parse_optional_env, validate_base_url, validate_operator_base_url,
 };
 use crate::error::ConfigError;
 use crate::llm::config::*;
@@ -495,13 +495,15 @@ impl LlmConfig {
             None
         };
 
-        // Generic cheap model (works with any backend).
+        // Generic cheap model: settings > env var > None.
         // Falls back to NearAI-specific cheap_model in provider chain logic.
-        let cheap_model = optional_env("LLM_CHEAP_MODEL")?;
+        let cheap_model = db_first_optional_string(&settings.cheap_model, "LLM_CHEAP_MODEL")?;
 
-        // Generic smart routing cascade flag.
-        // Defaults to true. Overrides NearAI-specific smart_routing_cascade.
-        let smart_routing_cascade = parse_optional_env("SMART_ROUTING_CASCADE", true)?;
+        // Generic smart routing cascade flag: settings > env var > true.
+        // Overrides NearAI-specific smart_routing_cascade.
+        let smart_routing_cascade =
+            db_first_option(&settings.smart_routing_cascade, "SMART_ROUTING_CASCADE")?
+                .unwrap_or(true);
 
         // Decorator chain settings — top-level `LLM_*` vars with fallback to
         // existing backend-specific vars for backward compatibility.
@@ -956,6 +958,127 @@ mod tests {
             std::env::remove_var("LLM_BACKEND");
             std::env::remove_var("LLM_BASE_URL");
             std::env::remove_var("LLM_MODEL");
+            std::env::remove_var("LLM_CHEAP_MODEL");
+            std::env::remove_var("SMART_ROUTING_CASCADE");
+        }
+    }
+
+    #[test]
+    fn cheap_model_uses_settings_when_env_unset() {
+        let _guard = lock_env();
+        clear_openai_compatible_env();
+
+        let settings = Settings {
+            cheap_model: Some("gpt-4o-mini".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        assert_eq!(cfg.cheap_model.as_deref(), Some("gpt-4o-mini"));
+    }
+
+    #[test]
+    fn cheap_model_uses_env_when_settings_unset() {
+        let _guard = lock_env();
+        clear_openai_compatible_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("LLM_CHEAP_MODEL", "env-cheap");
+        }
+
+        let cfg = LlmConfig::resolve(&Settings::default()).expect("resolve should succeed");
+        assert_eq!(cfg.cheap_model.as_deref(), Some("env-cheap"));
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_CHEAP_MODEL");
+        }
+    }
+
+    #[test]
+    fn cheap_model_settings_override_env() {
+        let _guard = lock_env();
+        clear_openai_compatible_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("LLM_CHEAP_MODEL", "env-cheap");
+        }
+
+        let settings = Settings {
+            cheap_model: Some("settings-cheap".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        assert_eq!(cfg.cheap_model.as_deref(), Some("settings-cheap"));
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_CHEAP_MODEL");
+        }
+    }
+
+    #[test]
+    fn smart_routing_cascade_uses_settings_when_env_unset() {
+        let _guard = lock_env();
+        clear_openai_compatible_env();
+
+        let settings = Settings {
+            smart_routing_cascade: Some(false),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        assert!(!cfg.smart_routing_cascade);
+    }
+
+    #[test]
+    fn smart_routing_cascade_defaults_true_when_unset() {
+        let _guard = lock_env();
+        clear_openai_compatible_env();
+
+        let cfg = LlmConfig::resolve(&Settings::default()).expect("resolve should succeed");
+        assert!(cfg.smart_routing_cascade);
+    }
+
+    #[test]
+    fn smart_routing_cascade_uses_env_when_settings_unset() {
+        let _guard = lock_env();
+        clear_openai_compatible_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("SMART_ROUTING_CASCADE", "false");
+        }
+
+        let cfg = LlmConfig::resolve(&Settings::default()).expect("resolve should succeed");
+        assert!(!cfg.smart_routing_cascade);
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("SMART_ROUTING_CASCADE");
+        }
+    }
+
+    #[test]
+    fn smart_routing_cascade_settings_override_env() {
+        let _guard = lock_env();
+        clear_openai_compatible_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("SMART_ROUTING_CASCADE", "true");
+        }
+
+        let settings = Settings {
+            smart_routing_cascade: Some(false),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        assert!(!cfg.smart_routing_cascade);
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("SMART_ROUTING_CASCADE");
         }
     }
 

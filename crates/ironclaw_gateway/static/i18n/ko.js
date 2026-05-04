@@ -523,6 +523,8 @@ I18n.register('ko', {
   'settings.envValue': '환경: {value}',
   'settings.envDefault': '환경 기본값',
   'settings.useEnvDefault': '환경 기본값 사용',
+  'settings.enabledOption': '활성화',
+  'settings.disabledOption': '비활성화',
 
   // 설정 그룹
   'cfg.group.llm': 'LLM 공급자',
@@ -542,6 +544,10 @@ I18n.register('ko', {
   'cfg.llm_backend.desc': 'LLM 추론 공급자',
   'cfg.selected_model.label': '모델',
   'cfg.selected_model.desc': '선택한 백엔드의 모델 이름 또는 ID',
+  'cfg.cheap_model.label': '저비용 모델',
+  'cfg.cheap_model.desc': '스마트 라우팅과 기타 가벼운 작업에 사용하는 저비용/고속 모델',
+  'cfg.smart_routing_cascade.label': '스마트 라우팅 캐스케이드',
+  'cfg.smart_routing_cascade.desc': '저비용 모델의 응답이 불확실해 보이면 기본 모델로 다시 시도합니다',
   'cfg.temperature.label': '온도',
   'cfg.temperature.desc': '기본 샘플링 온도 (0.0–2.0). 낮을수록 결정적, 높을수록 창의적',
   'cfg.group.inference': '추론',

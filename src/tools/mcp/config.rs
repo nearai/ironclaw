@@ -564,7 +564,7 @@ fn migrate_legacy_server_name(name: &mut String) {
     while end > 0 && !name.is_char_boundary(end) {
         end -= 1;
     }
-    let truncated = name[..end].to_string();
+    let truncated = name[..end].to_string(); // safety: end is walked back until it lands on a UTF-8 boundary
     tracing::warn!(
         original_name = %name,
         truncated_name = %truncated,

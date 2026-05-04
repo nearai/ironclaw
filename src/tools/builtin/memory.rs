@@ -1877,7 +1877,7 @@ mod tests {
             let ctx = JobContext::with_user("alice", "test", "test");
             let params = serde_json::json!({"query": "Rust backend"});
             let output = tool
-                .execute(params, &ctx)
+                .execute(params, &ctx) // safety: test-only tool execution; no DB transaction boundary involved
                 .await
                 .expect("execute should succeed");
 
@@ -1913,7 +1913,7 @@ mod tests {
 
             let ctx = JobContext::with_user("bob", "test", "test");
             let params = serde_json::json!({"query": "Rust backend"});
-            let result = tool.execute(params, &ctx).await;
+            let result = tool.execute(params, &ctx).await; // safety: test-only tool execution; no DB transaction boundary involved
 
             assert!(result.is_ok());
             assert_eq!(
@@ -1936,7 +1936,7 @@ mod tests {
 
             let ctx = JobContext::with_user("charlie", "test", "test");
             let params = serde_json::json!({"query": "Rust backend", "reasoning": true});
-            let result = tool.execute(params, &ctx).await;
+            let result = tool.execute(params, &ctx).await; // safety: test-only tool execution; no DB transaction boundary involved
 
             // Should succeed with raw results (no synthesis), not propagate the LLM error.
             assert!(
