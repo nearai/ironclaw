@@ -35,6 +35,8 @@ use crate::workspace::MemoryDocument;
 
 use crate::db::libsql_migrations;
 
+pub mod budgets;
+
 /// Explicit column list for routines table (matches positional access in `row_to_routine_libsql`).
 pub(crate) const ROUTINE_COLUMNS: &str = "\
     id, name, description, user_id, enabled, \
@@ -334,7 +336,7 @@ impl Database for LibSqlBackend {
         conn.query("PRAGMA journal_mode=WAL", ())
             .await
             .map_err(|e| DatabaseError::Migration(format!("Failed to enable WAL mode: {}", e)))?;
-        conn.execute_batch(libsql_migrations::SCHEMA)
+        conn.execute_batch(crate::db::libsql_migrations::SCHEMA)
             .await
             .map_err(|e| DatabaseError::Migration(format!("libSQL migration failed: {}", e)))?;
         // Apply incremental migrations (V9+) tracked in _migrations table.
@@ -572,6 +574,175 @@ mod tests {
         let row = rows.next().await.unwrap().unwrap();
         let timeout: i64 = row.get(0).unwrap();
         assert_eq!(timeout, 5000);
+    }
+
+    /// Smoke test: V26 budget tables materialise on a fresh libSQL
+    /// database, and the unique index permits the documented row shape.
+    ///
+    /// Uses `new_local` with a tempfile rather than `new_memory` because
+    /// `:memory:` databases are connection-local in SQLite — tables
+    /// created by one connection are invisible to the next.
+    #[tokio::test]
+    async fn v26_budget_schema_applies_and_accepts_a_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("budgets_smoke.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+        let conn = backend.connect().await.unwrap();
+
+        let mut all = conn
+            .query(
+                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
+                (),
+            )
+            .await
+            .unwrap();
+        let mut names = Vec::new();
+        while let Some(row) = all.next().await.unwrap() {
+            names.push(row.get::<String>(0).unwrap());
+        }
+        let found = names.join(", ");
+
+        for table in ["budgets", "budget_ledgers", "budget_events"] {
+            assert!(
+                names.iter().any(|n| n == table),
+                "{table} missing from schema after run_migrations(); got: {found}"
+            );
+        }
+
+        // Insert one row per table in documented shape. Any SQL
+        // regression (column count, CHECK violation, wrong type) surfaces
+        // here before the rest of the store code is written.
+        conn.execute(
+            "INSERT INTO budgets (
+                id, user_id, scope_kind, scope_id, limit_usd, limit_tokens,
+                limit_wall_clock_secs, period_kind, period_tz, period_unit,
+                source, active, created_at, created_by
+            ) VALUES (
+                'b-1', 'alice', 'user', 'alice', '5.00', NULL, NULL,
+                'rolling_24h', NULL, NULL, 'default', 1,
+                '2026-04-21T00:00:00.000Z', 'alice'
+            )",
+            (),
+        )
+        .await
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO budget_ledgers (
+                budget_id, period_start, period_end, spent_usd,
+                reserved_usd, tokens_used, updated_at
+            ) VALUES (
+                'b-1',
+                '2026-04-21T00:00:00.000Z',
+                '2026-04-22T00:00:00.000Z',
+                '0.00', '0.00', 0,
+                '2026-04-21T00:00:00.000Z'
+            )",
+            (),
+        )
+        .await
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO budget_events (
+                id, budget_id, thread_id, reservation_id, event_kind,
+                amount_usd, tokens, reason, actor_user_id, created_at
+            ) VALUES (
+                'e-1', 'b-1', NULL, 'r-1', 'reserve',
+                '0.10', 100, NULL, 'alice',
+                '2026-04-21T00:00:00.000Z'
+            )",
+            (),
+        )
+        .await
+        .unwrap();
+
+        // Reservation column is nullable for pure-audit events.
+        conn.execute(
+            "INSERT INTO budget_events (
+                id, budget_id, thread_id, reservation_id, event_kind,
+                amount_usd, tokens, reason, actor_user_id, created_at
+            ) VALUES (
+                'e-2', 'b-1', NULL, NULL, 'approve',
+                NULL, NULL, 'user approved', 'alice',
+                '2026-04-21T00:00:00.000Z'
+            )",
+            (),
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Regression for reviewer comment on PR #2847: the UNIQUE
+    /// constraint on active budgets must reject a duplicate even when
+    /// `period_unit` is NULL (per_invocation, rolling_24h), which a
+    /// plain table-level `UNIQUE(..., period_unit, ...)` does not —
+    /// SQLite treats NULLs as distinct. The partial unique indexes
+    /// `uq_budgets_non_calendar_active` fix it.
+    #[tokio::test]
+    async fn v26_partial_unique_indexes_reject_null_period_unit_duplicate() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("budgets_unique.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+        let conn = backend.connect().await.unwrap();
+
+        // First row inserts.
+        conn.execute(
+            "INSERT INTO budgets (
+                id, user_id, scope_kind, scope_id, limit_usd, limit_tokens,
+                limit_wall_clock_secs, period_kind, period_tz, period_unit,
+                source, active, created_at, created_by
+            ) VALUES (
+                'b-a', 'alice', 'user', 'alice', '5.00', NULL, NULL,
+                'rolling_24h', NULL, NULL, 'default', 1,
+                '2026-04-21T00:00:00.000Z', 'alice'
+            )",
+            (),
+        )
+        .await
+        .unwrap();
+
+        // Second row with identical (scope_kind, scope_id, period_kind)
+        // and NULL period_unit — must fail under the partial unique
+        // index. Without the index this would succeed because SQLite
+        // treats NULLs as distinct in a column-level UNIQUE.
+        let err = conn
+            .execute(
+                "INSERT INTO budgets (
+                    id, user_id, scope_kind, scope_id, limit_usd, limit_tokens,
+                    limit_wall_clock_secs, period_kind, period_tz, period_unit,
+                    source, active, created_at, created_by
+                ) VALUES (
+                    'b-b', 'alice', 'user', 'alice', '6.00', NULL, NULL,
+                    'rolling_24h', NULL, NULL, 'default', 1,
+                    '2026-04-21T00:00:00.000Z', 'alice'
+                )",
+                (),
+            )
+            .await;
+        assert!(err.is_err(), "expected UNIQUE violation, got {err:?}");
+
+        // Deactivating the first row releases the slot (the unique
+        // index is partial on active = 1).
+        conn.execute("UPDATE budgets SET active = 0 WHERE id = 'b-a'", ())
+            .await
+            .unwrap();
+        conn.execute(
+            "INSERT INTO budgets (
+                id, user_id, scope_kind, scope_id, limit_usd, limit_tokens,
+                limit_wall_clock_secs, period_kind, period_tz, period_unit,
+                source, active, created_at, created_by
+            ) VALUES (
+                'b-c', 'alice', 'user', 'alice', '7.00', NULL, NULL,
+                'rolling_24h', NULL, NULL, 'default', 1,
+                '2026-04-21T00:00:00.000Z', 'alice'
+            )",
+            (),
+        )
+        .await
+        .expect("insert after deactivation should succeed");
     }
 
     /// Regression test: save_job must persist user_id and get_job must return it.

@@ -3,6 +3,12 @@
 //! Defines CRUD operations for all engine types. The main crate implements
 //! this by wrapping its dual-backend `Database` trait (PostgreSQL + libSQL).
 
+use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
+
+use crate::types::budget::{
+    Budget, BudgetError, BudgetId, BudgetLedger, BudgetScope, ReservationId,
+};
 use crate::types::capability::{CapabilityLease, LeaseId};
 use crate::types::conversation::{ConversationId, ConversationSurface};
 use crate::types::error::EngineError;
@@ -247,5 +253,215 @@ pub trait Store: Send + Sync {
         Err(EngineError::Store {
             reason: format!("Store::list_all_missions not implemented for project '{project_id}'"),
         })
+    }
+
+    // ── Budget operations (issue #2843) ─────────────────────
+    //
+    // USD is primary. Reservation is pre-flight; reconciliation is
+    // post-flight. Denial is NOT an `EngineError` — it's an expected
+    // outcome carried by `AtomicReserveOutcome` so the caller can
+    // branch without error-message matching.
+    //
+    // All methods default to `unimplemented_budget_op` so a backend that
+    // hasn't shipped budget support yet fails loudly on use but doesn't
+    // break unrelated call sites.
+
+    /// Insert a new [`Budget`] row. Returns [`BudgetError::Store`] if the
+    /// row violates the `(scope_kind, scope_id, period_kind, period_unit, active)`
+    /// unique constraint.
+    async fn save_budget(&self, _budget: &Budget) -> Result<(), BudgetError> {
+        Err(unimplemented_budget_op("save_budget"))
+    }
+
+    /// Load a specific budget by id.
+    async fn load_budget(&self, _id: BudgetId) -> Result<Option<Budget>, BudgetError> {
+        Err(unimplemented_budget_op("load_budget"))
+    }
+
+    /// Return the active budgets covering a scope, in cascade-priority
+    /// order (user, project, mission, thread, background). A caller will
+    /// walk the returned vec and call `reserve_atomic` on each in turn.
+    async fn list_active_budgets_for_scope(
+        &self,
+        _scope: &BudgetScope,
+    ) -> Result<Vec<Budget>, BudgetError> {
+        Err(unimplemented_budget_op("list_active_budgets_for_scope"))
+    }
+
+    /// Deactivate a budget (sets `active = FALSE`). The row is retained
+    /// for audit.
+    async fn deactivate_budget(&self, _id: BudgetId) -> Result<(), BudgetError> {
+        Err(unimplemented_budget_op("deactivate_budget"))
+    }
+
+    /// Look up (or lazily create) the ledger row covering `now` for a
+    /// given budget. Returns the ledger with its current settled and
+    /// reserved totals.
+    async fn get_or_create_ledger_for_period(
+        &self,
+        _budget_id: BudgetId,
+        _now: DateTime<Utc>,
+    ) -> Result<BudgetLedger, BudgetError> {
+        Err(unimplemented_budget_op("get_or_create_ledger_for_period"))
+    }
+
+    /// Atomically reserve `requested_usd` (and optionally tokens) against
+    /// a budget's current-period ledger.
+    ///
+    /// Implementation contract:
+    ///
+    /// 1. Compute or read the `period_start`/`period_end` for `now` per
+    ///    the budget's [`BudgetPeriod`]. Create the ledger row if absent.
+    /// 2. Run a **single-statement atomic update** that increments
+    ///    `reserved_usd` by `requested_usd` iff
+    ///    `spent_usd + reserved_usd + requested_usd <= limit_usd`.
+    ///    Two concurrent reservers may not both observe the same
+    ///    pre-increment state; the DB must serialize.
+    ///     - PostgreSQL: `UPDATE ... WHERE ... RETURNING id`, empty result
+    ///       means denied.
+    ///     - libSQL: `BEGIN IMMEDIATE` + read-check-update-commit.
+    /// 3. On success, return `Ok(Some(...))` with the new reservation.
+    ///    On clean denial (budget would be exceeded), return `Ok(None)`.
+    ///    Plumbing failures are `Err(BudgetError::Store { ... })`.
+    ///
+    /// **Never** return `Ok(Some(..))` without having durably committed
+    /// the `reserved_usd` increment — the caller will proceed to spend
+    /// real money based on this return value.
+    ///
+    /// ## Reservation-lifetime persistence model (foundation PR)
+    ///
+    /// The pre-flight `reserved_usd` increment is durable, but the
+    /// *identity* of a live reservation (its `ReservationId` + original
+    /// reserved amount) is held in-memory by the caller between
+    /// `reserve_atomic` and `reconcile_reservation` / `release_reservation`.
+    /// The audit row written via [`Self::record_budget_event`] carries
+    /// the `reservation_id` for post-hoc correlation, but the ledger
+    /// only tracks the aggregate `reserved_usd`. That means:
+    ///
+    /// - A process crash between `reserve_atomic` and
+    ///   `reconcile_reservation` leaks `reserved_usd` headroom on the
+    ///   ledger — no automated release.
+    /// - Mid-cascade denial rollback is the caller's responsibility
+    ///   (they hold every earlier `original_reserved_usd` and must call
+    ///   `release_reservation` on each before bubbling the denial).
+    ///
+    /// A durable `budget_reservations` table that enumerates live
+    /// reservations — enabling crash-recovery release and preventing
+    /// permanent zombie `reserved_usd` — is an explicit follow-up
+    /// tracked under issue #2843's execution-loop-wiring milestone; the
+    /// contract here will extend (not change) when that lands.
+    async fn reserve_atomic(
+        &self,
+        _budget_id: BudgetId,
+        _requested_usd: Decimal,
+        _requested_tokens: u64,
+        _now: DateTime<Utc>,
+    ) -> Result<Option<AtomicReserveOutcome>, BudgetError> {
+        Err(unimplemented_budget_op("reserve_atomic"))
+    }
+
+    /// Settle an outstanding reservation. Atomically:
+    /// - decrements `reserved_usd` by `original_reserved_usd` (clamped at 0),
+    /// - increments `spent_usd` by `actual_usd`,
+    /// - increments `tokens_used` by `actual_tokens`.
+    ///
+    /// `actual_usd` may differ from `original_reserved_usd` (post-flight
+    /// cost was smaller or larger than the pre-flight estimate) — the
+    /// reservation slot is cleared regardless, and only the actual spend
+    /// is recorded.
+    #[allow(clippy::too_many_arguments)]
+    async fn reconcile_reservation(
+        &self,
+        _reservation_id: ReservationId,
+        _budget_id: BudgetId,
+        _original_reserved_usd: Decimal,
+        _actual_usd: Decimal,
+        _actual_tokens: u64,
+        _now: DateTime<Utc>,
+    ) -> Result<(), BudgetError> {
+        Err(unimplemented_budget_op("reconcile_reservation"))
+    }
+
+    /// Release a reservation without recording any spend (thread aborted,
+    /// LLM errored before doing work). Decrements `reserved_usd` by
+    /// `original_reserved_usd` (clamped at 0).
+    async fn release_reservation(
+        &self,
+        _reservation_id: ReservationId,
+        _budget_id: BudgetId,
+        _original_reserved_usd: Decimal,
+        _now: DateTime<Utc>,
+    ) -> Result<(), BudgetError> {
+        Err(unimplemented_budget_op("release_reservation"))
+    }
+
+    /// Append a row to the `budget_events` audit table. The enforcer
+    /// calls this on every reserve / reconcile / release / deny /
+    /// approve / override.
+    async fn record_budget_event(&self, _event: &BudgetEventRecord) -> Result<(), BudgetError> {
+        Err(unimplemented_budget_op("record_budget_event"))
+    }
+}
+
+/// Outcome of a successful [`Store::reserve_atomic`] call. Named so the
+/// trait signature doesn't leak reservation-creation details into every
+/// call site.
+#[derive(Debug, Clone)]
+pub struct AtomicReserveOutcome {
+    pub reservation_id: ReservationId,
+    pub budget_id: BudgetId,
+    pub reserved_usd: Decimal,
+    pub reserved_tokens: u64,
+    pub ledger: BudgetLedger,
+}
+
+/// Audit row for the `budget_events` table. Constructed by the enforcer
+/// and handed to [`Store::record_budget_event`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct BudgetEventRecord {
+    pub budget_id: BudgetId,
+    pub thread_id: Option<ThreadId>,
+    /// Reservation this event pertains to. `Some` for reserve /
+    /// reconcile / release; `None` for pure audit events (deny,
+    /// approve, override). Lets auditors stitch a reserve row to its
+    /// matching reconcile/release row when diagnosing leaked
+    /// `reserved_usd` headroom.
+    pub reservation_id: Option<ReservationId>,
+    pub event_kind: BudgetEventKind,
+    pub amount_usd: Option<Decimal>,
+    pub tokens: Option<u64>,
+    pub reason: Option<String>,
+    pub actor_user_id: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Kinds of audit events recorded against a budget. String form is the
+/// `event_kind` column value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetEventKind {
+    Reserve,
+    Reconcile,
+    Release,
+    Deny,
+    Approve,
+    Override,
+}
+
+impl BudgetEventKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Reserve => "reserve",
+            Self::Reconcile => "reconcile",
+            Self::Release => "release",
+            Self::Deny => "deny",
+            Self::Approve => "approve",
+            Self::Override => "override",
+        }
+    }
+}
+
+fn unimplemented_budget_op(name: &'static str) -> BudgetError {
+    BudgetError::Store {
+        reason: format!("Store::{name} not implemented for this backend"),
     }
 }

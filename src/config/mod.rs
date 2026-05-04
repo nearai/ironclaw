@@ -20,6 +20,7 @@
 
 pub mod acp;
 mod agent;
+mod budget;
 mod builder;
 mod channels;
 mod database;
@@ -51,6 +52,7 @@ use crate::settings::Settings;
 
 // Re-export all public types so `crate::config::FooConfig` continues to work.
 pub use self::agent::AgentConfig;
+pub use self::budget::{BudgetConfig, BudgetEnforcementMode};
 pub use self::builder::BuilderModeConfig;
 pub use self::channels::{
     ChannelsConfig, CliConfig, DEFAULT_GATEWAY_PORT, GatewayConfig, GatewayOidcConfig, HttpConfig,
@@ -111,6 +113,7 @@ pub struct Config {
     pub safety: SafetyConfig,
     pub wasm: WasmConfig,
     pub secrets: SecretsConfig,
+    pub budget: BudgetConfig,
     pub builder: BuilderModeConfig,
     pub heartbeat: HeartbeatConfig,
     pub hygiene: HygieneConfig,
@@ -229,6 +232,7 @@ impl Config {
                 source: crate::settings::KeySource::Env,
                 generated: false,
             },
+            budget: BudgetConfig::default(),
             builder: BuilderModeConfig {
                 enabled: false,
                 ..BuilderModeConfig::default()
@@ -594,6 +598,7 @@ impl Config {
             safety: resolve_safety_config(settings)?,
             wasm: WasmConfig::resolve(settings)?,
             secrets: SecretsConfig::resolve().await?,
+            budget: BudgetConfig::resolve()?,
             builder: BuilderModeConfig::resolve(settings)?,
             heartbeat: HeartbeatConfig::resolve(settings)?,
             hygiene: HygieneConfig::resolve(settings)?,

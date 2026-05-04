@@ -4,6 +4,7 @@
 //! - [`ThreadTree`] — parent-child relationship tracking
 //! - [`messaging`] — inter-thread signal channel
 
+pub mod budget;
 pub mod conversation;
 pub mod internal_write;
 pub mod lease_refresh;

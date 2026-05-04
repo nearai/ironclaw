@@ -6,6 +6,7 @@
 
 mod action_discovery;
 mod action_projector;
+pub(crate) mod budget_periods;
 mod capability_projector;
 mod cost_guard_gate;
 mod effect_adapter;
