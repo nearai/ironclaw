@@ -190,6 +190,27 @@ pub struct CompletionResult {
 /// system a malicious actor could swap a symlink after validation. This is
 /// acceptable in IronClaw's single-tenant design where the user controls
 /// the filesystem.
+/// Resolve the host address that worker containers should use to call
+/// back to the orchestrator API running in this process.
+///
+/// Defaults to `host.docker.internal`, which resolves dynamically inside
+/// worker containers via the `host.docker.internal:host-gateway` entry
+/// set in `extra_hosts` below. This adapts to non-default Docker
+/// networking (custom `bip`, rootless Docker) and is correct on Docker
+/// Desktop (macOS/Windows) as well.
+///
+/// **When to override with `ORCHESTRATOR_HOST`**: on orchestrators like
+/// Nomad in production mode, Docker ports are published on the node's
+/// advertised IP (e.g. `10.128.0.17`), NOT on `0.0.0.0`. In that case
+/// `host.docker.internal` (which resolves to the Docker bridge gateway)
+/// is not where the port is listening, so workers can't connect back.
+/// Set `ORCHESTRATOR_HOST` to the IP where Docker published the port
+/// (visible in `docker port <container>`). In a Nomad job spec that's
+/// `ORCHESTRATOR_HOST = "${attr.unique.network.ip-address}"`.
+fn resolve_orchestrator_host() -> String {
+    std::env::var("ORCHESTRATOR_HOST").unwrap_or_else(|_| "host.docker.internal".to_string())
+}
+
 fn validate_bind_mount_path(
     dir: &std::path::Path,
     job_id: Uuid,
@@ -420,10 +441,8 @@ impl ContainerJobManager {
         // Connect to Docker (reuses cached connection)
         let docker = self.docker().await?;
 
-        // Build container configuration
-        // Use host.docker.internal on all platforms — the extra_hosts mapping
-        // below resolves it to the actual host IP via Docker's host-gateway.
-        let orchestrator_host = "host.docker.internal";
+        // Build container configuration.
+        let orchestrator_host = resolve_orchestrator_host();
 
         let orchestrator_url = format!(
             "http://{}:{}",
@@ -964,12 +983,53 @@ async fn generate_worker_mcp_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::helpers::lock_env;
 
     #[test]
     fn test_container_job_config_default() {
         let config = ContainerJobConfig::default();
         assert_eq!(config.orchestrator_port, 50051);
         assert_eq!(config.memory_limit_mb, 2048);
+    }
+
+    #[test]
+    fn resolve_orchestrator_host_uses_env_var_when_set() {
+        let _guard = lock_env();
+
+        // Safety: env-var mutation requires unsafe in edition 2024;
+        // lock_env() serializes concurrent access from other test threads.
+        unsafe { std::env::set_var("ORCHESTRATOR_HOST", "10.128.0.17") };
+        assert_eq!(resolve_orchestrator_host(), "10.128.0.17");
+
+        unsafe { std::env::set_var("ORCHESTRATOR_HOST", "my-custom-host.internal") };
+        assert_eq!(resolve_orchestrator_host(), "my-custom-host.internal");
+
+        unsafe { std::env::remove_var("ORCHESTRATOR_HOST") };
+    }
+
+    #[test]
+    fn resolve_orchestrator_host_default_when_env_unset() {
+        let _guard = lock_env();
+
+        unsafe { std::env::remove_var("ORCHESTRATOR_HOST") };
+        // Default is `host.docker.internal` on all platforms — the
+        // `extra_hosts: ["host.docker.internal:host-gateway"]` on the worker
+        // container resolves this to the actual host gateway IP dynamically.
+        assert_eq!(resolve_orchestrator_host(), "host.docker.internal");
+    }
+
+    #[test]
+    fn resolve_orchestrator_host_empty_string_treated_as_value() {
+        // An empty string is a valid env var value (not "unset"), so
+        // std::env::var returns Ok(""), and we use it as-is. Documenting
+        // this behavior — operators should unset the var rather than set
+        // it empty if they want the default.
+        let _guard = lock_env();
+
+        unsafe { std::env::set_var("ORCHESTRATOR_HOST", "") };
+        assert_eq!(resolve_orchestrator_host(), "");
+
+        unsafe { std::env::remove_var("ORCHESTRATOR_HOST") };
     }
 
     #[test]
