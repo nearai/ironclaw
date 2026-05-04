@@ -854,7 +854,6 @@ async fn approval_resolution_executes_pending_call_directly() {
         user_timezone: None,
         client_thread_id: None,
         client_response_id: None,
-        spawning_mission_id: None,
     };
 
     let tool_result = effects
@@ -992,7 +991,6 @@ async fn auth_resolution_retries_same_pending_action_without_second_pause() {
         user_timezone: None,
         client_thread_id: None,
         client_response_id: None,
-        spawning_mission_id: None,
     };
 
     effects.mark_authenticated("http").await;
@@ -1105,7 +1103,6 @@ async fn approval_chains_directly_into_auth_for_install_flow() {
         user_timezone: None,
         client_thread_id: None,
         client_response_id: None,
-        spawning_mission_id: None,
     };
 
     effects.mark_approved("tool_install").await;

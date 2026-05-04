@@ -117,12 +117,6 @@ pub struct MissionUpdate {
     pub cooldown_secs: Option<u64>,
     pub max_concurrent: Option<u32>,
     pub dedup_window_secs: Option<u64>,
-    /// Keys to merge into the mission's metadata object. Existing keys not
-    /// present in this map are preserved; keys that overlap are overwritten.
-    /// Used to propagate routing identifiers (e.g. `client_thread_id`,
-    /// `client_response_id`) from the originating chat through to threads
-    /// the mission spawns.
-    pub metadata: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 /// In-memory dedup state for event-triggered missions. Keyed by
@@ -438,16 +432,6 @@ impl MissionManager {
         if let Some(secs) = updates.dedup_window_secs {
             mission.dedup_window_secs = secs;
         }
-        if let Some(extra) = updates.metadata {
-            if !mission.metadata.is_object() {
-                mission.metadata = serde_json::Value::Object(serde_json::Map::new());
-            }
-            if let Some(obj) = mission.metadata.as_object_mut() {
-                for (k, v) in extra {
-                    obj.insert(k, v);
-                }
-            }
-        }
 
         mission.updated_at = chrono::Utc::now();
         self.store.save_mission(&mission).await?;
@@ -702,47 +686,16 @@ impl MissionManager {
         let meta_prompt =
             build_meta_prompt(&mission, &project_docs, &trigger_payload, &context_blocks);
 
-        // Propagate routing identifiers from the mission's metadata to the
-        // spawned thread. The orchestrator reads `client_thread_id` /
-        // `client_response_id` from `Thread.metadata` (see
-        // `executor::orchestrator::thread_client_thread_id`) and the bridge
-        // forwards them as `JobContext.metadata.notify_thread_id` /
-        // `notify_response_id` so tools (e.g. `abound_send_wire(send)`) can
-        // route notifications back to the originating chat. Without this hop,
-        // every mission-spawned thread would be a fresh routing root.
-        let mut initial_metadata = serde_json::Map::new();
-        if let Some(obj) = mission.metadata.as_object() {
-            for key in ["client_thread_id", "client_response_id"] {
-                if let Some(v) = obj.get(key)
-                    && v.as_str().is_some_and(|s| !s.is_empty())
-                {
-                    initial_metadata.insert(key.to_string(), v.clone());
-                }
-            }
-        }
-        // Auto-stamp the spawning mission's own id on every fired thread so
-        // tools running inside this thread can operate on the mission (e.g.
-        // `abound_send_wire(send)` completes the mission on HTTP 2xx) without
-        // the LLM threading the id through tool params and without needing
-        // the mission to have stamped its own id into `metadata` at create
-        // time. Read by `orchestrator::thread_spawning_mission_id`.
-        initial_metadata.insert(
-            "spawning_mission_id".to_string(),
-            serde_json::Value::String(mission.id.to_string()),
-        );
-
         // Spawn thread with meta-prompt as initial user message
         let thread_id = self
             .thread_manager
-            .spawn_thread_with_history(
+            .spawn_thread(
                 &meta_prompt,
                 ThreadType::Mission,
                 mission.project_id,
                 ThreadConfig::default(),
                 None,
                 user_id,
-                Vec::new(),
-                initial_metadata,
             )
             .await?;
 
@@ -3481,182 +3434,6 @@ mod tests {
         assert!(
             mission.thread_history.contains(&tid),
             "thread should be recorded in mission history"
-        );
-    }
-
-    #[tokio::test]
-    async fn fire_mission_propagates_routing_metadata_to_spawned_thread() {
-        // Regression: fire_mission used to call `spawn_thread` with no
-        // initial metadata, so a mission created from a chat session would
-        // spawn threads that had no `client_thread_id` / `client_response_id`
-        // in their metadata. The bridge then resolved `notify_thread_id` to
-        // the engine's internal mission-thread id and notifications from
-        // tools running inside the mission (e.g. abound_send_wire(send))
-        // were routed to a thread the user never saw. Drive fire_mission
-        // through to its store side effect to lock the propagation in.
-        let store = Arc::new(TestStore::new());
-        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
-        let project_id = ProjectId::new();
-
-        let id = mgr
-            .create_mission(
-                project_id,
-                "test-user",
-                "rate-watcher",
-                "watch the rate",
-                MissionCadence::Manual,
-                Vec::new(),
-            )
-            .await
-            .unwrap();
-
-        let mut routing = serde_json::Map::new();
-        routing.insert(
-            "client_thread_id".into(),
-            serde_json::Value::String("chat-thread-uuid".into()),
-        );
-        routing.insert(
-            "client_response_id".into(),
-            serde_json::Value::String("resp_xxx".into()),
-        );
-        // Unrelated key the propagation must NOT carry forward.
-        routing.insert("self_improvement".into(), serde_json::Value::Bool(true));
-        mgr.update_mission(
-            id,
-            "test-user",
-            MissionUpdate {
-                metadata: Some(routing),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-
-        let tid = mgr
-            .fire_mission(id, "test-user", None)
-            .await
-            .unwrap()
-            .expect("fire_mission should return a thread id");
-
-        let thread = store
-            .load_thread(tid)
-            .await
-            .unwrap()
-            .expect("spawned thread should be persisted");
-
-        let meta = thread.metadata.as_object().expect("metadata is an object");
-        assert_eq!(
-            meta.get("client_thread_id").and_then(|v| v.as_str()),
-            Some("chat-thread-uuid"),
-            "client_thread_id should be propagated from Mission.metadata"
-        );
-        assert_eq!(
-            meta.get("client_response_id").and_then(|v| v.as_str()),
-            Some("resp_xxx"),
-            "client_response_id should be propagated from Mission.metadata"
-        );
-        assert!(
-            !meta.contains_key("self_improvement"),
-            "only the routing allow-list should be propagated; got {meta:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn fire_mission_skips_propagation_when_routing_metadata_absent() {
-        // Negative case: when no routing keys are stamped on the mission
-        // (e.g. heartbeat / self-improvement missions, or a mission created
-        // outside a user-facing chat), the spawned thread must NOT carry
-        // empty `client_thread_id` / `client_response_id` keys — the bridge
-        // distinguishes "absent" from "empty string", and an empty-string
-        // override would mask the engine's fallback to the thread id.
-        let store = Arc::new(TestStore::new());
-        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
-        let project_id = ProjectId::new();
-
-        let id = mgr
-            .create_mission(
-                project_id,
-                "test-user",
-                "no-routing",
-                "do work",
-                MissionCadence::Manual,
-                Vec::new(),
-            )
-            .await
-            .unwrap();
-
-        let tid = mgr
-            .fire_mission(id, "test-user", None)
-            .await
-            .unwrap()
-            .unwrap();
-        let thread = store.load_thread(tid).await.unwrap().unwrap();
-        let meta = thread.metadata.as_object().expect("metadata is an object");
-        assert!(
-            !meta.contains_key("client_thread_id"),
-            "absent routing must not appear as a key on the spawned thread"
-        );
-        assert!(
-            !meta.contains_key("client_response_id"),
-            "absent routing must not appear as a key on the spawned thread"
-        );
-    }
-
-    #[tokio::test]
-    async fn update_mission_metadata_merges_into_existing_object() {
-        // Regression: MissionUpdate.metadata must merge keys (not replace
-        // the whole object), so unrelated metadata such as
-        // `self_improvement: true` survives a routing-id stamp from
-        // abound_send_wire(action='wait').
-        let store = Arc::new(TestStore::new());
-        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
-        let project_id = ProjectId::new();
-
-        let id = mgr
-            .create_mission(
-                project_id,
-                "test-user",
-                "mission",
-                "goal",
-                MissionCadence::Manual,
-                Vec::new(),
-            )
-            .await
-            .unwrap();
-
-        // Seed an unrelated key on the mission directly via the store, the
-        // way `ensure_learning_missions` does for self-improvement missions.
-        let mut mission = store.load_mission(id).await.unwrap().unwrap();
-        mission.metadata = serde_json::json!({"self_improvement": true});
-        store.save_mission(&mission).await.unwrap();
-
-        let mut update_meta = serde_json::Map::new();
-        update_meta.insert(
-            "client_thread_id".into(),
-            serde_json::Value::String("chat-thread-uuid".into()),
-        );
-        mgr.update_mission(
-            id,
-            "test-user",
-            MissionUpdate {
-                metadata: Some(update_meta),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-
-        let saved = store.load_mission(id).await.unwrap().unwrap();
-        let obj = saved.metadata.as_object().expect("metadata is an object");
-        assert_eq!(
-            obj.get("self_improvement"),
-            Some(&serde_json::Value::Bool(true)),
-            "merge must preserve unrelated keys"
-        );
-        assert_eq!(
-            obj.get("client_thread_id").and_then(|v| v.as_str()),
-            Some("chat-thread-uuid"),
-            "merge must apply new keys"
         );
     }
 

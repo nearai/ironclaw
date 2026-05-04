@@ -480,8 +480,7 @@ impl ResponseAccumulator {
             }
             AppEvent::ToolStarted { name, call_id, .. } => {
                 // Emit function_call placeholder — arguments filled on ToolCompleted.
-                let call_id =
-                    call_id.unwrap_or_else(|| format!("call_{}", Uuid::new_v4().simple()));
+                let call_id = call_id.unwrap_or_else(|| format!("call_{}", Uuid::new_v4().simple()));
                 self.output.push(ResponseOutputItem::FunctionCall {
                     id: make_item_id(),
                     call_id,
@@ -608,7 +607,11 @@ impl ResponseAccumulator {
                         None => n == name,
                     };
                     let args_ok = !require_empty_args || arguments.is_empty();
-                    if id_match && args_ok { Some(idx) } else { None }
+                    if id_match && args_ok {
+                        Some(idx)
+                    } else {
+                        None
+                    }
                 }
                 _ => None,
             })
@@ -964,7 +967,8 @@ async fn streaming_worker(
                 ..
             } => {
                 if let Some(args) = parameters {
-                    if let Some(idx) = acc.find_function_call_index(name, call_id.as_deref(), true)
+                    if let Some(idx) =
+                        acc.find_function_call_index(name, call_id.as_deref(), true)
                         && let Some(ResponseOutputItem::FunctionCall { arguments, .. }) =
                             acc.output.get_mut(idx)
                     {

@@ -27,7 +27,8 @@ mod time;
 mod tool_info;
 
 pub use abound::{
-    AboundAccountInfoTool, AboundCreateNotificationTool, AboundExchangeRateTool, AboundSendWireTool,
+    AboundAccountInfoTool, AboundCreateNotificationTool, AboundExchangeRateTool,
+    AboundRateAlertTool, AboundSendWireTool,
 };
 pub use echo::EchoTool;
 pub use extension_tools::{

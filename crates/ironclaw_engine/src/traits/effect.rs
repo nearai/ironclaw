@@ -35,12 +35,6 @@ pub struct ThreadExecutionContext {
     /// Channel-supplied per-turn response id (full Responses API `resp_...`).
     /// Changes every turn. `None` for callers that don't supply one.
     pub client_response_id: Option<String>,
-    /// Id of the mission whose `fire_mission` spawned this thread, if any.
-    /// Auto-stamped by `MissionManager::fire_mission`. Tools running inside a
-    /// mission thread can read this to operate on their own mission (e.g.
-    /// completing the mission once a goal-condition is observed) without
-    /// needing the LLM to thread the id through tool params.
-    pub spawning_mission_id: Option<String>,
 }
 
 /// Abstraction over capability action execution.
