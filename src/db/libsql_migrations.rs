@@ -1007,6 +1007,137 @@ WHERE key = 'wasm.default_fuel_limit'
   AND CAST(json_extract(value, '$') AS INTEGER) = 10000000;
 "#,
     ),
+    (
+        26,
+        "legal_harness",
+        // Legal harness — projects, documents, chats, messages.
+        //
+        // Mirrors the PostgreSQL migration migrations/V26__legal_harness.sql.
+        // Stream A introduces all four tables; Streams B (chat) and C
+        // (DOCX export) consume the same shape. Schema is canonical — see
+        // legal-harness-spec.md.
+        //
+        // Storage notes:
+        // * Timestamps use `unixepoch()` — INTEGER seconds since epoch — to
+        //   match the canonical schema in the spec. This diverges from the
+        //   ISO-8601 TEXT pattern used elsewhere in the libSQL schema; the
+        //   tradeoff is intentional so all three streams agree on a single
+        //   shape across both backends.
+        // * `metadata` and `document_refs` carry JSON encoded as TEXT.
+        r#"
+CREATE TABLE IF NOT EXISTS legal_projects (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    deleted_at  INTEGER,
+    created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+    metadata    TEXT
+);
+
+CREATE TABLE IF NOT EXISTS legal_documents (
+    id              TEXT PRIMARY KEY,
+    project_id      TEXT NOT NULL REFERENCES legal_projects(id) ON DELETE CASCADE,
+    filename        TEXT NOT NULL,
+    content_type    TEXT NOT NULL,
+    storage_path    TEXT NOT NULL,
+    extracted_text  TEXT,
+    page_count      INTEGER,
+    bytes           INTEGER NOT NULL,
+    sha256          TEXT NOT NULL,
+    uploaded_at     INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE INDEX IF NOT EXISTS idx_legal_documents_project ON legal_documents(project_id);
+CREATE INDEX IF NOT EXISTS idx_legal_documents_sha256  ON legal_documents(sha256);
+-- Project-scoped sha dedupe — see migrations/V26__legal_harness.sql
+-- for the rationale. Closes the race between the dedupe lookup in
+-- `upload_document_handler` and the subsequent INSERT.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_legal_documents_project_sha
+    ON legal_documents(project_id, sha256);
+
+CREATE TABLE IF NOT EXISTS legal_chats (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL REFERENCES legal_projects(id) ON DELETE CASCADE,
+    title       TEXT,
+    created_at  INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE INDEX IF NOT EXISTS idx_legal_chats_project ON legal_chats(project_id);
+
+CREATE TABLE IF NOT EXISTS legal_chat_messages (
+    id              TEXT PRIMARY KEY,
+    chat_id         TEXT NOT NULL REFERENCES legal_chats(id) ON DELETE CASCADE,
+    role            TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system', 'tool')),
+    content         TEXT NOT NULL,
+    document_refs   TEXT,
+    created_at      INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE INDEX IF NOT EXISTS idx_legal_chat_messages_chat ON legal_chat_messages(chat_id);
+"#,
+    ),
+    (
+        28,
+        "legal_documents_fts",
+        // FTS5 search over legal_documents.extracted_text. Per-project
+        // queries run against this virtual table. Triggers keep it in
+        // sync with the canonical legal_documents row data — every
+        // INSERT/UPDATE/DELETE on legal_documents is mirrored here.
+        //
+        // We use the `content=''` external-content variant: the index
+        // owns its own copy of the indexable columns rather than reading
+        // them from legal_documents on every query, which keeps reads
+        // fast and lets us bump the schema (e.g. add a column) on
+        // legal_documents without invalidating the index.
+        //
+        // (Stream A's Postgres counterpart will land in a separate
+        // V28__legal_documents_fts.sql with a tsvector + trigger; for
+        // libSQL-only deploys today the gateway returns 501 from the
+        // Postgres backend, same shape as the chat handlers.)
+        r#"
+CREATE VIRTUAL TABLE IF NOT EXISTS legal_documents_fts USING fts5(
+    project_id UNINDEXED,
+    document_id UNINDEXED,
+    filename,
+    extracted_text,
+    tokenize = 'unicode61 remove_diacritics 2'
+);
+
+-- Backfill anything that's already in the table at migration time.
+INSERT INTO legal_documents_fts(rowid, project_id, document_id, filename, extracted_text)
+    SELECT rowid, project_id, id, filename, COALESCE(extracted_text, '')
+      FROM legal_documents
+     WHERE NOT EXISTS (
+        SELECT 1 FROM legal_documents_fts AS f WHERE f.rowid = legal_documents.rowid
+     );
+
+-- Insert: mirror the new row.
+CREATE TRIGGER IF NOT EXISTS legal_documents_fts_ai
+    AFTER INSERT ON legal_documents
+BEGIN
+    INSERT INTO legal_documents_fts(rowid, project_id, document_id, filename, extracted_text)
+        VALUES (new.rowid, new.project_id, new.id, new.filename, COALESCE(new.extracted_text, ''));
+END;
+
+-- Delete: this is a regular (non-contentless) FTS5 table, so we drop
+-- the row with plain DELETE rather than the external-content
+-- 'delete'-command form.
+CREATE TRIGGER IF NOT EXISTS legal_documents_fts_ad
+    AFTER DELETE ON legal_documents
+BEGIN
+    DELETE FROM legal_documents_fts WHERE rowid = old.rowid;
+END;
+
+-- Update: drop the old row + insert the new one. Mirrors the SQLite
+-- FTS5 docs' "synced regular FTS5 table" pattern.
+CREATE TRIGGER IF NOT EXISTS legal_documents_fts_au
+    AFTER UPDATE ON legal_documents
+BEGIN
+    DELETE FROM legal_documents_fts WHERE rowid = old.rowid;
+    INSERT INTO legal_documents_fts(rowid, project_id, document_id, filename, extracted_text)
+        VALUES (new.rowid, new.project_id, new.id, new.filename, COALESCE(new.extracted_text, ''));
+END;
+"#,
+    ),
 ];
 
 /// Migrations whose ADD COLUMN should be skipped when the column already
