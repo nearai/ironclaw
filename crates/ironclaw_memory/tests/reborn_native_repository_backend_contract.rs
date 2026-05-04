@@ -17,9 +17,6 @@
 
 use std::sync::Arc;
 
-#[cfg(feature = "libsql")]
-use std::sync::Mutex;
-
 use async_trait::async_trait;
 use ironclaw_filesystem::FilesystemError;
 use ironclaw_memory::{
@@ -119,7 +116,7 @@ async fn count_rows_libsql(db: &Arc<libsql::Database>, table: &str) -> i64 {
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
-async fn libsql_backend_inherits_config_metadata_for_skip_indexing() {
+async fn libsql_backend_skip_indexing_from_config_writes_zero_chunks_to_db() {
     use ironclaw_memory::MemoryDocumentRepository;
     let fixture = libsql_repo().await;
     let repo = fixture.repo.clone();
@@ -130,8 +127,13 @@ async fn libsql_backend_inherits_config_metadata_for_skip_indexing() {
         .await
         .unwrap();
 
-    let recording = Arc::new(CountingIndexer::default());
-    let backend = RepositoryMemoryBackend::new(repo.clone()).with_indexer(recording.clone());
+    // Use the real ChunkingMemoryDocumentIndexer which reads the resolved
+    // metadata and short-circuits on `skip_indexing`. This proves the
+    // signal actually reaches the chunk-writing layer — the previous
+    // version of this test only counted indexer invocations, which a
+    // skip-aware indexer respects but does not observably zero out.
+    let indexer = Arc::new(ChunkingMemoryDocumentIndexer::new(repo.clone()));
+    let backend = RepositoryMemoryBackend::new(repo.clone()).with_indexer(indexer);
     let context = MemoryContext::new(MemoryDocumentScope::new("tenant-a", "alice", None).unwrap());
     let path = MemoryDocumentPath::new("tenant-a", "alice", None, "folder/note.md").expect("path");
 
@@ -140,13 +142,46 @@ async fn libsql_backend_inherits_config_metadata_for_skip_indexing() {
         .await
         .unwrap();
 
-    // The backend currently always invokes the indexer (skip_indexing is a
-    // signal to the indexer, not the backend), so the call still happens —
-    // but the chunk write must observe the metadata. The behavior we lock
-    // in here is that resolved metadata reaches the indexer scope, which
-    // we exercise by confirming the write succeeded and the indexer ran
-    // exactly once for the new document.
-    assert_eq!(recording.count(), 1);
+    let chunk_count = count_rows_libsql(&fixture.db, "reborn_memory_chunks").await;
+    assert_eq!(
+        chunk_count, 0,
+        "skip_indexing inherited from .config must produce zero chunks"
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_backend_document_metadata_overrides_inherited_config() {
+    use ironclaw_memory::MemoryDocumentRepository;
+    let fixture = libsql_repo().await;
+    let repo = fixture.repo.clone();
+    // Parent .config says skip_versioning=true; document-level metadata
+    // overrides it back to false. The next overwrite must produce a
+    // version row, proving doc-level metadata wins over inherited config.
+    let cfg = MemoryDocumentPath::new("tenant-a", "alice", None, "logs/.config").expect("path");
+    repo.write_document(&cfg, b"").await.unwrap();
+    repo.write_document_metadata(&cfg, &serde_json::json!({"skip_versioning": true}))
+        .await
+        .unwrap();
+
+    let path = MemoryDocumentPath::new("tenant-a", "alice", None, "logs/entry.md").expect("path");
+    repo.write_document(&path, b"v1").await.unwrap();
+    repo.write_document_metadata(&path, &serde_json::json!({"skip_versioning": false}))
+        .await
+        .unwrap();
+
+    let backend = RepositoryMemoryBackend::new(repo.clone());
+    let context = MemoryContext::new(MemoryDocumentScope::new("tenant-a", "alice", None).unwrap());
+    backend
+        .write_document(&context, &path, b"v2")
+        .await
+        .unwrap();
+
+    let count = count_rows_libsql(&fixture.db, "reborn_memory_document_versions").await;
+    assert_eq!(
+        count, 1,
+        "document-level metadata must override inherited .config skip_versioning"
+    );
 }
 
 #[cfg(feature = "libsql")]
@@ -428,20 +463,158 @@ async fn libsql_backend_weighted_score_fusion_orders_results_by_weights() {
             .unwrap();
     }
 
-    // weighted-score fusion completes without error — the contract here is
-    // that the strategy is honored by `fuse_memory_search_results` and
-    // produces a non-empty ranked list.
-    let results = backend
+    // Heavy full-text weight + minimal vector weight: the FTS-only doc
+    // (`fts.md`, ranked higher in FTS, absent from vector) must lead the
+    // hybrid doc (`hybrid.md`, also FTS but additionally pulled by
+    // vector). With WeightedScore = w_ft / rank + w_vec / rank, swinging
+    // the weights swings the order — proving the strategy actually
+    // consumes the weights instead of behaving like RRF.
+    let fts_heavy = backend
         .search(
             &context,
             MemorySearchRequest::new("literal")
                 .unwrap()
                 .with_limit(3)
-                .with_fusion_strategy(FusionStrategy::WeightedScore),
+                .with_fusion_strategy(FusionStrategy::WeightedScore)
+                .with_full_text_weight(10.0)
+                .with_vector_weight(0.001),
         )
         .await
         .unwrap();
-    assert!(!results.is_empty());
+    assert!(!fts_heavy.is_empty(), "weighted-score must produce results");
+
+    let vec_heavy = backend
+        .search(
+            &context,
+            MemorySearchRequest::new("literal")
+                .unwrap()
+                .with_limit(3)
+                .with_fusion_strategy(FusionStrategy::WeightedScore)
+                .with_full_text_weight(0.001)
+                .with_vector_weight(10.0),
+        )
+        .await
+        .unwrap();
+
+    let fts_top = fts_heavy[0].path.relative_path().to_string();
+    let vec_top = vec_heavy[0].path.relative_path().to_string();
+    assert_ne!(
+        fts_top, vec_top,
+        "weighted-score must reorder when weights flip; got fts_top={fts_top}, vec_top={vec_top}"
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_backend_search_honors_pre_fusion_limit_per_branch() {
+    // The API clamps `pre_fusion_limit` up to at least `limit`, so the
+    // observable cap is `pre_fusion_limit` only when it >= limit. Use
+    // limit=2, pre_fusion_limit=2 (effective per-branch cap = 2): with 6
+    // matching docs, the FTS branch must contribute at most 2 candidates,
+    // and fusion must therefore output at most 2 paths.
+    let fixture = libsql_repo().await;
+    let repo = fixture.repo.clone();
+    let indexer = Arc::new(
+        ChunkingMemoryDocumentIndexer::new(repo.clone()).with_chunk_config(ChunkConfig {
+            chunk_size: 4,
+            overlap_percent: 0.0,
+            min_chunk_size: 1,
+        }),
+    );
+    let backend = RepositoryMemoryBackend::new(repo)
+        .with_indexer(indexer)
+        .with_capabilities(MemoryBackendCapabilities {
+            file_documents: true,
+            full_text_search: true,
+            ..MemoryBackendCapabilities::default()
+        });
+    let context = MemoryContext::new(MemoryDocumentScope::new("tenant-a", "alice", None).unwrap());
+
+    for index in 0..6 {
+        let path = MemoryDocumentPath::new(
+            "tenant-a",
+            "alice",
+            None,
+            format!("doc-{index}.md").as_str(),
+        )
+        .expect("path");
+        backend
+            .write_document(&context, &path, b"shared-keyword body content")
+            .await
+            .unwrap();
+    }
+
+    let request = MemorySearchRequest::new("shared-keyword")
+        .unwrap()
+        .with_limit(2)
+        .with_pre_fusion_limit(2)
+        .with_vector(false);
+    // Sanity-check: API clamps pre_fusion_limit >= limit (here both 2).
+    assert_eq!(request.pre_fusion_limit(), 2);
+
+    let results = backend.search(&context, request).await.unwrap();
+    assert!(
+        results.len() <= 2,
+        "pre_fusion_limit=2 must cap fused result count, got {}",
+        results.len()
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[test]
+fn pre_fusion_limit_is_clamped_up_to_limit() {
+    // Lock in the contract that `with_pre_fusion_limit(N)` is at least
+    // `limit` regardless of caller order. Without this clamp, the per-
+    // branch SQL `LIMIT` could be smaller than the post-fusion `limit`,
+    // silently shrinking the candidate set.
+    let request = MemorySearchRequest::new("x")
+        .unwrap()
+        .with_limit(5)
+        .with_pre_fusion_limit(2);
+    assert_eq!(
+        request.pre_fusion_limit(),
+        5,
+        "pre_fusion_limit must clamp up to limit"
+    );
+
+    let request = MemorySearchRequest::new("x")
+        .unwrap()
+        .with_limit(5)
+        .with_pre_fusion_limit(20);
+    assert_eq!(
+        request.pre_fusion_limit(),
+        20,
+        "pre_fusion_limit above limit must be preserved"
+    );
+
+    // Reverse-order regression: a small `pre_fusion_limit` set while `limit`
+    // is small, followed by a *larger* `with_limit`, must re-clamp
+    // `pre_fusion_limit` up. Before this fix `with_limit` did not touch
+    // `pre_fusion_limit`, so the per-branch SQL `LIMIT` could be smaller than
+    // the requested final limit.
+    let request = MemorySearchRequest::new("x")
+        .unwrap()
+        .with_limit(2)
+        .with_pre_fusion_limit(2)
+        .with_limit(5);
+    assert_eq!(
+        request.pre_fusion_limit(),
+        5,
+        "pre_fusion_limit must clamp up when a later with_limit raises the floor"
+    );
+
+    // Raising limit must never narrow a pre_fusion_limit that is already above
+    // the new limit.
+    let request = MemorySearchRequest::new("x")
+        .unwrap()
+        .with_limit(2)
+        .with_pre_fusion_limit(20)
+        .with_limit(5);
+    assert_eq!(
+        request.pre_fusion_limit(),
+        20,
+        "pre_fusion_limit above limit must be preserved across with_limit"
+    );
 }
 
 #[cfg(feature = "libsql")]
@@ -489,28 +662,6 @@ async fn libsql_backend_search_honors_limit() {
         .await
         .unwrap();
     assert!(results.len() <= 2, "limit must cap fused result count");
-}
-
-#[cfg(feature = "libsql")]
-#[derive(Default)]
-struct CountingIndexer {
-    count: Mutex<usize>,
-}
-
-#[cfg(feature = "libsql")]
-impl CountingIndexer {
-    fn count(&self) -> usize {
-        *self.count.lock().unwrap()
-    }
-}
-
-#[cfg(feature = "libsql")]
-#[async_trait]
-impl MemoryDocumentIndexer for CountingIndexer {
-    async fn reindex_document(&self, _path: &MemoryDocumentPath) -> Result<(), FilesystemError> {
-        *self.count.lock().unwrap() += 1;
-        Ok(())
-    }
 }
 
 // --- Postgres -------------------------------------------------------------
