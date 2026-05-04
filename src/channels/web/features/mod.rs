@@ -15,6 +15,11 @@ pub(crate) mod chat;
 pub(crate) mod debug;
 pub(crate) mod extensions;
 pub(crate) mod jobs;
+// Legal harness skill (foundation): libSQL-backed today. The store layer
+// returns `DatabaseError::Unsupported` when the active backend is
+// Postgres, which the handlers surface as 501. Streams B (chat) and
+// C (DOCX export) extend this same module.
+pub mod legal;
 pub(crate) mod logs;
 pub(crate) mod oauth;
 pub(crate) mod pairing;

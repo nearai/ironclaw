@@ -1271,6 +1271,23 @@ pub trait Database:
     /// Rewrite all rows where user_id = 'default' to owner_id across all
     /// affected tables. Idempotent — safe to call on every startup.
     async fn migrate_default_owner(&self, owner_id: &str) -> Result<(), DatabaseError>;
+
+    /// Borrow the underlying libSQL backend, when this implementation is
+    /// libSQL-backed. Used by features that bypass the supertrait — today
+    /// only the legal harness, which intentionally stays libSQL-only in v1
+    /// (PR: legal harness foundation). Default returns `None` so other
+    /// backends keep compiling without changes.
+    #[cfg(feature = "libsql")]
+    fn as_libsql(&self) -> Option<&libsql::LibSqlBackend> {
+        None
+    }
+}
+
+/// Convenience accessor that downcasts an `Arc<dyn Database>` to the libSQL
+/// backend, if applicable. Returns `None` for any other backend.
+#[cfg(feature = "libsql")]
+pub fn libsql_backend(db: &Arc<dyn Database>) -> Option<&libsql::LibSqlBackend> {
+    db.as_libsql()
 }
 
 #[cfg(test)]

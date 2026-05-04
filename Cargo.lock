@@ -935,6 +935,7 @@ dependencies = [
  "matchit 0.8.4",
  "memchr",
  "mime",
+ "multer",
  "percent-encoding",
  "pin-project-lite",
  "serde_core",
@@ -3926,6 +3927,7 @@ dependencies = [
  "postgres-types",
  "pretty_assertions",
  "pty-process",
+ "quick-xml",
  "rand 0.8.5",
  "readabilityrs",
  "refinery",
@@ -3964,6 +3966,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tracing-test",
+ "ulid",
  "url",
  "urlencoding",
  "uuid",
@@ -4835,6 +4838,23 @@ checksum = "bb85c154ba489f01b25c0d36ae69a87e4a1c73a72631fc6c0eb6dde34a73e44b"
 dependencies = [
  "num-traits",
  "pxfm",
+]
+
+[[package]]
+name = "multer"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83e87776546dc87511aa5ee218730c92b666d7264ab6ed41f9d215af9cd5224b"
+dependencies = [
+ "bytes",
+ "encoding_rs",
+ "futures-util",
+ "http 1.4.0",
+ "httparse",
+ "memchr",
+ "mime",
+ "spin",
+ "version_check",
 ]
 
 [[package]]
@@ -5891,6 +5911,15 @@ name = "quick-error"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a993555f31e5a609f617c12db6250dedcac1b0a85076912c436e6fc9b2c8e6a3"
+
+[[package]]
+name = "quick-xml"
+version = "0.36.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7649a7b4df05aed9ea7ec6f628c67c9953a43869b8bc50929569b2999d443fe"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "quinn"
@@ -8484,6 +8513,16 @@ dependencies = [
  "memoffset",
  "tempfile",
  "windows-sys 0.60.2",
+]
+
+[[package]]
+name = "ulid"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "470dbf6591da1b39d43c14523b2b469c86879a53e8b758c8e090a470fe7b1fbe"
+dependencies = [
+ "rand 0.9.2",
+ "web-time",
 ]
 
 [[package]]

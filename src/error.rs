@@ -93,6 +93,12 @@ pub enum DatabaseError {
     #[error("Serialization error: {0}")]
     Serialization(String),
 
+    /// The active database backend doesn't implement this operation
+    /// (e.g. a libSQL-only feature called against the Postgres backend).
+    /// Callers typically map this onto an HTTP 501 Not Implemented.
+    #[error("Operation not supported by current database backend: {0}")]
+    Unsupported(String),
+
     #[cfg(feature = "postgres")]
     #[error("PostgreSQL error: {0}")]
     Postgres(#[from] tokio_postgres::Error),
