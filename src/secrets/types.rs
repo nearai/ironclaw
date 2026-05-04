@@ -211,6 +211,155 @@ pub enum CredentialLocation {
     QueryParam { name: String },
     /// Inject by replacing a placeholder in URL or body templates
     UrlPath { placeholder: String },
+    /// HMAC-SHA256 over `${unix_seconds}${method}${path}${body}`,
+    /// emitted as URL-safe base64 in `signature_header` with the
+    /// timestamp echoed in `timestamp_header`. Secret value is the
+    /// URL-safe-base64-encoded HMAC key.
+    HmacSignedHeader {
+        signature_header: String,
+        timestamp_header: String,
+    },
+    /// EIP-712 typed structured data signing with secp256k1.
+    /// Schema declared by the tool; sources for each field come from
+    /// the closed [`FieldSource`] vocabulary so the signed payload is
+    /// bounded by the manifest review at install time.
+    Eip712SignedHeader {
+        domain: Eip712Domain,
+        primary_type: String,
+        structs: Vec<Eip712StructDef>,
+        output_headers: Vec<HeaderOutput>,
+        #[serde(default)]
+        output_body_fields: Vec<BodyJsonOutput>,
+    },
+    /// NEP-413 signed message with ed25519 (NEAR Protocol).
+    /// Nonce is always host-generated 32 random bytes per the spec.
+    Nep413SignedHeader {
+        recipient_source: FieldSource,
+        message_source: FieldSource,
+        #[serde(default)]
+        callback_url_source: Option<FieldSource>,
+        output_headers: Vec<HeaderOutput>,
+    },
+}
+
+/// EIP-712 domain separator parameters.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Eip712Domain {
+    pub name: String,
+    pub version: String,
+    pub chain_id: u64,
+    #[serde(default)]
+    pub verifying_contract: Option<String>,
+}
+
+/// EIP-712 struct definition: the primary type plus any nested types
+/// it references.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Eip712StructDef {
+    pub name: String,
+    pub fields: Vec<Eip712TypedField>,
+}
+
+/// One field of an EIP-712 struct: name, ABI type string, and the
+/// source that supplies its value at request time.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Eip712TypedField {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub type_name: String,
+    pub source: FieldSource,
+}
+
+/// Closed vocabulary of values a signed payload field may take. The
+/// vocabulary is closed so a tool cannot declare an arbitrary signing
+/// oracle: every source is either user-reviewed at install (literal)
+/// or derived from the request the tool was already authorized to
+/// send (timestamp, body, etc.).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum FieldSource {
+    Literal {
+        value: String,
+    },
+    SignerAddress,
+    SignerPublicKey,
+    RequestTimestampSecs,
+    RequestRandomNonceB64,
+    RequestBody,
+    /// Computes `keccak256` over a byte sequence assembled from the
+    /// declared parts and emits the 32-byte digest as a 0x-prefixed
+    /// hex string suitable for an EIP-712 `bytes32` field.
+    Bytes32Keccak256OfBytes {
+        parts: Vec<BytesPart>,
+    },
+}
+
+/// Closed vocabulary of byte fragments that can be concatenated and
+/// hashed under [`FieldSource::Bytes32Keccak256OfBytes`]. Each entry
+/// is either a manifest-time literal or a deterministic transform of
+/// a request body field, so the hashed payload remains bounded by the
+/// install-time review.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BytesPart {
+    /// Raw bytes specified as a hex string in the manifest.
+    LiteralHex { hex: String },
+    /// MessagePack encoding of the JSON value at `path` in the request
+    /// body. Path uses dot notation (e.g. `action`, `signature.r`).
+    BodyFieldMsgpack { path: String },
+    /// Big-endian 8-byte encoding of the integer at `path` in the
+    /// request body.
+    BodyFieldBeU64 { path: String },
+    /// EVM address marker bytes: emits `0x00` if the field is absent
+    /// or null, otherwise `0x01` followed by the 20-byte address.
+    BodyFieldEthAddressOptionalPrefixed { path: String },
+}
+
+/// Body-mutation output. Sets the JSON value at `json_path` in the
+/// request body to a value drawn from the closed [`BodyValue`]
+/// vocabulary. Path uses dot notation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct BodyJsonOutput {
+    pub json_path: String,
+    pub value: BodyValue,
+}
+
+/// Closed vocabulary of values that may be written into the request
+/// body by a signer.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum BodyValue {
+    SignerAddress,
+    SignerPublicKey,
+    SignatureHex,
+    SignatureBase64,
+    SignatureRHex,
+    SignatureSHex,
+    SignatureV,
+    RequestTimestampSecs,
+    RequestRandomNonceB64,
+    LiteralString { value: String },
+    LiteralNumber { value: i64 },
+}
+
+/// Header that the signer emits, with the value source.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct HeaderOutput {
+    pub header_name: String,
+    pub value: OutputSource,
+}
+
+/// Closed vocabulary of values an output header may take.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum OutputSource {
+    Literal { value: String },
+    SignerAddress,
+    SignerPublicKey,
+    RequestTimestampSecs,
+    RequestRandomNonceB64,
+    SignatureHex,
+    SignatureBase64,
 }
 
 /// Mapping from a secret name to where it should be injected.
