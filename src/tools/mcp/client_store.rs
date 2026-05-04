@@ -397,8 +397,14 @@ mod tests {
     #[tokio::test]
     async fn insert_and_get_are_per_user() {
         let store = McpClientStore::new();
-        let client_a = Arc::new(McpClient::new_with_name("notion", "http://a.invalid"));
-        let client_b = Arc::new(McpClient::new_with_name("notion", "http://b.invalid"));
+        let client_a = Arc::new(McpClient::new_with_name_unchecked(
+            "notion",
+            "http://a.invalid",
+        ));
+        let client_b = Arc::new(McpClient::new_with_name_unchecked(
+            "notion",
+            "http://b.invalid",
+        ));
 
         store
             .insert("user-a", "notion", client_a.clone(), "sig-a".into())
@@ -420,8 +426,14 @@ mod tests {
     #[tokio::test]
     async fn remove_and_check_empty_reports_last_user_out() {
         let store = McpClientStore::new();
-        let client_a = Arc::new(McpClient::new_with_name("notion", "http://a.invalid"));
-        let client_b = Arc::new(McpClient::new_with_name("notion", "http://b.invalid"));
+        let client_a = Arc::new(McpClient::new_with_name_unchecked(
+            "notion",
+            "http://a.invalid",
+        ));
+        let client_b = Arc::new(McpClient::new_with_name_unchecked(
+            "notion",
+            "http://b.invalid",
+        ));
 
         store
             .insert("user-a", "notion", client_a, "sig".into())
@@ -447,7 +459,10 @@ mod tests {
     #[tokio::test]
     async fn remove_and_check_empty_is_idempotent_on_missing_user() {
         let store = McpClientStore::new();
-        let client = Arc::new(McpClient::new_with_name("notion", "http://a.invalid"));
+        let client = Arc::new(McpClient::new_with_name_unchecked(
+            "notion",
+            "http://a.invalid",
+        ));
         store.insert("user-a", "notion", client, "sig".into()).await;
 
         assert!(
@@ -462,7 +477,10 @@ mod tests {
     #[tokio::test]
     async fn any_active_for_server_tracks_multi_tenancy() {
         let store = McpClientStore::new();
-        let client = Arc::new(McpClient::new_with_name("notion", "http://a.invalid"));
+        let client = Arc::new(McpClient::new_with_name_unchecked(
+            "notion",
+            "http://a.invalid",
+        ));
 
         assert!(!store.any_active_for_server("notion").await);
         store
@@ -483,7 +501,10 @@ mod tests {
     #[tokio::test]
     async fn check_surface_conflict_flags_divergent_surface_for_same_server() {
         let store = McpClientStore::new();
-        let client = Arc::new(McpClient::new_with_name("notion", "http://a.invalid"));
+        let client = Arc::new(McpClient::new_with_name_unchecked(
+            "notion",
+            "http://a.invalid",
+        ));
         store
             .insert("user-a", "notion", client, "surface-v1".into())
             .await;

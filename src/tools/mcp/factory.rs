@@ -23,6 +23,8 @@ pub enum McpFactoryError {
     UnixNotSupported { name: String },
     #[error("Invalid configuration for MCP server '{name}': {reason}")]
     InvalidConfig { name: String, reason: String },
+    #[error("{0}")]
+    Transport(#[from] crate::tools::tool::ToolError),
 }
 
 /// Create an `McpClient` from a server configuration, dispatching on the
@@ -123,7 +125,8 @@ pub async fn create_client_from_config(
                         Arc::clone(session_manager),
                         Arc::clone(secrets),
                         user_id,
-                    ));
+                    )
+                    .await?);
                 }
             }
 
@@ -133,6 +136,7 @@ pub async fn create_client_from_config(
             // transport must know about it to read/write the header.
             let transport = Arc::new(
                 HttpMcpTransport::new(server.url.clone(), validated_name.as_str())
+                    .await?
                     .with_session_manager(Arc::clone(session_manager), user_id),
             );
             Ok(McpClient::new_with_transport(
@@ -186,7 +190,7 @@ mod tests {
             "Authorization".to_string(),
             "Bearer sk-user-supplied".to_string(),
         );
-        let server = McpServerConfig::new("authheader-1948", "https://api.example.com")
+        let server = McpServerConfig::new("authheader-1948", "https://1.2.3.4")
             .with_headers(headers);
 
         let secrets = empty_secrets_store();
@@ -225,7 +229,7 @@ mod tests {
             "AUTHORIZATION".to_string(),
             "Bearer sk-user-supplied".to_string(),
         );
-        let server = McpServerConfig::new("authheader-1948-upper", "https://api.example.com")
+        let server = McpServerConfig::new("authheader-1948-upper", "https://1.2.3.4")
             .with_headers(headers)
             .with_oauth(OAuthConfig::new("client-id"));
 
@@ -260,7 +264,7 @@ mod tests {
     /// actually proving anything.
     #[tokio::test]
     async fn factory_takes_auth_path_for_remote_https_without_authorization_header() {
-        let server = McpServerConfig::new("noheader-1948", "https://api.example.com");
+        let server = McpServerConfig::new("noheader-1948", "https://1.2.3.4");
 
         let secrets = empty_secrets_store();
         let session_manager = Arc::new(McpSessionManager::new());

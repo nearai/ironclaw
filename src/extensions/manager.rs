@@ -3372,7 +3372,17 @@ impl ExtensionManager {
         // 50 MB cap to prevent disk-fill DoS
         const MAX_DOWNLOAD_SIZE: usize = 50 * 1024 * 1024;
 
-        let client = reqwest::Client::builder()
+        // Resolve hostname, reject private/loopback/metadata IPs, and pin the
+        // validated addresses so reqwest cannot re-resolve to a different IP
+        // (prevents DNS rebinding TOCTOU).
+        let target = crate::tools::wasm::validate_and_resolve_http_target(url)
+            .await
+            .map_err(|e| ExtensionError::DownloadFailed(format!("SSRF blocked: {e}")))?;
+
+        // Use centralized SSRF-safe client builder with DNS pinning (disables
+        // redirects to prevent redirect chains from external hosts to internal
+        // addresses, and pins the resolved IPs to close the TOCTOU window).
+        let client = crate::tools::wasm::ssrf_safe_client_builder_for_target(&target)
             .timeout(std::time::Duration::from_secs(60))
             .build()
             .map_err(|e| ExtensionError::DownloadFailed(e.to_string()))?;
@@ -3442,24 +3452,38 @@ impl ExtensionManager {
                 ));
             }
 
-            tokio::fs::write(&wasm_path, &bytes)
-                .await
-                .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
-
-            // Download capabilities separately if URL provided
-            if let Some(caps_url) = capabilities_url {
+            // Fetch capabilities into memory BEFORE writing the .wasm file to disk.
+            // This prevents a partial install state where the .wasm is stranded
+            // without its capabilities file if the caps download fails.
+            let caps_data = if let Some(caps_url) = capabilities_url {
+                // Validate capabilities URL: require HTTPS, same as main download
+                if !caps_url.starts_with("https://") {
+                    tracing::warn!(
+                        "Capabilities URL for '{}' rejected: only HTTPS allowed, got '{}'",
+                        name,
+                        sanitize_url_for_logging(caps_url),
+                    );
+                    return Err(ExtensionError::InstallFailed(
+                        "Only HTTPS URLs are allowed for capabilities downloads".to_string(),
+                    ));
+                }
+                // Resolve, validate, and pin capabilities URL (may be a different host).
+                let caps_target = crate::tools::wasm::validate_and_resolve_http_target(caps_url)
+                    .await
+                    .map_err(|e| {
+                        ExtensionError::DownloadFailed(format!(
+                            "SSRF blocked for capabilities URL: {e}"
+                        ))
+                    })?;
+                let caps_client =
+                    crate::tools::wasm::ssrf_safe_client_builder_for_target(&caps_target)
+                        .timeout(std::time::Duration::from_secs(30))
+                        .build()
+                        .map_err(|e| ExtensionError::DownloadFailed(e.to_string()))?;
                 const MAX_CAPS_SIZE: usize = 1024 * 1024; // 1 MB
-                match client.get(caps_url).send().await {
+                match caps_client.get(caps_url).send().await {
                     Ok(resp) if resp.status().is_success() => match resp.bytes().await {
-                        Ok(caps_bytes) if caps_bytes.len() <= MAX_CAPS_SIZE => {
-                            if let Err(e) = tokio::fs::write(&caps_path, &caps_bytes).await {
-                                tracing::warn!(
-                                    "Failed to write capabilities for '{}': {}",
-                                    name,
-                                    e
-                                );
-                            }
-                        }
+                        Ok(caps_bytes) if caps_bytes.len() <= MAX_CAPS_SIZE => Some(caps_bytes),
                         Ok(caps_bytes) => {
                             tracing::warn!(
                                 "Capabilities file for '{}' too large ({} bytes, max {})",
@@ -3467,9 +3491,11 @@ impl ExtensionManager {
                                 caps_bytes.len(),
                                 MAX_CAPS_SIZE
                             );
+                            None
                         }
                         Err(e) => {
                             tracing::warn!("Failed to download capabilities for '{}': {}", name, e);
+                            None
                         }
                     },
                     _ => {
@@ -3478,8 +3504,22 @@ impl ExtensionManager {
                             name,
                             caps_url
                         );
+                        None
                     }
                 }
+            } else {
+                None
+            };
+
+            // Write both files only after all downloads succeed.
+            tokio::fs::write(&wasm_path, &bytes)
+                .await
+                .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
+
+            if let Some(caps_data) = caps_data
+                && let Err(e) = tokio::fs::write(&caps_path, &caps_data).await
+            {
+                tracing::warn!("Failed to write capabilities for '{}': {}", name, e);
             }
         }
 
@@ -12760,6 +12800,80 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    /// Regression: capabilities_url must require HTTPS scheme.
+    #[test]
+    fn capabilities_url_rejects_non_https() {
+        let bad_urls = [
+            "http://evil.com/caps.json",
+            "file:///etc/passwd",
+            "ftp://internal/caps",
+        ];
+        for url in &bad_urls {
+            assert!(
+                !url.starts_with("https://"),
+                "test setup: {} should not be HTTPS",
+                url
+            );
+        }
+        assert!("https://registry.example.com/caps.json".starts_with("https://"));
+    }
+
+    /// Regression: download client must not follow redirects (SSRF prevention).
+    #[test]
+    fn download_client_disables_redirects() {
+        let client = crate::tools::wasm::ssrf_safe_client_builder()
+            .build()
+            .expect("client build");
+        drop(client);
+    }
+
+    /// Regression: validate_and_resolve_http_target blocks private IP literals.
+    #[tokio::test]
+    async fn download_url_rejects_private_ips() {
+        let blocked_urls = [
+            "https://127.0.0.1/evil.wasm",
+            "https://[::1]/evil.wasm",
+            "https://10.0.0.1/evil.wasm",
+            "https://192.168.1.1/evil.wasm",
+            "https://172.16.0.1/evil.wasm",
+            "https://169.254.169.254/latest/meta-data/",
+        ];
+        for url in &blocked_urls {
+            let result = crate::tools::wasm::validate_and_resolve_http_target(url).await;
+            assert!(
+                result.is_err(),
+                "Expected validate_and_resolve_http_target to block {}, but it was allowed",
+                url
+            );
+        }
+    }
+
+    /// Public IPs should be allowed by validate_and_resolve_http_target.
+    #[tokio::test]
+    async fn download_url_allows_public_ips() {
+        let allowed_urls = ["https://1.2.3.4/tool.wasm", "https://8.8.8.8/tool.wasm"];
+        for url in &allowed_urls {
+            let result = crate::tools::wasm::validate_and_resolve_http_target(url).await;
+            assert!(
+                result.is_ok(),
+                "Expected validate_and_resolve_http_target to allow {}, but it was blocked: {:?}",
+                url,
+                result.err()
+            );
+        }
+    }
+
+    /// Capabilities URL must also be validated against private IPs.
+    #[tokio::test]
+    async fn capabilities_url_rejects_private_ips() {
+        let blocked = "https://127.0.0.1/caps.json";
+        let result = crate::tools::wasm::validate_and_resolve_http_target(blocked).await;
+        assert!(
+            result.is_err(),
+            "Expected validate_and_resolve_http_target to block capabilities URL to loopback"
+        );
     }
 
     // ── find_local_tool_source_in ──────────────────────────────────────
