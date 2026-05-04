@@ -2,8 +2,12 @@
 //!
 //! Requires a running PostgreSQL with `pgcrypto` and `pgvector` extensions
 //! available. Set `DATABASE_URL=postgres://localhost/ironclaw_test`. Tests
-//! gracefully skip if Postgres is unreachable so this file does not flake CI
-//! on machines without a database.
+//! fail loud if Postgres is unreachable so the `ironclaw_memory` guardrail
+//! that Postgres coverage must be real (not compile/skip) is enforced. Set
+//! `IRONCLAW_SKIP_POSTGRES_TESTS=1` to opt into skipping when no DB is
+//! available — the previous "silent skip + green pass" pattern let
+//! migrations and read/write/search/chunk/version behavior go entirely
+//! unexercised.
 //!
 //! Each test creates a fresh tenant prefix so tests do not interfere even when
 //! sharing a Postgres instance.
@@ -32,14 +36,34 @@ fn pool() -> deadpool_postgres::Pool {
         .expect("build deadpool")
 }
 
-/// Returns `Some(())` if the pool can hand out a connection, `None` otherwise.
-/// Tests use this to skip when Postgres is unavailable.
+/// Explicit opt-in to skip the Postgres contract tests. Without this set,
+/// a connection failure must fail loud — the previous "silent skip + green
+/// pass" pattern violated the `ironclaw_memory` guardrail that Postgres
+/// behavioral coverage must be real.
+const POSTGRES_SKIP_ENV: &str = "IRONCLAW_SKIP_POSTGRES_TESTS";
+
+fn skip_requested() -> bool {
+    std::env::var(POSTGRES_SKIP_ENV).is_ok_and(|value| value == "1" || value == "true")
+}
+
+/// Returns `Some(())` if the pool can hand out a connection. Returns `None`
+/// only when the caller has opted into skipping via `IRONCLAW_SKIP_POSTGRES_TESTS=1`.
+/// Otherwise panics with an actionable message so a missing/unreachable DB
+/// surfaces as a real test failure instead of a green skip.
 async fn try_connect(pool: &deadpool_postgres::Pool) -> Option<()> {
     match pool.get().await {
         Ok(_) => Some(()),
         Err(error) => {
-            eprintln!("skipping reborn-postgres test: {error}");
-            None
+            if skip_requested() {
+                eprintln!("skipping reborn-postgres test ({POSTGRES_SKIP_ENV}=1): {error}");
+                None
+            } else {
+                panic!(
+                    "reborn-postgres test could not reach Postgres ({error}); \
+                     set DATABASE_URL to a reachable Postgres+pgvector instance, or set \
+                     {POSTGRES_SKIP_ENV}=1 to explicitly skip."
+                );
+            }
         }
     }
 }
