@@ -6,9 +6,6 @@
 
 #![cfg(any(feature = "libsql", feature = "postgres"))]
 
-use ironclaw_filesystem::FilesystemError;
-use ironclaw_memory::{MemoryDocumentPath, MemoryDocumentRepository, MemoryDocumentScope};
-
 #[cfg(feature = "libsql")]
 use ironclaw_memory::RebornLibSqlMemoryDocumentRepository;
 
@@ -76,37 +73,6 @@ async fn reborn_libsql_run_migrations_creates_native_substrate_idempotently() {
     );
 }
 
-#[cfg(feature = "libsql")]
-#[tokio::test]
-async fn reborn_libsql_repository_fails_closed_until_behavior_lands() {
-    // Until PR 3 implements behavior, every operation must surface a clear
-    // "not yet implemented" error rather than silently returning empty/None
-    // (which would let callers think the repository was working).
-    let (db, _dir) = libsql_db().await;
-    let repository = RebornLibSqlMemoryDocumentRepository::new(db);
-    repository.run_migrations().await.expect("migrations");
-
-    let scope = MemoryDocumentScope::new("tenant-a", "alice", None).expect("scope");
-    let path = MemoryDocumentPath::new("tenant-a", "alice", None, "MEMORY.md").expect("path");
-
-    let read_err = repository.read_document(&path).await.unwrap_err();
-    assert_not_yet_implemented(&read_err);
-
-    let write_err = repository
-        .write_document(&path, b"hello")
-        .await
-        .unwrap_err();
-    assert_not_yet_implemented(&write_err);
-
-    let list_err = repository.list_documents(&scope).await.unwrap_err();
-    assert_not_yet_implemented(&list_err);
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-fn assert_not_yet_implemented(error: &FilesystemError) {
-    let message = error.to_string();
-    assert!(
-        message.contains("not yet implemented"),
-        "expected `not yet implemented` error, got: {message}"
-    );
-}
+#[cfg(feature = "postgres")]
+#[allow(unused_imports)]
+use ironclaw_memory::RebornPostgresMemoryDocumentRepository;

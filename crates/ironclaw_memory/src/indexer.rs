@@ -20,6 +20,13 @@ pub trait MemoryDocumentIndexer: Send + Sync {
 }
 
 /// Repository operations used by the memory indexer to keep chunk/search rows in sync.
+///
+/// Chunk clearing is intentionally folded into
+/// [`replace_document_chunks_if_current`] (called with an empty `chunks`
+/// slice) — there is no separate unguarded `delete_document_chunks` method.
+/// A hash-guarded clear is the only safe shape: an unconditional delete
+/// races with concurrent writes that have already produced fresh chunks
+/// for newer content, silently leaving the latest write unsearchable.
 #[async_trait]
 pub trait MemoryDocumentIndexRepository: Send + Sync {
     async fn replace_document_chunks_if_current(
@@ -27,11 +34,6 @@ pub trait MemoryDocumentIndexRepository: Send + Sync {
         path: &MemoryDocumentPath,
         expected_content_hash: &str,
         chunks: &[MemoryChunkWrite],
-    ) -> Result<(), FilesystemError>;
-
-    async fn delete_document_chunks(
-        &self,
-        path: &MemoryDocumentPath,
     ) -> Result<(), FilesystemError>;
 }
 
@@ -84,21 +86,28 @@ where
                 "memory document content must be UTF-8",
             )
         })?;
+        // Compute the read-time hash up front so every chunk-write outcome
+        // (skip_indexing, empty chunks, real chunks) goes through the same
+        // hash-guarded `replace_document_chunks_if_current` path. An
+        // unconditional delete here would race with a concurrent writer that
+        // has already produced fresh chunks for newer content: a stale
+        // reindex (older bytes, older `skip_indexing` flag) could remove the
+        // newer write's chunk rows. The hash guard turns the stale clear
+        // into a no-op once the document has moved on.
+        let content_hash_at_read = content_sha256(content);
         let metadata = resolve_document_metadata(self.repository.as_ref(), path).await?;
         if metadata.skip_indexing == Some(true) {
-            return self.repository.delete_document_chunks(path).await;
+            return self
+                .repository
+                .replace_document_chunks_if_current(path, &content_hash_at_read, &[])
+                .await;
         }
-        let content_hash_at_read = content_sha256(content);
         let chunk_texts = chunk_document(content, self.chunk_config.clone());
         let chunks =
             build_chunk_writes(path, chunk_texts, self.embedding_provider.as_deref()).await?;
-        if chunks.is_empty() {
-            self.repository.delete_document_chunks(path).await
-        } else {
-            self.repository
-                .replace_document_chunks_if_current(path, &content_hash_at_read, &chunks)
-                .await
-        }
+        self.repository
+            .replace_document_chunks_if_current(path, &content_hash_at_read, &chunks)
+            .await
     }
 }
 
@@ -152,4 +161,151 @@ async fn build_chunk_writes(
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+    use crate::path::MemoryDocumentScope;
+    use crate::search::{MemorySearchRequest, MemorySearchResult};
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum IndexerCall {
+        Replace { chunks: usize, hash: String },
+    }
+
+    struct RecordingRepo {
+        content: Vec<u8>,
+        // {"skip_indexing": true} when set, otherwise empty
+        metadata: Option<serde_json::Value>,
+        calls: Mutex<Vec<IndexerCall>>,
+    }
+
+    impl RecordingRepo {
+        fn new(content: impl Into<Vec<u8>>) -> Self {
+            Self {
+                content: content.into(),
+                metadata: None,
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn with_skip_indexing(mut self) -> Self {
+            self.metadata = Some(serde_json::json!({"skip_indexing": true}));
+            self
+        }
+    }
+
+    #[async_trait]
+    impl MemoryDocumentRepository for RecordingRepo {
+        async fn read_document(
+            &self,
+            _path: &MemoryDocumentPath,
+        ) -> Result<Option<Vec<u8>>, FilesystemError> {
+            Ok(Some(self.content.clone()))
+        }
+
+        async fn write_document(
+            &self,
+            _path: &MemoryDocumentPath,
+            _bytes: &[u8],
+        ) -> Result<(), FilesystemError> {
+            Ok(())
+        }
+
+        async fn read_document_metadata(
+            &self,
+            _path: &MemoryDocumentPath,
+        ) -> Result<Option<serde_json::Value>, FilesystemError> {
+            Ok(self.metadata.clone())
+        }
+
+        async fn list_documents(
+            &self,
+            _scope: &MemoryDocumentScope,
+        ) -> Result<Vec<MemoryDocumentPath>, FilesystemError> {
+            Ok(Vec::new())
+        }
+
+        async fn search_documents(
+            &self,
+            _scope: &MemoryDocumentScope,
+            _request: &MemorySearchRequest,
+        ) -> Result<Vec<MemorySearchResult>, FilesystemError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[async_trait]
+    impl MemoryDocumentIndexRepository for RecordingRepo {
+        async fn replace_document_chunks_if_current(
+            &self,
+            _path: &MemoryDocumentPath,
+            expected_content_hash: &str,
+            chunks: &[MemoryChunkWrite],
+        ) -> Result<(), FilesystemError> {
+            self.calls.lock().unwrap().push(IndexerCall::Replace {
+                chunks: chunks.len(),
+                hash: expected_content_hash.to_string(),
+            });
+            Ok(())
+        }
+    }
+
+    fn doc_path() -> MemoryDocumentPath {
+        MemoryDocumentPath::new("tenant", "user", Some("project"), "note.md").unwrap()
+    }
+
+    // Regression for PR #3183 review: the indexer used to call an
+    // unconditional `delete_document_chunks` for both `skip_indexing == true`
+    // and the empty-chunks case. A stale reindex (older bytes, older
+    // skip_indexing flag) could then race with a concurrent writer that had
+    // already produced fresh chunks for newer content and silently clobber
+    // them. The fix routes both paths through the hash-checked
+    // `replace_document_chunks_if_current` helper, and the unguarded
+    // `delete_document_chunks` was removed from the trait entirely so no
+    // future caller can re-introduce the race. The recording repo here only
+    // implements the hash-checked path; if either branch ever started
+    // calling something else, this test would not compile.
+    #[tokio::test]
+    async fn skip_indexing_routes_through_hash_checked_replace() {
+        let content = "alpha beta gamma delta epsilon";
+        let repo = Arc::new(RecordingRepo::new(content).with_skip_indexing());
+        let indexer = ChunkingMemoryDocumentIndexer::new(repo.clone());
+        indexer.reindex_document(&doc_path()).await.unwrap();
+        let calls = repo.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "expected exactly one indexer call");
+        let IndexerCall::Replace { chunks, hash } = &calls[0];
+        assert_eq!(*chunks, 0, "skip_indexing must clear with empty chunk set");
+        assert_eq!(*hash, content_sha256(content));
+    }
+
+    #[tokio::test]
+    async fn empty_chunks_route_through_hash_checked_replace() {
+        let repo = Arc::new(RecordingRepo::new("   \n\t  "));
+        let indexer = ChunkingMemoryDocumentIndexer::new(repo.clone());
+        indexer.reindex_document(&doc_path()).await.unwrap();
+        let calls = repo.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let IndexerCall::Replace { chunks, hash } = &calls[0];
+        assert_eq!(*chunks, 0, "expected empty chunk set");
+        assert_eq!(*hash, content_sha256("   \n\t  "));
+    }
+
+    #[tokio::test]
+    async fn non_empty_chunks_route_through_hash_checked_replace() {
+        let content = "alpha beta gamma delta epsilon";
+        let repo = Arc::new(RecordingRepo::new(content));
+        let indexer = ChunkingMemoryDocumentIndexer::new(repo.clone());
+        indexer.reindex_document(&doc_path()).await.unwrap();
+        let calls = repo.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(matches!(
+            &calls[0],
+            IndexerCall::Replace { chunks, hash }
+                if *chunks > 0 && hash == &content_sha256(content)
+        ));
+    }
 }
