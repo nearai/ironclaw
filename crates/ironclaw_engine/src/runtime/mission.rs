@@ -720,6 +720,16 @@ impl MissionManager {
                 }
             }
         }
+        // Auto-stamp the spawning mission's own id on every fired thread so
+        // tools running inside this thread can operate on the mission (e.g.
+        // `abound_send_wire(send)` completes the mission on HTTP 2xx) without
+        // the LLM threading the id through tool params and without needing
+        // the mission to have stamped its own id into `metadata` at create
+        // time. Read by `orchestrator::thread_spawning_mission_id`.
+        initial_metadata.insert(
+            "spawning_mission_id".to_string(),
+            serde_json::Value::String(mission.id.to_string()),
+        );
 
         // Spawn thread with meta-prompt as initial user message
         let thread_id = self

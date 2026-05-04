@@ -411,6 +411,11 @@ async fn execute_pending_gate_action(
             .get("client_response_id")
             .and_then(|v| v.as_str())
             .map(String::from),
+        spawning_mission_id: thread
+            .metadata
+            .get("spawning_mission_id")
+            .and_then(|v| v.as_str())
+            .map(String::from),
     };
 
     state.effect_adapter.reset_call_count();

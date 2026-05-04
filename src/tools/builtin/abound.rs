@@ -534,6 +534,52 @@ impl Tool for AboundSendWireTool {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
             if (200..300).contains(&status) {
+                // When this `send` runs inside a mission-spawned thread, the
+                // engine stamps the mission's own id on the thread metadata
+                // and the bridge forwards it as `spawning_mission_id` in
+                // `JobContext.metadata`. Completing the mission here — on
+                // tool-side HTTP success, not on assistant text — is the
+                // authoritative signal that the goal fired, so the next cron
+                // tick can't re-send. Best-effort: a missing id (chat-driven
+                // send, no mission), an unparseable id, or a downstream
+                // error must never fail the call. The notification is
+                // already on its way to the user.
+                if let Some(mid_str) = ctx
+                    .metadata
+                    .get("spawning_mission_id")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                {
+                    match uuid::Uuid::parse_str(mid_str) {
+                        Ok(uuid) => {
+                            let mid = ironclaw_engine::MissionId(uuid);
+                            let slot = self.mission_slot.read().await;
+                            if let Some((mgr, _)) = slot.as_ref() {
+                                if let Err(e) = mgr.complete_mission(mid).await {
+                                    tracing::debug!(
+                                        mission_id = %mid_str,
+                                        error = %e,
+                                        "abound_send_wire: complete_mission failed (best-effort)"
+                                    );
+                                } else {
+                                    tracing::debug!(
+                                        mission_id = %mid_str,
+                                        "abound_send_wire: mission auto-completed after send"
+                                    );
+                                }
+                            } else {
+                                tracing::debug!(
+                                    "abound_send_wire: mission slot empty, skipping auto-complete"
+                                );
+                            }
+                        }
+                        Err(e) => tracing::debug!(
+                            mission_id = %mid_str,
+                            error = %e,
+                            "abound_send_wire: spawning_mission_id is not a valid uuid"
+                        ),
+                    }
+                }
                 return Ok(ToolOutput::text("Notification sent", start.elapsed()));
             } else {
                 let err_info = extract_abound_error(status, notif_result.get("body"));
