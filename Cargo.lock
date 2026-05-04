@@ -4288,6 +4288,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_runtime_policy"
+version = "0.1.0"
+dependencies = [
+ "ironclaw_host_api",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ironclaw_safety"
 version = "0.2.1"
 dependencies = [
