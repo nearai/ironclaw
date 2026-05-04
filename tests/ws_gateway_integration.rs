@@ -91,6 +91,7 @@ async fn start_test_server() -> (
         oauth_sweep_shutdown: None,
         frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         tool_dispatcher: None,
+        legal_chat_store: None,
     });
 
     let auth = ironclaw::channels::web::auth::MultiAuthState::single(

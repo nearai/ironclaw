@@ -62,6 +62,11 @@ pub mod hooks;
 pub mod http_intercept;
 #[cfg(feature = "import")]
 pub mod import;
+// Legal-harness skill (chat-with-legal-documents). v1 export-only stream
+// adds the read store + DOCX renderer; Streams A/B will plug in the
+// project/document and chat layers. The module gates itself on the
+// `libsql` feature internally per the shared spec.
+pub mod legal;
 pub mod llm;
 pub mod observability;
 pub mod orchestrator;

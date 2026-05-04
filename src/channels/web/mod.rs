@@ -196,6 +196,7 @@ impl GatewayChannel {
             oauth_sweep_shutdown: None,
             frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
             tool_dispatcher: None,
+            legal_chat_store: None,
         });
 
         Self {
@@ -262,6 +263,7 @@ impl GatewayChannel {
             // just because a `with_*` builder added a new subsystem.
             frontend_html_cache: Arc::clone(&self.state.frontend_html_cache),
             tool_dispatcher: self.state.tool_dispatcher.clone(),
+            legal_chat_store: self.state.legal_chat_store.clone(),
         };
         mutate(&mut new_state);
         new_state.auth_manager = build_gateway_auth_manager(&new_state);
@@ -336,6 +338,21 @@ impl GatewayChannel {
         // on security-critical actions (suspend, role change, token revoke).
         self.rebuild_state(|s| s.db_auth = Some(Arc::new(authenticator.clone())));
         self.auth.db_auth = Some(authenticator);
+        self
+    }
+
+    /// Enable the legal-harness DOCX export endpoint.
+    ///
+    /// The store wraps a shared libSQL database handle (the same one the
+    /// rest of the gateway already uses) and is the only legal-harness
+    /// piece Stream C ships. Streams A/B will introduce CRUD on top of
+    /// the same handle without touching this builder.
+    #[cfg(feature = "libsql")]
+    pub fn with_legal_chat_store(
+        mut self,
+        store: Arc<crate::legal::store::LegalChatStore>,
+    ) -> Self {
+        self.rebuild_state(|s| s.legal_chat_store = Some(store));
         self
     }
 

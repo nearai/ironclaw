@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(legal-harness)* introduce `POST /skills/legal/chats/{id}/export.docx` to render a chat thread (timestamps, role headings, document-reference callouts) as a `.docx`; ships the canonical legal-harness libSQL schema (V26: `legal_projects`, `legal_documents`, `legal_chats`, `legal_chat_messages`)
+
 ## [0.27.0](https://github.com/nearai/ironclaw/compare/ironclaw-v0.26.0...ironclaw-v0.27.0) - 2026-04-29
 
 ### Added

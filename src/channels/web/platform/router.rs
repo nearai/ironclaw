@@ -35,6 +35,10 @@ use crate::channels::web::features::jobs::{
     jobs_events_handler, jobs_list_handler, jobs_prompt_handler, jobs_restart_handler,
     jobs_summary_handler,
 };
+// Legal-harness DOCX export — gated on libSQL per the shared spec
+// (ironclaw uses libSQL as the legal harness backend in v1).
+#[cfg(feature = "libsql")]
+use crate::channels::web::features::legal::export_chat_docx_handler;
 use crate::channels::web::handlers::engine::{
     engine_mission_detail_handler, engine_mission_fire_handler, engine_mission_pause_handler,
     engine_mission_resume_handler, engine_missions_handler, engine_missions_summary_handler,
@@ -297,7 +301,24 @@ pub async fn start_server(
         .route(
             "/api/skills/{name}",
             axum::routing::delete(skills_remove_handler),
-        )
+        );
+
+    // Legal-harness skill — Stream C scope: DOCX export of an existing
+    // chat thread. Stream A introduces project/document CRUD, Stream B
+    // adds chat-with-docs RAG; both will register additional
+    // `/skills/legal/...` routes under the same prefix when they land.
+    // Gated on libSQL per the shared spec. The legal-harness skill uses
+    // the bare `/skills/legal/...` prefix specified in the cross-stream
+    // spec, not the `/api/skills/...` prefix used by the skills CRUD
+    // handlers (which are skill-management endpoints, a different
+    // surface).
+    #[cfg(feature = "libsql")]
+    let protected = protected.route(
+        "/skills/legal/chats/{id}/export.docx",
+        post(export_chat_docx_handler),
+    );
+
+    let protected = protected
         // Settings
         .route("/api/settings", get(settings_list_handler))
         .route("/api/settings/export", get(settings_export_handler))

@@ -15,6 +15,13 @@ pub(crate) mod chat;
 pub(crate) mod debug;
 pub(crate) mod extensions;
 pub(crate) mod jobs;
+// Legal-harness slice — Stream C ships only the DOCX export endpoint.
+// Streams A and B will fold project/document/chat handlers into this
+// same module when they merge upstream. Gated on `libsql` because the
+// legal harness uses ironclaw's libSQL embedded backend per the shared
+// spec; postgres-only deployments don't expose the surface yet.
+#[cfg(feature = "libsql")]
+pub(crate) mod legal;
 pub(crate) mod logs;
 pub(crate) mod oauth;
 pub(crate) mod pairing;
