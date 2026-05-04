@@ -92,13 +92,16 @@ where
         let chunk_texts = chunk_document(content, self.chunk_config.clone());
         let chunks =
             build_chunk_writes(path, chunk_texts, self.embedding_provider.as_deref()).await?;
-        if chunks.is_empty() {
-            self.repository.delete_document_chunks(path).await
-        } else {
-            self.repository
-                .replace_document_chunks_if_current(path, &content_hash_at_read, &chunks)
-                .await
-        }
+        // Route empty chunk sets through the same hash-checked replacement path
+        // used for non-empty sets. An unconditional delete would otherwise race
+        // with a concurrent writer that has already produced fresh chunk rows
+        // for newer content: indexer A reads a whitespace document and computes
+        // an empty chunk list, writer B replaces chunks with real content, A
+        // resumes and clobbers B's rows. The hash guard makes A's delete a
+        // no-op once the document has moved on.
+        self.repository
+            .replace_document_chunks_if_current(path, &content_hash_at_read, &chunks)
+            .await
     }
 }
 
@@ -152,4 +155,133 @@ async fn build_chunk_writes(
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+    use crate::path::MemoryDocumentScope;
+    use crate::search::{MemorySearchRequest, MemorySearchResult};
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum IndexerCall {
+        Replace { chunks: usize, hash: String },
+        Delete,
+    }
+
+    struct RecordingRepo {
+        content: Vec<u8>,
+        calls: Mutex<Vec<IndexerCall>>,
+    }
+
+    impl RecordingRepo {
+        fn new(content: impl Into<Vec<u8>>) -> Self {
+            Self {
+                content: content.into(),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl MemoryDocumentRepository for RecordingRepo {
+        async fn read_document(
+            &self,
+            _path: &MemoryDocumentPath,
+        ) -> Result<Option<Vec<u8>>, FilesystemError> {
+            Ok(Some(self.content.clone()))
+        }
+
+        async fn write_document(
+            &self,
+            _path: &MemoryDocumentPath,
+            _bytes: &[u8],
+        ) -> Result<(), FilesystemError> {
+            Ok(())
+        }
+
+        async fn list_documents(
+            &self,
+            _scope: &MemoryDocumentScope,
+        ) -> Result<Vec<MemoryDocumentPath>, FilesystemError> {
+            Ok(Vec::new())
+        }
+
+        async fn search_documents(
+            &self,
+            _scope: &MemoryDocumentScope,
+            _request: &MemorySearchRequest,
+        ) -> Result<Vec<MemorySearchResult>, FilesystemError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[async_trait]
+    impl MemoryDocumentIndexRepository for RecordingRepo {
+        async fn replace_document_chunks_if_current(
+            &self,
+            _path: &MemoryDocumentPath,
+            expected_content_hash: &str,
+            chunks: &[MemoryChunkWrite],
+        ) -> Result<(), FilesystemError> {
+            self.calls.lock().unwrap().push(IndexerCall::Replace {
+                chunks: chunks.len(),
+                hash: expected_content_hash.to_string(),
+            });
+            Ok(())
+        }
+
+        async fn delete_document_chunks(
+            &self,
+            _path: &MemoryDocumentPath,
+        ) -> Result<(), FilesystemError> {
+            self.calls.lock().unwrap().push(IndexerCall::Delete);
+            Ok(())
+        }
+    }
+
+    fn doc_path() -> MemoryDocumentPath {
+        MemoryDocumentPath::new("tenant", "user", Some("project"), "note.md").unwrap()
+    }
+
+    // Regression for PR #3180 review: empty/whitespace documents previously
+    // routed through the unconditional `delete_document_chunks`, which races
+    // with a concurrent writer that has already inserted fresh chunks for
+    // newer content. Empty chunk sets must go through the same hash-checked
+    // replacement path as non-empty sets so the delete becomes a no-op once
+    // the document content has moved on.
+    #[tokio::test]
+    async fn empty_chunks_route_through_hash_checked_replace_not_unconditional_delete() {
+        let repo = Arc::new(RecordingRepo::new("   \n\t  "));
+        let indexer = ChunkingMemoryDocumentIndexer::new(repo.clone());
+        indexer.reindex_document(&doc_path()).await.unwrap();
+        let calls = repo.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "expected exactly one indexer call");
+        match &calls[0] {
+            IndexerCall::Replace { chunks, hash } => {
+                assert_eq!(*chunks, 0, "expected empty chunk set");
+                assert_eq!(*hash, content_sha256("   \n\t  "));
+            }
+            IndexerCall::Delete => {
+                panic!("empty chunks must not call unconditional delete_document_chunks")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn non_empty_chunks_still_route_through_hash_checked_replace() {
+        let content = "alpha beta gamma delta epsilon";
+        let repo = Arc::new(RecordingRepo::new(content));
+        let indexer = ChunkingMemoryDocumentIndexer::new(repo.clone());
+        indexer.reindex_document(&doc_path()).await.unwrap();
+        let calls = repo.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(matches!(
+            &calls[0],
+            IndexerCall::Replace { chunks, hash }
+                if *chunks > 0 && hash == &content_sha256(content)
+        ));
+    }
 }

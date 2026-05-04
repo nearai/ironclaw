@@ -253,6 +253,43 @@ where
     }
 }
 
+// Defense-in-depth scope guards for the public `MemoryBackend` seam. The host
+// resolves and authorizes a `MemoryContext` before calling any backend method;
+// the backend must refuse to operate on a path or scope that doesn't match
+// that authorized context. Without this, a direct caller that authorized one
+// context but passed a path/scope for another tenant/user/agent/project
+// would bypass the boundary even when the filesystem adapter would have
+// passed matching values.
+fn ensure_path_matches_context(
+    context: &MemoryContext,
+    path: &MemoryDocumentPath,
+    operation: FilesystemOperation,
+) -> Result<(), FilesystemError> {
+    if path.scope() == context.scope() {
+        return Ok(());
+    }
+    Err(memory_error(
+        path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+        operation,
+        "memory document scope does not match authorized memory context",
+    ))
+}
+
+fn ensure_scope_matches_context(
+    context: &MemoryContext,
+    scope: &MemoryDocumentScope,
+    operation: FilesystemOperation,
+) -> Result<(), FilesystemError> {
+    if scope == context.scope() {
+        return Ok(());
+    }
+    Err(memory_backend_unsupported(
+        context.scope(),
+        operation,
+        "memory document scope does not match authorized memory context",
+    ))
+}
+
 #[async_trait]
 impl<R> MemoryBackend for RepositoryMemoryBackend<R>
 where
@@ -264,9 +301,10 @@ where
 
     async fn read_document(
         &self,
-        _context: &MemoryContext,
+        context: &MemoryContext,
         path: &MemoryDocumentPath,
     ) -> Result<Option<Vec<u8>>, FilesystemError> {
+        ensure_path_matches_context(context, path, FilesystemOperation::ReadFile)?;
         self.repository.read_document(path).await
     }
 
@@ -276,6 +314,7 @@ where
         path: &MemoryDocumentPath,
         bytes: &[u8],
     ) -> Result<(), FilesystemError> {
+        ensure_path_matches_context(context, path, FilesystemOperation::WriteFile)?;
         let content = std::str::from_utf8(bytes).map_err(|_| {
             memory_error(
                 path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
@@ -339,6 +378,7 @@ where
         expected_previous_hash: Option<&str>,
         bytes: &[u8],
     ) -> Result<MemoryAppendOutcome, FilesystemError> {
+        ensure_path_matches_context(context, path, FilesystemOperation::AppendFile)?;
         let current = self.repository.read_document(path).await?;
         if current.as_deref().map(content_bytes_sha256).as_deref() != expected_previous_hash {
             return Ok(MemoryAppendOutcome::Conflict);
@@ -406,9 +446,10 @@ where
 
     async fn list_documents(
         &self,
-        _context: &MemoryContext,
+        context: &MemoryContext,
         scope: &MemoryDocumentScope,
     ) -> Result<Vec<MemoryDocumentPath>, FilesystemError> {
+        ensure_scope_matches_context(context, scope, FilesystemOperation::ListDir)?;
         self.repository.list_documents(scope).await
     }
 
@@ -488,5 +529,88 @@ where
         self.repository
             .search_documents(context.scope(), &request)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::repo::InMemoryMemoryDocumentRepository;
+
+    fn alpha_path() -> MemoryDocumentPath {
+        MemoryDocumentPath::new("tenant", "alpha", Some("project"), "note.md").unwrap()
+    }
+
+    fn beta_path() -> MemoryDocumentPath {
+        MemoryDocumentPath::new("tenant", "beta", Some("project"), "note.md").unwrap()
+    }
+
+    fn alpha_context() -> MemoryContext {
+        MemoryContext::new(MemoryDocumentScope::new("tenant", "alpha", Some("project")).unwrap())
+    }
+
+    fn make_backend() -> RepositoryMemoryBackend<InMemoryMemoryDocumentRepository> {
+        let repo = Arc::new(InMemoryMemoryDocumentRepository::new());
+        RepositoryMemoryBackend::new(repo).without_prompt_write_safety_policy()
+    }
+
+    // Regression for PR #3180 review: a `MemoryBackend` is reachable from
+    // host/runtime composition as a public seam, and any caller that
+    // authorized one `MemoryContext` but passed a path or scope for another
+    // tenant/user/agent/project must be rejected before any repository side
+    // effect.
+    #[tokio::test]
+    async fn read_document_rejects_path_with_scope_outside_authorized_context() {
+        let backend = make_backend();
+        let result = backend.read_document(&alpha_context(), &beta_path()).await;
+        assert!(
+            result.is_err(),
+            "expected scope mismatch on read_document to fail closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_document_rejects_path_with_scope_outside_authorized_context() {
+        let backend = make_backend();
+        let result = backend
+            .write_document(&alpha_context(), &beta_path(), b"hello")
+            .await;
+        assert!(
+            result.is_err(),
+            "expected scope mismatch on write_document to fail closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn compare_and_append_document_rejects_path_with_scope_outside_authorized_context() {
+        let backend = make_backend();
+        let result = backend
+            .compare_and_append_document(&alpha_context(), &beta_path(), None, b"hello")
+            .await;
+        assert!(
+            result.is_err(),
+            "expected scope mismatch on compare_and_append_document to fail closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_documents_rejects_scope_outside_authorized_context() {
+        let backend = make_backend();
+        let other_scope = MemoryDocumentScope::new("tenant", "beta", Some("project")).unwrap();
+        let result = backend.list_documents(&alpha_context(), &other_scope).await;
+        assert!(
+            result.is_err(),
+            "expected scope mismatch on list_documents to fail closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn matching_context_and_path_succeed() {
+        let backend = make_backend();
+        // Sanity: the same scope on both sides is the happy path.
+        backend
+            .read_document(&alpha_context(), &alpha_path())
+            .await
+            .expect("matching scope should not be rejected");
     }
 }

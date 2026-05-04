@@ -256,15 +256,20 @@ pub(crate) fn fuse_memory_search_results(
             vector_rank: result.vector_rank,
         })
         .collect::<Vec<_>>();
-    if request.min_score() > 0.0 {
-        fused.retain(|result| result.score >= request.min_score());
-    }
+    // Normalize before applying `min_score`: raw RRF/weighted scores are tiny
+    // (e.g. `1/(60+1) ≈ 0.016` for the top RRF hit), so a caller-supplied
+    // `min_score` like `0.5` would drop every result if applied to the
+    // unnormalized values. Workspace's existing fusion normalizes first, then
+    // filters; we mirror that contract here.
     if let Some(max_score) = fused.iter().map(|result| result.score).reduce(f32::max)
         && max_score > 0.0
     {
         for result in &mut fused {
             result.score /= max_score;
         }
+    }
+    if request.min_score() > 0.0 {
+        fused.retain(|result| result.score >= request.min_score());
     }
     fused.sort_by(|left, right| {
         right
@@ -287,5 +292,91 @@ pub(crate) fn escape_fts5_query(query: &str) -> Option<String> {
         None
     } else {
         Some(phrases.join(" "))
+    }
+}
+
+#[cfg(all(test, any(feature = "libsql", feature = "postgres")))]
+mod tests {
+    use super::*;
+
+    fn ranked(rank: u32, key: &str) -> RankedMemorySearchResult {
+        RankedMemorySearchResult {
+            chunk_key: key.to_string(),
+            path: MemoryDocumentPath::new("tenant", "user", Some("project"), format!("{key}.md"))
+                .unwrap(),
+            snippet: format!("snippet-{key}"),
+            rank,
+        }
+    }
+
+    fn rrf_request(min_score: f32) -> MemorySearchRequest {
+        MemorySearchRequest::new("query")
+            .unwrap()
+            .with_fusion_strategy(FusionStrategy::Rrf)
+            .with_rrf_k(60)
+            .with_min_score(min_score)
+    }
+
+    fn weighted_request(min_score: f32) -> MemorySearchRequest {
+        MemorySearchRequest::new("query")
+            .unwrap()
+            .with_fusion_strategy(FusionStrategy::WeightedScore)
+            .with_full_text_weight(0.5)
+            .with_vector_weight(0.5)
+            .with_min_score(min_score)
+    }
+
+    // Regression for PR #3180 review: `min_score` was filtering raw RRF/weighted
+    // scores before the later normalization pass. With the default RRF k=60 the
+    // top single-source raw score is ~0.016, so `min_score = 0.5` would drop
+    // every result before normalization could lift the best hit to 1.0. The
+    // contract is "filter against normalized scores", matching the existing
+    // workspace fusion.
+    #[test]
+    fn rrf_min_score_filters_normalized_scores_not_raw_rrf_values() {
+        let full_text = vec![ranked(1, "alpha"), ranked(2, "beta"), ranked(3, "gamma")];
+        let request = rrf_request(0.5);
+        let fused = fuse_memory_search_results(full_text, Vec::new(), &request);
+        // Normalized to [0, 1]; min_score=0.5 should keep at least the top hit
+        // even though its raw RRF score (1/61) is far below 0.5.
+        assert!(
+            !fused.is_empty(),
+            "expected at least the top hit to survive"
+        );
+        assert_eq!(fused[0].score, 1.0);
+        for result in &fused {
+            assert!(
+                result.score >= 0.5,
+                "filtered score {} fell below min_score=0.5",
+                result.score
+            );
+        }
+    }
+
+    #[test]
+    fn weighted_min_score_filters_normalized_scores_not_raw_weighted_values() {
+        let full_text = vec![ranked(1, "alpha"), ranked(2, "beta")];
+        let vector = vec![ranked(1, "alpha"), ranked(3, "gamma")];
+        let request = weighted_request(0.5);
+        let fused = fuse_memory_search_results(full_text, vector, &request);
+        assert!(
+            !fused.is_empty(),
+            "expected at least the top hit to survive"
+        );
+        assert_eq!(fused[0].score, 1.0);
+        for result in &fused {
+            assert!(
+                result.score >= 0.5,
+                "filtered score {} fell below min_score=0.5",
+                result.score
+            );
+        }
+    }
+
+    #[test]
+    fn min_score_zero_keeps_every_fused_result() {
+        let full_text = vec![ranked(1, "alpha"), ranked(2, "beta"), ranked(3, "gamma")];
+        let fused = fuse_memory_search_results(full_text, Vec::new(), &rrf_request(0.0));
+        assert_eq!(fused.len(), 3);
     }
 }
