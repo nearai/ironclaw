@@ -263,6 +263,11 @@ impl HostState {
         use crate::tools::wasm::allowlist::AllowlistValidator;
 
         let validator = AllowlistValidator::new(capability.allowlist.clone());
+        let validator = if capability.allow_insecure {
+            validator.allow_http()
+        } else {
+            validator
+        };
         let result = validator.validate(url, method);
 
         if result.is_allowed() {

@@ -1,0 +1,24 @@
+{
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Publish notes, search, send DMs, and interact with Nostr via relays. Supports kind 0 (profile), kind 1 (notes), kind 3 (contacts), kind 4 (DMs), kind 7 (reactions). Event signing via Schnorr/secp256k1, published to relays over WebSocket.",
+  "http": {
+    "allowlist": [
+      { "host": "relay.damus.io", "methods": ["GET", "POST"] },
+      { "host": "nos.lol", "methods": ["GET", "POST"] },
+      { "host": "relay.nostr.band", "methods": ["GET", "POST"] },
+      { "host": "nostr-pub.wellorder.net", "methods": ["GET", "POST"] },
+      { "host": "api.nostr.band", "path_prefix": "/v1/", "methods": ["GET"] }
+    ],
+    "rate_limit": { "requests_per_minute": 30, "requests_per_hour": 500 },
+    "timeout_secs": 15
+  },
+  "workspace": { "allowed_prefixes": ["nostr/"] },
+  "secrets": { "allowed_names": ["nostr_private_key"] },
+  "auth": {
+    "secret_name": "nostr_private_key",
+    "display_name": "Nostr",
+    "instructions": "1. Generate or obtain your Nostr private key (nsec1... or hex)\n2. Store it in the workspace at nostr/private_key using memory_write\n   - hex format: 64 hex chars (e.g. 0123456789abcdef...)\n   - nsec format: nsec1qrpvf... (bech32-encoded)\n3. Use 'get_pubkey' to verify your setup",
+    "setup_url": "https://nostr.how/get-started"
+  }
+}

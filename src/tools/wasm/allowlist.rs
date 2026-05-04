@@ -105,8 +105,8 @@ impl AllowlistValidator {
             Err(e) => return AllowlistResult::Denied(DenyReason::InvalidUrl(e)),
         };
 
-        // Check HTTPS requirement
-        if self.require_https && parsed.scheme != "https" {
+        // Check HTTPS requirement (wss:// is also considered secure)
+        if self.require_https && parsed.scheme != "https" && parsed.scheme != "wss" {
             return AllowlistResult::Denied(DenyReason::InsecureScheme(parsed.scheme.clone()));
         }
 
@@ -174,7 +174,7 @@ struct ParsedUrl {
 fn parse_url(url: &str) -> Result<ParsedUrl, String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("URL parse failed: {e}"))?;
     let scheme = parsed.scheme().to_lowercase();
-    if scheme != "http" && scheme != "https" {
+    if scheme != "http" && scheme != "https" && scheme != "ws" && scheme != "wss" {
         return Err(format!("Unsupported scheme: {}", scheme));
     }
 

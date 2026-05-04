@@ -156,6 +156,7 @@ impl StoredCapabilities {
                 max_request_bytes: self.max_request_body_bytes as usize,
                 max_response_bytes: self.max_response_body_bytes as usize,
                 timeout: std::time::Duration::from_secs(self.http_timeout_secs as u64),
+                allow_insecure: false,
             });
         }
 
