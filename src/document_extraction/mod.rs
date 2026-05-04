@@ -4,7 +4,7 @@
 //! on incoming messages and extracts text content so the LLM can reason about them.
 //!
 //! Supported formats:
-//! - **PDF** — via `pdf-extract`
+//! - **PDF** — via `pdf_oxide` (layout-aware markdown extraction)
 //! - **Office XML** (DOCX, PPTX, XLSX) — ZIP + XML text extraction
 //! - **Plain text** (TXT, CSV, JSON, XML, Markdown, code) — UTF-8 decode
 
@@ -96,7 +96,7 @@ impl DocumentExtractionMiddleware {
 
             let mime = &attachment.mime_type;
             let filename = attachment.filename.as_deref();
-            match extractors::extract_text(&data, mime, filename) {
+            match extractors::extract_text(data, mime, filename) {
                 Ok(text) => {
                     // Truncate at a char boundary to avoid panicking on multi-byte UTF-8
                     let text = if text.len() > MAX_EXTRACTED_TEXT_LEN {
