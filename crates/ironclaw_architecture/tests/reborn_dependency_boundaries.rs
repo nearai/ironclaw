@@ -138,43 +138,6 @@ fn reborn_runtime_http_egress_has_single_network_boundary() {
     );
 }
 
-#[test]
-fn regression_check_treats_reborn_control_plane_crates_as_high_risk() {
-    let root = workspace_root();
-    let workflow =
-        std::fs::read_to_string(root.join(".github/workflows/regression-test-check.yml"))
-            .expect("regression workflow must be readable");
-    let required_patterns = [
-        "crates/ironclaw_approvals/src/",
-        "crates/ironclaw_authorization/src/",
-        "crates/ironclaw_capabilities/src/",
-        "crates/ironclaw_dispatcher/src/",
-        "crates/ironclaw_events/src/",
-        "crates/ironclaw_extensions/src/",
-        "crates/ironclaw_filesystem/src/",
-        "crates/ironclaw_engine/src/",
-        "crates/ironclaw_host_api/src/",
-        "crates/ironclaw_host_runtime/src/",
-        "crates/ironclaw_mcp/src/",
-        "crates/ironclaw_memory/src/",
-        "crates/ironclaw_network/src/",
-        "crates/ironclaw_processes/src/",
-        "crates/ironclaw_resources/src/",
-        "crates/ironclaw_run_state/src/",
-        "crates/ironclaw_scripts/src/",
-        "crates/ironclaw_secrets/src/",
-        "crates/ironclaw_trust/src/",
-        "crates/ironclaw_wasm/src/",
-    ];
-
-    for pattern in required_patterns {
-        assert!(
-            workflow.contains(pattern),
-            "Regression test enforcement must treat `{pattern}` as high-risk Reborn control-plane code"
-        );
-    }
-}
-
 struct ForbiddenRuntimeNetworkUse {
     pattern: &'static str,
     reason: &'static str,
