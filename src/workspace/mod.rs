@@ -55,6 +55,7 @@ mod search;
 pub mod settings_adapter;
 pub use settings_adapter::WorkspaceSettingsAdapter;
 pub mod settings_schemas;
+pub mod snapshot;
 
 pub use chunker::{ChunkConfig, chunk_document};
 pub use document::{

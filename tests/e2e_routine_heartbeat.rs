@@ -983,8 +983,20 @@ mod tests {
             state_dir: _tmp.path().to_path_buf(),
         };
 
-        let runner = HeartbeatRunner::new(HeartbeatConfig::default(), hygiene_config, ws, llm)
-            .with_response_channel(tx);
+        let snapshot_config = ironclaw::workspace::snapshot::SnapshotConfig {
+            enabled: false,
+            cadence_hours: 24,
+            snapshot_path: std::path::PathBuf::new(),
+            state_path: std::path::PathBuf::new(),
+        };
+        let runner = HeartbeatRunner::new(
+            HeartbeatConfig::default(),
+            hygiene_config,
+            snapshot_config,
+            ws,
+            llm,
+        )
+        .with_response_channel(tx);
 
         let result = runner.check_heartbeat().await;
         match result {
@@ -1029,7 +1041,19 @@ mod tests {
             state_dir: _tmp.path().to_path_buf(),
         };
 
-        let runner = HeartbeatRunner::new(HeartbeatConfig::default(), hygiene_config, ws, llm);
+        let snapshot_config = ironclaw::workspace::snapshot::SnapshotConfig {
+            enabled: false,
+            cadence_hours: 24,
+            snapshot_path: std::path::PathBuf::new(),
+            state_path: std::path::PathBuf::new(),
+        };
+        let runner = HeartbeatRunner::new(
+            HeartbeatConfig::default(),
+            hygiene_config,
+            snapshot_config,
+            ws,
+            llm,
+        );
 
         let result = runner.check_heartbeat().await;
         assert!(
