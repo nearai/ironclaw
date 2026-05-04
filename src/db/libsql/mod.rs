@@ -399,6 +399,10 @@ impl Database for LibSqlBackend {
             }
         }
     }
+
+    fn as_libsql(&self) -> Option<&LibSqlBackend> {
+        Some(self)
+    }
 }
 
 // ==================== Row conversion helpers ====================
