@@ -365,6 +365,26 @@ pub struct ApiTokenRecord {
     pub revoked_at: Option<DateTime<Utc>>,
 }
 
+/// A one-time onboarding invitation. Plaintext tokens are never persisted;
+/// `token_prefix` is non-secret display material and `token_hash` is the
+/// lookup key.
+#[derive(Debug, Clone)]
+pub struct InvitationRecord {
+    pub id: Uuid,
+    pub token_prefix: String,
+    pub token_hash: String,
+    pub created_by_admin: String,
+    pub target_email: Option<String>,
+    pub target_role: String,
+    pub scopes: serde_json::Value,
+    pub expires_at: DateTime<Utc>,
+    pub claimed_at: Option<DateTime<Utc>>,
+    pub claimed_by_user_id: Option<String>,
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub metadata: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}
+
 // ==================== User identity record types ====================
 
 /// A linked external identity from an OAuth/social login provider.
@@ -1064,6 +1084,15 @@ pub trait UserStore: Send + Sync {
         token_prefix: &str,
         expires_at: Option<DateTime<Utc>>,
     ) -> Result<ApiTokenRecord, DatabaseError>;
+
+    /// Create an invitation. The plaintext token must never be passed here.
+    async fn create_invitation(&self, invitation: &InvitationRecord) -> Result<(), DatabaseError>;
+
+    /// Look up an invitation by SHA-256 token hash.
+    async fn get_invitation_by_token_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<InvitationRecord>, DatabaseError>;
 }
 
 /// Per-user LLM usage statistics.

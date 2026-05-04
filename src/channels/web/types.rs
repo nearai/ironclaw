@@ -699,6 +699,25 @@ pub struct AdminUserDeleteResponse {
     pub deleted: bool,
 }
 
+// --- Admin Invitations ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminInvitationCreateResponse {
+    pub id: String,
+    pub invite_url: String,
+    pub target_email: Option<String>,
+    pub target_role: String,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvitationPreviewResponse {
+    pub org_name: String,
+    pub inviter_handle: String,
+    pub target_role: String,
+    pub expires_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminUsageEntry {
     pub user_id: String,

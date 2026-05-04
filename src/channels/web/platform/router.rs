@@ -139,6 +139,10 @@ pub async fn start_server(
             "/api/webhooks/u/{user_id}/{path}",
             post(crate::channels::web::handlers::webhooks::webhook_trigger_user_scoped_handler),
         )
+        .route(
+            "/api/invitations/{token}",
+            get(crate::channels::web::handlers::invitations::invitations_preview_handler),
+        )
         // OAuth social login routes (public, no auth required)
         .route(
             "/auth/providers",
@@ -326,6 +330,11 @@ pub async fn start_server(
         )
         .route("/api/llm/list_models", post(llm_list_models_handler))
         .route("/api/llm/providers", get(llm_providers_handler))
+        // Pilot invitations (admin)
+        .route(
+            "/api/admin/invitations",
+            post(crate::channels::web::handlers::invitations::invitations_create_handler),
+        )
         // User management (admin)
         .route(
             "/api/admin/users",

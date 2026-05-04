@@ -16,9 +16,9 @@ use crate::agent::routine::{Routine, RoutineRun, RunStatus};
 use crate::config::DatabaseConfig;
 use crate::context::{ActionRecord, JobContext, JobState};
 use crate::db::{
-    ApiTokenRecord, ChannelPairingStore, ConversationStore, Database, IdentityStore, JobStore,
-    PairingRequestRecord, RoutineStore, SandboxStore, SettingsStore, ToolFailureStore,
-    UserIdentityRecord, UserRecord, UserStore, WorkspaceStore,
+    ApiTokenRecord, ChannelPairingStore, ConversationStore, Database, IdentityStore,
+    InvitationRecord, JobStore, PairingRequestRecord, RoutineStore, SandboxStore, SettingsStore,
+    ToolFailureStore, UserIdentityRecord, UserRecord, UserStore, WorkspaceStore,
 };
 use crate::error::{DatabaseError, WorkspaceError};
 use crate::history::{
@@ -1099,6 +1099,17 @@ impl UserStore for PgBackend {
         self.store
             .create_user_with_token(user, token_name, token_hash, token_prefix, expires_at)
             .await
+    }
+
+    async fn create_invitation(&self, invitation: &InvitationRecord) -> Result<(), DatabaseError> {
+        self.store.create_invitation(invitation).await
+    }
+
+    async fn get_invitation_by_token_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<InvitationRecord>, DatabaseError> {
+        self.store.get_invitation_by_token_hash(token_hash).await
     }
 }
 
