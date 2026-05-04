@@ -57,6 +57,12 @@ impl MemorySearchRequest {
 
     pub fn with_limit(mut self, limit: usize) -> Self {
         self.limit = limit.max(1);
+        // Re-clamp pre_fusion_limit so the invariant `pre_fusion_limit >= limit`
+        // holds regardless of builder call order: if the caller sets
+        // `with_pre_fusion_limit(2).with_limit(5)`, the pre-fusion candidate
+        // budget must also widen to at least 5, otherwise the per-branch SQL
+        // `LIMIT` would silently be smaller than the requested final limit.
+        self.pre_fusion_limit = self.pre_fusion_limit.max(self.limit);
         self
     }
 
@@ -287,5 +293,56 @@ pub(crate) fn escape_fts5_query(query: &str) -> Option<String> {
         None
     } else {
         Some(phrases.join(" "))
+    }
+}
+
+#[cfg(all(test, any(feature = "libsql", feature = "postgres")))]
+mod tests {
+    use super::*;
+    use crate::path::MemoryDocumentPath;
+
+    fn ranked(chunk_key: &str, relative_path: &str, rank: u32) -> RankedMemorySearchResult {
+        RankedMemorySearchResult {
+            chunk_key: chunk_key.to_string(),
+            path: MemoryDocumentPath::new("tenant-a", "alice", None, relative_path).expect("path"),
+            snippet: format!("snippet for {relative_path}"),
+            rank,
+        }
+    }
+
+    #[test]
+    fn fusion_ties_break_deterministically_by_path_ascending() {
+        // Two distinct chunks with identical FT rank (and no vector
+        // contribution) produce identical fusion scores. The tiebreak
+        // must order them by relative path ascending — proving
+        // hybrid-search ordering is deterministic across runs even when
+        // scores are equal.
+        let request = MemorySearchRequest::new("q").unwrap().with_limit(10);
+        let ft = vec![ranked("chunk-z", "z.md", 1), ranked("chunk-a", "a.md", 1)];
+        let fused = fuse_memory_search_results(ft, Vec::new(), &request);
+        let paths: Vec<_> = fused
+            .iter()
+            .map(|r| r.path.relative_path().to_string())
+            .collect();
+        assert_eq!(
+            paths,
+            vec!["a.md".to_string(), "z.md".to_string()],
+            "tied scores must sort by path ascending"
+        );
+    }
+
+    #[test]
+    fn fusion_reverses_when_path_order_flips_under_ties() {
+        // Reverse insertion order to confirm path-asc tiebreak does not
+        // depend on insertion order — the sort is genuinely stable on
+        // the path key, not coincidentally on iteration order.
+        let request = MemorySearchRequest::new("q").unwrap().with_limit(10);
+        let ft = vec![ranked("chunk-a", "a.md", 1), ranked("chunk-z", "z.md", 1)];
+        let fused = fuse_memory_search_results(ft, Vec::new(), &request);
+        let paths: Vec<_> = fused
+            .iter()
+            .map(|r| r.path.relative_path().to_string())
+            .collect();
+        assert_eq!(paths, vec!["a.md".to_string(), "z.md".to_string()]);
     }
 }
