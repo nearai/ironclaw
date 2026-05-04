@@ -70,6 +70,8 @@ pub struct Scheduler {
     sse_tx: Option<Arc<crate::channels::web::sse::SseManager>>,
     /// HTTP interceptor for trace recording/replay (propagated to workers).
     http_interceptor: Option<Arc<dyn crate::llm::recording::HttpInterceptor>>,
+    /// Cryptographic signing service propagated to workers.
+    signing: Option<Arc<crate::signing::SigningService>>,
     /// Running jobs (main LLM-driven jobs).
     jobs: Arc<RwLock<HashMap<Uuid, ScheduledJob>>>,
     /// Running sub-tasks (tool executions, background tasks).
@@ -96,6 +98,7 @@ impl Scheduler {
             hooks: deps.hooks,
             sse_tx: None,
             http_interceptor: None,
+            signing: None,
             jobs: Arc::new(RwLock::new(HashMap::new())),
             subtasks: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -112,6 +115,11 @@ impl Scheduler {
         interceptor: Arc<dyn crate::llm::recording::HttpInterceptor>,
     ) {
         self.http_interceptor = Some(interceptor);
+    }
+
+    /// Set the cryptographic signing service for tool-call audit chaining.
+    pub fn set_signing(&mut self, signing: Arc<crate::signing::SigningService>) {
+        self.signing = Some(signing);
     }
 
     /// Create, persist, and schedule a job in one shot.
@@ -314,6 +322,7 @@ impl Scheduler {
                 approval_context,
                 http_interceptor: self.http_interceptor.clone(),
                 multi_tenant: self.config.multi_tenant,
+                signing: self.signing.clone(),
             };
             let worker = Worker::new(job_id, deps);
 

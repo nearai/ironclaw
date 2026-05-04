@@ -198,6 +198,7 @@ mod tests {
             cost_guard: components.cost_guard.clone(),
             sse_tx: None,
             http_interceptor: None,
+            signing: None,
             transcription: None,
             document_extraction: None,
             sandbox_readiness: ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,

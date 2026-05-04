@@ -51,7 +51,7 @@ async fn tool_dispatcher_survives_subsequent_with_calls() {
     use crate::db::Database;
     backend.run_migrations().await.expect("migrations");
     let db: Arc<dyn crate::db::Database> = Arc::new(backend);
-    let dispatcher = Arc::new(ToolDispatcher::new(registry, safety, Arc::clone(&db)));
+    let dispatcher = Arc::new(ToolDispatcher::new(registry, safety, Arc::clone(&db), None));
 
     // Inject the dispatcher first, then run several other `with_*` builder
     // calls (each of which goes through `rebuild_state`).

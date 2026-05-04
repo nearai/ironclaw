@@ -562,6 +562,7 @@ impl TestHarnessBuilder {
             cost_guard,
             sse_tx: None,
             http_interceptor: None,
+            signing: None,
             transcription: None,
             document_extraction: None,
             sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,

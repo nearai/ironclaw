@@ -37,6 +37,7 @@ mod safety;
 mod sandbox;
 mod search;
 mod secrets;
+mod signing;
 mod skills;
 mod transcription;
 mod tunnel;
@@ -70,6 +71,7 @@ use self::safety::resolve_safety_config;
 pub use self::sandbox::{AcpModeConfig, ClaudeCodeConfig, SandboxModeConfig};
 pub use self::search::WorkspaceSearchConfig;
 pub use self::secrets::SecretsConfig;
+pub use self::signing::SigningConfig;
 pub use self::skills::SkillsConfig;
 pub use self::transcription::TranscriptionConfig;
 pub use self::tunnel::TunnelConfig;
@@ -124,6 +126,8 @@ pub struct Config {
     pub missions: MissionsConfig,
     pub workspace: WorkspaceConfig,
     pub observability: crate::observability::ObservabilityConfig,
+    /// Cryptographic signing of tool calls via signet-core.
+    pub signing: SigningConfig,
     /// OAuth/social login configuration (Google, GitHub, etc.).
     pub oauth: OAuthConfig,
     /// Channel-relay integration (Slack via external relay service).
@@ -256,6 +260,10 @@ impl Config {
             missions: MissionsConfig::default(),
             workspace: WorkspaceConfig::default(),
             observability: crate::observability::ObservabilityConfig::default(),
+            signing: SigningConfig {
+                enabled: false,
+                ..SigningConfig::default()
+            },
             oauth: OAuthConfig::default(),
             relay: None,
         }
@@ -609,6 +617,7 @@ impl Config {
             observability: crate::observability::ObservabilityConfig {
                 backend: std::env::var("OBSERVABILITY_BACKEND").unwrap_or_else(|_| "none".into()),
             },
+            signing: SigningConfig::resolve()?,
             oauth: OAuthConfig::resolve()?,
             relay: RelayConfig::from_env(),
         })

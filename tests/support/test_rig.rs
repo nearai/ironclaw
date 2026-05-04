@@ -1411,6 +1411,7 @@ impl TestRigBuilder {
             cost_guard: components.cost_guard,
             sse_tx: None,
             http_interceptor,
+            signing: components.signing.clone(),
             transcription: None,
             document_extraction: None,
             sandbox_readiness: ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,

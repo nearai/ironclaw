@@ -229,6 +229,8 @@ pub struct AgentDeps {
     pub sse_tx: Option<Arc<crate::channels::web::sse::SseManager>>,
     /// HTTP interceptor for trace recording/replay.
     pub http_interceptor: Option<Arc<dyn crate::llm::recording::HttpInterceptor>>,
+    /// Cryptographic signing service propagated to the scheduler/workers.
+    pub signing: Option<Arc<crate::signing::SigningService>>,
     /// Audio transcription middleware for voice messages.
     pub transcription: Option<Arc<crate::llm::transcription::TranscriptionMiddleware>>,
     /// Document text extraction middleware for PDF, DOCX, PPTX, etc.
@@ -319,6 +321,9 @@ impl Agent {
         }
         if let Some(ref interceptor) = deps.http_interceptor {
             scheduler.set_http_interceptor(Arc::clone(interceptor));
+        }
+        if let Some(ref signing) = deps.signing {
+            scheduler.set_signing(Arc::clone(signing));
         }
         let scheduler = Arc::new(scheduler);
 
@@ -2249,6 +2254,7 @@ mod tests {
             cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
             sse_tx: None,
             http_interceptor: None,
+            signing: None,
             transcription: None,
             document_extraction: None,
             sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
