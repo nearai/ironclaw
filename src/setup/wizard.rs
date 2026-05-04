@@ -653,6 +653,16 @@ impl SetupWizard {
                     print_info("Let's configure a new database URL.");
                 } else {
                     print_success("Database connection successful");
+
+                    if confirm("Run database migrations?", true).map_err(SetupError::Io)? {
+                        self.run_migrations_postgres().await?;
+                    } else {
+                        return Err(SetupError::Database(
+                            "PostgreSQL onboarding requires running migrations before continuing"
+                                .to_string(),
+                        ));
+                    }
+
                     self.settings.database_url = Some(url.clone());
                     return Ok(());
                 }
@@ -679,6 +689,11 @@ impl SetupWizard {
 
                     if confirm("Run database migrations?", true).map_err(SetupError::Io)? {
                         self.run_migrations_postgres().await?;
+                    } else {
+                        return Err(SetupError::Database(
+                            "PostgreSQL onboarding requires running migrations before continuing"
+                                .to_string(),
+                        ));
                     }
 
                     self.settings.database_url = Some(url);
@@ -727,6 +742,11 @@ impl SetupWizard {
                 {
                     Ok(()) => {
                         print_success("Database connection successful");
+
+                        // Existing libSQL databases still need the idempotent schema
+                        // bootstrap before later steps persist settings or secrets.
+                        self.run_migrations_libsql().await?;
+
                         self.settings.libsql_path = Some(path.clone());
                         if let Some(url) = turso_url {
                             self.settings.libsql_url = Some(url);
@@ -3978,6 +3998,57 @@ mod tests {
     use super::*;
     use crate::config::helpers::lock_env;
 
+    #[cfg(unix)]
+    unsafe extern "C" {
+        fn dup(fd: std::ffi::c_int) -> std::ffi::c_int;
+        fn dup2(oldfd: std::ffi::c_int, newfd: std::ffi::c_int) -> std::ffi::c_int;
+        fn close(fd: std::ffi::c_int) -> std::ffi::c_int;
+    }
+
+    #[cfg(unix)]
+    struct StdinGuard {
+        original_fd: std::ffi::c_int,
+        _input: tempfile::NamedTempFile,
+    }
+
+    #[cfg(unix)]
+    impl StdinGuard {
+        fn new(input: &str) -> Self {
+            use std::io::{Seek, Write};
+            use std::os::fd::AsRawFd;
+
+            let mut script = tempfile::NamedTempFile::new().expect("stdin script temp file");
+            script
+                .write_all(input.as_bytes())
+                .expect("write stdin script");
+            script
+                .as_file_mut()
+                .seek(std::io::SeekFrom::Start(0))
+                .expect("rewind stdin script");
+
+            let original_fd = unsafe { dup(0) };
+            assert!(original_fd >= 0, "failed to duplicate stdin");
+
+            let swapped = unsafe { dup2(script.as_file().as_raw_fd(), 0) };
+            assert!(swapped >= 0, "failed to redirect stdin");
+
+            Self {
+                original_fd,
+                _input: script,
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for StdinGuard {
+        fn drop(&mut self) {
+            let restored = unsafe { dup2(self.original_fd, 0) };
+            assert!(restored >= 0, "failed to restore stdin");
+            let closed = unsafe { close(self.original_fd) };
+            assert_eq!(closed, 0, "failed to close duplicated stdin");
+        }
+    }
+
     #[test]
     fn test_wizard_creation() {
         let wizard = SetupWizard::new();
@@ -4696,6 +4767,38 @@ mod tests {
         );
     }
 
+    /// Regression test for #2752: accepting an existing libSQL path in the
+    /// interactive database step must still run migrations before later steps
+    /// persist settings.
+    #[cfg(all(feature = "libsql", unix))]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_step_database_libsql_existing_path_runs_migrations() {
+        let _lock = lock_env();
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("existing.db");
+
+        let _path_guard = EnvGuard::set(
+            "LIBSQL_PATH",
+            db_path.to_str().expect("temp path must be valid UTF-8"),
+        );
+        let _backend_guard = EnvGuard::set("DATABASE_BACKEND", "libsql");
+        let _pg_guard = EnvGuard::clear("DATABASE_URL");
+        let _stdin = StdinGuard::new("y\n");
+
+        let mut wizard = SetupWizard::new();
+        wizard
+            .step_database_libsql()
+            .await
+            .expect("existing libSQL path should be accepted");
+
+        let saved = wizard
+            .persist_settings()
+            .await
+            .expect("persist_settings must succeed after libSQL migrations");
+        assert!(saved, "persist_settings must write to the settings table");
+    }
+
     /// Regression test for #846: auto_setup_database must establish a DB
     /// connection and run migrations so that persist_settings succeeds.
     #[cfg(feature = "libsql")]
@@ -4772,12 +4875,78 @@ mod tests {
         Some((container, url))
     }
 
-    /// Assert that an `auto_setup_database()` run against a preset
-    /// `DATABASE_URL` left the wizard in the correct state: live pool,
-    /// recorded settings, migrations applied (proven by a round-trip
+    /// Regression test for #2752: accepting an existing PostgreSQL URL in the
+    /// interactive database step must still run migrations before later steps
+    /// save secrets or settings.
+    #[cfg(all(feature = "postgres", feature = "integration", unix))]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_step_database_postgres_existing_url_runs_migrations() {
+        let _lock = lock_env();
+
+        let Some((_container, database_url)) = start_pg_container().await else {
+            return;
+        };
+
+        let _url_guard = EnvGuard::set("DATABASE_URL", &database_url);
+        let _backend_guard = EnvGuard::clear("DATABASE_BACKEND");
+        let _libsql_guard = EnvGuard::clear("LIBSQL_PATH");
+        let _ssl_guard = EnvGuard::set("DATABASE_SSLMODE", "disable");
+        let _stdin = StdinGuard::new("y\ny\n");
+
+        let mut wizard = SetupWizard::new();
+        wizard
+            .step_database_postgres()
+            .await
+            .expect("existing postgres URL should be accepted");
+
+        assert_postgres_persisted(&wizard, &database_url).await;
+    }
+
+    /// Regression test for PR #2810 review feedback: declining PostgreSQL
+    /// migrations must fail early instead of allowing onboarding to continue
+    /// with a pool that cannot persist later setup state.
+    #[cfg(all(feature = "postgres", feature = "integration", unix))]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_step_database_postgres_existing_url_declining_migrations_fails_early() {
+        let _lock = lock_env();
+
+        let Some((_container, database_url)) = start_pg_container().await else {
+            return;
+        };
+
+        let _url_guard = EnvGuard::set("DATABASE_URL", &database_url);
+        let _backend_guard = EnvGuard::clear("DATABASE_BACKEND");
+        let _libsql_guard = EnvGuard::clear("LIBSQL_PATH");
+        let _ssl_guard = EnvGuard::set("DATABASE_SSLMODE", "disable");
+        let _stdin = StdinGuard::new("y\nn\n");
+
+        let mut wizard = SetupWizard::new();
+        let err = wizard
+            .step_database_postgres()
+            .await
+            .expect_err("declining postgres migrations must abort onboarding");
+
+        assert!(
+            matches!(
+                err,
+                SetupError::Database(message)
+                    if message == "PostgreSQL onboarding requires running migrations before continuing"
+            ),
+            "declining migrations should return the explicit onboarding error"
+        );
+        assert_eq!(
+            wizard.settings.database_url, None,
+            "failing early should not record a postgres URL"
+        );
+    }
+
+    /// Assert that a postgres setup path left the wizard in the correct state:
+    /// live pool, recorded settings, migrations applied (proven by a round-trip
     /// write+read through the `settings` table).
     #[cfg(all(feature = "postgres", feature = "integration"))]
-    async fn assert_auto_setup_postgres_persisted(wizard: &SetupWizard, database_url: &str) {
+    async fn assert_postgres_persisted(wizard: &SetupWizard, database_url: &str) {
         assert!(
             wizard.db_pool.is_some(),
             "auto_setup_database must establish db_pool on the postgres early-return path"
@@ -4865,7 +5034,7 @@ mod tests {
             .await
             .expect("auto_setup_database must succeed on preset postgres URL");
 
-        assert_auto_setup_postgres_persisted(&wizard, &database_url).await;
+        assert_postgres_persisted(&wizard, &database_url).await;
     }
 
     /// Companion to `test_auto_setup_database_runs_migrations_postgres_branch`:
@@ -4895,6 +5064,6 @@ mod tests {
             .await
             .expect("auto_setup_database must succeed with DATABASE_BACKEND=postgres");
 
-        assert_auto_setup_postgres_persisted(&wizard, &database_url).await;
+        assert_postgres_persisted(&wizard, &database_url).await;
     }
 }
