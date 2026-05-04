@@ -44,6 +44,8 @@ pub(crate) const REMITTANCE_BASE: &str =
 const NOTIFICATION_BASE: &str = "https://dev.timesclub.co/times/users/agent";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+const WAIT_MISSION_GOAL_TEMPLATE: &str = include_str!("prompts/abound_wait_mission_goal.md");
+
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
@@ -396,7 +398,7 @@ impl Tool for AboundSendWireTool {
         "Send a wire transfer via Abound. Four actions:\n\
          - action='initiate': runs timing analysis + graph. Requires: funding_source_id, beneficiary_ref_id, amount, payment_reason_key.\n\
          - action='send': sends a notification for approval on the remote client. Requires: amount, beneficiary_ref_id, payment_reason_key.\n\
-         - action='wait': creates an hourly rate monitoring mission. Requires: target_rate, current_rate.\n\
+         - action='wait': creates an hourly rate monitoring mission. Requires: target_rate, current_rate, amount, beneficiary_ref_id, payment_reason_key. When the rate is reached the mission calls action='send' with these details so the user can approve, then action='execute' to actually send.\n\
          - action='execute': executes the actual wire transfer. Call ONLY after user confirms approval. Requires: funding_source_id, beneficiary_ref_id, amount, payment_reason_key."
     }
 
@@ -563,10 +565,23 @@ impl Tool for AboundSendWireTool {
                 .ok_or_else(|| {
                     ToolError::InvalidParameters("current_rate is required for wait action".into())
                 })?;
+            let amount = params
+                .get("amount")
+                .and_then(|v| v.as_f64())
+                .ok_or_else(|| {
+                    ToolError::InvalidParameters("amount is required for wait action".into())
+                })?;
+            let beneficiary_ref_id = require_str(&params, "beneficiary_ref_id")?;
+            let payment_reason_key = require_str(&params, "payment_reason_key")?;
 
             if target_rate <= 0.0 {
                 return Err(ToolError::InvalidParameters(
                     "target_rate must be a positive number".into(),
+                ));
+            }
+            if amount <= 0.0 {
+                return Err(ToolError::InvalidParameters(
+                    "amount must be a positive number".into(),
                 ));
             }
 
@@ -574,17 +589,11 @@ impl Tool for AboundSendWireTool {
 
             let slot = self.mission_slot.read().await;
             if let Some((mgr, project_id)) = slot.as_ref() {
-                let goal = format!(
-                    "This mission runs exactly 24 times (once per hour for 24 hours).\n\
-                     \n\
-                     On each run, call abound_rate_alert(threshold={threshold}).\n\
-                     - If the rate exceeds the threshold, a notification is sent automatically. \
-                     Respond with FINAL() including 'goal achieved: yes'.\n\
-                     - If this is thread #24 (the final run) and the threshold has NOT been reached, \
-                     call abound_rate_alert(threshold={threshold}, force_notify=true) to send a \
-                     status notification anyway. Then respond with FINAL() including 'mission complete'.\n\
-                     - Otherwise, call FINAL() with the result and note the current rate."
-                );
+                let goal = WAIT_MISSION_GOAL_TEMPLATE
+                    .replace("{threshold}", &format_rate(threshold))
+                    .replace("{amount}", &format!("{amount}"))
+                    .replace("{beneficiary_ref_id}", beneficiary_ref_id)
+                    .replace("{payment_reason_key}", payment_reason_key);
                 let cadence = ironclaw_engine::types::mission::MissionCadence::Cron {
                     expression: "0 * * * *".to_string(),
                     timezone: None,
@@ -612,6 +621,43 @@ impl Tool for AboundSendWireTool {
                         ))
                     })?;
 
+                // Carry the originating chat's routing identifiers onto the
+                // mission so each spawned thread can deliver notifications
+                // back to the same chat (see `MissionManager::fire_mission`
+                // for the propagation, and `EffectBridgeAdapter` for the
+                // final hop into `JobContext.metadata`). The keys come in as
+                // `notify_*` from the bridge but are stored under the engine
+                // names `client_*` so they line up with what the executor's
+                // orchestrator reads off `Thread.metadata`.
+                let mut metadata_updates = serde_json::Map::new();
+                if let Some(tid) = ctx
+                    .metadata
+                    .get("notify_thread_id")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                {
+                    metadata_updates.insert(
+                        "client_thread_id".into(),
+                        serde_json::Value::String(tid.into()),
+                    );
+                }
+                if let Some(rid) = ctx
+                    .metadata
+                    .get("notify_response_id")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                {
+                    metadata_updates.insert(
+                        "client_response_id".into(),
+                        serde_json::Value::String(rid.into()),
+                    );
+                }
+                let metadata_field = if metadata_updates.is_empty() {
+                    None
+                } else {
+                    Some(metadata_updates)
+                };
+
                 // Set max_threads_per_day to 2×24 to absorb retries while still bounding the mission
                 let updates = ironclaw_engine::runtime::mission::MissionUpdate {
                     name: None,
@@ -629,6 +675,7 @@ impl Tool for AboundSendWireTool {
                     cooldown_secs: None,
                     max_concurrent: None,
                     dedup_window_secs: None,
+                    metadata: metadata_field,
                 };
                 let guardrail_note = if let Err(e) =
                     mgr.update_mission(mission_id, &ctx.user_id, updates).await
@@ -931,226 +978,6 @@ impl Tool for AboundCreateNotificationTool {
 
     fn risk_level_for(&self, _params: &serde_json::Value) -> RiskLevel {
         RiskLevel::Medium
-    }
-}
-
-// ===========================================================================
-// abound_rate_alert — atomic check-and-notify for mission threads
-// ===========================================================================
-
-pub struct AboundRateAlertTool {
-    secrets: Arc<dyn SecretsStore + Send + Sync>,
-    client: Client,
-}
-
-impl AboundRateAlertTool {
-    pub fn new(secrets: Arc<dyn SecretsStore + Send + Sync>) -> Result<Self, ToolError> {
-        Ok(Self {
-            secrets,
-            client: shared_client()?,
-        })
-    }
-}
-
-#[async_trait]
-impl Tool for AboundRateAlertTool {
-    fn name(&self) -> &str {
-        "abound_rate_alert"
-    }
-
-    fn description(&self) -> &str {
-        "Check the current exchange rate and send a notification if it exceeds a threshold. \
-         Designed for mission threads — does everything in one call: fetch rate, compare, notify. \
-         Returns the current rate, whether threshold was exceeded, and whether notification was sent."
-    }
-
-    fn parameters_schema(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "from_currency": {
-                    "type": "string",
-                    "description": "Source currency code (default: USD)",
-                    "default": "USD"
-                },
-                "to_currency": {
-                    "type": "string",
-                    "description": "Target currency code (default: INR)",
-                    "default": "INR"
-                },
-                "threshold": {
-                    "type": "number",
-                    "description": "Rate threshold. Notification is sent if the current rate exceeds this value."
-                },
-                "message_id": {
-                    "type": "string",
-                    "description": "Notification message identifier (default: rate_alert)",
-                    "default": "rate_alert"
-                },
-                "force_notify": {
-                    "type": "boolean",
-                    "description": "When true, send the notification regardless of whether the threshold is exceeded. Use on the final run.",
-                    "default": false
-                }
-            },
-            "required": ["threshold"]
-        })
-    }
-
-    async fn execute(
-        &self,
-        params: serde_json::Value,
-        ctx: &JobContext,
-    ) -> Result<ToolOutput, ToolError> {
-        let start = Instant::now();
-
-        let from = validate_currency_code(
-            params
-                .get("from_currency")
-                .and_then(|v| v.as_str())
-                .unwrap_or("USD"),
-        )?;
-        let to = validate_currency_code(
-            params
-                .get("to_currency")
-                .and_then(|v| v.as_str())
-                .unwrap_or("INR"),
-        )?;
-        let threshold = params
-            .get("threshold")
-            .and_then(|v| v.as_f64())
-            .ok_or_else(|| ToolError::InvalidParameters("threshold must be a number".into()))?;
-        let message_id = params
-            .get("message_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("rate_alert");
-        let force_notify = params
-            .get("force_notify")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        // Step 1: Fetch exchange rate
-        let url = format!("{REMITTANCE_BASE}/exchange-rate?from_currency={from}&to_currency={to}");
-        let rate_response = abound_get(&self.client, &*self.secrets, &ctx.user_id, &url).await?;
-
-        // Parse rate from response: body.data.current_exchange_rate.formatted_value
-        let current_rate = rate_response
-            .get("body")
-            .and_then(|b| b.get("data"))
-            .and_then(|d| d.get("current_exchange_rate"))
-            .and_then(|r| {
-                r.get("value").and_then(|v| v.as_f64()).or_else(|| {
-                    r.get("formatted_value")
-                        .and_then(|v| v.as_str())
-                        .and_then(|s| s.parse::<f64>().ok())
-                })
-            })
-            .unwrap_or_else(|| {
-                tracing::debug!(
-                    "abound_rate_alert: could not parse current_rate — unexpected response shape"
-                );
-                0.0
-            });
-
-        let effective_rate = rate_response
-            .get("body")
-            .and_then(|b| b.get("data"))
-            .and_then(|d| d.get("effective_exchange_rate"))
-            .and_then(|r| {
-                r.get("value").and_then(|v| v.as_f64()).or_else(|| {
-                    r.get("formatted_value")
-                        .and_then(|v| v.as_str())
-                        .and_then(|s| s.parse::<f64>().ok())
-                })
-            })
-            .unwrap_or(0.0);
-
-        let exceeded = current_rate > threshold;
-        let should_notify = exceeded || force_notify;
-
-        // Step 2: Send notification if threshold exceeded or force_notify
-        let notification_sent = if should_notify {
-            // See `abound_send_wire(send)` for the `notify_thread_id` contract:
-            // it carries the full `resp_...` when the caller is the Responses
-            // API, and falls back to the bare client thread id otherwise.
-            let response_id = ctx
-                .metadata
-                .get("notify_response_id")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty());
-            let thread_id = ctx
-                .metadata
-                .get("notify_thread_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let notify_id = response_id.unwrap_or(thread_id);
-
-            let notif_body = json!({
-                "message_id": message_id,
-                "action_type": "notification",
-                "notify_thread_id": notify_id,
-                "meta_data": {
-                    "alert": format!("{from}/{to} rate alert"),
-                    "current_rate": current_rate,
-                    "effective_rate": effective_rate,
-                    "threshold": threshold,
-                },
-            });
-            let notif_url = format!("{NOTIFICATION_BASE}/create-notification");
-            match abound_post(
-                &self.client,
-                &*self.secrets,
-                &ctx.user_id,
-                &notif_url,
-                &notif_body,
-            )
-            .await
-            {
-                Ok(r) => {
-                    let status = r.get("status").and_then(|v| v.as_u64()).unwrap_or(0);
-                    if !(200..300).contains(&status) {
-                        tracing::debug!(
-                            status,
-                            "abound_rate_alert: notification POST returned non-2xx"
-                        );
-                    }
-                    (200..300).contains(&status)
-                }
-                Err(e) => {
-                    tracing::debug!("abound_rate_alert: notification POST failed: {e}");
-                    false
-                }
-            }
-        } else {
-            false
-        };
-
-        let result = json!({
-            "current_rate": current_rate,
-            "effective_rate": effective_rate,
-            "threshold": threshold,
-            "exceeded": exceeded,
-            "notification_sent": notification_sent,
-            "notification_error": if should_notify && !notification_sent {
-                serde_json::Value::String("notification delivery failed — check abound credentials or retry".into())
-            } else {
-                serde_json::Value::Null
-            },
-            "pair": format!("{from}/{to}"),
-        });
-        Ok(ToolOutput::success(result, start.elapsed()))
-    }
-
-    fn requires_sanitization(&self) -> bool {
-        true
-    }
-
-    fn domain(&self) -> ToolDomain {
-        ToolDomain::Orchestrator
-    }
-
-    fn risk_level_for(&self, _params: &serde_json::Value) -> RiskLevel {
-        RiskLevel::Low
     }
 }
 
