@@ -2,6 +2,10 @@
 
 **IronClaw** is a secure personal AI assistant — user-first security, self-expanding tools, defense in depth, multi-channel access with proactive background execution.
 
+## Branch & PR Workflow
+
+**All feature PRs target `staging`, not `main`.** The `main` branch receives merges from `staging` only after integration validation. When creating a PR with `gh pr create`, always use `--base staging`.
+
 ## Build & Test
 
 ```bash
