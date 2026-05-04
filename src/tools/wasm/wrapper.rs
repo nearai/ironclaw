@@ -331,6 +331,13 @@ impl StoreData {
                 .then_with(|| a.secret_name.cmp(&b.secret_name))
         });
 
+        let timestamp_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let mut nonce_bytes = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+
         for cred in matches_for_request {
             // Merge injected headers (host credentials take precedence; the
             // most-specific match iterates last, so it wins any conflict).
@@ -364,13 +371,6 @@ impl StoreData {
             }
 
             if let Some(signing) = &cred.signing {
-                let timestamp_secs = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                let mut nonce_bytes = [0u8; 32];
-                rand::thread_rng().fill_bytes(&mut nonce_bytes);
-
                 let result = match signing {
                     SigningSpec::Hmac(spec) => apply_hmac_signing(
                         spec,
@@ -505,7 +505,7 @@ fn apply_eip712_signing(
     for field in &primary.fields {
         let raw = resolve_field_source(
             &field.source,
-            &address_hex,
+            Some(&address_hex),
             &public_key_hex,
             body,
             timestamp_secs,
@@ -550,7 +550,7 @@ fn apply_eip712_signing(
     for header in &spec.output_headers {
         let value = resolve_output_source(
             &header.value,
-            &address_hex,
+            Some(&address_hex),
             &public_key_hex,
             &signature_hex,
             &signature_b64,
@@ -584,11 +584,10 @@ fn apply_nep413_signing(
         "ed25519:{}",
         bs58::encode(verifying_key.as_bytes()).into_string()
     );
-    let signer_address_placeholder = "";
 
     let recipient = resolve_field_source(
         &spec.recipient_source,
-        signer_address_placeholder,
+        None,
         &public_key_b58,
         body,
         timestamp_secs,
@@ -596,7 +595,7 @@ fn apply_nep413_signing(
     )?;
     let message = resolve_field_source(
         &spec.message_source,
-        signer_address_placeholder,
+        None,
         &public_key_b58,
         body,
         timestamp_secs,
@@ -605,7 +604,7 @@ fn apply_nep413_signing(
     let callback_url = match &spec.callback_url_source {
         Some(src) => Some(resolve_field_source(
             src,
-            signer_address_placeholder,
+            None,
             &public_key_b58,
             body,
             timestamp_secs,
@@ -638,7 +637,7 @@ fn apply_nep413_signing(
     for header in &spec.output_headers {
         let value = resolve_output_source(
             &header.value,
-            signer_address_placeholder,
+            None,
             &public_key_b58,
             &signature_hex,
             &signature_b64,
@@ -846,7 +845,7 @@ fn sign_secp256k1_recoverable(
 
 fn resolve_field_source(
     source: &crate::secrets::FieldSource,
-    signer_address: &str,
+    signer_address: Option<&str>,
     signer_public_key: &str,
     body: Option<&[u8]>,
     timestamp_secs: u64,
@@ -855,7 +854,12 @@ fn resolve_field_source(
     use crate::secrets::FieldSource;
     match source {
         FieldSource::Literal { value } => Ok(value.clone()),
-        FieldSource::SignerAddress => Ok(signer_address.to_string()),
+        FieldSource::SignerAddress => signer_address.map(str::to_string).ok_or_else(|| {
+            SignerError::UnsupportedSource(
+                "signer_address is not produced by this signer type (use signer_public_key instead)"
+                    .into(),
+            )
+        }),
         FieldSource::SignerPublicKey => Ok(signer_public_key.to_string()),
         FieldSource::RequestTimestampSecs => Ok(timestamp_secs.to_string()),
         FieldSource::RequestRandomNonceB64 => {
@@ -881,7 +885,7 @@ fn resolve_field_source(
 
 fn resolve_output_source(
     source: &crate::secrets::OutputSource,
-    signer_address: &str,
+    signer_address: Option<&str>,
     signer_public_key: &str,
     signature_hex: &str,
     signature_b64: &str,
@@ -891,7 +895,12 @@ fn resolve_output_source(
     use crate::secrets::OutputSource;
     match source {
         OutputSource::Literal { value } => Ok(value.clone()),
-        OutputSource::SignerAddress => Ok(signer_address.to_string()),
+        OutputSource::SignerAddress => signer_address.map(str::to_string).ok_or_else(|| {
+            SignerError::UnsupportedSource(
+                "signer_address is not produced by this signer type (use signer_public_key instead)"
+                    .into(),
+            )
+        }),
         OutputSource::SignerPublicKey => Ok(signer_public_key.to_string()),
         OutputSource::RequestTimestampSecs => Ok(timestamp_secs.to_string()),
         OutputSource::RequestRandomNonceB64 => {
@@ -950,10 +959,12 @@ fn json_path_set(
     path: &str,
     value: serde_json::Value,
 ) -> Result<(), SignerError> {
-    let parts: Vec<&str> = path.split('.').collect();
-    if parts.is_empty() {
-        return Err(SignerError::InvalidSchema("empty json path".into()));
+    if path.is_empty() || path.split('.').any(str::is_empty) {
+        return Err(SignerError::InvalidSchema(format!(
+            "invalid json path '{path}'"
+        )));
     }
+    let parts: Vec<&str> = path.split('.').collect();
     let mut current = root;
     for (idx, part) in parts.iter().enumerate() {
         let is_last = idx + 1 == parts.len();
@@ -1006,9 +1017,27 @@ fn assemble_bytes_for_keccak(
     parts: &[crate::secrets::BytesPart],
     body: Option<&[u8]>,
 ) -> Result<Vec<u8>, SignerError> {
+    use crate::secrets::BytesPart;
+    let needs_body = parts
+        .iter()
+        .any(|p| !matches!(p, BytesPart::LiteralHex { .. }));
+    let body_json = if needs_body {
+        let bytes = body.ok_or_else(|| {
+            SignerError::UnsupportedSource(
+                "body-derived bytes_part declared but no request body provided".into(),
+            )
+        })?;
+        Some(
+            serde_json::from_slice::<serde_json::Value>(bytes)
+                .map_err(|e| SignerError::InvalidField(format!("body not json: {e}")))?,
+        )
+    } else {
+        None
+    };
+
     let mut out: Vec<u8> = Vec::new();
     for part in parts {
-        let bytes = evaluate_bytes_part(part, body)?;
+        let bytes = evaluate_bytes_part(part, body_json.as_ref())?;
         out.extend_from_slice(&bytes);
     }
     Ok(out)
@@ -1016,7 +1045,7 @@ fn assemble_bytes_for_keccak(
 
 fn evaluate_bytes_part(
     part: &crate::secrets::BytesPart,
-    body: Option<&[u8]>,
+    body_json: Option<&serde_json::Value>,
 ) -> Result<Vec<u8>, SignerError> {
     use crate::secrets::BytesPart;
     match part {
@@ -1026,14 +1055,12 @@ fn evaluate_bytes_part(
                 .map_err(|e| SignerError::InvalidField(format!("literal_hex: {e}")))
         }
         BytesPart::BodyFieldMsgpack { path } => {
-            let body_bytes = body.ok_or_else(|| {
+            let json = body_json.ok_or_else(|| {
                 SignerError::UnsupportedSource(
                     "body_field_msgpack source needs request body".into(),
                 )
             })?;
-            let json: serde_json::Value = serde_json::from_slice(body_bytes)
-                .map_err(|e| SignerError::InvalidField(format!("body not json: {e}")))?;
-            let field = json_path_get(&json, path).ok_or_else(|| {
+            let field = json_path_get(json, path).ok_or_else(|| {
                 SignerError::InvalidField(format!("body field '{path}' not found"))
             })?;
             let mut out: Vec<u8> = Vec::new();
@@ -1043,14 +1070,12 @@ fn evaluate_bytes_part(
             Ok(out)
         }
         BytesPart::BodyFieldBeU64 { path } => {
-            let body_bytes = body.ok_or_else(|| {
+            let json = body_json.ok_or_else(|| {
                 SignerError::UnsupportedSource(
                     "body_field_be_u64 source needs request body".into(),
                 )
             })?;
-            let json: serde_json::Value = serde_json::from_slice(body_bytes)
-                .map_err(|e| SignerError::InvalidField(format!("body not json: {e}")))?;
-            let field = json_path_get(&json, path).ok_or_else(|| {
+            let field = json_path_get(json, path).ok_or_else(|| {
                 SignerError::InvalidField(format!("body field '{path}' not found"))
             })?;
             let n = field.as_u64().ok_or_else(|| {
@@ -1061,14 +1086,12 @@ fn evaluate_bytes_part(
             Ok(n.to_be_bytes().to_vec())
         }
         BytesPart::BodyFieldEthAddressOptionalPrefixed { path } => {
-            let body_bytes = body.ok_or_else(|| {
+            let json = body_json.ok_or_else(|| {
                 SignerError::UnsupportedSource(
                     "body_field_eth_address_optional_prefixed source needs request body".into(),
                 )
             })?;
-            let json: serde_json::Value = serde_json::from_slice(body_bytes)
-                .map_err(|e| SignerError::InvalidField(format!("body not json: {e}")))?;
-            match json_path_get(&json, path) {
+            match json_path_get(json, path) {
                 None | Some(serde_json::Value::Null) => Ok(vec![0x00]),
                 Some(serde_json::Value::String(s)) => {
                     let addr = parse_eth_address(s)?;
@@ -2169,18 +2192,13 @@ impl std::fmt::Debug for WasmToolWrapper {
     }
 }
 
-/// Pre-resolve credentials for all HTTP capability mappings.
+/// Pre-resolved credentials returned from [`resolve_host_credentials`].
 ///
-/// Called once per tool execution (in async context, before spawn_blocking)
-/// so that the synchronous WASM host function can inject credentials
-/// without needing async access to the secrets store.
-///
-/// Resolves the host credentials declared by a WASM tool for the current user.
-///
-/// Optional mappings may be skipped when unavailable. Required mappings are
-/// tracked in `missing_required` so the caller can fail closed before
-/// execution instead of letting the tool run without the credentials it
-/// declared. That prevents a malicious or misconfigured tool from issuing
+/// Resolution runs once per tool execution in an async context, before the
+/// synchronous WASM host function spawns. Optional mappings may be skipped
+/// when unavailable; required mappings that fail to resolve are tracked in
+/// `missing_required` so the caller can fail closed before execution starts.
+/// Failing closed prevents a malicious or misconfigured tool from issuing
 /// requests that silently borrow another scope's secrets or exfiltrate user
 /// context to an unauthenticated endpoint.
 struct HostCredentialsResolution {
@@ -4705,6 +4723,293 @@ mod tests {
             }
             _ => panic!("expected SigningSpec::Nep413"),
         }
+    }
+
+    const POLYMARKET_CLOB_CAPABILITIES_JSON: &str = r#"{
+      "version": "0.1.0",
+      "wit_version": "0.3.0",
+      "description": "Polymarket signed trading.",
+      "http": {
+        "allowlist": [
+          { "host": "clob.polymarket.com", "path_prefix": "/", "methods": ["GET","POST","DELETE"] }
+        ],
+        "credentials": {
+          "polymarket_l1_clobauth": {
+            "secret_name": "polymarket_l1_private_key",
+            "host_patterns": ["clob.polymarket.com"],
+            "path_patterns": ["/auth/api-key"],
+            "location": {
+              "type": "eip712_signed_header",
+              "domain": { "name": "ClobAuthDomain", "version": "1", "chain_id": 137 },
+              "primary_type": "ClobAuth",
+              "structs": [
+                {
+                  "name": "ClobAuth",
+                  "fields": [
+                    { "name": "address", "type": "address",
+                      "source": { "source": "signer_address" } },
+                    { "name": "timestamp", "type": "string",
+                      "source": { "source": "request_timestamp_secs" } },
+                    { "name": "nonce", "type": "uint256",
+                      "source": { "source": "literal", "value": "0" } },
+                    { "name": "message", "type": "string",
+                      "source": { "source": "literal", "value": "This message attests that I control the given wallet" } }
+                  ]
+                }
+              ],
+              "output_headers": [
+                { "header_name": "POLY_ADDRESS",   "value": { "source": "signer_address" } },
+                { "header_name": "POLY_SIGNATURE", "value": { "source": "signature_hex" } },
+                { "header_name": "POLY_TIMESTAMP", "value": { "source": "request_timestamp_secs" } },
+                { "header_name": "POLY_NONCE",     "value": { "source": "literal", "value": "0" } }
+              ]
+            }
+          },
+          "polymarket_l2_hmac": {
+            "secret_name": "polymarket_l2_secret",
+            "host_patterns": ["clob.polymarket.com"],
+            "location": {
+              "type": "hmac_signed_header",
+              "signature_header": "POLY_SIGNATURE",
+              "timestamp_header": "POLY_TIMESTAMP"
+            }
+          },
+          "polymarket_l2_api_key": {
+            "secret_name": "polymarket_l2_api_key",
+            "host_patterns": ["clob.polymarket.com"],
+            "location": { "type": "header", "name": "POLY_API_KEY" }
+          },
+          "polymarket_l2_passphrase": {
+            "secret_name": "polymarket_l2_passphrase",
+            "host_patterns": ["clob.polymarket.com"],
+            "location": { "type": "header", "name": "POLY_PASSPHRASE" }
+          },
+          "polymarket_l2_address": {
+            "secret_name": "polymarket_l1_address",
+            "host_patterns": ["clob.polymarket.com"],
+            "location": { "type": "header", "name": "POLY_ADDRESS" }
+          }
+        },
+        "rate_limit": { "requests_per_minute": 120, "requests_per_hour": 3600 },
+        "timeout_secs": 30
+      },
+      "secrets": {
+        "allowed_names": [
+          "polymarket_l1_private_key", "polymarket_l1_address",
+          "polymarket_l2_api_key", "polymarket_l2_secret", "polymarket_l2_passphrase"
+        ]
+      }
+    }"#;
+
+    async fn polymarket_dummy_secrets_store() -> (
+        crate::secrets::InMemorySecretsStore,
+        String,
+        String,
+    ) {
+        use crate::secrets::{CreateSecretParams, SecretsStore};
+
+        let signing_key = super::parse_secp256k1_secret(TEST_ETH_PRIVATE_KEY).unwrap();
+        let derived_address = super::derive_eth_address(&signing_key);
+        let derived_address_hex = format!("0x{}", hex::encode(derived_address));
+        let l2_secret_b64 = "dGVzdC1obWFjLXNlY3JldA==";
+
+        let store = test_secrets_store();
+        let user_id = "default";
+        for (name, value) in [
+            ("polymarket_l1_private_key", TEST_ETH_PRIVATE_KEY),
+            ("polymarket_l1_address", derived_address_hex.as_str()),
+            ("polymarket_l2_api_key", "dummy-api-key"),
+            ("polymarket_l2_secret", l2_secret_b64),
+            ("polymarket_l2_passphrase", "dummy-passphrase"),
+        ] {
+            store
+                .create(user_id, CreateSecretParams::new(name, value))
+                .await
+                .unwrap();
+        }
+
+        (store, derived_address_hex, l2_secret_b64.to_string())
+    }
+
+    #[tokio::test]
+    async fn polymarket_clob_l2_request_assembles_with_signed_headers_end_to_end() {
+        use crate::tools::wasm::capabilities_schema::CapabilitiesFile;
+        use crate::tools::wasm::wrapper::{StoreData, resolve_host_credentials};
+
+        let caps_file = CapabilitiesFile::from_json(POLYMARKET_CLOB_CAPABILITIES_JSON)
+            .expect("polymarket-clob capabilities parse");
+        let runtime_caps = caps_file.to_capabilities();
+        let (store, expected_address, l2_secret_b64) = polymarket_dummy_secrets_store().await;
+
+        let resolved =
+            resolve_host_credentials(&runtime_caps, Some(&store), "default", None, None).await;
+        assert_eq!(resolved.len(), 5, "five credential mappings should resolve");
+
+        let store_data = StoreData::new(
+            1024 * 1024,
+            runtime_caps,
+            HashMap::new(),
+            resolved.resolved,
+        );
+
+        let mut headers = HashMap::new();
+        let mut url = "https://clob.polymarket.com/data/orders".to_string();
+        let mut body: Option<Vec<u8>> = None;
+        store_data.inject_host_credentials(
+            "clob.polymarket.com",
+            "GET",
+            &mut body,
+            &mut headers,
+            &mut url,
+        );
+
+        assert_eq!(headers.get("POLY_API_KEY").map(String::as_str), Some("dummy-api-key"));
+        assert_eq!(
+            headers.get("POLY_PASSPHRASE").map(String::as_str),
+            Some("dummy-passphrase")
+        );
+        assert_eq!(
+            headers.get("POLY_ADDRESS"),
+            Some(&expected_address),
+            "POLY_ADDRESS must match the derived wallet address"
+        );
+
+        let timestamp = headers.get("POLY_TIMESTAMP").expect("timestamp emitted").clone();
+        timestamp.parse::<u64>().expect("timestamp is unix seconds");
+
+        let signature = headers.get("POLY_SIGNATURE").expect("signature emitted");
+        let expected_sig = expected_hmac_signature(
+            &l2_secret_b64,
+            &timestamp,
+            "GET",
+            "/data/orders",
+            None,
+        );
+        assert_eq!(
+            signature, &expected_sig,
+            "L2 HMAC signature must match independent recomputation"
+        );
+
+        assert!(
+            !headers.contains_key("POLY_NONCE"),
+            "L2 path must not emit POLY_NONCE (that is L1 only)"
+        );
+    }
+
+    #[tokio::test]
+    async fn polymarket_clob_l1_register_key_request_assembles_with_eip712_headers_end_to_end() {
+        use crate::tools::wasm::capabilities_schema::CapabilitiesFile;
+        use crate::tools::wasm::wrapper::{StoreData, resolve_host_credentials};
+        use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
+
+        let caps_file = CapabilitiesFile::from_json(POLYMARKET_CLOB_CAPABILITIES_JSON).unwrap();
+        let runtime_caps = caps_file.to_capabilities();
+        let (store, expected_address_hex, _) = polymarket_dummy_secrets_store().await;
+
+        let resolved =
+            resolve_host_credentials(&runtime_caps, Some(&store), "default", None, None).await;
+
+        let store_data = StoreData::new(
+            1024 * 1024,
+            runtime_caps,
+            HashMap::new(),
+            resolved.resolved,
+        );
+
+        let mut headers = HashMap::new();
+        let mut url = "https://clob.polymarket.com/auth/api-key".to_string();
+        let mut body: Option<Vec<u8>> = Some(b"{}".to_vec());
+        store_data.inject_host_credentials(
+            "clob.polymarket.com",
+            "POST",
+            &mut body,
+            &mut headers,
+            &mut url,
+        );
+
+        assert_eq!(headers.get("POLY_NONCE").map(String::as_str), Some("0"));
+        assert_eq!(
+            headers.get("POLY_ADDRESS"),
+            Some(&expected_address_hex),
+            "POLY_ADDRESS on L1 must match the EIP-712 signer-derived address"
+        );
+
+        let timestamp = headers.get("POLY_TIMESTAMP").unwrap().clone();
+        timestamp.parse::<u64>().expect("timestamp is unix seconds");
+        let signature_hex = headers.get("POLY_SIGNATURE").expect("signature emitted").clone();
+
+        let sig_bytes = hex::decode(signature_hex.trim_start_matches("0x")).unwrap();
+        assert_eq!(sig_bytes.len(), 65, "EIP-712 signature must be 65 bytes (r||s||v)");
+        let v = sig_bytes[64];
+        let signature = Signature::from_slice(&sig_bytes[..64]).unwrap();
+        let recovery_id = RecoveryId::try_from(v - 27).unwrap();
+
+        let domain = crate::secrets::Eip712Domain {
+            name: "ClobAuthDomain".to_string(),
+            version: "1".to_string(),
+            chain_id: 137,
+            verifying_contract: None,
+        };
+        let domain_sep = super::compute_eip712_domain_separator(&domain).unwrap();
+
+        let primary = crate::secrets::Eip712StructDef {
+            name: "ClobAuth".to_string(),
+            fields: vec![
+                crate::secrets::Eip712TypedField {
+                    name: "address".to_string(),
+                    type_name: "address".to_string(),
+                    source: crate::secrets::FieldSource::SignerAddress,
+                },
+                crate::secrets::Eip712TypedField {
+                    name: "timestamp".to_string(),
+                    type_name: "string".to_string(),
+                    source: crate::secrets::FieldSource::RequestTimestampSecs,
+                },
+                crate::secrets::Eip712TypedField {
+                    name: "nonce".to_string(),
+                    type_name: "uint256".to_string(),
+                    source: crate::secrets::FieldSource::Literal {
+                        value: "0".to_string(),
+                    },
+                },
+                crate::secrets::Eip712TypedField {
+                    name: "message".to_string(),
+                    type_name: "string".to_string(),
+                    source: crate::secrets::FieldSource::Literal {
+                        value: "This message attests that I control the given wallet".to_string(),
+                    },
+                },
+            ],
+        };
+        let type_hash = super::keccak256(super::encode_eip712_type_string(&primary).as_bytes());
+        let mut struct_buf: Vec<u8> = Vec::new();
+        struct_buf.extend_from_slice(&type_hash);
+        struct_buf.extend_from_slice(&super::encode_eip712_field_value("address", &expected_address_hex).unwrap());
+        struct_buf.extend_from_slice(&super::encode_eip712_field_value("string", &timestamp).unwrap());
+        struct_buf.extend_from_slice(&super::encode_eip712_field_value("uint256", "0").unwrap());
+        struct_buf.extend_from_slice(
+            &super::encode_eip712_field_value("string", "This message attests that I control the given wallet").unwrap(),
+        );
+        let struct_hash = super::keccak256(&struct_buf);
+
+        let mut final_buf: Vec<u8> = Vec::new();
+        final_buf.extend_from_slice(&[0x19u8, 0x01u8]);
+        final_buf.extend_from_slice(&domain_sep);
+        final_buf.extend_from_slice(&struct_hash);
+        let final_hash = super::keccak256(&final_buf);
+
+        let recovered_pk =
+            VerifyingKey::recover_from_prehash(&final_hash, &signature, recovery_id).unwrap();
+        let recovered_point = recovered_pk.to_encoded_point(false);
+        let recovered_pk_bytes = &recovered_point.as_bytes()[1..];
+        let h = super::keccak256(recovered_pk_bytes);
+        let mut recovered_addr = [0u8; 20];
+        recovered_addr.copy_from_slice(&h[12..]);
+        let recovered_hex = format!("0x{}", hex::encode(recovered_addr));
+        assert_eq!(
+            recovered_hex, expected_address_hex,
+            "EIP-712 signature must recover to the dummy wallet address"
+        );
     }
 
     #[tokio::test]
