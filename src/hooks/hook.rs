@@ -183,12 +183,17 @@ pub enum HookError {
 pub struct HookContext {
     /// Arbitrary metadata hooks can use.
     pub metadata: serde_json::Value,
+    /// Original user message that triggered this tool call, if known.
+    /// Set by the chat dispatcher; `None` for job workers and approval-resumed
+    /// calls where the originating message is unavailable or already authorised.
+    pub intent: Option<String>,
 }
 
 impl Default for HookContext {
     fn default() -> Self {
         Self {
             metadata: serde_json::Value::Null,
+            intent: None,
         }
     }
 }

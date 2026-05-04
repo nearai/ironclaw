@@ -129,6 +129,12 @@ pub struct GateContext<'a> {
     pub execution_mode: ExecutionMode,
     /// Tools the session has auto-approved ("always" button).
     pub auto_approved: &'a HashSet<String>,
+    /// The originating thread goal (user intent) that caused this action to be
+    /// requested. Forwarded to `HookContext::intent` so semantic hooks such as
+    /// the LLM judge can evaluate the action against what the user actually asked
+    /// for. `None` when the gate is called from a context that does not carry
+    /// explicit user intent (e.g. approval-resumed calls).
+    pub thread_goal: Option<&'a str>,
 }
 
 // ── Gate trait ───────────────────────────────────────────────

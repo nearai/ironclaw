@@ -1532,6 +1532,11 @@ impl Agent {
                 }
             };
 
+            // Capture the original user message before the if-let moves resumed_turn.
+            // Needed to thread intent into BeforeToolCall hooks for deferred siblings.
+            let original_intent: Option<String> =
+                resumed_turn.as_ref().map(|(_, _, user_input, _)| user_input.clone());
+
             if let Some((turn_number, user_message_id, user_input, started_at)) = resumed_turn {
                 self.persist_processing_live_state(
                     thread_id,
@@ -1688,9 +1693,20 @@ impl Agent {
             }
 
             // === Phase 1: Preflight (sequential) ===
-            // Walk deferred tools checking approval. Collect runnable
-            // tools; stop at the first that needs approval.
-            let mut runnable: Vec<crate::llm::ToolCall> = Vec::new();
+            // Walk deferred tools checking approval and BeforeToolCall hooks.
+            // Only the explicitly-approved tool is exempt from hook evaluation;
+            // its deferred siblings are re-evaluated here.
+            //
+            // DeferredDecision encodes the per-tool preflight outcome. Using
+            // an inline enum keeps Phase 3 order-preserving without extra sorts.
+            enum DeferredDecision {
+                /// Tool passed all checks — execute in Phase 2.
+                Run(crate::llm::ToolCall),
+                /// BeforeToolCall hook rejected this sibling — produce an error
+                /// result without executing the tool.
+                HookBlocked(crate::llm::ToolCall, String),
+            }
+            let mut deferred_outcomes: Vec<DeferredDecision> = Vec::new();
             let mut approval_needed: Option<(
                 usize,
                 crate::llm::ToolCall,
@@ -1722,10 +1738,58 @@ impl Agent {
                         approval_needed = Some((idx, tc.clone(), tool, allow_always));
                         break; // remaining tools stay deferred
                     }
+
+                    // Re-run BeforeToolCall hooks for deferred siblings. The
+                    // directly-approved tool is already skipped (intent=None path
+                    // in the judge hook); siblings were never individually approved
+                    // and must go through the normal hook pipeline.
+                    if let Some(ref intent) = original_intent {
+                        use crate::hooks::{HookContext, HookError, HookEvent, HookOutcome};
+                        let hook_params =
+                            crate::tools::redact_params(&tc.arguments, tool.sensitive_params());
+                        let hook_event = HookEvent::ToolCall {
+                            tool_name: tc.name.clone(),
+                            parameters: hook_params,
+                            user_id: message.user_id.clone(),
+                            context: "chat".to_string(),
+                        };
+                        let hook_ctx = HookContext {
+                            intent: Some(intent.clone()),
+                            ..Default::default()
+                        };
+                        let blocked_reason =
+                            match self.hooks().run_with_context(&hook_event, hook_ctx).await {
+                                Err(HookError::Rejected { reason })
+                                | Ok(HookOutcome::Reject { reason }) => Some(reason),
+                                _ => None,
+                            };
+                        if let Some(reason) = blocked_reason {
+                            tracing::warn!(
+                                tool = %tc.name,
+                                reason = %reason,
+                                "BeforeToolCall hook blocked deferred sibling tool"
+                            );
+                            deferred_outcomes
+                                .push(DeferredDecision::HookBlocked(tc.clone(), reason));
+                            continue;
+                        }
+                    }
                 }
 
-                runnable.push(tc.clone());
+                deferred_outcomes.push(DeferredDecision::Run(tc.clone()));
             }
+
+            // Build the runnable list for Phase 2 from the Run decisions only.
+            let runnable: Vec<crate::llm::ToolCall> = deferred_outcomes
+                .iter()
+                .filter_map(|o| {
+                    if let DeferredDecision::Run(tc) = o {
+                        Some(tc.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
 
             // === Phase 2: Parallel execution ===
             let exec_results: Vec<(crate::llm::ToolCall, Result<String, Error>)> = if runnable.len()
@@ -1870,8 +1934,30 @@ impl Agent {
             // === Phase 3: Post-flight (sequential, in original order) ===
             // Process all results before any conditional return so every
             // tool result is recorded in the session audit trail.
+            //
+            // Merge Phase 2 execution results with Phase 1 hook-blocked errors,
+            // restoring the original deferred_tool_calls order. The LLM needs
+            // a tool_result for every tool_use ID in the assistant message.
+            let mut exec_iter = exec_results.into_iter();
+            let all_deferred_results: Vec<(crate::llm::ToolCall, Result<String, Error>)> =
+                deferred_outcomes
+                    .into_iter()
+                    .map(|outcome| match outcome {
+                        DeferredDecision::Run(_) => exec_iter
+                            .next()
+                            .expect("exec_results count must match Run decisions"),
+                        DeferredDecision::HookBlocked(tc, reason) => {
+                            let err: Error = crate::error::ToolError::ExecutionFailed {
+                                name: tc.name.clone(),
+                                reason: format!("Blocked by hook: {reason}"),
+                            }
+                            .into();
+                            (tc, Err(err))
+                        }
+                    })
+                    .collect();
 
-            for (tc, deferred_result) in exec_results {
+            for (tc, deferred_result) in all_deferred_results {
                 if let Ok(ref output) = deferred_result
                     && !output.is_empty()
                 {
@@ -3656,6 +3742,218 @@ mod tests {
                 .contains("Files-only regression attachment."),
             "{}",
             turn.user_input
+        );
+    }
+
+    /// Regression: for attachment-only messages the judge must see the
+    /// effective (augmented) content as its intent, not the empty raw
+    /// `message.content`. Before the fix `intent` was `Some("")` which
+    /// caused the judge to produce Ambiguous → Block on legitimate calls.
+    #[tokio::test]
+    async fn test_before_tool_call_hook_receives_effective_content_for_attachment_only_message() {
+        use crate::channels::{AttachmentKind, IncomingAttachment, IncomingMessage};
+        use crate::hooks::{HookContext, HookError, HookEvent, HookOutcome, HookPoint};
+        use crate::agent::session::{Session, Thread};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use uuid::Uuid;
+
+        // --- Capturing BeforeToolCall hook ---
+        struct IntentCapture {
+            captured: Arc<std::sync::Mutex<Option<String>>>,
+        }
+        #[async_trait::async_trait]
+        impl crate::hooks::hook::Hook for IntentCapture {
+            fn name(&self) -> &str { "intent_capture" }
+            fn hook_points(&self) -> &[HookPoint] { &[HookPoint::BeforeToolCall] }
+            async fn execute(
+                &self,
+                _event: &HookEvent,
+                ctx: &HookContext,
+            ) -> Result<HookOutcome, HookError> {
+                *self.captured.lock().unwrap() = ctx.intent.clone();
+                Ok(HookOutcome::Continue { modified: None })
+            }
+        }
+
+        // --- LLM: returns one tool call, then text ---
+        struct OnceThenText(AtomicBool);
+        #[async_trait::async_trait]
+        impl crate::llm::LlmProvider for OnceThenText {
+            fn model_name(&self) -> &str { "once-then-text" }
+            fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+                (rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO)
+            }
+            async fn complete(
+                &self,
+                _req: crate::llm::CompletionRequest,
+            ) -> Result<crate::llm::CompletionResponse, crate::error::LlmError> {
+                Ok(crate::llm::CompletionResponse {
+                    content: "ok".to_string(),
+                    input_tokens: 0, output_tokens: 0,
+                    finish_reason: crate::llm::FinishReason::Stop,
+                    cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
+                })
+            }
+            async fn complete_with_tools(
+                &self,
+                _req: crate::llm::ToolCompletionRequest,
+            ) -> Result<crate::llm::ToolCompletionResponse, crate::error::LlmError> {
+                if !self.0.swap(true, Ordering::SeqCst) {
+                    Ok(crate::llm::ToolCompletionResponse {
+                        content: None,
+                        tool_calls: vec![crate::llm::ToolCall {
+                            id: "tc1".to_string(),
+                            name: "echo".to_string(),
+                            arguments: serde_json::json!({"message": "hi"}),
+                            reasoning: None,
+                        }],
+                        input_tokens: 0, output_tokens: 0,
+                        finish_reason: crate::llm::FinishReason::ToolUse,
+                        cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
+                    })
+                } else {
+                    Ok(crate::llm::ToolCompletionResponse {
+                        content: Some("ok".to_string()),
+                        tool_calls: vec![],
+                        input_tokens: 0, output_tokens: 0,
+                        finish_reason: crate::llm::FinishReason::Stop,
+                        cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
+                    })
+                }
+            }
+        }
+
+        let captured = Arc::new(std::sync::Mutex::new(None::<String>));
+        let hook = Arc::new(IntentCapture { captured: Arc::clone(&captured) });
+
+        let statuses = Arc::new(TokioMutex::new(Vec::new()));
+        let channels = Arc::new(crate::channels::ChannelManager::new());
+        channels
+            .add(Box::new(RecordingStatusChannel { statuses: Arc::clone(&statuses) }))
+            .await;
+
+        let hooks = Arc::new(crate::hooks::HookRegistry::new());
+        hooks.register(hook).await;
+
+        let deps = crate::agent::AgentDeps {
+            owner_id: "default".to_string(),
+            store: None,
+            settings_store: None,
+            llm: Arc::new(OnceThenText(AtomicBool::new(false))),
+            cheap_llm: None,
+            safety: Arc::new(ironclaw_safety::SafetyLayer::new(
+                &ironclaw_safety::SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: true,
+                },
+            )),
+            tools: {
+                // Register echo so the reasoning engine has at least one tool
+                // and uses complete_with_tools (triggering BeforeToolCall hooks).
+                let r = Arc::new(crate::tools::ToolRegistry::new());
+                r.register(Arc::new(crate::tools::builtin::EchoTool)).await;
+                r
+            },
+            workspace: None,
+            extension_manager: None,
+            skill_registry: None,
+            skill_catalog: None,
+            skills_config: crate::config::SkillsConfig::default(),
+            hooks,
+            auth_manager: None,
+            cost_guard: Arc::new(crate::agent::cost_guard::CostGuard::new(
+                crate::agent::cost_guard::CostGuardConfig::default(),
+            )),
+            sse_tx: None,
+            http_interceptor: None,
+            transcription: None,
+            document_extraction: None,
+            sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
+            builder: None,
+            llm_backend: "nearai".to_string(),
+            tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+        };
+
+        let agent = Agent::new(
+            crate::config::AgentConfig {
+                name: "intent-capture-test".to_string(),
+                max_parallel_jobs: 1,
+                job_timeout: Duration::from_secs(60),
+                stuck_threshold: Duration::from_secs(60),
+                repair_check_interval: Duration::from_secs(30),
+                max_repair_attempts: 1,
+                use_planning: false,
+                session_idle_timeout: Duration::from_secs(300),
+                allow_local_tools: false,
+                max_cost_per_day_cents: None,
+                max_actions_per_hour: None,
+                max_cost_per_user_per_day_cents: None,
+                max_tool_iterations: 50,
+                auto_approve_tools: false,
+                default_timezone: "UTC".to_string(),
+                max_jobs_per_user: None,
+                max_tokens_per_job: 0,
+                multi_tenant: false,
+                max_llm_concurrent_per_user: None,
+                max_jobs_concurrent_per_user: None,
+                engine_v2: false,
+            },
+            deps,
+            channels,
+            None,
+            None,
+            None,
+            Some(Arc::new(crate::context::ContextManager::new(1))),
+            None,
+        );
+
+        let session_id = Uuid::new_v4();
+        let thread_id = Uuid::new_v4();
+        let thread = Thread::with_id(thread_id, session_id, Some("test"));
+        let mut sess = Session::new("test-user");
+        sess.threads.insert(thread_id, thread);
+        let session = Arc::new(TokioMutex::new(sess));
+
+        let message = IncomingMessage::new("test", "test-user", "").with_attachments(vec![
+            IncomingAttachment {
+                id: "att_1".to_string(),
+                kind: AttachmentKind::Document,
+                mime_type: "text/plain".to_string(),
+                filename: Some("report.txt".to_string()),
+                size_bytes: Some(30),
+                source_url: None,
+                storage_key: None,
+                local_path: None,
+                extracted_text: Some("summarise this document please".to_string()),
+                data: b"summarise this document please".to_vec(),
+                duration_secs: None,
+            },
+        ]);
+
+        let _ = agent
+            .process_user_input(
+                &message,
+                agent.tenant_ctx("test-user").await,
+                Arc::clone(&session),
+                thread_id,
+                "",
+            )
+            .await
+            .expect("attachment-only message processed");
+
+        let intent = captured.lock().unwrap().clone();
+        assert!(
+            intent.is_some(),
+            "BeforeToolCall hook must have been called (LLM returned a tool call)"
+        );
+        let intent = intent.unwrap();
+        assert!(
+            intent.contains("summarise this document please"),
+            "hook intent must contain attachment text, got: {intent:?}"
+        );
+        assert!(
+            !intent.is_empty(),
+            "hook intent must not be empty for attachment-only message"
         );
     }
 

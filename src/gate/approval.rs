@@ -191,7 +191,11 @@ impl ExecutionGate for HookGate {
             context: format!("gate:{}", ctx.thread_id),
         };
 
-        match self.hooks.run(&hook_event).await {
+        let hook_ctx = crate::hooks::HookContext {
+            intent: ctx.thread_goal.map(str::to_string),
+            ..Default::default()
+        };
+        match self.hooks.run_with_context(&hook_event, hook_ctx).await {
             Ok(crate::hooks::HookOutcome::Reject { reason }) => GateDecision::Deny {
                 reason: format!("Tool '{}' blocked by hook: {reason}", ctx.action_name),
             },
@@ -381,6 +385,7 @@ mod tests {
             action_def,
             execution_mode: mode,
             auto_approved,
+            thread_goal: None,
         }
     }
 

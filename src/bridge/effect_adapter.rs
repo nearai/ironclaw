@@ -1494,7 +1494,11 @@ impl EffectBridgeAdapter {
             context: format!("engine_v2:{}", context.thread_id),
         };
 
-        match self.hooks.run(&hook_event).await {
+        let hook_ctx = crate::hooks::HookContext {
+            intent: context.thread_goal.clone(),
+            ..Default::default()
+        };
+        match self.hooks.run_with_context(&hook_event, hook_ctx).await {
             Ok(HookOutcome::Reject { reason }) => {
                 return Err(EngineError::LeaseDenied {
                     reason: format!("Tool '{}' blocked by hook: {}", action_name, reason),
@@ -8524,6 +8528,77 @@ Use this skill to set up a Pika meeting.
         assert!(
             names.contains(&"safe_action"),
             "safe_action should surface through the engine capability path: {names:?}"
+        );
+    }
+
+    /// Regression: engine-v2 BeforeToolCall hook must receive the thread_goal
+    /// as intent. Before the fix `HookContext::default()` was passed, giving
+    /// the judge `intent = None` and causing it to skip evaluation on every
+    /// engine-v2 tool call regardless of configuration.
+    #[tokio::test]
+    async fn execute_action_threads_thread_goal_into_hook_context() {
+        use crate::hooks::{HookContext, HookError, HookEvent, HookOutcome, HookPoint};
+        use ironclaw_safety::SafetyConfig;
+
+        struct IntentCapture {
+            captured: Arc<std::sync::Mutex<Option<String>>>,
+        }
+        #[async_trait::async_trait]
+        impl crate::hooks::hook::Hook for IntentCapture {
+            fn name(&self) -> &str {
+                "intent_capture"
+            }
+            fn hook_points(&self) -> &[HookPoint] {
+                &[HookPoint::BeforeToolCall]
+            }
+            async fn execute(
+                &self,
+                _event: &HookEvent,
+                ctx: &HookContext,
+            ) -> Result<HookOutcome, HookError> {
+                *self.captured.lock().unwrap() = ctx.intent.clone();
+                Ok(HookOutcome::Continue { modified: None })
+            }
+        }
+
+        let captured = Arc::new(std::sync::Mutex::new(None::<String>));
+        let hook = Arc::new(IntentCapture {
+            captured: Arc::clone(&captured),
+        });
+
+        let hooks = Arc::new(HookRegistry::new());
+        hooks.register(hook).await;
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(V1EchoTool)).await;
+
+        let adapter = EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            hooks,
+        );
+
+        let thread_id = ironclaw_engine::ThreadId::new();
+        let mut ctx = exec_ctx(thread_id, None);
+        ctx.thread_goal = Some("summarise the quarterly report".to_string());
+
+        let _ = adapter
+            .execute_action(
+                "echo",
+                serde_json::json!({"message": "hello"}),
+                &lease(),
+                &ctx,
+            )
+            .await;
+
+        let intent = captured.lock().unwrap().clone();
+        assert_eq!(
+            intent.as_deref(),
+            Some("summarise the quarterly report"),
+            "BeforeToolCall hook must receive thread_goal as intent on the engine-v2 path"
         );
     }
 }

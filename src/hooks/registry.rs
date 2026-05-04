@@ -79,8 +79,19 @@ impl HookRegistry {
     /// - `Modify` chains the modification through subsequent hooks.
     /// - Timeout/error handling respects each hook's `failure_mode`.
     pub async fn run(&self, event: &HookEvent) -> Result<HookOutcome, HookError> {
+        self.run_with_context(event, HookContext::default()).await
+    }
+
+    /// Like [`run`] but with a caller-supplied [`HookContext`].
+    ///
+    /// Use this when the caller has additional context (e.g. the originating
+    /// user message) that hooks may need for semantic evaluation.
+    pub async fn run_with_context(
+        &self,
+        event: &HookEvent,
+        ctx: HookContext,
+    ) -> Result<HookOutcome, HookError> {
         let point = event.hook_point();
-        let ctx = HookContext::default();
 
         // Clone matching hooks and drop the read guard before executing.
         // Each hook can run up to its timeout, so holding the guard would

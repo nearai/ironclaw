@@ -174,7 +174,7 @@ pub fn create_llm_provider_with_config(
 /// Dispatches on `RegistryProviderConfig::protocol` to build the appropriate
 /// rig-core client. This single function replaces what used to be 5 separate
 /// `create_*_provider` functions.
-fn create_registry_provider(
+pub(crate) fn create_registry_provider(
     config: &RegistryProviderConfig,
     request_timeout_secs: u64,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {

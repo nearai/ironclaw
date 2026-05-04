@@ -9,10 +9,15 @@
 
 mod credential_detect;
 mod leak_detector;
+pub mod llm_judge;
 mod policy;
 mod sanitizer;
 pub mod sensitive_paths;
 mod validator;
+
+pub use llm_judge::{
+    AmbiguousPolicy, JudgeLlm, JudgeVerdict, LlmJudge, LlmJudgeConfig, ToolCallRequest,
+};
 
 pub use credential_detect::params_contain_manual_credentials;
 pub use leak_detector::{

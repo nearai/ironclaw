@@ -269,12 +269,27 @@ impl Agent {
         let force_text_at = max_tool_iterations;
         let nudge_at = max_tool_iterations.saturating_sub(1);
 
+        // Compute attachment-augmented content once so BeforeToolCall hooks
+        // receive the full user payload as intent — message.content is ""
+        // for attachment-only turns.
+        let effective_user_content = {
+            let augmented = crate::agent::augment_with_attachments(
+                &message.content,
+                &message.attachments,
+            );
+            match augmented {
+                Some(r) => r.text,
+                None => message.content.clone(),
+            }
+        };
+
         let delegate = ChatDelegate {
             agent: self,
             tenant,
             session: session.clone(),
             thread_id,
             message,
+            effective_user_content,
             job_ctx,
             active_skills,
             cached_prompt,
@@ -389,6 +404,10 @@ struct ChatDelegate<'a> {
     session: Arc<Mutex<Session>>,
     thread_id: Uuid,
     message: &'a IncomingMessage,
+    /// Attachment-augmented message content. Used as `HookContext::intent` so
+    /// the judge sees the full user payload even when `message.content` is
+    /// empty (attachment-only turns).
+    effective_user_content: String,
     job_ctx: JobContext,
     active_skills: Vec<ironclaw_skills::LoadedSkill>,
     cached_prompt: String,
@@ -892,7 +911,19 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 user_id: self.message.user_id.clone(),
                 context: "chat".to_string(),
             };
-            match self.agent.hooks().run(&event).await {
+            // Use the attachment-augmented effective content, not the raw
+            // message field — for attachment-only turns message.content is ""
+            // even though the user's payload is non-empty.
+            let intent = if self.effective_user_content.is_empty() {
+                None
+            } else {
+                Some(self.effective_user_content.clone())
+            };
+            let hook_ctx = crate::hooks::HookContext {
+                intent,
+                ..Default::default()
+            };
+            match self.agent.hooks().run_with_context(&event, hook_ctx).await {
                 Err(crate::hooks::HookError::Rejected { reason }) => {
                     preflight.push((
                         tc,

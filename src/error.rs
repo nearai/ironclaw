@@ -198,6 +198,9 @@ pub enum SafetyError {
 
     #[error("Policy violation: {rule}")]
     PolicyViolation { rule: String },
+
+    #[error("LLM judge denied tool call '{tool}': {reason}")]
+    LlmJudgeDenied { tool: String, reason: String },
 }
 
 /// Job-related errors.

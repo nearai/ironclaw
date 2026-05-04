@@ -109,6 +109,7 @@ mod tests {
             action_def,
             execution_mode: ExecutionMode::Autonomous,
             auto_approved: auto,
+            thread_goal: None,
         }
     }
 
