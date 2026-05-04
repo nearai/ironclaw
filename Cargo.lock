@@ -3911,6 +3911,8 @@ dependencies = [
  "ironclaw_common",
  "ironclaw_engine",
  "ironclaw_gateway",
+ "ironclaw_host_api",
+ "ironclaw_runtime_policy",
  "ironclaw_safety",
  "ironclaw_skills",
  "ironclaw_tui",

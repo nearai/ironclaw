@@ -90,6 +90,22 @@ impl std::fmt::Display for DeploymentMode {
     }
 }
 
+impl std::str::FromStr for DeploymentMode {
+    type Err = ParseRuntimePolicyEnumError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "local_single_user" => Ok(Self::LocalSingleUser),
+            "hosted_multi_tenant" => Ok(Self::HostedMultiTenant),
+            "enterprise_dedicated" => Ok(Self::EnterpriseDedicated),
+            other => Err(ParseRuntimePolicyEnumError {
+                kind: "deployment mode",
+                value: other.to_string(),
+            }),
+        }
+    }
+}
+
 /// Operator/user-selected runtime preset.
 ///
 /// Profiles are vocabulary; the resolver in `ironclaw_runtime_policy` turns
@@ -214,6 +230,47 @@ impl std::fmt::Display for RuntimeProfile {
         f.write_str(self.as_str())
     }
 }
+
+impl std::str::FromStr for RuntimeProfile {
+    type Err = ParseRuntimePolicyEnumError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "secure_default" => Ok(Self::SecureDefault),
+            "local_safe" => Ok(Self::LocalSafe),
+            "local_dev" => Ok(Self::LocalDev),
+            "local_yolo" => Ok(Self::LocalYolo),
+            "hosted_safe" => Ok(Self::HostedSafe),
+            "hosted_dev" => Ok(Self::HostedDev),
+            "hosted_yolo_tenant_scoped" => Ok(Self::HostedYoloTenantScoped),
+            "enterprise_safe" => Ok(Self::EnterpriseSafe),
+            "enterprise_dev" => Ok(Self::EnterpriseDev),
+            "enterprise_yolo_dedicated" => Ok(Self::EnterpriseYoloDedicated),
+            "sandboxed" => Ok(Self::Sandboxed),
+            "experiment" => Ok(Self::Experiment),
+            other => Err(ParseRuntimePolicyEnumError {
+                kind: "runtime profile",
+                value: other.to_string(),
+            }),
+        }
+    }
+}
+
+/// Error returned by [`std::str::FromStr`] implementations on the runtime
+/// policy enums when the input doesn't match any known wire name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseRuntimePolicyEnumError {
+    pub kind: &'static str,
+    pub value: String,
+}
+
+impl std::fmt::Display for ParseRuntimePolicyEnumError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown {} value `{}`", self.kind, self.value)
+    }
+}
+
+impl std::error::Error for ParseRuntimePolicyEnumError {}
 
 /// Filesystem backend the host runtime should expose for an invocation.
 ///
@@ -485,6 +542,36 @@ impl EffectiveRuntimePolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deployment_mode_and_runtime_profile_parse_from_wire_names() {
+        use std::str::FromStr;
+        for mode in [
+            DeploymentMode::LocalSingleUser,
+            DeploymentMode::HostedMultiTenant,
+            DeploymentMode::EnterpriseDedicated,
+        ] {
+            assert_eq!(DeploymentMode::from_str(mode.as_str()).unwrap(), mode);
+        }
+        for profile in [
+            RuntimeProfile::SecureDefault,
+            RuntimeProfile::LocalSafe,
+            RuntimeProfile::LocalDev,
+            RuntimeProfile::LocalYolo,
+            RuntimeProfile::HostedSafe,
+            RuntimeProfile::HostedDev,
+            RuntimeProfile::HostedYoloTenantScoped,
+            RuntimeProfile::EnterpriseSafe,
+            RuntimeProfile::EnterpriseDev,
+            RuntimeProfile::EnterpriseYoloDedicated,
+            RuntimeProfile::Sandboxed,
+            RuntimeProfile::Experiment,
+        ] {
+            assert_eq!(RuntimeProfile::from_str(profile.as_str()).unwrap(), profile);
+        }
+        assert!(DeploymentMode::from_str("nonsense").is_err());
+        assert!(RuntimeProfile::from_str("nonsense").is_err());
+    }
 
     #[test]
     fn deployment_mode_as_str_matches_serde_wire_name() {
