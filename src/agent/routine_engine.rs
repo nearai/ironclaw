@@ -43,6 +43,12 @@ use crate::tools::{
 use crate::workspace::Workspace;
 use ironclaw_safety::SafetyLayer;
 
+/// Maximum age (hours) for an orphaned dispatched routine run whose linked job
+/// is still in a non-terminal state (Pending / InProgress). After this
+/// threshold `sync_dispatched_runs` force-fails the run so the routine can
+/// fire again rather than being permanently blocked by a stuck worker.
+const DISPATCH_RUN_TIMEOUT_HOURS: i64 = 1;
+
 enum EventMatcher {
     Message { routine: Routine, regex: Regex },
     System { routine: Routine },
@@ -584,14 +590,39 @@ impl RoutineEngine {
                 }
             };
 
-            // Map job state to final run status
+            // Map job state to final run status.
+            //
+            // `Stuck` is treated as terminal failure here: self_repair already
+            // uses it as its diagnostic for "exceeded stuck_threshold / timed
+            // out", and the original watcher process that might have recovered
+            // it is gone. Finalising as Failed lets the routine fire again
+            // instead of being permanently blocked.
             let final_status = match job.state {
                 JobState::Completed | JobState::Submitted | JobState::Accepted => {
                     Some(RunStatus::Ok)
                 }
-                JobState::Failed | JobState::Cancelled => Some(RunStatus::Failed),
-                // Pending, InProgress, Stuck — still running
-                _ => None,
+                JobState::Failed | JobState::Cancelled | JobState::Stuck => Some(RunStatus::Failed),
+                // Pending / InProgress — job is still running or waiting for a
+                // worker. Apply a wall-clock escape hatch: if the run is older
+                // than DISPATCH_RUN_TIMEOUT_HOURS force-fail it so that a
+                // permanent scheduler wedge (worker crash before the job ever
+                // started) cannot block the routine indefinitely.
+                _ => {
+                    let age = Utc::now().signed_duration_since(run.started_at);
+                    if age > chrono::Duration::hours(DISPATCH_RUN_TIMEOUT_HOURS) {
+                        tracing::warn!(
+                            run_id = %run.id,
+                            job_id = %job_id,
+                            job_state = %job.state,
+                            age_hours = age.num_hours(),
+                            "Orphaned routine run exceeded dispatch timeout; force-failing \
+                             (job stuck in non-terminal state)"
+                        );
+                        Some(RunStatus::Failed)
+                    } else {
+                        None
+                    }
+                }
             };
 
             let status = match final_status {
@@ -1098,9 +1129,21 @@ impl FullJobWatcher {
 
     fn map_job_state(state: &crate::context::JobState) -> RunStatus {
         use crate::context::JobState;
+        // Mirror the terminal-state mapping in `sync_dispatched_runs` so that
+        // both the live-watcher path and the orphaned-run recovery path agree
+        // on what `Stuck` means. We deliberately do NOT extract a shared
+        // helper (per repo guidance) because the call sites operate on
+        // different sources (live job poll vs orphan-recovery scan) and have
+        // different non-terminal handling — only the terminal mapping needs
+        // to stay aligned.
+        //
+        // The caller checks `is_parallel_blocking()` before invoking this, so
+        // Pending/InProgress should not normally reach here. They map to
+        // Failed as a safety net rather than the previous silent Ok fallback.
         match state {
-            JobState::Failed | JobState::Cancelled => RunStatus::Failed,
-            _ => RunStatus::Ok, // Completed / Submitted / Accepted
+            JobState::Completed | JobState::Submitted | JobState::Accepted => RunStatus::Ok,
+            JobState::Failed | JobState::Cancelled | JobState::Stuck => RunStatus::Failed,
+            JobState::Pending | JobState::InProgress => RunStatus::Failed,
         }
     }
 }
@@ -2736,12 +2779,14 @@ mod tests {
         assert!(msg.contains("Docker is not available"));
     }
 
-    /// Regression test for #1317: FullJobWatcher maps terminal job states correctly.
+    /// Regression test for #1317 + #2655: FullJobWatcher maps terminal job
+    /// states correctly, and Stuck is treated as Failed (matching the orphan
+    /// recovery path in sync_dispatched_runs).
     #[test]
     fn test_full_job_watcher_state_mapping() {
         use crate::context::JobState;
 
-        // Failed/Cancelled → RunStatus::Failed
+        // Failed/Cancelled/Stuck → RunStatus::Failed
         assert_eq!(
             super::FullJobWatcher::map_job_state(&JobState::Failed),
             RunStatus::Failed
@@ -2750,8 +2795,15 @@ mod tests {
             super::FullJobWatcher::map_job_state(&JobState::Cancelled),
             RunStatus::Failed
         );
+        // Stuck must map to Failed in BOTH the live-watcher path and the
+        // orphan-recovery path. Previously this fell through to the `_` arm
+        // and silently became Ok, which was the inconsistency flagged in #2658.
+        assert_eq!(
+            super::FullJobWatcher::map_job_state(&JobState::Stuck),
+            RunStatus::Failed
+        );
 
-        // All other non-active states → RunStatus::Ok
+        // Successful terminal states → RunStatus::Ok
         assert_eq!(
             super::FullJobWatcher::map_job_state(&JobState::Completed),
             RunStatus::Ok
@@ -2760,62 +2812,125 @@ mod tests {
             super::FullJobWatcher::map_job_state(&JobState::Accepted),
             RunStatus::Ok
         );
+        assert_eq!(
+            super::FullJobWatcher::map_job_state(&JobState::Submitted),
+            RunStatus::Ok
+        );
     }
 
     /// Verify that job state to run status mapping covers all expected cases.
+    ///
+    /// Regression test for #2655: JobState::Stuck must map to RunStatus::Failed
+    /// (not be treated as an active state) so that orphaned runs whose linked
+    /// job was diagnosed as stuck by self_repair are finalised on the next tick
+    /// rather than blocking the routine forever.
     #[test]
     fn test_job_state_to_run_status_mapping() {
         use crate::context::JobState;
 
-        // Success states
-        for state in [JobState::Completed, JobState::Submitted, JobState::Accepted] {
-            let status = match state {
+        // Helper that mirrors the logic in sync_dispatched_runs (excluding the
+        // wall-clock timeout branch which is tested separately).
+        let map = |state: &JobState| -> Option<RunStatus> {
+            match state {
                 JobState::Completed | JobState::Submitted | JobState::Accepted => {
                     Some(RunStatus::Ok)
                 }
-                JobState::Failed | JobState::Cancelled => Some(RunStatus::Failed),
+                // Stuck is now treated as terminal failure (#2655).
+                JobState::Failed | JobState::Cancelled | JobState::Stuck => Some(RunStatus::Failed),
                 _ => None,
-            };
+            }
+        };
+
+        // Success states
+        for state in [JobState::Completed, JobState::Submitted, JobState::Accepted] {
             assert_eq!(
-                status,
+                map(&state),
                 Some(RunStatus::Ok),
                 "{:?} should map to RunStatus::Ok",
                 state
             );
         }
 
-        // Failure states
-        for state in [JobState::Failed, JobState::Cancelled] {
-            let status = match state {
-                JobState::Completed | JobState::Submitted | JobState::Accepted => {
-                    Some(RunStatus::Ok)
-                }
-                JobState::Failed | JobState::Cancelled => Some(RunStatus::Failed),
-                _ => None,
-            };
+        // Failure states — including Stuck (regression for #2655)
+        for state in [JobState::Failed, JobState::Cancelled, JobState::Stuck] {
             assert_eq!(
-                status,
+                map(&state),
                 Some(RunStatus::Failed),
                 "{:?} should map to RunStatus::Failed",
                 state
             );
         }
 
-        // Active states (should not finalize)
-        for state in [JobState::Pending, JobState::InProgress, JobState::Stuck] {
-            let status = match state {
-                JobState::Completed | JobState::Submitted | JobState::Accepted => {
-                    Some(RunStatus::Ok)
-                }
-                JobState::Failed | JobState::Cancelled => Some(RunStatus::Failed),
-                _ => None,
-            };
+        // Active states (should not finalize without wall-clock timeout)
+        for state in [JobState::Pending, JobState::InProgress] {
             assert_eq!(
-                status, None,
-                "{:?} should not finalize the routine run",
+                map(&state),
+                None,
+                "{:?} should not finalize the routine run (without timeout)",
                 state
             );
         }
+    }
+
+    /// Regression test for #2655: a Pending or InProgress orphan run that has
+    /// been running longer than `DISPATCH_RUN_TIMEOUT_HOURS` is force-failed
+    /// so the routine can fire again rather than being permanently blocked
+    /// by a worker that never pinged back.
+    #[test]
+    fn test_dispatch_run_wallclock_timeout() {
+        use crate::context::JobState;
+
+        // Mirror the wall-clock branch from sync_dispatched_runs in isolation
+        // so we can drive it with controlled `started_at` values without
+        // standing up a database.
+        let decide = |state: &JobState, started_at: chrono::DateTime<Utc>| -> Option<RunStatus> {
+            match state {
+                JobState::Completed | JobState::Submitted | JobState::Accepted => {
+                    Some(RunStatus::Ok)
+                }
+                JobState::Failed | JobState::Cancelled | JobState::Stuck => Some(RunStatus::Failed),
+                _ => {
+                    let age = Utc::now().signed_duration_since(started_at);
+                    if age > chrono::Duration::hours(super::DISPATCH_RUN_TIMEOUT_HOURS) {
+                        Some(RunStatus::Failed)
+                    } else {
+                        None
+                    }
+                }
+            }
+        };
+
+        let recent = Utc::now() - chrono::Duration::minutes(30);
+        let stale = Utc::now()
+            - chrono::Duration::hours(super::DISPATCH_RUN_TIMEOUT_HOURS)
+            - chrono::Duration::minutes(5);
+
+        // Recent Pending / InProgress orphans must NOT be finalised — the
+        // worker may still be coming online or making progress.
+        for state in [JobState::Pending, JobState::InProgress] {
+            assert_eq!(
+                decide(&state, recent),
+                None,
+                "recent {:?} run should remain active",
+                state
+            );
+        }
+
+        // Stale Pending / InProgress orphans must be force-failed so a
+        // permanently wedged worker doesn't block the routine forever.
+        for state in [JobState::Pending, JobState::InProgress] {
+            assert_eq!(
+                decide(&state, stale),
+                Some(RunStatus::Failed),
+                "stale {:?} run should be force-failed past dispatch timeout",
+                state
+            );
+        }
+
+        // Terminal states are decided independently of age — verify the age
+        // branch doesn't override an explicit terminal mapping.
+        assert_eq!(decide(&JobState::Completed, stale), Some(RunStatus::Ok));
+        assert_eq!(decide(&JobState::Stuck, stale), Some(RunStatus::Failed));
     }
 
     /// Regression test for #1320: transient errors are retried for lightweight
