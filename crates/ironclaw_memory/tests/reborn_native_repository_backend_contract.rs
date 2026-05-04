@@ -35,12 +35,19 @@ use ironclaw_memory::RebornPostgresMemoryDocumentRepository;
 
 // --- shared test stubs ----------------------------------------------------
 
-struct RecordingEmbeddingProvider;
+/// Deterministic embedding provider for backend tests. Produces a
+/// one-hot vector at position 0/1/2 depending on coarse content
+/// category — three "buckets" matching the legacy workspace contract:
+/// hybrid/semantic-only content vs. unrelated content vs. everything
+/// else. Generic over `DIM` so the same semantics work against
+/// libSQL (DIM=3, blob-shaped embeddings) and Postgres (DIM=1536,
+/// fixed-width pgvector column).
+struct RecordingEmbeddingProvider<const DIM: usize>;
 
 #[async_trait]
-impl EmbeddingProvider for RecordingEmbeddingProvider {
+impl<const DIM: usize> EmbeddingProvider for RecordingEmbeddingProvider<DIM> {
     fn dimension(&self) -> usize {
-        3
+        DIM
     }
 
     fn model_name(&self) -> &str {
@@ -48,13 +55,19 @@ impl EmbeddingProvider for RecordingEmbeddingProvider {
     }
 
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
-        if text.contains("hybrid-vector") || text == "literal" || text.contains("semantic-only") {
-            Ok(vec![1.0, 0.0, 0.0])
+        let mut v = vec![0.0_f32; DIM];
+        let slot = if text.contains("hybrid-vector")
+            || text == "literal"
+            || text.contains("semantic-only")
+        {
+            0
         } else if text.contains("unrelated") {
-            Ok(vec![0.0, 1.0, 0.0])
+            1
         } else {
-            Ok(vec![0.0, 0.0, 1.0])
-        }
+            2
+        };
+        v[slot] = 1.0;
+        Ok(v)
     }
 }
 
@@ -344,7 +357,7 @@ async fn libsql_backend_search_fails_closed_for_unsupported_vector_search() {
 async fn libsql_backend_search_fails_closed_on_query_embedding_dimension_mismatch() {
     let fixture = libsql_repo().await;
     let repo = fixture.repo.clone();
-    let provider = Arc::new(RecordingEmbeddingProvider);
+    let provider = Arc::new(RecordingEmbeddingProvider::<3>);
     let backend = RepositoryMemoryBackend::new(repo)
         .with_embedding_provider(provider)
         .with_capabilities(MemoryBackendCapabilities {
@@ -378,7 +391,7 @@ async fn libsql_backend_search_fails_closed_on_query_embedding_dimension_mismatc
 async fn libsql_backend_hybrid_search_fuses_full_text_and_vector_results() {
     let fixture = libsql_repo().await;
     let repo = fixture.repo.clone();
-    let provider = Arc::new(RecordingEmbeddingProvider);
+    let provider = Arc::new(RecordingEmbeddingProvider::<3>);
     let indexer = Arc::new(
         ChunkingMemoryDocumentIndexer::new(repo.clone()).with_embedding_provider(provider.clone()),
     );
@@ -436,7 +449,7 @@ async fn libsql_backend_hybrid_search_fuses_full_text_and_vector_results() {
 async fn libsql_backend_weighted_score_fusion_orders_results_by_weights() {
     let fixture = libsql_repo().await;
     let repo = fixture.repo.clone();
-    let provider = Arc::new(RecordingEmbeddingProvider);
+    let provider = Arc::new(RecordingEmbeddingProvider::<3>);
     let indexer = Arc::new(
         ChunkingMemoryDocumentIndexer::new(repo.clone()).with_embedding_provider(provider.clone()),
     );
@@ -544,6 +557,27 @@ async fn libsql_backend_search_honors_pre_fusion_limit_per_branch() {
             .unwrap();
     }
 
+    // Establish the precondition first: with no per-branch cap, the FTS
+    // branch must surface every matching document. Without this, the
+    // `<= 2` assertion below would be vacuously satisfied by an empty or
+    // 1-result response from a regression that broke FTS or indexing.
+    let unbounded = backend
+        .search(
+            &context,
+            MemorySearchRequest::new("shared-keyword")
+                .unwrap()
+                .with_limit(10)
+                .with_pre_fusion_limit(10)
+                .with_vector(false),
+        )
+        .await
+        .unwrap();
+    assert!(
+        unbounded.len() >= 6,
+        "expected at least 6 unbounded matches before testing the per-branch cap, got {}",
+        unbounded.len()
+    );
+
     let request = MemorySearchRequest::new("shared-keyword")
         .unwrap()
         .with_limit(2)
@@ -553,10 +587,10 @@ async fn libsql_backend_search_honors_pre_fusion_limit_per_branch() {
     assert_eq!(request.pre_fusion_limit(), 2);
 
     let results = backend.search(&context, request).await.unwrap();
-    assert!(
-        results.len() <= 2,
-        "pre_fusion_limit=2 must cap fused result count, got {}",
-        results.len()
+    assert_eq!(
+        results.len(),
+        2,
+        "pre_fusion_limit=2 must truncate to exactly 2 fused candidates with 6 matches available"
     );
 }
 
@@ -652,6 +686,24 @@ async fn libsql_backend_search_honors_limit() {
             .unwrap();
     }
 
+    // Establish the precondition: an unbounded search surfaces every
+    // matching doc. Without this baseline a regression that broke FTS or
+    // indexing entirely would still satisfy `results.len() <= 2`.
+    let unbounded = backend
+        .search(
+            &context,
+            MemorySearchRequest::new("shared-keyword")
+                .unwrap()
+                .with_limit(10),
+        )
+        .await
+        .unwrap();
+    assert!(
+        unbounded.len() >= 5,
+        "expected at least 5 unbounded matches before testing limit truncation, got {}",
+        unbounded.len()
+    );
+
     let results = backend
         .search(
             &context,
@@ -661,7 +713,11 @@ async fn libsql_backend_search_honors_limit() {
         )
         .await
         .unwrap();
-    assert!(results.len() <= 2, "limit must cap fused result count");
+    assert_eq!(
+        results.len(),
+        2,
+        "limit must truncate to exactly 2 results with 5 matches available"
+    );
 }
 
 // --- Postgres -------------------------------------------------------------
@@ -680,13 +736,33 @@ fn pg_pool() -> deadpool_postgres::Pool {
         .expect("build deadpool")
 }
 
+/// Explicit opt-in to skip the Postgres backend tests. Without this set,
+/// a connection failure must fail loud — the previous "silent skip + green
+/// pass" pattern violated the `ironclaw_memory` guardrail that Postgres
+/// behavioral coverage must be real.
 #[cfg(feature = "postgres")]
-async fn pg_try_connect(pool: &deadpool_postgres::Pool) -> Option<()> {
+const POSTGRES_SKIP_ENV: &str = "IRONCLAW_SKIP_POSTGRES_TESTS";
+
+#[cfg(feature = "postgres")]
+fn pg_skip_requested() -> bool {
+    std::env::var(POSTGRES_SKIP_ENV).is_ok_and(|value| value == "1" || value == "true")
+}
+
+#[cfg(feature = "postgres")]
+async fn pg_require_connection(pool: &deadpool_postgres::Pool) -> Option<()> {
     match pool.get().await {
         Ok(_) => Some(()),
         Err(error) => {
-            eprintln!("skipping reborn-postgres backend test: {error}");
-            None
+            if pg_skip_requested() {
+                eprintln!("skipping reborn-postgres backend test ({POSTGRES_SKIP_ENV}=1): {error}");
+                None
+            } else {
+                panic!(
+                    "reborn-postgres backend test could not reach Postgres ({error}); \
+                     set DATABASE_URL to a reachable Postgres+pgvector instance, or set \
+                     {POSTGRES_SKIP_ENV}=1 to explicitly skip."
+                );
+            }
         }
     }
 }
@@ -705,7 +781,7 @@ async fn pg_cleanup_tenant(pool: &deadpool_postgres::Pool, tenant_id: &str) {
 #[cfg(feature = "postgres")]
 async fn pg_repo(tenant_id: &str) -> Option<Arc<RebornPostgresMemoryDocumentRepository>> {
     let pool = pg_pool();
-    pg_try_connect(&pool).await?;
+    pg_require_connection(&pool).await?;
     let repo = Arc::new(RebornPostgresMemoryDocumentRepository::new(pool.clone()));
     repo.run_migrations().await.expect("run_migrations");
     pg_cleanup_tenant(&pool, tenant_id).await;
@@ -822,7 +898,7 @@ async fn postgres_backend_search_fails_closed_on_query_embedding_dimension_misma
     let Some(repo) = pg_repo(tenant).await else {
         return;
     };
-    let provider = Arc::new(RecordingEmbeddingProvider);
+    let provider = Arc::new(RecordingEmbeddingProvider::<1536>);
     let backend = RepositoryMemoryBackend::new(repo)
         .with_embedding_provider(provider)
         .with_capabilities(MemoryBackendCapabilities {
@@ -848,6 +924,287 @@ async fn postgres_backend_search_fails_closed_on_query_embedding_dimension_misma
         err.to_string()
             .contains("query embedding dimension 2 does not match"),
         "expected dimension-mismatch error, got: {err}"
+    );
+    pg_cleanup_tenant(&pg_pool(), tenant).await;
+}
+
+// Postgres counterparts for the search/fusion/limit contract that previously
+// only ran against libSQL. `RebornPostgresMemoryDocumentRepository` has its
+// own FTS (`tsvector`) and pgvector query implementations, so a Postgres-only
+// regression in ranking, fusion inputs, vector results, or limit handling
+// would not be caught by the libSQL versions above.
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_backend_hybrid_search_fuses_full_text_and_vector_results() {
+    let tenant = "reborn-pg-be-hybrid";
+    let Some(repo) = pg_repo(tenant).await else {
+        return;
+    };
+    let provider = Arc::new(RecordingEmbeddingProvider::<1536>);
+    let indexer = Arc::new(
+        ChunkingMemoryDocumentIndexer::new(repo.clone()).with_embedding_provider(provider.clone()),
+    );
+    let backend = RepositoryMemoryBackend::new(repo.clone())
+        .with_indexer(indexer)
+        .with_embedding_provider(provider)
+        .with_capabilities(MemoryBackendCapabilities {
+            file_documents: true,
+            full_text_search: true,
+            vector_search: true,
+            embeddings: true,
+            ..MemoryBackendCapabilities::default()
+        });
+    let context = MemoryContext::new(MemoryDocumentScope::new(tenant, "alice", None).unwrap());
+    for (relative_path, content) in [
+        ("notes/hybrid.md", b"literal hybrid-vector".as_slice()),
+        ("notes/fts-only.md", b"literal unrelated".as_slice()),
+        ("notes/vector-only.md", b"semantic-only".as_slice()),
+    ] {
+        let path = MemoryDocumentPath::new(tenant, "alice", None, relative_path).expect("path");
+        backend
+            .write_document(&context, &path, content)
+            .await
+            .unwrap();
+    }
+
+    let results = backend
+        .search(
+            &context,
+            MemorySearchRequest::new("literal")
+                .unwrap()
+                .with_limit(3)
+                .with_fusion_strategy(FusionStrategy::Rrf),
+        )
+        .await
+        .unwrap();
+    assert!(
+        results
+            .iter()
+            .any(|r| r.path.relative_path() == "notes/hybrid.md"),
+        "rrf fusion must surface the hybrid match"
+    );
+    let hybrid = results
+        .iter()
+        .find(|r| r.path.relative_path() == "notes/hybrid.md")
+        .unwrap();
+    assert!(
+        hybrid.is_hybrid(),
+        "hybrid match must report is_hybrid=true"
+    );
+    pg_cleanup_tenant(&pg_pool(), tenant).await;
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_backend_weighted_score_fusion_orders_results_by_weights() {
+    let tenant = "reborn-pg-be-weighted";
+    let Some(repo) = pg_repo(tenant).await else {
+        return;
+    };
+    let provider = Arc::new(RecordingEmbeddingProvider::<1536>);
+    let indexer = Arc::new(
+        ChunkingMemoryDocumentIndexer::new(repo.clone()).with_embedding_provider(provider.clone()),
+    );
+    let backend = RepositoryMemoryBackend::new(repo.clone())
+        .with_indexer(indexer)
+        .with_embedding_provider(provider)
+        .with_capabilities(MemoryBackendCapabilities {
+            file_documents: true,
+            full_text_search: true,
+            vector_search: true,
+            embeddings: true,
+            ..MemoryBackendCapabilities::default()
+        });
+    let context = MemoryContext::new(MemoryDocumentScope::new(tenant, "alice", None).unwrap());
+
+    // Asymmetric FTS relevance: `fts.md` has many more "literal" matches so
+    // Postgres `ts_rank_cd` ranks it strictly above `hybrid.md` on the FTS
+    // branch — without this, the two docs tie under `plainto_tsquery` and
+    // the order across the FTS-heavy and vector-heavy searches becomes
+    // non-deterministic. `hybrid.md` is the only doc whose embedding matches
+    // the query bucket, so the vector branch deterministically prefers it.
+    for (relative_path, content) in [
+        ("hybrid.md", b"literal hybrid-vector".as_slice()),
+        (
+            "fts.md",
+            b"literal literal literal literal unrelated".as_slice(),
+        ),
+    ] {
+        let path = MemoryDocumentPath::new(tenant, "alice", None, relative_path).expect("path");
+        backend
+            .write_document(&context, &path, content)
+            .await
+            .unwrap();
+    }
+
+    let fts_heavy = backend
+        .search(
+            &context,
+            MemorySearchRequest::new("literal")
+                .unwrap()
+                .with_limit(3)
+                .with_fusion_strategy(FusionStrategy::WeightedScore)
+                .with_full_text_weight(10.0)
+                .with_vector_weight(0.001),
+        )
+        .await
+        .unwrap();
+    assert!(!fts_heavy.is_empty(), "weighted-score must produce results");
+
+    let vec_heavy = backend
+        .search(
+            &context,
+            MemorySearchRequest::new("literal")
+                .unwrap()
+                .with_limit(3)
+                .with_fusion_strategy(FusionStrategy::WeightedScore)
+                .with_full_text_weight(0.001)
+                .with_vector_weight(10.0),
+        )
+        .await
+        .unwrap();
+
+    let fts_top = fts_heavy[0].path.relative_path().to_string();
+    let vec_top = vec_heavy[0].path.relative_path().to_string();
+    assert_eq!(
+        fts_top, "fts.md",
+        "fts-heavy weights must surface the FTS leader; got {fts_top}"
+    );
+    assert_eq!(
+        vec_top, "hybrid.md",
+        "vector-heavy weights must surface the vector leader; got {vec_top}"
+    );
+    pg_cleanup_tenant(&pg_pool(), tenant).await;
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_backend_search_honors_pre_fusion_limit_per_branch() {
+    let tenant = "reborn-pg-be-prefusion";
+    let Some(repo) = pg_repo(tenant).await else {
+        return;
+    };
+    let indexer = Arc::new(
+        ChunkingMemoryDocumentIndexer::new(repo.clone()).with_chunk_config(ChunkConfig {
+            chunk_size: 4,
+            overlap_percent: 0.0,
+            min_chunk_size: 1,
+        }),
+    );
+    let backend = RepositoryMemoryBackend::new(repo.clone())
+        .with_indexer(indexer)
+        .with_capabilities(MemoryBackendCapabilities {
+            file_documents: true,
+            full_text_search: true,
+            ..MemoryBackendCapabilities::default()
+        });
+    let context = MemoryContext::new(MemoryDocumentScope::new(tenant, "alice", None).unwrap());
+
+    for index in 0..6 {
+        let path =
+            MemoryDocumentPath::new(tenant, "alice", None, format!("doc-{index}.md").as_str())
+                .expect("path");
+        backend
+            .write_document(&context, &path, b"shared-keyword body content")
+            .await
+            .unwrap();
+    }
+
+    let unbounded = backend
+        .search(
+            &context,
+            MemorySearchRequest::new("shared-keyword")
+                .unwrap()
+                .with_limit(10)
+                .with_pre_fusion_limit(10)
+                .with_vector(false),
+        )
+        .await
+        .unwrap();
+    assert!(
+        unbounded.len() >= 6,
+        "expected at least 6 unbounded matches before testing the per-branch cap, got {}",
+        unbounded.len()
+    );
+
+    let request = MemorySearchRequest::new("shared-keyword")
+        .unwrap()
+        .with_limit(2)
+        .with_pre_fusion_limit(2)
+        .with_vector(false);
+    assert_eq!(request.pre_fusion_limit(), 2);
+
+    let results = backend.search(&context, request).await.unwrap();
+    assert_eq!(
+        results.len(),
+        2,
+        "pre_fusion_limit=2 must truncate to exactly 2 fused candidates with 6 matches available"
+    );
+    pg_cleanup_tenant(&pg_pool(), tenant).await;
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_backend_search_honors_limit() {
+    let tenant = "reborn-pg-be-limit";
+    let Some(repo) = pg_repo(tenant).await else {
+        return;
+    };
+    let indexer = Arc::new(
+        ChunkingMemoryDocumentIndexer::new(repo.clone()).with_chunk_config(ChunkConfig {
+            chunk_size: 4,
+            overlap_percent: 0.0,
+            min_chunk_size: 1,
+        }),
+    );
+    let backend = RepositoryMemoryBackend::new(repo.clone())
+        .with_indexer(indexer)
+        .with_capabilities(MemoryBackendCapabilities {
+            file_documents: true,
+            full_text_search: true,
+            ..MemoryBackendCapabilities::default()
+        });
+    let context = MemoryContext::new(MemoryDocumentScope::new(tenant, "alice", None).unwrap());
+
+    for index in 0..5 {
+        let path =
+            MemoryDocumentPath::new(tenant, "alice", None, format!("doc-{index}.md").as_str())
+                .expect("path");
+        backend
+            .write_document(&context, &path, b"shared-keyword body content")
+            .await
+            .unwrap();
+    }
+
+    let unbounded = backend
+        .search(
+            &context,
+            MemorySearchRequest::new("shared-keyword")
+                .unwrap()
+                .with_limit(10),
+        )
+        .await
+        .unwrap();
+    assert!(
+        unbounded.len() >= 5,
+        "expected at least 5 unbounded matches before testing limit truncation, got {}",
+        unbounded.len()
+    );
+
+    let results = backend
+        .search(
+            &context,
+            MemorySearchRequest::new("shared-keyword")
+                .unwrap()
+                .with_limit(2),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        results.len(),
+        2,
+        "limit must truncate to exactly 2 results with 5 matches available"
     );
     pg_cleanup_tenant(&pg_pool(), tenant).await;
 }
