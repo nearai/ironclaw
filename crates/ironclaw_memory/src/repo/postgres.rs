@@ -597,39 +597,6 @@ impl MemoryDocumentIndexRepository for PostgresMemoryDocumentRepository {
         })?;
         Ok(())
     }
-
-    async fn delete_document_chunks(
-        &self,
-        path: &MemoryDocumentPath,
-    ) -> Result<(), FilesystemError> {
-        let virtual_path = path.virtual_path().unwrap_or_else(|_| valid_memory_path());
-        let client = self
-            .client(virtual_path.clone(), FilesystemOperation::WriteFile)
-            .await?;
-        let owner_key = scoped_memory_owner_key(path.scope());
-        let agent_id = scoped_memory_agent_id(path.scope());
-        let db_path = db_path_for_memory_document(path);
-        client
-            .execute(
-                r#"
-                DELETE FROM memory_chunks
-                WHERE document_id IN (
-                    SELECT id FROM memory_documents
-                    WHERE user_id = $1 AND agent_id IS NOT DISTINCT FROM $2 AND path = $3
-                )
-                "#,
-                &[&owner_key, &agent_id, &db_path],
-            )
-            .await
-            .map_err(|error| {
-                memory_error(
-                    virtual_path,
-                    FilesystemOperation::WriteFile,
-                    error.to_string(),
-                )
-            })?;
-        Ok(())
-    }
 }
 
 async fn postgres_save_document_version<C: deadpool_postgres::GenericClient + Sync>(

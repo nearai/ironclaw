@@ -20,6 +20,13 @@ pub trait MemoryDocumentIndexer: Send + Sync {
 }
 
 /// Repository operations used by the memory indexer to keep chunk/search rows in sync.
+///
+/// Chunk clearing is intentionally folded into
+/// [`replace_document_chunks_if_current`] (called with an empty `chunks`
+/// slice) — there is no separate unguarded `delete_document_chunks` method.
+/// A hash-guarded clear is the only safe shape: an unconditional delete
+/// races with concurrent writes that have already produced fresh chunks
+/// for newer content, silently leaving the latest write unsearchable.
 #[async_trait]
 pub trait MemoryDocumentIndexRepository: Send + Sync {
     async fn replace_document_chunks_if_current(
@@ -27,11 +34,6 @@ pub trait MemoryDocumentIndexRepository: Send + Sync {
         path: &MemoryDocumentPath,
         expected_content_hash: &str,
         chunks: &[MemoryChunkWrite],
-    ) -> Result<(), FilesystemError>;
-
-    async fn delete_document_chunks(
-        &self,
-        path: &MemoryDocumentPath,
     ) -> Result<(), FilesystemError>;
 }
 
@@ -172,7 +174,6 @@ mod tests {
     #[derive(Debug, PartialEq, Eq)]
     enum IndexerCall {
         Replace { chunks: usize, hash: String },
-        Delete,
     }
 
     struct RecordingRepo {
@@ -251,63 +252,46 @@ mod tests {
             });
             Ok(())
         }
-
-        async fn delete_document_chunks(
-            &self,
-            _path: &MemoryDocumentPath,
-        ) -> Result<(), FilesystemError> {
-            self.calls.lock().unwrap().push(IndexerCall::Delete);
-            Ok(())
-        }
     }
 
     fn doc_path() -> MemoryDocumentPath {
         MemoryDocumentPath::new("tenant", "user", Some("project"), "note.md").unwrap()
     }
 
-    // Regression for PR #3183 review: the indexer used to call the
+    // Regression for PR #3183 review: the indexer used to call an
     // unconditional `delete_document_chunks` for both `skip_indexing == true`
     // and the empty-chunks case. A stale reindex (older bytes, older
     // skip_indexing flag) could then race with a concurrent writer that had
     // already produced fresh chunks for newer content and silently clobber
-    // them. Both paths must now route through the same hash-checked
-    // `replace_document_chunks_if_current` helper so a stale clear becomes a
-    // no-op once the document has moved on.
+    // them. The fix routes both paths through the hash-checked
+    // `replace_document_chunks_if_current` helper, and the unguarded
+    // `delete_document_chunks` was removed from the trait entirely so no
+    // future caller can re-introduce the race. The recording repo here only
+    // implements the hash-checked path; if either branch ever started
+    // calling something else, this test would not compile.
     #[tokio::test]
-    async fn skip_indexing_routes_through_hash_checked_replace_not_unconditional_delete() {
+    async fn skip_indexing_routes_through_hash_checked_replace() {
         let content = "alpha beta gamma delta epsilon";
         let repo = Arc::new(RecordingRepo::new(content).with_skip_indexing());
         let indexer = ChunkingMemoryDocumentIndexer::new(repo.clone());
         indexer.reindex_document(&doc_path()).await.unwrap();
         let calls = repo.calls.lock().unwrap();
         assert_eq!(calls.len(), 1, "expected exactly one indexer call");
-        match &calls[0] {
-            IndexerCall::Replace { chunks, hash } => {
-                assert_eq!(*chunks, 0, "skip_indexing must clear with empty chunk set");
-                assert_eq!(*hash, content_sha256(content));
-            }
-            IndexerCall::Delete => {
-                panic!("skip_indexing must not call unconditional delete_document_chunks")
-            }
-        }
+        let IndexerCall::Replace { chunks, hash } = &calls[0];
+        assert_eq!(*chunks, 0, "skip_indexing must clear with empty chunk set");
+        assert_eq!(*hash, content_sha256(content));
     }
 
     #[tokio::test]
-    async fn empty_chunks_route_through_hash_checked_replace_not_unconditional_delete() {
+    async fn empty_chunks_route_through_hash_checked_replace() {
         let repo = Arc::new(RecordingRepo::new("   \n\t  "));
         let indexer = ChunkingMemoryDocumentIndexer::new(repo.clone());
         indexer.reindex_document(&doc_path()).await.unwrap();
         let calls = repo.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
-        match &calls[0] {
-            IndexerCall::Replace { chunks, hash } => {
-                assert_eq!(*chunks, 0, "expected empty chunk set");
-                assert_eq!(*hash, content_sha256("   \n\t  "));
-            }
-            IndexerCall::Delete => {
-                panic!("empty chunks must not call unconditional delete_document_chunks")
-            }
-        }
+        let IndexerCall::Replace { chunks, hash } = &calls[0];
+        assert_eq!(*chunks, 0, "expected empty chunk set");
+        assert_eq!(*hash, content_sha256("   \n\t  "));
     }
 
     #[tokio::test]

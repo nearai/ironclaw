@@ -506,41 +506,6 @@ impl MemoryDocumentIndexRepository for RebornLibSqlMemoryDocumentRepository {
         })?;
         Ok(())
     }
-
-    async fn delete_document_chunks(
-        &self,
-        path: &MemoryDocumentPath,
-    ) -> Result<(), FilesystemError> {
-        let virtual_path = path.virtual_path().unwrap_or_else(|_| valid_memory_path());
-        let conn = self
-            .connect(virtual_path.clone(), FilesystemOperation::WriteFile)
-            .await?;
-        let scope = path.scope();
-        conn.execute(
-            "DELETE FROM reborn_memory_chunks \
-             WHERE document_id IN ( \
-                 SELECT id FROM reborn_memory_documents \
-                 WHERE tenant_id = ?1 AND user_id = ?2 AND agent_id = ?3 \
-                   AND project_id = ?4 AND path = ?5 \
-             )",
-            libsql::params![
-                scope.tenant_id(),
-                scope.user_id(),
-                reborn_agent_id_db_value(scope),
-                reborn_project_id_db_value(scope),
-                path.relative_path(),
-            ],
-        )
-        .await
-        .map_err(|error| {
-            memory_error(
-                virtual_path,
-                FilesystemOperation::WriteFile,
-                error.to_string(),
-            )
-        })?;
-        Ok(())
-    }
 }
 
 async fn reborn_libsql_list_paths_for_scope(
