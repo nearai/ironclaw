@@ -34,6 +34,11 @@ pub struct AppComponents {
     /// The (potentially mutated) config after DB reload and secret injection.
     pub config: Config,
     pub db: Option<Arc<dyn Database>>,
+    /// Storage handle for the legal-harness skill. Populated by the
+    /// AppBuilder when the configured backend is libSQL; left as `None`
+    /// otherwise so the gateway still boots in environments where the
+    /// legal harness is not provisioned.
+    pub legal_store: Option<Arc<dyn crate::legal::LegalStore>>,
     pub secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     pub llm: Arc<dyn LlmProvider>,
     pub cheap_llm: Option<Arc<dyn LlmProvider>>,
@@ -1303,9 +1308,31 @@ impl AppBuilder {
         // that every tool name is known.  Existing entries are never overwritten.
         seed_tool_permissions(&tools, self.db.as_ref(), &self.config.owner_id).await;
 
+        // Build the legal-harness store from the libSQL handle when one
+        // is available. The handle is only present on libSQL backends —
+        // postgres deployments leave `legal_store` as `None` and the
+        // gateway routes return 503.
+        let legal_store: Option<Arc<dyn crate::legal::LegalStore>> = {
+            #[cfg(feature = "libsql")]
+            {
+                self.handles
+                    .as_ref()
+                    .and_then(|h| h.libsql_db.as_ref())
+                    .map(|db| {
+                        Arc::new(crate::legal::LibSqlLegalStore::new(Arc::clone(db)))
+                            as Arc<dyn crate::legal::LegalStore>
+                    })
+            }
+            #[cfg(not(feature = "libsql"))]
+            {
+                None
+            }
+        };
+
         Ok(AppComponents {
             config: self.config,
             db: self.db,
+            legal_store,
             secrets_store: self.secrets_store,
             llm,
             cheap_llm,

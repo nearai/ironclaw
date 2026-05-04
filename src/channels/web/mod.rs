@@ -15,6 +15,17 @@
 //! ```
 
 pub(crate) mod features;
+
+/// Public handler exports for the legal harness chat slice.
+///
+/// `features` itself is `pub(crate)` to keep its internal modules private,
+/// but the legal-harness handlers (Stream B) need to be reachable from
+/// integration tests in `tests/`. The same shape will work for any future
+/// public-facing handler — keep slice internals private and surface only
+/// the handler functions here.
+pub mod legal {
+    pub use super::features::legal::*;
+}
 pub(crate) mod handlers;
 pub mod log_layer;
 pub mod oauth;
@@ -196,6 +207,7 @@ impl GatewayChannel {
             oauth_sweep_shutdown: None,
             frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
             tool_dispatcher: None,
+            legal_store: None,
         });
 
         Self {
@@ -262,6 +274,7 @@ impl GatewayChannel {
             // just because a `with_*` builder added a new subsystem.
             frontend_html_cache: Arc::clone(&self.state.frontend_html_cache),
             tool_dispatcher: self.state.tool_dispatcher.clone(),
+            legal_store: self.state.legal_store.clone(),
         };
         mutate(&mut new_state);
         new_state.auth_manager = build_gateway_auth_manager(&new_state);
@@ -307,6 +320,14 @@ impl GatewayChannel {
     /// Inject the database store for sandbox job persistence.
     pub fn with_store(mut self, store: Arc<dyn Database>) -> Self {
         self.rebuild_state(|s| s.store = Some(store));
+        self
+    }
+
+    /// Inject the legal-harness store backing the chat-with-documents
+    /// endpoints under `/skills/legal/`. Optional — the handlers return
+    /// 503 when the store is absent so the gateway still boots without it.
+    pub fn with_legal_store(mut self, store: Arc<dyn crate::legal::LegalStore>) -> Self {
+        self.rebuild_state(|s| s.legal_store = Some(store));
         self
     }
 
