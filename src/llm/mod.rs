@@ -8,6 +8,7 @@
 //! - **OpenAI-compatible**: Any endpoint that speaks the OpenAI API
 //! - **AWS Bedrock**: Native Converse API via aws-sdk-bedrockruntime
 
+mod aliyun;
 mod anthropic_oauth;
 #[cfg(feature = "bedrock")]
 mod bedrock;
@@ -47,10 +48,11 @@ pub mod models;
 pub mod reasoning_models;
 pub mod vision_models;
 
+pub use aliyun::AliyunProvider;
 pub use circuit_breaker::{CircuitBreakerConfig, CircuitBreakerProvider};
 pub use config::{
-    BedrockConfig, CacheRetention, LlmConfig, NearAiConfig, OAUTH_PLACEHOLDER, OpenAiCodexConfig,
-    RegistryProviderConfig,
+    AliyunConfig, BedrockConfig, CacheRetention, LlmConfig, NearAiConfig, OAUTH_PLACEHOLDER,
+    OpenAiCodexConfig, RegistryProviderConfig,
 };
 pub use error::LlmError;
 pub use failover::{CooldownConfig, FailoverProvider};
@@ -131,6 +133,14 @@ pub async fn create_llm_provider(
         });
     }
 
+    // Aliyun Coding Plan
+    if config.backend == "aliyun" || config.backend == "coding_plan" {
+        let cfg = config.aliyun.as_ref().ok_or_else(|| LlmError::AuthFailed {
+            provider: "aliyun".to_string(),
+        })?;
+        tracing::debug!(model = %cfg.model, base_url = %cfg.base_url, "Using Aliyun Coding Plan provider");
+        return Ok(Arc::new(AliyunProvider::new(cfg.clone())?));
+    }
     let reg_config = config
         .provider
         .as_ref()
@@ -522,6 +532,19 @@ fn create_cheap_provider_for_backend(
         return Ok(Some(Arc::new(provider)));
     }
 
+    if config.backend == "aliyun" || config.backend == "coding_plan" {
+        let Some(ref aliyun_config) = config.aliyun else {
+            return Err(LlmError::RequestFailed {
+                provider: "aliyun".to_string(),
+                reason: "Aliyun config not available for cheap model".to_string(),
+            });
+        };
+        let mut cheap_aliyun = aliyun_config.clone();
+        cheap_aliyun.model = cheap_model.to_string();
+        let provider = AliyunProvider::new(cheap_aliyun)?;
+        return Ok(Some(Arc::new(provider)));
+    }
+
     // Registry-based provider: clone config and swap model
     let reg_config = config.provider.as_ref().ok_or_else(|| LlmError::RequestFailed {
         provider: config.backend.clone(),
@@ -819,6 +842,7 @@ mod tests {
             nearai: test_nearai_config(),
             provider: None,
             bedrock: None,
+            aliyun: None,
             gemini_oauth: None,
             request_timeout_secs: 120,
             cheap_model: None,
