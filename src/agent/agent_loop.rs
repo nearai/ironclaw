@@ -322,6 +322,9 @@ impl Agent {
         }
         let scheduler = Arc::new(scheduler);
 
+        let context_limit = config.context_limit_tokens;
+        let compaction_threshold = config.compaction_threshold;
+
         Self {
             config,
             deps,
@@ -330,7 +333,9 @@ impl Agent {
             scheduler,
             router: Router::new(),
             session_manager,
-            context_monitor: ContextMonitor::new(),
+            context_monitor: ContextMonitor::new()
+                .with_limit(context_limit)
+                .with_threshold(compaction_threshold),
             heartbeat_config,
             hygiene_config,
             routine_config,
