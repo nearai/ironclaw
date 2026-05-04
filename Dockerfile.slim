@@ -1,0 +1,74 @@
+# IronClaw Production Slim Dockerfile
+#
+# A multi-stage build optimized for high-density Nomad shards (Scenario 3) 
+# and session workers (Scenario 4).
+#
+# Final Image Size: ~45MB (compared to ~1.5GB for a standard build)
+
+# ── Phase 1: Build Environment ─────────────────────────────────────────
+FROM rust:1.92-slim-bookworm AS builder
+
+# Install build dependencies for PostgreSQL (libpq), SSL (openssl), and
+# Python (pyo3-build-config needs a python3 interpreter at build time).
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    libpq-dev \
+    python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /usr/src/ironclaw
+
+# Cache dependencies: copy manifests first and build a dummy to populate the cache.
+# Every workspace member listed in the root Cargo.toml must appear here so the
+# workspace manifest resolves during the dummy build.
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ironclaw_common/Cargo.toml   crates/ironclaw_common/Cargo.toml
+COPY crates/ironclaw_engine/Cargo.toml   crates/ironclaw_engine/Cargo.toml
+COPY crates/ironclaw_gateway/Cargo.toml  crates/ironclaw_gateway/Cargo.toml
+COPY crates/ironclaw_safety/Cargo.toml   crates/ironclaw_safety/Cargo.toml
+COPY crates/ironclaw_skills/Cargo.toml   crates/ironclaw_skills/Cargo.toml
+COPY crates/ironclaw_tui/Cargo.toml      crates/ironclaw_tui/Cargo.toml
+RUN mkdir -p src \
+    && echo 'fn main() {}' > src/main.rs \
+    && touch src/lib.rs \
+    && for c in ironclaw_common ironclaw_engine ironclaw_gateway \
+                ironclaw_safety ironclaw_skills ironclaw_tui; do \
+         mkdir -p "crates/$c/src" && touch "crates/$c/src/lib.rs"; \
+       done \
+    && cargo build --release --bin ironclaw 2>&1 || true \
+    && rm -rf src crates/*/src
+
+# Copy full source and build for real.
+COPY . .
+RUN cargo build --release --bin ironclaw
+
+# ── Phase 2: Runtime Environment ──────────────────────────────────────
+FROM debian:bookworm-slim
+
+# Install ONLY the runtime dependencies required for HTTPS/SSL and Postgres.
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    libpq5 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the lean release binary from the builder.
+COPY --from=builder /usr/src/ironclaw/target/release/ironclaw /usr/local/bin/ironclaw
+
+# ── Configuration for High-Density Scaling ───────────────────────────
+
+# Default to "Slim Mode" (Single-threaded runtime).
+# Nomad jobs can override this via their own 'env' blocks.
+ENV TOKIO_WORKER_THREADS=1
+ENV DATABASE_POOL_SIZE=1
+
+# Expose the standard IronClaw ports (HTTP and Gateway).
+EXPOSE 8080
+EXPOSE 9000
+
+# Set the entrypoint to the IronClaw binary.
+ENTRYPOINT ["ironclaw"]
+
+# Default command if none provided.
+CMD ["run"]

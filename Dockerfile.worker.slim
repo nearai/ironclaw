@@ -1,0 +1,70 @@
+# Slim worker image for Nomad sandboxed job execution.
+#
+# Includes Python, Node.js, git, and common tools — but NOT Rust/Clang
+# build toolchains. Use the root Dockerfile.worker for full dev environments.
+#
+# Build:
+#   docker build -f Dockerfile.worker.slim -t ironclaw-worker .
+
+FROM rust:1.92-slim-bookworm AS builder
+
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    libpq-dev \
+    python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /usr/src/ironclaw
+
+# Cache dependencies (same pattern as Dockerfile.slim). Every workspace
+# member listed in the root Cargo.toml must appear here so the workspace
+# manifest resolves during the dummy build.
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ironclaw_common/Cargo.toml   crates/ironclaw_common/Cargo.toml
+COPY crates/ironclaw_engine/Cargo.toml   crates/ironclaw_engine/Cargo.toml
+COPY crates/ironclaw_gateway/Cargo.toml  crates/ironclaw_gateway/Cargo.toml
+COPY crates/ironclaw_safety/Cargo.toml   crates/ironclaw_safety/Cargo.toml
+COPY crates/ironclaw_skills/Cargo.toml   crates/ironclaw_skills/Cargo.toml
+COPY crates/ironclaw_tui/Cargo.toml      crates/ironclaw_tui/Cargo.toml
+RUN mkdir -p src \
+    && echo 'fn main() {}' > src/main.rs \
+    && touch src/lib.rs \
+    && for c in ironclaw_common ironclaw_engine ironclaw_gateway \
+                ironclaw_safety ironclaw_skills ironclaw_tui; do \
+         mkdir -p "crates/$c/src" && touch "crates/$c/src/lib.rs"; \
+       done \
+    && cargo build --release --bin ironclaw 2>&1 || true \
+    && rm -rf src crates/*/src
+
+COPY . .
+RUN cargo build --release --bin ironclaw
+
+# ── Runtime ──────────────────────────────────────────────────────────
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    git \
+    libssl3 \
+    libpq5 \
+    nodejs \
+    npm \
+    python3 \
+    python3-pip \
+    python3-venv \
+    jq \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /usr/src/ironclaw/target/release/ironclaw /usr/local/bin/ironclaw
+
+# Create non-root sandbox user (UID 1000 matches orchestrator config)
+RUN useradd -m -u 1000 -s /bin/bash sandbox \
+    && mkdir -p /workspace \
+    && chown sandbox:sandbox /workspace
+
+USER sandbox
+WORKDIR /workspace
+
+ENTRYPOINT ["ironclaw"]

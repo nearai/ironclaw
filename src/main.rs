@@ -39,10 +39,9 @@ fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
     ironclaw::bootstrap::load_ironclaw_env();
 
-    let result = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(async_main());
+    let runtime = ironclaw::bootstrap::build_runtime_from_env()?;
+
+    let result = runtime.block_on(async_main());
 
     if let Err(ref e) = result {
         format_top_level_error(e);
