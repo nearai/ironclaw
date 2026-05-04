@@ -23,7 +23,7 @@ exclude = [
 
 [package]
 name = "ironclaw"
-version = "0.26.0"
+version = "0.27.0"
 edition = "2024"
 rust-version = "1.92"
 description = "Secure personal AI assistant that protects your data and expands its capabilities on the fly"
@@ -31,7 +31,6 @@ authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
-publish = false
 
 [package.metadata.wix]
 upgrade-guid = "D0156E61-BA37-451E-8AB9-1A2ECCCFA48F"
@@ -116,13 +115,13 @@ cron = "0.13"
 jsonschema = { version = "0.45", default-features = false }
 
 # Shared types
-ironclaw_common = { path = "crates/ironclaw_common", version = "0.3.0" }
+ironclaw_common = { path = "crates/ironclaw_common", version = "0.4.0" }
 
 # Safety/sanitization
 ironclaw_engine = { path = "crates/ironclaw_engine", version = "0.1.0" }
 ironclaw_gateway = { path = "crates/ironclaw_gateway", version = "0.1.0" }
-ironclaw_safety = { path = "crates/ironclaw_safety", version = "0.2.1" }
-ironclaw_skills = { path = "crates/ironclaw_skills", version = "0.2.0" }
+ironclaw_safety = { path = "crates/ironclaw_safety", version = "0.2.2" }
+ironclaw_skills = { path = "crates/ironclaw_skills", version = "0.3.0" }
 ironclaw_tui = { path = "crates/ironclaw_tui", optional = true, version = "0.1.0" }
 regex = "1"
 aho-corasick = "1"
@@ -153,8 +152,8 @@ open = "5"
 pgvector = { version = "0.4", features = ["postgres"], optional = true }
 
 # WASM sandbox for untrusted tool execution
-wasmtime = { version = "43.0.1", features = ["component-model"] }
-wasmtime-wasi = "43.0.1"  # WASI support for component model
+wasmtime = { version = "43.0.2", features = ["component-model"] }
+wasmtime-wasi = "43.0.2"  # WASI support for component model
 wasmparser = "0.245.1"  # WASM binary parsing for validation
 
 # Cryptography for secrets management
@@ -282,7 +281,7 @@ lto = "thin"
 # Config for 'dist'
 [workspace.metadata.dist]
 # The preferred dist version to use in CI (Cargo.toml SemVer syntax)
-cargo-dist-version = "0.30.3"
+cargo-dist-version = "0.31.0"
 # Ignore out-of-date generated CI so custom release.yml jobs are allowed
 allow-dirty = ["ci"]
 # CI backends to support

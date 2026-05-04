@@ -9,6 +9,11 @@ on:
   pull_request:
     branches:
       - main
+  merge_group:
+    branches:
+      - main
+    types:
+      - checks_requested
   push:
     branches:
       - main
@@ -17,42 +22,111 @@ permissions:
   contents: read
 
 concurrency:
-  group: test-${{ github.head_ref || github.ref }}
+  group: test-${{ github.event_name }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  # ── Skip expensive jobs when only docs/config changed on a PR ──
   changes:
     name: Detect code changes
     runs-on: ubuntu-latest
     outputs:
-      has_code: ${{ steps.non_pr.outputs.has_code || steps.pr_check.outputs.has_code }}
+      docs_only: ${{ steps.non_diff.outputs.docs_only || steps.diff.outputs.docs_only }}
+      has_core_code: ${{ steps.non_diff.outputs.has_core_code || steps.diff.outputs.has_core_code }}
+      has_engine_replay_risk: ${{ steps.non_diff.outputs.has_engine_replay_risk || steps.diff.outputs.has_engine_replay_risk }}
+      has_runtime_heavy_risk: ${{ steps.non_diff.outputs.has_runtime_heavy_risk || steps.diff.outputs.has_runtime_heavy_risk }}
+      has_web_risk: ${{ steps.non_diff.outputs.has_web_risk || steps.diff.outputs.has_web_risk }}
+      has_wasm_abi_risk: ${{ steps.non_diff.outputs.has_wasm_abi_risk || steps.diff.outputs.has_wasm_abi_risk }}
+      has_telegram_risk: ${{ steps.non_diff.outputs.has_telegram_risk || steps.diff.outputs.has_telegram_risk }}
+      has_slack_risk: ${{ steps.non_diff.outputs.has_slack_risk || steps.diff.outputs.has_slack_risk }}
     steps:
-      - id: non_pr
-        if: github.event_name != 'pull_request'
-        run: echo "has_code=true" >> "$GITHUB_OUTPUT"
+      - id: non_diff
+        if: github.event_name != 'pull_request' && github.event_name != 'merge_group'
+        run: |
+          echo "docs_only=false" >> "$GITHUB_OUTPUT"
+          echo "has_core_code=true" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "workflow_call" ]; then
+            echo "has_engine_replay_risk=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_engine_replay_risk=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "has_runtime_heavy_risk=true" >> "$GITHUB_OUTPUT"
+          # Keep full browser E2E outside the workflow-call / push path for now;
+          # merge_group runs cover the full browser suite before queued merges land.
+          echo "has_web_risk=false" >> "$GITHUB_OUTPUT"
+          echo "has_wasm_abi_risk=true" >> "$GITHUB_OUTPUT"
+          echo "has_telegram_risk=true" >> "$GITHUB_OUTPUT"
+          echo "has_slack_risk=true" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         with:
           fetch-depth: 0
           persist-credentials: false
-      - id: pr_check
-        if: github.event_name == 'pull_request'
+      - id: diff
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
         run: |
-          CODE_CHANGES=$(git diff --name-only "$BASE_SHA"...HEAD -- \
-            'src/' 'crates/' 'channels-src/' 'tools-src/' 'tests/' 'migrations/' \
-            'Cargo.toml' 'Cargo.lock' 'Dockerfile' 'build.rs' \
-            | head -1)
-          if [ -n "$CODE_CHANGES" ]; then
-            echo "has_code=true" >> "$GITHUB_OUTPUT"
+          CHANGED_FILES="$(git diff --name-only "$BASE_SHA"...HEAD)"
+
+          echo "Changed files:"
+          if [ -n "$CHANGED_FILES" ]; then
+            printf '%s\n' "$CHANGED_FILES"
           else
-            echo "has_code=false" >> "$GITHUB_OUTPUT"
-            echo "No code changes detected — expensive jobs will be skipped"
+            echo "<none>"
           fi
 
-  # ── Dynamic matrix: PRs run only all-features; full matrix on staging/push ──
+          has_match() {
+            printf '%s\n' "$CHANGED_FILES" | grep -Eq "$1"
+          }
+
+          if [ -z "$CHANGED_FILES" ] || [ -z "$(printf '%s\n' "$CHANGED_FILES" | grep -Ev '(^docs/|^\\.github/ISSUE_TEMPLATE/|^\\.github/pull_request_template\\.md$|^[^/]+\\.md$)' || true)" ]; then
+            echo "docs_only=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if has_match '^(src/|crates/|channels-src/|tools-src/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|build\.rs$|\.github/workflows/(test|e2e|replay-gate|code_style|docker|release|release-plz|rebuild-release-image|coverage|live-canary|pr-label-classify|pr-label-scope|claude-review)\.yml$|\.github/actions/install-cargo-component/|\.github/(dependabot|labeler)\.yml$)'; then
+            echo "has_core_code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_core_code=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if has_match '^(crates/ironclaw_(common|engine|skills)/|src/(agent|auth|bridge|context|extensions|llm|orchestrator|secrets|skills|tools|worker|workspace)/|tests/fixtures/llm_traces/|tests/snapshots/|tests/support/replay_outcome\.rs$|tests/e2e_engine_v2\.rs$|tests/e2e_live\.rs$|tests/e2e_recorded_trace\.rs$|tests/e2e_advanced_traces\.rs$|tests/e2e_trace_.*\.rs$|Cargo\.toml$|\.github/workflows/(replay-gate|test)\.yml$)'; then
+            echo "has_engine_replay_risk=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_engine_replay_risk=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if has_match '^(crates/ironclaw_(common|safety|skills)/|src/(agent|auth|bridge|config|context|db|extensions|gate|history|hooks|orchestrator|ownership|pairing|safety|sandbox|secrets|setup|skills|tools|webhooks|worker|workspace)/|src/channels/channel\.rs$|src/channels/manager\.rs$|src/channels/relay/|src/channels/wasm/|channels-src/telegram/|migrations/|src/app\.rs$|src/main\.rs$|src/lib\.rs$|tests/telegram_auth_integration\.rs$|tests/e2e_thread_scheduling\.rs$|\.github/workflows/test\.yml$)'; then
+            echo "has_runtime_heavy_risk=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_runtime_heavy_risk=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if has_match '^(src/(auth|bridge|extensions|ownership|pairing|secrets|webhooks|workspace)/|src/channels/web/|crates/ironclaw_gateway/|src/channels/attachments\.rs$|tests/e2e/|tests/fixtures/gateway_traces/|tests/test-pages/|scripts/check_gateway_boundaries\.py$|\.github/workflows/(e2e|test)\.yml$)'; then
+            echo "has_web_risk=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_web_risk=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if has_match '^(wit/|crates/ironclaw_common/|src/(channels/wasm|extensions|registry|tools/mcp|tools/wasm)/|channels-src/|tools-src/|registry/|scripts/build-wasm-extensions\.sh$|scripts/check-version-bumps\.sh$|tests/wit_compat\.rs$|tests/wasm_channel_integration\.rs$|tests/e2e_wasm_.*|Cargo\.toml$|Cargo\.lock$|\.github/workflows/test\.yml$)'; then
+            echo "has_wasm_abi_risk=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_wasm_abi_risk=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if has_match '^(channels-src/telegram/|src/channels/wasm/|tests/telegram_auth_integration\.rs$|tests/e2e_telegram_message_routing\.rs$|tests/e2e/scenarios/test_telegram_.*|\.github/workflows/test\.yml$)'; then
+            echo "has_telegram_risk=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_telegram_risk=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if has_match '^(channels-src/slack/|src/channels/wasm/|tests/slack_auth_integration\.rs$|\.github/workflows/test\.yml$)'; then
+            echo "has_slack_risk=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_slack_risk=false" >> "$GITHUB_OUTPUT"
+          fi
+
   matrix-config:
     name: Configure matrix
     runs-on: ubuntu-latest
@@ -76,9 +150,12 @@ jobs:
   tests:
     name: Tests (${{ matrix.name }})
     needs: [changes, matrix-config]
-    if: needs.changes.outputs.has_code == 'true'
+    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_core_code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     strategy:
       fail-fast: false
       matrix:
@@ -89,6 +166,11 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          df -h /
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
@@ -96,7 +178,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: ${{ matrix.name }}
-          save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Install cargo-component
         uses: ./.github/actions/install-cargo-component
       - name: Build WASM channels (for integration tests)
@@ -109,7 +191,7 @@ jobs:
   heavy-integration-tests:
     name: Heavy Integration Tests
     needs: changes
-    if: needs.changes.outputs.has_code == 'true'
+    if: needs.changes.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || needs.changes.outputs.has_runtime_heavy_risk == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -125,23 +207,87 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: heavy-integration
-          save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Build Telegram WASM channel
         run: cargo build --manifest-path channels-src/telegram/Cargo.toml --target wasm32-wasip2 --release
       - name: Run thread scheduling integration tests
         run: |
           timeout --signal=INT --kill-after=30s 15m \
             cargo test --no-default-features --features libsql,integration --test e2e_thread_scheduling -- --nocapture
-      - name: Run Telegram thread-scope regression test
+
+  telegram-integration-tests:
+    name: Telegram Integration Tests (${{ matrix.partition }})
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || needs.changes.outputs.has_runtime_heavy_risk == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        partition:
+          - 1/2
+          - 2/2
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: telegram-integration-${{ matrix.partition }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Build Telegram WASM channel
+        run: cargo build --manifest-path channels-src/telegram/Cargo.toml --target wasm32-wasip2 --release
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # v2
+        with:
+          tool: cargo-nextest
+      - name: Run Telegram integration tests
+        env:
+          NEXTEST_PROFILE: ci
         run: |
-          timeout --signal=INT --kill-after=30s 10m \
-            cargo test --features integration --test telegram_auth_integration test_private_messages_use_chat_id_as_thread_scope -- --exact
+          timeout --signal=INT --kill-after=30s 15m \
+            cargo nextest run \
+              --profile ci \
+              --features integration \
+              --test telegram_auth_integration \
+              --partition hash:${{ matrix.partition }}
+
+  replay-required:
+    name: Replay Required
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true' && github.event_name != 'push' && (github.event_name == 'workflow_call' || needs.changes.outputs.has_engine_replay_risk == 'true')
+    uses: ./.github/workflows/replay-gate.yml
+    with:
+      ref: ${{ inputs.ref || github.sha }}
+
+  web-e2e-smoke:
+    name: Web E2E Smoke
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true' && github.event_name == 'pull_request' && needs.changes.outputs.has_web_risk == 'true'
+    uses: ./.github/workflows/e2e.yml
+    with:
+      ref: ${{ inputs.ref || github.sha }}
+      mode: smoke
+
+  web-e2e-full:
+    name: Web E2E Full
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true' && github.event_name == 'merge_group' && needs.changes.outputs.has_web_risk == 'true'
+    uses: ./.github/workflows/e2e.yml
+    with:
+      ref: ${{ inputs.ref || github.sha }}
+      mode: full
 
   telegram-tests:
     name: Telegram Channel Tests
-    if: >
-      github.event_name != 'pull_request' ||
-      github.base_ref != 'staging'
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || needs.changes.outputs.has_telegram_risk == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -154,18 +300,43 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Run Telegram Channel Tests
         run: |
           timeout --signal=INT --kill-after=30s 10m \
             cargo test --manifest-path channels-src/telegram/Cargo.toml -- --nocapture
 
+  slack-tests:
+    name: Slack Channel Tests
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || needs.changes.outputs.has_slack_risk == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: slack-integration
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Build Slack WASM channel
+        run: cargo build --manifest-path channels-src/slack/Cargo.toml --target wasm32-wasip2 --release
+      - name: Run Slack integration tests
+        run: |
+          timeout --signal=INT --kill-after=30s 15m \
+            cargo test --features integration --test slack_auth_integration -- --nocapture
+
   windows-build:
     name: Windows Build (${{ matrix.name }})
-    needs: matrix-config
-    if: >
-      github.event_name != 'pull_request' ||
-      github.base_ref != 'staging'
+    needs: [changes, matrix-config]
+    if: needs.changes.outputs.docs_only != 'true' && github.event_name != 'pull_request'
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -182,23 +353,30 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: windows-${{ matrix.name }}
-          save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Check compilation
         run: cargo check --all --benches --tests --examples ${{ matrix.flags }}
 
   wasm-wit-compat:
     name: WASM WIT Compatibility
-    if: >
-      github.event_name != 'pull_request' ||
-      github.base_ref != 'staging'
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || needs.changes.outputs.has_wasm_abi_risk == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          df -h /
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
@@ -206,7 +384,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: wasm-extensions
-          save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Install cargo-component
         uses: ./.github/actions/install-cargo-component
       - name: Build all WASM extensions against current WIT
@@ -214,12 +392,12 @@ jobs:
       - name: Instantiation test (host linker compatibility)
         run: |
           timeout --signal=INT --kill-after=30s 20m \
-            cargo test --all-features wit_compat -- --nocapture
+            cargo test --all-features --test wit_compat -- --nocapture
 
   bench-compile:
     name: Benchmark Compilation
     needs: changes
-    if: needs.changes.outputs.has_code == 'true'
+    if: needs.changes.outputs.docs_only != 'true' && github.event_name != 'pull_request' && needs.changes.outputs.has_core_code == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -232,15 +410,14 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: bench
-          save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Compile benchmarks
         run: cargo bench --all-features --no-run
 
   docker-build:
     name: Docker Build
-    if: >
-      github.event_name != 'pull_request' ||
-      github.base_ref != 'staging'
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -254,7 +431,14 @@ jobs:
   version-check:
     name: Version Bump Check
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    needs: changes
+    if: >
+      (github.event_name == 'pull_request' || github.event_name == 'merge_group') &&
+      needs.changes.outputs.docs_only != 'true'
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -262,46 +446,150 @@ jobs:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
           fetch-depth: 0
+      - name: Resolve version-check skip labels
+        id: skip_labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ inputs.ref || github.sha }}
+          PR_LABELS: ${{ github.event_name == 'pull_request' && join(github.event.pull_request.labels.*.name, ',') || '' }}
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "labels=${PR_LABELS}" >> "$GITHUB_OUTPUT"
+            echo "allow_skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          COMPARE_JSON="$(gh api "repos/${REPO}/compare/${BASE_SHA}...${HEAD_SHA}")"
+          PR_NUMBERS="$(
+            printf '%s' "$COMPARE_JSON" | jq -r '.commits[].sha' \
+            | while read -r sha; do
+                [ -n "$sha" ] || continue
+                gh api "repos/${REPO}/commits/${sha}/pulls" \
+                  -H "Accept: application/vnd.github+json" \
+                  --jq '.[].number' 2>/dev/null || true
+              done \
+            | awk 'NF && !seen[$0]++'
+          )"
+
+          PR_COUNT="$(printf '%s\n' "$PR_NUMBERS" | awk 'NF' | wc -l | tr -d ' ')"
+          if [ "${PR_COUNT}" != "1" ]; then
+            echo "labels=" >> "$GITHUB_OUTPUT"
+            echo "allow_skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          LABELS="$(
+            printf '%s\n' "$PR_NUMBERS" \
+            | while read -r pr; do
+                [ -n "$pr" ] || continue
+                gh api "repos/${REPO}/issues/${pr}" --jq '.labels[].name' 2>/dev/null || true
+              done \
+            | awk 'NF && !seen[$0]++'
+          )"
+
+          if [ -n "$LABELS" ]; then
+            echo "labels=$(printf '%s\n' "$LABELS" | paste -sd, -)" >> "$GITHUB_OUTPUT"
+          else
+            echo "labels=" >> "$GITHUB_OUTPUT"
+          fi
+          echo "allow_skip=true" >> "$GITHUB_OUTPUT"
       - name: Check version bumps for changed extensions
         env:
-          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          PR_LABELS: ${{ steps.skip_labels.outputs.labels }}
+          GITHUB_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || github.event_name == 'merge_group' && github.event.merge_group.base_ref || '' }}
+          ALLOW_SKIP_VERSION_CHECK: ${{ steps.skip_labels.outputs.allow_skip }}
         run: ./scripts/check-version-bumps.sh
 
-  # Roll-up job for branch protection
   run-tests:
     name: Run Tests
     runs-on: ubuntu-latest
     if: always()
-    needs: [changes, matrix-config, tests, heavy-integration-tests, telegram-tests, wasm-wit-compat, docker-build, windows-build, version-check, bench-compile]
+    needs:
+      - changes
+      - matrix-config
+      - tests
+      - heavy-integration-tests
+      - telegram-integration-tests
+      - replay-required
+      - web-e2e-smoke
+      - web-e2e-full
+      - telegram-tests
+      - slack-tests
+      - wasm-wit-compat
+      - docker-build
+      - windows-build
+      - version-check
+      - bench-compile
     steps:
       - run: |
-          # If no code changes on a PR, expensive jobs were correctly skipped
-          if [[ "${{ needs.changes.outputs.has_code }}" == "false" ]]; then
-            echo "No code changes — all tests skipped correctly"
+          require_success() {
+            name="$1"
+            result="$2"
+            if [[ "$result" != "success" ]]; then
+              echo "$name failed: $result"
+              exit 1
+            fi
+          }
+
+          event="${{ github.event_name }}"
+
+          if [[ "${{ needs.changes.result }}" != "success" ]]; then
+            echo "changes failed: ${{ needs.changes.result }}"
+            exit 1
+          fi
+
+          if [[ "${{ needs.changes.outputs.docs_only }}" == "true" ]]; then
+            echo "Docs-only change detected — test roll-up passes fast"
             exit 0
           fi
 
-          # Unit tests must always pass
-          if [[ "${{ needs.tests.result }}" != "success" ]]; then
-            echo "Unit tests failed"
-            exit 1
+          if [[ "${{ needs.changes.outputs.has_core_code }}" == "true" ]]; then
+            require_success "tests" "${{ needs.tests.result }}"
           fi
-          if [[ "${{ needs.heavy-integration-tests.result }}" != "success" ]]; then
-            echo "Heavy integration tests failed"
-            exit 1
+
+          if [[ "$event" != "pull_request" || "${{ needs.changes.outputs.has_runtime_heavy_risk }}" == "true" ]]; then
+            require_success "heavy-integration-tests" "${{ needs.heavy-integration-tests.result }}"
+            require_success "telegram-integration-tests" "${{ needs.telegram-integration-tests.result }}"
           fi
-          # Gated jobs: must pass on promotion PRs / push, skipped on developer PRs
-          for job in telegram-tests wasm-wit-compat docker-build windows-build version-check bench-compile; do
-            case "$job" in
-              telegram-tests) result="${{ needs.telegram-tests.result }}" ;;
-              wasm-wit-compat) result="${{ needs.wasm-wit-compat.result }}" ;;
-              docker-build) result="${{ needs.docker-build.result }}" ;;
-              windows-build) result="${{ needs.windows-build.result }}" ;;
-              version-check) result="${{ needs.version-check.result }}" ;;
-              bench-compile) result="${{ needs.bench-compile.result }}" ;;
-            esac
-            if [[ "$result" == "failure" || "$result" == "cancelled" ]]; then
-              echo "$job failed"
-              exit 1
-            fi
-          done
+
+          if [[ "$event" != "push" && ( "$event" == "workflow_call" || "${{ needs.changes.outputs.has_engine_replay_risk }}" == "true" ) ]]; then
+            require_success "replay-required" "${{ needs.replay-required.result }}"
+          fi
+
+          if [[ "$event" == "pull_request" && "${{ needs.changes.outputs.has_web_risk }}" == "true" ]]; then
+            require_success "web-e2e-smoke" "${{ needs.web-e2e-smoke.result }}"
+          fi
+
+          if [[ "$event" == "merge_group" && "${{ needs.changes.outputs.has_web_risk }}" == "true" ]]; then
+            require_success "web-e2e-full" "${{ needs.web-e2e-full.result }}"
+          fi
+
+          if [[ "$event" != "pull_request" || "${{ needs.changes.outputs.has_telegram_risk }}" == "true" ]]; then
+            require_success "telegram-tests" "${{ needs.telegram-tests.result }}"
+          fi
+
+          if [[ "$event" != "pull_request" || "${{ needs.changes.outputs.has_slack_risk }}" == "true" ]]; then
+            require_success "slack-tests" "${{ needs.slack-tests.result }}"
+          fi
+
+          if [[ "$event" != "pull_request" || "${{ needs.changes.outputs.has_wasm_abi_risk }}" == "true" ]]; then
+            require_success "wasm-wit-compat" "${{ needs.wasm-wit-compat.result }}"
+          fi
+
+          if [[ "$event" != "pull_request" ]]; then
+            require_success "docker-build" "${{ needs.docker-build.result }}"
+          fi
+
+          if [[ "$event" != "pull_request" ]]; then
+            require_success "windows-build" "${{ needs.windows-build.result }}"
+          fi
+
+          if [[ "$event" != "pull_request" && "${{ needs.changes.outputs.has_core_code }}" == "true" ]]; then
+            require_success "bench-compile" "${{ needs.bench-compile.result }}"
+          fi
+
+          if [[ "$event" == "pull_request" || "$event" == "merge_group" ]] && [[ "${{ needs.changes.outputs.docs_only }}" != "true" ]]; then
+            require_success "version-check" "${{ needs.version-check.result }}"
+          fi

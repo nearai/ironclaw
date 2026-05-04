@@ -9,7 +9,7 @@ chooses the wrong action or claims success before persistence.
 
 ## Scope
 
-Observed from live persona traces and logs, especially:
+Observed from committed live persona traces and generated local logs, especially:
 
 - `tests/fixtures/llm_traces/live/ceo_full_workflow.log`
 - `tests/fixtures/llm_traces/live/content_creator_full_workflow.log`
