@@ -390,8 +390,12 @@ function pruneOldMessages() {
   let removed = 0;
   const target = items.length - MAX_DOM_MESSAGES;
   for (let i = 0; i < items.length && removed < target; i++) {
-    if (items[i].getAttribute('data-streaming') === 'true') continue;
-    items[i].remove();
+    const item = items[i];
+    if (item.getAttribute('data-streaming') === 'true') continue;
+    const removalTarget = item.classList.contains('assistant')
+      ? (item.closest('.gw-msg') || item)
+      : item;
+    removalTarget.remove();
     removed++;
   }
   // Clean up orphaned leading time-separators left after pruning.
@@ -455,6 +459,58 @@ function appendToLastAssistant(chunk) {
   } else {
     addMessage('assistant', chunk);
   }
+}
+
+// --- Reasoning (thinking) collapsible card ---
+
+function createReasoningElement(content, meta) {
+  const card = document.createElement('div');
+  card.className = 'gw-reasoning';
+
+  const header = document.createElement('button');
+  header.type = 'button';
+  header.className = 'gw-reasoning__header';
+
+  const chev = document.createElement('span');
+  chev.className = 'gw-reasoning__chev';
+  chev.textContent = '\u203A'; // ›
+  header.appendChild(chev);
+
+  const label = document.createElement('span');
+  label.className = 'gw-reasoning__label';
+  label.textContent = I18n.t('message.thinking');
+  header.appendChild(label);
+
+  if (meta) {
+    const metaEl = document.createElement('span');
+    metaEl.className = 'gw-reasoning__meta';
+    metaEl.textContent = meta;
+    header.appendChild(metaEl);
+  }
+
+  const body = document.createElement('div');
+  body.className = 'gw-reasoning__body';
+  body.style.display = 'none';
+  body.textContent = content || '';
+
+  header.addEventListener('click', () => {
+    const isOpen = body.style.display !== 'none';
+    body.style.display = isOpen ? 'none' : 'block';
+    chev.classList.toggle('is-open', !isOpen);
+    card.classList.toggle('is-open', !isOpen);
+  });
+
+  card.appendChild(header);
+  card.appendChild(body);
+  return card;
+}
+
+function addReasoningCard(content, meta) {
+  const container = document.getElementById('chat-messages');
+  const card = createReasoningElement(content, meta);
+  container.appendChild(card);
+  container.scrollTop = container.scrollHeight;
+  return card;
 }
 
 // --- Inline Tool Activity Cards ---

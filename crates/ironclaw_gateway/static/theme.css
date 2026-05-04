@@ -18,6 +18,7 @@
   --radius: 8px;
   --radius-lg: 12px;
   --shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  --font-sans: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --font-mono: 'IBM Plex Mono', 'SF Mono', 'Fira Code', Consolas, monospace;
   --bg-overlay: rgba(0, 0, 0, 0.5);
   --bg-modal: #1a1a1a;
@@ -29,6 +30,10 @@
   --text-on-accent: #09090b;
   --accent-brand: #00D894;
   --accent-brand-hover: #00be82;
+  --docs-primary: #1191f0;
+  --docs-primary-hover: #0e7bcd;
+  --docs-primary-soft: rgba(17, 145, 240, 0.15);
+  --mascot-blue: #1191f0;
   --warning-bg: #1e1400;
   --warning-border: #3a2a00;
   --warning-text: #facc15;
@@ -184,4 +189,40 @@
   --bg-hover: var(--hover-surface);
   --danger-soft: var(--danger-subtle);
   --warning-soft: var(--warning-subtle);
+}
+
+/* Scrollbar — thin, unobtrusive, theme-aware */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.1) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+[data-theme="light"] * {
+  scrollbar-color: rgba(0, 0, 0, 0.15) transparent;
+}
+
+[data-theme="light"] *::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.15);
+}
+
+[data-theme="light"] *::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.25);
 }

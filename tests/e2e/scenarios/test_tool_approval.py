@@ -94,8 +94,12 @@ async def _wait_for_history(
     )
 
 
+def _normalized_resolution_label(text: str | None) -> str:
+    return (text or "").strip().removeprefix("✓ ").removeprefix("✗ ").strip()
+
+
 async def test_approval_card_appears(page):
-    """Injecting an approval event should show the approval card."""
+    """Injecting an approval event should show the current approval card UI."""
     # Inject a fake approval_needed event
     await page.evaluate("""
         showApproval({
@@ -111,14 +115,14 @@ async def test_approval_card_appears(page):
     card = page.locator(SEL["approval_card"])
     await card.wait_for(state="visible", timeout=5000)
 
-    # Check card contents
-    header = card.locator(SEL["approval_header"].replace(".approval-card ", ""))
-    assert await header.text_content() == "Tool requires approval"
+    header = card.locator(SEL["approval_header"])
+    await header.wait_for(state="visible", timeout=5000)
+    assert "shell" in (await header.inner_text()).lower()
 
-    tool_name = card.locator(".approval-tool-name")
+    tool_name = card.locator(SEL["approval_tool_name"])
     assert await tool_name.text_content() == "shell"
 
-    desc = card.locator(".approval-description")
+    desc = card.locator(SEL["approval_description"])
     assert "echo hello world" in await desc.text_content()
 
     # Verify all three buttons exist
@@ -154,8 +158,41 @@ async def test_approval_approve_disables_buttons(page):
         assert is_disabled, f"Button {i} should be disabled after approval"
 
     # Resolved status should show
-    resolved = card.locator(".approval-resolved")
-    assert await resolved.text_content() == "Approved"
+    resolved = card.locator(SEL["approval_resolved"])
+    assert _normalized_resolution_label(await resolved.text_content()) == "Approved"
+
+
+async def test_approval_resolve_removes_warning_wrapper(page):
+    """Resolving an approval removes the entire warning row, not just the card."""
+    request_id = "test-req-002b"
+    await page.evaluate(
+        """(requestId) => {
+            showApproval({
+                request_id: requestId,
+                thread_id: currentThreadId,
+                tool_name: 'http',
+                description: 'GET https://example.com/remove-wrapper',
+            })
+        }""",
+        request_id,
+    )
+
+    card = page.locator(f'.approval-card[data-request-id="{request_id}"]')
+    await card.wait_for(state="visible", timeout=5000)
+    await card.locator("button.approve").click()
+
+    resolved = card.locator(SEL["approval_resolved"])
+    await resolved.wait_for(state="visible", timeout=5000)
+
+    # chat.js removes the whole .gw-msg wrapper after a 1.5s confirmation delay.
+    await page.wait_for_function(
+        """(requestId) => !document.querySelector(
+            `.approval-card[data-request-id="${requestId}"]`
+        )""",
+        arg=request_id,
+        timeout=5000,
+    )
+    assert await page.locator('#chat-messages .gw-msg__avatar--warn').count() == 0
 
 
 async def test_approval_deny_shows_denied(page):
@@ -176,42 +213,99 @@ async def test_approval_deny_shows_denied(page):
     await card.locator("button.deny").click()
 
     await page.wait_for_timeout(500)
-    resolved = card.locator(".approval-resolved")
-    assert await resolved.text_content() == "Denied"
+    resolved = card.locator(SEL["approval_resolved"])
+    assert _normalized_resolution_label(await resolved.text_content()) == "Denied"
 
 
 async def test_approval_params_toggle(page):
-    """Parameters toggle should show/hide the parameter details."""
-    await page.evaluate("""
-        showApproval({
-            request_id: 'test-req-004',
-            thread_id: currentThreadId,
-            tool_name: 'shell',
-            description: 'Run command',
-            parameters: '{"command": "ls -la /tmp"}'
-        })
-    """)
+    """Long approval params should expand/collapse via the current toggle UI."""
+    parameters = json.dumps(
+        {
+            "command": "ls -la /tmp",
+            "notes": "x" * 240,
+        },
+        indent=2,
+    )
+    await page.evaluate(
+        """(params) => {
+            showApproval({
+                request_id: 'test-req-004',
+                thread_id: currentThreadId,
+                tool_name: 'shell',
+                description: 'Run command',
+                parameters: params,
+            })
+        }""",
+        parameters,
+    )
 
     card = page.locator('.approval-card[data-request-id="test-req-004"]')
     await card.wait_for(state="visible", timeout=5000)
 
+    toggle = card.locator(SEL["approval_params_toggle"])
+    await toggle.wait_for(state="visible", timeout=5000)
+
     # Parameters should be hidden initially
-    params = card.locator(".approval-params")
+    params = card.locator(SEL["approval_params"])
     assert await params.is_hidden(), "Parameters should be hidden initially"
 
-    # Click toggle to show
-    toggle = card.locator(".approval-params-toggle")
+    # Click toggle to show the full payload
     await toggle.click()
     await page.wait_for_timeout(300)
 
     assert await params.is_visible(), "Parameters should be visible after toggle"
     text = await params.text_content()
-    assert "ls -la /tmp" in text
+    assert text is not None and text == parameters
 
     # Click toggle again to hide
     await toggle.click()
     await page.wait_for_timeout(300)
     assert await params.is_hidden(), "Parameters should be hidden after second toggle"
+
+
+async def test_subagent_tool_args_keep_highlighting_after_html_escaping(page):
+    """Caller-level tool rendering should still highlight JSON after escaping."""
+    tool_args = json.dumps(
+        {
+            "command": 'echo "hi"',
+            "path": "<b>unsafe</b>",
+            "count": 2,
+        }
+    )
+
+    await page.evaluate(
+        """(toolArgs) => {
+            const card = window.__e2e.toolActivity.createSubAgentCard({
+                id: 'test-subagent-args',
+                title: 'Formatter',
+                status: 'done',
+                tools: [{
+                    name: 'shell',
+                    status: 'success',
+                    args: toolArgs,
+                    duration_ms: 12,
+                }],
+            });
+            document.getElementById('chat-messages').appendChild(card);
+        }""",
+        tool_args,
+    )
+
+    card = page.locator(f"{SEL['subagent_card']}[data-subagent-id='test-subagent-args']")
+    await card.wait_for(state="visible", timeout=5000)
+    await card.locator(SEL["subagent_header"]).click()
+
+    args = card.locator(f"{SEL['subagent_steps']} {SEL['toolline_args']}")
+    await args.wait_for(state="visible", timeout=5000)
+
+    assert await card.locator(SEL["toolline_arg_key"]).count() == 3
+    assert await card.locator(SEL["toolline_arg_string"]).count() == 2
+    assert await card.locator(SEL["toolline_arg_number"]).count() == 1
+
+    args_text = await args.text_content()
+    assert args_text == tool_args
+    assert "<b>unsafe</b>" in args_text
+    assert await args.locator("b").count() == 0
 
 
 async def test_waiting_for_approval_message_no_error_prefix(page):
@@ -232,8 +326,8 @@ async def test_waiting_for_approval_message_no_error_prefix(page):
     card = page.locator(SEL["approval_card"]).last
     await card.wait_for(state="visible", timeout=10000)
 
-    tool_name = await card.locator(".approval-tool-name").text_content()
-    desc_text = await card.locator(".approval-description").text_content()
+    tool_name = await card.locator(SEL["approval_tool_name"]).text_content()
+    desc_text = await card.locator(SEL["approval_description"]).text_content()
     assert tool_name == "http"
     assert desc_text is not None and "HTTP requests to external APIs" in desc_text
 
@@ -313,7 +407,7 @@ async def test_chat_reply_deny_rejects_pending_tool(ironclaw_server):
     assert "Tool 'http' was rejected" in response_text
 
 
-async def test_text_approval_resolves_real_tool_call(page):
+async def test_text_approval_resolves_real_tool_call_page_fixture(page):
     """Typing 'yes' should resolve a real approval gate triggered by a tool call."""
     await _require_http_approval(_page_base_url(page))
     chat_input = page.locator(SEL["chat_input"])
@@ -327,7 +421,7 @@ async def test_text_approval_resolves_real_tool_call(page):
     card = page.locator(SEL["approval_card"]).last
     await card.wait_for(state="visible", timeout=15000)
 
-    tool_name = await card.locator(".approval-tool-name").text_content()
+    tool_name = await card.locator(SEL["approval_tool_name"]).text_content()
     assert tool_name == "http"
 
     # Type "yes" to approve — should be intercepted by the frontend
@@ -337,13 +431,13 @@ async def test_text_approval_resolves_real_tool_call(page):
     # Card should show resolved status
     resolved = card.locator(".approval-resolved")
     await resolved.wait_for(state="visible", timeout=5000)
-    assert await resolved.text_content() == "Approved"
+    assert _normalized_resolution_label(await resolved.text_content()) == "Approved"
 
     # Card should be removed after brief delay
     await card.wait_for(state="hidden", timeout=5000)
 
 
-async def test_slash_approve_is_thread_scoped_api(ironclaw_server):
+async def test_slash_approve_is_thread_scoped_api_default_server(ironclaw_server):
     """Sending '/approve' in thread A must not resolve a pending gate in thread B."""
     await _require_http_approval(ironclaw_server)
     thread_a = await _create_thread(ironclaw_server)
@@ -435,7 +529,7 @@ async def test_text_yes_intercepts_approval(page):
 
     resolved = card.locator(".approval-resolved")
     await resolved.wait_for(state="visible", timeout=5000)
-    assert await resolved.text_content() == "Approved"
+    assert _normalized_resolution_label(await resolved.text_content()) == "Approved"
 
     # Input should be cleared after interception
     assert await chat_input.input_value() == "", "Input should be cleared after keyword interception"
@@ -468,7 +562,7 @@ async def test_text_no_intercepts_denial(page):
 
     resolved = card.locator(".approval-resolved")
     await resolved.wait_for(state="visible", timeout=5000)
-    assert await resolved.text_content() == "Denied"
+    assert _normalized_resolution_label(await resolved.text_content()) == "Denied"
 
     assert await chat_input.input_value() == "", "Input should be cleared after keyword interception"
 
@@ -494,7 +588,7 @@ async def test_text_always_intercepts_always(page):
 
     resolved = card.locator(".approval-resolved")
     await resolved.wait_for(state="visible", timeout=5000)
-    assert await resolved.text_content() == "Always approved"
+    assert _normalized_resolution_label(await resolved.text_content()) == "Always approved"
 
     assert await chat_input.input_value() == "", "Input should be cleared after keyword interception"
 
@@ -535,7 +629,7 @@ async def test_text_skips_resolved_card_targets_unresolved(page):
 
     older_resolved = older_card.locator(".approval-resolved")
     await older_resolved.wait_for(state="visible", timeout=5000)
-    assert await older_resolved.text_content() == "Approved"
+    assert _normalized_resolution_label(await older_resolved.text_content()) == "Approved"
 
 
 async def test_text_aliases_intercepted(page):
@@ -570,7 +664,7 @@ async def test_text_aliases_intercepted(page):
 
         resolved = card.locator(".approval-resolved")
         await resolved.wait_for(state="visible", timeout=5000)
-        actual = await resolved.text_content()
+        actual = _normalized_resolution_label(await resolved.text_content())
         assert actual == expected_label, (
             f"Alias '{text}' should resolve as '{expected_label}', got '{actual}'"
         )
@@ -608,7 +702,7 @@ async def test_text_approval_case_insensitive(page):
 
         resolved = card.locator(".approval-resolved")
         await resolved.wait_for(state="visible", timeout=5000)
-        actual = await resolved.text_content()
+        actual = _normalized_resolution_label(await resolved.text_content())
         assert actual == expected_label, (
             f"Case '{text}' should resolve as '{expected_label}', got '{actual}'"
         )
@@ -649,7 +743,7 @@ async def test_normal_text_not_intercepted_with_approval_card(page):
     )
 
 
-async def test_text_approval_resolves_real_tool_call(browser, managed_gateway_server):
+async def test_text_approval_resolves_real_tool_call_managed_server(browser, managed_gateway_server):
     """Typing 'yes' should resolve a real approval gate triggered by a tool call."""
     await _require_http_approval(managed_gateway_server.base_url)
     context = await browser.new_context(viewport={"width": 1280, "height": 720})
@@ -667,7 +761,7 @@ async def test_text_approval_resolves_real_tool_call(browser, managed_gateway_se
         card = page.locator(SEL["approval_card"]).last
         await card.wait_for(state="visible", timeout=15000)
 
-        tool_name = await card.locator(".approval-tool-name").text_content()
+        tool_name = await card.locator(SEL["approval_tool_name"]).text_content()
         assert tool_name == "http"
 
         # Type "yes" to approve — should be intercepted by the frontend
@@ -677,7 +771,7 @@ async def test_text_approval_resolves_real_tool_call(browser, managed_gateway_se
         # Card should show resolved status
         resolved = card.locator(".approval-resolved")
         await resolved.wait_for(state="visible", timeout=5000)
-        assert await resolved.text_content() == "Approved"
+        assert _normalized_resolution_label(await resolved.text_content()) == "Approved"
 
         # Card should be removed after brief delay
         await card.wait_for(state="hidden", timeout=5000)
@@ -861,7 +955,7 @@ async def test_slash_approve_does_not_intercept_other_thread_card(page):
     )
 
 
-async def test_slash_approve_is_thread_scoped_api(managed_gateway_server):
+async def test_slash_approve_is_thread_scoped_api_managed_server(managed_gateway_server):
     """Sending '/approve' in thread A must not resolve a pending gate in thread B."""
     base_url = managed_gateway_server.base_url
     await _require_http_approval(base_url)

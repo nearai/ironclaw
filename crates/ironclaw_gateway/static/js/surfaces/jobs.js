@@ -480,7 +480,8 @@ function appendActivityEvent(terminal, eventType, data) {
       break;
     case 'tool_result': {
       const trSuccess = data.success !== false;
-      const trIcon = trSuccess ? '&#10003;' : '&#10007;';
+      const trDotClass = trSuccess ? 'activity-status-dot--ok' : 'activity-status-dot--fail';
+      const trIcon = '<span class="activity-status-dot ' + trDotClass + '"></span>';
       const trOutput = getToolActivityBodyText({
         error: data.error || '',
         result: data.output || '',

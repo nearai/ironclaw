@@ -80,6 +80,23 @@
   flex-shrink: 0;
 }
 
+.tree-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  flex-shrink: 0;
+  color: var(--text-secondary);
+}
+
+.tree-icon--dir {
+  color: var(--accent);
+}
+
+.tree-row:hover .tree-icon--file {
+  color: var(--accent);
+}
+
 .tree-label {
   white-space: nowrap;
   overflow: hidden;

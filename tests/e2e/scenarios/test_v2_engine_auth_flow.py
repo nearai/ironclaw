@@ -836,19 +836,20 @@ async def _send_files_and_wait_for_terminal_message(
 async def _wait_for_approval_card(page, tool_name: str, *, timeout: int = 30000):
     rendered_name = tool_name.replace("_", " ")
     last_cards = []
+    tool_selector = SEL["approval_tool_name"]
     for _ in range(max(1, timeout // 500)):
         cards = await page.evaluate(
-            """
-            () => Array.from(document.querySelectorAll('.approval-card')).map((card) => {
-              const tool = card.querySelector('.approval-tool-name');
-              return {
+            f"""
+            () => Array.from(document.querySelectorAll('.approval-card')).map((card) => {{
+              const tool = card.querySelector({tool_selector!r});
+              return {{
                 requestId: card.getAttribute('data-request-id'),
                 threadId: card.getAttribute('data-thread-id'),
                 visible: !!card.offsetParent,
                 text: (tool && tool.textContent || '').trim(),
                 body: (card.innerText || '').trim(),
-              };
-            })
+              }};
+            }})
             """
         )
         last_cards = cards

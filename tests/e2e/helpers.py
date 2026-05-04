@@ -47,11 +47,11 @@ SEL = {
     "sse_dot": "#sse-dot",
     # Approval overlay
     "approval_card": ".approval-card",
-    "approval_header": ".approval-header",
-    "approval_tool_name": ".approval-tool-name",
-    "approval_description": ".approval-description",
-    "approval_params_toggle": ".approval-params-toggle",
-    "approval_params": ".approval-params",
+    "approval_header": ".gw-approval__header",
+    "approval_tool_name": ".gw-approval__title",
+    "approval_description": ".gw-approval__summary",
+    "approval_params_toggle": ".gw-approval__toggle",
+    "approval_params": ".gw-approval__params",
     "approval_actions": ".approval-actions",
     "approval_approve_btn": ".approval-actions button.approve",
     "approval_always_btn": ".approval-actions button.always",
@@ -179,6 +179,14 @@ SEL = {
     "activity_tool_body":       ".activity-tool-body",
     "activity_thinking":        ".activity-thinking",
     "activity_thinking_text":   ".activity-thinking-text",
+    # Sub-agent / inline tool lines
+    "subagent_card":            ".gw-subagent",
+    "subagent_header":          ".gw-subagent__header",
+    "subagent_steps":           ".gw-subagent__steps",
+    "toolline_args":            ".gw-toolline__args",
+    "toolline_arg_key":         ".gw-toolline__args .k",
+    "toolline_arg_string":      ".gw-toolline__args .s",
+    "toolline_arg_number":      ".gw-toolline__args .n",
     # Thread processing indicator
     "thread_processing":        ".thread-processing",
     # Projects control-room
