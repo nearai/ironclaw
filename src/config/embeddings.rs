@@ -7,7 +7,7 @@ use crate::config::helpers::{
     validate_operator_base_url,
 };
 use crate::error::ConfigError;
-use crate::llm::{BedrockConfig, SessionManager};
+use crate::llm::{BedrockConfig, OLLAMA_DEFAULT_BASE_URL, SessionManager};
 use crate::settings::Settings;
 use crate::workspace::EmbeddingProvider;
 
@@ -25,7 +25,7 @@ pub struct EmbeddingsConfig {
     pub openai_api_key: Option<SecretString>,
     /// Model to use for embeddings.
     pub model: String,
-    /// Ollama base URL (for Ollama provider). Defaults to http://localhost:11434.
+    /// Ollama base URL (for Ollama provider). Defaults to `OLLAMA_DEFAULT_BASE_URL`.
     pub ollama_base_url: String,
     /// Embedding vector dimension. Inferred from the model name when not set explicitly.
     pub dimension: usize,
@@ -49,7 +49,7 @@ impl Default for EmbeddingsConfig {
             provider: "openai".to_string(),
             openai_api_key: None,
             model,
-            ollama_base_url: "http://localhost:11434".to_string(),
+            ollama_base_url: OLLAMA_DEFAULT_BASE_URL.to_string(),
             dimension,
             openai_base_url: None,
             cache_size: DEFAULT_EMBEDDING_CACHE_SIZE,
@@ -98,7 +98,6 @@ impl EmbeddingsConfig {
 
         // ollama_base_url lives on the top-level Settings, not the embeddings
         // sub-struct. Use a manual DB > env > default chain.
-        let default_ollama_url = "http://localhost:11434".to_string();
         let ollama_base_url = match settings
             .ollama_base_url
             .as_ref()
@@ -106,7 +105,8 @@ impl EmbeddingsConfig {
             .cloned()
         {
             Some(url) => url,
-            None => optional_env("OLLAMA_BASE_URL")?.unwrap_or(default_ollama_url),
+            None => optional_env("OLLAMA_BASE_URL")?
+                .unwrap_or_else(|| OLLAMA_DEFAULT_BASE_URL.to_string()),
         };
 
         // Dimension depends on the resolved model, not on a DB setting — env-only.
