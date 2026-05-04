@@ -14,8 +14,8 @@ use std::{
 
 use ironclaw_extensions::{ExtensionPackage, ExtensionRuntime};
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, ResourceEstimate, ResourceReservation, ResourceReservationId,
-    ResourceScope, ResourceUsage, RuntimeHttpEgress, RuntimeHttpEgressError,
+    CapabilityId, ExtensionId, MountView, ResourceEstimate, ResourceReservation,
+    ResourceReservationId, ResourceScope, ResourceUsage, RuntimeHttpEgress, RuntimeHttpEgressError,
     RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind,
 };
 use ironclaw_resources::{ResourceError, ResourceGovernor, ResourceReceipt};
@@ -63,6 +63,7 @@ pub struct ScriptExecutionRequest<'a> {
     pub capability_id: &'a CapabilityId,
     pub scope: ResourceScope,
     pub estimate: ResourceEstimate,
+    pub mounts: Option<MountView>,
     pub resource_reservation: Option<ResourceReservation>,
     pub invocation: ScriptInvocation,
 }

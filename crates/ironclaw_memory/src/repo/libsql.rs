@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
 use ironclaw_host_api::VirtualPath;
 
-use crate::chunking::{MemoryChunkWrite, content_sha256};
+use crate::chunking::{MemoryChunkWrite, content_bytes_sha256, content_sha256};
 use crate::embedding::{cosine_similarity, decode_embedding_blob, encode_embedding_blob};
 use crate::indexer::MemoryDocumentIndexRepository;
 use crate::metadata::MemoryWriteOptions;
@@ -17,8 +17,9 @@ use crate::search::{
 };
 
 use super::{
-    MemoryDocumentRepository, db_path_for_memory_document, ensure_document_path_does_not_conflict,
-    memory_document_from_db_path, scoped_memory_agent_id, scoped_memory_owner_key,
+    MemoryAppendOutcome, MemoryDocumentRepository, db_path_for_memory_document,
+    ensure_document_path_does_not_conflict, memory_document_from_db_path, scoped_memory_agent_id,
+    scoped_memory_owner_key,
 };
 
 /// libSQL repository adapter for the existing `memory_documents` table shape.
@@ -377,6 +378,141 @@ impl MemoryDocumentRepository for LibSqlMemoryDocumentRepository {
                     memory_error(
                         virtual_path.clone(),
                         FilesystemOperation::WriteFile,
+                        error.to_string(),
+                    )
+                })?;
+        } else {
+            let _ = conn.execute("ROLLBACK", libsql::params![]).await;
+        }
+        result
+    }
+
+    async fn compare_and_append_document_with_options(
+        &self,
+        path: &MemoryDocumentPath,
+        expected_previous_hash: Option<&str>,
+        bytes: &[u8],
+        options: &MemoryWriteOptions,
+    ) -> Result<MemoryAppendOutcome, FilesystemError> {
+        let append_content = std::str::from_utf8(bytes).map_err(|_| {
+            memory_error(
+                path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+                FilesystemOperation::AppendFile,
+                "memory document content must be UTF-8",
+            )
+        })?;
+        let virtual_path = path.virtual_path().unwrap_or_else(|_| valid_memory_path());
+        let conn = self
+            .connect(virtual_path.clone(), FilesystemOperation::AppendFile)
+            .await?;
+        let owner_key = scoped_memory_owner_key(path.scope());
+        let agent_id = scoped_memory_agent_id(path.scope());
+        let db_path = db_path_for_memory_document(path);
+
+        conn.execute("BEGIN IMMEDIATE", libsql::params![])
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::AppendFile,
+                    error.to_string(),
+                )
+            })?;
+
+        let result: Result<MemoryAppendOutcome, FilesystemError> = async {
+            let existing = {
+                let mut rows = conn
+                    .query(
+                        "SELECT id, content FROM memory_documents WHERE user_id = ?1 AND ((?2 IS NULL AND agent_id IS NULL) OR agent_id = ?2) AND path = ?3",
+                        libsql::params![owner_key.as_str(), agent_id, db_path.as_str()],
+                    )
+                    .await
+                    .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::AppendFile, error.to_string()))?;
+                rows.next()
+                    .await
+                    .map_err(|error| {
+                        memory_error(virtual_path.clone(), FilesystemOperation::AppendFile, error.to_string())
+                    })?
+                    .map(|row| {
+                        let id: String = row.get(0)?;
+                        let previous_content: String = row.get(1)?;
+                        Ok::<_, libsql::Error>((id, previous_content))
+                    })
+                    .transpose()
+                    .map_err(|error| {
+                        memory_error(virtual_path.clone(), FilesystemOperation::AppendFile, error.to_string())
+                    })?
+            };
+            let current_hash = existing
+                .as_ref()
+                .map(|(_, content)| content_bytes_sha256(content.as_bytes()));
+            if current_hash.as_deref() != expected_previous_hash {
+                return Ok(MemoryAppendOutcome::Conflict);
+            }
+
+            if let Some((document_id, previous_content)) = existing {
+                let content = format!("{previous_content}{append_content}");
+                if options.metadata.skip_versioning != Some(true)
+                    && previous_content != content
+                    && !previous_content.is_empty()
+                {
+                    libsql_save_document_version(
+                        &conn,
+                        &virtual_path,
+                        &document_id,
+                        &previous_content,
+                        options.changed_by.as_deref(),
+                    )
+                    .await?;
+                }
+                conn.execute(
+                    "UPDATE memory_documents SET content = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1",
+                    libsql::params![document_id, content],
+                )
+                .await
+                .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::AppendFile, error.to_string()))?;
+            } else {
+                let documents = libsql_list_documents_for_scope(
+                    &conn,
+                    path.scope(),
+                    &virtual_path,
+                    FilesystemOperation::AppendFile,
+                )
+                .await?;
+                ensure_document_path_does_not_conflict(
+                    path,
+                    &documents,
+                    FilesystemOperation::AppendFile,
+                )?;
+                conn.execute(
+                    r#"
+                INSERT INTO memory_documents (id, user_id, agent_id, path, content, metadata)
+                VALUES (?1, ?2, ?3, ?4, ?5, '{}')
+                "#,
+                    libsql::params![
+                        uuid::Uuid::new_v4().to_string(),
+                        owner_key.as_str(),
+                        agent_id,
+                        db_path.as_str(),
+                        append_content,
+                    ],
+                )
+                .await
+                .map_err(|error| {
+                    memory_error(virtual_path.clone(), FilesystemOperation::AppendFile, error.to_string())
+                })?;
+            }
+            Ok(MemoryAppendOutcome::Appended)
+        }
+        .await;
+
+        if result.is_ok() {
+            conn.execute("COMMIT", libsql::params![])
+                .await
+                .map_err(|error| {
+                    memory_error(
+                        virtual_path.clone(),
+                        FilesystemOperation::AppendFile,
                         error.to_string(),
                     )
                 })?;

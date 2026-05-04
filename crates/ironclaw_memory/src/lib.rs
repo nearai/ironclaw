@@ -12,6 +12,7 @@ mod indexer;
 mod metadata;
 mod path;
 mod repo;
+mod safety;
 mod schema;
 mod search;
 
@@ -34,5 +35,13 @@ pub use repo::PostgresMemoryDocumentRepository;
 pub use repo::RebornLibSqlMemoryDocumentRepository;
 #[cfg(feature = "postgres")]
 pub use repo::RebornPostgresMemoryDocumentRepository;
-pub use repo::{InMemoryMemoryDocumentRepository, MemoryDocumentRepository};
+pub use repo::{InMemoryMemoryDocumentRepository, MemoryAppendOutcome, MemoryDocumentRepository};
+pub use safety::{
+    DefaultPromptWriteSafetyPolicy, PromptProtectedPathClass, PromptProtectedPathRegistry,
+    PromptSafetyAllowanceId, PromptSafetyPolicyVersion, PromptSafetyReason, PromptSafetyReasonCode,
+    PromptSafetySeverity, PromptSafetySummary, PromptWriteOperation, PromptWriteSafetyDecision,
+    PromptWriteSafetyError, PromptWriteSafetyEvent, PromptWriteSafetyEventKind,
+    PromptWriteSafetyEventSink, PromptWriteSafetyPolicy, PromptWriteSafetyRequest,
+    PromptWriteSource,
+};
 pub use search::{FusionStrategy, MemorySearchRequest, MemorySearchResult};

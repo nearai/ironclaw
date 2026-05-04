@@ -35,6 +35,13 @@ pub use native_postgres::RebornPostgresMemoryDocumentRepository;
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresMemoryDocumentRepository;
 
+/// Result of an optimistic atomic append attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryAppendOutcome {
+    Appended,
+    Conflict,
+}
+
 /// Repository for file-shaped memory documents.
 ///
 /// Implementations own the actual source of truth, such as the existing
@@ -61,6 +68,21 @@ pub trait MemoryDocumentRepository: Send + Sync {
     ) -> Result<(), FilesystemError> {
         let _ = options;
         self.write_document(path, bytes).await
+    }
+
+    async fn compare_and_append_document_with_options(
+        &self,
+        path: &MemoryDocumentPath,
+        expected_previous_hash: Option<&str>,
+        bytes: &[u8],
+        options: &MemoryWriteOptions,
+    ) -> Result<MemoryAppendOutcome, FilesystemError> {
+        let _ = (expected_previous_hash, bytes, options);
+        Err(memory_error(
+            path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+            FilesystemOperation::AppendFile,
+            "memory document repository does not support atomic append",
+        ))
     }
 
     async fn read_document_metadata(

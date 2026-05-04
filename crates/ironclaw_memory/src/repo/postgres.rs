@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
 use ironclaw_host_api::VirtualPath;
 
-use crate::chunking::{MemoryChunkWrite, content_sha256};
+use crate::chunking::{MemoryChunkWrite, content_bytes_sha256, content_sha256};
 use crate::indexer::MemoryDocumentIndexRepository;
 use crate::metadata::MemoryWriteOptions;
 use crate::path::{MemoryDocumentPath, MemoryDocumentScope, memory_error, valid_memory_path};
@@ -13,8 +13,9 @@ use crate::search::{
 };
 
 use super::{
-    MemoryDocumentRepository, db_path_for_memory_document, ensure_document_path_does_not_conflict,
-    memory_document_from_db_path, scoped_memory_agent_id, scoped_memory_owner_key,
+    MemoryAppendOutcome, MemoryDocumentRepository, db_path_for_memory_document,
+    ensure_document_path_does_not_conflict, memory_document_from_db_path, scoped_memory_agent_id,
+    scoped_memory_owner_key,
 };
 
 /// PostgreSQL repository adapter for the existing `memory_documents` table shape.
@@ -318,6 +319,133 @@ impl MemoryDocumentRepository for PostgresMemoryDocumentRepository {
             )
         })?;
         Ok(())
+    }
+
+    async fn compare_and_append_document_with_options(
+        &self,
+        path: &MemoryDocumentPath,
+        expected_previous_hash: Option<&str>,
+        bytes: &[u8],
+        options: &MemoryWriteOptions,
+    ) -> Result<MemoryAppendOutcome, FilesystemError> {
+        let append_content = std::str::from_utf8(bytes).map_err(|_| {
+            memory_error(
+                path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+                FilesystemOperation::AppendFile,
+                "memory document content must be UTF-8",
+            )
+        })?;
+        let virtual_path = path.virtual_path().unwrap_or_else(|_| valid_memory_path());
+        let mut client = self
+            .client(virtual_path.clone(), FilesystemOperation::AppendFile)
+            .await?;
+        let owner_key = scoped_memory_owner_key(path.scope());
+        let agent_id = scoped_memory_agent_id(path.scope());
+        let db_path = db_path_for_memory_document(path);
+        let txn = client.transaction().await.map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::AppendFile,
+                error.to_string(),
+            )
+        })?;
+        txn.batch_execute("LOCK TABLE memory_documents IN SHARE ROW EXCLUSIVE MODE")
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::AppendFile,
+                    error.to_string(),
+                )
+            })?;
+        let existing = txn
+            .query_opt(
+                "SELECT id, content FROM memory_documents WHERE user_id = $1 AND agent_id IS NOT DISTINCT FROM $2 AND path = $3 FOR UPDATE",
+                &[&owner_key, &agent_id, &db_path],
+            )
+            .await
+            .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::AppendFile, error.to_string()))?;
+        let current_hash = existing.as_ref().map(|row| {
+            let previous_content: String = row.get("content");
+            content_bytes_sha256(previous_content.as_bytes())
+        });
+        if current_hash.as_deref() != expected_previous_hash {
+            txn.commit().await.map_err(|error| {
+                memory_error(
+                    virtual_path,
+                    FilesystemOperation::AppendFile,
+                    error.to_string(),
+                )
+            })?;
+            return Ok(MemoryAppendOutcome::Conflict);
+        }
+
+        if let Some(row) = existing {
+            let document_id: uuid::Uuid = row.get("id");
+            let previous_content: String = row.get("content");
+            let content = format!("{previous_content}{append_content}");
+            if options.metadata.skip_versioning != Some(true)
+                && previous_content != content
+                && !previous_content.is_empty()
+            {
+                postgres_save_document_version(
+                    &txn,
+                    &virtual_path,
+                    document_id,
+                    &previous_content,
+                    options.changed_by.as_deref(),
+                )
+                .await?;
+            }
+            txn.execute(
+                "UPDATE memory_documents SET content = $2, updated_at = NOW() WHERE id = $1",
+                &[&document_id, &content],
+            )
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::AppendFile,
+                    error.to_string(),
+                )
+            })?;
+        } else {
+            let documents = postgres_list_documents_for_scope(
+                &txn,
+                path.scope(),
+                &virtual_path,
+                FilesystemOperation::AppendFile,
+            )
+            .await?;
+            ensure_document_path_does_not_conflict(
+                path,
+                &documents,
+                FilesystemOperation::AppendFile,
+            )?;
+            txn.execute(
+                r#"
+                    INSERT INTO memory_documents (user_id, agent_id, path, content, metadata)
+                    VALUES ($1, $2, $3, $4, '{}'::jsonb)
+                    "#,
+                &[&owner_key, &agent_id, &db_path, &append_content],
+            )
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::AppendFile,
+                    error.to_string(),
+                )
+            })?;
+        }
+        txn.commit().await.map_err(|error| {
+            memory_error(
+                virtual_path,
+                FilesystemOperation::AppendFile,
+                error.to_string(),
+            )
+        })?;
+        Ok(MemoryAppendOutcome::Appended)
     }
 
     async fn read_document_metadata(
