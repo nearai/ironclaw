@@ -3,7 +3,7 @@
 //! Extends the existing `SandboxManager` infrastructure to support persistent
 //! containers with their own agent loops (as opposed to ephemeral per-command containers).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -103,6 +103,8 @@ pub struct ContainerJobConfig {
     /// Whether per-job MCP server filtering is enabled.
     /// When false, `mcp_servers` param on `create_job` is ignored.
     pub mcp_per_job_enabled: bool,
+    /// User ID for secret lookups (single-tenant, typically "default" or from config.owner_id).
+    pub user_id: String,
     /// Whether Claude Code sandbox mode is available (from CLAUDE_CODE_ENABLED).
     pub claude_code_enabled: bool,
     /// Whether ACP agent mode is available (from ACP_ENABLED).
@@ -125,6 +127,7 @@ impl Default for ContainerJobConfig {
             acp_memory_limit_mb: 4096,
             acp_timeout_secs: 1800,
             mcp_per_job_enabled: false,
+            user_id: "default".to_string(),
             claude_code_enabled: false,
             acp_enabled: false,
         }
@@ -434,6 +437,7 @@ impl ContainerJobManager {
             format!("IRONCLAW_WORKER_TOKEN={}", token),
             format!("IRONCLAW_JOB_ID={}", job_id),
             format!("IRONCLAW_ORCHESTRATOR_URL={}", orchestrator_url),
+            format!("IRONCLAW_USER_ID={}", self.config.user_id),
         ];
 
         // Build volume mounts (validate project_dir stays within ~/.ironclaw/projects/)
@@ -467,11 +471,19 @@ impl ContainerJobManager {
             )
             .await?
             {
-                Some(config_path) => {
+                Some((config_path, filtered_config)) => {
                     binds.push(format!(
                         "{}:/home/sandbox/.ironclaw/mcp-servers.json:ro",
                         config_path.display()
                     ));
+
+                    let allowlist = compute_mcp_secret_allowlist(filtered_config, job_id);
+                    if !allowlist.is_empty() {
+                        self.token_store
+                            .store_mcp_secret_allowlist(job_id, allowlist)
+                            .await;
+                    }
+
                     tracing::debug!(
                         job_id = %job_id,
                         filtered = mcp_servers.is_some(),
@@ -831,7 +843,7 @@ async fn generate_worker_mcp_config(
     master: Option<&serde_json::Value>,
     server_names: Option<&[String]>,
     job_id: Uuid,
-) -> Result<Option<std::path::PathBuf>, OrchestratorError> {
+) -> Result<Option<(std::path::PathBuf, serde_json::Value)>, OrchestratorError> {
     let Some(master) = master else {
         return Ok(None);
     };
@@ -958,7 +970,38 @@ async fn generate_worker_mcp_config(
             reason: format!("failed to write per-job MCP config: {e}"),
         })?;
 
-    Ok(Some(tmp_path))
+    Ok(Some((tmp_path, filtered)))
+}
+
+/// Compute the exhaustive set of MCP secret names for a filtered config value.
+///
+/// For each OAuth-capable server, produces the 5 canonical secret names
+/// (access token, refresh token, legacy refresh, client_id, client_secret).
+/// Returns an empty set if the config cannot be parsed or has no OAuth servers.
+fn compute_mcp_secret_allowlist(config_value: serde_json::Value, job_id: Uuid) -> HashSet<String> {
+    let servers_file: crate::tools::mcp::config::McpServersFile =
+        match serde_json::from_value(config_value) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::debug!(
+                    job_id = %job_id,
+                    "Failed to parse MCP config for secret allowlist: {e}"
+                );
+                return HashSet::new();
+            }
+        };
+
+    let mut allowlist = HashSet::new();
+    for server in servers_file.enabled_servers() {
+        if server.requires_auth() {
+            allowlist.insert(server.token_secret_name());
+            allowlist.insert(server.refresh_token_secret_name());
+            allowlist.insert(server.legacy_refresh_token_secret_name());
+            allowlist.insert(server.client_id_secret_name());
+            allowlist.insert(server.client_secret_secret_name());
+        }
+    }
+    allowlist
 }
 
 #[cfg(test)]
@@ -1184,7 +1227,7 @@ mod tests {
             ]}"#,
         );
         let result = generate_worker_mcp_config(Some(&master), None, job_id).await;
-        let out_path = result.unwrap().expect("should write a temp config"); // safety: test fixture
+        let (out_path, _) = result.unwrap().expect("should write a temp config"); // safety: test fixture
         let content: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&out_path).unwrap()).unwrap(); // safety: test fixture
         let servers = content["servers"].as_array().unwrap(); // safety: test fixture
@@ -1236,7 +1279,7 @@ mod tests {
 
         let names = vec!["serpstat".to_string(), "disabled".to_string()];
         let result = generate_worker_mcp_config(Some(&master), Some(&names), job_id).await;
-        let out_path = result.unwrap().expect("should produce a filtered config");
+        let (out_path, _) = result.unwrap().expect("should produce a filtered config");
 
         let content: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&out_path).unwrap()).unwrap();
@@ -1265,7 +1308,7 @@ mod tests {
         let master = master_value(r#"{"servers":[{"name":"Serpstat","enabled":true}]}"#);
         let names = vec!["serpstat".to_string()];
         let result = generate_worker_mcp_config(Some(&master), Some(&names), job_id).await;
-        let out_path = result.unwrap().expect("case-insensitive match should work");
+        let (out_path, _) = result.unwrap().expect("case-insensitive match should work");
         let _ = std::fs::remove_file(&out_path);
     }
 
@@ -1361,7 +1404,7 @@ mod tests {
 
         let names = vec!["serpstat".to_string()];
         let result = generate_worker_mcp_config(Some(&master), Some(&names), job_id).await;
-        let out_path = result.unwrap().expect("should produce a filtered config");
+        let (out_path, _) = result.unwrap().expect("should produce a filtered config");
 
         let content: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&out_path).unwrap()).unwrap();
@@ -1411,7 +1454,7 @@ mod tests {
 
         let names = vec!["serpstat".to_string()];
         let result = generate_worker_mcp_config(Some(&master), Some(&names), job_id).await;
-        let out_path = result.unwrap().expect("should produce a filtered config");
+        let (out_path, _) = result.unwrap().expect("should produce a filtered config");
         assert!(
             out_path.exists(),
             "temp config file should exist after creation"
@@ -1452,7 +1495,7 @@ mod tests {
 
         let names = vec!["test".to_string()];
         let result = generate_worker_mcp_config(Some(&master), Some(&names), job_id).await;
-        let out_path = result.unwrap().expect("should produce a filtered config");
+        let (out_path, _) = result.unwrap().expect("should produce a filtered config");
 
         let dir_path = out_path.parent().unwrap();
         let mode = std::fs::metadata(dir_path).unwrap().permissions().mode() & 0o777;
@@ -1486,7 +1529,7 @@ mod tests {
         });
 
         let result = generate_worker_mcp_config(Some(&master), None, job_id).await;
-        let out_path = result.unwrap().expect(
+        let (out_path, _) = result.unwrap().expect(
             // safety: test fixture
             "DB-loaded master with no filter must produce a mountable config — \
              pre-fix this would silently fall back to None on installs where \
