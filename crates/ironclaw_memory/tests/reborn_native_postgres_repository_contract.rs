@@ -473,6 +473,106 @@ async fn full_text_search_uses_rrf_when_only_full_text_branch_returns_results() 
     cleanup_tenant(&pool(), tenant).await;
 }
 
+#[tokio::test]
+async fn same_path_in_different_tenants_stores_separate_rows() {
+    // libSQL parity test (`full_scope_isolates_tenant_user_agent_project_independently`)
+    // varies tenant explicitly. Postgres uses identical SQL filters for
+    // the tenant column, but must be proven independently per the issue
+    // guardrail "Postgres compile-only coverage is not sufficient".
+    let tenant_a = "reborn-pg-tenant-iso-a";
+    let tenant_b = "reborn-pg-tenant-iso-b";
+    let Some(repo_a) = fresh_repository(tenant_a).await else {
+        return;
+    };
+    cleanup_tenant(&pool(), tenant_b).await;
+
+    let path_a = MemoryDocumentPath::new(tenant_a, "alice", None, "shared.md").expect("path");
+    let path_b = MemoryDocumentPath::new(tenant_b, "alice", None, "shared.md").expect("path");
+    repo_a.write_document(&path_a, b"a-body").await.unwrap();
+    repo_a.write_document(&path_b, b"b-body").await.unwrap();
+
+    assert_eq!(
+        repo_a.read_document(&path_a).await.unwrap().as_deref(),
+        Some(b"a-body".as_slice())
+    );
+    assert_eq!(
+        repo_a.read_document(&path_b).await.unwrap().as_deref(),
+        Some(b"b-body".as_slice())
+    );
+    let listed_a = repo_a.list_documents(path_a.scope()).await.unwrap();
+    assert_eq!(listed_a.len(), 1);
+    assert_eq!(listed_a[0].tenant_id(), tenant_a);
+    let listed_b = repo_a.list_documents(path_b.scope()).await.unwrap();
+    assert_eq!(listed_b.len(), 1);
+    assert_eq!(listed_b[0].tenant_id(), tenant_b);
+
+    cleanup_tenant(&pool(), tenant_a).await;
+    cleanup_tenant(&pool(), tenant_b).await;
+}
+
+#[tokio::test]
+async fn concurrent_writes_under_same_scope_and_path_produce_exactly_one_row() {
+    // Postgres uses `LOCK TABLE … IN SHARE ROW EXCLUSIVE MODE` inside the
+    // write transaction, which serializes overlapping writers on the
+    // same scope+path. Drive that with two `tokio::join!`-launched writes
+    // and assert the row count is exactly one.
+    let tenant = "reborn-pg-race";
+    let Some(repo) = fresh_repository(tenant).await else {
+        return;
+    };
+    let path = MemoryDocumentPath::new(tenant, "alice", None, "race.md").expect("path");
+    let path_a = path.clone();
+    let path_b = path.clone();
+    let repo_a = repo.clone();
+    let repo_b = repo.clone();
+    let (r1, r2) = tokio::join!(
+        repo_a.write_document(&path_a, b"writer-a"),
+        repo_b.write_document(&path_b, b"writer-b"),
+    );
+    r1.expect("writer-a");
+    r2.expect("writer-b");
+
+    let listed = repo.list_documents(path.scope()).await.unwrap();
+    let races = listed
+        .iter()
+        .filter(|p| p.relative_path() == "race.md")
+        .count();
+    assert_eq!(races, 1, "concurrent writes must serialize to one row");
+    cleanup_tenant(&pool(), tenant).await;
+}
+
+#[tokio::test]
+async fn fts_query_with_only_stopwords_does_not_error() {
+    let tenant = "reborn-pg-stopword";
+    let Some(repo) = fresh_repository(tenant).await else {
+        return;
+    };
+    let indexer = Arc::new(
+        ChunkingMemoryDocumentIndexer::new(repo.clone()).with_chunk_config(ChunkConfig {
+            chunk_size: 4,
+            overlap_percent: 0.0,
+            min_chunk_size: 1,
+        }),
+    );
+    let path = MemoryDocumentPath::new(tenant, "alice", None, "stop.md").expect("path");
+    repo.write_document(&path, b"the quick brown fox")
+        .await
+        .unwrap();
+    indexer.reindex_document(&path).await.unwrap();
+
+    for query in ["the", "and", "of and the"] {
+        let request = MemorySearchRequest::new(query)
+            .unwrap()
+            .with_vector(false)
+            .with_limit(10);
+        let _ = repo
+            .search_documents(path.scope(), &request)
+            .await
+            .unwrap_or_else(|err| panic!("stopword query {query:?} must not error: {err}"));
+    }
+    cleanup_tenant(&pool(), tenant).await;
+}
+
 // --- helpers --------------------------------------------------------------
 
 async fn count_versions(
