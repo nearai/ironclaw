@@ -17,14 +17,14 @@ use crate::tools::builder::{
 };
 use crate::tools::builtin::{
     AboundAccountInfoTool, AboundCreateNotificationTool, AboundExchangeRateTool,
-    AboundRateAlertTool, AboundSendWireTool, AnalyzeTransferTool, ApplyPatchTool, CancelJobTool,
-    CreateJobTool, EchoTool, ExtensionInfoTool, FileUndoTool, ForexHistoricalDataTool, GlobTool,
-    GrepTool, HttpTool, JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool,
-    ListJobsTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool,
-    PlanUpdateTool, PromptQueue, ReadFileTool, ShellTool, SkillInstallTool, SkillListTool,
-    SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool,
-    ToolListTool, ToolPermissionSetTool, ToolRemoveTool, ToolSearchTool, ToolUpgradeTool,
-    ValidateTransferTargetTool, WriteFileTool, shared_file_history, shared_read_file_state,
+    AboundSendWireTool, AnalyzeTransferTool, ApplyPatchTool, CancelJobTool, CreateJobTool,
+    EchoTool, ExtensionInfoTool, FileUndoTool, ForexHistoricalDataTool, GlobTool, GrepTool,
+    HttpTool, JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool,
+    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PlanUpdateTool, PromptQueue,
+    ReadFileTool, ShellTool, SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool,
+    TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolPermissionSetTool,
+    ToolRemoveTool, ToolSearchTool, ToolUpgradeTool, ValidateTransferTargetTool, WriteFileTool,
+    shared_file_history, shared_read_file_state,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{
@@ -124,7 +124,6 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "abound_exchange_rate",
     "abound_send_wire",
     "abound_create_notification",
-    "abound_rate_alert",
     // Forex tools
     "forex_historical_data",
     "analyze_transfer",
@@ -505,7 +504,6 @@ impl ToolRegistry {
                 Arc::clone(&self.mission_slot),
             ));
             register_or_warn!(AboundCreateNotificationTool::new(Arc::clone(ss)));
-            register_or_warn!(AboundRateAlertTool::new(Arc::clone(ss)));
             register_or_warn!(ForexHistoricalDataTool::new(Arc::clone(ss)));
             register_or_warn!(AnalyzeTransferTool::new(Arc::clone(ss)));
             register_or_warn!(ValidateTransferTargetTool::new(Arc::clone(ss)));

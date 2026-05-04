@@ -492,6 +492,7 @@ mod tests {
             user_timezone: None,
             client_thread_id: None,
             client_response_id: None,
+            spawning_mission_id: None,
         }
     }
 
