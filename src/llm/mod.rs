@@ -66,9 +66,9 @@ pub use provider::{
 };
 pub use reasoning::{
     ActionPlan, Reasoning, ReasoningContext, RespondOutput, RespondResult, ResponseAnomaly,
-    ResponseMetadata, SILENT_REPLY_TOKEN, TOOL_INTENT_NUDGE, TRUNCATED_TOOL_CALL_NOTICE,
-    TokenUsage, ToolSelection, is_silent_reply, llm_signals_tool_intent,
-    user_signals_execution_intent,
+    ResponseMetadata, SILENT_REPLY_TOKEN, SkillSelectionCandidate, TOOL_INTENT_NUDGE,
+    TRUNCATED_TOOL_CALL_NOTICE, TokenUsage, ToolSelection, is_silent_reply,
+    llm_signals_tool_intent, user_signals_execution_intent,
 };
 pub(crate) use reasoning::{clean_response, recover_tool_calls_from_content};
 pub use recording::RecordingLlm;
