@@ -1413,22 +1413,21 @@ class TestV2EngineSkillInstallFlow:
         # fire a fresh approval gate. `SkillInstallTool::requires_approval`
         # short-circuits to `ApprovalRequirement::Never` when the skill
         # is already loaded — asking the user to approve a guaranteed
-        # no-op is pure friction. The test used to wait for an approval
-        # card here and time out; now it skips the approval step and
-        # goes straight to the terminal message, which must carry the
+        # no-op is pure friction. Poll history directly instead of relying on
+        # a DOM terminal-message race; the completed turn must carry the
         # idempotent "already installed / no install needed" wording.
         await _open_chat_tab(v2_skill_page)
-        baseline = await _message_counts(v2_skill_page)
+        thread_id = await _wait_for_current_thread_id(v2_skill_page)
         await _send_chat_message(
             v2_skill_page,
             "install https://github.com/Pika-Labs/Pika-Skills",
         )
-        installed = await _wait_for_terminal_message(
-            v2_skill_page,
-            timeout=90000,
-            baseline=baseline,
-        )
-        assert "already" in installed["text"].lower() or "no install needed" in installed["text"].lower(), installed
+        history = await _wait_for_response(base_url, thread_id, timeout=90.0)
+        assert history.get("pending_gate") is None, history
+        all_responses = " ".join(
+            (turn.get("response") or "") for turn in history.get("turns", [])
+        ).lower()
+        assert "already" in all_responses or "no install needed" in all_responses, history
 
         await _open_skills_settings(v2_skill_page)
         assert await v2_skill_page.locator(SEL["skill_installed"]).filter(
