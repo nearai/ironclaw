@@ -317,13 +317,9 @@ impl CreateJobTool {
             .get("notify_metadata")
             .filter(|value| value.is_object())
             .unwrap_or(&null_metadata);
-        // Use the adapter channel name (notify_channel) as the routing key so
-        // is_dm() sees "slack-relay" / "telegram" etc., not the platform channel
-        // ID stored in notify_metadata.channel (e.g. "D..." for Slack DMs).
-        let routing_channel = ctx
-            .metadata
-            .get("notify_channel")
-            .and_then(|v| v.as_str());
+        // Route by adapter channel name so is_dm() sees "slack-relay" /
+        // "telegram", not the platform-specific ID in notify_metadata.channel.
+        let routing_channel = ctx.metadata.get("notify_channel").and_then(|v| v.as_str());
 
         let routing_channel = match routing_channel {
             Some(ch) => ch,
@@ -924,16 +920,13 @@ fn resolve_project_dir(
 }
 
 fn monitor_route_from_ctx(ctx: &JobContext) -> Option<crate::agent::job_monitor::JobMonitorRoute> {
-    // notify_channel is required — without it we don't know which channel to
-    // route the monitor output to, so return None to skip monitoring entirely.
+    // Without notify_channel we cannot route monitor output, so skip monitoring.
     let channel = ctx
         .metadata
         .get("notify_channel")
         .and_then(|v| v.as_str())?
         .to_string();
-    // notify_user is optional — fall back to the job's own user_id, which is
-    // always present. The channel is the routing decision; the user is just
-    // for attribution and can default safely.
+    // notify_user is optional; fall back to the job user for attribution.
     let user_id = ctx
         .metadata
         .get("notify_user")
