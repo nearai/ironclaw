@@ -1,0 +1,26 @@
+[package]
+name = "ironclaw_wasm"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+wasmtime = { version = "43.0.2", features = ["component-model"] }
+wasmtime-wasi = "43.0.2"
+
+[dev-dependencies]
+async-trait = "0.1"
+ironclaw_dispatcher = { path = "../ironclaw_dispatcher" }
+ironclaw_events = { path = "../ironclaw_events" }
+ironclaw_extensions = { path = "../ironclaw_extensions" }
+ironclaw_filesystem = { path = "../ironclaw_filesystem" }
+ironclaw_resources = { path = "../ironclaw_resources" }
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt"] }
+wat = "1.245.1"
+wit-component = "0.245.1"
+wit-parser = "0.245.1"

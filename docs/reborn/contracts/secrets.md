@@ -21,7 +21,7 @@ ResourceScope + SecretHandle
   -> SecretMaterial exactly once
 ```
 
-The crate owns storage mechanics and one-shot lease state. It does not decide authorization, run approval flows, inject secrets into runtime requests, contact networks, emit audit events, or execute product workflows. It only provides the lease/consume primitive; runtime injection is not enforced until an obligation-handler/runtime composition slice wires it in.
+The crate owns storage mechanics and one-shot lease state. It does not decide authorization, run approval flows, contact networks, emit audit events, or execute product workflows. It only provides the metadata and lease/consume primitive; host-runtime composition owns any concrete injection into runtime requests.
 
 ---
 
@@ -48,8 +48,8 @@ Ownership remains:
 host_api       -> opaque SecretHandle and Action::UseSecret shapes
 secrets        -> scoped storage, metadata, and one-shot leases
 authorization  -> whether a caller may use a SecretHandle
-capabilities   -> caller-facing workflow; currently fails closed on InjectSecretOnce obligations
-host_runtime   -> future composition of secret services into runtime adapters/obligation handlers
+capabilities   -> caller-facing workflow; fails closed on InjectSecretOnce unless an obligation handler is configured
+host_runtime   -> built-in obligation handler leases/stages one-shot secret material and shared runtime HTTP egress injects/redacts secrets for host-mediated requests
 runtimes        -> consume injected values only after host-side authorization and lease handling
 ```
 
@@ -57,7 +57,7 @@ runtimes        -> consume injected values only after host-side authorization an
 
 ## 3. Scope and isolation
 
-All operations receive a `ResourceScope`. The in-memory V1 implementation keys stored secrets by tenant/user/agent/project plus `SecretHandle`, and keys one-shot leases by the full resource scope plus `SecretLeaseId`.
+All operations receive a `ResourceScope`. The in-memory V1 implementation keys secrets by tenant/user/agent/project plus `SecretHandle`; leases are scoped by the full invocation context plus `SecretLeaseId`.
 
 Rules:
 
@@ -67,9 +67,8 @@ Rules:
 - missing secrets return `UnknownSecret` and do not create leases
 - consumed leases cannot be consumed again
 - revoked leases cannot be consumed
-- consumed and revoked lease tombstones drop retained cloned secret material
 
-This is the minimum shape needed before wiring secret injection into obligation handling.
+This is the minimum shape needed for host-runtime composition to wire secret injection into obligation handling without exposing raw values to runtime crates.
 
 ---
 
@@ -88,6 +87,48 @@ let material = secrets.consume(&scope, lease.id).await?;
 
 `SecretStore::put(...)` is for trusted setup, composition, migration, or storage-code paths that are already allowed to manage secret material. It is not a runtime/plugin API, and it intentionally does not perform authorization itself.
 
+The shared Reborn runtime HTTP egress service uses this surface to:
+
+- check metadata for required or optional credential handles
+- create one-shot leases scoped to the request
+- consume the lease exactly once inside the host process
+- reject runtime-supplied sensitive headers, auth-like headers, credential query parameters, credential-shaped request content, and credential-shaped raw or percent-decoded URL content before network dispatch
+- inject material into the outgoing request shape
+- scrub leased values from runtime-visible network errors and response headers/bodies
+- strip sensitive response headers and block credential-shaped response bodies before they reach runtime callers
+
+Runtime HTTP credential injection is authority-bearing and must be host-derived.
+`RuntimeCredentialInjection` is not a permission request supplied by guest code,
+runtime code, or an extension process. The upstream capability/obligation owner
+must derive it only after proving:
+
+- the extension or capability declared the secret handle
+- the caller is authorized or approved to use the secret
+- the destination URL matches the capability or secret destination policy
+- the injection target and prefix are host-approved
+- the final request still passes the network policy boundary
+
+The shared egress service intentionally does not perform that authorization
+decision; it consumes the already-approved injection plan, injects it, redacts
+it, and fails closed when a required credential is unavailable. Injection plans
+also declare a material source: `SecretStoreLease` leases and consumes directly
+from `SecretStore`, while `StagedObligation { capability_id }` consumes material
+that `BuiltinObligationHandler` already leased, consumed, and staged in
+`RuntimeSecretInjectionStore`. Runtime adapters that use the staged source must
+not lease the same handle independently; `HostHttpEgressService` removes staged
+material with `take(scope, capability_id, handle)` before outbound transport so
+the value cannot be reused after success, failure, or runtime-visible errors.
+Staged entries also expire after the store TTL (five minutes by default) and
+expired material is pruned during insertion, `take(...)`, and explicit
+`prune_expired(...)` calls. If one approved request plan injects the same
+source+handle into multiple targets, the egress service consumes or leases the
+material once and reuses it only within that request. Runtime callers must not
+supply their own `Authorization`, cookie, or API-key-style headers; those values
+must come from the host-approved injection plan. WASM host-mediated HTTP
+composition can construct staged plans with `WasmStagedRuntimeCredentials` after
+attaching the invoking capability id to the adapter; exact-url rules should be
+preferred when a credential is only valid for specific destinations.
+
 ---
 
 ## 5. Non-goals
@@ -100,7 +141,7 @@ This slice does not implement:
 - secret audit emission
 - authorization policy for secret use
 - approval prompts for secret use
-- runtime environment/request injection
+- direct runtime environment/request injection from this crate
 - OAuth/token refresh flows
 - network policy enforcement
 
@@ -115,7 +156,7 @@ The crate tests cover:
 - metadata returns no raw secret material
 - one-shot leases consume exactly once
 - same-handle secrets are tenant/user/agent/project isolated
+- consumed and revoked lease records drop retained secret material
 - revoked leases cannot be consumed
 - missing secrets fail without creating leases
-- consumed and revoked lease records do not retain cloned secret material
 - crate boundary remains low-level and does not depend on workflow/runtime/observability crates

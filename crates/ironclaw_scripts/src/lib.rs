@@ -14,8 +14,9 @@ use std::{
 
 use ironclaw_extensions::{ExtensionPackage, ExtensionRuntime};
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, ResourceEstimate, ResourceReservation, ResourceReservationId,
-    ResourceScope, ResourceUsage, RuntimeKind,
+    CapabilityId, ExtensionId, MountView, ResourceEstimate, ResourceReservation,
+    ResourceReservationId, ResourceScope, ResourceUsage, RuntimeHttpEgress, RuntimeHttpEgressError,
+    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind,
 };
 use ironclaw_resources::{ResourceError, ResourceGovernor, ResourceReceipt};
 use serde_json::Value;
@@ -62,6 +63,7 @@ pub struct ScriptExecutionRequest<'a> {
     pub capability_id: &'a CapabilityId,
     pub scope: ResourceScope,
     pub estimate: ResourceEstimate,
+    pub mounts: Option<MountView>,
     pub resource_reservation: Option<ResourceReservation>,
     pub invocation: ScriptInvocation,
 }
@@ -148,6 +150,69 @@ pub struct ScriptCapabilityResult {
 pub struct ScriptExecutionResult {
     pub result: ScriptCapabilityResult,
     pub receipt: ResourceReceipt,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptHostHttpRequest {
+    pub scope: ResourceScope,
+    pub capability_id: CapabilityId,
+    pub method: ironclaw_host_api::NetworkMethod,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+    pub network_policy: ironclaw_host_api::NetworkPolicy,
+    pub credential_injections: Vec<ironclaw_host_api::RuntimeCredentialInjection>,
+    pub response_body_limit: Option<u64>,
+    pub timeout_ms: Option<u32>,
+}
+
+pub type ScriptHostHttpResponse = RuntimeHttpEgressResponse;
+
+#[derive(Debug, Error)]
+pub enum ScriptHostHttpError {
+    #[error("script host HTTP error: {reason}")]
+    Egress { reason: String },
+}
+
+#[derive(Debug, Clone)]
+pub struct ScriptRuntimeHttpAdapter<E> {
+    egress: E,
+}
+
+impl<E> ScriptRuntimeHttpAdapter<E>
+where
+    E: RuntimeHttpEgress,
+{
+    pub fn new(egress: E) -> Self {
+        Self { egress }
+    }
+
+    pub fn request(
+        &self,
+        request: ScriptHostHttpRequest,
+    ) -> Result<ScriptHostHttpResponse, ScriptHostHttpError> {
+        self.egress
+            .execute(RuntimeHttpEgressRequest {
+                runtime: RuntimeKind::Script,
+                scope: request.scope,
+                capability_id: request.capability_id,
+                method: request.method,
+                url: request.url,
+                headers: request.headers,
+                body: request.body,
+                network_policy: request.network_policy,
+                credential_injections: request.credential_injections,
+                response_body_limit: request.response_body_limit,
+                timeout_ms: request.timeout_ms,
+            })
+            .map_err(script_http_error)
+    }
+}
+
+fn script_http_error(error: RuntimeHttpEgressError) -> ScriptHostHttpError {
+    ScriptHostHttpError::Egress {
+        reason: error.stable_runtime_reason().to_string(),
+    }
 }
 
 /// Script runtime failures.
@@ -397,15 +462,9 @@ fn execute_docker_request(
     image: &str,
 ) -> Result<ScriptBackendOutput, String> {
     let started = Instant::now();
-    let mut child = Command::new("docker")
-        .arg("run")
-        .arg("--rm")
-        .arg("-i")
-        .arg("--network")
-        .arg("none")
-        .arg(image)
-        .arg(&request.command)
-        .args(&request.args)
+    let mut command = Command::new("docker");
+    command.args(docker_run_args(&request, image));
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -476,6 +535,20 @@ fn execute_docker_request(
     })
 }
 
+fn docker_run_args(request: &ScriptBackendRequest, image: &str) -> Vec<String> {
+    let mut args = vec![
+        "run".to_string(),
+        "--rm".to_string(),
+        "-i".to_string(),
+        "--network".to_string(),
+        "none".to_string(),
+        image.to_string(),
+        request.command.clone(),
+    ];
+    args.extend(request.args.clone());
+    args
+}
+
 fn read_bounded<R>(mut reader: R, limit: u64) -> Result<Vec<u8>, String>
 where
     R: Read,
@@ -525,10 +598,8 @@ fn release_after_failure<G>(
 where
     G: ResourceGovernor + ?Sized,
 {
-    match governor.release(reservation_id) {
-        Ok(_) => original,
-        Err(error) => ScriptError::Resource(Box::new(error)),
-    }
+    let _ = governor.release(reservation_id);
+    original
 }
 
 fn bounded_lossy(bytes: &[u8], limit: u64) -> String {
@@ -539,9 +610,18 @@ fn bounded_lossy(bytes: &[u8], limit: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::{ffi::OsString, fs, io::Cursor, sync::Mutex};
 
-    use super::{read_bounded, validate_docker_image_reference};
+    use super::{
+        DockerScriptBackend, ScriptBackend, ScriptBackendRequest, docker_run_args, read_bounded,
+        validate_docker_image_reference,
+    };
+    use ironclaw_host_api::{CapabilityId, InvocationId, ResourceScope, TenantId, UserId};
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn read_bounded_rejects_output_larger_than_limit() {
@@ -565,5 +645,147 @@ mod tests {
     fn docker_image_reference_rejects_whitespace() {
         let err = validate_docker_image_reference("alpine --privileged").unwrap_err();
         assert!(err.contains("must not contain whitespace"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn docker_backend_disables_ambient_network_before_image_and_manifest_args() {
+        let fake_bin = tempfile::tempdir().unwrap();
+        let args_file = fake_bin.path().join("docker-args.txt");
+        let docker_path = fake_bin.path().join("docker");
+        fs::write(
+            &docker_path,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$IRONCLAW_DOCKER_ARGS_FILE\"\ncat >/dev/null\nprintf '{\"ok\":true}'\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&docker_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&docker_path, permissions).unwrap();
+
+        let _lock = ENV_LOCK.lock().unwrap();
+        let old_path = std::env::var_os("PATH");
+        let old_args_file = std::env::var_os("IRONCLAW_DOCKER_ARGS_FILE");
+        let _restore = EnvRestore(vec![
+            ("PATH", old_path.clone()),
+            ("IRONCLAW_DOCKER_ARGS_FILE", old_args_file),
+        ]);
+        let mut paths = vec![fake_bin.path().to_path_buf()];
+        if let Some(old_path) = old_path.as_ref() {
+            paths.extend(std::env::split_paths(old_path));
+        }
+        let path = std::env::join_paths(paths).unwrap();
+        unsafe {
+            std::env::set_var("PATH", path);
+            std::env::set_var("IRONCLAW_DOCKER_ARGS_FILE", &args_file);
+        }
+
+        let output = DockerScriptBackend
+            .execute(sample_docker_request())
+            .unwrap();
+
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(output.stdout, br#"{"ok":true}"#);
+        let recorded = fs::read_to_string(args_file).unwrap();
+        let args = recorded.lines().collect::<Vec<_>>();
+        assert_eq!(
+            &args[..6],
+            &["run", "--rm", "-i", "--network", "none", "alpine:latest"]
+        );
+        assert_eq!(args[6], "script-echo");
+        assert_eq!(args[7], "--json");
+        assert_eq!(args[8], "--network=host");
+        let image_index = args
+            .iter()
+            .position(|arg| *arg == "alpine:latest")
+            .expect("image must be present");
+        let network_index = args
+            .iter()
+            .position(|arg| *arg == "--network")
+            .expect("network flag must be present");
+        let command_index = args
+            .iter()
+            .position(|arg| *arg == "script-echo")
+            .expect("command must be present");
+        let manifest_arg_index = args
+            .iter()
+            .position(|arg| *arg == "--network=host")
+            .expect("manifest arg must be preserved after the command");
+        assert!(network_index < image_index);
+        assert!(image_index < command_index);
+        assert!(command_index < manifest_arg_index);
+    }
+
+    #[test]
+    fn docker_run_args_disable_ambient_network_before_image_and_manifest_args() {
+        let request = sample_docker_request();
+
+        let args = docker_run_args(&request, "alpine:latest");
+
+        assert_eq!(
+            &args[..6],
+            &["run", "--rm", "-i", "--network", "none", "alpine:latest"]
+        );
+        assert_eq!(args[6], "script-echo");
+        assert_eq!(args[7], "--json");
+        assert_eq!(args[8], "--network=host");
+        let image_index = args
+            .iter()
+            .position(|arg| arg == "alpine:latest")
+            .expect("image must be present");
+        let network_index = args
+            .iter()
+            .position(|arg| arg == "--network")
+            .expect("network flag must be present");
+        let command_index = args
+            .iter()
+            .position(|arg| arg == "script-echo")
+            .expect("command must be present");
+        let manifest_arg_index = args
+            .iter()
+            .position(|arg| arg == "--network=host")
+            .expect("manifest arg must be preserved after the command");
+        assert!(network_index < image_index);
+        assert!(image_index < command_index);
+        assert!(command_index < manifest_arg_index);
+    }
+
+    fn sample_docker_request() -> ScriptBackendRequest {
+        ScriptBackendRequest {
+            provider: ironclaw_host_api::ExtensionId::new("script").unwrap(),
+            capability_id: CapabilityId::new("script.echo").unwrap(),
+            scope: ResourceScope {
+                tenant_id: TenantId::new("tenant1").unwrap(),
+                user_id: UserId::new("user1").unwrap(),
+                agent_id: None,
+                project_id: None,
+                mission_id: None,
+                thread_id: None,
+                invocation_id: InvocationId::new(),
+            },
+            runner: "docker".to_string(),
+            image: Some("alpine:latest".to_string()),
+            command: "script-echo".to_string(),
+            args: vec!["--json".to_string(), "--network=host".to_string()],
+            stdin_json: "{}".to_string(),
+            max_stdout_bytes: 1024,
+            max_stderr_bytes: 1024,
+            max_wall_clock_ms: 1_000,
+        }
+    }
+
+    struct EnvRestore(Vec<(&'static str, Option<OsString>)>);
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            for (key, value) in &self.0 {
+                unsafe {
+                    if let Some(value) = value {
+                        std::env::set_var(key, value);
+                    } else {
+                        std::env::remove_var(key);
+                    }
+                }
+            }
+        }
     }
 }
