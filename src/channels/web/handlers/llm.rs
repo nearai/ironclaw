@@ -55,13 +55,21 @@ pub async fn llm_test_connection_handler(
     Json(test_provider_connection(body).await)
 }
 
-async fn test_provider_connection(req: TestConnectionRequest) -> TestConnectionResponse {
-    if let Err(e) = validate_operator_base_url(&req.base_url, "base_url") {
-        return TestConnectionResponse {
-            ok: false,
-            message: format!("Invalid base URL: {e}"),
-        };
-    }
+async fn test_provider_connection(mut req: TestConnectionRequest) -> TestConnectionResponse {
+    // Rebind `base_url` to the trimmed form the validator returns (#2886):
+    // `url::Url::parse` tolerates surrounding whitespace, but the `http::Uri`
+    // step inside reqwest rejects it with "invalid uri character". Without
+    // this rebinding, a pasted value with a trailing `\n` would pass
+    // validation here and then fail at request construction below.
+    req.base_url = match validate_operator_base_url(&req.base_url, "base_url") {
+        Ok(trimmed) => trimmed,
+        Err(e) => {
+            return TestConnectionResponse {
+                ok: false,
+                message: format!("Invalid base URL: {e}"),
+            };
+        }
+    };
 
     if req.model.trim().is_empty() {
         return TestConnectionResponse {
@@ -241,14 +249,19 @@ pub async fn llm_list_models_handler(
     Json(fetch_provider_models(body).await)
 }
 
-async fn fetch_provider_models(req: ListModelsRequest) -> ListModelsResponse {
-    if let Err(e) = validate_operator_base_url(&req.base_url, "base_url") {
-        return ListModelsResponse {
-            ok: false,
-            models: vec![],
-            message: format!("Invalid base URL: {e}"),
-        };
-    }
+async fn fetch_provider_models(mut req: ListModelsRequest) -> ListModelsResponse {
+    // Rebind `base_url` to the trimmed form the validator returns (#2886);
+    // see the matching note in `test_provider_connection` above.
+    req.base_url = match validate_operator_base_url(&req.base_url, "base_url") {
+        Ok(trimmed) => trimmed,
+        Err(e) => {
+            return ListModelsResponse {
+                ok: false,
+                models: vec![],
+                message: format!("Invalid base URL: {e}"),
+            };
+        }
+    };
 
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
@@ -1063,6 +1076,93 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    // --- Whitespace-in-base-url regressions (#2886 follow-up) ------------
+
+    /// Assert that `message` looks like a network-layer failure, not a
+    /// URL-construction failure. If whitespace leaks into the built URL,
+    /// reqwest reports a `builder error` / "invalid uri character" before
+    /// any TCP connect happens; we never reach a "Connection failed" /
+    /// connect-refused code path.
+    fn assert_reached_network(message: &str) {
+        let lower = message.to_lowercase();
+        assert!(
+            !lower.contains("invalid uri") && !lower.contains("builder error"),
+            "trimmed URL should build cleanly before reaching the transport: {message}"
+        );
+        assert!(
+            !message.contains("Invalid base URL"),
+            "whitespace-only padding must not fail SSRF validation: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_connection_trims_whitespace_before_building_request() {
+        // Regression for #2886: `validate_operator_base_url` returns the
+        // trimmed canonical URL, but `test_provider_connection` previously
+        // ignored the return value and built the HTTP request from
+        // `req.base_url` raw. A pasted value with a trailing newline would
+        // pass validation here and then fail at request construction.
+        //
+        // Point the test at `127.0.0.1:9` (discard port — reserved, nothing
+        // listens) so the TCP connect fails fast *after* URL construction.
+        let req = TestConnectionRequest {
+            adapter: "openai".to_string(),
+            base_url: "  http://127.0.0.1:9/v1\n".to_string(),
+            model: "test-model".to_string(),
+            api_key: None,
+            provider_id: None,
+            provider_type: None,
+        };
+        let resp = test_provider_connection(req).await;
+        assert!(
+            !resp.ok,
+            "discard port should not accept, got ok response: {}",
+            resp.message
+        );
+        assert_reached_network(&resp.message);
+    }
+
+    #[tokio::test]
+    async fn list_models_trims_whitespace_before_building_request() {
+        // Same bug, `fetch_provider_models` side.
+        let req = ListModelsRequest {
+            adapter: "openai".to_string(),
+            base_url: "\thttp://127.0.0.1:9/v1 ".to_string(),
+            api_key: None,
+            provider_id: None,
+            provider_type: None,
+        };
+        let resp = fetch_provider_models(req).await;
+        assert!(
+            !resp.ok,
+            "discard port should not return a model list, got ok response: {}",
+            resp.message
+        );
+        assert_reached_network(&resp.message);
+    }
+
+    #[tokio::test]
+    async fn test_connection_still_rejects_ssrf_unsafe_urls_with_whitespace() {
+        // The trim happens before validation, so a public HTTP URL wrapped
+        // in whitespace must still be rejected — we are not accidentally
+        // bypassing SSRF protection by normalizing earlier.
+        let req = TestConnectionRequest {
+            adapter: "openai".to_string(),
+            base_url: " http://8.8.8.8/v1\n".to_string(),
+            model: "test-model".to_string(),
+            api_key: None,
+            provider_id: None,
+            provider_type: None,
+        };
+        let resp = test_provider_connection(req).await;
+        assert!(!resp.ok);
+        assert!(
+            resp.message.contains("Invalid base URL"),
+            "public HTTP must still fail validation after trim: {}",
+            resp.message
+        );
     }
 
     // --- Env-var fallback for builtin provider API key ---

@@ -128,11 +128,17 @@ impl EmbeddingsConfig {
 
         let openai_base_url = optional_env("EMBEDDING_BASE_URL")?;
 
-        // Validate base URLs to prevent SSRF attacks (#1103).
-        validate_operator_base_url(&ollama_base_url, "OLLAMA_BASE_URL")?;
-        if let Some(ref url) = openai_base_url {
-            validate_operator_base_url(url, "EMBEDDING_BASE_URL")?;
-        }
+        // Validate base URLs to prevent SSRF attacks (#1103). Rebind to the
+        // trimmed URL the validator returns — otherwise a whitespace-polluted
+        // DB/env value (e.g. `"http://localhost:11434\n"`) passes validation
+        // here but fails later at request construction with `http::Uri`
+        // "invalid uri character" inside `OllamaEmbeddings` /
+        // `OpenAiEmbeddings::with_base_url`. Mirrors the #2886 fix on the
+        // LLM provider side.
+        let ollama_base_url = validate_operator_base_url(&ollama_base_url, "OLLAMA_BASE_URL")?;
+        let openai_base_url = openai_base_url
+            .map(|url| validate_operator_base_url(&url, "EMBEDDING_BASE_URL"))
+            .transpose()?;
 
         let cache_size = parse_optional_env("EMBEDDING_CACHE_SIZE", DEFAULT_EMBEDDING_CACHE_SIZE)?;
 
@@ -433,6 +439,83 @@ mod tests {
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("EMBEDDING_BASE_URL");
+        }
+    }
+
+    #[test]
+    fn resolve_trims_whitespace_from_ollama_and_embedding_base_urls() {
+        // Regression for #2886 follow-up: `validate_operator_base_url` returns
+        // the trimmed URL, but the embeddings resolver previously discarded
+        // the return value and kept the raw, whitespace-polluted input. That
+        // raw value reached `OllamaEmbeddings::new(..)` /
+        // `OpenAiEmbeddings::with_base_url(..)` and failed at request time
+        // with `http::Uri` "invalid uri character".
+        let _guard = lock_env();
+        clear_embedding_env();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var("EMBEDDING_ENABLED", "true");
+            std::env::set_var("EMBEDDING_PROVIDER", "ollama");
+            std::env::set_var("OLLAMA_BASE_URL", "  http://localhost:11434\n");
+            std::env::set_var("EMBEDDING_BASE_URL", "\thttps://8.8.8.8/v1 ");
+        }
+
+        let settings = Settings::default();
+        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
+        assert_eq!(
+            config.ollama_base_url, "http://localhost:11434",
+            "ollama_base_url must be trimmed before reaching OllamaEmbeddings::new"
+        );
+        assert_eq!(
+            config.openai_base_url.as_deref(),
+            Some("https://8.8.8.8/v1"),
+            "embedding base URL must be trimmed before reaching OpenAiEmbeddings::with_base_url"
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("EMBEDDING_ENABLED");
+            std::env::remove_var("EMBEDDING_PROVIDER");
+            std::env::remove_var("OLLAMA_BASE_URL");
+            std::env::remove_var("EMBEDDING_BASE_URL");
+        }
+    }
+
+    #[test]
+    fn resolve_trims_whitespace_from_ollama_base_url_via_db_setting() {
+        // Same bug, but with the value coming from a DB-stored `Settings`
+        // instead of an env var. The DB path used `settings.ollama_base_url`
+        // directly and dropped the validator's trimmed return — a raw paste
+        // with a trailing newline would survive all the way into the Ollama
+        // HTTP client.
+        let _guard = lock_env();
+        clear_embedding_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("EMBEDDING_ENABLED", "true");
+            std::env::set_var("EMBEDDING_PROVIDER", "ollama");
+        }
+
+        let settings = Settings {
+            ollama_base_url: Some("  http://localhost:11434\n".to_string()),
+            embeddings: EmbeddingsSettings {
+                enabled: true,
+                provider: "ollama".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
+        assert_eq!(
+            config.ollama_base_url, "http://localhost:11434",
+            "DB-sourced ollama_base_url must also be trimmed"
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("EMBEDDING_ENABLED");
+            std::env::remove_var("EMBEDDING_PROVIDER");
         }
     }
 

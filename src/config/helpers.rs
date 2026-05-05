@@ -235,8 +235,16 @@ enum BaseUrlPolicy {
 ///
 /// This is intended for config-time validation of base URLs like
 /// `OLLAMA_BASE_URL`, `EMBEDDING_BASE_URL`, `NEARAI_BASE_URL`, etc.
-pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), ConfigError> {
-    validate_base_url_with_policy(url, field_name, BaseUrlPolicy::StrictSsrf)
+pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<String, ConfigError> {
+    // `url::Url::parse` tolerates leading/trailing ASCII whitespace per the
+    // WHATWG URL spec, but `http::Uri` (reqwest/rig) rejects it with
+    // "invalid uri character". Returning the trimmed URL forces every call
+    // site to use the canonical form — the original #2886 fix covered only
+    // the registry-provider path, leaving NearAI/Codex/transcription
+    // siblings reachable with the same failure.
+    let trimmed = url.trim().to_string();
+    validate_base_url_with_policy(&trimmed, field_name, BaseUrlPolicy::StrictSsrf)?;
+    Ok(trimmed)
 }
 
 /// Validate an operator-configured model endpoint.
@@ -245,8 +253,13 @@ pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), Confi
 /// over both HTTP and HTTPS because they are explicitly configured by the
 /// operator. Public HTTP endpoints remain blocked to avoid sending credentials
 /// over plaintext transport.
-pub(crate) fn validate_operator_base_url(url: &str, field_name: &str) -> Result<(), ConfigError> {
-    validate_base_url_with_policy(url, field_name, BaseUrlPolicy::AllowPrivateNetwork)
+pub(crate) fn validate_operator_base_url(
+    url: &str,
+    field_name: &str,
+) -> Result<String, ConfigError> {
+    let trimmed = url.trim().to_string();
+    validate_base_url_with_policy(&trimmed, field_name, BaseUrlPolicy::AllowPrivateNetwork)?;
+    Ok(trimmed)
 }
 
 fn classify_ip(ip: &std::net::IpAddr) -> IpClass {
@@ -788,6 +801,20 @@ mod tests {
         assert!(validate_base_url("", "TEST").is_err());
         assert!(validate_base_url("not-a-url", "TEST").is_err());
         assert!(validate_base_url("://missing-scheme", "TEST").is_err());
+    }
+
+    #[test]
+    fn validate_base_url_returns_trimmed_url() {
+        // Regression for #2886: `url::Url::parse` tolerates surrounding
+        // whitespace, but `http::Uri` (reqwest/rig) rejects it. The validator
+        // is the shared fix point — callers get the canonical form back.
+        let got = validate_base_url("  http://localhost:11434\n", "TEST")
+            .expect("trimmed URL should validate");
+        assert_eq!(got, "http://localhost:11434");
+
+        let got = validate_operator_base_url("\thttps://10.0.0.1/v1 ", "TEST")
+            .expect("trimmed operator URL should validate");
+        assert_eq!(got, "https://10.0.0.1/v1");
     }
 
     #[test]

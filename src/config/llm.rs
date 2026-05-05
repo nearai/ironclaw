@@ -319,14 +319,16 @@ impl LlmConfig {
         // set the URL.  Default URLs point to private.near.ai which requires DNS
         // resolution — this blocks startup in environments without network access
         // (CI runners, containers) when a different backend is configured.
-        if is_nearai
+        let nearai_auth_url = if is_nearai
             || nearai_auth_url_explicit.is_some()
             || nearai_api_key_env.is_some()
             || nearai_override_has_base_url
             || nearai_embeddings_active
         {
-            validate_base_url(&nearai_auth_url, "NEARAI_AUTH_URL")?;
-        }
+            validate_base_url(&nearai_auth_url, "NEARAI_AUTH_URL")?
+        } else {
+            nearai_auth_url.trim().to_string()
+        };
         let session = SessionConfig {
             auth_base_url: nearai_auth_url,
             session_path: optional_env("NEARAI_SESSION_PATH")?
@@ -359,14 +361,16 @@ impl LlmConfig {
         } else {
             "https://private.near.ai".to_string()
         };
-        if is_nearai
+        let nearai_base_url = if is_nearai
             || nearai_base_url_explicit.is_some()
             || nearai_api_key.is_some()
             || nearai_override_has_base_url
             || nearai_embeddings_active
         {
-            validate_base_url(&nearai_base_url, "NEARAI_BASE_URL")?;
-        }
+            validate_base_url(&nearai_base_url, "NEARAI_BASE_URL")?
+        } else {
+            nearai_base_url.trim().to_string()
+        };
         let nearai = NearAiConfig {
             model: nearai_model,
             cheap_model: optional_env("NEARAI_CHEAP_MODEL")?,
@@ -457,10 +461,10 @@ impl LlmConfig {
                 .unwrap_or_else(|| "gpt-5.3-codex".to_string());
             let auth_endpoint = optional_env("OPENAI_CODEX_AUTH_URL")?
                 .unwrap_or_else(|| "https://auth.openai.com".to_string());
-            validate_base_url(&auth_endpoint, "OPENAI_CODEX_AUTH_URL")?;
+            let auth_endpoint = validate_base_url(&auth_endpoint, "OPENAI_CODEX_AUTH_URL")?;
             let api_base_url = optional_env("OPENAI_CODEX_API_URL")?
                 .unwrap_or_else(|| "https://chatgpt.com/backend-api/codex".to_string());
-            validate_base_url(&api_base_url, "OPENAI_CODEX_API_URL")?;
+            let api_base_url = validate_base_url(&api_base_url, "OPENAI_CODEX_API_URL")?;
             let client_id = optional_env("OPENAI_CODEX_CLIENT_ID")?
                 .unwrap_or_else(|| "app_EMoamEEZ73f0CkXaXp7hrann".to_string());
             let session_path = optional_env("OPENAI_CODEX_SESSION_PATH")?
@@ -615,14 +619,15 @@ impl LlmConfig {
             .map(|k| SecretString::from(k.clone()));
 
         let base_url = custom.base_url.clone().unwrap_or_default();
-        if base_url.is_empty() {
+        let base_url = if base_url.is_empty() {
             tracing::warn!(id = %custom.id, "Custom provider has no base_url configured — requests will fail");
+            base_url
         } else {
             validate_operator_base_url(
                 &base_url,
                 &format!("custom provider '{}' base_url", custom.id),
-            )?;
-        }
+            )?
+        };
 
         let model = Self::selected_model_override(settings)
             .or(optional_env("LLM_MODEL")?)
@@ -791,11 +796,15 @@ impl LlmConfig {
 
         // Provider base URLs are explicit operator configuration, so allow
         // private/local endpoints while still rejecting unsafe schemes,
-        // public plaintext HTTP, and special blocked addresses.
-        if !base_url.is_empty() {
+        // public plaintext HTTP, and special blocked addresses. The validator
+        // also returns the trimmed URL (#2886) so whitespace-polluted inputs
+        // (CI env vars, DB paste) never reach the request layer.
+        let base_url = if base_url.is_empty() {
+            base_url
+        } else {
             let field = base_url_env.unwrap_or("LLM_BASE_URL");
-            validate_operator_base_url(&base_url, field)?;
-        }
+            validate_operator_base_url(&base_url, field)?
+        };
 
         // Resolve model: selected_model (DB) > per-provider override (DB) > env var > registry default
         let model = Self::selected_model_override(settings)
@@ -1392,6 +1401,68 @@ mod tests {
         unsafe {
             std::env::remove_var("LLM_BACKEND");
             std::env::remove_var("LLM_BASE_URL");
+        }
+    }
+
+    #[test]
+    fn base_url_trims_surrounding_whitespace() {
+        // Regression for #2886: GitHub Actions repo variables and DB-pasted
+        // URLs can carry trailing newlines or spaces. `url::Url::parse`
+        // tolerates them, but `http::Uri` (reqwest/rig) rejects with
+        // "invalid uri character", causing all live requests to fail.
+        //
+        // The trim lives in the shared `validate_base_url` /
+        // `validate_operator_base_url`. This test exercises several callers
+        // (openai_compatible env, openai_compatible DB, NearAI) to verify
+        // each site actually captures the normalized return value — a
+        // helper-level unit test alone cannot catch a caller that forgets
+        // to rebind.
+        let _guard = lock_env();
+        clear_openai_compatible_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("LLM_BACKEND", "openai_compatible");
+            std::env::set_var("LLM_BASE_URL", "  http://localhost:8080/v1\n");
+            std::env::set_var("LLM_MODEL", "test-model");
+        }
+
+        let settings = Settings::default();
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let provider = cfg.provider.expect("should have provider config");
+        assert_eq!(provider.base_url, "http://localhost:8080/v1");
+
+        // Same path through DB-stored settings.
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BASE_URL");
+        }
+        let settings = Settings {
+            openai_compatible_base_url: Some("http://localhost:8080/v1\n".to_string()),
+            ..Default::default()
+        };
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let provider = cfg.provider.expect("should have provider config");
+        assert_eq!(provider.base_url, "http://localhost:8080/v1");
+
+        // NearAI sibling path: NEARAI_BASE_URL and NEARAI_AUTH_URL both
+        // flow through `validate_base_url`. Use localhost to avoid DNS.
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("LLM_BACKEND", "nearai");
+            std::env::set_var("NEARAI_BASE_URL", "  http://localhost:9090/v1\n");
+            std::env::set_var("NEARAI_AUTH_URL", "\thttp://localhost:9091 ");
+        }
+        let settings = Settings::default();
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        assert_eq!(cfg.nearai.base_url, "http://localhost:9090/v1");
+        assert_eq!(cfg.session.auth_base_url, "http://localhost:9091");
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("LLM_MODEL");
+            std::env::remove_var("NEARAI_BASE_URL");
+            std::env::remove_var("NEARAI_AUTH_URL");
         }
     }
 
