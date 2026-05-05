@@ -32,6 +32,7 @@ const MAX_TOTAL_UNZIPPED_BYTES: u64 = 20 * 1024 * 1024;
 /// case a future refactor (parallel fetching, retries) changes that
 /// invariant.
 const MAX_CHAIN_QUEUE: usize = MAX_CHAIN_DEPS * 10;
+const INSTALL_METADATA_FILE_NAME: &str = ".ironclaw-install.json";
 
 #[derive(Debug, Clone, Error)]
 #[error("{message}")]
@@ -464,6 +465,34 @@ fn append_chain_install_report_fields(output: &mut serde_json::Value, report: &C
     }
 }
 
+fn normalize_install_source_url(url: &str) -> String {
+    url.trim().trim_end_matches('/').to_string()
+}
+
+fn loaded_skill_name_for_source_url(
+    registry: &SkillRegistry,
+    requested_url: &str,
+) -> Option<String> {
+    let requested_url = normalize_install_source_url(requested_url);
+    if requested_url.is_empty() {
+        return None;
+    }
+
+    registry.skills().iter().find_map(|skill| {
+        let skill_dir = match &skill.source {
+            ironclaw_skills::SkillSource::Installed(path) => path,
+            _ => return None,
+        };
+        let metadata_path = skill_dir.join(INSTALL_METADATA_FILE_NAME);
+        let metadata_bytes = std::fs::read(metadata_path).ok()?;
+        let metadata: ironclaw_skills::registry::InstalledSkillMetadata =
+            serde_json::from_slice(&metadata_bytes).ok()?;
+        let source_url = metadata.source_url.as_deref()?;
+        (normalize_install_source_url(source_url) == requested_url)
+            .then(|| skill.name().to_string())
+    })
+}
+
 // ── skill_list ──────────────────────────────────────────────────────────
 
 pub struct SkillListTool {
@@ -795,16 +824,30 @@ impl Tool for SkillInstallTool {
             .filter(|s| !s.is_empty())
             .map(str::to_string);
 
-        // Idempotent: if a skill with this name is already loaded (from any
+        // Idempotent: if the requested skill is already loaded (from any
         // source — local SKILL.md, bundled, previously installed), avoid
-        // reinstalling the top-level skill. Dependency installs are not a
-        // no-op: when explicitly requested, walk the loaded skill's companion
-        // list instead of returning early.
+        // reinstalling the top-level skill. URL installs can have a suggested
+        // `name` derived from the repository slug instead of the final parsed
+        // skill name, so also match against persisted install metadata.
+        // Dependency installs are not a no-op: when explicitly requested,
+        // walk the loaded skill's companion list instead of returning early.
         let loaded_required_skills = {
             let guard = self
                 .registry
                 .read()
                 .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
+
+            if !install_dependencies
+                && let Some(url) = params.get("url").and_then(|v| v.as_str())
+                && let Some(installed_name) = loaded_skill_name_for_source_url(&guard, url)
+            {
+                let report = ChainInstallReport::default();
+                return Ok(ToolOutput::success(
+                    build_already_installed_output(&installed_name, &report),
+                    start.elapsed(),
+                ));
+            }
+
             if let Some(loaded_skill) = guard.find_by_name(name) {
                 let required_skills = loaded_skill.manifest.requires.skills.clone();
                 if install_dependencies && !required_skills.is_empty() {
@@ -884,10 +927,11 @@ impl Tool for SkillInstallTool {
                 .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
             if guard.has(&skill_name) {
-                return Err(ToolError::ExecutionFailed(format!(
-                    "Skill '{}' already exists",
-                    skill_name
-                )));
+                let report = ChainInstallReport::default();
+                return Ok(ToolOutput::success(
+                    build_already_installed_output(&skill_name, &report),
+                    start.elapsed(),
+                ));
             }
 
             (
@@ -1001,19 +1045,27 @@ impl Tool for SkillInstallTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        // No-op shortcut: if a skill with this name is already loaded (bundled,
-        // user, workspace, or previously installed), `execute` will return
+        // No-op shortcut: if a skill is already loaded (bundled, user,
+        // workspace, or previously installed), `execute` will return
         // `already_installed` without touching the catalog. Asking for approval
         // on a guaranteed no-op is pure friction, so we mirror the idempotent
-        // path here. Dependency-chain installs may still fetch companion
-        // skills, so they must go through the approval path below.
-        if !install_deps
-            && let Some(name) = params.get("name").and_then(|v| v.as_str())
-            && !name.is_empty()
-            && let Ok(guard) = self.registry.read()
-            && guard.has(name)
-        {
-            return ApprovalRequirement::Never;
+        // path here. URL installs may use a repository-derived `name`, so also
+        // match the request URL against persisted install metadata.
+        // Dependency-chain installs may still fetch companion skills, so they
+        // must go through the approval path below.
+        if !install_deps && let Ok(guard) = self.registry.read() {
+            let name_is_loaded = params
+                .get("name")
+                .and_then(|v| v.as_str())
+                .filter(|name| !name.is_empty())
+                .is_some_and(|name| guard.has(name));
+            let source_url_is_loaded = params
+                .get("url")
+                .and_then(|v| v.as_str())
+                .is_some_and(|url| loaded_skill_name_for_source_url(&guard, url).is_some());
+            if name_is_loaded || source_url_is_loaded {
+                return ApprovalRequirement::Never;
+            }
         }
 
         // Chain installs pull up to MAX_CHAIN_DEPS additional skills, each
@@ -2033,6 +2085,54 @@ mod tests {
             })),
             ApprovalRequirement::Always,
             "install_dependencies=true must prompt even if the main skill is loaded",
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_install_url_duplicate_is_idempotent_without_approval() {
+        use crate::tools::tool::ApprovalRequirement;
+
+        let registry = test_registry();
+        let source_url = "https://github.com/Pika-Labs/Pika-Skills";
+        let (name, loaded) = {
+            let dir = registry.read().unwrap().install_target_dir().to_path_buf();
+            SkillRegistry::prepare_install_bundle_to_disk(
+                &dir,
+                "pikastream-video-meeting",
+                &skill_content("pikastream-video-meeting", &[]),
+                &[],
+                Some(&ironclaw_skills::registry::InstalledSkillMetadata {
+                    source_url: Some(source_url.to_string()),
+                    source_subdir: None,
+                }),
+            )
+            .await
+            .expect("prepare should succeed")
+        };
+        registry
+            .write()
+            .unwrap()
+            .commit_install(&name, loaded)
+            .expect("commit should succeed");
+        let tool = SkillInstallTool::new(Arc::clone(&registry), test_catalog());
+
+        let params = serde_json::json!({
+            "name": "pika-skills",
+            "url": source_url,
+        });
+        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Never);
+
+        let output = tool
+            .execute(params, &JobContext::default())
+            .await
+            .expect("duplicate URL install should be a no-op");
+        assert_eq!(output.result["status"], "already_installed");
+        assert_eq!(output.result["name"], "pikastream-video-meeting");
+        assert!(
+            output.result["message"]
+                .as_str()
+                .unwrap()
+                .contains("no install needed")
         );
     }
 
