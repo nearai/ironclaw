@@ -4,6 +4,8 @@ use std::sync::Mutex;
 
 use crate::{TurnError, TurnRunId, TurnScope, TurnStatus};
 
+const MAX_IN_MEMORY_EVENTS: usize = 10_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
 #[serde(transparent)]
 pub struct EventCursor(pub u64);
@@ -57,6 +59,10 @@ impl TurnEventSink for InMemoryTurnEventSink {
             reason: "turn event sink mutex poisoned".to_string(),
         })?;
         events.push(event);
+        if events.len() > MAX_IN_MEMORY_EVENTS {
+            let excess = events.len() - MAX_IN_MEMORY_EVENTS;
+            events.drain(0..excess);
+        }
         Ok(())
     }
 }

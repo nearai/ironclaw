@@ -3,11 +3,13 @@ use std::sync::Arc;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, BlockedReason, CancelRunRequest,
-    DefaultTurnCoordinator, GateRef, GetRunStateRequest, IdempotencyKey, InMemoryTurnStateStore,
-    ReplyTargetBindingRef, ResumeTurnRequest, SanitizedCancelReason, SanitizedFailure,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
-    TurnAdmissionPolicy, TurnCheckpointId, TurnCoordinator, TurnError, TurnLeaseToken, TurnRunId,
-    TurnRunProfile, TurnRunnerId, TurnScope, TurnStatus,
+    DefaultTurnCoordinator, GateRef, GetRunStateRequest, IdempotencyKey, InMemoryTurnEventSink,
+    InMemoryTurnStateStore, ReplyTargetBindingRef, ResumeTurnRequest, SanitizedCancelReason,
+    SanitizedFailure, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
+    TurnActor, TurnAdmissionPolicy, TurnCheckpointId, TurnCoordinator, TurnError, TurnEventKind,
+    TurnEventSink, TurnLeaseToken, TurnLifecycleEvent, TurnRunId, TurnRunProfile, TurnRunnerId,
+    TurnScope, TurnStatus,
+    events::EventCursor,
     runner::{
         BlockRunRequest, ClaimRunRequest, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
         TurnRunTransitionPort,
@@ -357,6 +359,91 @@ async fn cancel_run_for_queued_run_terminally_cancels_and_releases_lock() {
 }
 
 #[tokio::test]
+async fn cancelled_running_run_cannot_be_reopened_as_blocked() {
+    let (coordinator, store) = coordinator();
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-a", "idem-submit-a"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    coordinator
+        .cancel_run(cancel_request("thread-a", run_id, "idem-cancel-a"))
+        .await
+        .unwrap();
+
+    let blocked_after_cancel = store
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            reason: BlockedReason::Approval {
+                gate_ref: GateRef::new("approval-gate").unwrap(),
+            },
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        blocked_after_cancel,
+        TurnError::InvalidTransition {
+            from: TurnStatus::CancelRequested,
+            to: TurnStatus::BlockedApproval,
+        }
+    );
+
+    let state = coordinator
+        .get_run_state(GetRunStateRequest {
+            scope: scope("thread-a"),
+            run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(state.status, TurnStatus::CancelRequested);
+}
+
+#[tokio::test]
+async fn sanitized_failure_rejects_empty_controlled_or_oversized_categories() {
+    assert!(SanitizedFailure::new("policy").is_ok());
+    assert!(SanitizedFailure::new("").is_err());
+    assert!(SanitizedFailure::new("backend\nsecret=leaked").is_err());
+    assert!(SanitizedFailure::new("x".repeat(257)).is_err());
+}
+
+#[tokio::test]
+async fn in_memory_event_sink_retains_a_bounded_tail() {
+    let sink = InMemoryTurnEventSink::default();
+    for cursor in 1..=10_001 {
+        sink.publish(TurnLifecycleEvent {
+            cursor: EventCursor(cursor),
+            scope: scope("thread-a"),
+            run_id: TurnRunId::new(),
+            status: TurnStatus::Queued,
+            kind: TurnEventKind::Submitted,
+            sanitized_reason: None,
+        })
+        .await
+        .unwrap();
+    }
+
+    let events = sink.events();
+    assert_eq!(events.len(), 10_000);
+    assert_eq!(events.first().unwrap().cursor, EventCursor(2));
+    assert_eq!(events.last().unwrap().cursor, EventCursor(10_001));
+}
+
+#[tokio::test]
 async fn terminal_runner_outcome_releases_lock_exactly_once() {
     let (coordinator, store) = coordinator();
     let run_id = accepted_run_id(
@@ -398,7 +485,7 @@ async fn terminal_runner_outcome_releases_lock_exactly_once() {
             run_id,
             runner_id,
             lease_token,
-            failure: SanitizedFailure::new("late_failure"),
+            failure: SanitizedFailure::new("late_failure").unwrap(),
         })
         .await
         .unwrap_err();

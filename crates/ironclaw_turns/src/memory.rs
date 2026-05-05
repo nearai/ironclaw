@@ -261,10 +261,7 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
         let mut record = inner.take_record(request.run_id)?;
         let result = (|| {
             ensure_lease(&record, request.runner_id, request.lease_token)?;
-            if !matches!(
-                record.status,
-                TurnStatus::Running | TurnStatus::CancelRequested
-            ) {
+            if !matches!(record.status, TurnStatus::Running) {
                 return Err(TurnError::InvalidTransition {
                     from: record.status,
                     to: request.reason.status(),
@@ -488,7 +485,7 @@ impl Inner {
             self.release_active_lock(&record);
             self.remove_queued_run(record.run_id);
             let state = record.state();
-            self.push_event(&record, kind, failure.map(|failure| failure.category));
+            self.push_event(&record, kind, failure.map(SanitizedFailure::into_category));
             self.mark_terminal(record.run_id);
             Ok(state)
         })();

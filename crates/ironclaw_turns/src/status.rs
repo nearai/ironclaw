@@ -74,15 +74,36 @@ impl BlockedReason {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SanitizedFailure {
-    pub category: String,
+    category: String,
 }
 
 impl SanitizedFailure {
-    pub fn new(category: impl Into<String>) -> Self {
-        Self {
-            category: category.into(),
-        }
+    pub fn new(category: impl Into<String>) -> Result<Self, String> {
+        let category = category.into();
+        validate_sanitized_category("failure_category", &category)?;
+        Ok(Self { category })
     }
+
+    pub fn category(&self) -> &str {
+        &self.category
+    }
+
+    pub fn into_category(self) -> String {
+        self.category
+    }
+}
+
+fn validate_sanitized_category(kind: &'static str, value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err(format!("{kind} must not be empty"));
+    }
+    if value.len() > 256 {
+        return Err(format!("{kind} must be at most 256 bytes"));
+    }
+    if value.chars().any(|c| c == '\0' || c.is_control()) {
+        return Err(format!("{kind} must not contain control characters"));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
