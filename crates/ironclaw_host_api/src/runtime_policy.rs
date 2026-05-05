@@ -192,24 +192,60 @@ impl RuntimeProfile {
 
     /// `true` for `Local*` variants. The resolver uses this to refuse local
     /// profiles on hosted/enterprise deployments.
+    ///
+    /// Exhaustive `match` rather than `matches!` is intentional: this
+    /// predicate gates security-critical deployment boundary checks, and a
+    /// new `RuntimeProfile` variant must force a compile-time decision here
+    /// rather than silently default to `false`.
     pub const fn is_local(&self) -> bool {
-        matches!(self, Self::LocalSafe | Self::LocalDev | Self::LocalYolo)
+        match self {
+            Self::LocalSafe | Self::LocalDev | Self::LocalYolo => true,
+            Self::SecureDefault
+            | Self::HostedSafe
+            | Self::HostedDev
+            | Self::HostedYoloTenantScoped
+            | Self::EnterpriseSafe
+            | Self::EnterpriseDev
+            | Self::EnterpriseYoloDedicated
+            | Self::Sandboxed
+            | Self::Experiment => false,
+        }
     }
 
     /// `true` for `Hosted*` variants.
+    ///
+    /// Exhaustive `match` for the same reason as [`Self::is_local`].
     pub const fn is_hosted(&self) -> bool {
-        matches!(
-            self,
-            Self::HostedSafe | Self::HostedDev | Self::HostedYoloTenantScoped
-        )
+        match self {
+            Self::HostedSafe | Self::HostedDev | Self::HostedYoloTenantScoped => true,
+            Self::SecureDefault
+            | Self::LocalSafe
+            | Self::LocalDev
+            | Self::LocalYolo
+            | Self::EnterpriseSafe
+            | Self::EnterpriseDev
+            | Self::EnterpriseYoloDedicated
+            | Self::Sandboxed
+            | Self::Experiment => false,
+        }
     }
 
     /// `true` for `Enterprise*` variants.
+    ///
+    /// Exhaustive `match` for the same reason as [`Self::is_local`].
     pub const fn is_enterprise(&self) -> bool {
-        matches!(
-            self,
-            Self::EnterpriseSafe | Self::EnterpriseDev | Self::EnterpriseYoloDedicated
-        )
+        match self {
+            Self::EnterpriseSafe | Self::EnterpriseDev | Self::EnterpriseYoloDedicated => true,
+            Self::SecureDefault
+            | Self::LocalSafe
+            | Self::LocalDev
+            | Self::LocalYolo
+            | Self::HostedSafe
+            | Self::HostedDev
+            | Self::HostedYoloTenantScoped
+            | Self::Sandboxed
+            | Self::Experiment => false,
+        }
     }
 
     /// `true` for any `*Yolo*` variant.
@@ -217,11 +253,22 @@ impl RuntimeProfile {
     /// Yolo variants always require explicit selection and visible disclosure
     /// — the resolver and CLI/settings surfaces enforce that, this method is
     /// just a predicate.
+    ///
+    /// Exhaustive `match` for the same reason as [`Self::is_local`]: a new
+    /// yolo-shaped profile must be classified at compile time.
     pub const fn is_yolo(&self) -> bool {
-        matches!(
-            self,
-            Self::LocalYolo | Self::HostedYoloTenantScoped | Self::EnterpriseYoloDedicated
-        )
+        match self {
+            Self::LocalYolo | Self::HostedYoloTenantScoped | Self::EnterpriseYoloDedicated => true,
+            Self::SecureDefault
+            | Self::LocalSafe
+            | Self::LocalDev
+            | Self::HostedSafe
+            | Self::HostedDev
+            | Self::EnterpriseSafe
+            | Self::EnterpriseDev
+            | Self::Sandboxed
+            | Self::Experiment => false,
+        }
     }
 }
 
