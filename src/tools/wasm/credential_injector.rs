@@ -427,6 +427,10 @@ pub(crate) fn inject_credential(
             // URL placeholder replacement is handled by channel/tool wrappers
             // that substitute {PLACEHOLDER} values in templated strings.
         }
+        CredentialLocation::HmacSignedHeader { .. }
+        | CredentialLocation::Eip712SignedHeader { .. }
+        | CredentialLocation::Nep413SignedHeader { .. }
+        | CredentialLocation::SolanaSignedTransaction { .. } => {}
     }
 }
 

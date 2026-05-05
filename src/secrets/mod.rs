@@ -70,8 +70,9 @@ pub use store::LibSqlSecretsStore;
 pub use store::PostgresSecretsStore;
 pub use store::{SecretConsumeResult, SecretsStore};
 pub use types::{
-    CreateSecretParams, CredentialLocation, CredentialMapping, DecryptedSecret, Secret,
-    SecretError, SecretRef,
+    BodyJsonOutput, BodyValue, BytesPart, CreateSecretParams, CredentialLocation,
+    CredentialMapping, DecryptedSecret, Eip712Domain, Eip712StructDef, Eip712TypedField,
+    FieldSource, HeaderOutput, OutputSource, Secret, SecretError, SecretRef,
 };
 pub(crate) use types::{
     extract_url_path_for_matching, host_matches_pattern, match_specificity, path_matches_prefix,

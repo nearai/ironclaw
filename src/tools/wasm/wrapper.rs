@@ -24,6 +24,17 @@ use crate::secrets::SecretsStore;
 use crate::secrets::host_matches_pattern;
 use crate::tools::tool::{Tool, ToolDiscoverySummary, ToolError, ToolOutput};
 use crate::tools::wasm::capabilities::Capabilities;
+use base64::Engine as _;
+use borsh::BorshSerialize;
+use ed25519_dalek::Signer as _;
+use hmac::{Hmac, Mac};
+use k256::ecdsa::{Signature as K256Signature, SigningKey, signature::hazmat::PrehashSigner};
+use rand::RngCore;
+use rmp_serde::Serializer as MsgpackSerializer;
+use serde::Serialize as _;
+use sha2::{Digest, Sha256};
+use sha3::Keccak256;
+
 use crate::tools::wasm::credential_injector::{InjectedCredentials, inject_credential};
 use crate::tools::wasm::error::WasmError;
 use crate::tools::wasm::host::{HostState, LogLevel};
@@ -107,6 +118,47 @@ struct ResolvedHostCredential {
     query_params: HashMap<String, String>,
     /// Raw secret value for redaction in error messages.
     secret_value: String,
+    /// When set, the secret feeds a per-request signer (HMAC, EIP-712,
+    /// or NEP-413). The variant carries the venue-specific output
+    /// schema declared by the tool in its capabilities file.
+    signing: Option<SigningSpec>,
+}
+
+#[derive(Clone)]
+enum SigningSpec {
+    Hmac(HmacSigning),
+    Eip712(Eip712Signing),
+    Nep413(Nep413Signing),
+    Solana(SolanaSigning),
+}
+
+#[derive(Clone)]
+struct HmacSigning {
+    signature_header: String,
+    timestamp_header: String,
+}
+
+#[derive(Clone)]
+struct Eip712Signing {
+    domain: crate::secrets::Eip712Domain,
+    primary_type: String,
+    structs: Vec<crate::secrets::Eip712StructDef>,
+    output_headers: Vec<crate::secrets::HeaderOutput>,
+    output_body_fields: Vec<crate::secrets::BodyJsonOutput>,
+}
+
+#[derive(Clone)]
+struct Nep413Signing {
+    recipient_source: crate::secrets::FieldSource,
+    message_source: crate::secrets::FieldSource,
+    callback_url_source: Option<crate::secrets::FieldSource>,
+    output_headers: Vec<crate::secrets::HeaderOutput>,
+}
+
+#[derive(Clone)]
+struct SolanaSigning {
+    message_source: crate::secrets::FieldSource,
+    output_body_fields: Vec<crate::secrets::BodyJsonOutput>,
 }
 
 impl std::fmt::Debug for ResolvedHostCredential {
@@ -117,11 +169,45 @@ impl std::fmt::Debug for ResolvedHostCredential {
         // contain decrypted secret material.
         let header_keys: Vec<&String> = self.headers.keys().collect();
         let query_keys: Vec<&String> = self.query_params.keys().collect();
+        let signing_summary: Option<String> = self.signing.as_ref().map(|s| match s {
+            SigningSpec::Hmac(spec) => format!(
+                "hmac(sig={}, ts={})",
+                spec.signature_header, spec.timestamp_header
+            ),
+            SigningSpec::Eip712(spec) => {
+                let outs: Vec<&str> = spec
+                    .output_headers
+                    .iter()
+                    .map(|o| o.header_name.as_str())
+                    .collect();
+                format!(
+                    "eip712(domain={}, primary={}, outputs={:?})",
+                    spec.domain.name, spec.primary_type, outs
+                )
+            }
+            SigningSpec::Nep413(spec) => {
+                let outs: Vec<&str> = spec
+                    .output_headers
+                    .iter()
+                    .map(|o| o.header_name.as_str())
+                    .collect();
+                format!("nep413(outputs={:?})", outs)
+            }
+            SigningSpec::Solana(spec) => {
+                let outs: Vec<&str> = spec
+                    .output_body_fields
+                    .iter()
+                    .map(|o| o.json_path.as_str())
+                    .collect();
+                format!("solana(body_outputs={:?})", outs)
+            }
+        });
         f.debug_struct("ResolvedHostCredential")
             .field("host_patterns", &self.host_patterns)
             .field("path_patterns", &self.path_patterns)
             .field("header_names", &header_keys)
             .field("query_param_names", &query_keys)
+            .field("signing", &signing_summary)
             .field("secret_value", &"[REDACTED]")
             .finish()
     }
@@ -226,6 +312,8 @@ impl StoreData {
     fn inject_host_credentials(
         &self,
         url_host: &str,
+        method: &str,
+        body: &mut Option<Vec<u8>>,
         headers: &mut HashMap<String, String>,
         url: &mut String,
     ) {
@@ -258,6 +346,13 @@ impl StoreData {
                 .then_with(|| a.secret_name.cmp(&b.secret_name))
         });
 
+        let timestamp_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let mut nonce_bytes = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+
         for cred in matches_for_request {
             // Merge injected headers (host credentials take precedence; the
             // most-specific match iterates last, so it wins any conflict).
@@ -288,6 +383,951 @@ impl StoreData {
                 if let Some(frag) = fragment {
                     url.push_str(&frag);
                 }
+            }
+
+            if let Some(signing) = &cred.signing {
+                let result = match signing {
+                    SigningSpec::Hmac(spec) => apply_hmac_signing(
+                        spec,
+                        &cred.secret_value,
+                        method,
+                        &url_path,
+                        body.as_deref(),
+                        timestamp_secs,
+                    ),
+                    SigningSpec::Eip712(spec) => apply_eip712_signing(
+                        spec,
+                        &cred.secret_value,
+                        body.as_deref(),
+                        timestamp_secs,
+                        &nonce_bytes,
+                    ),
+                    SigningSpec::Nep413(spec) => apply_nep413_signing(
+                        spec,
+                        &cred.secret_value,
+                        body.as_deref(),
+                        timestamp_secs,
+                        &nonce_bytes,
+                    ),
+                    SigningSpec::Solana(spec) => apply_solana_signing(
+                        spec,
+                        &cred.secret_value,
+                        body.as_deref(),
+                        timestamp_secs,
+                        &nonce_bytes,
+                    ),
+                };
+
+                match result {
+                    Ok(extra) => {
+                        for (k, v) in extra.headers {
+                            headers.insert(k, v);
+                        }
+                        if let Err(error) = apply_body_mutations(body, &extra.body_mutations) {
+                            tracing::warn!(
+                                secret_name = %cred.secret_name,
+                                error = %error,
+                                "body mutation failed; signing headers applied but body left unmodified"
+                            );
+                        }
+                    }
+                    Err(error) => tracing::warn!(
+                        secret_name = %cred.secret_name,
+                        error = %error,
+                        "signer failed; skipping signing headers"
+                    ),
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum SignerError {
+    #[error("invalid secret material: {0}")]
+    InvalidSecret(String),
+    #[error("invalid signing schema: {0}")]
+    InvalidSchema(String),
+    #[error("invalid eip712 field: {0}")]
+    InvalidField(String),
+    #[error("source not supported in this position: {0}")]
+    UnsupportedSource(String),
+    #[error("signing failed: {0}")]
+    SignFailed(String),
+}
+
+#[derive(Debug, Default)]
+struct SignerOutput {
+    headers: Vec<(String, String)>,
+    body_mutations: Vec<(String, serde_json::Value)>,
+}
+
+fn apply_hmac_signing(
+    spec: &HmacSigning,
+    secret_value: &str,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+    timestamp_secs: u64,
+) -> Result<SignerOutput, SignerError> {
+    let key_bytes = base64::engine::general_purpose::URL_SAFE
+        .decode(secret_value.as_bytes())
+        .map_err(|e| SignerError::InvalidSecret(format!("hmac key not url-safe base64: {e}")))?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(&key_bytes)
+        .map_err(|e| SignerError::SignFailed(format!("hmac key rejected: {e}")))?;
+    let timestamp = timestamp_secs.to_string();
+    mac.update(timestamp.as_bytes());
+    mac.update(method.as_bytes());
+    mac.update(path.as_bytes());
+    if let Some(body_bytes) = body {
+        mac.update(body_bytes);
+    }
+    let signature = base64::engine::general_purpose::URL_SAFE.encode(mac.finalize().into_bytes());
+    Ok(SignerOutput {
+        headers: vec![
+            (spec.signature_header.clone(), signature),
+            (spec.timestamp_header.clone(), timestamp),
+        ],
+        body_mutations: Vec::new(),
+    })
+}
+
+fn apply_eip712_signing(
+    spec: &Eip712Signing,
+    secret_value: &str,
+    body: Option<&[u8]>,
+    timestamp_secs: u64,
+    nonce_bytes: &[u8; 32],
+) -> Result<SignerOutput, SignerError> {
+    let signing_key = parse_secp256k1_secret(secret_value)?;
+    let address_bytes = derive_eth_address(&signing_key);
+    let address_hex = format!("0x{}", hex::encode(address_bytes));
+    let public_key_hex = derive_secp256k1_public_key_hex(&signing_key);
+
+    if spec.structs.len() != 1 {
+        return Err(SignerError::InvalidSchema(
+            "only single-struct eip712 schemas are supported in this build".into(),
+        ));
+    }
+    let primary = spec
+        .structs
+        .iter()
+        .find(|s| s.name == spec.primary_type)
+        .ok_or_else(|| {
+            SignerError::InvalidSchema(format!(
+                "primary type '{}' not found in declared structs",
+                spec.primary_type
+            ))
+        })?;
+
+    let body_json = parse_body_json_if_needed(
+        primary.fields.iter().map(|f| &f.source),
+        body,
+    )?;
+
+    let mut field_value_buf: Vec<u8> = Vec::with_capacity(32 + primary.fields.len() * 32);
+    let type_string = encode_eip712_type_string(primary);
+    let type_hash = keccak256(type_string.as_bytes());
+    field_value_buf.extend_from_slice(&type_hash);
+    for field in &primary.fields {
+        let raw = resolve_field_source(
+            &field.source,
+            Some(&address_hex),
+            &public_key_hex,
+            body,
+            body_json.as_ref(),
+            timestamp_secs,
+            nonce_bytes,
+        )?;
+        let encoded = encode_eip712_field_value(&field.type_name, &raw)?;
+        field_value_buf.extend_from_slice(&encoded);
+    }
+    let struct_hash = keccak256(&field_value_buf);
+
+    let domain_separator = compute_eip712_domain_separator(&spec.domain)?;
+
+    let mut final_buf = Vec::with_capacity(2 + 32 + 32);
+    final_buf.extend_from_slice(&[0x19u8, 0x01u8]);
+    final_buf.extend_from_slice(&domain_separator);
+    final_buf.extend_from_slice(&struct_hash);
+    let final_hash = keccak256(&final_buf);
+
+    let (sig_64, recovery_id) = sign_secp256k1_recoverable(&signing_key, &final_hash)?;
+    let mut sig_with_v = Vec::with_capacity(65);
+    sig_with_v.extend_from_slice(&sig_64);
+    let v = recovery_id + 27;
+    sig_with_v.push(v);
+    let signature_hex = format!("0x{}", hex::encode(&sig_with_v));
+    let signature_b64 = base64::engine::general_purpose::URL_SAFE.encode(&sig_with_v);
+    let signature_r_hex = format!("0x{}", hex::encode(&sig_64[..32]));
+    let signature_s_hex = format!("0x{}", hex::encode(&sig_64[32..]));
+
+    let evaluated = EvaluatedSignature {
+        signer_address: address_hex.clone(),
+        signer_public_key: public_key_hex.clone(),
+        signature_hex: signature_hex.clone(),
+        signature_b64: signature_b64.clone(),
+        signature_r_hex,
+        signature_s_hex,
+        signature_v: v,
+        timestamp_secs,
+        nonce_bytes: *nonce_bytes,
+    };
+
+    let mut headers: Vec<(String, String)> = Vec::with_capacity(spec.output_headers.len());
+    for header in &spec.output_headers {
+        let value = resolve_output_source(
+            &header.value,
+            Some(&address_hex),
+            &public_key_hex,
+            &signature_hex,
+            &signature_b64,
+            timestamp_secs,
+            nonce_bytes,
+        )?;
+        headers.push((header.header_name.clone(), value));
+    }
+
+    let mut body_mutations: Vec<(String, serde_json::Value)> =
+        Vec::with_capacity(spec.output_body_fields.len());
+    for field in &spec.output_body_fields {
+        let v = evaluate_body_value(&field.value, &evaluated)?;
+        body_mutations.push((field.json_path.clone(), v));
+    }
+
+    Ok(SignerOutput {
+        headers,
+        body_mutations,
+    })
+}
+
+fn apply_nep413_signing(
+    spec: &Nep413Signing,
+    secret_value: &str,
+    body: Option<&[u8]>,
+    timestamp_secs: u64,
+    nonce_bytes: &[u8; 32],
+) -> Result<SignerOutput, SignerError> {
+    let (signing_key, verifying_key) = parse_ed25519_secret(secret_value)?;
+    let public_key_b58 = format!(
+        "ed25519:{}",
+        bs58::encode(verifying_key.as_bytes()).into_string()
+    );
+
+    let body_json = parse_body_json_if_needed(
+        [
+            Some(&spec.recipient_source),
+            Some(&spec.message_source),
+            spec.callback_url_source.as_ref(),
+        ]
+        .into_iter()
+        .flatten(),
+        body,
+    )?;
+
+    let recipient = resolve_field_source(
+        &spec.recipient_source,
+        None,
+        &public_key_b58,
+        body,
+        body_json.as_ref(),
+        timestamp_secs,
+        nonce_bytes,
+    )?;
+    let message = resolve_field_source(
+        &spec.message_source,
+        None,
+        &public_key_b58,
+        body,
+        body_json.as_ref(),
+        timestamp_secs,
+        nonce_bytes,
+    )?;
+    let callback_url = match &spec.callback_url_source {
+        Some(src) => Some(resolve_field_source(
+            src,
+            None,
+            &public_key_b58,
+            body,
+            body_json.as_ref(),
+            timestamp_secs,
+            nonce_bytes,
+        )?),
+        None => None,
+    };
+
+    let payload = Nep413Payload {
+        message,
+        nonce: *nonce_bytes,
+        recipient,
+        callback_url,
+    };
+
+    let mut serialized: Vec<u8> = Vec::new();
+    let prefix: u32 = 2_147_484_061;
+    BorshSerialize::serialize(&prefix, &mut serialized)
+        .map_err(|e| SignerError::SignFailed(format!("borsh prefix: {e}")))?;
+    BorshSerialize::serialize(&payload, &mut serialized)
+        .map_err(|e| SignerError::SignFailed(format!("borsh payload: {e}")))?;
+
+    let hash = Sha256::digest(&serialized);
+    let signature = signing_key.sign(&hash);
+    let signature_bytes = signature.to_bytes();
+    let signature_hex = format!("0x{}", hex::encode(signature_bytes));
+    let signature_b64 = base64::engine::general_purpose::URL_SAFE.encode(signature_bytes);
+
+    let mut headers: Vec<(String, String)> = Vec::with_capacity(spec.output_headers.len());
+    for header in &spec.output_headers {
+        let value = resolve_output_source(
+            &header.value,
+            None,
+            &public_key_b58,
+            &signature_hex,
+            &signature_b64,
+            timestamp_secs,
+            nonce_bytes,
+        )?;
+        headers.push((header.header_name.clone(), value));
+    }
+    Ok(SignerOutput {
+        headers,
+        body_mutations: Vec::new(),
+    })
+}
+
+#[derive(BorshSerialize)]
+struct Nep413Payload {
+    message: String,
+    nonce: [u8; 32],
+    recipient: String,
+    callback_url: Option<String>,
+}
+
+const SOLANA_MAX_PACKET_BYTES: usize = 1232;
+const SOLANA_SIGNATURE_BYTES: usize = 64;
+const SOLANA_SIG_COUNT_ONE_COMPACT_U16: u8 = 0x01;
+
+fn apply_solana_signing(
+    spec: &SolanaSigning,
+    secret_value: &str,
+    body: Option<&[u8]>,
+    timestamp_secs: u64,
+    nonce_bytes: &[u8; 32],
+) -> Result<SignerOutput, SignerError> {
+    use ed25519_dalek::Signer;
+
+    let (signing_key, verifying_key) = parse_ed25519_secret(secret_value)?;
+    let public_key_b58 = bs58::encode(verifying_key.as_bytes()).into_string();
+
+    let body_json =
+        parse_body_json_if_needed(std::iter::once(&spec.message_source), body)?;
+
+    let message_b64 = resolve_field_source(
+        &spec.message_source,
+        None,
+        &public_key_b58,
+        body,
+        body_json.as_ref(),
+        timestamp_secs,
+        nonce_bytes,
+    )?;
+    let message_bytes = base64::engine::general_purpose::STANDARD
+        .decode(message_b64.as_bytes())
+        .map_err(|e| {
+            SignerError::InvalidField(format!(
+                "solana message is not valid standard base64: {e}"
+            ))
+        })?;
+
+    if message_bytes.is_empty() {
+        return Err(SignerError::InvalidField(
+            "solana message must not be empty".into(),
+        ));
+    }
+    let total_tx_len = 1 + SOLANA_SIGNATURE_BYTES + message_bytes.len();
+    if total_tx_len > SOLANA_MAX_PACKET_BYTES {
+        return Err(SignerError::InvalidField(format!(
+            "solana signed transaction would be {total_tx_len} bytes, exceeds packet limit {SOLANA_MAX_PACKET_BYTES}"
+        )));
+    }
+
+    let signature_bytes = signing_key.sign(&message_bytes).to_bytes();
+
+    let mut signed_tx = Vec::with_capacity(total_tx_len);
+    signed_tx.push(SOLANA_SIG_COUNT_ONE_COMPACT_U16);
+    signed_tx.extend_from_slice(&signature_bytes);
+    signed_tx.extend_from_slice(&message_bytes);
+    let signed_tx_b64 = base64::engine::general_purpose::STANDARD.encode(&signed_tx);
+
+    let mut body_mutations: Vec<(String, serde_json::Value)> =
+        Vec::with_capacity(spec.output_body_fields.len());
+    for field in &spec.output_body_fields {
+        let v = evaluate_solana_body_value(
+            &field.value,
+            &public_key_b58,
+            &signature_bytes,
+            &signed_tx_b64,
+            timestamp_secs,
+            nonce_bytes,
+        )?;
+        body_mutations.push((field.json_path.clone(), v));
+    }
+
+    Ok(SignerOutput {
+        headers: Vec::new(),
+        body_mutations,
+    })
+}
+
+fn evaluate_solana_body_value(
+    value: &crate::secrets::BodyValue,
+    public_key_b58: &str,
+    signature_bytes: &[u8; 64],
+    signed_tx_b64: &str,
+    timestamp_secs: u64,
+    nonce_bytes: &[u8; 32],
+) -> Result<serde_json::Value, SignerError> {
+    use crate::secrets::BodyValue;
+    use serde_json::json;
+    Ok(match value {
+        BodyValue::SignerAddress | BodyValue::SignerPublicKey => json!(public_key_b58),
+        BodyValue::SignatureBase64 => {
+            json!(base64::engine::general_purpose::STANDARD.encode(signature_bytes))
+        }
+        BodyValue::SignatureHex => json!(format!("0x{}", hex::encode(signature_bytes))),
+        BodyValue::SolanaSignedTransactionBase64 => json!(signed_tx_b64),
+        BodyValue::RequestTimestampSecs => json!(timestamp_secs),
+        BodyValue::RequestRandomNonceB64 => {
+            json!(base64::engine::general_purpose::URL_SAFE.encode(nonce_bytes))
+        }
+        BodyValue::LiteralString { value } => json!(value),
+        BodyValue::LiteralNumber { value } => json!(value),
+        BodyValue::SignatureRHex | BodyValue::SignatureSHex | BodyValue::SignatureV => {
+            return Err(SignerError::InvalidSchema(
+                "ecdsa r/s/v components are not produced by the solana ed25519 signer"
+                    .into(),
+            ));
+        }
+    })
+}
+
+fn parse_secp256k1_secret(secret: &str) -> Result<SigningKey, SignerError> {
+    let trimmed = secret.trim().trim_start_matches("0x");
+    let bytes = hex::decode(trimmed)
+        .map_err(|e| SignerError::InvalidSecret(format!("expected hex secp256k1 key: {e}")))?;
+    if bytes.len() != 32 {
+        return Err(SignerError::InvalidSecret(format!(
+            "secp256k1 key must be 32 bytes, got {}",
+            bytes.len()
+        )));
+    }
+    SigningKey::from_slice(&bytes)
+        .map_err(|e| SignerError::InvalidSecret(format!("invalid secp256k1 key: {e}")))
+}
+
+fn parse_ed25519_secret(
+    secret: &str,
+) -> Result<(ed25519_dalek::SigningKey, ed25519_dalek::VerifyingKey), SignerError> {
+    let trimmed = secret.trim();
+    let trimmed = trimmed.strip_prefix("ed25519:").unwrap_or(trimmed);
+    let bytes = bs58::decode(trimmed)
+        .into_vec()
+        .map_err(|e| SignerError::InvalidSecret(format!("expected base58 ed25519 key: {e}")))?;
+    let seed_bytes: [u8; 32] = match bytes.len() {
+        32 => bytes
+            .try_into()
+            .map_err(|_| SignerError::InvalidSecret("ed25519 32-byte slice".into()))?,
+        64 => bytes[..32]
+            .try_into()
+            .map_err(|_| SignerError::InvalidSecret("ed25519 64-byte slice prefix".into()))?,
+        n => {
+            return Err(SignerError::InvalidSecret(format!(
+                "ed25519 key must be 32 or 64 bytes, got {n}"
+            )));
+        }
+    };
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed_bytes);
+    let verifying_key = signing_key.verifying_key();
+    Ok((signing_key, verifying_key))
+}
+
+fn derive_eth_address(key: &SigningKey) -> [u8; 20] {
+    let pubkey_point = key.verifying_key().to_encoded_point(false);
+    let pubkey_bytes = &pubkey_point.as_bytes()[1..];
+    let hash = keccak256(pubkey_bytes);
+    let mut addr = [0u8; 20];
+    addr.copy_from_slice(&hash[12..]);
+    addr
+}
+
+fn derive_secp256k1_public_key_hex(key: &SigningKey) -> String {
+    let pubkey_point = key.verifying_key().to_encoded_point(false);
+    format!("0x{}", hex::encode(pubkey_point.as_bytes()))
+}
+
+fn keccak256(input: &[u8]) -> [u8; 32] {
+    let mut hasher = Keccak256::new();
+    hasher.update(input);
+    hasher.finalize().into()
+}
+
+fn encode_eip712_type_string(primary: &crate::secrets::Eip712StructDef) -> String {
+    let fields: Vec<String> = primary
+        .fields
+        .iter()
+        .map(|f| format!("{} {}", f.type_name, f.name))
+        .collect();
+    format!("{}({})", primary.name, fields.join(","))
+}
+
+fn compute_eip712_domain_separator(
+    domain: &crate::secrets::Eip712Domain,
+) -> Result<[u8; 32], SignerError> {
+    let mut domain_type = String::from("EIP712Domain(string name,string version,uint256 chainId");
+    if domain.verifying_contract.is_some() {
+        domain_type.push_str(",address verifyingContract");
+    }
+    domain_type.push(')');
+
+    let domain_type_hash = keccak256(domain_type.as_bytes());
+    let name_hash = keccak256(domain.name.as_bytes());
+    let version_hash = keccak256(domain.version.as_bytes());
+
+    let mut buf = Vec::with_capacity(32 * 5);
+    buf.extend_from_slice(&domain_type_hash);
+    buf.extend_from_slice(&name_hash);
+    buf.extend_from_slice(&version_hash);
+
+    let mut chain_id_be = [0u8; 32];
+    chain_id_be[24..].copy_from_slice(&domain.chain_id.to_be_bytes());
+    buf.extend_from_slice(&chain_id_be);
+
+    if let Some(addr) = &domain.verifying_contract {
+        let addr_bytes = parse_eth_address(addr)?;
+        let mut padded = [0u8; 32];
+        padded[12..].copy_from_slice(&addr_bytes);
+        buf.extend_from_slice(&padded);
+    }
+
+    Ok(keccak256(&buf))
+}
+
+fn encode_eip712_field_value(type_name: &str, value: &str) -> Result<[u8; 32], SignerError> {
+    match type_name {
+        "string" => Ok(keccak256(value.as_bytes())),
+        "address" => {
+            let addr = parse_eth_address(value)?;
+            let mut padded = [0u8; 32];
+            padded[12..].copy_from_slice(&addr);
+            Ok(padded)
+        }
+        "uint256" => parse_uint256_be(value),
+        "bytes32" => {
+            let trimmed = value.trim_start_matches("0x");
+            let bytes = hex::decode(trimmed)
+                .map_err(|e| SignerError::InvalidField(format!("bytes32 hex: {e}")))?;
+            if bytes.len() != 32 {
+                return Err(SignerError::InvalidField(format!(
+                    "bytes32 must be 32 bytes, got {}",
+                    bytes.len()
+                )));
+            }
+            let mut padded = [0u8; 32];
+            padded.copy_from_slice(&bytes);
+            Ok(padded)
+        }
+        other => Err(SignerError::InvalidField(format!(
+            "unsupported eip712 type: {other}"
+        ))),
+    }
+}
+
+fn parse_uint256_be(value: &str) -> Result<[u8; 32], SignerError> {
+    let s = value.trim();
+    if s.is_empty() {
+        return Err(SignerError::InvalidField("uint256 is empty".into()));
+    }
+    let mut bytes = [0u8; 32];
+    for ch in s.chars() {
+        let digit = ch.to_digit(10).ok_or_else(|| {
+            SignerError::InvalidField(format!("uint256 contains non-digit '{ch}' in '{s}'"))
+        })?;
+        let mut carry: u32 = digit;
+        for byte in bytes.iter_mut().rev() {
+            let v = u32::from(*byte) * 10 + carry;
+            *byte = (v & 0xff) as u8;
+            carry = v >> 8;
+        }
+        if carry != 0 {
+            return Err(SignerError::InvalidField(format!(
+                "uint256 overflow: '{s}' exceeds 2^256 - 1"
+            )));
+        }
+    }
+    Ok(bytes)
+}
+
+fn parse_eth_address(value: &str) -> Result<[u8; 20], SignerError> {
+    let trimmed = value.trim().trim_start_matches("0x");
+    let bytes = hex::decode(trimmed)
+        .map_err(|e| SignerError::InvalidField(format!("address hex: {e}")))?;
+    if bytes.len() != 20 {
+        return Err(SignerError::InvalidField(format!(
+            "address must be 20 bytes, got {}",
+            bytes.len()
+        )));
+    }
+    let mut addr = [0u8; 20];
+    addr.copy_from_slice(&bytes);
+    Ok(addr)
+}
+
+fn sign_secp256k1_recoverable(
+    key: &SigningKey,
+    hash: &[u8; 32],
+) -> Result<([u8; 64], u8), SignerError> {
+    use k256::ecdsa::{RecoveryId, VerifyingKey};
+
+    let signature: K256Signature = key
+        .sign_prehash(hash)
+        .map_err(|e| SignerError::SignFailed(format!("secp256k1 sign: {e}")))?;
+    let signature = signature.normalize_s().unwrap_or(signature);
+    let verifying_key = key.verifying_key();
+
+    let mut recovery_id: Option<u8> = None;
+    for rid in 0..2u8 {
+        let id = RecoveryId::try_from(rid)
+            .map_err(|e| SignerError::SignFailed(format!("recovery id: {e}")))?;
+        if let Ok(recovered) = VerifyingKey::recover_from_prehash(hash, &signature, id)
+            && &recovered == verifying_key
+        {
+            recovery_id = Some(rid);
+            break;
+        }
+    }
+    let recovery_id = recovery_id
+        .ok_or_else(|| SignerError::SignFailed("could not derive recovery id".into()))?;
+
+    let sig_bytes: [u8; 64] = signature.to_bytes().into();
+    Ok((sig_bytes, recovery_id))
+}
+
+fn resolve_field_source(
+    source: &crate::secrets::FieldSource,
+    signer_address: Option<&str>,
+    signer_public_key: &str,
+    body: Option<&[u8]>,
+    body_json: Option<&serde_json::Value>,
+    timestamp_secs: u64,
+    nonce_bytes: &[u8; 32],
+) -> Result<String, SignerError> {
+    use crate::secrets::FieldSource;
+    match source {
+        FieldSource::Literal { value } => Ok(value.clone()),
+        FieldSource::SignerAddress => signer_address.map(str::to_string).ok_or_else(|| {
+            SignerError::UnsupportedSource(
+                "signer_address is not produced by this signer type (use signer_public_key instead)"
+                    .into(),
+            )
+        }),
+        FieldSource::SignerPublicKey => Ok(signer_public_key.to_string()),
+        FieldSource::RequestTimestampSecs => Ok(timestamp_secs.to_string()),
+        FieldSource::RequestRandomNonceB64 => {
+            Ok(base64::engine::general_purpose::URL_SAFE.encode(nonce_bytes))
+        }
+        FieldSource::RequestBody => {
+            let bytes = body.ok_or_else(|| {
+                SignerError::UnsupportedSource(
+                    "request_body source declared but no body present on this request".into(),
+                )
+            })?;
+            String::from_utf8(bytes.to_vec()).map_err(|e| {
+                SignerError::UnsupportedSource(format!("request_body is not valid utf-8: {e}"))
+            })
+        }
+        FieldSource::Bytes32Keccak256OfBytes { parts } => {
+            let assembled = assemble_bytes_for_keccak(parts, body_json)?;
+            let h = keccak256(&assembled);
+            Ok(format!("0x{}", hex::encode(h)))
+        }
+        FieldSource::BodyFieldString { path } => {
+            let json = body_json.ok_or_else(|| {
+                SignerError::UnsupportedSource(
+                    "body_field_string source requires the request body to be json".into(),
+                )
+            })?;
+            match json_path_get(json, path) {
+                Some(serde_json::Value::String(s)) => Ok(s.clone()),
+                Some(_) => Err(SignerError::InvalidField(format!(
+                    "body field at '{path}' is not a string"
+                ))),
+                None => Err(SignerError::InvalidField(format!(
+                    "body field at '{path}' not found"
+                ))),
+            }
+        }
+    }
+}
+
+fn resolve_output_source(
+    source: &crate::secrets::OutputSource,
+    signer_address: Option<&str>,
+    signer_public_key: &str,
+    signature_hex: &str,
+    signature_b64: &str,
+    timestamp_secs: u64,
+    nonce_bytes: &[u8; 32],
+) -> Result<String, SignerError> {
+    use crate::secrets::OutputSource;
+    match source {
+        OutputSource::Literal { value } => Ok(value.clone()),
+        OutputSource::SignerAddress => signer_address.map(str::to_string).ok_or_else(|| {
+            SignerError::UnsupportedSource(
+                "signer_address is not produced by this signer type (use signer_public_key instead)"
+                    .into(),
+            )
+        }),
+        OutputSource::SignerPublicKey => Ok(signer_public_key.to_string()),
+        OutputSource::RequestTimestampSecs => Ok(timestamp_secs.to_string()),
+        OutputSource::RequestRandomNonceB64 => {
+            Ok(base64::engine::general_purpose::URL_SAFE.encode(nonce_bytes))
+        }
+        OutputSource::SignatureHex => Ok(signature_hex.to_string()),
+        OutputSource::SignatureBase64 => Ok(signature_b64.to_string()),
+    }
+}
+
+struct EvaluatedSignature {
+    signer_address: String,
+    signer_public_key: String,
+    signature_hex: String,
+    signature_b64: String,
+    signature_r_hex: String,
+    signature_s_hex: String,
+    signature_v: u8,
+    timestamp_secs: u64,
+    nonce_bytes: [u8; 32],
+}
+
+fn evaluate_body_value(
+    value: &crate::secrets::BodyValue,
+    sig: &EvaluatedSignature,
+) -> Result<serde_json::Value, SignerError> {
+    use crate::secrets::BodyValue;
+    use serde_json::json;
+    Ok(match value {
+        BodyValue::SignerAddress => json!(sig.signer_address),
+        BodyValue::SignerPublicKey => json!(sig.signer_public_key),
+        BodyValue::SignatureHex => json!(sig.signature_hex),
+        BodyValue::SignatureBase64 => json!(sig.signature_b64),
+        BodyValue::SignatureRHex => json!(sig.signature_r_hex),
+        BodyValue::SignatureSHex => json!(sig.signature_s_hex),
+        BodyValue::SignatureV => json!(sig.signature_v),
+        BodyValue::RequestTimestampSecs => json!(sig.timestamp_secs),
+        BodyValue::RequestRandomNonceB64 => json!(
+            base64::engine::general_purpose::URL_SAFE.encode(sig.nonce_bytes)
+        ),
+        BodyValue::LiteralString { value } => json!(value),
+        BodyValue::LiteralNumber { value } => json!(value),
+        BodyValue::SolanaSignedTransactionBase64 => {
+            return Err(SignerError::InvalidSchema(
+                "solana_signed_transaction_base64 is only valid inside solana_signed_transaction"
+                    .into(),
+            ));
+        }
+    })
+}
+
+fn json_path_get<'a>(root: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+    let mut current = root;
+    for part in path.split('.') {
+        current = current.as_object()?.get(part)?;
+    }
+    Some(current)
+}
+
+fn json_path_set(
+    root: &mut serde_json::Value,
+    path: &str,
+    value: serde_json::Value,
+) -> Result<(), SignerError> {
+    if path.is_empty() || path.split('.').any(str::is_empty) {
+        return Err(SignerError::InvalidSchema(format!(
+            "invalid json path '{path}'"
+        )));
+    }
+    let parts: Vec<&str> = path.split('.').collect();
+    let mut current = root;
+    for (idx, part) in parts.iter().enumerate() {
+        let is_last = idx + 1 == parts.len();
+        match current {
+            serde_json::Value::Object(map) => {
+                if is_last {
+                    map.insert((*part).to_string(), value);
+                    return Ok(());
+                }
+                if !map.contains_key(*part) {
+                    map.insert(
+                        (*part).to_string(),
+                        serde_json::Value::Object(serde_json::Map::new()),
+                    );
+                }
+                current = map.get_mut(*part).ok_or_else(|| {
+                    SignerError::SignFailed(format!("json path '{path}' walk failed"))
+                })?;
+            }
+            serde_json::Value::Array(arr) => {
+                let i: usize = part.parse().map_err(|_| {
+                    SignerError::SignFailed(format!(
+                        "json path '{path}' segment '{part}' is not a valid array index"
+                    ))
+                })?;
+                if i >= arr.len() {
+                    return Err(SignerError::SignFailed(format!(
+                        "json path '{path}' index {i} out of bounds (len {})",
+                        arr.len()
+                    )));
+                }
+                if is_last {
+                    arr[i] = value;
+                    return Ok(());
+                }
+                current = &mut arr[i];
+            }
+            _ => {
+                return Err(SignerError::SignFailed(format!(
+                    "json path '{path}' descends into a scalar"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_body_mutations(
+    body: &mut Option<Vec<u8>>,
+    mutations: &[(String, serde_json::Value)],
+) -> Result<(), SignerError> {
+    if mutations.is_empty() {
+        return Ok(());
+    }
+    let bytes = body.as_deref().ok_or_else(|| {
+        SignerError::UnsupportedSource(
+            "signing declares output_body_fields but no request body provided".into(),
+        )
+    })?;
+    let mut json: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|e| SignerError::SignFailed(format!("request body is not json: {e}")))?;
+    for (path, value) in mutations {
+        json_path_set(&mut json, path, value.clone())?;
+    }
+    let new_bytes = serde_json::to_vec(&json)
+        .map_err(|e| SignerError::SignFailed(format!("re-serialize body: {e}")))?;
+    *body = Some(new_bytes);
+    Ok(())
+}
+
+fn parse_body_json_if_needed<'a, I>(
+    sources: I,
+    body: Option<&[u8]>,
+) -> Result<Option<serde_json::Value>, SignerError>
+where
+    I: IntoIterator<Item = &'a crate::secrets::FieldSource>,
+{
+    use crate::secrets::{BytesPart, FieldSource};
+    let needs = sources.into_iter().any(|s| match s {
+        FieldSource::Bytes32Keccak256OfBytes { parts } => parts
+            .iter()
+            .any(|p| !matches!(p, BytesPart::LiteralHex { .. })),
+        FieldSource::BodyFieldString { .. } => true,
+        _ => false,
+    });
+    if !needs {
+        return Ok(None);
+    }
+    let bytes = body.ok_or_else(|| {
+        SignerError::UnsupportedSource(
+            "body-derived signer source declared but no request body provided".into(),
+        )
+    })?;
+    Ok(Some(
+        serde_json::from_slice::<serde_json::Value>(bytes)
+            .map_err(|e| SignerError::InvalidField(format!("body not json: {e}")))?,
+    ))
+}
+
+fn assemble_bytes_for_keccak(
+    parts: &[crate::secrets::BytesPart],
+    body_json: Option<&serde_json::Value>,
+) -> Result<Vec<u8>, SignerError> {
+    let mut out: Vec<u8> = Vec::new();
+    for part in parts {
+        let bytes = evaluate_bytes_part(part, body_json)?;
+        out.extend_from_slice(&bytes);
+    }
+    Ok(out)
+}
+
+fn evaluate_bytes_part(
+    part: &crate::secrets::BytesPart,
+    body_json: Option<&serde_json::Value>,
+) -> Result<Vec<u8>, SignerError> {
+    use crate::secrets::BytesPart;
+    match part {
+        BytesPart::LiteralHex { hex } => {
+            let trimmed = hex.trim_start_matches("0x");
+            hex::decode(trimmed)
+                .map_err(|e| SignerError::InvalidField(format!("literal_hex: {e}")))
+        }
+        BytesPart::BodyFieldMsgpack { path } => {
+            let json = body_json.ok_or_else(|| {
+                SignerError::UnsupportedSource(
+                    "body_field_msgpack source needs request body".into(),
+                )
+            })?;
+            let field = json_path_get(json, path).ok_or_else(|| {
+                SignerError::InvalidField(format!("body field '{path}' not found"))
+            })?;
+            let mut out: Vec<u8> = Vec::new();
+            field
+                .serialize(&mut MsgpackSerializer::new(&mut out).with_struct_map())
+                .map_err(|e| SignerError::InvalidField(format!("msgpack encode: {e}")))?;
+            Ok(out)
+        }
+        BytesPart::BodyFieldBeU64 { path } => {
+            let json = body_json.ok_or_else(|| {
+                SignerError::UnsupportedSource(
+                    "body_field_be_u64 source needs request body".into(),
+                )
+            })?;
+            let field = json_path_get(json, path).ok_or_else(|| {
+                SignerError::InvalidField(format!("body field '{path}' not found"))
+            })?;
+            let n = field.as_u64().ok_or_else(|| {
+                SignerError::InvalidField(format!(
+                    "body field '{path}' must be a non-negative integer"
+                ))
+            })?;
+            Ok(n.to_be_bytes().to_vec())
+        }
+        BytesPart::BodyFieldEthAddressOptionalPrefixed { path } => {
+            let json = body_json.ok_or_else(|| {
+                SignerError::UnsupportedSource(
+                    "body_field_eth_address_optional_prefixed source needs request body".into(),
+                )
+            })?;
+            match json_path_get(json, path) {
+                None | Some(serde_json::Value::Null) => Ok(vec![0x00]),
+                Some(serde_json::Value::String(s)) => {
+                    let addr = parse_eth_address(s)?;
+                    let mut out = Vec::with_capacity(21);
+                    out.push(0x01);
+                    out.extend_from_slice(&addr);
+                    Ok(out)
+                }
+                Some(_) => Err(SignerError::InvalidField(format!(
+                    "body field '{path}' must be a string or null"
+                ))),
             }
         }
     }
@@ -333,7 +1373,7 @@ impl near::agent::host::Host for StoreData {
         method: String,
         url: String,
         headers_json: String,
-        body: Option<Vec<u8>>,
+        mut body: Option<Vec<u8>>,
         timeout_ms: Option<u32>,
     ) -> Result<near::agent::host::HttpResponse, String> {
         // Inject credentials into URL (e.g., replace {TELEGRAM_BOT_TOKEN})
@@ -389,7 +1429,7 @@ impl near::agent::host::Host for StoreData {
         // Inject pre-resolved host credentials (Bearer tokens, API keys, etc.)
         // based on the request's target host.
         if let Some(host) = extract_host_from_url(&url) {
-            self.inject_host_credentials(&host, &mut headers, &mut url);
+            self.inject_host_credentials(&host, &method, &mut body, &mut headers, &mut url);
         }
 
         // Get the max response size from capabilities (default 10MB).
@@ -1377,18 +2417,13 @@ impl std::fmt::Debug for WasmToolWrapper {
     }
 }
 
-/// Pre-resolve credentials for all HTTP capability mappings.
+/// Pre-resolved credentials returned from [`resolve_host_credentials`].
 ///
-/// Called once per tool execution (in async context, before spawn_blocking)
-/// so that the synchronous WASM host function can inject credentials
-/// without needing async access to the secrets store.
-///
-/// Resolves the host credentials declared by a WASM tool for the current user.
-///
-/// Optional mappings may be skipped when unavailable. Required mappings are
-/// tracked in `missing_required` so the caller can fail closed before
-/// execution instead of letting the tool run without the credentials it
-/// declared. That prevents a malicious or misconfigured tool from issuing
+/// Resolution runs once per tool execution in an async context, before the
+/// synchronous WASM host function spawns. Optional mappings may be skipped
+/// when unavailable; required mappings that fail to resolve are tracked in
+/// `missing_required` so the caller can fail closed before execution starts.
+/// Failing closed prevents a malicious or misconfigured tool from issuing
 /// requests that silently borrow another scope's secrets or exfiltrate user
 /// context to an unauthenticated endpoint.
 struct HostCredentialsResolution {
@@ -1508,7 +2543,49 @@ async fn resolve_host_credentials(
         let mut injected = InjectedCredentials::empty();
         inject_credential(&mut injected, &mapping.location, &secret);
 
-        if injected.is_empty() {
+        let signing = match &mapping.location {
+            crate::secrets::CredentialLocation::HmacSignedHeader {
+                signature_header,
+                timestamp_header,
+            } => Some(SigningSpec::Hmac(HmacSigning {
+                signature_header: signature_header.clone(),
+                timestamp_header: timestamp_header.clone(),
+            })),
+            crate::secrets::CredentialLocation::Eip712SignedHeader {
+                domain,
+                primary_type,
+                structs,
+                output_headers,
+                output_body_fields,
+            } => Some(SigningSpec::Eip712(Eip712Signing {
+                domain: domain.clone(),
+                primary_type: primary_type.clone(),
+                structs: structs.clone(),
+                output_headers: output_headers.clone(),
+                output_body_fields: output_body_fields.clone(),
+            })),
+            crate::secrets::CredentialLocation::Nep413SignedHeader {
+                recipient_source,
+                message_source,
+                callback_url_source,
+                output_headers,
+            } => Some(SigningSpec::Nep413(Nep413Signing {
+                recipient_source: recipient_source.clone(),
+                message_source: message_source.clone(),
+                callback_url_source: callback_url_source.clone(),
+                output_headers: output_headers.clone(),
+            })),
+            crate::secrets::CredentialLocation::SolanaSignedTransaction {
+                message_source,
+                output_body_fields,
+            } => Some(SigningSpec::Solana(SolanaSigning {
+                message_source: message_source.clone(),
+                output_body_fields: output_body_fields.clone(),
+            })),
+            _ => None,
+        };
+
+        if injected.is_empty() && signing.is_none() {
             continue;
         }
 
@@ -1519,6 +2596,7 @@ async fn resolve_host_credentials(
             headers: injected.headers,
             query_params: injected.query_params,
             secret_value: secret.expose().to_string(),
+            signing,
         });
     }
 
@@ -1805,6 +2883,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
+    use base64::Engine as _;
+    use hmac::Mac as _;
+    use sha2::Digest as _;
     use axum::extract::{Form, State};
     use axum::http::HeaderMap;
     use axum::routing::post;
@@ -2438,6 +3519,7 @@ mod tests {
             },
             query_params: HashMap::new(),
             secret_value: TEST_BEARER_TOKEN_123.to_string(),
+            signing: None,
         }];
 
         let store_data = StoreData::new(
@@ -2450,7 +3532,7 @@ mod tests {
         // Should inject for matching host
         let mut headers = HashMap::new();
         let mut url = "https://www.googleapis.com/calendar/v3/events".to_string();
-        store_data.inject_host_credentials("www.googleapis.com", &mut headers, &mut url);
+        store_data.inject_host_credentials("www.googleapis.com", "GET", &mut None, &mut headers, &mut url);
         assert_eq!(
             headers.get("Authorization"),
             Some(&format!("Bearer {TEST_BEARER_TOKEN_123}"))
@@ -2459,7 +3541,7 @@ mod tests {
         // Should not inject for non-matching host
         let mut headers2 = HashMap::new();
         let mut url2 = "https://other.com/api".to_string();
-        store_data.inject_host_credentials("other.com", &mut headers2, &mut url2);
+        store_data.inject_host_credentials("other.com", "GET", &mut None, &mut headers2, &mut url2);
         assert!(!headers2.contains_key("Authorization"));
     }
 
@@ -2482,6 +3564,7 @@ mod tests {
             },
             query_params: HashMap::new(),
             secret_value: "scoped-token".to_string(),
+            signing: None,
         }];
 
         let store_data = StoreData::new(
@@ -2494,7 +3577,7 @@ mod tests {
         // Should inject for matching host + matching path
         let mut headers = HashMap::new();
         let mut url = "https://api.example.com/api/v1/users".to_string();
-        store_data.inject_host_credentials("api.example.com", &mut headers, &mut url);
+        store_data.inject_host_credentials("api.example.com", "GET", &mut None, &mut headers, &mut url);
         assert_eq!(
             headers.get("Authorization"),
             Some(&"Bearer scoped-token".to_string())
@@ -2503,13 +3586,13 @@ mod tests {
         // Should NOT inject for matching host + non-matching path
         let mut headers2 = HashMap::new();
         let mut url2 = "https://api.example.com/other/endpoint".to_string();
-        store_data.inject_host_credentials("api.example.com", &mut headers2, &mut url2);
+        store_data.inject_host_credentials("api.example.com", "GET", &mut None, &mut headers2, &mut url2);
         assert!(!headers2.contains_key("Authorization"));
 
         // Should NOT inject for matching host + prefix-boundary attack
         let mut headers3 = HashMap::new();
         let mut url3 = "https://api.example.com/api/v1-malicious".to_string();
-        store_data.inject_host_credentials("api.example.com", &mut headers3, &mut url3);
+        store_data.inject_host_credentials("api.example.com", "GET", &mut None, &mut headers3, &mut url3);
         assert!(!headers3.contains_key("Authorization"));
     }
 
@@ -2530,6 +3613,7 @@ mod tests {
                 },
                 query_params: HashMap::new(),
                 secret_value: "v1-token".to_string(),
+                signing: None,
             },
             ResolvedHostCredential {
                 secret_name: "v2_token".to_string(),
@@ -2542,6 +3626,7 @@ mod tests {
                 },
                 query_params: HashMap::new(),
                 secret_value: "v2-token".to_string(),
+                signing: None,
             },
         ];
 
@@ -2555,7 +3640,7 @@ mod tests {
         // /api/v1 path gets v1 token
         let mut headers = HashMap::new();
         let mut url = "https://api.example.com/api/v1/users".to_string();
-        store_data.inject_host_credentials("api.example.com", &mut headers, &mut url);
+        store_data.inject_host_credentials("api.example.com", "GET", &mut None, &mut headers, &mut url);
         assert_eq!(
             headers.get("Authorization"),
             Some(&"Bearer v1-token".to_string())
@@ -2564,7 +3649,7 @@ mod tests {
         // /api/v2 path gets v2 token
         let mut headers2 = HashMap::new();
         let mut url2 = "https://api.example.com/api/v2/data".to_string();
-        store_data.inject_host_credentials("api.example.com", &mut headers2, &mut url2);
+        store_data.inject_host_credentials("api.example.com", "GET", &mut None, &mut headers2, &mut url2);
         assert_eq!(
             headers2.get("Authorization"),
             Some(&"Bearer v2-token".to_string())
@@ -2573,7 +3658,7 @@ mod tests {
         // Unscoped path gets neither
         let mut headers3 = HashMap::new();
         let mut url3 = "https://api.example.com/other".to_string();
-        store_data.inject_host_credentials("api.example.com", &mut headers3, &mut url3);
+        store_data.inject_host_credentials("api.example.com", "GET", &mut None, &mut headers3, &mut url3);
         assert!(!headers3.contains_key("Authorization"));
     }
 
@@ -2599,6 +3684,7 @@ mod tests {
                 },
                 query_params: HashMap::new(),
                 secret_value: "GLOBAL".to_string(),
+                signing: None,
             }
         }
         fn scoped() -> ResolvedHostCredential {
@@ -2613,6 +3699,7 @@ mod tests {
                 },
                 query_params: HashMap::new(),
                 secret_value: "WRITE".to_string(),
+                signing: None,
             }
         }
 
@@ -2626,7 +3713,7 @@ mod tests {
             let store = StoreData::new(1024 * 1024, Capabilities::default(), HashMap::new(), creds);
             let mut headers = HashMap::new();
             let mut url = "https://api.example.com/api/v1/write/foo".to_string();
-            store.inject_host_credentials("api.example.com", &mut headers, &mut url);
+            store.inject_host_credentials("api.example.com", "GET", &mut None, &mut headers, &mut url);
             assert_eq!(
                 headers.get("Authorization"),
                 Some(&"Bearer WRITE".to_string()),
@@ -2651,6 +3738,7 @@ mod tests {
                 q
             },
             secret_value: "secret123".to_string(),
+            signing: None,
         }];
 
         let store_data = StoreData::new(
@@ -2662,7 +3750,7 @@ mod tests {
 
         let mut headers = HashMap::new();
         let mut url = "https://api.example.com/v1/data".to_string();
-        store_data.inject_host_credentials("api.example.com", &mut headers, &mut url);
+        store_data.inject_host_credentials("api.example.com", "GET", &mut None, &mut headers, &mut url);
         assert!(url.contains("api_key=secret123"));
         assert!(url.contains('?'));
     }
@@ -2679,6 +3767,7 @@ mod tests {
             headers: HashMap::new(),
             query_params: HashMap::new(),
             secret_value: "super-secret-token".to_string(),
+            signing: None,
         }];
 
         let store_data = StoreData::new(
@@ -2692,6 +3781,1689 @@ mod tests {
         let redacted = store_data.redact_credentials(text);
         assert!(!redacted.contains("super-secret-token"));
         assert!(redacted.contains("[REDACTED:host_credential]"));
+    }
+
+    fn expected_hmac_signature(
+        base64_secret: &str,
+        timestamp: &str,
+        method: &str,
+        path: &str,
+        body: Option<&[u8]>,
+    ) -> String {
+        let key = base64::engine::general_purpose::URL_SAFE
+            .decode(base64_secret)
+            .expect("test secret decodes as url-safe base64");
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&key)
+            .expect("hmac accepts arbitrary key length");
+        mac.update(timestamp.as_bytes());
+        mac.update(method.as_bytes());
+        mac.update(path.as_bytes());
+        if let Some(b) = body {
+            mac.update(b);
+        }
+        base64::engine::general_purpose::URL_SAFE.encode(mac.finalize().into_bytes())
+    }
+
+    const TEST_HMAC_SECRET_B64: &str = "MDEyMzQ1Njc4OWFiY2RlZg==";
+
+    fn hmac_credential(
+        host: &str,
+        path_patterns: Vec<String>,
+        sig_header: &str,
+        ts_header: &str,
+    ) -> super::ResolvedHostCredential {
+        super::ResolvedHostCredential {
+            secret_name: "polymarket_api_secret".to_string(),
+            host_patterns: vec![host.to_string()],
+            path_patterns,
+            headers: HashMap::new(),
+            query_params: HashMap::new(),
+            secret_value: TEST_HMAC_SECRET_B64.to_string(),
+            signing: Some(super::SigningSpec::Hmac(super::HmacSigning {
+                signature_header: sig_header.to_string(),
+                timestamp_header: ts_header.to_string(),
+            })),
+        }
+    }
+
+    #[test]
+    fn test_inject_host_credentials_hmac_basic_get() {
+        use crate::tools::wasm::wrapper::StoreData;
+
+        let creds = vec![hmac_credential(
+            "clob.polymarket.com",
+            vec![],
+            "POLY-SIGNATURE",
+            "POLY-TIMESTAMP",
+        )];
+        let store_data =
+            StoreData::new(1024 * 1024, Capabilities::default(), HashMap::new(), creds);
+
+        let mut headers = HashMap::new();
+        let mut url = "https://clob.polymarket.com/orders".to_string();
+        store_data.inject_host_credentials(
+            "clob.polymarket.com",
+            "GET",
+            &mut None,
+            &mut headers,
+            &mut url,
+        );
+
+        let timestamp = headers
+            .get("POLY-TIMESTAMP")
+            .expect("timestamp header was emitted")
+            .clone();
+        assert!(timestamp.parse::<u64>().is_ok(), "timestamp must be unix seconds");
+
+        let signature = headers
+            .get("POLY-SIGNATURE")
+            .expect("signature header was emitted");
+        let expected = expected_hmac_signature(
+            TEST_HMAC_SECRET_B64,
+            &timestamp,
+            "GET",
+            "/orders",
+            None,
+        );
+        assert_eq!(signature, &expected);
+    }
+
+    #[test]
+    fn test_inject_host_credentials_hmac_with_body() {
+        use crate::tools::wasm::wrapper::StoreData;
+
+        let creds = vec![hmac_credential(
+            "clob.polymarket.com",
+            vec![],
+            "POLY-SIGNATURE",
+            "POLY-TIMESTAMP",
+        )];
+        let store_data =
+            StoreData::new(1024 * 1024, Capabilities::default(), HashMap::new(), creds);
+
+        let body = br#"{"price":"0.5","side":"BUY","size":"10"}"#;
+        let mut headers = HashMap::new();
+        let mut url = "https://clob.polymarket.com/order".to_string();
+        let mut body_slot: Option<Vec<u8>> = Some(body.to_vec());
+        store_data.inject_host_credentials(
+            "clob.polymarket.com",
+            "POST",
+            &mut body_slot,
+            &mut headers,
+            &mut url,
+        );
+
+        let timestamp = headers.get("POLY-TIMESTAMP").unwrap().clone();
+        let signature = headers.get("POLY-SIGNATURE").unwrap();
+        let expected = expected_hmac_signature(
+            TEST_HMAC_SECRET_B64,
+            &timestamp,
+            "POST",
+            "/order",
+            Some(body),
+        );
+        assert_eq!(signature, &expected);
+
+        let signature_no_body = expected_hmac_signature(
+            TEST_HMAC_SECRET_B64,
+            &timestamp,
+            "POST",
+            "/order",
+            None,
+        );
+        assert_ne!(
+            signature, &signature_no_body,
+            "body bytes must change the resulting signature"
+        );
+    }
+
+    #[test]
+    fn test_inject_host_credentials_hmac_path_scoped_match() {
+        use crate::tools::wasm::wrapper::StoreData;
+
+        let creds = vec![hmac_credential(
+            "api.example.com",
+            vec!["/v1/private".to_string()],
+            "X-SIG",
+            "X-TS",
+        )];
+        let store_data =
+            StoreData::new(1024 * 1024, Capabilities::default(), HashMap::new(), creds);
+
+        let mut headers = HashMap::new();
+        let mut url = "https://api.example.com/v1/private/orders".to_string();
+        store_data.inject_host_credentials(
+            "api.example.com",
+            "GET",
+            &mut None,
+            &mut headers,
+            &mut url,
+        );
+
+        assert!(headers.contains_key("X-SIG"));
+        assert!(headers.contains_key("X-TS"));
+    }
+
+    #[test]
+    fn test_inject_host_credentials_hmac_path_scoped_miss() {
+        use crate::tools::wasm::wrapper::StoreData;
+
+        let creds = vec![hmac_credential(
+            "api.example.com",
+            vec!["/v1/private".to_string()],
+            "X-SIG",
+            "X-TS",
+        )];
+        let store_data =
+            StoreData::new(1024 * 1024, Capabilities::default(), HashMap::new(), creds);
+
+        let mut headers = HashMap::new();
+        let mut url = "https://api.example.com/v1/public/orders".to_string();
+        store_data.inject_host_credentials(
+            "api.example.com",
+            "GET",
+            &mut None,
+            &mut headers,
+            &mut url,
+        );
+
+        assert!(!headers.contains_key("X-SIG"));
+        assert!(!headers.contains_key("X-TS"));
+    }
+
+    #[test]
+    fn test_inject_host_credentials_hmac_host_mismatch() {
+        use crate::tools::wasm::wrapper::StoreData;
+
+        let creds = vec![hmac_credential(
+            "api.example.com",
+            vec![],
+            "X-SIG",
+            "X-TS",
+        )];
+        let store_data =
+            StoreData::new(1024 * 1024, Capabilities::default(), HashMap::new(), creds);
+
+        let mut headers = HashMap::new();
+        let mut url = "https://other.com/anything".to_string();
+        store_data.inject_host_credentials(
+            "other.com",
+            "GET",
+            &mut None,
+            &mut headers,
+            &mut url,
+        );
+
+        assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn test_inject_host_credentials_hmac_invalid_secret_skips() {
+        use crate::tools::wasm::wrapper::{ResolvedHostCredential, StoreData};
+
+        let creds = vec![ResolvedHostCredential {
+            secret_name: "polymarket_api_secret".to_string(),
+            host_patterns: vec!["clob.polymarket.com".to_string()],
+            path_patterns: vec![],
+            headers: HashMap::new(),
+            query_params: HashMap::new(),
+            secret_value: "this is not valid url-safe base64!!!".to_string(),
+            signing: Some(super::SigningSpec::Hmac(super::HmacSigning {
+                signature_header: "POLY-SIGNATURE".to_string(),
+                timestamp_header: "POLY-TIMESTAMP".to_string(),
+            })),
+        }];
+        let store_data =
+            StoreData::new(1024 * 1024, Capabilities::default(), HashMap::new(), creds);
+
+        let mut headers = HashMap::new();
+        let mut url = "https://clob.polymarket.com/orders".to_string();
+        store_data.inject_host_credentials(
+            "clob.polymarket.com",
+            "GET",
+            &mut None,
+            &mut headers,
+            &mut url,
+        );
+
+        assert!(!headers.contains_key("POLY-SIGNATURE"));
+        assert!(!headers.contains_key("POLY-TIMESTAMP"));
+    }
+
+    #[test]
+    fn test_inject_host_credentials_hmac_combined_with_static_bearer() {
+        use crate::tools::wasm::wrapper::{ResolvedHostCredential, StoreData};
+
+        let api_key_cred = ResolvedHostCredential {
+            secret_name: "polymarket_api_key".to_string(),
+            host_patterns: vec!["clob.polymarket.com".to_string()],
+            path_patterns: vec![],
+            headers: {
+                let mut h = HashMap::new();
+                h.insert("POLY-API-KEY".to_string(), "the-api-key-id".to_string());
+                h
+            },
+            query_params: HashMap::new(),
+            secret_value: "the-api-key-id".to_string(),
+            signing: None,
+        };
+
+        let creds = vec![
+            api_key_cred,
+            hmac_credential(
+                "clob.polymarket.com",
+                vec![],
+                "POLY-SIGNATURE",
+                "POLY-TIMESTAMP",
+            ),
+        ];
+        let store_data =
+            StoreData::new(1024 * 1024, Capabilities::default(), HashMap::new(), creds);
+
+        let mut headers = HashMap::new();
+        let mut url = "https://clob.polymarket.com/orders".to_string();
+        store_data.inject_host_credentials(
+            "clob.polymarket.com",
+            "GET",
+            &mut None,
+            &mut headers,
+            &mut url,
+        );
+
+        assert_eq!(
+            headers.get("POLY-API-KEY"),
+            Some(&"the-api-key-id".to_string())
+        );
+        assert!(headers.contains_key("POLY-SIGNATURE"));
+        assert!(headers.contains_key("POLY-TIMESTAMP"));
+    }
+
+    #[test]
+    fn test_resolved_host_credential_debug_redacts_hmac_secret() {
+        use crate::tools::wasm::wrapper::ResolvedHostCredential;
+
+        let cred = ResolvedHostCredential {
+            secret_name: "polymarket_api_secret".to_string(),
+            host_patterns: vec!["clob.polymarket.com".to_string()],
+            path_patterns: vec![],
+            headers: HashMap::new(),
+            query_params: HashMap::new(),
+            secret_value: TEST_HMAC_SECRET_B64.to_string(),
+            signing: Some(super::SigningSpec::Hmac(super::HmacSigning {
+                signature_header: "POLY-SIGNATURE".to_string(),
+                timestamp_header: "POLY-TIMESTAMP".to_string(),
+            })),
+        };
+
+        let dbg = format!("{cred:?}");
+        assert!(dbg.contains("POLY-SIGNATURE"));
+        assert!(dbg.contains("POLY-TIMESTAMP"));
+        assert!(dbg.contains("[REDACTED]"));
+        assert!(!dbg.contains(TEST_HMAC_SECRET_B64));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_host_credentials_hmac_creates_signing_field() {
+        use crate::secrets::{
+            CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
+        };
+        use crate::tools::wasm::capabilities::HttpCapability;
+        use crate::tools::wasm::wrapper::resolve_host_credentials;
+
+        let store = test_secrets_store();
+        store
+            .create(
+                "user1",
+                CreateSecretParams::new("polymarket_api_secret", TEST_HMAC_SECRET_B64),
+            )
+            .await
+            .unwrap();
+
+        let mut credentials = HashMap::new();
+        credentials.insert(
+            "polymarket_api_secret".to_string(),
+            CredentialMapping {
+                secret_name: "polymarket_api_secret".to_string(),
+                location: CredentialLocation::HmacSignedHeader {
+                    signature_header: "POLY-SIGNATURE".to_string(),
+                    timestamp_header: "POLY-TIMESTAMP".to_string(),
+                },
+                host_patterns: vec!["clob.polymarket.com".to_string()],
+                path_patterns: Vec::new(),
+                optional: false,
+            },
+        );
+
+        let caps = Capabilities {
+            http: Some(HttpCapability {
+                credentials,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let result = resolve_host_credentials(&caps, Some(&store), "user1", None, None).await;
+        assert_eq!(result.len(), 1);
+        assert!(result[0].headers.is_empty());
+        assert!(result[0].query_params.is_empty());
+        let signing = result[0]
+            .signing
+            .as_ref()
+            .expect("signing field populated for HmacSignedHeader location");
+        match signing {
+            super::SigningSpec::Hmac(spec) => {
+                assert_eq!(spec.signature_header, "POLY-SIGNATURE");
+                assert_eq!(spec.timestamp_header, "POLY-TIMESTAMP");
+            }
+            other => panic!("expected SigningSpec::Hmac, got {:?}", std::mem::discriminant(other)),
+        }
+    }
+
+    const TEST_ETH_PRIVATE_KEY: &str =
+        "0x0123456789012345678901234567890123456789012345678901234567890123";
+    const TEST_NEAR_ED25519_SEED: &str =
+        "11111111111111111111111111111111";
+
+    fn polymarket_clobauth_struct() -> crate::secrets::Eip712StructDef {
+        use crate::secrets::{Eip712StructDef, Eip712TypedField, FieldSource};
+        Eip712StructDef {
+            name: "ClobAuth".to_string(),
+            fields: vec![
+                Eip712TypedField {
+                    name: "address".to_string(),
+                    type_name: "address".to_string(),
+                    source: FieldSource::SignerAddress,
+                },
+                Eip712TypedField {
+                    name: "timestamp".to_string(),
+                    type_name: "string".to_string(),
+                    source: FieldSource::RequestTimestampSecs,
+                },
+                Eip712TypedField {
+                    name: "nonce".to_string(),
+                    type_name: "uint256".to_string(),
+                    source: FieldSource::Literal {
+                        value: "0".to_string(),
+                    },
+                },
+                Eip712TypedField {
+                    name: "message".to_string(),
+                    type_name: "string".to_string(),
+                    source: FieldSource::Literal {
+                        value: "This message attests that I control the given wallet"
+                            .to_string(),
+                    },
+                },
+            ],
+        }
+    }
+
+    fn polymarket_clobauth_signing() -> super::Eip712Signing {
+        use crate::secrets::{Eip712Domain, HeaderOutput, OutputSource};
+        super::Eip712Signing {
+            domain: Eip712Domain {
+                name: "ClobAuthDomain".to_string(),
+                version: "1".to_string(),
+                chain_id: 137,
+                verifying_contract: None,
+            },
+            primary_type: "ClobAuth".to_string(),
+            structs: vec![polymarket_clobauth_struct()],
+            output_headers: vec![
+                HeaderOutput {
+                    header_name: "POLY_ADDRESS".to_string(),
+                    value: OutputSource::SignerAddress,
+                },
+                HeaderOutput {
+                    header_name: "POLY_SIGNATURE".to_string(),
+                    value: OutputSource::SignatureHex,
+                },
+                HeaderOutput {
+                    header_name: "POLY_TIMESTAMP".to_string(),
+                    value: OutputSource::RequestTimestampSecs,
+                },
+                HeaderOutput {
+                    header_name: "POLY_NONCE".to_string(),
+                    value: OutputSource::Literal {
+                        value: "0".to_string(),
+                    },
+                },
+            ],
+            output_body_fields: vec![],
+        }
+    }
+
+    #[test]
+    fn test_inject_host_credentials_eip712_polymarket_clobauth_recovers_signer() {
+        use crate::tools::wasm::wrapper::{ResolvedHostCredential, StoreData};
+        use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
+
+        let signing_key = super::parse_secp256k1_secret(TEST_ETH_PRIVATE_KEY)
+            .expect("test private key parses");
+        let expected_address = super::derive_eth_address(&signing_key);
+        let expected_address_hex = format!("0x{}", hex::encode(expected_address));
+
+        let cred = ResolvedHostCredential {
+            secret_name: "polymarket_eth_key".to_string(),
+            host_patterns: vec!["clob.polymarket.com".to_string()],
+            path_patterns: vec![],
+            headers: HashMap::new(),
+            query_params: HashMap::new(),
+            secret_value: TEST_ETH_PRIVATE_KEY.to_string(),
+            signing: Some(super::SigningSpec::Eip712(polymarket_clobauth_signing())),
+        };
+
+        let store_data = StoreData::new(
+            1024 * 1024,
+            Capabilities::default(),
+            HashMap::new(),
+            vec![cred],
+        );
+
+        let mut headers = HashMap::new();
+        let mut url = "https://clob.polymarket.com/auth-api-key".to_string();
+        store_data.inject_host_credentials(
+            "clob.polymarket.com",
+            "POST",
+            &mut None,
+            &mut headers,
+            &mut url,
+        );
+
+        assert_eq!(headers.get("POLY_ADDRESS"), Some(&expected_address_hex));
+        assert_eq!(headers.get("POLY_NONCE"), Some(&"0".to_string()));
+
+        let timestamp_str = headers
+            .get("POLY_TIMESTAMP")
+            .expect("timestamp header emitted")
+            .clone();
+        timestamp_str
+            .parse::<u64>()
+            .expect("timestamp must be unix seconds");
+
+        let signature_hex = headers
+            .get("POLY_SIGNATURE")
+            .expect("signature header emitted")
+            .clone();
+        let sig_bytes = hex::decode(signature_hex.trim_start_matches("0x"))
+            .expect("signature is hex");
+        assert_eq!(sig_bytes.len(), 65, "signature must be 65 bytes (r||s||v)");
+        let v = sig_bytes[64];
+        assert!(v == 27 || v == 28, "v must be 27 or 28, got {v}");
+
+        let signature = Signature::from_slice(&sig_bytes[..64]).expect("valid signature");
+        let recovery_id = RecoveryId::try_from(v - 27).expect("valid recovery id");
+
+        let domain_sep =
+            super::compute_eip712_domain_separator(&polymarket_clobauth_signing().domain)
+                .expect("domain separator");
+        let primary = polymarket_clobauth_struct();
+        let type_hash =
+            super::keccak256(super::encode_eip712_type_string(&primary).as_bytes());
+        let mut struct_buf: Vec<u8> = Vec::new();
+        struct_buf.extend_from_slice(&type_hash);
+        struct_buf
+            .extend_from_slice(&super::encode_eip712_field_value("address", &expected_address_hex).unwrap());
+        struct_buf
+            .extend_from_slice(&super::encode_eip712_field_value("string", &timestamp_str).unwrap());
+        struct_buf.extend_from_slice(&super::encode_eip712_field_value("uint256", "0").unwrap());
+        struct_buf.extend_from_slice(
+            &super::encode_eip712_field_value(
+                "string",
+                "This message attests that I control the given wallet",
+            )
+            .unwrap(),
+        );
+        let struct_hash = super::keccak256(&struct_buf);
+
+        let mut final_buf: Vec<u8> = Vec::with_capacity(2 + 32 + 32);
+        final_buf.extend_from_slice(&[0x19u8, 0x01u8]);
+        final_buf.extend_from_slice(&domain_sep);
+        final_buf.extend_from_slice(&struct_hash);
+        let final_hash = super::keccak256(&final_buf);
+
+        let recovered_pk = VerifyingKey::recover_from_prehash(&final_hash, &signature, recovery_id)
+            .expect("recover from signature");
+        let recovered_point = recovered_pk.to_encoded_point(false);
+        let recovered_pk_bytes = &recovered_point.as_bytes()[1..];
+        let h = super::keccak256(recovered_pk_bytes);
+        let mut recovered_addr = [0u8; 20];
+        recovered_addr.copy_from_slice(&h[12..]);
+        assert_eq!(
+            recovered_addr, expected_address,
+            "signature must recover to the signer address"
+        );
+    }
+
+    #[test]
+    fn parse_uint256_handles_zero_small_max_and_overflow() {
+        let zero = super::parse_uint256_be("0").unwrap();
+        assert_eq!(zero, [0u8; 32]);
+
+        let one = super::parse_uint256_be("1").unwrap();
+        let mut expected_one = [0u8; 32];
+        expected_one[31] = 1;
+        assert_eq!(one, expected_one);
+
+        let above_u128 = "340282366920938463463374607431768211457";
+        let result = super::parse_uint256_be(above_u128).unwrap();
+        let mut expected = [0u8; 32];
+        expected[15] = 1;
+        expected[31] = 1;
+        assert_eq!(
+            result, expected,
+            "value just above 2^128 must encode without overflow"
+        );
+
+        let max = "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+        let max_bytes = super::parse_uint256_be(max).unwrap();
+        assert_eq!(max_bytes, [0xffu8; 32]);
+
+        let overflow = "115792089237316195423570985008687907853269984665640564039457584007913129639936";
+        let err = super::parse_uint256_be(overflow).unwrap_err();
+        assert!(
+            matches!(err, super::SignerError::InvalidField(ref m) if m.contains("overflow")),
+            "expected overflow error, got {err:?}"
+        );
+
+        assert!(super::parse_uint256_be("").is_err());
+        assert!(super::parse_uint256_be("12a3").is_err());
+        assert!(super::parse_uint256_be("-1").is_err());
+    }
+
+    #[test]
+    fn test_inject_host_credentials_eip712_invalid_secret_skips() {
+        use crate::tools::wasm::wrapper::{ResolvedHostCredential, StoreData};
+
+        let cred = ResolvedHostCredential {
+            secret_name: "polymarket_eth_key".to_string(),
+            host_patterns: vec!["clob.polymarket.com".to_string()],
+            path_patterns: vec![],
+            headers: HashMap::new(),
+            query_params: HashMap::new(),
+            secret_value: "not a real hex private key".to_string(),
+            signing: Some(super::SigningSpec::Eip712(polymarket_clobauth_signing())),
+        };
+        let store_data = StoreData::new(
+            1024 * 1024,
+            Capabilities::default(),
+            HashMap::new(),
+            vec![cred],
+        );
+
+        let mut headers = HashMap::new();
+        let mut url = "https://clob.polymarket.com/auth-api-key".to_string();
+        store_data.inject_host_credentials(
+            "clob.polymarket.com",
+            "POST",
+            &mut None,
+            &mut headers,
+            &mut url,
+        );
+
+        assert!(!headers.contains_key("POLY_ADDRESS"));
+        assert!(!headers.contains_key("POLY_SIGNATURE"));
+        assert!(!headers.contains_key("POLY_TIMESTAMP"));
+    }
+
+    #[test]
+    fn test_inject_host_credentials_eip712_multi_struct_schema_skips() {
+        use crate::secrets::{Eip712StructDef, Eip712TypedField, FieldSource};
+        use crate::tools::wasm::wrapper::{ResolvedHostCredential, StoreData};
+
+        let mut spec = polymarket_clobauth_signing();
+        spec.structs.push(Eip712StructDef {
+            name: "Other".to_string(),
+            fields: vec![Eip712TypedField {
+                name: "x".to_string(),
+                type_name: "uint256".to_string(),
+                source: FieldSource::Literal {
+                    value: "1".to_string(),
+                },
+            }],
+        });
+
+        let cred = ResolvedHostCredential {
+            secret_name: "polymarket_eth_key".to_string(),
+            host_patterns: vec!["clob.polymarket.com".to_string()],
+            path_patterns: vec![],
+            headers: HashMap::new(),
+            query_params: HashMap::new(),
+            secret_value: TEST_ETH_PRIVATE_KEY.to_string(),
+            signing: Some(super::SigningSpec::Eip712(spec)),
+        };
+        let store_data = StoreData::new(
+            1024 * 1024,
+            Capabilities::default(),
+            HashMap::new(),
+            vec![cred],
+        );
+
+        let mut headers = HashMap::new();
+        let mut url = "https://clob.polymarket.com/auth-api-key".to_string();
+        store_data.inject_host_credentials(
+            "clob.polymarket.com",
+            "POST",
+            &mut None,
+            &mut headers,
+            &mut url,
+        );
+
+        assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn test_nep413_borsh_prefix_matches_spec() {
+        let prefix: u32 = 2_147_484_061;
+        let mut buf: Vec<u8> = Vec::new();
+        borsh::BorshSerialize::serialize(&prefix, &mut buf).unwrap();
+        assert_eq!(buf, vec![0x9D, 0x01, 0x00, 0x80]);
+    }
+
+    fn nep413_signing(recipient: &str, message: &str) -> super::Nep413Signing {
+        use crate::secrets::{FieldSource, HeaderOutput, OutputSource};
+        super::Nep413Signing {
+            recipient_source: FieldSource::Literal {
+                value: recipient.to_string(),
+            },
+            message_source: FieldSource::Literal {
+                value: message.to_string(),
+            },
+            callback_url_source: None,
+            output_headers: vec![
+                HeaderOutput {
+                    header_name: "X-NEAR-PUBLIC-KEY".to_string(),
+                    value: OutputSource::SignerPublicKey,
+                },
+                HeaderOutput {
+                    header_name: "X-NEAR-SIGNATURE".to_string(),
+                    value: OutputSource::SignatureBase64,
+                },
+                HeaderOutput {
+                    header_name: "X-NEAR-NONCE".to_string(),
+                    value: OutputSource::RequestRandomNonceB64,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn test_inject_host_credentials_nep413_signature_verifies() {
+        use crate::tools::wasm::wrapper::{ResolvedHostCredential, StoreData};
+        use ed25519_dalek::Verifier;
+
+        let cred = ResolvedHostCredential {
+            secret_name: "near_account_key".to_string(),
+            host_patterns: vec!["api.trezu.example".to_string()],
+            path_patterns: vec![],
+            headers: HashMap::new(),
+            query_params: HashMap::new(),
+            secret_value: TEST_NEAR_ED25519_SEED.to_string(),
+            signing: Some(super::SigningSpec::Nep413(nep413_signing(
+                "trezu.near",
+                "auth-challenge-2026",
+            ))),
+        };
+        let store_data = StoreData::new(
+            1024 * 1024,
+            Capabilities::default(),
+            HashMap::new(),
+            vec![cred],
+        );
+
+        let mut headers = HashMap::new();
+        let mut url = "https://api.trezu.example/login".to_string();
+        store_data.inject_host_credentials(
+            "api.trezu.example",
+            "POST",
+            &mut None,
+            &mut headers,
+            &mut url,
+        );
+
+        let pk_str = headers
+            .get("X-NEAR-PUBLIC-KEY")
+            .expect("public key header emitted")
+            .clone();
+        assert!(pk_str.starts_with("ed25519:"));
+        let pk_b58 = pk_str.trim_start_matches("ed25519:");
+        let pk_bytes = bs58::decode(pk_b58).into_vec().unwrap();
+        let verifying_key =
+            ed25519_dalek::VerifyingKey::from_bytes(pk_bytes.as_slice().try_into().unwrap())
+                .unwrap();
+
+        let sig_b64 = headers
+            .get("X-NEAR-SIGNATURE")
+            .expect("signature header emitted")
+            .clone();
+        let sig_bytes = base64::engine::general_purpose::URL_SAFE
+            .decode(sig_b64.as_bytes())
+            .expect("signature is url-safe base64");
+        let signature =
+            ed25519_dalek::Signature::from_bytes(sig_bytes.as_slice().try_into().unwrap());
+
+        let nonce_b64 = headers
+            .get("X-NEAR-NONCE")
+            .expect("nonce header emitted")
+            .clone();
+        let nonce_bytes_vec = base64::engine::general_purpose::URL_SAFE
+            .decode(nonce_b64.as_bytes())
+            .unwrap();
+        let nonce_bytes: [u8; 32] = nonce_bytes_vec.as_slice().try_into().unwrap();
+
+        let payload = super::Nep413Payload {
+            message: "auth-challenge-2026".to_string(),
+            nonce: nonce_bytes,
+            recipient: "trezu.near".to_string(),
+            callback_url: None,
+        };
+
+        let mut serialized: Vec<u8> = Vec::new();
+        let prefix: u32 = 2_147_484_061;
+        borsh::BorshSerialize::serialize(&prefix, &mut serialized).unwrap();
+        borsh::BorshSerialize::serialize(&payload, &mut serialized).unwrap();
+        let hash = sha2::Sha256::digest(&serialized);
+
+        verifying_key
+            .verify(&hash, &signature)
+            .expect("signature must verify against the published public key");
+    }
+
+    #[test]
+    fn test_inject_host_credentials_nep413_invalid_secret_skips() {
+        use crate::tools::wasm::wrapper::{ResolvedHostCredential, StoreData};
+
+        let cred = ResolvedHostCredential {
+            secret_name: "near_account_key".to_string(),
+            host_patterns: vec!["api.trezu.example".to_string()],
+            path_patterns: vec![],
+            headers: HashMap::new(),
+            query_params: HashMap::new(),
+            secret_value: "definitely not a base58 ed25519 key !@#".to_string(),
+            signing: Some(super::SigningSpec::Nep413(nep413_signing(
+                "trezu.near",
+                "challenge",
+            ))),
+        };
+        let store_data = StoreData::new(
+            1024 * 1024,
+            Capabilities::default(),
+            HashMap::new(),
+            vec![cred],
+        );
+
+        let mut headers = HashMap::new();
+        let mut url = "https://api.trezu.example/login".to_string();
+        store_data.inject_host_credentials(
+            "api.trezu.example",
+            "POST",
+            &mut None,
+            &mut headers,
+            &mut url,
+        );
+
+        assert!(!headers.contains_key("X-NEAR-PUBLIC-KEY"));
+        assert!(!headers.contains_key("X-NEAR-SIGNATURE"));
+        assert!(!headers.contains_key("X-NEAR-NONCE"));
+    }
+
+    fn solana_signing_at(path: &str) -> super::SolanaSigning {
+        use crate::secrets::{BodyJsonOutput, BodyValue, FieldSource};
+        super::SolanaSigning {
+            message_source: FieldSource::BodyFieldString {
+                path: path.to_string(),
+            },
+            output_body_fields: vec![BodyJsonOutput {
+                json_path: "params.0".to_string(),
+                value: BodyValue::SolanaSignedTransactionBase64,
+            }],
+        }
+    }
+
+    fn solana_call(message_path: &str, body: serde_json::Value) -> Result<super::SignerOutput, super::SignerError> {
+        super::apply_solana_signing(
+            &solana_signing_at(message_path),
+            TEST_NEAR_ED25519_SEED,
+            Some(serde_json::to_vec(&body).unwrap().as_slice()),
+            0,
+            &[0u8; 32],
+        )
+    }
+
+    #[test]
+    fn test_inject_host_credentials_solana_signature_verifies() {
+        use crate::tools::wasm::wrapper::{ResolvedHostCredential, StoreData};
+        use base64::engine::general_purpose::STANDARD as B64;
+        use ed25519_dalek::Verifier;
+
+        let message_bytes: Vec<u8> = (0u8..96).collect();
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "sendTransaction",
+            "params": ["", {"encoding": "base64"}],
+            "_signing": {"message_b64": B64.encode(&message_bytes)}
+        });
+        let mut body_bytes = Some(serde_json::to_vec(&body).unwrap());
+
+        let cred = ResolvedHostCredential {
+            secret_name: "solana_signer".to_string(),
+            host_patterns: vec!["api.mainnet-beta.solana.com".to_string()],
+            path_patterns: vec![],
+            headers: HashMap::new(),
+            query_params: HashMap::new(),
+            secret_value: TEST_NEAR_ED25519_SEED.to_string(),
+            signing: Some(super::SigningSpec::Solana(solana_signing_at(
+                "_signing.message_b64",
+            ))),
+        };
+        let store_data = StoreData::new(
+            1024 * 1024,
+            Capabilities::default(),
+            HashMap::new(),
+            vec![cred],
+        );
+
+        let mut headers = HashMap::new();
+        let mut url = "https://api.mainnet-beta.solana.com/".to_string();
+        store_data.inject_host_credentials(
+            "api.mainnet-beta.solana.com",
+            "POST",
+            &mut body_bytes,
+            &mut headers,
+            &mut url,
+        );
+
+        let new_body: serde_json::Value =
+            serde_json::from_slice(body_bytes.as_ref().expect("body present")).unwrap();
+        let signed_b64 = new_body["params"][0]
+            .as_str()
+            .expect("params.0 set to signed tx");
+        let signed_bytes = B64.decode(signed_b64.as_bytes()).unwrap();
+
+        assert_eq!(signed_bytes[0], super::SOLANA_SIG_COUNT_ONE_COMPACT_U16);
+        assert_eq!(
+            signed_bytes.len(),
+            1 + super::SOLANA_SIGNATURE_BYTES + message_bytes.len()
+        );
+        let sig_bytes: [u8; 64] = signed_bytes[1..1 + super::SOLANA_SIGNATURE_BYTES]
+            .try_into()
+            .unwrap();
+        assert_eq!(
+            &signed_bytes[1 + super::SOLANA_SIGNATURE_BYTES..],
+            message_bytes.as_slice()
+        );
+
+        let seed_bytes = bs58::decode(TEST_NEAR_ED25519_SEED)
+            .into_vec()
+            .unwrap();
+        let seed: [u8; 32] = seed_bytes.as_slice().try_into().unwrap();
+        let verifying_key = ed25519_dalek::SigningKey::from_bytes(&seed).verifying_key();
+        let signature = ed25519_dalek::Signature::from_bytes(&sig_bytes);
+        verifying_key
+            .verify(&message_bytes, &signature)
+            .expect("ed25519 signature must verify against the message bytes");
+    }
+
+    #[test]
+    fn test_inject_host_credentials_solana_rejects_empty_message() {
+        let err = solana_call(
+            "_signing.message_b64",
+            serde_json::json!({"_signing": {"message_b64": ""}}),
+        )
+        .expect_err("empty message must be rejected");
+        assert!(err.to_string().contains("empty"), "got: {err}");
+    }
+
+    #[test]
+    fn test_inject_host_credentials_solana_rejects_oversized_message() {
+        use base64::engine::general_purpose::STANDARD as B64;
+        let oversized = vec![0u8; super::SOLANA_MAX_PACKET_BYTES];
+        let err = solana_call(
+            "_signing.message_b64",
+            serde_json::json!({"_signing": {"message_b64": B64.encode(&oversized)}}),
+        )
+        .expect_err("oversized message must be rejected");
+        assert!(err.to_string().contains("packet limit"), "got: {err}");
+    }
+
+    #[test]
+    fn test_inject_host_credentials_solana_rejects_missing_message_path() {
+        let err = solana_call(
+            "_signing.message_b64",
+            serde_json::json!({"params": []}),
+        )
+        .expect_err("missing path must be rejected");
+        assert!(err.to_string().contains("not found"), "got: {err}");
+    }
+
+    #[test]
+    fn test_inject_host_credentials_solana_rejects_non_string_at_path() {
+        let err = solana_call(
+            "_signing.message_b64",
+            serde_json::json!({"_signing": {"message_b64": 12345}}),
+        )
+        .expect_err("non-string at path must be rejected");
+        assert!(err.to_string().contains("not a string"), "got: {err}");
+    }
+
+    #[test]
+    fn test_solana_signed_tx_base64_rejected_in_eip712_signer() {
+        use crate::secrets::BodyValue;
+        let evaluated = super::EvaluatedSignature {
+            signer_address: String::new(),
+            signer_public_key: String::new(),
+            signature_hex: String::new(),
+            signature_b64: String::new(),
+            signature_r_hex: String::new(),
+            signature_s_hex: String::new(),
+            signature_v: 0,
+            timestamp_secs: 0,
+            nonce_bytes: [0u8; 32],
+        };
+        let err =
+            super::evaluate_body_value(&BodyValue::SolanaSignedTransactionBase64, &evaluated)
+                .expect_err("eip712 signer must reject solana-only output type");
+        assert!(err.to_string().contains("solana"), "got: {err}");
+    }
+
+    #[test]
+    fn test_solana_signer_rejects_ecdsa_rsv_outputs() {
+        use crate::secrets::{BodyJsonOutput, BodyValue};
+        use base64::engine::general_purpose::STANDARD as B64;
+
+        let bad_output = BodyJsonOutput {
+            json_path: "params.0".to_string(),
+            value: BodyValue::SignatureRHex,
+        };
+        let mut spec = solana_signing_at("_signing.message_b64");
+        spec.output_body_fields = vec![bad_output];
+
+        let body = serde_json::json!({
+            "_signing": {"message_b64": B64.encode([0u8; 32])}
+        });
+        let err = super::apply_solana_signing(
+            &spec,
+            TEST_NEAR_ED25519_SEED,
+            Some(serde_json::to_vec(&body).unwrap().as_slice()),
+            0,
+            &[0u8; 32],
+        )
+        .expect_err("solana signer must reject ecdsa r/s/v outputs");
+        assert!(err.to_string().contains("ecdsa"), "got: {err}");
+    }
+
+    fn hyperliquid_agent_signing() -> super::Eip712Signing {
+        use crate::secrets::{
+            BodyJsonOutput, BodyValue, BytesPart, Eip712Domain, Eip712StructDef,
+            Eip712TypedField, FieldSource, HeaderOutput, OutputSource,
+        };
+        super::Eip712Signing {
+            domain: Eip712Domain {
+                name: "Exchange".to_string(),
+                version: "1".to_string(),
+                chain_id: 1337,
+                verifying_contract: Some("0x0000000000000000000000000000000000000000".to_string()),
+            },
+            primary_type: "Agent".to_string(),
+            structs: vec![Eip712StructDef {
+                name: "Agent".to_string(),
+                fields: vec![
+                    Eip712TypedField {
+                        name: "source".to_string(),
+                        type_name: "string".to_string(),
+                        source: FieldSource::Literal {
+                            value: "a".to_string(),
+                        },
+                    },
+                    Eip712TypedField {
+                        name: "connectionId".to_string(),
+                        type_name: "bytes32".to_string(),
+                        source: FieldSource::Bytes32Keccak256OfBytes {
+                            parts: vec![
+                                BytesPart::BodyFieldMsgpack {
+                                    path: "action".to_string(),
+                                },
+                                BytesPart::BodyFieldBeU64 {
+                                    path: "nonce".to_string(),
+                                },
+                                BytesPart::BodyFieldEthAddressOptionalPrefixed {
+                                    path: "vaultAddress".to_string(),
+                                },
+                            ],
+                        },
+                    },
+                ],
+            }],
+            output_headers: vec![HeaderOutput {
+                header_name: "X-WALLET-ADDRESS".to_string(),
+                value: OutputSource::SignerAddress,
+            }],
+            output_body_fields: vec![
+                BodyJsonOutput {
+                    json_path: "signature.r".to_string(),
+                    value: BodyValue::SignatureRHex,
+                },
+                BodyJsonOutput {
+                    json_path: "signature.s".to_string(),
+                    value: BodyValue::SignatureSHex,
+                },
+                BodyJsonOutput {
+                    json_path: "signature.v".to_string(),
+                    value: BodyValue::SignatureV,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn test_inject_host_credentials_eip712_hyperliquid_signature_in_body_recovers_signer() {
+        use crate::tools::wasm::wrapper::{ResolvedHostCredential, StoreData};
+        use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
+        use serde::Serialize as _;
+
+        let signing_key = super::parse_secp256k1_secret(TEST_ETH_PRIVATE_KEY)
+            .expect("test private key parses");
+        let expected_address = super::derive_eth_address(&signing_key);
+        let expected_address_hex = format!("0x{}", hex::encode(expected_address));
+
+        let body_json = serde_json::json!({
+            "action": { "type": "order", "grouping": "na" },
+            "nonce": 1_700_000_000_000u64,
+            "vaultAddress": serde_json::Value::Null,
+        });
+        let body_bytes = serde_json::to_vec(&body_json).unwrap();
+
+        let cred = ResolvedHostCredential {
+            secret_name: "hyperliquid_eth_key".to_string(),
+            host_patterns: vec!["api.hyperliquid.xyz".to_string()],
+            path_patterns: vec![],
+            headers: HashMap::new(),
+            query_params: HashMap::new(),
+            secret_value: TEST_ETH_PRIVATE_KEY.to_string(),
+            signing: Some(super::SigningSpec::Eip712(hyperliquid_agent_signing())),
+        };
+        let store_data = StoreData::new(
+            1024 * 1024,
+            Capabilities::default(),
+            HashMap::new(),
+            vec![cred],
+        );
+
+        let mut headers = HashMap::new();
+        let mut url = "https://api.hyperliquid.xyz/exchange".to_string();
+        let mut body_slot: Option<Vec<u8>> = Some(body_bytes.clone());
+        store_data.inject_host_credentials(
+            "api.hyperliquid.xyz",
+            "POST",
+            &mut body_slot,
+            &mut headers,
+            &mut url,
+        );
+
+        assert_eq!(headers.get("X-WALLET-ADDRESS"), Some(&expected_address_hex));
+
+        let mutated_body = body_slot.as_ref().expect("body retained after signing");
+        let mutated_json: serde_json::Value =
+            serde_json::from_slice(mutated_body).expect("body still valid json");
+
+        let r_hex = mutated_json["signature"]["r"]
+            .as_str()
+            .expect("signature.r is a string")
+            .to_string();
+        let s_hex = mutated_json["signature"]["s"]
+            .as_str()
+            .expect("signature.s is a string")
+            .to_string();
+        let v_num = mutated_json["signature"]["v"]
+            .as_u64()
+            .expect("signature.v is a number") as u8;
+        assert!(v_num == 27 || v_num == 28, "v must be 27 or 28, got {v_num}");
+
+        let r_bytes = hex::decode(r_hex.trim_start_matches("0x")).unwrap();
+        let s_bytes = hex::decode(s_hex.trim_start_matches("0x")).unwrap();
+        assert_eq!(r_bytes.len(), 32);
+        assert_eq!(s_bytes.len(), 32);
+
+        let mut sig_64 = [0u8; 64];
+        sig_64[..32].copy_from_slice(&r_bytes);
+        sig_64[32..].copy_from_slice(&s_bytes);
+        let signature = Signature::from_slice(&sig_64).unwrap();
+        let recovery_id = RecoveryId::try_from(v_num - 27).unwrap();
+
+        let mut connection_input: Vec<u8> = Vec::new();
+        let action_value = &body_json["action"];
+        action_value
+            .serialize(
+                &mut rmp_serde::Serializer::new(&mut connection_input).with_struct_map(),
+            )
+            .unwrap();
+        connection_input.extend_from_slice(&1_700_000_000_000u64.to_be_bytes());
+        connection_input.push(0x00);
+        let connection_id_bytes = super::keccak256(&connection_input);
+        let connection_id_hex = format!("0x{}", hex::encode(connection_id_bytes));
+
+        let primary = &hyperliquid_agent_signing().structs[0].clone();
+        let type_string = super::encode_eip712_type_string(primary);
+        let type_hash = super::keccak256(type_string.as_bytes());
+
+        let mut struct_buf: Vec<u8> = Vec::new();
+        struct_buf.extend_from_slice(&type_hash);
+        struct_buf.extend_from_slice(&super::encode_eip712_field_value("string", "a").unwrap());
+        struct_buf.extend_from_slice(
+            &super::encode_eip712_field_value("bytes32", &connection_id_hex).unwrap(),
+        );
+        let struct_hash = super::keccak256(&struct_buf);
+
+        let domain_separator =
+            super::compute_eip712_domain_separator(&hyperliquid_agent_signing().domain).unwrap();
+        let mut final_buf: Vec<u8> = Vec::new();
+        final_buf.extend_from_slice(&[0x19u8, 0x01u8]);
+        final_buf.extend_from_slice(&domain_separator);
+        final_buf.extend_from_slice(&struct_hash);
+        let final_hash = super::keccak256(&final_buf);
+
+        let recovered_pk =
+            VerifyingKey::recover_from_prehash(&final_hash, &signature, recovery_id)
+                .expect("recover from signature");
+        let recovered_point = recovered_pk.to_encoded_point(false);
+        let recovered_pk_bytes = &recovered_point.as_bytes()[1..];
+        let h = super::keccak256(recovered_pk_bytes);
+        let mut recovered_addr = [0u8; 20];
+        recovered_addr.copy_from_slice(&h[12..]);
+        assert_eq!(
+            recovered_addr, expected_address,
+            "Hyperliquid signature must recover to the signer address"
+        );
+
+        let original_action = body_json.get("action").unwrap();
+        assert_eq!(mutated_json.get("action"), Some(original_action),
+            "the action field must not be modified by signing");
+    }
+
+    #[test]
+    fn test_inject_host_credentials_eip712_body_field_msgpack_no_body_skips() {
+        use crate::secrets::{
+            BodyJsonOutput, BodyValue, BytesPart, Eip712Domain, Eip712StructDef,
+            Eip712TypedField, FieldSource, HeaderOutput, OutputSource,
+        };
+        use crate::tools::wasm::wrapper::{ResolvedHostCredential, StoreData};
+
+        let cred = ResolvedHostCredential {
+            secret_name: "hyperliquid_eth_key".to_string(),
+            host_patterns: vec!["api.hyperliquid.xyz".to_string()],
+            path_patterns: vec![],
+            headers: HashMap::new(),
+            query_params: HashMap::new(),
+            secret_value: TEST_ETH_PRIVATE_KEY.to_string(),
+            signing: Some(super::SigningSpec::Eip712(super::Eip712Signing {
+                domain: Eip712Domain {
+                    name: "Exchange".to_string(),
+                    version: "1".to_string(),
+                    chain_id: 1337,
+                    verifying_contract: None,
+                },
+                primary_type: "Agent".to_string(),
+                structs: vec![Eip712StructDef {
+                    name: "Agent".to_string(),
+                    fields: vec![Eip712TypedField {
+                        name: "connectionId".to_string(),
+                        type_name: "bytes32".to_string(),
+                        source: FieldSource::Bytes32Keccak256OfBytes {
+                            parts: vec![BytesPart::BodyFieldMsgpack {
+                                path: "action".to_string(),
+                            }],
+                        },
+                    }],
+                }],
+                output_headers: vec![HeaderOutput {
+                    header_name: "X-WALLET-ADDRESS".to_string(),
+                    value: OutputSource::SignerAddress,
+                }],
+                output_body_fields: vec![BodyJsonOutput {
+                    json_path: "signature".to_string(),
+                    value: BodyValue::SignatureHex,
+                }],
+            })),
+        };
+        let store_data = StoreData::new(
+            1024 * 1024,
+            Capabilities::default(),
+            HashMap::new(),
+            vec![cred],
+        );
+
+        let mut headers = HashMap::new();
+        let mut url = "https://api.hyperliquid.xyz/exchange".to_string();
+        store_data.inject_host_credentials(
+            "api.hyperliquid.xyz",
+            "POST",
+            &mut None,
+            &mut headers,
+            &mut url,
+        );
+
+        assert!(!headers.contains_key("X-WALLET-ADDRESS"));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_host_credentials_eip712_creates_signing_field() {
+        use crate::secrets::{
+            CreateSecretParams, CredentialLocation, CredentialMapping, Eip712Domain,
+            Eip712StructDef, Eip712TypedField, FieldSource, HeaderOutput, OutputSource,
+            SecretsStore,
+        };
+        use crate::tools::wasm::capabilities::HttpCapability;
+        use crate::tools::wasm::wrapper::resolve_host_credentials;
+
+        let store = test_secrets_store();
+        store
+            .create(
+                "user1",
+                CreateSecretParams::new("polymarket_eth_key", TEST_ETH_PRIVATE_KEY),
+            )
+            .await
+            .unwrap();
+
+        let mut credentials = HashMap::new();
+        credentials.insert(
+            "polymarket_eth_key".to_string(),
+            CredentialMapping {
+                secret_name: "polymarket_eth_key".to_string(),
+                location: CredentialLocation::Eip712SignedHeader {
+                    domain: Eip712Domain {
+                        name: "ClobAuthDomain".to_string(),
+                        version: "1".to_string(),
+                        chain_id: 137,
+                        verifying_contract: None,
+                    },
+                    primary_type: "ClobAuth".to_string(),
+                    structs: vec![Eip712StructDef {
+                        name: "ClobAuth".to_string(),
+                        fields: vec![Eip712TypedField {
+                            name: "address".to_string(),
+                            type_name: "address".to_string(),
+                            source: FieldSource::SignerAddress,
+                        }],
+                    }],
+                    output_headers: vec![HeaderOutput {
+                        header_name: "POLY_ADDRESS".to_string(),
+                        value: OutputSource::SignerAddress,
+                    }],
+                    output_body_fields: vec![],
+                },
+                host_patterns: vec!["clob.polymarket.com".to_string()],
+                path_patterns: Vec::new(),
+                optional: false,
+            },
+        );
+
+        let caps = Capabilities {
+            http: Some(HttpCapability {
+                credentials,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let result = resolve_host_credentials(&caps, Some(&store), "user1", None, None).await;
+        assert_eq!(result.len(), 1);
+        assert!(result[0].headers.is_empty());
+        match result[0].signing.as_ref().unwrap() {
+            super::SigningSpec::Eip712(spec) => {
+                assert_eq!(spec.domain.name, "ClobAuthDomain");
+                assert_eq!(spec.primary_type, "ClobAuth");
+            }
+            _ => panic!("expected SigningSpec::Eip712"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_host_credentials_nep413_creates_signing_field() {
+        use crate::secrets::{
+            CreateSecretParams, CredentialLocation, CredentialMapping, FieldSource, HeaderOutput,
+            OutputSource, SecretsStore,
+        };
+        use crate::tools::wasm::capabilities::HttpCapability;
+        use crate::tools::wasm::wrapper::resolve_host_credentials;
+
+        let store = test_secrets_store();
+        store
+            .create(
+                "user1",
+                CreateSecretParams::new("near_account_key", TEST_NEAR_ED25519_SEED),
+            )
+            .await
+            .unwrap();
+
+        let mut credentials = HashMap::new();
+        credentials.insert(
+            "near_account_key".to_string(),
+            CredentialMapping {
+                secret_name: "near_account_key".to_string(),
+                location: CredentialLocation::Nep413SignedHeader {
+                    recipient_source: FieldSource::Literal {
+                        value: "trezu.near".to_string(),
+                    },
+                    message_source: FieldSource::Literal {
+                        value: "auth".to_string(),
+                    },
+                    callback_url_source: None,
+                    output_headers: vec![HeaderOutput {
+                        header_name: "X-NEAR-PUBLIC-KEY".to_string(),
+                        value: OutputSource::SignerPublicKey,
+                    }],
+                },
+                host_patterns: vec!["api.trezu.example".to_string()],
+                path_patterns: Vec::new(),
+                optional: false,
+            },
+        );
+
+        let caps = Capabilities {
+            http: Some(HttpCapability {
+                credentials,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let result = resolve_host_credentials(&caps, Some(&store), "user1", None, None).await;
+        assert_eq!(result.len(), 1);
+        match result[0].signing.as_ref().unwrap() {
+            super::SigningSpec::Nep413(spec) => {
+                assert_eq!(spec.output_headers.len(), 1);
+                assert_eq!(spec.output_headers[0].header_name, "X-NEAR-PUBLIC-KEY");
+            }
+            _ => panic!("expected SigningSpec::Nep413"),
+        }
+    }
+
+    const POLYMARKET_CLOB_CAPABILITIES_JSON: &str = r#"{
+      "version": "0.1.0",
+      "wit_version": "0.3.0",
+      "description": "Polymarket signed trading.",
+      "http": {
+        "allowlist": [
+          { "host": "clob.polymarket.com", "path_prefix": "/", "methods": ["GET","POST","DELETE"] }
+        ],
+        "credentials": {
+          "polymarket_l1_clobauth": {
+            "secret_name": "polymarket_l1_private_key",
+            "host_patterns": ["clob.polymarket.com"],
+            "path_patterns": ["/auth/api-key"],
+            "location": {
+              "type": "eip712_signed_header",
+              "domain": { "name": "ClobAuthDomain", "version": "1", "chain_id": 137 },
+              "primary_type": "ClobAuth",
+              "structs": [
+                {
+                  "name": "ClobAuth",
+                  "fields": [
+                    { "name": "address", "type": "address",
+                      "source": { "source": "signer_address" } },
+                    { "name": "timestamp", "type": "string",
+                      "source": { "source": "request_timestamp_secs" } },
+                    { "name": "nonce", "type": "uint256",
+                      "source": { "source": "literal", "value": "0" } },
+                    { "name": "message", "type": "string",
+                      "source": { "source": "literal", "value": "This message attests that I control the given wallet" } }
+                  ]
+                }
+              ],
+              "output_headers": [
+                { "header_name": "POLY_ADDRESS",   "value": { "source": "signer_address" } },
+                { "header_name": "POLY_SIGNATURE", "value": { "source": "signature_hex" } },
+                { "header_name": "POLY_TIMESTAMP", "value": { "source": "request_timestamp_secs" } },
+                { "header_name": "POLY_NONCE",     "value": { "source": "literal", "value": "0" } }
+              ]
+            }
+          },
+          "polymarket_l2_hmac": {
+            "secret_name": "polymarket_l2_secret",
+            "host_patterns": ["clob.polymarket.com"],
+            "location": {
+              "type": "hmac_signed_header",
+              "signature_header": "POLY_SIGNATURE",
+              "timestamp_header": "POLY_TIMESTAMP"
+            }
+          },
+          "polymarket_l2_api_key": {
+            "secret_name": "polymarket_l2_api_key",
+            "host_patterns": ["clob.polymarket.com"],
+            "location": { "type": "header", "name": "POLY_API_KEY" }
+          },
+          "polymarket_l2_passphrase": {
+            "secret_name": "polymarket_l2_passphrase",
+            "host_patterns": ["clob.polymarket.com"],
+            "location": { "type": "header", "name": "POLY_PASSPHRASE" }
+          },
+          "polymarket_l2_address": {
+            "secret_name": "polymarket_l1_address",
+            "host_patterns": ["clob.polymarket.com"],
+            "location": { "type": "header", "name": "POLY_ADDRESS" }
+          }
+        },
+        "rate_limit": { "requests_per_minute": 120, "requests_per_hour": 3600 },
+        "timeout_secs": 30
+      },
+      "secrets": {
+        "allowed_names": [
+          "polymarket_l1_private_key", "polymarket_l1_address",
+          "polymarket_l2_api_key", "polymarket_l2_secret", "polymarket_l2_passphrase"
+        ]
+      }
+    }"#;
+
+    async fn polymarket_dummy_secrets_store() -> (
+        crate::secrets::InMemorySecretsStore,
+        String,
+        String,
+    ) {
+        use crate::secrets::{CreateSecretParams, SecretsStore};
+
+        let signing_key = super::parse_secp256k1_secret(TEST_ETH_PRIVATE_KEY).unwrap();
+        let derived_address = super::derive_eth_address(&signing_key);
+        let derived_address_hex = format!("0x{}", hex::encode(derived_address));
+        let l2_secret_b64 = "dGVzdC1obWFjLXNlY3JldA==";
+
+        let store = test_secrets_store();
+        let user_id = "default";
+        for (name, value) in [
+            ("polymarket_l1_private_key", TEST_ETH_PRIVATE_KEY),
+            ("polymarket_l1_address", derived_address_hex.as_str()),
+            ("polymarket_l2_api_key", "dummy-api-key"),
+            ("polymarket_l2_secret", l2_secret_b64),
+            ("polymarket_l2_passphrase", "dummy-passphrase"),
+        ] {
+            store
+                .create(user_id, CreateSecretParams::new(name, value))
+                .await
+                .unwrap();
+        }
+
+        (store, derived_address_hex, l2_secret_b64.to_string())
+    }
+
+    #[tokio::test]
+    async fn polymarket_clob_l2_request_assembles_with_signed_headers_end_to_end() {
+        use crate::tools::wasm::capabilities_schema::CapabilitiesFile;
+        use crate::tools::wasm::wrapper::{StoreData, resolve_host_credentials};
+
+        let caps_file = CapabilitiesFile::from_json(POLYMARKET_CLOB_CAPABILITIES_JSON)
+            .expect("polymarket-clob capabilities parse");
+        let runtime_caps = caps_file.to_capabilities();
+        let (store, expected_address, l2_secret_b64) = polymarket_dummy_secrets_store().await;
+
+        let resolved =
+            resolve_host_credentials(&runtime_caps, Some(&store), "default", None, None).await;
+        assert_eq!(resolved.len(), 5, "five credential mappings should resolve");
+
+        let store_data = StoreData::new(
+            1024 * 1024,
+            runtime_caps,
+            HashMap::new(),
+            resolved.resolved,
+        );
+
+        let mut headers = HashMap::new();
+        let mut url = "https://clob.polymarket.com/data/orders".to_string();
+        let mut body: Option<Vec<u8>> = None;
+        store_data.inject_host_credentials(
+            "clob.polymarket.com",
+            "GET",
+            &mut body,
+            &mut headers,
+            &mut url,
+        );
+
+        assert_eq!(headers.get("POLY_API_KEY").map(String::as_str), Some("dummy-api-key"));
+        assert_eq!(
+            headers.get("POLY_PASSPHRASE").map(String::as_str),
+            Some("dummy-passphrase")
+        );
+        assert_eq!(
+            headers.get("POLY_ADDRESS"),
+            Some(&expected_address),
+            "POLY_ADDRESS must match the derived wallet address"
+        );
+
+        let timestamp = headers.get("POLY_TIMESTAMP").expect("timestamp emitted").clone();
+        timestamp.parse::<u64>().expect("timestamp is unix seconds");
+
+        let signature = headers.get("POLY_SIGNATURE").expect("signature emitted");
+        let expected_sig = expected_hmac_signature(
+            &l2_secret_b64,
+            &timestamp,
+            "GET",
+            "/data/orders",
+            None,
+        );
+        assert_eq!(
+            signature, &expected_sig,
+            "L2 HMAC signature must match independent recomputation"
+        );
+
+        assert!(
+            !headers.contains_key("POLY_NONCE"),
+            "L2 path must not emit POLY_NONCE (that is L1 only)"
+        );
+    }
+
+    #[tokio::test]
+    async fn polymarket_clob_l1_register_key_request_assembles_with_eip712_headers_end_to_end() {
+        use crate::tools::wasm::capabilities_schema::CapabilitiesFile;
+        use crate::tools::wasm::wrapper::{StoreData, resolve_host_credentials};
+        use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
+
+        let caps_file = CapabilitiesFile::from_json(POLYMARKET_CLOB_CAPABILITIES_JSON).unwrap();
+        let runtime_caps = caps_file.to_capabilities();
+        let (store, expected_address_hex, _) = polymarket_dummy_secrets_store().await;
+
+        let resolved =
+            resolve_host_credentials(&runtime_caps, Some(&store), "default", None, None).await;
+
+        let store_data = StoreData::new(
+            1024 * 1024,
+            runtime_caps,
+            HashMap::new(),
+            resolved.resolved,
+        );
+
+        let mut headers = HashMap::new();
+        let mut url = "https://clob.polymarket.com/auth/api-key".to_string();
+        let mut body: Option<Vec<u8>> = Some(b"{}".to_vec());
+        store_data.inject_host_credentials(
+            "clob.polymarket.com",
+            "POST",
+            &mut body,
+            &mut headers,
+            &mut url,
+        );
+
+        assert_eq!(headers.get("POLY_NONCE").map(String::as_str), Some("0"));
+        assert_eq!(
+            headers.get("POLY_ADDRESS"),
+            Some(&expected_address_hex),
+            "POLY_ADDRESS on L1 must match the EIP-712 signer-derived address"
+        );
+
+        let timestamp = headers.get("POLY_TIMESTAMP").unwrap().clone();
+        timestamp.parse::<u64>().expect("timestamp is unix seconds");
+        let signature_hex = headers.get("POLY_SIGNATURE").expect("signature emitted").clone();
+
+        let sig_bytes = hex::decode(signature_hex.trim_start_matches("0x")).unwrap();
+        assert_eq!(sig_bytes.len(), 65, "EIP-712 signature must be 65 bytes (r||s||v)");
+        let v = sig_bytes[64];
+        let signature = Signature::from_slice(&sig_bytes[..64]).unwrap();
+        let recovery_id = RecoveryId::try_from(v - 27).unwrap();
+
+        let domain = crate::secrets::Eip712Domain {
+            name: "ClobAuthDomain".to_string(),
+            version: "1".to_string(),
+            chain_id: 137,
+            verifying_contract: None,
+        };
+        let domain_sep = super::compute_eip712_domain_separator(&domain).unwrap();
+
+        let primary = crate::secrets::Eip712StructDef {
+            name: "ClobAuth".to_string(),
+            fields: vec![
+                crate::secrets::Eip712TypedField {
+                    name: "address".to_string(),
+                    type_name: "address".to_string(),
+                    source: crate::secrets::FieldSource::SignerAddress,
+                },
+                crate::secrets::Eip712TypedField {
+                    name: "timestamp".to_string(),
+                    type_name: "string".to_string(),
+                    source: crate::secrets::FieldSource::RequestTimestampSecs,
+                },
+                crate::secrets::Eip712TypedField {
+                    name: "nonce".to_string(),
+                    type_name: "uint256".to_string(),
+                    source: crate::secrets::FieldSource::Literal {
+                        value: "0".to_string(),
+                    },
+                },
+                crate::secrets::Eip712TypedField {
+                    name: "message".to_string(),
+                    type_name: "string".to_string(),
+                    source: crate::secrets::FieldSource::Literal {
+                        value: "This message attests that I control the given wallet".to_string(),
+                    },
+                },
+            ],
+        };
+        let type_hash = super::keccak256(super::encode_eip712_type_string(&primary).as_bytes());
+        let mut struct_buf: Vec<u8> = Vec::new();
+        struct_buf.extend_from_slice(&type_hash);
+        struct_buf.extend_from_slice(&super::encode_eip712_field_value("address", &expected_address_hex).unwrap());
+        struct_buf.extend_from_slice(&super::encode_eip712_field_value("string", &timestamp).unwrap());
+        struct_buf.extend_from_slice(&super::encode_eip712_field_value("uint256", "0").unwrap());
+        struct_buf.extend_from_slice(
+            &super::encode_eip712_field_value("string", "This message attests that I control the given wallet").unwrap(),
+        );
+        let struct_hash = super::keccak256(&struct_buf);
+
+        let mut final_buf: Vec<u8> = Vec::new();
+        final_buf.extend_from_slice(&[0x19u8, 0x01u8]);
+        final_buf.extend_from_slice(&domain_sep);
+        final_buf.extend_from_slice(&struct_hash);
+        let final_hash = super::keccak256(&final_buf);
+
+        let recovered_pk =
+            VerifyingKey::recover_from_prehash(&final_hash, &signature, recovery_id).unwrap();
+        let recovered_point = recovered_pk.to_encoded_point(false);
+        let recovered_pk_bytes = &recovered_point.as_bytes()[1..];
+        let h = super::keccak256(recovered_pk_bytes);
+        let mut recovered_addr = [0u8; 20];
+        recovered_addr.copy_from_slice(&h[12..]);
+        let recovered_hex = format!("0x{}", hex::encode(recovered_addr));
+        assert_eq!(
+            recovered_hex, expected_address_hex,
+            "EIP-712 signature must recover to the dummy wallet address"
+        );
     }
 
     #[tokio::test]
@@ -4084,6 +6856,7 @@ mod tests {
             headers,
             query_params,
             secret_value: "raw-secret-bytes".to_string(),
+            signing: None,
         };
 
         let debug_output = format!("{cred:?}");

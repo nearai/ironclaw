@@ -160,9 +160,13 @@ aes-gcm = "0.10"
 hkdf = "0.12"
 hmac = "0.12"
 sha2 = "0.10"
+sha3 = "0.10"
 blake3 = "1"
 rand = "0.8"
 subtle = "2"  # Constant-time comparisons for token validation
+k256 = { version = "0.13", features = ["ecdsa"] }
+borsh = { version = "1.5", features = ["derive"] }
+rmp-serde = "1.3"
 
 # Multi-provider LLM support
 rig-core = { version = "0.30", default-features = false, features = ["reqwest-rustls"] }

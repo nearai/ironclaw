@@ -373,7 +373,11 @@ async fn forward_request(
                 // fetch credentials via the orchestrator's GET /worker/{id}/credentials
                 // endpoint and set them directly.
                 CredentialLocation::AuthorizationBasic { .. }
-                | CredentialLocation::UrlPath { .. } => {
+                | CredentialLocation::UrlPath { .. }
+                | CredentialLocation::HmacSignedHeader { .. }
+                | CredentialLocation::Eip712SignedHeader { .. }
+                | CredentialLocation::Nep413SignedHeader { .. }
+                | CredentialLocation::SolanaSignedTransaction { .. } => {
                     tracing::warn!(
                         "Proxy: credential location {:?} not supported for forward proxy, skipping",
                         location
