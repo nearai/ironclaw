@@ -15,6 +15,7 @@ use chrono::Utc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use crate::agent::channel_routing::ChannelRoutingConfig;
 use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::IncomingMessage;
 use crate::context::{ContextManager, JobContext, JobState};
@@ -93,6 +94,10 @@ pub struct CreateJobTool {
     inject_tx: Option<tokio::sync::mpsc::Sender<IncomingMessage>>,
     /// Encrypted secrets store for validating credential grants.
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    /// Cached channel routing config (shared with dispatcher and SIGHUP handler).
+    /// When present, avoids a per-job DB read and guarantees the same version
+    /// seen by the dispatcher is used for MCP server scoping.
+    channel_routing: Option<Arc<RwLock<Option<ChannelRoutingConfig>>>>,
 }
 
 impl CreateJobTool {
@@ -105,6 +110,7 @@ impl CreateJobTool {
             event_tx: None,
             inject_tx: None,
             secrets_store: None,
+            channel_routing: None,
         }
     }
 
@@ -140,6 +146,20 @@ impl CreateJobTool {
     /// Inject secrets store for credential validation.
     pub fn with_secrets(mut self, secrets: Arc<dyn SecretsStore + Send + Sync>) -> Self {
         self.secrets_store = Some(secrets);
+        self
+    }
+
+    /// Inject the shared channel routing Arc (from AgentDeps).
+    ///
+    /// When present, `derive_routed_mcp_servers` reads from this cached value
+    /// instead of issuing a fresh DB query per job creation, avoiding extra
+    /// round-trips and ensuring the job inherits the same routing version as
+    /// the dispatcher turn that created it.
+    pub fn with_channel_routing(
+        mut self,
+        routing: Arc<RwLock<Option<ChannelRoutingConfig>>>,
+    ) -> Self {
+        self.channel_routing = Some(routing);
         self
     }
 
@@ -267,6 +287,61 @@ impl CreateJobTool {
         crate::tools::mcp::config::load_master_mcp_config_value(store.as_ref(), user_id).await
     }
 
+    /// Derive an implicit MCP server allowlist from the originating channel's
+    /// routing group when the caller did not pass `mcp_servers` explicitly.
+    ///
+    /// Uses the cached routing Arc when available (no extra DB round-trip).
+    /// When channel context is missing (routine/heartbeat jobs), applies the
+    /// default group rather than failing open and allowing all servers.
+    async fn derive_routed_mcp_servers(
+        &self,
+        ctx: &JobContext,
+        explicit_mcp_servers: Option<Vec<String>>,
+    ) -> Option<Vec<String>> {
+        if explicit_mcp_servers.is_some() {
+            return explicit_mcp_servers;
+        }
+
+        // Read from cached Arc first; fall back to a DB query when not wired.
+        let routing = if let Some(ref arc) = self.channel_routing {
+            arc.read().await.clone()
+        } else {
+            let store = self.store.as_ref()?;
+            ChannelRoutingConfig::load_from_store(store.as_ref(), &ctx.user_id).await
+        };
+        let routing = routing?;
+
+        let null_metadata = serde_json::Value::Null;
+        let routing_metadata = ctx
+            .metadata
+            .get("notify_metadata")
+            .filter(|value| value.is_object())
+            .unwrap_or(&null_metadata);
+        // Route by adapter channel name so is_dm() sees "slack-relay" /
+        // "telegram", not the platform-specific ID in notify_metadata.channel.
+        let routing_channel = ctx.metadata.get("notify_channel").and_then(|v| v.as_str());
+
+        let routing_channel = match routing_channel {
+            Some(ch) => ch,
+            None => {
+                // No channel context (e.g., routine or heartbeat spawned job).
+                // Fail-closed: apply the default group rather than bypassing routing.
+                return routing.groups.get(&routing.default_group).cloned();
+            }
+        };
+
+        if ChannelRoutingConfig::is_dm(routing_channel, routing_metadata) {
+            return None;
+        }
+
+        let group = routing.resolve_group(routing_channel);
+        routing
+            .groups
+            .get(group)
+            .or_else(|| routing.groups.get(&routing.default_group))
+            .cloned()
+    }
+
     /// Persist a sandbox job record (fire-and-forget).
     fn persist_job(&self, record: SandboxJobRecord) {
         if let Some(store) = self.store.clone() {
@@ -361,8 +436,25 @@ impl CreateJobTool {
         if let Some(ref slot) = self.scheduler_slot
             && let Some(ref scheduler) = *slot.read().await
         {
+            // Propagate origin channel context so the spawned worker can apply
+            // channel routing. Without this, jobs dispatched from restricted
+            // channels lose their origin and run with the full tool set.
+            let channel_metadata = {
+                let mut m = serde_json::Map::new();
+                if let Some(ch) = ctx.metadata.get("notify_channel") {
+                    m.insert("notify_channel".to_string(), ch.clone());
+                }
+                if let Some(meta) = ctx.metadata.get("notify_metadata") {
+                    m.insert("notify_metadata".to_string(), meta.clone());
+                }
+                if m.is_empty() {
+                    None
+                } else {
+                    Some(serde_json::Value::Object(m))
+                }
+            };
             return match scheduler
-                .dispatch_job(&ctx.user_id, title, description, None)
+                .dispatch_job(&ctx.user_id, title, description, channel_metadata)
                 .await
             {
                 Ok(job_id) => {
@@ -828,16 +920,13 @@ fn resolve_project_dir(
 }
 
 fn monitor_route_from_ctx(ctx: &JobContext) -> Option<crate::agent::job_monitor::JobMonitorRoute> {
-    // notify_channel is required — without it we don't know which channel to
-    // route the monitor output to, so return None to skip monitoring entirely.
+    // Without notify_channel we cannot route monitor output, so skip monitoring.
     let channel = ctx
         .metadata
         .get("notify_channel")
         .and_then(|v| v.as_str())?
         .to_string();
-    // notify_user is optional — fall back to the job's own user_id, which is
-    // always present. The channel is the routing decision; the user is just
-    // for attribution and can default safely.
+    // notify_user is optional; fall back to the job user for attribution.
     let user_id = ctx
         .metadata
         .get("notify_user")
@@ -1043,7 +1132,7 @@ impl Tool for CreateJobTool {
 
             // Parse optional MCP server filter and iteration cap.
             // Validate types: warn if present but wrong type so callers know why it was ignored.
-            let mcp_servers: Option<Vec<String>> = match params.get("mcp_servers") {
+            let explicit_mcp_servers: Option<Vec<String>> = match params.get("mcp_servers") {
                 Some(v) if v.is_array() => v.as_array().map(|arr| {
                     arr.iter()
                         .filter_map(|v| v.as_str().map(String::from))
@@ -1055,6 +1144,9 @@ impl Tool for CreateJobTool {
                 }
                 None => None,
             };
+            let mcp_servers = self
+                .derive_routed_mcp_servers(ctx, explicit_mcp_servers)
+                .await;
             let max_iterations: Option<u32> = match params.get("max_iterations") {
                 Some(v) if v.is_u64() || v.is_i64() => v.as_u64().map(|n| n.clamp(1, 500) as u32),
                 Some(_) => {

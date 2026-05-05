@@ -639,6 +639,9 @@ impl ToolRegistry {
         inject_tx: Option<tokio::sync::mpsc::Sender<crate::channels::IncomingMessage>>,
         prompt_queue: Option<PromptQueue>,
         secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+        channel_routing: Option<
+            Arc<tokio::sync::RwLock<Option<crate::agent::channel_routing::ChannelRoutingConfig>>>,
+        >,
     ) {
         let mut create_tool = CreateJobTool::new(Arc::clone(&context_manager));
         if let Some(slot) = scheduler_slot {
@@ -655,6 +658,9 @@ impl ToolRegistry {
         }
         if let Some(secrets) = secrets_store {
             create_tool = create_tool.with_secrets(secrets);
+        }
+        if let Some(routing) = channel_routing {
+            create_tool = create_tool.with_channel_routing(routing);
         }
         self.register_sync(Arc::new(create_tool));
         self.register_sync(Arc::new(ListJobsTool::new(Arc::clone(&context_manager))));

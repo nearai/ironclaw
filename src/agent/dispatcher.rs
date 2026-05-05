@@ -96,6 +96,33 @@ impl TurnUsageSummary {
 }
 
 impl Agent {
+    /// Apply per-channel tool filtering if routing config is loaded.
+    async fn apply_channel_routing(
+        &self,
+        channel: &str,
+        metadata: &serde_json::Value,
+        tools: Vec<crate::llm::ToolDefinition>,
+    ) -> Vec<crate::llm::ToolDefinition> {
+        let routing = { self.deps.channel_routing.read().await.clone() };
+        if let Some(routing) = routing {
+            let builtin_names = self.deps.tools.builtin_tool_names().await;
+            let before = tools.len();
+            let filtered = routing.filter_tool_defs(channel, metadata, tools, &builtin_names);
+            if filtered.len() < before {
+                tracing::debug!(
+                    channel,
+                    group = routing.resolve_group(channel),
+                    before,
+                    after = filtered.len(),
+                    "Channel routing filtered tools"
+                );
+            }
+            filtered
+        } else {
+            tools
+        }
+    }
+
     /// Run the agentic loop: call LLM, execute tools, repeat until text response.
     ///
     /// Returns `AgenticLoopResult::Response` on completion, or
@@ -257,6 +284,9 @@ impl Agent {
         // Build system prompts once for this turn. Two variants: with tools
         // (normal iterations) and without (force_text final iteration).
         let initial_tool_defs = self.tools().tool_definitions().await;
+        let initial_tool_defs = self
+            .apply_channel_routing(&message.channel, &message.metadata, initial_tool_defs)
+            .await;
         let initial_tool_defs = if !active_skills.is_empty() {
             crate::skills::attenuate_tools(&initial_tool_defs, &active_skills).tools
         } else {
@@ -453,6 +483,10 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
 
         // Refresh tool definitions each iteration so newly built tools become visible
         let tool_defs = self.agent.tools().tool_definitions().await;
+        let tool_defs = self
+            .agent
+            .apply_channel_routing(&self.message.channel, &self.message.metadata, tool_defs)
+            .await;
 
         // Apply trust-based tool attenuation if skills are active.
         let tool_defs = if !self.active_skills.is_empty() {
@@ -2091,6 +2125,7 @@ mod tests {
             builder: None,
             llm_backend: "nearai".to_string(),
             tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+            channel_routing: crate::agent::channel_routing::ChannelRoutingConfig::none_arc(),
         };
 
         Agent::new(
@@ -2398,6 +2433,7 @@ mod tests {
             builder: None,
             llm_backend: "nearai".to_string(),
             tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+            channel_routing: crate::agent::channel_routing::ChannelRoutingConfig::none_arc(),
         };
 
         let agent = Agent::new(
@@ -3385,6 +3421,7 @@ mod tests {
             builder: None,
             llm_backend: "nearai".to_string(),
             tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+            channel_routing: crate::agent::channel_routing::ChannelRoutingConfig::none_arc(),
         };
 
         Agent::new(
@@ -3534,6 +3571,7 @@ mod tests {
             builder: None,
             llm_backend: "nearai".to_string(),
             tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+            channel_routing: crate::agent::channel_routing::ChannelRoutingConfig::none_arc(),
         };
 
         let agent = Agent::new(
@@ -3669,6 +3707,7 @@ mod tests {
                 builder: None,
                 llm_backend: "nearai".to_string(),
                 tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+                channel_routing: crate::agent::channel_routing::ChannelRoutingConfig::none_arc(),
             };
 
             Agent::new(

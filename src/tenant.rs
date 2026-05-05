@@ -564,6 +564,19 @@ impl SystemScope {
         Self { inner: db }
     }
 
+    /// Read the channel routing config for a specific user.
+    ///
+    /// Typed wrapper over the settings store so callers don't need to know the
+    /// raw settings key. Used by `ChannelRoutingConfig::load_from_system_scope`
+    /// for autonomous workers that hold a `SystemScope` rather than a raw
+    /// `SettingsStore`.
+    pub async fn get_channel_routing(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<serde_json::Value>, DatabaseError> {
+        self.inner.get_setting(user_id, "channel_routing").await
+    }
+
     /// Construct a per-user workspace for system-process operations.
     ///
     /// Used by the heartbeat and routine engine to get a workspace scoped to

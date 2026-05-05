@@ -250,6 +250,8 @@ impl Channel for RelayChannel {
                         "event_type": event.event_type,
                         "thread_id": event.thread_id.as_deref().unwrap_or(&event.id),
                         "provider": event.provider,
+                        crate::agent::channel_routing::TRUSTED_DM_METADATA_KEY: event.event_type
+                            == crate::channels::relay::client::event_types::DIRECT_MESSAGE,
                     }));
 
                 // Use the original thread_id if present (already in a thread),

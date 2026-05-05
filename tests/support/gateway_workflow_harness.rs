@@ -186,6 +186,7 @@ impl GatewayWorkflowHarness {
             None,
             None,
             None,
+            None,
         );
 
         // Agent::run() creates its own RoutineEngine and populates this slot.
@@ -289,6 +290,7 @@ impl GatewayWorkflowHarness {
                 builder: None,
                 llm_backend: "nearai".to_string(),
                 tenant_rates: std::sync::Arc::new(ironclaw::tenant::TenantRateRegistry::new(4, 3)),
+                channel_routing: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             },
             channels,
             None,
