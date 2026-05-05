@@ -1,6 +1,10 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    },
+    time::Duration,
 };
 
 use chrono::{DateTime, TimeZone, Utc};
@@ -194,6 +198,29 @@ async fn submit_turn_idempotency_replays_before_policy_is_rechecked() {
     assert_eq!(duplicate, first);
 }
 
+#[test]
+fn submit_turn_admission_policy_can_reenter_store_without_deadlock() {
+    let (sender, receiver) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let store = Arc::new(InMemoryTurnStateStore::default());
+        let coordinator = DefaultTurnCoordinator::new(store.clone())
+            .with_admission_policy(Arc::new(ReentrantStorePolicy { store }));
+        let result = runtime
+            .block_on(coordinator.submit_turn(submit_request("thread-a", "idem-reentrant-policy")));
+        let _ = sender.send(result);
+    });
+
+    let result = receiver
+        .recv_timeout(Duration::from_secs(1))
+        .expect("submit_turn should not deadlock when admission policy reads store state");
+    assert!(matches!(result, Ok(SubmitTurnResponse::Accepted { .. })));
+}
+
 #[tokio::test]
 async fn submit_turn_idempotency_replays_same_admission_rejection() {
     let store = Arc::new(InMemoryTurnStateStore::default());
@@ -281,6 +308,50 @@ async fn get_run_state_wrong_scope_returns_not_found_without_leaking_existence()
     assert_eq!(err, TurnError::ScopeNotFound);
     assert_eq!(err.category(), TurnErrorCategory::ScopeNotFound);
     assert_eq!(err.adapter_status_code(), 404);
+}
+
+#[test]
+fn admission_rejection_reason_status_mapping_is_user_actionable() {
+    assert_eq!(
+        TurnError::AdmissionRejected(AdmissionRejection::new(
+            AdmissionRejectionReason::TenantLimit
+        ))
+        .adapter_status_code(),
+        429
+    );
+    assert_eq!(
+        TurnError::AdmissionRejected(AdmissionRejection::new(
+            AdmissionRejectionReason::ProfileRejected
+        ))
+        .category(),
+        TurnErrorCategory::InvalidRequest
+    );
+    assert_eq!(
+        TurnError::AdmissionRejected(AdmissionRejection::new(
+            AdmissionRejectionReason::ProfileRejected
+        ))
+        .adapter_status_code(),
+        400
+    );
+    assert_eq!(
+        TurnError::AdmissionRejected(AdmissionRejection::new(AdmissionRejectionReason::Policy))
+            .adapter_status_code(),
+        429
+    );
+    assert_eq!(
+        TurnError::AdmissionRejected(AdmissionRejection::new(
+            AdmissionRejectionReason::Unauthorized
+        ))
+        .adapter_status_code(),
+        403
+    );
+    assert_eq!(
+        TurnError::AdmissionRejected(AdmissionRejection::new(
+            AdmissionRejectionReason::Unavailable
+        ))
+        .adapter_status_code(),
+        503
+    );
 }
 
 #[tokio::test]
@@ -779,6 +850,17 @@ fn scope(thread: &str) -> TurnScope {
 
 fn actor() -> TurnActor {
     TurnActor::new(UserId::new("user1").unwrap())
+}
+
+struct ReentrantStorePolicy {
+    store: Arc<InMemoryTurnStateStore>,
+}
+
+impl TurnAdmissionPolicy for ReentrantStorePolicy {
+    fn check_submit(&self, _request: &SubmitTurnRequest) -> Result<(), AdmissionRejection> {
+        let _ = self.store.events();
+        Ok(())
+    }
 }
 
 #[derive(Default)]

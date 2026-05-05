@@ -246,9 +246,10 @@ impl TurnError {
             Self::AdmissionRejected(rejection) => match rejection.reason {
                 AdmissionRejectionReason::Unauthorized => TurnErrorCategory::Unauthorized,
                 AdmissionRejectionReason::Unavailable => TurnErrorCategory::Unavailable,
-                AdmissionRejectionReason::TenantLimit
-                | AdmissionRejectionReason::ProfileRejected
-                | AdmissionRejectionReason::Policy => TurnErrorCategory::AdmissionRejected,
+                AdmissionRejectionReason::ProfileRejected => TurnErrorCategory::InvalidRequest,
+                AdmissionRejectionReason::TenantLimit | AdmissionRejectionReason::Policy => {
+                    TurnErrorCategory::AdmissionRejected
+                }
             },
             Self::ScopeNotFound => TurnErrorCategory::ScopeNotFound,
             Self::Unauthorized => TurnErrorCategory::Unauthorized,

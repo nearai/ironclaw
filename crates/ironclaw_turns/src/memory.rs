@@ -143,16 +143,25 @@ impl TurnStateStore for InMemoryTurnStateStore {
         request: SubmitTurnRequest,
         admission_policy: &dyn TurnAdmissionPolicy,
     ) -> Result<SubmitTurnResponse, TurnError> {
-        let mut inner = self.lock_inner()?;
         let idempotency_key = SubmitIdempotencyKey {
             scope: request.scope.clone(),
             key: request.idempotency_key.clone(),
         };
+        {
+            let inner = self.lock_inner()?;
+            if let Some(result) = inner.submit_idempotency.get(&idempotency_key) {
+                return result.clone();
+            }
+        }
+
+        let admission_result = admission_policy.check_submit(&request);
+
+        let mut inner = self.lock_inner()?;
         if let Some(result) = inner.submit_idempotency.get(&idempotency_key) {
             return result.clone();
         }
 
-        if let Err(rejection) = admission_policy.check_submit(&request) {
+        if let Err(rejection) = admission_result {
             let response = Err(TurnError::AdmissionRejected(rejection));
             inner.remember_submit_idempotency(idempotency_key, response.clone());
             return response;
