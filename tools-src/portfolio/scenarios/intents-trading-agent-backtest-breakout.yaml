@@ -1,0 +1,33 @@
+id: intents-trading-agent-backtest-breakout
+description: |
+  Backtests a long-only breakout strategy with explicit fee/slippage
+  assumptions. This is the trend-following baseline in the strategy
+  test corpus.
+steps:
+  - name: backtest_breakout
+    action: backtest
+    params:
+      initial_cash_usd: 1000
+      fee_bps: 10
+      slippage_bps: 5
+      max_position_pct: 0.75
+      take_profit_bps: 1800
+      strategy:
+        kind: breakout
+        lookback_window: 3
+        threshold_bps: 25
+      candles:
+        - {ts: "2026-02-01T00:00:00Z", open: 20.0, high: 20.3, low: 19.8, close: 20.0, volume: 900}
+        - {ts: "2026-02-02T00:00:00Z", open: 20.1, high: 20.4, low: 19.9, close: 20.1, volume: 900}
+        - {ts: "2026-02-03T00:00:00Z", open: 20.0, high: 20.3, low: 19.7, close: 20.0, volume: 900}
+        - {ts: "2026-02-04T00:00:00Z", open: 20.2, high: 20.5, low: 20.0, close: 20.2, volume: 950}
+        - {ts: "2026-02-05T00:00:00Z", open: 20.3, high: 21.2, low: 20.2, close: 21.1, volume: 1300}
+        - {ts: "2026-02-06T00:00:00Z", open: 21.2, high: 22.4, low: 21.0, close: 22.1, volume: 1500}
+        - {ts: "2026-02-07T00:00:00Z", open: 22.2, high: 23.5, low: 22.0, close: 23.2, volume: 1600}
+        - {ts: "2026-02-08T00:00:00Z", open: 23.3, high: 24.6, low: 23.0, close: 24.0, volume: 1700}
+        - {ts: "2026-02-09T00:00:00Z", open: 24.0, high: 24.4, low: 23.3, close: 23.8, volume: 1200}
+    expect:
+      backtest_schema_version: intents-backtest/1
+      backtest_trades_min: 1
+      backtest_total_return_gt: 5
+      backtest_lookahead_safe: true

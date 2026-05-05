@@ -1,0 +1,58 @@
+id: intents-trading-agent-nl-compile
+description: |
+  Natural-language compile pass over the four supported intent kinds
+  plus a no-op. Verifies recommended action, structured params, and
+  confidence floor.
+steps:
+  - name: dca_six_months_into_near
+    action: compile_intent_prompt
+    params:
+      prompt: "DCA $100 weekly into NEAR for 6 months"
+    expect:
+      backtest_schema_version: intents-nl-compile/1
+      nl_intent_kind: dca-schedule
+      nl_recommended_action: plan_dca_schedule
+      nl_param_eq:
+        pair: "NEAR/USDC"
+        cadence: "weekly"
+        total_periods: 25
+        notional_per_period_usd: 100.0
+      nl_confidence_min: 0.7
+  - name: swap_btc_to_usdc
+    action: compile_intent_prompt
+    params:
+      prompt: "swap 0.5 BTC to USDC on near"
+    expect:
+      nl_intent_kind: swap
+      nl_recommended_action: build_intent
+  - name: backtest_sma_pair
+    action: compile_intent_prompt
+    params:
+      prompt: "backtest sma 5/20 on NEAR/USDC"
+    expect:
+      nl_intent_kind: backtest
+      nl_recommended_action: backtest_suite
+  - name: research_pair
+    action: compile_intent_prompt
+    params:
+      prompt: "research catalyst risk on NEAR/USDC this week"
+    expect:
+      nl_intent_kind: research
+      nl_recommended_action: plan_paid_research
+      nl_param_eq:
+        pair: "NEAR/USDC"
+        budget_usd: 0.0
+  - name: watch_btc_breakout
+    action: compile_intent_prompt
+    params:
+      prompt: "watch BTC for breakout above 70000"
+    expect:
+      nl_intent_kind: watch
+      nl_recommended_action: format_intents_widget
+  - name: unsupported_prompt
+    action: compile_intent_prompt
+    params:
+      prompt: "hello there"
+    expect:
+      nl_intent_kind: unsupported
+      nl_recommended_action: noop

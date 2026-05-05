@@ -109,6 +109,95 @@
     },
     {
       "properties": {
+        "action": { "const": "format_intents_widget" },
+        "generated_at": {
+          "type": "string",
+          "description": "ISO 8601 timestamp for the current strategy/intent report."
+        },
+        "project_id": {
+          "type": "string",
+          "description": "Project slug or id, usually intents-trading-agent."
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["paper", "quote", "execution"],
+          "default": "paper",
+          "description": "Trading workflow mode. Execution remains future wallet-only plumbing."
+        },
+        "pair": {
+          "type": "string",
+          "description": "Watched pair, for example NEAR/BTC."
+        },
+        "stance": {
+          "type": "string",
+          "enum": ["skip", "watch", "paper-intent", "quote-intent", "blocked"],
+          "default": "watch"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "backtest_suite": {
+          "type": "object",
+          "description": "Output from backtest_suite. Top five ranked candidates are extracted for the widget."
+        },
+        "risk_gates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "status": {
+                "type": "string",
+                "enum": ["pass", "warn", "fail", "blocked", "unknown"]
+              },
+              "detail": { "type": "string" }
+            },
+            "required": ["name", "status"]
+          },
+          "default": []
+        },
+        "intent": {
+          "type": "object",
+          "description": "Optional unsigned NEAR Intent bundle preview.",
+          "properties": {
+            "bundle": {
+              "type": "object",
+              "description": "IntentBundle returned from build_intent."
+            },
+            "status": {
+              "type": "string",
+              "enum": ["none", "paper-built", "live-quote-built", "awaiting-signature", "submitted", "failed", "blocked"],
+              "default": "none"
+            },
+            "route_label": { "type": "string" },
+            "quote_source": { "type": "string" }
+          },
+          "required": ["bundle"]
+        },
+        "research_sources": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": []
+        },
+        "paid_research_plan": {
+          "type": "object",
+          "description": "Optional output from plan_paid_research. The widget extracts budget, payable sources, rails, policy gates, and NEAR funding routes."
+        },
+        "trial_plan": {
+          "type": "object",
+          "description": "Optional output from plan_near_intents_trial. The widget extracts nominal budget, setup steps, trial risk gates, and quote readiness."
+        },
+        "next_action": {
+          "type": "string",
+          "description": "Operator-facing next step shown in the widget."
+        }
+      },
+      "required": ["action", "pair"]
+    },
+    {
+      "properties": {
         "action": { "const": "progress" },
         "history": {
           "type": "array",
@@ -128,6 +217,790 @@
         }
       },
       "required": ["action", "history", "config"]
+    },
+    {
+      "properties": {
+        "action": { "const": "backtest" },
+        "candles": {
+          "type": "array",
+          "description": "OHLCV candles sorted oldest to newest. Signals are formed on candle close and executed at the next candle open.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "ts": { "type": "string" },
+              "open": { "type": "number", "exclusiveMinimum": 0 },
+              "high": { "type": "number", "exclusiveMinimum": 0 },
+              "low": { "type": "number", "exclusiveMinimum": 0 },
+              "close": { "type": "number", "exclusiveMinimum": 0 },
+              "volume": { "type": "number" }
+            },
+            "required": ["ts", "open", "high", "low", "close"]
+          },
+          "minItems": 2
+        },
+        "strategy": {
+          "type": "object",
+          "description": "Long-only spot strategy config. Supported kinds: buy-hold, sma-cross, breakout, mean-reversion, momentum, rsi-mean-reversion.",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["buy-hold", "sma-cross", "breakout", "mean-reversion", "momentum", "rsi-mean-reversion"]
+            },
+            "fast_window": { "type": "integer", "minimum": 1 },
+            "slow_window": { "type": "integer", "minimum": 1 },
+            "lookback_window": { "type": "integer", "minimum": 1 },
+            "threshold_bps": { "type": "number", "minimum": 0 },
+            "entry_threshold": { "type": "number", "minimum": 0 },
+            "exit_threshold": { "type": "number", "minimum": 0 }
+          },
+          "required": ["kind"]
+        },
+        "initial_cash_usd": { "type": "number", "exclusiveMinimum": 0, "default": 10000 },
+        "fee_bps": { "type": "number", "minimum": 0, "default": 10 },
+        "slippage_bps": { "type": "number", "minimum": 0, "default": 5 },
+        "max_position_pct": { "type": "number", "exclusiveMinimum": 0, "maximum": 1, "default": 1 },
+        "stop_loss_bps": { "type": "number", "minimum": 0 },
+        "take_profit_bps": { "type": "number", "minimum": 0 }
+      },
+      "required": ["action", "candles", "strategy"]
+    },
+    {
+      "properties": {
+        "action": { "const": "backtest_suite" },
+        "candles": {
+          "type": "array",
+          "description": "OHLCV candles sorted oldest to newest. Every candidate is evaluated against this same market episode.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "ts": { "type": "string" },
+              "open": { "type": "number", "exclusiveMinimum": 0 },
+              "high": { "type": "number", "exclusiveMinimum": 0 },
+              "low": { "type": "number", "exclusiveMinimum": 0 },
+              "close": { "type": "number", "exclusiveMinimum": 0 },
+              "volume": { "type": "number" }
+            },
+            "required": ["ts", "open", "high", "low", "close"]
+          },
+          "minItems": 2
+        },
+        "candidates": {
+          "type": "array",
+          "description": "Strategy menu to rank. Each candidate may override position size, stop-loss, and take-profit.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "strategy": {
+                "type": "object",
+                "description": "Long-only spot strategy config. Supported kinds: buy-hold, sma-cross, breakout, mean-reversion, momentum, rsi-mean-reversion.",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": ["buy-hold", "sma-cross", "breakout", "mean-reversion", "momentum", "rsi-mean-reversion"]
+                  },
+                  "fast_window": { "type": "integer", "minimum": 1 },
+                  "slow_window": { "type": "integer", "minimum": 1 },
+                  "lookback_window": { "type": "integer", "minimum": 1 },
+                  "threshold_bps": { "type": "number", "minimum": 0 },
+                  "entry_threshold": { "type": "number", "minimum": 0 },
+                  "exit_threshold": { "type": "number", "minimum": 0 }
+                },
+                "required": ["kind"]
+              },
+              "max_position_pct": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
+              "stop_loss_bps": { "type": "number", "minimum": 0 },
+              "take_profit_bps": { "type": "number", "minimum": 0 }
+            },
+            "required": ["id", "strategy"]
+          },
+          "minItems": 1
+        },
+        "initial_cash_usd": { "type": "number", "exclusiveMinimum": 0, "default": 10000 },
+        "fee_bps": { "type": "number", "minimum": 0, "default": 10 },
+        "slippage_bps": { "type": "number", "minimum": 0, "default": 5 }
+      },
+      "required": ["action", "candles", "candidates"]
+    },
+    {
+      "properties": {
+        "action": { "const": "backtest_walkforward" },
+        "candles": {
+          "type": "array",
+          "description": "OHLCV candles sorted oldest to newest. Split into N contiguous, non-overlapping fold windows.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "ts": { "type": "string" },
+              "open": { "type": "number", "exclusiveMinimum": 0 },
+              "high": { "type": "number", "exclusiveMinimum": 0 },
+              "low": { "type": "number", "exclusiveMinimum": 0 },
+              "close": { "type": "number", "exclusiveMinimum": 0 },
+              "volume": { "type": "number" }
+            },
+            "required": ["ts", "open", "high", "low", "close"]
+          },
+          "minItems": 8
+        },
+        "strategy": {
+          "type": "object",
+          "description": "Long-only spot strategy config. Same kinds as 'backtest'.",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["buy-hold", "sma-cross", "breakout", "mean-reversion", "momentum", "rsi-mean-reversion"]
+            },
+            "fast_window": { "type": "integer", "minimum": 1 },
+            "slow_window": { "type": "integer", "minimum": 1 },
+            "lookback_window": { "type": "integer", "minimum": 1 },
+            "threshold_bps": { "type": "number", "minimum": 0 },
+            "entry_threshold": { "type": "number", "minimum": 0 },
+            "exit_threshold": { "type": "number", "minimum": 0 }
+          },
+          "required": ["kind"]
+        },
+        "n_folds": { "type": "integer", "minimum": 2 },
+        "train_pct": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1, "default": 0.7 },
+        "embargo": { "type": "integer", "minimum": 0, "default": 0 },
+        "initial_cash_usd": { "type": "number", "exclusiveMinimum": 0, "default": 10000 },
+        "fee_bps": { "type": "number", "minimum": 0, "default": 10 },
+        "slippage_bps": { "type": "number", "minimum": 0, "default": 5 },
+        "max_position_pct": { "type": "number", "exclusiveMinimum": 0, "maximum": 1, "default": 1 },
+        "stop_loss_bps": { "type": "number", "minimum": 0 },
+        "take_profit_bps": { "type": "number", "minimum": 0 }
+      },
+      "required": ["action", "candles", "strategy", "n_folds"]
+    },
+    {
+      "properties": {
+        "action": { "const": "backtest_montecarlo" },
+        "trade_returns_pct": {
+          "type": "array",
+          "items": { "type": "number" },
+          "minItems": 1,
+          "description": "Per-trade percent returns. Typically the trades[].return_pct array from a prior backtest."
+        },
+        "initial_cash_usd": { "type": "number", "exclusiveMinimum": 0, "default": 10000 },
+        "iterations": { "type": "integer", "minimum": 1, "default": 1000 },
+        "seed": { "type": "integer", "default": 13888280946577510895 },
+        "method": { "type": "string", "enum": ["shuffle", "permute"], "default": "shuffle" }
+      },
+      "required": ["action", "trade_returns_pct"]
+    },
+    {
+      "properties": {
+        "action": { "const": "backtest_grid" },
+        "candles": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "ts": { "type": "string" },
+              "open": { "type": "number", "exclusiveMinimum": 0 },
+              "high": { "type": "number", "exclusiveMinimum": 0 },
+              "low": { "type": "number", "exclusiveMinimum": 0 },
+              "close": { "type": "number", "exclusiveMinimum": 0 },
+              "volume": { "type": "number" }
+            },
+            "required": ["ts", "open", "high", "low", "close"]
+          },
+          "minItems": 2
+        },
+        "base": {
+          "type": "object",
+          "description": "Base strategy config; axes override these fields per cell.",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["buy-hold", "sma-cross", "breakout", "mean-reversion", "momentum", "rsi-mean-reversion"]
+            },
+            "fast_window": { "type": "integer", "minimum": 1 },
+            "slow_window": { "type": "integer", "minimum": 1 },
+            "lookback_window": { "type": "integer", "minimum": 1 },
+            "threshold_bps": { "type": "number", "minimum": 0 },
+            "entry_threshold": { "type": "number", "minimum": 0 },
+            "exit_threshold": { "type": "number", "minimum": 0 }
+          },
+          "required": ["kind"]
+        },
+        "axes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "param": {
+                "type": "string",
+                "enum": ["fast_window", "slow_window", "lookback_window", "threshold_bps", "entry_threshold", "exit_threshold"]
+              },
+              "values": {
+                "type": "array",
+                "items": { "type": "number" },
+                "minItems": 1
+              }
+            },
+            "required": ["param", "values"]
+          }
+        },
+        "max_position_pct_options": { "type": "array", "items": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 } },
+        "stop_loss_bps_options": { "type": "array", "items": { "type": "number", "minimum": 0 } },
+        "take_profit_bps_options": { "type": "array", "items": { "type": "number", "minimum": 0 } },
+        "initial_cash_usd": { "type": "number", "exclusiveMinimum": 0, "default": 10000 },
+        "fee_bps": { "type": "number", "minimum": 0, "default": 10 },
+        "slippage_bps": { "type": "number", "minimum": 0, "default": 5 },
+        "max_cells": { "type": "integer", "minimum": 1, "default": 1024 }
+      },
+      "required": ["action", "candles", "base"]
+    },
+    {
+      "properties": {
+        "action": { "const": "validate_episode" },
+        "episode": {
+          "type": "object",
+          "description": "Multi-surface episode bundling candles, optional solver fixture, and optional news context.",
+          "properties": {
+            "id": { "type": "string", "minLength": 1 },
+            "pair": { "type": "string", "minLength": 1 },
+            "timeframe": { "type": "string" },
+            "candles": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "ts": { "type": "string" },
+                  "open": { "type": "number", "exclusiveMinimum": 0 },
+                  "high": { "type": "number", "exclusiveMinimum": 0 },
+                  "low": { "type": "number", "exclusiveMinimum": 0 },
+                  "close": { "type": "number", "exclusiveMinimum": 0 },
+                  "volume": { "type": "number" }
+                },
+                "required": ["ts", "open", "high", "low", "close"]
+              },
+              "minItems": 2
+            },
+            "solver_fixture": {},
+            "news_context": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "ts": { "type": "string" },
+                  "headline": { "type": "string" },
+                  "url": { "type": "string" },
+                  "source": { "type": "string" },
+                  "kind": { "type": "string" }
+                },
+                "required": ["ts", "headline"]
+              }
+            },
+            "generated_at": { "type": "string" },
+            "source": { "type": "string" },
+            "notes": { "type": "string" }
+          },
+          "required": ["id", "pair", "candles"]
+        }
+      },
+      "required": ["action", "episode"]
+    },
+    {
+      "properties": {
+        "action": { "const": "replay_episode" },
+        "episode": {
+          "type": "object",
+          "description": "Same shape as validate_episode.",
+          "required": ["id", "pair", "candles"]
+        },
+        "candidates": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "strategy": { "type": "object", "required": ["kind"] },
+              "max_position_pct": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
+              "stop_loss_bps": { "type": "number", "minimum": 0 },
+              "take_profit_bps": { "type": "number", "minimum": 0 }
+            },
+            "required": ["id", "strategy"]
+          }
+        },
+        "initial_cash_usd": { "type": "number", "exclusiveMinimum": 0, "default": 10000 },
+        "fee_bps": { "type": "number", "minimum": 0, "default": 10 },
+        "slippage_bps": { "type": "number", "minimum": 0, "default": 5 }
+      },
+      "required": ["action", "episode", "candidates"]
+    },
+    {
+      "properties": {
+        "action": { "const": "backtest_dca" },
+        "candles": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "ts": { "type": "string" },
+              "open": { "type": "number", "exclusiveMinimum": 0 },
+              "high": { "type": "number", "exclusiveMinimum": 0 },
+              "low": { "type": "number", "exclusiveMinimum": 0 },
+              "close": { "type": "number", "exclusiveMinimum": 0 },
+              "volume": { "type": "number" }
+            },
+            "required": ["ts", "open", "high", "low", "close"]
+          },
+          "minItems": 2
+        },
+        "notional_per_period_usd": { "type": "number", "exclusiveMinimum": 0 },
+        "period_candles": { "type": "integer", "minimum": 1, "default": 1 },
+        "offset": { "type": "integer", "minimum": 0, "default": 0 },
+        "skip_above_premium_bps": { "type": "number", "minimum": 0 },
+        "opportunistic_below_discount_bps": { "type": "number", "minimum": 0 },
+        "fee_bps": { "type": "number", "minimum": 0, "default": 10 },
+        "slippage_bps": { "type": "number", "minimum": 0, "default": 5 },
+        "initial_cash_usd": { "type": "number", "exclusiveMinimum": 0, "default": 10000 }
+      },
+      "required": ["action", "candles", "notional_per_period_usd"]
+    },
+    {
+      "properties": {
+        "action": { "const": "plan_dca_schedule" },
+        "pair": { "type": "string", "minLength": 1 },
+        "source_asset": { "type": "string", "minLength": 1 },
+        "destination_asset": { "type": "string", "minLength": 1 },
+        "source_chain": { "type": "string", "minLength": 1 },
+        "destination_chain": { "type": "string", "minLength": 1 },
+        "notional_per_period_usd": { "type": "number", "exclusiveMinimum": 0 },
+        "cadence": { "type": "string", "description": "daily | weekly | biweekly | monthly | raw 5-or-6-field cron" },
+        "total_periods": { "type": "integer", "minimum": 1 },
+        "max_slippage_bps": { "type": "number", "minimum": 0, "default": 50 },
+        "start_at": { "type": "string" },
+        "assumed_price_usd": { "type": "number", "exclusiveMinimum": 0 },
+        "mode": { "type": "string", "enum": ["paper", "quote"], "default": "paper" },
+        "notional_currency": { "type": "string", "default": "USDC" },
+        "solver": { "type": "string" }
+      },
+      "required": ["action", "pair", "source_asset", "destination_asset", "source_chain", "destination_chain", "notional_per_period_usd", "cadence", "total_periods"]
+    },
+    {
+      "properties": {
+        "action": { "const": "compile_intent_prompt" },
+        "prompt": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Natural-language trade prompt. Examples: 'DCA $100 weekly into NEAR for 6 months', 'swap 0.5 BTC to USDC on near', 'backtest sma 5/20 on NEAR/USDC', 'watch BTC for breakout above 70000'."
+        },
+        "default_chain": { "type": "string", "default": "near" },
+        "default_funding_asset": { "type": "string", "default": "USDC" },
+        "focus_pair": { "type": "string" }
+      },
+      "required": ["action", "prompt"]
+    },
+    {
+      "properties": {
+        "action": { "const": "validate_strategy" },
+        "candles": { "type": "array", "minItems": 2 },
+        "strategy": { "type": "object", "required": ["kind"] },
+        "initial_cash_usd": { "type": "number", "exclusiveMinimum": 0, "default": 10000 },
+        "fee_bps": { "type": "number", "minimum": 0, "default": 10 },
+        "slippage_bps": { "type": "number", "minimum": 0, "default": 5 },
+        "max_position_pct": { "type": "number", "exclusiveMinimum": 0, "maximum": 1, "default": 1 },
+        "stop_loss_bps": { "type": "number", "minimum": 0 },
+        "take_profit_bps": { "type": "number", "minimum": 0 },
+        "walkforward_n_folds": { "type": "integer", "minimum": 0, "default": 4 },
+        "walkforward_train_pct": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1, "default": 0.7 },
+        "walkforward_embargo": { "type": "integer", "minimum": 0, "default": 0 },
+        "montecarlo_iterations": { "type": "integer", "minimum": 0, "default": 1000 },
+        "montecarlo_seed": { "type": "integer" },
+        "montecarlo_method": { "type": "string", "enum": ["shuffle", "permute"], "default": "shuffle" },
+        "min_trades": { "type": "integer", "minimum": 0, "default": 5 },
+        "min_total_return_pct": { "type": "number", "default": 0 },
+        "max_drawdown_pct": { "type": "number", "minimum": 0, "default": 35 },
+        "min_profit_factor": { "type": "number", "minimum": 0, "default": 1 },
+        "max_loss_probability": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.4 },
+        "max_is_oos_gap_pct": { "type": "number", "minimum": 0, "default": 25 }
+      },
+      "required": ["action", "candles", "strategy"]
+    },
+    {
+      "properties": {
+        "action": { "const": "format_strategy_doc" },
+        "report": { "type": "object", "description": "Any of the new backtest-family responses; the formatter dispatches on `schema_version`." },
+        "title": { "type": "string" },
+        "pair": { "type": "string" }
+      },
+      "required": ["action", "report"]
+    },
+    {
+      "properties": {
+        "action": { "const": "format_dca_mission" },
+        "schedule": { "type": "object", "description": "intents-dca-schedule/1 document from plan_dca_schedule" },
+        "project_id": { "type": "string", "default": "intents-trading-agent" },
+        "name": { "type": "string" },
+        "timezone": { "type": "string", "default": "UTC" },
+        "cooldown_minutes": { "type": "integer", "minimum": 0, "default": 15 }
+      },
+      "required": ["action", "schedule"]
+    },
+    {
+      "properties": {
+        "action": { "const": "plan_basket_dca_schedule" },
+        "allocations": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "object",
+            "properties": {
+              "destination_asset": { "type": "string", "minLength": 1 },
+              "destination_chain": { "type": "string", "minLength": 1 },
+              "weight_pct": { "type": "number", "exclusiveMinimum": 0, "maximum": 100 }
+            },
+            "required": ["destination_asset", "destination_chain", "weight_pct"]
+          }
+        },
+        "source_asset": { "type": "string", "minLength": 1 },
+        "source_chain": { "type": "string", "minLength": 1 },
+        "notional_per_period_usd": { "type": "number", "exclusiveMinimum": 0 },
+        "cadence": { "type": "string" },
+        "total_periods": { "type": "integer", "minimum": 1 },
+        "max_slippage_bps": { "type": "number", "minimum": 0, "default": 50 },
+        "assumed_prices_usd": { "type": "object", "description": "Map of destination asset → assumed price USD." },
+        "mode": { "type": "string", "enum": ["paper", "quote"], "default": "paper" },
+        "notional_currency": { "type": "string", "default": "USDC" },
+        "solver": { "type": "string" },
+        "start_at": { "type": "string" }
+      },
+      "required": ["action", "allocations", "source_asset", "source_chain", "notional_per_period_usd", "cadence", "total_periods"]
+    },
+    {
+      "properties": {
+        "action": { "const": "plan_paid_research" },
+        "query": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Question or research task to answer before a trading decision."
+        },
+        "pair": {
+          "type": "string",
+          "description": "Optional watched pair, for example NEAR/BTC."
+        },
+        "budget_usd": {
+          "type": "number",
+          "minimum": 0,
+          "default": 5,
+          "description": "Maximum total spend across selected paid sources. Zero allows only free sources."
+        },
+        "max_sources": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 4,
+          "description": "Maximum number of sources to select."
+        },
+        "min_relevance": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.35,
+          "description": "Minimum relevance gate after explicit and lexical scoring."
+        },
+        "min_trust_score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.45,
+          "description": "Minimum trust gate to reduce agentic-SEO manipulation."
+        },
+        "max_seo_risk_score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.65,
+          "description": "Maximum accepted source-manipulation risk score."
+        },
+        "max_source_age_days": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Optional freshness gate for sources that include age_days."
+        },
+        "spending_mode": {
+          "type": "string",
+          "enum": ["plan-only", "quote", "autopay"],
+          "default": "plan-only",
+          "description": "plan-only and quote never authorize payment; autopay still requires a policy wallet outside this tool."
+        },
+        "near_funding_asset": {
+          "type": "string",
+          "default": "USDC.near",
+          "description": "NEAR-side asset to route from when funding external MPP/x402 rails through NEAR Intents."
+        },
+        "preferred_payment_protocols": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["near-intents", "mpp", "x402", "subscription", "manual", "free"]
+          },
+          "default": ["near-intents", "mpp", "x402", "subscription", "manual", "free"],
+          "description": "Payment rail preference order when a source supports more than one rail."
+        },
+        "default_article_price_usd": {
+          "type": "number",
+          "minimum": 0,
+          "default": 0.01,
+          "description": "Default article price used for wallet-cap math."
+        },
+        "agent_wallet": {
+          "type": "object",
+          "description": "Optional autonomous wallet policy. This is policy metadata only, not signing material.",
+          "properties": {
+            "provider": { "type": "string", "default": "AgentCash" },
+            "address": { "type": "string" },
+            "network": { "type": "string", "default": "base" },
+            "balance_usd": { "type": "number", "minimum": 0 },
+            "default_article_price_usd": { "type": "number", "minimum": 0, "default": 0.01 },
+            "per_article_cap_usd": { "type": "number", "minimum": 0, "default": 0.05 },
+            "daily_cap_usd": { "type": "number", "minimum": 0, "default": 1.0 },
+            "max_wallet_balance_usd": { "type": "number", "minimum": 0, "default": 5.0 },
+            "audit_urls": { "type": "array", "items": { "type": "string" }, "default": [] }
+          }
+        },
+        "required_tags": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "All selected sources must include these tags when provided."
+        },
+        "blocked_publishers": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Authors or publishers to exclude from selection."
+        },
+        "sources": {
+          "type": "array",
+          "description": "Candidate free or paid sources discovered from newsletters, APIs, x402/MPP discovery, or project config.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "title": { "type": "string" },
+              "author": { "type": "string" },
+              "publisher": { "type": "string" },
+              "url": { "type": "string" },
+              "summary": { "type": "string" },
+              "tags": { "type": "array", "items": { "type": "string" }, "default": [] },
+              "price_usd": { "type": "number", "minimum": 0 },
+              "relevance": { "type": "number", "minimum": 0, "maximum": 1 },
+              "trust_score": { "type": "number", "minimum": 0, "maximum": 1 },
+              "freshness_score": { "type": "number", "minimum": 0, "maximum": 1 },
+              "seo_risk_score": { "type": "number", "minimum": 0, "maximum": 1 },
+              "age_days": { "type": "integer", "minimum": 0 },
+              "payment": {
+                "type": "object",
+                "description": "Payment rail metadata. This is planning data only; no payment is signed.",
+                "properties": {
+                  "protocol": {
+                    "type": "string",
+                    "enum": ["near-intents", "mpp", "x402", "subscription", "manual", "free"],
+                    "default": "manual"
+                  },
+                  "network": { "type": "string" },
+                  "asset": { "type": "string" },
+                  "recipient": { "type": "string" },
+                  "endpoint": { "type": "string" }
+                }
+              },
+              "payment_options": {
+                "type": "array",
+                "description": "Alternative rails accepted by the same source, for example DripStack supporting both MPP and x402.",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "protocol": {
+                      "type": "string",
+                      "enum": ["near-intents", "mpp", "x402", "subscription", "manual", "free"],
+                      "default": "manual"
+                    },
+                    "network": { "type": "string" },
+                    "asset": { "type": "string" },
+                    "recipient": { "type": "string" },
+                    "endpoint": { "type": "string" }
+                  }
+                },
+                "default": []
+              }
+            },
+            "required": ["id", "title", "author", "url"]
+          },
+          "default": []
+        }
+      },
+      "required": ["action", "query"]
+    },
+    {
+      "properties": {
+        "action": { "const": "fetch_dripstack_catalog" },
+        "publication_slug": {
+          "type": "string",
+          "description": "Optional publication slug. Omit to fetch the free publication catalog; provide it to fetch free post-title metadata for one publication."
+        }
+      },
+      "required": ["action"]
+    },
+    {
+      "properties": {
+        "action": { "const": "plan_dripstack_browse" },
+        "topic": {
+          "type": "string",
+          "description": "User topic. If absent, the output checkpoint asks for a topic before any catalog work."
+        },
+        "selected_publication_slug": {
+          "type": "string",
+          "description": "Publication slug selected by the user from a matched shortlist."
+        },
+        "selected_post_slug": {
+          "type": "string",
+          "description": "Post slug selected by the user from post summaries."
+        },
+        "max_results": { "type": "integer", "minimum": 1, "maximum": 10, "default": 5 },
+        "default_price_usd": {
+          "type": "number",
+          "minimum": 0,
+          "default": 0.01,
+          "description": "Default planned article price when a post-specific price is unavailable."
+        },
+        "publications": {
+          "type": "array",
+          "description": "Free DripStack publication catalog rows from GET /api/v1/publications.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "slug": { "type": "string" },
+              "title": { "type": "string" },
+              "description": { "type": "string" },
+              "site_url": { "type": "string" },
+              "last_synced_at": { "type": "string" }
+            },
+            "required": ["slug"]
+          },
+          "default": []
+        },
+        "posts": {
+          "type": "array",
+          "description": "Free post summaries from GET /api/v1/publications/{publicationSlug}.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "slug": { "type": "string" },
+              "title": { "type": "string" },
+              "subtitle": { "type": "string" },
+              "author": { "type": "string" },
+              "published_at": { "type": "string" },
+              "price_usd": { "type": "number", "minimum": 0 }
+            },
+            "required": ["slug", "title"]
+          },
+          "default": []
+        }
+      },
+      "required": ["action"]
+    },
+    {
+      "properties": {
+        "action": { "const": "prepare_dripstack_paid_fetch" },
+        "publication_slug": {
+          "type": "string",
+          "minLength": 1,
+          "description": "DripStack publication slug exactly as returned by the free catalog."
+        },
+        "post_slug": {
+          "type": "string",
+          "minLength": 1,
+          "description": "DripStack post slug exactly as returned by the free publication detail route."
+        },
+        "title": {
+          "type": "string",
+          "description": "Optional display title for confirmation prompts."
+        },
+        "endpoint": {
+          "type": "string",
+          "description": "Optional paid article endpoint. Defaults to https://dripstack.xyz/api/v1/publications/{publication_slug}/{post_slug}."
+        },
+        "price_usd": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Static estimated price. The live HTTP 402 challenge remains authoritative."
+        },
+        "payment_protocol": {
+          "type": "string",
+          "enum": ["mpp", "x402"],
+          "default": "mpp"
+        },
+        "user_confirmed_purchase": {
+          "type": "boolean",
+          "default": false,
+          "description": "Must be true before the agent probes the paid endpoint or prepares receipt-backed retry headers."
+        },
+        "mpp_authorization": {
+          "type": "string",
+          "description": "MPP Authorization credential returned by a payment-aware client. The tool only previews the header; it never signs."
+        },
+        "x402_payment_signature": {
+          "type": "string",
+          "description": "x402 PAYMENT-SIGNATURE returned by a payment-aware client. The tool only previews the header; it never signs."
+        }
+      },
+      "required": ["action", "publication_slug", "post_slug"]
+    },
+    {
+      "properties": {
+        "action": { "const": "plan_near_intents_trial" },
+        "near_account_id": {
+          "type": "string",
+          "description": "Optional NEAR signer account id for the trial wallet."
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["paper", "quote", "execution"],
+          "default": "paper",
+          "description": "Paper builds fixture intents; quote prepares a live NEAR Intents quote request; execution remains manual-wallet only."
+        },
+        "pair": {
+          "type": "string",
+          "default": "NEAR/USDC",
+          "description": "Trial pair. Single-token values are normalized as NEAR/<token>."
+        },
+        "nominal_near": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 0.25,
+          "description": "Total NEAR budget the user intends to keep in the isolated trial wallet."
+        },
+        "max_trade_near": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Maximum NEAR-equivalent size for one trial quote/trade."
+        },
+        "assumed_near_usd": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 3.0,
+          "description": "Fresh NEAR/USD estimate used only for sizing. Recompute before any live quote."
+        },
+        "max_slippage_bps": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000,
+          "default": 50
+        },
+        "selected_strategy_id": {
+          "type": "string",
+          "description": "Optional strategy id selected from backtest_suite ranked results."
+        },
+        "backtest_suite": {
+          "type": "object",
+          "description": "Optional output from backtest_suite, used to gate/recommend the trial strategy."
+        }
+      },
+      "required": ["action"]
     },
     {
       "properties": {

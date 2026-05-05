@@ -1,0 +1,6 @@
+{
+  "id": "near-intents-console",
+  "name": "NEAR Intents Console",
+  "slot": "project_header",
+  "position": "before:missions"
+}

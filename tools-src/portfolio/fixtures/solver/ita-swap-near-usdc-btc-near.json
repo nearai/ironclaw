@@ -1,0 +1,31 @@
+{
+  "quote_id": "q-ita-swap-near-usdc-btc-2026-05-02",
+  "quote_version": "near-intents/1",
+  "legs": [
+    {
+      "id": "swap-near-usdc-btc",
+      "kind": "swap",
+      "chain": "near",
+      "near_intent_payload": {
+        "op": "swap",
+        "from_chain": "near",
+        "to_chain": "near",
+        "from_asset": "USDC",
+        "to_asset": "BTC",
+        "amount_in": "100.00",
+        "min_amount_out": "0.00099500",
+        "paper_mode": true,
+        "source": "intents-trading-agent-smoke"
+      },
+      "min_out": {
+        "symbol": "BTC",
+        "chain": "near",
+        "amount": "0.00099500",
+        "value_usd": "98.01"
+      },
+      "quoted_by": "relay-solver/replay"
+    }
+  ],
+  "total_cost_usd": "1.50",
+  "expires_at_unix": 1800000000
+}

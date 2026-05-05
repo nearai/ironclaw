@@ -5,7 +5,7 @@
 
 //! Portfolio WASM tool for IronClaw.
 //!
-//! Single tool with three operations:
+//! Single tool with multiple operations:
 //!
 //! - `scan` — discover positions across chains for one or more addresses
 //!   and classify them against the embedded protocol registry.
@@ -14,6 +14,61 @@
 //!   filter; LLM does the final ranking via the skill playbook).
 //! - `build_intent` — translate a movement plan into an unsigned NEAR
 //!   Intent bundle, applying bounded checks before returning.
+//! - `backtest` — run deterministic long-only spot strategy tests over
+//!   caller-provided OHLCV candles before any intent is built.
+//! - `backtest_suite` — rank several strategy candidates over the same
+//!   candle episode before any strategy is selected for paper intent work.
+//! - `backtest_walkforward` — fixed-strategy walk-forward across N
+//!   contiguous, non-overlapping fold windows; reports per-fold
+//!   IS/OOS gap and an aggregate robustness verdict.
+//! - `backtest_montecarlo` — seeded resample/permute over a per-trade
+//!   return series; reports return / drawdown / terminal-equity
+//!   distributions and loss probabilities.
+//! - `backtest_grid` — cartesian sweep over strategy parameter axes
+//!   plus optional sizing/stop/take-profit options; ranked through
+//!   `backtest_suite`.
+//! - `validate_episode` — structural check for the shared episode
+//!   format (candles + optional solver fixture + optional news
+//!   context).
+//! - `replay_episode` — validate then replay an episode through
+//!   `backtest_suite`, surfacing the embedded solver fixture and
+//!   news context.
+//! - `backtest_dca` — replay a fixed-cadence dollar-cost-averaging
+//!   buy schedule with optional symmetric price-band variants.
+//! - `plan_dca_schedule` — emit a recurring DCA schedule (cron + per
+//!   period plan + `build_intent` template + risk gates) for a
+//!   NEAR-Intents-supported destination asset; unsigned only.
+//! - `compile_intent_prompt` — turn a natural-language trade prompt
+//!   ("DCA $100 weekly into NEAR for 6 months") into a structured
+//!   recommended action plus extracted fields, assumptions,
+//!   clarifications, and gates. Deterministic pattern matching, no
+//!   LLM call.
+//! - `validate_strategy` — composed base backtest + walk-forward +
+//!   Monte Carlo against caller-tunable thresholds; returns an
+//!   `approved` / `watch` / `rejected` verdict with a per-gate
+//!   pass/fail table.
+//! - `format_strategy_doc` — Markdown formatter for any of the
+//!   backtest-family schemas; produces a journal-ready document the
+//!   agent persists after a run.
+//! - `format_dca_mission` — turn a DCA schedule into an IronClaw
+//!   mission scaffold (cron + goal + per-tick bridge calls + YAML)
+//!   so a one-shot DCA plan can be promoted to autopilot.
+//! - `plan_basket_dca_schedule` — fixed-proportion accumulation
+//!   across multiple destinations (e.g. 60% NEAR / 30% BTC / 10% ETH);
+//!   per-period total notional splits across N legs by weight, each
+//!   leg becomes one swap in the per-period `build_intent` template.
+//! - `plan_paid_research` — rank paid/free research sources, budget a
+//!   premium-source query, and prepare attribution/payment gates.
+//! - `plan_dripstack_browse` — model DripStack's guided topic →
+//!   publication → article purchase flow without fetching paid content.
+//! - `fetch_dripstack_catalog` — fetch DripStack's free publication or
+//!   publication-post metadata routes for guided browse.
+//! - `prepare_dripstack_paid_fetch` — prepare the explicit
+//!   confirmation/receipt boundary for a single paid DripStack article.
+//! - `plan_near_intents_trial` — prepare a nominal-NEAR paper/quote
+//!   rehearsal with strategy gates and unsigned intent build requests.
+//! - `format_intents_widget` — build the NEAR Intents trading console
+//!   view model consumed by the project widget.
 //!
 //! The agent never holds private keys. All output is read-only or
 //! unsigned.
@@ -27,7 +82,11 @@
 //! ├── indexer/            // scan: fetch + normalize raw positions
 //! ├── analyzer/           // classify raw positions via protocols/*.json
 //! ├── strategy/           // propose: parse strategy docs + filter
-//! └── intents/            // build_intent: solver call + bounded checks
+//! ├── intents/            // build_intent: solver call + bounded checks
+//! ├── backtest.rs         // paper strategy replay/ranking over OHLCV candles
+//! ├── research.rs         // paid research source budgeting/attribution
+//! ├── trial.rs            // nominal NEAR rehearsal planning
+//! └── widget.rs           // web widget state formatters
 //! ```
 
 wit_bindgen::generate!({
@@ -38,11 +97,21 @@ wit_bindgen::generate!({
 use serde::{Deserialize, Serialize};
 
 mod analyzer;
+mod backtest;
+mod basket;
+mod dca;
+mod episode;
 mod format;
 mod indexer;
 mod intents;
+mod lab;
+mod mission;
+mod nl;
+mod research;
 mod strategy;
+mod trial;
 mod types;
+mod validate;
 mod widget;
 
 #[cfg(test)]
@@ -109,10 +178,151 @@ enum PortfolioAction {
     #[serde(rename = "progress")]
     Progress(format::ProgressInput),
 
+    /// Run deterministic long-only spot backtests over caller-provided
+    /// OHLCV candles. Used by the Intents Trading Agent before a
+    /// candidate trade is eligible for intent construction.
+    #[serde(rename = "backtest")]
+    Backtest(backtest::BacktestInput),
+
+    /// Run and rank several deterministic long-only spot strategy
+    /// candidates over the same OHLCV episode. Used to build a
+    /// menu of choices instead of blindly evaluating one strategy.
+    #[serde(rename = "backtest_suite")]
+    BacktestSuite(backtest::BacktestSuiteInput),
+
+    /// Run a fixed-strategy walk-forward across N contiguous,
+    /// non-overlapping fold windows, splitting each fold into
+    /// in-sample (train) and out-of-sample (test) ranges with an
+    /// optional embargo. Reports per-fold IS/OOS gap and an
+    /// aggregate robustness verdict. Does not refit parameters.
+    #[serde(rename = "backtest_walkforward")]
+    BacktestWalkForward(lab::WalkForwardInput),
+
+    /// Run a deterministic Monte Carlo on a per-trade return series
+    /// (typically `trades[].return_pct` from a prior backtest). Uses
+    /// a seeded xorshift64* PRNG to resample or permute the trade
+    /// order and reports return / drawdown / terminal-equity
+    /// distributions plus loss probabilities.
+    #[serde(rename = "backtest_montecarlo")]
+    BacktestMonteCarlo(lab::MonteCarloInput),
+
+    /// Cartesian sweep over strategy parameter axes plus optional
+    /// sizing/stop/take-profit options. Materializes candidates,
+    /// runs `backtest_suite`, and returns the ranked grid plus a
+    /// flat cell table. Enforces a `max_cells` cap so the WASM
+    /// sandbox can't be DOSed by an oversized request.
+    #[serde(rename = "backtest_grid")]
+    BacktestGrid(lab::GridInput),
+
+    /// Validate a multi-surface episode (candles + optional solver
+    /// fixture + optional news context) and return a deterministic
+    /// summary. No backtest is run.
+    #[serde(rename = "validate_episode")]
+    ValidateEpisode(episode::ValidateEpisodeInput),
+
+    /// Validate an episode and replay it through `backtest_suite`,
+    /// surfacing the embedded solver fixture and news context so the
+    /// caller can route them into `build_intent` and the analyst
+    /// memos.
+    #[serde(rename = "replay_episode")]
+    ReplayEpisode(episode::ReplayEpisodeInput),
+
+    /// Replay a fixed-cadence dollar-cost-averaging schedule over a
+    /// candle series. Reports lots, breakeven, mark-to-market, and
+    /// alpha vs lump-sum buy-and-hold. Optional symmetric price band
+    /// turns the schedule into "skip when stretched, double-up when
+    /// discounted" without breaking determinism.
+    #[serde(rename = "backtest_dca")]
+    BacktestDca(dca::DcaBacktestInput),
+
+    /// Plan a recurring DCA schedule into a NEAR-Intents-supported
+    /// destination asset. Emits a cron expression, per-period plans,
+    /// risk gates, and a `build_intent` template the caller uses per
+    /// period. All output is unsigned; signing remains user-only.
+    #[serde(rename = "plan_dca_schedule")]
+    PlanDcaSchedule(dca::DcaScheduleInput),
+
+    /// Compile a natural-language trade prompt into a structured
+    /// recommended action (one of `plan_dca_schedule`, `build_intent`,
+    /// `backtest_suite`, `plan_paid_research`, `format_intents_widget`,
+    /// or `noop`). Deterministic pattern matching, no LLM call. The
+    /// caller invokes the recommended action separately after risk
+    /// gating; this compiler never executes anything.
+    #[serde(rename = "compile_intent_prompt")]
+    CompileIntentPrompt(nl::CompileInput),
+
+    /// Composed strategy validation: runs the base backtest plus
+    /// optional walk-forward and Monte Carlo passes against a single
+    /// candidate, applies caller-tunable eligibility thresholds, and
+    /// returns an `approved` / `watch` / `rejected` verdict with a
+    /// per-gate pass/fail table.
+    #[serde(rename = "validate_strategy")]
+    ValidateStrategy(validate::ValidateStrategyInput),
+
+    /// Format any of the new backtest-family responses (base
+    /// backtest, walk-forward, Monte Carlo, grid, DCA backtest, DCA
+    /// schedule, validation) as a journal-ready Markdown document.
+    /// Deterministic; the caller persists the output.
+    #[serde(rename = "format_strategy_doc")]
+    FormatStrategyDoc(validate::FormatStrategyDocInput),
+
+    /// Turn a `intents-dca-schedule/1` document into an IronClaw
+    /// mission scaffold (YAML + structured bridge calls + cron) so
+    /// the DCA loop can be promoted from a one-shot plan to an
+    /// autopilot mission. The scaffold is advisory and unsigned.
+    #[serde(rename = "format_dca_mission")]
+    FormatDcaMission(mission::DcaMissionInput),
+
+    /// Plan a multi-asset (basket) DCA schedule. Per-period total
+    /// notional splits across N legs by weight; each leg becomes one
+    /// swap in the per-period `build_intent` template. Weights must
+    /// sum to 100; supports up to 12 destinations.
+    #[serde(rename = "plan_basket_dca_schedule")]
+    PlanBasketDcaSchedule(basket::BasketDcaScheduleInput),
+
+    /// Plan a premium-source research query before fetching paywalled
+    /// content. This ranks candidate sources, enforces a budget, and
+    /// returns attribution/payment gates for MPP, x402, and NEAR
+    /// Intents-style rails. It never fetches paid content or signs.
+    #[serde(rename = "plan_paid_research")]
+    PlanPaidResearch(research::PaidResearchPlanInput),
+
+    /// Plan the DripStack guided-browse flow. Free catalog/post-title
+    /// metadata goes in; a selected article becomes a paid-source
+    /// candidate for `plan_paid_research`. It never buys or fetches
+    /// article bodies.
+    #[serde(rename = "plan_dripstack_browse")]
+    PlanDripstackBrowse(research::DripstackBrowseInput),
+
+    /// Fetch DripStack's free catalog routes. This may return
+    /// publication metadata or post-title metadata; it does not fetch
+    /// paid article bodies.
+    #[serde(rename = "fetch_dripstack_catalog")]
+    FetchDripstackCatalog(research::DripstackCatalogInput),
+
+    /// Prepare the paid article fetch boundary for one DripStack post:
+    /// confirmation, 402 challenge probe, and receipt-backed retry
+    /// headers. It never creates a payment receipt or reads article
+    /// content by itself.
+    #[serde(rename = "prepare_dripstack_paid_fetch")]
+    PrepareDripstackPaidFetch(research::DripstackPaidFetchInput),
+
+    /// Plan a nominal-NEAR trial run. This returns setup guardrails,
+    /// strategy menu defaults, and a paper/live-quote `build_intent`
+    /// request without signing or moving funds.
+    #[serde(rename = "plan_near_intents_trial")]
+    PlanNearIntentsTrial(trial::NearTrialPlanInput),
+
     /// Build the render-ready view model the web widget consumes.
     /// Writes to `projects/<id>/widgets/state.json`.
     #[serde(rename = "format_widget")]
     FormatWidget(widget::FormatWidgetInput),
+
+    /// Build the render-ready view model the Intents Trading Agent
+    /// project widget consumes. The caller persists it under
+    /// `projects/intents-trading-agent/widgets/state.json`.
+    #[serde(rename = "format_intents_widget")]
+    FormatIntentsWidget(widget::FormatIntentsTradingWidgetInput),
 }
 
 fn default_chains() -> ChainSelector {
@@ -184,7 +394,13 @@ impl exports::near::agent::tool::Guest for PortfolioTool {
         "Cross-chain DeFi portfolio analyzer. Discovers positions across chains, \
          classifies them against an embedded protocol registry, generates ranked \
          rebalancing proposals from declarative strategy docs, and builds unsigned \
-         NEAR Intent bundles. Three operations: scan, propose, build_intent. \
+         NEAR Intent bundles. Operations: scan, propose, build_intent, progress, \
+         backtest, backtest_suite, backtest_walkforward, backtest_montecarlo, \
+         backtest_grid, backtest_dca, plan_dca_schedule, plan_basket_dca_schedule, \
+         compile_intent_prompt, validate_strategy, format_strategy_doc, \
+         format_dca_mission, validate_episode, replay_episode, plan_paid_research, \
+         plan_dripstack_browse, fetch_dripstack_catalog, prepare_dripstack_paid_fetch, \
+         plan_near_intents_trial, format_suggestion, format_widget, format_intents_widget. \
          Read-only and unsigned — the agent never holds private keys."
             .to_string()
     }
@@ -272,10 +488,109 @@ fn execute_inner(params: &str) -> Result<String, String> {
             let output = format::format_progress(input);
             serde_json::to_string(&output).map_err(|e| format!("Serialize progress response: {e}"))
         }
+        PortfolioAction::Backtest(input) => {
+            let output = backtest::run(input)?;
+            serde_json::to_string(&output).map_err(|e| format!("Serialize backtest response: {e}"))
+        }
+        PortfolioAction::BacktestSuite(input) => {
+            let output = backtest::run_suite(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize backtest_suite response: {e}"))
+        }
+        PortfolioAction::BacktestWalkForward(input) => {
+            let output = lab::run_walkforward(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize backtest_walkforward response: {e}"))
+        }
+        PortfolioAction::BacktestMonteCarlo(input) => {
+            let output = lab::run_montecarlo(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize backtest_montecarlo response: {e}"))
+        }
+        PortfolioAction::BacktestGrid(input) => {
+            let output = lab::run_grid(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize backtest_grid response: {e}"))
+        }
+        PortfolioAction::ValidateEpisode(input) => {
+            let output = episode::validate(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize validate_episode response: {e}"))
+        }
+        PortfolioAction::ReplayEpisode(input) => {
+            let output = episode::replay(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize replay_episode response: {e}"))
+        }
+        PortfolioAction::BacktestDca(input) => {
+            let output = dca::run_backtest(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize backtest_dca response: {e}"))
+        }
+        PortfolioAction::PlanDcaSchedule(input) => {
+            let output = dca::plan_schedule(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize plan_dca_schedule response: {e}"))
+        }
+        PortfolioAction::CompileIntentPrompt(input) => {
+            let output = nl::compile(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize compile_intent_prompt response: {e}"))
+        }
+        PortfolioAction::ValidateStrategy(input) => {
+            let output = validate::run(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize validate_strategy response: {e}"))
+        }
+        PortfolioAction::FormatStrategyDoc(input) => {
+            let output = validate::format(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize format_strategy_doc response: {e}"))
+        }
+        PortfolioAction::FormatDcaMission(input) => {
+            let output = mission::format_dca_mission(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize format_dca_mission response: {e}"))
+        }
+        PortfolioAction::PlanBasketDcaSchedule(input) => {
+            let output = basket::plan(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize plan_basket_dca_schedule response: {e}"))
+        }
+        PortfolioAction::PlanPaidResearch(input) => {
+            let output = research::plan(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize plan_paid_research response: {e}"))
+        }
+        PortfolioAction::PlanDripstackBrowse(input) => {
+            let output = research::plan_dripstack_browse(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize plan_dripstack_browse response: {e}"))
+        }
+        PortfolioAction::FetchDripstackCatalog(input) => {
+            let output = research::fetch_dripstack_catalog(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize fetch_dripstack_catalog response: {e}"))
+        }
+        PortfolioAction::PrepareDripstackPaidFetch(input) => {
+            let output = research::prepare_dripstack_paid_fetch(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize prepare_dripstack_paid_fetch response: {e}"))
+        }
+        PortfolioAction::PlanNearIntentsTrial(input) => {
+            let output = trial::plan(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize plan_near_intents_trial response: {e}"))
+        }
         PortfolioAction::FormatWidget(input) => {
             let output = widget::format_widget(input);
             serde_json::to_string(&output)
                 .map_err(|e| format!("Serialize format_widget response: {e}"))
+        }
+        PortfolioAction::FormatIntentsWidget(input) => {
+            let output = widget::format_intents_trading_widget(input);
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize format_intents_widget response: {e}"))
         }
     }
 }
