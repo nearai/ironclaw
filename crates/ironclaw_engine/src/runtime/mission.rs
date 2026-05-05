@@ -4223,6 +4223,7 @@ mod tests {
             },
             resume_output: None,
             paused_lease: None,
+            reason: None,
         };
 
         process_mission_outcome_and_notify(
@@ -4724,6 +4725,7 @@ mod tests {
                     }),
                     resume_output: None,
                     paused_lease: None,
+                    reason: None,
                 });
             }
             Ok(ActionResult {

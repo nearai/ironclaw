@@ -56,6 +56,11 @@ pub enum ThreadOutcome {
         /// `large_enum_variant` threshold — `CapabilityLease` is ~360
         /// bytes and would otherwise dominate the whole enum's size.
         paused_lease: Option<Box<crate::types::capability::CapabilityLease>>,
+        /// Optional human-readable reason for the pause (e.g. tirith finding
+        /// summary). When `None`, downstream renderers (router.rs PendingGate
+        /// description, mission notifications) fall back to a generic format.
+        /// Boxed for the same `large_enum_variant` reason as `paused_lease`.
+        reason: Option<Box<String>>,
     },
 }
 

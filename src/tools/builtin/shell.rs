@@ -388,7 +388,7 @@ pub fn classify_command_risk(command: &str) -> RiskLevel {
 ///
 /// Handles both the normal case (a JSON object with a `"command"` key) and the
 /// rare case where the LLM provider returns string-encoded JSON.
-fn extract_command_param(params: &serde_json::Value) -> Option<String> {
+pub(crate) fn extract_command_param(params: &serde_json::Value) -> Option<String> {
     params
         .get("command")
         .and_then(|c| c.as_str().map(String::from))

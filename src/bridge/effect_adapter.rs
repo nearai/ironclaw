@@ -342,6 +342,54 @@ impl EffectBridgeAdapter {
             PermissionState::AlwaysAllow | PermissionState::AskEachTime => {}
         }
 
+        // Tirith pre-exec scan. Block / Warn / WarnAck become approval-
+        // requiring pauses with `allow_always = false` (Hermes #3428 pattern)
+        // so users cannot permanently allow-list a tirith finding. Operational
+        // failures under `fail_open = false` hard-deny via `LeaseDenied` —
+        // never an approvable pause, since clicking through a fail-closed
+        // scan would silently turn fail-closed into fail-open.
+        //
+        // `approval_already_granted` means the user already saw and approved
+        // this specific call (including any tirith reason); skip rescanning.
+        //
+        // The scanned name is `approval.lookup_name` (the canonical tool
+        // the adapter has resolved to and will actually execute), not
+        // `approval.action_name` (the alias / discovered name the LLM
+        // used). Routing on the alias would let any alias for `shell`
+        // bypass the scan because `tirith_preflight` matches on
+        // `tool_name == "shell"`.
+        if !approval.approval_already_granted
+            && let Some(cfg) = self.tools.tirith_config()
+        {
+            use crate::tools::builtin::{TirithPreflightDecision, tirith_preflight};
+            match tirith_preflight(approval.lookup_name, approval.parameters, cfg).await {
+                TirithPreflightDecision::Allow => {}
+                TirithPreflightDecision::Approval { reason } => {
+                    // Persist the canonical resolved name (`lookup_name`) on
+                    // the pause, NOT the alias / discovery name the LLM used
+                    // (`action_name`). The router resumes by passing
+                    // `pending.action_name` back into the adapter, where it
+                    // would otherwise re-resolve the alias and risk landing
+                    // on a different tool than the one tirith just scanned.
+                    return Err(Self::gate_paused(
+                        "approval",
+                        approval.lookup_name,
+                        approval.context.current_call_id.as_deref(),
+                        approval.parameters.clone(),
+                        ironclaw_engine::ResumeKind::Approval {
+                            allow_always: false,
+                        },
+                        None,
+                        Some(approval.lease.clone()),
+                        Some(reason),
+                    ));
+                }
+                TirithPreflightDecision::Deny { reason } => {
+                    return Err(EngineError::LeaseDenied { reason });
+                }
+            }
+        }
+
         if approval.approval_already_granted {
             return Ok(());
         }
@@ -360,6 +408,7 @@ impl EffectBridgeAdapter {
                 },
                 None,
                 Some(approval.lease.clone()),
+                None,
             ));
         }
 
@@ -381,6 +430,7 @@ impl EffectBridgeAdapter {
                 },
                 None,
                 Some(approval.lease.clone()),
+                None,
             ));
         }
 
@@ -409,6 +459,7 @@ impl EffectBridgeAdapter {
                 ironclaw_engine::ResumeKind::Approval { allow_always: true },
                 None,
                 Some(approval.lease.clone()),
+                None,
             ));
         }
         Ok(())
@@ -608,6 +659,7 @@ impl EffectBridgeAdapter {
         Ok(Some(pid))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn gate_paused(
         gate_name: &str,
         action_name: &str,
@@ -616,6 +668,7 @@ impl EffectBridgeAdapter {
         resume_kind: ironclaw_engine::ResumeKind,
         resume_output: Option<serde_json::Value>,
         paused_lease: Option<CapabilityLease>,
+        reason: Option<String>,
     ) -> EngineError {
         EngineError::GatePaused {
             gate_name: gate_name.to_string(),
@@ -625,6 +678,7 @@ impl EffectBridgeAdapter {
             resume_kind: Box::new(resume_kind),
             resume_output: resume_output.map(Box::new),
             paused_lease: paused_lease.map(Box::new),
+            reason: reason.map(Box::new),
         }
     }
 
@@ -671,6 +725,7 @@ impl EffectBridgeAdapter {
                 },
                 None,
                 Some(lease.clone()),
+                None,
             )),
             _ => None,
         }
@@ -1331,6 +1386,7 @@ impl EffectBridgeAdapter {
                         },
                         None,
                         Some(lease.clone()),
+                        None,
                     ));
                 }
                 Ok(LatentActionExecution::NeedsSetup { message }) => {
@@ -1410,6 +1466,7 @@ impl EffectBridgeAdapter {
                         },
                         None,
                         Some(lease.clone()),
+                        None,
                     ));
                 }
                 AuthCheckResult::Ready => {
@@ -1451,6 +1508,7 @@ impl EffectBridgeAdapter {
                         },
                         None,
                         Some(lease.clone()),
+                        None,
                     ));
                 }
                 ToolReadiness::NeedsSetup { message } => {
@@ -1666,6 +1724,7 @@ impl EffectBridgeAdapter {
                                 },
                                 Some(output_value),
                                 None,
+                                None,
                             ));
                         }
                         ToolReadiness::NeedsSetup { ref message } => {
@@ -1766,6 +1825,7 @@ impl EffectBridgeAdapter {
                         },
                         None,
                         Some(lease.clone()),
+                        None,
                     ));
                 }
 

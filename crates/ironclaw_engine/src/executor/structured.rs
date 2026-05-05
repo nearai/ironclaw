@@ -213,6 +213,7 @@ pub async fn execute_action_calls(
                         resume_kind: crate::gate::ResumeKind::Approval { allow_always: true },
                         resume_output: None,
                         paused_lease: None,
+                        reason: None,
                     }),
                 });
             }
@@ -374,6 +375,11 @@ pub async fn execute_action_calls(
                         .get("paused_lease")
                         .cloned()
                         .and_then(|value| serde_json::from_value(value).ok()),
+                    reason: result
+                        .output
+                        .get("reason")
+                        .and_then(|v| v.as_str())
+                        .map(|s| Box::new(s.to_string())),
                 });
             }
             results.push(result);
@@ -462,6 +468,7 @@ fn classify_exec_result(
             resume_kind,
             resume_output,
             paused_lease,
+            reason,
         }) => {
             let _error_msg = format!("gate paused: {gate_name}");
             let error_result = ActionResult {
@@ -473,6 +480,7 @@ fn classify_exec_result(
                     "resume_kind": serde_json::to_value(&*resume_kind).unwrap_or_default(),
                     "resume_output": resume_output.as_deref().cloned(),
                     "paused_lease": paused_lease.as_deref().cloned(),
+                    "reason": reason,
                 }),
                 is_error: true,
                 duration: std::time::Duration::ZERO,
@@ -481,7 +489,11 @@ fn classify_exec_result(
                 action_name,
                 call_id,
                 parameters: Some((*parameters).clone()),
-                description: None,
+                // Carry the engine-supplied reason (e.g. tirith finding) so
+                // trace observers and the v2 router see the same description
+                // regardless of which executor path produced the pause.
+                // Symmetric with orchestrator.rs:1366 / :1916.
+                description: reason.as_deref().cloned(),
                 allow_always: match *resume_kind {
                     crate::gate::ResumeKind::Approval { allow_always } => Some(allow_always),
                     _ => None,
@@ -980,6 +992,7 @@ mod tests {
                 }),
                 resume_output: None,
                 paused_lease: None,
+                reason: None,
             })],
         ));
         let leases = Arc::new(LeaseManager::new());
@@ -1064,6 +1077,7 @@ mod tests {
                     }),
                     resume_output: None,
                     paused_lease: None,
+                    reason: None,
                 }),
                 Ok(ActionResult {
                     call_id: String::new(),
