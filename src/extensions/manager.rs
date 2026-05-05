@@ -3772,6 +3772,17 @@ impl ExtensionManager {
             return Ok(AuthResult::authenticated(name, ExtensionKind::McpServer));
         }
 
+        // Non-HTTP transports (stdio, unix) never use HTTP-based OAuth.
+        // `requires_auth()` already returns `false` for these — `factory.rs`
+        // gates client construction on the same predicate. Without this
+        // short-circuit, `auth_mcp_build_url` below feeds a non-HTTP URL
+        // placeholder to `discover_full_oauth_metadata` and the `url` crate
+        // surfaces "Invalid URL: relative URL without a base". Fixes
+        // nearai/ironclaw#2923.
+        if !server.requires_auth() {
+            return Ok(AuthResult::no_auth_required(name, ExtensionKind::McpServer));
+        }
+
         // In gateway mode, build an auth URL and return it for the frontend to
         // open in the same browser. The gateway's /oauth/callback handler will
         // complete the token exchange.
@@ -11268,6 +11279,56 @@ mod tests {
         );
         assert_eq!(oauth.token_url, "https://example.com/oauth/token");
         assert_eq!(oauth.scopes, vec!["search:read".to_string()]);
+    }
+
+    /// Regression for nearai/ironclaw#2923.
+    ///
+    /// Activating a stdio-transport MCP server used to fail with
+    /// `Failed to discover authorization endpoints: Invalid URL: relative URL
+    /// without a base` because `auth_mcp` ran the OAuth pre-flight
+    /// unconditionally. `requires_auth()` returns `false` for stdio/unix, so
+    /// `auth_mcp` now short-circuits with `NoAuthRequired` for those
+    /// transports and never feeds a non-HTTP URL to the OAuth discovery.
+    ///
+    /// Per `.claude/rules/testing.md` "Test Through the Caller, Not Just
+    /// the Helper": the bug was the wrapper ignoring `requires_auth()`,
+    /// so the test must drive `auth()` end-to-end (which dispatches to
+    /// `auth_mcp` via `determine_installed_kind`), not the predicate alone.
+    #[tokio::test]
+    async fn auth_mcp_skips_oauth_discovery_for_stdio_transport() {
+        use std::collections::HashMap;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let mgr = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            Some(Arc::clone(&store)),
+        );
+
+        let stdio_server = McpServerConfig::new_stdio(
+            "demo-stdio",
+            "/bin/echo",
+            Vec::<String>::new(),
+            HashMap::new(),
+        );
+        mgr.add_mcp_server(stdio_server, "test")
+            .await
+            .expect("add stdio mcp server");
+
+        let result = mgr
+            .auth("demo-stdio", "test")
+            .await
+            .expect("stdio auth must short-circuit instead of attempting OAuth endpoint discovery");
+
+        assert_eq!(
+            result.status,
+            crate::extensions::AuthStatus::NoAuthRequired,
+            "stdio MCP servers should report NoAuthRequired, got {:?}",
+            result.status
+        );
+        assert_eq!(result.kind, ExtensionKind::McpServer);
     }
 
     #[test]
