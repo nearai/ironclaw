@@ -49,6 +49,13 @@ impl std::fmt::Display for PromptSafetyPolicyVersion {
 }
 
 /// Stable protected-path class emitted by prompt-write safety decisions.
+///
+/// `as_str()` returns a per-file stable identifier (e.g. `agents_md`,
+/// `soul_md`, `heartbeat_md`) for the default registry paths so
+/// telemetry can distinguish events by which protected file was
+/// written. Custom paths added via [`PromptProtectedPathRegistry::with_additional_path`]
+/// fall through to `custom_protected_path`; consumers that need the
+/// exact path use [`relative_path`](Self::relative_path).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptProtectedPathClass {
     relative_path: String,
@@ -59,8 +66,27 @@ impl PromptProtectedPathClass {
         &self.relative_path
     }
 
-    pub fn as_str(&self) -> &str {
-        "system_prompt_file"
+    pub fn as_str(&self) -> &'static str {
+        // The match arms must stay aligned with `DEFAULT_PROMPT_PROTECTED_PATHS`
+        // (lowercased, since `normalize_prompt_protected_path` lowercases on
+        // insert). A new default path without a corresponding arm here
+        // collapses into `custom_protected_path` and is invisible to
+        // per-file telemetry — `default_paths_have_distinct_stable_class`
+        // catches that.
+        match self.relative_path.as_str() {
+            "soul.md" => "soul_md",
+            "agents.md" => "agents_md",
+            "user.md" => "user_md",
+            "identity.md" => "identity_md",
+            "system.md" => "system_md",
+            "memory.md" => "memory_md",
+            "tools.md" => "tools_md",
+            "heartbeat.md" => "heartbeat_md",
+            "bootstrap.md" => "bootstrap_md",
+            "context/assistant-directives.md" => "context_assistant_directives",
+            "context/profile.json" => "context_profile",
+            _ => "custom_protected_path",
+        }
     }
 }
 
@@ -821,4 +847,64 @@ pub(crate) fn take_prompt_safety_allowance(
         )
     })?;
     Ok(allowance.take())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn default_paths_have_distinct_stable_class() {
+        // Lock in zmanian's M2 fix: every default protected path gets a
+        // distinct stable class string so telemetry can distinguish
+        // AGENTS.md vs SOUL.md vs HEARTBEAT.md events. A regression that
+        // collapses any two defaults into the same bucket trips the
+        // duplicate check; a regression that drops the per-file mapping
+        // entirely (everything → custom_protected_path) trips both
+        // the count and the spot-check assertion below.
+        let registry = PromptProtectedPathRegistry::default();
+        let mut classes: Vec<&'static str> = Vec::new();
+        for default_path in DEFAULT_PROMPT_PROTECTED_PATHS {
+            let class = registry
+                .classify_relative_path(default_path)
+                .unwrap_or_else(|| panic!("default path {default_path} must classify"));
+            classes.push(class.as_str());
+        }
+        let unique: HashSet<&'static str> = classes.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            classes.len(),
+            "every default protected path must have a distinct stable class string; got {classes:?}"
+        );
+        assert!(
+            !classes.contains(&"custom_protected_path"),
+            "no default path may fall through to the custom bucket; got {classes:?}"
+        );
+        // Spot-check the names zmanian called out specifically.
+        let agents = registry.classify_relative_path("AGENTS.md").unwrap();
+        let soul = registry.classify_relative_path("SOUL.md").unwrap();
+        let heartbeat = registry.classify_relative_path("HEARTBEAT.md").unwrap();
+        assert_eq!(agents.as_str(), "agents_md");
+        assert_eq!(soul.as_str(), "soul_md");
+        assert_eq!(heartbeat.as_str(), "heartbeat_md");
+    }
+
+    #[test]
+    fn custom_paths_use_generic_class_but_carry_specific_relative_path() {
+        let registry = PromptProtectedPathRegistry::new(
+            PromptSafetyPolicyVersion::new("test:v1").unwrap(),
+            ["custom/playbook.md"],
+        )
+        .unwrap();
+        let class = registry
+            .classify_relative_path("custom/playbook.md")
+            .expect("custom path must classify");
+        assert_eq!(class.as_str(), "custom_protected_path");
+        assert_eq!(
+            class.relative_path(),
+            "custom/playbook.md",
+            "custom paths fall through to the generic class but consumers can still recover the path"
+        );
+    }
 }

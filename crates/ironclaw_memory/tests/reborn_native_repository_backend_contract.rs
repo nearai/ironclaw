@@ -71,6 +71,30 @@ impl<const DIM: usize> EmbeddingProvider for RecordingEmbeddingProvider<DIM> {
     }
 }
 
+/// EmbeddingProvider that declares one `dimension()` but returns vectors of
+/// a different actual dimension. Used to drive the write/index-time
+/// dimension validation path that mirrors the search-side check at
+/// `backend.rs:513-527`. zmanian test gap 2.
+struct LyingEmbeddingProvider {
+    declared: usize,
+    actual: usize,
+}
+
+#[async_trait]
+impl EmbeddingProvider for LyingEmbeddingProvider {
+    fn dimension(&self) -> usize {
+        self.declared
+    }
+
+    fn model_name(&self) -> &str {
+        "lying-test-embedding"
+    }
+
+    async fn embed(&self, _text: &str) -> Result<Vec<f32>, EmbeddingError> {
+        Ok(vec![0.5_f32; self.actual])
+    }
+}
+
 struct FailingIndexer;
 
 #[async_trait]
@@ -388,6 +412,70 @@ async fn libsql_backend_search_fails_closed_on_query_embedding_dimension_mismatc
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
+async fn libsql_backend_index_fails_closed_when_provider_returns_wrong_dimension() {
+    // zmanian test gap 2: the search-side dimension mismatch check is
+    // covered above. The mirror check at write/index time (provider
+    // declares dim N, returns dim M) was previously only exercised in
+    // unit tests on the embedding helper. Drive it through the backend
+    // write seam so a regression that drops the validation in
+    // `compute_chunk_embeddings` is caught.
+    let fixture = libsql_repo().await;
+    let repo = fixture.repo.clone();
+    let provider = Arc::new(LyingEmbeddingProvider {
+        declared: 4,
+        actual: 2,
+    });
+    let indexer = Arc::new(
+        ChunkingMemoryDocumentIndexer::new(repo.clone()).with_embedding_provider(provider.clone()),
+    );
+    let backend = RepositoryMemoryBackend::new(repo.clone())
+        .with_indexer(indexer)
+        .with_embedding_provider(provider)
+        .with_capabilities(MemoryBackendCapabilities {
+            file_documents: true,
+            full_text_search: true,
+            vector_search: true,
+            embeddings: true,
+            ..MemoryBackendCapabilities::default()
+        });
+    let context = MemoryContext::new(MemoryDocumentScope::new("tenant-a", "alice", None).unwrap());
+    let path = MemoryDocumentPath::new("tenant-a", "alice", None, "lie.md").expect("path");
+
+    // Backend write succeeds because indexer failures are best-effort —
+    // the durable row lands on disk. But the chunk index must NOT contain
+    // any rows because the indexer fails closed on the dim mismatch.
+    backend
+        .write_document(&context, &path, b"body content")
+        .await
+        .expect("durable write must succeed even if indexer fails closed");
+    let chunk_count = count_rows_libsql(&fixture.db, "reborn_memory_chunks").await;
+    assert_eq!(
+        chunk_count, 0,
+        "indexer must refuse to persist mis-dimensioned embeddings; got {chunk_count} chunks"
+    );
+
+    // The dimension validation also surfaces when the indexer is invoked
+    // directly so callers that bypass the write best-effort policy see
+    // the error explicitly.
+    use ironclaw_memory::MemoryDocumentIndexer;
+    let standalone_indexer = ChunkingMemoryDocumentIndexer::new(repo).with_embedding_provider(
+        Arc::new(LyingEmbeddingProvider {
+            declared: 4,
+            actual: 2,
+        }),
+    );
+    let err = standalone_indexer
+        .reindex_document(&path)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("dimension"),
+        "expected dimension-mismatch error from indexer, got: {err}"
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
 async fn libsql_backend_hybrid_search_fuses_full_text_and_vector_results() {
     let fixture = libsql_repo().await;
     let repo = fixture.repo.clone();
@@ -591,6 +679,90 @@ async fn libsql_backend_search_honors_pre_fusion_limit_per_branch() {
         results.len(),
         2,
         "pre_fusion_limit=2 must truncate to exactly 2 fused candidates with 6 matches available"
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_backend_search_with_many_candidates_caps_pre_fusion_per_branch() {
+    // zmanian test gap 7: drive the per-branch SQL `LIMIT` against >50
+    // matching candidates so a regression that drops the per-branch cap
+    // and lets every match flow into fusion would surface as either a
+    // non-deterministic ranking shift or a result-count blowup. The
+    // contract is: `pre_fusion_limit` caps each branch's candidate set
+    // before fusion, and the final result set respects `limit`.
+    let fixture = libsql_repo().await;
+    let repo = fixture.repo.clone();
+    let indexer = Arc::new(
+        ChunkingMemoryDocumentIndexer::new(repo.clone()).with_chunk_config(ChunkConfig {
+            chunk_size: 4,
+            overlap_percent: 0.0,
+            min_chunk_size: 1,
+        }),
+    );
+    let backend = RepositoryMemoryBackend::new(repo)
+        .with_indexer(indexer)
+        .with_capabilities(MemoryBackendCapabilities {
+            file_documents: true,
+            full_text_search: true,
+            ..MemoryBackendCapabilities::default()
+        });
+    let context = MemoryContext::new(MemoryDocumentScope::new("tenant-a", "alice", None).unwrap());
+
+    // 60 docs all containing the same searchable token — well above the
+    // 50-candidate threshold zmanian called out.
+    for index in 0..60 {
+        let path = MemoryDocumentPath::new("tenant-a", "alice", None, format!("doc-{index}.md"))
+            .expect("path");
+        backend
+            .write_document(&context, &path, b"shared-needle body content")
+            .await
+            .unwrap();
+    }
+
+    // Establish that the unbounded candidate set is at least 50 — a
+    // regression that broke FTS or indexing would shrink this and make
+    // the `limit` assertion below vacuous.
+    let unbounded = backend
+        .search(
+            &context,
+            MemorySearchRequest::new("shared-needle")
+                .unwrap()
+                .with_limit(60)
+                .with_pre_fusion_limit(60)
+                .with_vector(false),
+        )
+        .await
+        .unwrap();
+    assert!(
+        unbounded.len() >= 50,
+        "expected ≥50 unbounded matches before exercising the clamp; got {}",
+        unbounded.len()
+    );
+
+    // pre_fusion_limit=20 with limit=10: the per-branch SQL must cap to
+    // 20 candidates, fusion outputs at most 10. The result set must
+    // contain unique paths and match the limit exactly.
+    let request = MemorySearchRequest::new("shared-needle")
+        .unwrap()
+        .with_limit(10)
+        .with_pre_fusion_limit(20)
+        .with_vector(false);
+    assert_eq!(request.limit(), 10);
+    assert_eq!(request.pre_fusion_limit(), 20);
+
+    let results = backend.search(&context, request).await.unwrap();
+    assert_eq!(
+        results.len(),
+        10,
+        "limit=10 with 60 candidates must yield exactly 10 results"
+    );
+    let unique: std::collections::HashSet<&str> =
+        results.iter().map(|r| r.path.relative_path()).collect();
+    assert_eq!(
+        unique.len(),
+        10,
+        "result paths must be unique; got duplicates in {unique:?}"
     );
 }
 
@@ -924,6 +1096,78 @@ async fn postgres_backend_search_fails_closed_on_query_embedding_dimension_misma
         err.to_string()
             .contains("query embedding dimension 2 does not match"),
         "expected dimension-mismatch error, got: {err}"
+    );
+    pg_cleanup_tenant(&pg_pool(), tenant).await;
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_backend_index_fails_closed_when_provider_returns_wrong_dimension() {
+    // zmanian test gap 2 (Postgres mirror): provider declares dim N,
+    // returns dim M; the indexer must fail closed before any chunks are
+    // written. The durable document row still lands because backend
+    // writes treat indexer failures as best-effort.
+    let tenant = "reborn-pg-be-write-dimmm";
+    let Some(repo) = pg_repo(tenant).await else {
+        return;
+    };
+    let provider = Arc::new(LyingEmbeddingProvider {
+        declared: 4,
+        actual: 2,
+    });
+    let indexer = Arc::new(
+        ChunkingMemoryDocumentIndexer::new(repo.clone()).with_embedding_provider(provider.clone()),
+    );
+    let backend = RepositoryMemoryBackend::new(repo.clone())
+        .with_indexer(indexer)
+        .with_embedding_provider(provider)
+        .with_capabilities(MemoryBackendCapabilities {
+            file_documents: true,
+            full_text_search: true,
+            vector_search: true,
+            embeddings: true,
+            ..MemoryBackendCapabilities::default()
+        });
+    let context = MemoryContext::new(MemoryDocumentScope::new(tenant, "alice", None).unwrap());
+    let path = MemoryDocumentPath::new(tenant, "alice", None, "lie.md").expect("path");
+
+    backend
+        .write_document(&context, &path, b"body content")
+        .await
+        .expect("durable write must succeed even if indexer fails closed");
+
+    // Verify zero chunks were inserted via a direct SQL count.
+    let client = pg_pool().get().await.expect("client");
+    let count: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM reborn_memory_chunks c \
+             JOIN reborn_memory_documents d ON d.id = c.document_id \
+             WHERE d.tenant_id = $1",
+            &[&tenant],
+        )
+        .await
+        .expect("count chunks")
+        .get(0);
+    assert_eq!(
+        count, 0,
+        "indexer must refuse to persist mis-dimensioned embeddings; got {count} chunks"
+    );
+
+    // Direct indexer invocation surfaces the dimension error explicitly.
+    use ironclaw_memory::MemoryDocumentIndexer;
+    let standalone_indexer = ChunkingMemoryDocumentIndexer::new(repo).with_embedding_provider(
+        Arc::new(LyingEmbeddingProvider {
+            declared: 4,
+            actual: 2,
+        }),
+    );
+    let err = standalone_indexer
+        .reindex_document(&path)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("dimension"),
+        "expected dimension-mismatch error from indexer, got: {err}"
     );
     pg_cleanup_tenant(&pg_pool(), tenant).await;
 }

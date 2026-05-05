@@ -27,6 +27,23 @@ use super::{
     scoped_memory_owner_key,
 };
 
+/// Render a tokio_postgres error with its full source chain.
+///
+/// `tokio_postgres::Error` displays only the error kind ("db error",
+/// "deserializing column", …) at the top level — the actual SQLSTATE and
+/// server message live in the source chain. Surfacing the chain here so
+/// `FilesystemError::Backend.reason` is diagnosable in test output.
+fn pg_error_chain(error: &dyn std::error::Error) -> String {
+    let mut out = error.to_string();
+    let mut source = error.source();
+    while let Some(next) = source {
+        out.push_str(" :: ");
+        out.push_str(&next.to_string());
+        source = next.source();
+    }
+    out
+}
+
 /// Reborn-native PostgreSQL repository for `reborn_memory_*` tables.
 pub struct RebornPostgresMemoryDocumentRepository {
     pool: deadpool_postgres::Pool,
@@ -59,19 +76,47 @@ impl RebornPostgresMemoryDocumentRepository {
                 memory_error(
                     valid_memory_path(),
                     FilesystemOperation::CreateDirAll,
-                    error.to_string(),
+                    pg_error_chain(&error),
                 )
             })?;
-        let migration_result = client
-            .batch_execute(REBORN_POSTGRES_MEMORY_DOCUMENTS_SCHEMA)
+        // Short-circuit if the schema is already present. Re-running the full
+        // DDL on every `run_migrations` call would take an AccessExclusiveLock
+        // on `reborn_memory_documents` for the FK validation in the dependent
+        // `CREATE TABLE IF NOT EXISTS reborn_memory_chunks`, which would
+        // deadlock against concurrent writers holding RowExclusiveLock once
+        // the global write-side LOCK TABLE was removed (zmanian H1+H2).
+        // The advisory lock above still serializes the *first* migration
+        // across all processes; subsequent calls find the schema and skip.
+        let already_migrated = client
+            .query_opt(
+                "SELECT 1 FROM information_schema.tables \
+                 WHERE table_schema = current_schema() \
+                   AND table_name = 'reborn_memory_documents'",
+                &[],
+            )
             .await
             .map_err(|error| {
                 memory_error(
                     valid_memory_path(),
                     FilesystemOperation::CreateDirAll,
-                    error.to_string(),
+                    pg_error_chain(&error),
                 )
-            });
+            })?
+            .is_some();
+        let migration_result = if already_migrated {
+            Ok(())
+        } else {
+            client
+                .batch_execute(REBORN_POSTGRES_MEMORY_DOCUMENTS_SCHEMA)
+                .await
+                .map_err(|error| {
+                    memory_error(
+                        valid_memory_path(),
+                        FilesystemOperation::CreateDirAll,
+                        pg_error_chain(&error),
+                    )
+                })
+        };
         // Best-effort unlock; if the lock release fails we still surface the
         // migration result. The lock is session-scoped so the connection
         // returning to the pool will release it on drop anyway.
@@ -93,7 +138,7 @@ impl RebornPostgresMemoryDocumentRepository {
         self.pool
             .get()
             .await
-            .map_err(|error| memory_error(path, operation, error.to_string()))
+            .map_err(|error| memory_error(path, operation, pg_error_chain(&error)))
     }
 }
 
@@ -126,7 +171,7 @@ impl MemoryDocumentRepository for RebornPostgresMemoryDocumentRepository {
                 memory_error(
                     virtual_path,
                     FilesystemOperation::ReadFile,
-                    error.to_string(),
+                    pg_error_chain(&error),
                 )
             })?;
         Ok(row.map(|row| {
@@ -179,18 +224,14 @@ impl MemoryDocumentRepository for RebornPostgresMemoryDocumentRepository {
             memory_error(
                 virtual_path.clone(),
                 FilesystemOperation::WriteFile,
-                error.to_string(),
+                pg_error_chain(&error),
             )
         })?;
-        txn.batch_execute("LOCK TABLE reborn_memory_documents IN SHARE ROW EXCLUSIVE MODE")
-            .await
-            .map_err(|error| {
-                memory_error(
-                    virtual_path.clone(),
-                    FilesystemOperation::WriteFile,
-                    error.to_string(),
-                )
-            })?;
+        // Per-scope advisory lock instead of a table-level LOCK so writes
+        // for different (tenant, user, agent, project) tuples do not
+        // serialize globally — see `reborn_postgres_lock_scope` (zmanian H2).
+        reborn_postgres_lock_scope(&txn, scope, &virtual_path, FilesystemOperation::WriteFile)
+            .await?;
 
         let documents = reborn_postgres_list_paths_for_scope(
             &txn,
@@ -219,7 +260,7 @@ impl MemoryDocumentRepository for RebornPostgresMemoryDocumentRepository {
                 memory_error(
                     virtual_path.clone(),
                     FilesystemOperation::WriteFile,
-                    error.to_string(),
+                    pg_error_chain(&error),
                 )
             })?;
 
@@ -250,7 +291,7 @@ impl MemoryDocumentRepository for RebornPostgresMemoryDocumentRepository {
                 memory_error(
                     virtual_path.clone(),
                     FilesystemOperation::WriteFile,
-                    error.to_string(),
+                    pg_error_chain(&error),
                 )
             })?;
         } else {
@@ -274,7 +315,7 @@ impl MemoryDocumentRepository for RebornPostgresMemoryDocumentRepository {
                 memory_error(
                     virtual_path.clone(),
                     FilesystemOperation::WriteFile,
-                    error.to_string(),
+                    pg_error_chain(&error),
                 )
             })?;
         }
@@ -283,7 +324,7 @@ impl MemoryDocumentRepository for RebornPostgresMemoryDocumentRepository {
             memory_error(
                 virtual_path,
                 FilesystemOperation::WriteFile,
-                error.to_string(),
+                pg_error_chain(&error),
             )
         })?;
         Ok(())
@@ -314,20 +355,16 @@ impl MemoryDocumentRepository for RebornPostgresMemoryDocumentRepository {
             memory_error(
                 virtual_path.clone(),
                 FilesystemOperation::AppendFile,
-                error.to_string(),
+                pg_error_chain(&error),
             )
         })?;
-        // SHARE ROW EXCLUSIVE keeps concurrent appends serialized; FOR UPDATE
+        // Per-scope advisory lock keeps concurrent appends within the same
+        // (tenant, user, agent, project) tuple serialized; `FOR UPDATE`
         // on the SELECT pins the specific row across the transaction.
-        txn.batch_execute("LOCK TABLE reborn_memory_documents IN SHARE ROW EXCLUSIVE MODE")
-            .await
-            .map_err(|error| {
-                memory_error(
-                    virtual_path.clone(),
-                    FilesystemOperation::AppendFile,
-                    error.to_string(),
-                )
-            })?;
+        // Different scopes do not contend — see `reborn_postgres_lock_scope`
+        // (zmanian H2).
+        reborn_postgres_lock_scope(&txn, scope, &virtual_path, FilesystemOperation::AppendFile)
+            .await?;
         let existing = txn
             .query_opt(
                 "SELECT id, content FROM reborn_memory_documents \
@@ -347,7 +384,7 @@ impl MemoryDocumentRepository for RebornPostgresMemoryDocumentRepository {
                 memory_error(
                     virtual_path.clone(),
                     FilesystemOperation::AppendFile,
-                    error.to_string(),
+                    pg_error_chain(&error),
                 )
             })?;
         let current_hash = existing.as_ref().map(|row| {
@@ -359,7 +396,7 @@ impl MemoryDocumentRepository for RebornPostgresMemoryDocumentRepository {
                 memory_error(
                     virtual_path,
                     FilesystemOperation::AppendFile,
-                    error.to_string(),
+                    pg_error_chain(&error),
                 )
             })?;
             return Ok(MemoryAppendOutcome::Conflict);
@@ -394,7 +431,7 @@ impl MemoryDocumentRepository for RebornPostgresMemoryDocumentRepository {
                 memory_error(
                     virtual_path.clone(),
                     FilesystemOperation::AppendFile,
-                    error.to_string(),
+                    pg_error_chain(&error),
                 )
             })?;
         } else {
@@ -431,7 +468,7 @@ impl MemoryDocumentRepository for RebornPostgresMemoryDocumentRepository {
                 memory_error(
                     virtual_path.clone(),
                     FilesystemOperation::AppendFile,
-                    error.to_string(),
+                    pg_error_chain(&error),
                 )
             })?;
         }
@@ -439,7 +476,7 @@ impl MemoryDocumentRepository for RebornPostgresMemoryDocumentRepository {
             memory_error(
                 virtual_path,
                 FilesystemOperation::AppendFile,
-                error.to_string(),
+                pg_error_chain(&error),
             )
         })?;
         Ok(MemoryAppendOutcome::Appended)
@@ -472,7 +509,7 @@ impl MemoryDocumentRepository for RebornPostgresMemoryDocumentRepository {
                 memory_error(
                     virtual_path,
                     FilesystemOperation::ReadFile,
-                    error.to_string(),
+                    pg_error_chain(&error),
                 )
             })?;
         Ok(row.map(|row| row.get("metadata")))
@@ -508,7 +545,7 @@ impl MemoryDocumentRepository for RebornPostgresMemoryDocumentRepository {
                 memory_error(
                     virtual_path,
                     FilesystemOperation::WriteFile,
-                    error.to_string(),
+                    pg_error_chain(&error),
                 )
             })?;
         Ok(())
@@ -590,7 +627,7 @@ impl MemoryDocumentIndexRepository for RebornPostgresMemoryDocumentRepository {
             memory_error(
                 virtual_path.clone(),
                 FilesystemOperation::WriteFile,
-                error.to_string(),
+                pg_error_chain(&error),
             )
         })?;
         let Some(row) = tx
@@ -611,7 +648,7 @@ impl MemoryDocumentIndexRepository for RebornPostgresMemoryDocumentRepository {
                 memory_error(
                     virtual_path.clone(),
                     FilesystemOperation::WriteFile,
-                    error.to_string(),
+                    pg_error_chain(&error),
                 )
             })?
         else {
@@ -631,7 +668,7 @@ impl MemoryDocumentIndexRepository for RebornPostgresMemoryDocumentRepository {
             memory_error(
                 virtual_path.clone(),
                 FilesystemOperation::WriteFile,
-                error.to_string(),
+                pg_error_chain(&error),
             )
         })?;
         for (index, chunk) in chunks.iter().enumerate() {
@@ -660,7 +697,7 @@ impl MemoryDocumentIndexRepository for RebornPostgresMemoryDocumentRepository {
                 memory_error(
                     virtual_path.clone(),
                     FilesystemOperation::WriteFile,
-                    error.to_string(),
+                    pg_error_chain(&error),
                 )
             })?;
         }
@@ -668,11 +705,67 @@ impl MemoryDocumentIndexRepository for RebornPostgresMemoryDocumentRepository {
             memory_error(
                 virtual_path,
                 FilesystemOperation::WriteFile,
-                error.to_string(),
+                pg_error_chain(&error),
             )
         })?;
         Ok(())
     }
+}
+
+/// Stable per-scope identifier used as the input to `pg_advisory_xact_lock`.
+///
+/// Two writes only contend when they share a `(tenant, user, agent, project)`
+/// tuple — different scopes hash to different lock keys and proceed in
+/// parallel. This avoids the global serialization that a table-level
+/// `LOCK TABLE … IN SHARE ROW EXCLUSIVE MODE` would impose under
+/// multi-tenant load (zmanian H2). Empty strings for absent agent/project
+/// match the on-disk DB sentinels so the lock identity tracks the actual
+/// row identity.
+fn reborn_postgres_scope_lock_key(scope: &MemoryDocumentScope) -> String {
+    format!(
+        "tenant:{}:user:{}:agent:{}:project:{}",
+        scope.tenant_id(),
+        scope.user_id(),
+        reborn_agent_id_db_value(scope),
+        reborn_project_id_db_value(scope),
+    )
+}
+
+/// Acquire the transaction-scoped advisory lock for `scope`.
+///
+/// The lock is released automatically when the surrounding transaction
+/// commits or rolls back; no explicit unlock is needed. `hashtext()`
+/// returns int4 which we cast to bigint for the single-arg
+/// `pg_advisory_xact_lock(bigint)` overload — collisions across unrelated
+/// scopes are tolerable because a colliding pair just shares a lock
+/// briefly, never affecting correctness.
+async fn reborn_postgres_lock_scope<C>(
+    client: &C,
+    scope: &MemoryDocumentScope,
+    virtual_path: &VirtualPath,
+    operation: FilesystemOperation,
+) -> Result<(), FilesystemError>
+where
+    C: deadpool_postgres::GenericClient + Sync,
+{
+    let key = reborn_postgres_scope_lock_key(scope);
+    client
+        .execute(
+            "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
+            &[&key],
+        )
+        .await
+        .map_err(|error| {
+            let mut chain = pg_error_chain(&error);
+            let mut source = std::error::Error::source(&error);
+            while let Some(next) = source {
+                chain.push_str(" :: ");
+                chain.push_str(&next.to_string());
+                source = next.source();
+            }
+            memory_error(virtual_path.clone(), operation, chain)
+        })?;
+    Ok(())
 }
 
 async fn reborn_postgres_list_paths_for_scope<C>(
@@ -697,7 +790,7 @@ where
             ],
         )
         .await
-        .map_err(|error| memory_error(virtual_path.clone(), operation, error.to_string()))?;
+        .map_err(|error| memory_error(virtual_path.clone(), operation, pg_error_chain(&error)))?;
     Ok(rows
         .into_iter()
         .filter_map(|row| {
@@ -734,7 +827,7 @@ where
             memory_error(
                 virtual_path.clone(),
                 FilesystemOperation::WriteFile,
-                error.to_string(),
+                pg_error_chain(&error),
             )
         })?;
     let next_version: i32 = row.get(0);
@@ -756,7 +849,7 @@ where
             memory_error(
                 virtual_path.clone(),
                 FilesystemOperation::WriteFile,
-                error.to_string(),
+                pg_error_chain(&error),
             )
         })?;
     Ok(next_version)
@@ -794,7 +887,7 @@ async fn reborn_postgres_full_text_search_ranked(
             memory_error(
                 virtual_path.clone(),
                 FilesystemOperation::ReadFile,
-                error.to_string(),
+                pg_error_chain(&error),
             )
         })?;
 
@@ -859,7 +952,7 @@ async fn reborn_postgres_vector_search_ranked(
             memory_error(
                 virtual_path.clone(),
                 FilesystemOperation::ReadFile,
-                error.to_string(),
+                pg_error_chain(&error),
             )
         })?;
 
@@ -928,11 +1021,27 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-DROP TRIGGER IF EXISTS update_reborn_memory_documents_updated_at ON reborn_memory_documents;
-CREATE TRIGGER update_reborn_memory_documents_updated_at
-    BEFORE UPDATE ON reborn_memory_documents
-    FOR EACH ROW
-    EXECUTE FUNCTION reborn_memory_documents_set_updated_at();
+-- Create the updated_at trigger only if it does not already exist. The
+-- previous DROP-then-CREATE pattern took an AccessExclusiveLock on the
+-- table on every `run_migrations` call and would deadlock with concurrent
+-- writers holding RowExclusiveLock once we removed the global table-level
+-- LOCK on the write path (zmanian H2 → exposes H1). The function body is
+-- still `CREATE OR REPLACE FUNCTION` above, so refreshing the function
+-- logic does not require touching the trigger.
+DO $reborn_trigger$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgname = 'update_reborn_memory_documents_updated_at'
+          AND tgrelid = 'reborn_memory_documents'::regclass
+    ) THEN
+        CREATE TRIGGER update_reborn_memory_documents_updated_at
+            BEFORE UPDATE ON reborn_memory_documents
+            FOR EACH ROW
+            EXECUTE FUNCTION reborn_memory_documents_set_updated_at();
+    END IF;
+END
+$reborn_trigger$;
 
 CREATE TABLE IF NOT EXISTS reborn_memory_chunks (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

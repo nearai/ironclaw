@@ -674,7 +674,109 @@ async fn direct_write_attributes_version_to_scoped_owner_key() {
     );
 }
 
+#[tokio::test]
+async fn concurrent_replace_chunks_with_same_hash_serializes_to_one_winner() {
+    // zmanian test gap 1: two concurrent indexers call
+    // `replace_document_chunks_if_current` with the same
+    // `expected_content_hash` but different chunk sets. Production uses
+    // `BEGIN IMMEDIATE` (libSQL) / `FOR UPDATE` (Postgres) so writers
+    // serialize on the row, and the final state must equal exactly one
+    // writer's chunk set — never a partial/duplicate union of the two.
+    let f = fresh_repository().await;
+    let path = MemoryDocumentPath::new("tenant-a", "alice", None, "concurrent.md").expect("path");
+    f.repo.write_document(&path, b"shared body").await.unwrap();
+    let hash = content_sha256("shared body");
+
+    let chunks_a = vec![
+        MemoryChunkWrite {
+            content: "writer-a-1".to_string(),
+            embedding: None,
+        },
+        MemoryChunkWrite {
+            content: "writer-a-2".to_string(),
+            embedding: None,
+        },
+    ];
+    let chunks_b = vec![
+        MemoryChunkWrite {
+            content: "writer-b-1".to_string(),
+            embedding: None,
+        },
+        MemoryChunkWrite {
+            content: "writer-b-2".to_string(),
+            embedding: None,
+        },
+        MemoryChunkWrite {
+            content: "writer-b-3".to_string(),
+            embedding: None,
+        },
+    ];
+
+    let repo_a = f.repo.clone();
+    let repo_b = f.repo.clone();
+    let path_a = path.clone();
+    let path_b = path.clone();
+    let hash_a = hash.clone();
+    let hash_b = hash.clone();
+    let (r_a, r_b) = tokio::join!(
+        async move {
+            repo_a
+                .replace_document_chunks_if_current(&path_a, &hash_a, &chunks_a)
+                .await
+        },
+        async move {
+            repo_b
+                .replace_document_chunks_if_current(&path_b, &hash_b, &chunks_b)
+                .await
+        },
+    );
+    r_a.expect("writer A");
+    r_b.expect("writer B");
+
+    let stored_contents = read_chunk_contents(&f.db, &path).await;
+    let count = stored_contents.len();
+    let writer_a_set: std::collections::HashSet<&str> =
+        ["writer-a-1", "writer-a-2"].iter().copied().collect();
+    let writer_b_set: std::collections::HashSet<&str> = ["writer-b-1", "writer-b-2", "writer-b-3"]
+        .iter()
+        .copied()
+        .collect();
+    let stored: std::collections::HashSet<&str> =
+        stored_contents.iter().map(String::as_str).collect();
+    assert!(
+        (count == 2 && stored == writer_a_set) || (count == 3 && stored == writer_b_set),
+        "final chunk set must equal exactly one writer's contribution; got {count} chunks: {stored:?}"
+    );
+}
+
 // --- helpers --------------------------------------------------------------
+
+async fn read_chunk_contents(db: &Arc<libsql::Database>, path: &MemoryDocumentPath) -> Vec<String> {
+    let conn = db.connect().expect("connect");
+    let scope = path.scope();
+    let mut rows = conn
+        .query(
+            "SELECT c.content FROM reborn_memory_chunks c \
+             JOIN reborn_memory_documents d ON d.id = c.document_id \
+             WHERE d.tenant_id = ?1 AND d.user_id = ?2 AND d.agent_id = ?3 \
+               AND d.project_id = ?4 AND d.path = ?5 \
+             ORDER BY c.chunk_index",
+            libsql::params![
+                scope.tenant_id(),
+                scope.user_id(),
+                scope.agent_id().unwrap_or(""),
+                scope.project_id().unwrap_or(""),
+                path.relative_path(),
+            ],
+        )
+        .await
+        .unwrap();
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        out.push(row.get::<String>(0).unwrap());
+    }
+    out
+}
 
 async fn read_version_rows_with_changed_by(
     db: &Arc<libsql::Database>,

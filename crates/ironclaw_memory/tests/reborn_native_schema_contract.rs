@@ -243,3 +243,95 @@ async fn reborn_postgres_run_migrations_creates_native_substrate_idempotently() 
         "reborn-native migration must not create the legacy memory_documents table"
     );
 }
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn reborn_postgres_run_migrations_serializes_concurrent_callers_from_two_pools() {
+    // zmanian H1 + test gap 6: two `RebornPostgresMemoryDocumentRepository`
+    // instances on independent pools (simulating two processes) call
+    // `run_migrations` concurrently against a *cold* schema. The session-
+    // level `pg_advisory_lock(REBORN_MIGRATION_LOCK_ID)` must serialize
+    // them so both succeed and the schema lands exactly once. Any breakage
+    // of the advisory-lock contract (or a regression that races
+    // `CREATE EXTENSION` / DDL across connections) trips the assertion.
+    //
+    // Uses a per-test Postgres schema so dropping the tables to drive the
+    // cold path does not disturb sibling tests sharing the database.
+    let Some(_) = postgres_pool_or_skip().await else {
+        return;
+    };
+    let database_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://localhost/ironclaw_test".to_string());
+
+    // Use a unique schema name so parallel runs of this test against the
+    // same database also do not interfere.
+    let schema = format!(
+        "reborn_pg_migrate_race_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+
+    let pool_for_schema = |schema: &str| {
+        let mut config: tokio_postgres::Config = database_url.parse().expect("valid DATABASE_URL");
+        config.options(format!("-c search_path={schema},public"));
+        let mgr = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
+        deadpool_postgres::Pool::builder(mgr)
+            .max_size(2)
+            .build()
+            .expect("build deadpool")
+    };
+
+    // Provision the isolated schema using a temporary unscoped pool.
+    {
+        let mut bootstrap_config: tokio_postgres::Config =
+            database_url.parse().expect("valid DATABASE_URL");
+        bootstrap_config.application_name("reborn-migration-race-bootstrap");
+        let mgr = deadpool_postgres::Manager::new(bootstrap_config, tokio_postgres::NoTls);
+        let bootstrap_pool = deadpool_postgres::Pool::builder(mgr)
+            .max_size(1)
+            .build()
+            .expect("bootstrap pool");
+        let client = bootstrap_pool.get().await.expect("bootstrap client");
+        client
+            .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {schema}"))
+            .await
+            .expect("create schema");
+    }
+
+    let pool_a = pool_for_schema(&schema);
+    let pool_b = pool_for_schema(&schema);
+
+    let repo_a = RebornPostgresMemoryDocumentRepository::new(pool_a.clone());
+    let repo_b = RebornPostgresMemoryDocumentRepository::new(pool_b.clone());
+    let (a, b) = tokio::join!(repo_a.run_migrations(), repo_b.run_migrations());
+    a.expect("repo A migration must succeed under contention");
+    b.expect("repo B migration must succeed under contention");
+
+    // Schema landed exactly once — the unique constraint name is the
+    // simplest fingerprint that is created by the schema and is
+    // duplicate-detectable if the DDL ran twice without the IF NOT EXISTS
+    // guarantees.
+    let client = pool_a.get().await.expect("verify client");
+    let count: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM information_schema.table_constraints \
+             WHERE constraint_schema = $1 \
+               AND constraint_name = 'reborn_memory_documents_unique_scope_path'",
+            &[&schema],
+        )
+        .await
+        .expect("count unique constraint")
+        .get(0);
+    assert_eq!(
+        count, 1,
+        "concurrent migrations must produce exactly one constraint definition"
+    );
+
+    // Tear down the per-test schema so the database does not accumulate
+    // schemas across runs.
+    let _ = client
+        .batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await;
+}

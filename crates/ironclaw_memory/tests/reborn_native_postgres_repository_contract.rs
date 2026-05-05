@@ -802,7 +802,170 @@ async fn embedding_column_accepts_non_1536_dimension_vectors() {
     cleanup_tenant(&pool(), tenant).await;
 }
 
+#[tokio::test]
+async fn writes_with_non_english_cjk_content_persist_under_english_tsvector_config() {
+    // zmanian test gap 5: `reborn_memory_chunks.content_tsv` is a generated
+    // TSVECTOR computed with `to_tsvector('english', content)`. Non-English
+    // content (CJK, etc.) gets degraded full-text relevance under the
+    // English config, but the write must not fail — `to_tsvector` is
+    // total over arbitrary text. Smoke-test that a chunk with a Japanese
+    // body and a chunk with a Chinese body land cleanly through the
+    // indexer-driven write path so a regression that switches to a
+    // configuration that rejects non-ASCII (e.g. `'simple'` after a
+    // typo, or a missing dictionary) is caught.
+    let tenant = "reborn-pg-cjk-tsvector";
+    let Some(repo) = fresh_repository(tenant).await else {
+        return;
+    };
+    let path = MemoryDocumentPath::new(tenant, "alice", None, "cjk.md").expect("path");
+    let body = "こんにちは世界 — 你好世界 — hello world";
+    repo.write_document(&path, body.as_bytes()).await.unwrap();
+    let hash = content_sha256(body);
+
+    let chunks = vec![
+        MemoryChunkWrite {
+            content: "こんにちは世界".to_string(),
+            embedding: None,
+        },
+        MemoryChunkWrite {
+            content: "你好世界".to_string(),
+            embedding: None,
+        },
+        MemoryChunkWrite {
+            content: "hello world".to_string(),
+            embedding: None,
+        },
+    ];
+    repo.replace_document_chunks_if_current(&path, &hash, &chunks)
+        .await
+        .expect("CJK chunks must persist under the english tsvector config");
+
+    // The English-language token "hello" must still be findable via the
+    // standard FTS path; the CJK chunks may or may not be retrievable
+    // depending on the dictionary, but the writes must have succeeded.
+    let request = MemorySearchRequest::new("hello")
+        .unwrap()
+        .with_vector(false)
+        .with_limit(10);
+    let hits = repo
+        .search_documents(path.scope(), &request)
+        .await
+        .expect("english fts query against CJK-bearing rows must succeed");
+    assert!(
+        !hits.is_empty(),
+        "english token 'hello' must hit the english chunk even when CJK siblings are present"
+    );
+    cleanup_tenant(&pool(), tenant).await;
+}
+
+#[tokio::test]
+async fn concurrent_replace_chunks_with_same_hash_serializes_to_one_winner() {
+    // zmanian test gap 1: two concurrent indexers call
+    // `replace_document_chunks_if_current` with the same
+    // `expected_content_hash` but different chunk sets. The Postgres
+    // implementation uses `SELECT … FOR UPDATE` to pin the document row;
+    // writers serialize on the row, and the final state must equal
+    // exactly one writer's chunk set — never a partial/duplicate union.
+    let tenant = "reborn-pg-concurrent-chunks";
+    let Some(repo) = fresh_repository(tenant).await else {
+        return;
+    };
+    let path = MemoryDocumentPath::new(tenant, "alice", None, "concurrent.md").expect("path");
+    repo.write_document(&path, b"shared body").await.unwrap();
+    let hash = content_sha256("shared body");
+
+    let chunks_a = vec![
+        MemoryChunkWrite {
+            content: "writer-a-1".to_string(),
+            embedding: None,
+        },
+        MemoryChunkWrite {
+            content: "writer-a-2".to_string(),
+            embedding: None,
+        },
+    ];
+    let chunks_b = vec![
+        MemoryChunkWrite {
+            content: "writer-b-1".to_string(),
+            embedding: None,
+        },
+        MemoryChunkWrite {
+            content: "writer-b-2".to_string(),
+            embedding: None,
+        },
+        MemoryChunkWrite {
+            content: "writer-b-3".to_string(),
+            embedding: None,
+        },
+    ];
+
+    let repo_a = repo.clone();
+    let repo_b = repo.clone();
+    let path_a = path.clone();
+    let path_b = path.clone();
+    let hash_a = hash.clone();
+    let hash_b = hash.clone();
+    let (r_a, r_b) = tokio::join!(
+        async move {
+            repo_a
+                .replace_document_chunks_if_current(&path_a, &hash_a, &chunks_a)
+                .await
+        },
+        async move {
+            repo_b
+                .replace_document_chunks_if_current(&path_b, &hash_b, &chunks_b)
+                .await
+        },
+    );
+    r_a.expect("writer A");
+    r_b.expect("writer B");
+
+    let stored = read_chunk_contents(&pool(), tenant, &path).await;
+    let count = stored.len();
+    let writer_a_set: std::collections::HashSet<&str> =
+        ["writer-a-1", "writer-a-2"].iter().copied().collect();
+    let writer_b_set: std::collections::HashSet<&str> = ["writer-b-1", "writer-b-2", "writer-b-3"]
+        .iter()
+        .copied()
+        .collect();
+    let stored_set: std::collections::HashSet<&str> = stored.iter().map(String::as_str).collect();
+    assert!(
+        (count == 2 && stored_set == writer_a_set) || (count == 3 && stored_set == writer_b_set),
+        "final chunk set must equal exactly one writer's contribution; got {count} chunks: {stored_set:?}"
+    );
+    cleanup_tenant(&pool(), tenant).await;
+}
+
 // --- helpers --------------------------------------------------------------
+
+async fn read_chunk_contents(
+    pool: &deadpool_postgres::Pool,
+    tenant_id: &str,
+    path: &MemoryDocumentPath,
+) -> Vec<String> {
+    let client = pool.get().await.expect("client");
+    let scope = path.scope();
+    let rows = client
+        .query(
+            "SELECT c.content FROM reborn_memory_chunks c \
+             JOIN reborn_memory_documents d ON d.id = c.document_id \
+             WHERE d.tenant_id = $1 AND d.user_id = $2 AND d.agent_id = $3 \
+               AND d.project_id = $4 AND d.path = $5 \
+             ORDER BY c.chunk_index",
+            &[
+                &tenant_id,
+                &scope.user_id(),
+                &scope.agent_id().unwrap_or(""),
+                &scope.project_id().unwrap_or(""),
+                &path.relative_path(),
+            ],
+        )
+        .await
+        .expect("read chunk contents");
+    rows.into_iter()
+        .map(|row| row.get::<_, String>(0))
+        .collect()
+}
 
 async fn read_version_rows_with_changed_by(
     pool: &deadpool_postgres::Pool,
