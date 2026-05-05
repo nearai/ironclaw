@@ -67,9 +67,14 @@ impl From<SecretError> for InjectionError {
 /// Aggregates credential mappings from WASM tools so the built-in HTTP tool can
 /// auto-inject credentials for matching hosts. Uses `std::sync::RwLock` so
 /// `requires_approval` (sync) can query it without async.
+///
+/// Also holds skill-driven HTTP host allowlist patterns. When non-empty, the
+/// built-in `http` tool only permits requests to hosts matching these patterns
+/// (plus any hosts from registered credentials). Empty allowlist = no restriction.
 pub struct SharedCredentialRegistry {
     mappings: RwLock<Vec<CredentialMapping>>,
     oauth_refresh: RwLock<HashMap<String, OAuthRefreshConfig>>,
+    http_allowlist: RwLock<HashMap<String, usize>>,
 }
 
 impl SharedCredentialRegistry {
@@ -78,6 +83,7 @@ impl SharedCredentialRegistry {
         Self {
             mappings: RwLock::new(Vec::new()),
             oauth_refresh: RwLock::new(HashMap::new()),
+            http_allowlist: RwLock::new(HashMap::new()),
         }
     }
 
@@ -226,6 +232,83 @@ impl SharedCredentialRegistry {
             }
         };
         guard.get(secret_name).cloned()
+    }
+
+    /// Add HTTP allowlist host patterns from a skill.
+    ///
+    /// These patterns restrict which hosts the built-in `http` tool may
+    /// contact when any skill with an allowlist is active.
+    pub fn add_http_allowlist_patterns(&self, patterns: impl IntoIterator<Item = String>) {
+        let mut guard = match self.http_allowlist.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!(
+                    "SharedCredentialRegistry RwLock poisoned during add_http_allowlist_patterns; recovering"
+                );
+                poisoned.into_inner()
+            }
+        };
+        for pattern in patterns {
+            *guard.entry(pattern).or_insert(0) += 1;
+        }
+    }
+
+    /// Remove HTTP allowlist patterns that match any of the given patterns.
+    ///
+    /// Called when a skill is removed so its host restrictions don't outlive it.
+    pub fn remove_http_allowlist_patterns(&self, to_remove: &[String]) {
+        let mut guard = match self.http_allowlist.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!(
+                    "SharedCredentialRegistry RwLock poisoned during remove_http_allowlist_patterns; recovering"
+                );
+                poisoned.into_inner()
+            }
+        };
+        for pattern in to_remove {
+            if let Some(count) = guard.get_mut(pattern) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    guard.remove(pattern);
+                }
+            }
+        }
+    }
+
+    /// Check if a host is allowed by the skill-driven HTTP allowlist.
+    ///
+    /// Returns `true` when:
+    /// - The allowlist is empty (no restriction, all hosts permitted)
+    /// - The host matches any pattern in the allowlist
+    /// - The host matches any registered credential's host_patterns
+    ///   (credential hosts are implicitly allowed)
+    ///
+    /// Returns `false` when the allowlist is non-empty and the host
+    /// matches neither allowlist patterns nor credential host patterns.
+    pub fn http_host_allowed(&self, host: &str) -> bool {
+        let allowlist_guard = match self.http_allowlist.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!(
+                    "SharedCredentialRegistry RwLock poisoned during http_host_allowed; recovering"
+                );
+                poisoned.into_inner()
+            }
+        };
+
+        if allowlist_guard.is_empty() {
+            return true;
+        }
+
+        if allowlist_guard
+            .keys()
+            .any(|pattern| host_matches_pattern(host, pattern))
+        {
+            return true;
+        }
+
+        self.has_credentials_for_host(host)
     }
 }
 
@@ -806,5 +889,46 @@ mod tests {
 
         let found = registry.find_for_host("api.example.com");
         assert_eq!(found.len(), 4);
+    }
+
+    #[test]
+    fn test_http_allowlist_shared_pattern_refcounting() {
+        let registry = SharedCredentialRegistry::new();
+
+        registry.add_http_allowlist_patterns(vec![
+            "*.googleapis.com".to_string(),
+            "api.github.com".to_string(),
+        ]);
+        registry.add_http_allowlist_patterns(vec![
+            "*.googleapis.com".to_string(),
+            "slack.com".to_string(),
+        ]);
+
+        assert!(registry.http_host_allowed("storage.googleapis.com"));
+        assert!(registry.http_host_allowed("api.github.com"));
+        assert!(registry.http_host_allowed("slack.com"));
+        assert!(!registry.http_host_allowed("evil.com"));
+
+        registry.remove_http_allowlist_patterns(&["*.googleapis.com".to_string()]);
+
+        assert!(
+            registry.http_host_allowed("storage.googleapis.com"),
+            "shared pattern should still be allowed after one removal"
+        );
+        assert!(registry.http_host_allowed("api.github.com"));
+        assert!(registry.http_host_allowed("slack.com"));
+
+        registry.remove_http_allowlist_patterns(&["*.googleapis.com".to_string()]);
+
+        assert!(
+            !registry.http_host_allowed("storage.googleapis.com"),
+            "pattern should be revoked after last skill removes it"
+        );
+    }
+
+    #[test]
+    fn test_http_allowlist_empty_means_no_restriction() {
+        let registry = SharedCredentialRegistry::new();
+        assert!(registry.http_host_allowed("any.host.com"));
     }
 }

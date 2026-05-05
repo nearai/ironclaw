@@ -86,8 +86,8 @@ mod tests {
         // Should have at least the manifests from registry/ if built from the repo
         // (empty is also valid for minimal builds without registry/)
         assert!(
-            manifests.is_empty() || manifests.contains_key("tools/github"),
-            "Expected either empty catalog or github tool, got {} entries",
+            manifests.is_empty() || manifests.contains_key("tools/portfolio"),
+            "Expected either empty catalog or portfolio tool, got {} entries",
             manifests.len()
         );
     }

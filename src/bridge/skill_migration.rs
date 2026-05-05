@@ -203,7 +203,7 @@ async fn v1_skill_to_memory_doc(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_skills::types::{ActivationCriteria, SkillManifest, SkillTrust};
+    use ironclaw_skills::types::{ActivationCriteria, SkillHttpAllowlist, SkillManifest, SkillTrust};
     use std::path::PathBuf;
 
     fn make_v1_skill(name: &str, content: &str) -> LoadedSkill {
@@ -217,6 +217,7 @@ mod tests {
                     ..Default::default()
                 },
                 credentials: vec![],
+                http: SkillHttpAllowlist::default(),
                 requires: ironclaw_skills::GatingRequirements::default(),
             },
             prompt_content: content.to_string(),

@@ -37,6 +37,9 @@ credentials:
       refresh:
         strategy: reauthorize_only
     setup_instructions: "Create a personal access token at https://github.com/settings/tokens"
+http:
+  allowed_hosts:
+    - "api.github.com"
 ---
 
 # GitHub API Skill

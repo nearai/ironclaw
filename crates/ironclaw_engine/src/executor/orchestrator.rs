@@ -4370,14 +4370,14 @@ mod tests {
     fn python_action_call_round_trips_through_serde() {
         let original = ActionCall {
             id: "call_abc123".to_string(),
-            action_name: "google_drive_tool".to_string(),
+            action_name: "portfolio_tool".to_string(),
             parameters: serde_json::json!({"query": "expenses"}),
         };
 
         let python_json = serde_json::to_value(PythonActionCall::from(&original))
             .expect("PythonActionCall must serialize");
         // Python-friendly field names — match what default.py reads.
-        assert_eq!(python_json["name"], "google_drive_tool");
+        assert_eq!(python_json["name"], "portfolio_tool");
         assert_eq!(python_json["call_id"], "call_abc123");
         assert_eq!(
             python_json["params"],
@@ -4402,7 +4402,7 @@ mod tests {
             },
             ActionCall {
                 id: "call_2".to_string(),
-                action_name: "google_drive_tool".to_string(),
+                action_name: "portfolio_tool".to_string(),
                 parameters: serde_json::json!({"action": "list"}),
             },
         ];
@@ -4410,7 +4410,7 @@ mod tests {
         assert_eq!(json.len(), 2);
         assert_eq!(json[0]["name"], "notion_notion_search");
         assert_eq!(json[0]["call_id"], "call_1");
-        assert_eq!(json[1]["name"], "google_drive_tool");
+        assert_eq!(json[1]["name"], "portfolio_tool");
         assert_eq!(json[1]["call_id"], "call_2");
     }
 
@@ -4420,14 +4420,14 @@ mod tests {
         // messages via `append_message(..., action_calls=calls)`).
         let python_json = serde_json::json!([
             {"name": "notion_notion_search", "call_id": "call_xyz", "params": {"q": "foo"}},
-            {"name": "google_drive_tool", "call_id": "call_abc", "params": {"action": "list"}},
+            {"name": "portfolio_tool", "call_id": "call_abc", "params": {"action": "list"}},
         ]);
         let parsed = python_json_to_action_calls(&python_json).expect("must parse");
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].action_name, "notion_notion_search");
         assert_eq!(parsed[0].id, "call_xyz");
         assert_eq!(parsed[0].parameters, serde_json::json!({"q": "foo"}));
-        assert_eq!(parsed[1].action_name, "google_drive_tool");
+        assert_eq!(parsed[1].action_name, "portfolio_tool");
         assert_eq!(parsed[1].id, "call_abc");
     }
 
@@ -4453,7 +4453,7 @@ mod tests {
         // `params`), not user data.
         let pii_value = serde_json::json!([
             {
-                "name": "google_drive_tool",
+                "name": "portfolio_tool",
                 "call_id": "call_xyz",
                 "params": {
                     "query": "salary spreadsheet for joe",
@@ -4490,7 +4490,7 @@ mod tests {
             "summary must not leak free-text content: {summary}"
         );
         assert!(
-            !summary.contains("google_drive_tool"),
+            !summary.contains("portfolio_tool"),
             "summary must not leak the tool name itself (could expose intent): {summary}"
         );
     }
@@ -4607,7 +4607,7 @@ mod tests {
             Some("I'll search for that".to_string()),
             vec![ActionCall {
                 id: "call_resume_test".to_string(),
-                action_name: "google_drive_tool".to_string(),
+                action_name: "portfolio_tool".to_string(),
                 parameters: serde_json::json!({"query": "budget"}),
             }],
         );
@@ -4641,7 +4641,7 @@ mod tests {
         );
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].id, "call_resume_test");
-        assert_eq!(calls[0].action_name, "google_drive_tool");
+        assert_eq!(calls[0].action_name, "portfolio_tool");
         assert_eq!(calls[0].parameters, serde_json::json!({"query": "budget"}));
     }
 

@@ -412,9 +412,9 @@ def wasm_tools_dir(_wasm_build_symlinks):
     WASM files here; tests exercise the full install pipeline.
 
     NOTE on capabilities file naming: Cargo builds with underscored stems
-    (web_search_tool.wasm) but capabilities use hyphens (web-search-tool.
+    (portfolio_tool.wasm) but capabilities use hyphens (portfolio-tool.
     capabilities.json). The loader expects matching stems. If you pre-load
-    files, rename caps: web-search-tool → web_search_tool.
+    files, rename caps: portfolio-tool → portfolio_tool.
     """
     return str(Path(_WASM_TOOLS_TMPDIR.name))
 

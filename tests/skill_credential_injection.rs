@@ -58,6 +58,7 @@ fn make_skill(
             description: format!("{} skill", name),
             activation: ActivationCriteria::default(),
             credentials,
+            http: ironclaw_skills::SkillHttpAllowlist::default(),
             requires: ironclaw_skills::GatingRequirements::default(),
         },
         prompt_content: prompt.to_string(),

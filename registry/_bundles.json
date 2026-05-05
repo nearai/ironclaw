@@ -1,19 +1,5 @@
 {
   "bundles": {
-    "google": {
-      "display_name": "Google Suite",
-      "description": "Gmail, Calendar, Drive, Docs, Sheets, Slides",
-      "aliases": ["gws", "gsuite", "google workspace", "g suite"],
-      "extensions": [
-        "tools/gmail",
-        "tools/google_calendar",
-        "tools/google_docs",
-        "tools/google_drive",
-        "tools/google_sheets",
-        "tools/google_slides"
-      ],
-      "shared_auth": "google_oauth_token"
-    },
     "messaging": {
       "display_name": "Messaging Channels",
       "description": "Discord, Telegram, Slack, and WhatsApp channels",
@@ -30,11 +16,7 @@
       "display_name": "Recommended Set",
       "description": "Core tools and channels for a productive setup",
       "extensions": [
-        "tools/github",
-        "tools/gmail",
-        "tools/google_calendar",
-        "tools/google_drive",
-        "tools/slack_tool",
+        "tools/portfolio",
         "channels/telegram",
         "channels/slack"
       ],

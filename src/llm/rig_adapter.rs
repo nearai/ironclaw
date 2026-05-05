@@ -1006,7 +1006,7 @@ mod tests {
         );
     }
 
-    /// Regression for google_docs_tool: a tagged enum with a variant
+    /// Regression for test_docs_tool: a tagged enum with a variant
     /// containing `requests: Vec<serde_json::Value>` produces a top-level
     /// `oneOf` (which we flatten) with a nested `{"type": "array"}` property
     /// that has no `items`. The flatten path originally short-circuited
@@ -1296,7 +1296,7 @@ mod tests {
         );
     }
 
-    /// End-to-end regression test using the google_docs_tool's actual schema
+    /// End-to-end regression test using the test_docs_tool's actual schema
     /// shape. This tool has a tagged enum (`oneOf`) with a `BatchUpdate`
     /// variant containing `requests: Vec<serde_json::Value>` — which
     /// produces a bare `{"type": "array"}` with no `items`. The flatten
@@ -1318,7 +1318,7 @@ mod tests {
     /// - output passes `validate_strict_schema` with zero violations
     #[test]
     fn test_realistic_wasm_schema_survives_normalize_flatten_pipeline() {
-        // Actual shape from google_docs_tool: tagged enum with 4 variants.
+        // Actual shape from test_docs_tool: tagged enum with 4 variants.
         // BatchUpdate has `requests: Vec<Value>` (bare array, no items).
         // GetDocument/ReadContent have only string fields.
         // InsertText has a nested object (text_style).
@@ -1408,7 +1408,7 @@ mod tests {
 
         // Path 2: rig-based provider entry point.
         let tools = convert_tools(&[IronToolDefinition {
-            name: "google_docs_tool".to_string(),
+            name: "test_docs_tool".to_string(),
             description: "Google Docs".to_string(),
             parameters: wasm_schema.clone(),
         }]);

@@ -18,6 +18,9 @@ const MAX_PATTERNS_PER_SKILL: usize = 5;
 /// Maximum number of tags allowed per skill to prevent scoring manipulation.
 const MAX_TAGS_PER_SKILL: usize = 10;
 
+/// Maximum number of host patterns in a skill's HTTP allowlist.
+pub const MAX_HTTP_ALLOWLIST_HOSTS: usize = 50;
+
 /// Maximum number of companion skill declarations in `requires.skills`.
 /// Maximum length for `setup_marker` paths (bytes). Prevents untrusted
 /// skills from injecting excessively long marker strings.
@@ -140,6 +143,22 @@ fn default_max_context_tokens() -> usize {
     2000
 }
 
+/// HTTP host allowlist declared by a skill.
+///
+/// When present and non-empty, the built-in `http` tool will only permit
+/// requests to hosts matching these patterns (or hosts declared in
+/// `credentials[].hosts`) when this skill is active. When absent or empty,
+/// no host restriction is applied (all HTTPS hosts allowed).
+///
+/// Host patterns support glob syntax: `*.googleapis.com` matches
+/// `gmail.googleapis.com` but not bare `googleapis.com`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SkillHttpAllowlist {
+    /// Host patterns this skill may reach via the built-in HTTP tool.
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
+}
+
 /// Parsed skill manifest from SKILL.md YAML frontmatter.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillManifest {
@@ -158,6 +177,12 @@ pub struct SkillManifest {
     /// Parsed at load time; values are never in the LLM context.
     #[serde(default)]
     pub credentials: Vec<SkillCredentialSpec>,
+    /// HTTP host allowlist — restricts which hosts the `http` tool may
+    /// contact when this skill is active. Hosts from `credentials[].hosts`
+    /// are implicitly included in the effective allowlist at registration
+    /// time, so they do not need to be repeated here.
+    #[serde(default)]
+    pub http: SkillHttpAllowlist,
     /// Gating requirements (binaries, env vars, config files, companion skills).
     #[serde(default)]
     pub requires: GatingRequirements,
@@ -518,6 +543,7 @@ requires:
                 description: String::new(),
                 activation: ActivationCriteria::default(),
                 credentials: vec![],
+                http: SkillHttpAllowlist::default(),
                 requires: GatingRequirements::default(),
             },
             prompt_content: "test prompt".to_string(),
@@ -787,6 +813,71 @@ credentials:
         assert_eq!(
             criteria.setup_marker.as_deref(),
             Some("commitments/.developer-setup-complete")
+        );
+    }
+
+    #[test]
+    fn test_parse_http_allowlist() {
+        let yaml = r#"
+name: gmail
+version: "1.0.0"
+description: Gmail API
+http:
+  allowed_hosts:
+    - "gmail.googleapis.com"
+    - "*.googleapis.com"
+"#;
+        let manifest: SkillManifest = serde_yml::from_str(yaml).expect("parse failed");
+        assert_eq!(
+            manifest.http.allowed_hosts,
+            vec!["gmail.googleapis.com", "*.googleapis.com"]
+        );
+    }
+
+    #[test]
+    fn test_parse_manifest_without_http_defaults_empty() {
+        let yaml = r#"
+name: simple-skill
+description: No HTTP allowlist
+"#;
+        let manifest: SkillManifest = serde_yml::from_str(yaml).expect("parse failed");
+        assert!(manifest.http.allowed_hosts.is_empty());
+    }
+
+    #[test]
+    fn test_http_allowlist_serde_roundtrip() {
+        let allowlist = SkillHttpAllowlist {
+            allowed_hosts: vec![
+                "api.github.com".to_string(),
+                "*.googleapis.com".to_string(),
+            ],
+        };
+        let json = serde_json::to_string(&allowlist).unwrap();
+        let back: SkillHttpAllowlist = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.allowed_hosts.len(), 2);
+        assert_eq!(back.allowed_hosts[0], "api.github.com");
+        assert_eq!(back.allowed_hosts[1], "*.googleapis.com");
+    }
+
+    #[test]
+    fn test_parse_credentials_and_http_together() {
+        let yaml = r#"
+name: gmail
+credentials:
+  - name: google_oauth_token
+    provider: google
+    location:
+      type: bearer
+    hosts: ["gmail.googleapis.com"]
+http:
+  allowed_hosts:
+    - "*.googleapis.com"
+"#;
+        let manifest: SkillManifest = serde_yml::from_str(yaml).expect("parse failed");
+        assert_eq!(manifest.credentials.len(), 1);
+        assert_eq!(
+            manifest.http.allowed_hosts,
+            vec!["*.googleapis.com"]
         );
     }
 }

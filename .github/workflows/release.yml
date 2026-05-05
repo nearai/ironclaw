@@ -304,7 +304,7 @@ jobs:
               echo "::error::Manifest '$manifest' has invalid or missing .kind ('$kind'); expected 'tool' or 'channel'"
               exit 1
             fi
-            # ext_name: the manifest's .name field (e.g. "slack-tool").
+            # ext_name: the manifest's .name field (e.g. "portfolio-tool").
             # Used for file names *inside* the archive — the installer extracts by manifest.name.
             ext_name=$(jq -r '.name' "$manifest")
             source_dir=$(jq -r '.source.dir' "$manifest")
