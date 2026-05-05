@@ -13,9 +13,12 @@
 //! - Listing deployment profiles (`profile list`)
 //! - Active health diagnostics (`doctor`)
 //! - Viewing gateway logs (`logs`)
+//! - Running project verification tiers (`verify`)
+//! - Auditing verification, git diff, and PR checks before shipping (`audit`)
 //! - Checking system health (`status`)
 
 pub mod acp;
+mod audit;
 mod channels;
 mod completion;
 mod config;
@@ -36,8 +39,10 @@ mod service;
 mod skills;
 pub mod status;
 mod tool;
+mod verify;
 
 pub use acp::{AcpCommand, run_acp_command};
+pub use audit::{AuditCommand, run_audit_command};
 pub use channels::{ChannelsCommand, run_channels_command};
 pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
@@ -58,6 +63,7 @@ pub use service::{ServiceCommand, run_service_command};
 pub use skills::{SkillsCommand, run_skills_command};
 pub use status::run_status_command;
 pub use tool::{ToolCommand, run_tool_command};
+pub use verify::{VerifyCommand, run_verify_command};
 
 use std::sync::Arc;
 
@@ -279,6 +285,30 @@ pub enum Command {
            ironclaw models set-provider ollama --model llama3  # Switch to local Ollama"
     )]
     Models(ModelsCommand),
+
+    /// Run layered verification tiers from .ironclaw-verify.json or .autoverify.json
+    #[command(
+        about = "Run layered project verification",
+        long_about = "Runs machine-readable verification tiers from .ironclaw-verify.json or the Hermes-compatible .autoverify.json.\n\n\
+         Use this after code changes and before shipping autonomous work.\n\n\
+         Examples:\n  \
+           ironclaw verify --list\n  \
+           ironclaw verify --tier smoke --compact\n  \
+           ironclaw verify --upto integration\n  \
+           ironclaw verify --target ../my-project --loop --interval 30 --max 20"
+    )]
+    Verify(VerifyCommand),
+
+    /// Audit verifier state, git diff, and PR checks before shipping
+    #[command(
+        about = "Audit ship readiness",
+        long_about = "Combines the latest `ironclaw verify` state, git status/diff, and optional GitHub PR checks into a deterministic ship/no-ship verdict.\n\n\
+         Examples:\n  \
+           ironclaw audit --compact\n  \
+           ironclaw audit --strict\n  \
+           ironclaw audit --no-checks --base origin/main"
+    )]
+    Audit(AuditCommand),
 
     /// Probe external dependencies and validate configuration
     #[command(

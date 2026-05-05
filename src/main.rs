@@ -208,6 +208,14 @@ async fn async_main() -> anyhow::Result<()> {
             return ironclaw::cli::run_models_command(models_cmd.clone(), cli.config.as_deref())
                 .await;
         }
+        Some(Command::Verify(verify_cmd)) => {
+            init_cli_tracing();
+            return ironclaw::cli::run_verify_command(verify_cmd.clone()).await;
+        }
+        Some(Command::Audit(audit_cmd)) => {
+            init_cli_tracing();
+            return ironclaw::cli::run_audit_command(audit_cmd.clone()).await;
+        }
         Some(Command::Doctor) => {
             init_cli_tracing();
             return ironclaw::cli::run_doctor_command().await;

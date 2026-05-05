@@ -179,6 +179,8 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `sandbox` | ✅ | ✅ | - | WASM sandbox |
 | `doctor` | ✅ | 🚧 | P2 | 16 subsystem checks |
 | `logs` | ✅ | 🚧 | P3 | `logs` (gateway.log tail), `--follow` (SSE live stream), `--level` (get/set). No DB-persisted log history. |
+| `verify` / autoverify | ✅ | ✅ | P2 | Native layered verification tiers (`.ironclaw-verify.json`) with Hermes-compatible `.autoverify.json` fallback, structured JSON verdicts, retry/flaky handling, and persisted `.autoverify.state.json`. |
+| `audit` / auto-audit | ✅ | ✅ | P2 | Deterministic ship-readiness audit over latest verify state, git status/diff, and PR checks via `gh`. |
 | `update` | ✅ | ❌ | P3 | Self-update |
 | `completion` | ✅ | ✅ | - | Shell completion |
 | `/subagents spawn` | ✅ | ❌ | P3 | Spawn subagents from chat |

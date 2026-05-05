@@ -140,6 +140,15 @@ cargo build --release
 
 # Run tests
 cargo test
+
+# Run the layered verification harness
+ironclaw verify --tier smoke
+
+# Inspect configured verification tiers
+ironclaw verify --list
+
+# Audit verification state, git diff, and PR checks before shipping
+ironclaw audit --compact
 ```
 
 For **full release** (after modifying channel sources), run `./scripts/build-all.sh` to rebuild channels first.
@@ -314,6 +323,15 @@ cargo clippy --all --benches --tests --examples --all-features
 # Run tests
 createdb ironclaw_test
 cargo test
+
+# Run the repo's autonomous verification tiers
+cargo run --bin ironclaw -- verify --tier smoke
+
+# Inspect the repo verification plan
+cargo run --bin ironclaw -- verify --list
+
+# Audit the current branch before shipping
+cargo run --bin ironclaw -- audit --compact
 
 # Run specific test
 cargo test test_name
