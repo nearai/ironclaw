@@ -18,11 +18,11 @@ use crate::tools::builder::{
 use crate::tools::builtin::{
     ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, ExtensionInfoTool, FileUndoTool,
     GlobTool, GrepTool, HttpTool, JobEventsTool, JobPromptTool, JobStatusTool, JsonTool,
-    ListDirTool, ListJobsTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool,
-    PlanUpdateTool, PromptQueue, ReadFileTool, ShellTool, SkillInstallTool, SkillListTool,
-    SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool,
-    ToolListTool, ToolPermissionSetTool, ToolRemoveTool, ToolSearchTool, ToolUpgradeTool,
-    WriteFileTool, shared_file_history, shared_read_file_state,
+    LinearWebhookTool, ListDirTool, ListJobsTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool,
+    MemoryWriteTool, PlanUpdateTool, PromptQueue, ReadFileTool, ShellTool, SkillInstallTool,
+    SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool,
+    ToolInstallTool, ToolListTool, ToolPermissionSetTool, ToolRemoveTool, ToolSearchTool,
+    ToolUpgradeTool, WriteFileTool, shared_file_history, shared_read_file_state,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{
@@ -453,6 +453,8 @@ impl ToolRegistry {
             http = http.with_role_lookup(Arc::clone(role_lookup));
         }
         self.register_sync(Arc::new(http));
+
+        self.register_sync(Arc::new(LinearWebhookTool));
 
         tracing::debug!("Registered {} built-in tools", self.count());
     }
