@@ -429,7 +429,8 @@ pub(crate) fn inject_credential(
         }
         CredentialLocation::HmacSignedHeader { .. }
         | CredentialLocation::Eip712SignedHeader { .. }
-        | CredentialLocation::Nep413SignedHeader { .. } => {}
+        | CredentialLocation::Nep413SignedHeader { .. }
+        | CredentialLocation::SolanaSignedTransaction { .. } => {}
     }
 }
 

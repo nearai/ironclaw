@@ -240,6 +240,13 @@ pub enum CredentialLocation {
         callback_url_source: Option<FieldSource>,
         output_headers: Vec<HeaderOutput>,
     },
+    /// Solana transaction signing with ed25519. Tool supplies the
+    /// unsigned message bytes; runtime emits the wire-formatted
+    /// signed transaction.
+    SolanaSignedTransaction {
+        message_source: FieldSource,
+        output_body_fields: Vec<BodyJsonOutput>,
+    },
 }
 
 /// EIP-712 domain separator parameters.
@@ -292,6 +299,11 @@ pub enum FieldSource {
     Bytes32Keccak256OfBytes {
         parts: Vec<BytesPart>,
     },
+    /// Reads the JSON value at `path` in the request body and emits
+    /// it as a string. Strictly narrower than `RequestBody`.
+    BodyFieldString {
+        path: String,
+    },
 }
 
 /// Closed vocabulary of byte fragments that can be concatenated and
@@ -340,6 +352,9 @@ pub enum BodyValue {
     RequestRandomNonceB64,
     LiteralString { value: String },
     LiteralNumber { value: i64 },
+    /// Base64 of `[0x01][64-byte sig][message bytes]`. Only valid
+    /// inside `SolanaSignedTransaction` output_body_fields.
+    SolanaSignedTransactionBase64,
 }
 
 /// Header that the signer emits, with the value source.

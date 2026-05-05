@@ -129,6 +129,7 @@ enum SigningSpec {
     Hmac(HmacSigning),
     Eip712(Eip712Signing),
     Nep413(Nep413Signing),
+    Solana(SolanaSigning),
 }
 
 #[derive(Clone)]
@@ -152,6 +153,12 @@ struct Nep413Signing {
     message_source: crate::secrets::FieldSource,
     callback_url_source: Option<crate::secrets::FieldSource>,
     output_headers: Vec<crate::secrets::HeaderOutput>,
+}
+
+#[derive(Clone)]
+struct SolanaSigning {
+    message_source: crate::secrets::FieldSource,
+    output_body_fields: Vec<crate::secrets::BodyJsonOutput>,
 }
 
 impl std::fmt::Debug for ResolvedHostCredential {
@@ -185,6 +192,14 @@ impl std::fmt::Debug for ResolvedHostCredential {
                     .map(|o| o.header_name.as_str())
                     .collect();
                 format!("nep413(outputs={:?})", outs)
+            }
+            SigningSpec::Solana(spec) => {
+                let outs: Vec<&str> = spec
+                    .output_body_fields
+                    .iter()
+                    .map(|o| o.json_path.as_str())
+                    .collect();
+                format!("solana(body_outputs={:?})", outs)
             }
         });
         f.debug_struct("ResolvedHostCredential")
@@ -394,6 +409,13 @@ impl StoreData {
                         timestamp_secs,
                         &nonce_bytes,
                     ),
+                    SigningSpec::Solana(spec) => apply_solana_signing(
+                        spec,
+                        &cred.secret_value,
+                        body.as_deref(),
+                        timestamp_secs,
+                        &nonce_bytes,
+                    ),
                 };
 
                 match result {
@@ -569,7 +591,8 @@ fn apply_eip712_signing(
     let mut body_mutations: Vec<(String, serde_json::Value)> =
         Vec::with_capacity(spec.output_body_fields.len());
     for field in &spec.output_body_fields {
-        body_mutations.push((field.json_path.clone(), evaluate_body_value(&field.value, &evaluated)));
+        let v = evaluate_body_value(&field.value, &evaluated)?;
+        body_mutations.push((field.json_path.clone(), v));
     }
 
     Ok(SignerOutput {
@@ -678,6 +701,114 @@ struct Nep413Payload {
     nonce: [u8; 32],
     recipient: String,
     callback_url: Option<String>,
+}
+
+const SOLANA_MAX_PACKET_BYTES: usize = 1232;
+const SOLANA_SIGNATURE_BYTES: usize = 64;
+const SOLANA_SIG_COUNT_ONE_COMPACT_U16: u8 = 0x01;
+
+fn apply_solana_signing(
+    spec: &SolanaSigning,
+    secret_value: &str,
+    body: Option<&[u8]>,
+    timestamp_secs: u64,
+    nonce_bytes: &[u8; 32],
+) -> Result<SignerOutput, SignerError> {
+    use ed25519_dalek::Signer;
+
+    let (signing_key, verifying_key) = parse_ed25519_secret(secret_value)?;
+    let public_key_b58 = bs58::encode(verifying_key.as_bytes()).into_string();
+
+    let body_json =
+        parse_body_json_if_needed(std::iter::once(&spec.message_source), body)?;
+
+    let message_b64 = resolve_field_source(
+        &spec.message_source,
+        None,
+        &public_key_b58,
+        body,
+        body_json.as_ref(),
+        timestamp_secs,
+        nonce_bytes,
+    )?;
+    let message_bytes = base64::engine::general_purpose::STANDARD
+        .decode(message_b64.as_bytes())
+        .map_err(|e| {
+            SignerError::InvalidField(format!(
+                "solana message is not valid standard base64: {e}"
+            ))
+        })?;
+
+    if message_bytes.is_empty() {
+        return Err(SignerError::InvalidField(
+            "solana message must not be empty".into(),
+        ));
+    }
+    let total_tx_len = 1 + SOLANA_SIGNATURE_BYTES + message_bytes.len();
+    if total_tx_len > SOLANA_MAX_PACKET_BYTES {
+        return Err(SignerError::InvalidField(format!(
+            "solana signed transaction would be {total_tx_len} bytes, exceeds packet limit {SOLANA_MAX_PACKET_BYTES}"
+        )));
+    }
+
+    let signature_bytes = signing_key.sign(&message_bytes).to_bytes();
+
+    let mut signed_tx = Vec::with_capacity(total_tx_len);
+    signed_tx.push(SOLANA_SIG_COUNT_ONE_COMPACT_U16);
+    signed_tx.extend_from_slice(&signature_bytes);
+    signed_tx.extend_from_slice(&message_bytes);
+    let signed_tx_b64 = base64::engine::general_purpose::STANDARD.encode(&signed_tx);
+
+    let mut body_mutations: Vec<(String, serde_json::Value)> =
+        Vec::with_capacity(spec.output_body_fields.len());
+    for field in &spec.output_body_fields {
+        let v = evaluate_solana_body_value(
+            &field.value,
+            &public_key_b58,
+            &signature_bytes,
+            &signed_tx_b64,
+            timestamp_secs,
+            nonce_bytes,
+        )?;
+        body_mutations.push((field.json_path.clone(), v));
+    }
+
+    Ok(SignerOutput {
+        headers: Vec::new(),
+        body_mutations,
+    })
+}
+
+fn evaluate_solana_body_value(
+    value: &crate::secrets::BodyValue,
+    public_key_b58: &str,
+    signature_bytes: &[u8; 64],
+    signed_tx_b64: &str,
+    timestamp_secs: u64,
+    nonce_bytes: &[u8; 32],
+) -> Result<serde_json::Value, SignerError> {
+    use crate::secrets::BodyValue;
+    use serde_json::json;
+    Ok(match value {
+        BodyValue::SignerAddress | BodyValue::SignerPublicKey => json!(public_key_b58),
+        BodyValue::SignatureBase64 => {
+            json!(base64::engine::general_purpose::STANDARD.encode(signature_bytes))
+        }
+        BodyValue::SignatureHex => json!(format!("0x{}", hex::encode(signature_bytes))),
+        BodyValue::SolanaSignedTransactionBase64 => json!(signed_tx_b64),
+        BodyValue::RequestTimestampSecs => json!(timestamp_secs),
+        BodyValue::RequestRandomNonceB64 => {
+            json!(base64::engine::general_purpose::URL_SAFE.encode(nonce_bytes))
+        }
+        BodyValue::LiteralString { value } => json!(value),
+        BodyValue::LiteralNumber { value } => json!(value),
+        BodyValue::SignatureRHex | BodyValue::SignatureSHex | BodyValue::SignatureV => {
+            return Err(SignerError::InvalidSchema(
+                "ecdsa r/s/v components are not produced by the solana ed25519 signer"
+                    .into(),
+            ));
+        }
+    })
 }
 
 fn parse_secp256k1_secret(secret: &str) -> Result<SigningKey, SignerError> {
@@ -919,6 +1050,22 @@ fn resolve_field_source(
             let h = keccak256(&assembled);
             Ok(format!("0x{}", hex::encode(h)))
         }
+        FieldSource::BodyFieldString { path } => {
+            let json = body_json.ok_or_else(|| {
+                SignerError::UnsupportedSource(
+                    "body_field_string source requires the request body to be json".into(),
+                )
+            })?;
+            match json_path_get(json, path) {
+                Some(serde_json::Value::String(s)) => Ok(s.clone()),
+                Some(_) => Err(SignerError::InvalidField(format!(
+                    "body field at '{path}' is not a string"
+                ))),
+                None => Err(SignerError::InvalidField(format!(
+                    "body field at '{path}' not found"
+                ))),
+            }
+        }
     }
 }
 
@@ -965,10 +1112,10 @@ struct EvaluatedSignature {
 fn evaluate_body_value(
     value: &crate::secrets::BodyValue,
     sig: &EvaluatedSignature,
-) -> serde_json::Value {
+) -> Result<serde_json::Value, SignerError> {
     use crate::secrets::BodyValue;
     use serde_json::json;
-    match value {
+    Ok(match value {
         BodyValue::SignerAddress => json!(sig.signer_address),
         BodyValue::SignerPublicKey => json!(sig.signer_public_key),
         BodyValue::SignatureHex => json!(sig.signature_hex),
@@ -982,7 +1129,13 @@ fn evaluate_body_value(
         ),
         BodyValue::LiteralString { value } => json!(value),
         BodyValue::LiteralNumber { value } => json!(value),
-    }
+        BodyValue::SolanaSignedTransactionBase64 => {
+            return Err(SignerError::InvalidSchema(
+                "solana_signed_transaction_base64 is only valid inside solana_signed_transaction"
+                    .into(),
+            ));
+        }
+    })
 }
 
 fn json_path_get<'a>(root: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
@@ -1007,24 +1160,46 @@ fn json_path_set(
     let mut current = root;
     for (idx, part) in parts.iter().enumerate() {
         let is_last = idx + 1 == parts.len();
-        let map = match current {
-            serde_json::Value::Object(m) => m,
+        match current {
+            serde_json::Value::Object(map) => {
+                if is_last {
+                    map.insert((*part).to_string(), value);
+                    return Ok(());
+                }
+                if !map.contains_key(*part) {
+                    map.insert(
+                        (*part).to_string(),
+                        serde_json::Value::Object(serde_json::Map::new()),
+                    );
+                }
+                current = map.get_mut(*part).ok_or_else(|| {
+                    SignerError::SignFailed(format!("json path '{path}' walk failed"))
+                })?;
+            }
+            serde_json::Value::Array(arr) => {
+                let i: usize = part.parse().map_err(|_| {
+                    SignerError::SignFailed(format!(
+                        "json path '{path}' segment '{part}' is not a valid array index"
+                    ))
+                })?;
+                if i >= arr.len() {
+                    return Err(SignerError::SignFailed(format!(
+                        "json path '{path}' index {i} out of bounds (len {})",
+                        arr.len()
+                    )));
+                }
+                if is_last {
+                    arr[i] = value;
+                    return Ok(());
+                }
+                current = &mut arr[i];
+            }
             _ => {
                 return Err(SignerError::SignFailed(format!(
-                    "json path '{path}' descends into a non-object"
+                    "json path '{path}' descends into a scalar"
                 )));
             }
-        };
-        if is_last {
-            map.insert((*part).to_string(), value);
-            return Ok(());
         }
-        if !map.contains_key(*part) {
-            map.insert((*part).to_string(), serde_json::Value::Object(serde_json::Map::new()));
-        }
-        current = map
-            .get_mut(*part)
-            .ok_or_else(|| SignerError::SignFailed(format!("json path '{path}' walk failed")))?;
     }
     Ok(())
 }
@@ -1064,6 +1239,7 @@ where
         FieldSource::Bytes32Keccak256OfBytes { parts } => parts
             .iter()
             .any(|p| !matches!(p, BytesPart::LiteralHex { .. })),
+        FieldSource::BodyFieldString { .. } => true,
         _ => false,
     });
     if !needs {
@@ -2398,6 +2574,13 @@ async fn resolve_host_credentials(
                 message_source: message_source.clone(),
                 callback_url_source: callback_url_source.clone(),
                 output_headers: output_headers.clone(),
+            })),
+            crate::secrets::CredentialLocation::SolanaSignedTransaction {
+                message_source,
+                output_body_fields,
+            } => Some(SigningSpec::Solana(SolanaSigning {
+                message_source: message_source.clone(),
+                output_body_fields: output_body_fields.clone(),
             })),
             _ => None,
         };
@@ -4422,6 +4605,192 @@ mod tests {
         assert!(!headers.contains_key("X-NEAR-PUBLIC-KEY"));
         assert!(!headers.contains_key("X-NEAR-SIGNATURE"));
         assert!(!headers.contains_key("X-NEAR-NONCE"));
+    }
+
+    fn solana_signing_at(path: &str) -> super::SolanaSigning {
+        use crate::secrets::{BodyJsonOutput, BodyValue, FieldSource};
+        super::SolanaSigning {
+            message_source: FieldSource::BodyFieldString {
+                path: path.to_string(),
+            },
+            output_body_fields: vec![BodyJsonOutput {
+                json_path: "params.0".to_string(),
+                value: BodyValue::SolanaSignedTransactionBase64,
+            }],
+        }
+    }
+
+    fn solana_call(message_path: &str, body: serde_json::Value) -> Result<super::SignerOutput, super::SignerError> {
+        super::apply_solana_signing(
+            &solana_signing_at(message_path),
+            TEST_NEAR_ED25519_SEED,
+            Some(serde_json::to_vec(&body).unwrap().as_slice()),
+            0,
+            &[0u8; 32],
+        )
+    }
+
+    #[test]
+    fn test_inject_host_credentials_solana_signature_verifies() {
+        use crate::tools::wasm::wrapper::{ResolvedHostCredential, StoreData};
+        use base64::engine::general_purpose::STANDARD as B64;
+        use ed25519_dalek::Verifier;
+
+        let message_bytes: Vec<u8> = (0u8..96).collect();
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "sendTransaction",
+            "params": ["", {"encoding": "base64"}],
+            "_signing": {"message_b64": B64.encode(&message_bytes)}
+        });
+        let mut body_bytes = Some(serde_json::to_vec(&body).unwrap());
+
+        let cred = ResolvedHostCredential {
+            secret_name: "solana_signer".to_string(),
+            host_patterns: vec!["api.mainnet-beta.solana.com".to_string()],
+            path_patterns: vec![],
+            headers: HashMap::new(),
+            query_params: HashMap::new(),
+            secret_value: TEST_NEAR_ED25519_SEED.to_string(),
+            signing: Some(super::SigningSpec::Solana(solana_signing_at(
+                "_signing.message_b64",
+            ))),
+        };
+        let store_data = StoreData::new(
+            1024 * 1024,
+            Capabilities::default(),
+            HashMap::new(),
+            vec![cred],
+        );
+
+        let mut headers = HashMap::new();
+        let mut url = "https://api.mainnet-beta.solana.com/".to_string();
+        store_data.inject_host_credentials(
+            "api.mainnet-beta.solana.com",
+            "POST",
+            &mut body_bytes,
+            &mut headers,
+            &mut url,
+        );
+
+        let new_body: serde_json::Value =
+            serde_json::from_slice(body_bytes.as_ref().expect("body present")).unwrap();
+        let signed_b64 = new_body["params"][0]
+            .as_str()
+            .expect("params.0 set to signed tx");
+        let signed_bytes = B64.decode(signed_b64.as_bytes()).unwrap();
+
+        assert_eq!(signed_bytes[0], super::SOLANA_SIG_COUNT_ONE_COMPACT_U16);
+        assert_eq!(
+            signed_bytes.len(),
+            1 + super::SOLANA_SIGNATURE_BYTES + message_bytes.len()
+        );
+        let sig_bytes: [u8; 64] = signed_bytes[1..1 + super::SOLANA_SIGNATURE_BYTES]
+            .try_into()
+            .unwrap();
+        assert_eq!(
+            &signed_bytes[1 + super::SOLANA_SIGNATURE_BYTES..],
+            message_bytes.as_slice()
+        );
+
+        let seed_bytes = bs58::decode(TEST_NEAR_ED25519_SEED)
+            .into_vec()
+            .unwrap();
+        let seed: [u8; 32] = seed_bytes.as_slice().try_into().unwrap();
+        let verifying_key = ed25519_dalek::SigningKey::from_bytes(&seed).verifying_key();
+        let signature = ed25519_dalek::Signature::from_bytes(&sig_bytes);
+        verifying_key
+            .verify(&message_bytes, &signature)
+            .expect("ed25519 signature must verify against the message bytes");
+    }
+
+    #[test]
+    fn test_inject_host_credentials_solana_rejects_empty_message() {
+        let err = solana_call(
+            "_signing.message_b64",
+            serde_json::json!({"_signing": {"message_b64": ""}}),
+        )
+        .expect_err("empty message must be rejected");
+        assert!(err.to_string().contains("empty"), "got: {err}");
+    }
+
+    #[test]
+    fn test_inject_host_credentials_solana_rejects_oversized_message() {
+        use base64::engine::general_purpose::STANDARD as B64;
+        let oversized = vec![0u8; super::SOLANA_MAX_PACKET_BYTES];
+        let err = solana_call(
+            "_signing.message_b64",
+            serde_json::json!({"_signing": {"message_b64": B64.encode(&oversized)}}),
+        )
+        .expect_err("oversized message must be rejected");
+        assert!(err.to_string().contains("packet limit"), "got: {err}");
+    }
+
+    #[test]
+    fn test_inject_host_credentials_solana_rejects_missing_message_path() {
+        let err = solana_call(
+            "_signing.message_b64",
+            serde_json::json!({"params": []}),
+        )
+        .expect_err("missing path must be rejected");
+        assert!(err.to_string().contains("not found"), "got: {err}");
+    }
+
+    #[test]
+    fn test_inject_host_credentials_solana_rejects_non_string_at_path() {
+        let err = solana_call(
+            "_signing.message_b64",
+            serde_json::json!({"_signing": {"message_b64": 12345}}),
+        )
+        .expect_err("non-string at path must be rejected");
+        assert!(err.to_string().contains("not a string"), "got: {err}");
+    }
+
+    #[test]
+    fn test_solana_signed_tx_base64_rejected_in_eip712_signer() {
+        use crate::secrets::BodyValue;
+        let evaluated = super::EvaluatedSignature {
+            signer_address: String::new(),
+            signer_public_key: String::new(),
+            signature_hex: String::new(),
+            signature_b64: String::new(),
+            signature_r_hex: String::new(),
+            signature_s_hex: String::new(),
+            signature_v: 0,
+            timestamp_secs: 0,
+            nonce_bytes: [0u8; 32],
+        };
+        let err =
+            super::evaluate_body_value(&BodyValue::SolanaSignedTransactionBase64, &evaluated)
+                .expect_err("eip712 signer must reject solana-only output type");
+        assert!(err.to_string().contains("solana"), "got: {err}");
+    }
+
+    #[test]
+    fn test_solana_signer_rejects_ecdsa_rsv_outputs() {
+        use crate::secrets::{BodyJsonOutput, BodyValue};
+        use base64::engine::general_purpose::STANDARD as B64;
+
+        let bad_output = BodyJsonOutput {
+            json_path: "params.0".to_string(),
+            value: BodyValue::SignatureRHex,
+        };
+        let mut spec = solana_signing_at("_signing.message_b64");
+        spec.output_body_fields = vec![bad_output];
+
+        let body = serde_json::json!({
+            "_signing": {"message_b64": B64.encode([0u8; 32])}
+        });
+        let err = super::apply_solana_signing(
+            &spec,
+            TEST_NEAR_ED25519_SEED,
+            Some(serde_json::to_vec(&body).unwrap().as_slice()),
+            0,
+            &[0u8; 32],
+        )
+        .expect_err("solana signer must reject ecdsa r/s/v outputs");
+        assert!(err.to_string().contains("ecdsa"), "got: {err}");
     }
 
     fn hyperliquid_agent_signing() -> super::Eip712Signing {
