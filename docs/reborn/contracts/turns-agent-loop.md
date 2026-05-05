@@ -91,6 +91,8 @@ Rules:
 - memory prompt context uses the same tenant/user/project/agent scope;
 - channel metadata does not grant authority by itself.
 
+Adapter-facing `TurnCoordinator` requests carry canonical scope plus durable references only: accepted-message ref, source/reply binding refs, actor metadata, requested run-profile hint, scoped idempotency key, and `received_at`. Submit responses expose redacted metadata including run status, event cursor, accepted-message ref, reply-target binding ref, and resolved run-profile id+version; scoped run-state reads additionally expose the source binding ref. Trusted runner transition APIs stay behind the explicit `ironclaw_turns::runner` surface rather than the adapter prelude.
+
 ---
 
 ## 4. Turn lifecycle

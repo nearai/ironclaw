@@ -68,10 +68,9 @@ where
         &self,
         request: SubmitTurnRequest,
     ) -> Result<SubmitTurnResponse, TurnError> {
-        self.admission_policy
-            .check_submit(&request)
-            .map_err(TurnError::AdmissionRejected)?;
-        self.store.submit_turn(request).await
+        self.store
+            .submit_turn(request, self.admission_policy.as_ref())
+            .await
     }
 
     async fn resume_turn(

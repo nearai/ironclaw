@@ -21,15 +21,18 @@ pub use coordinator::{
 };
 pub use events::{InMemoryTurnEventSink, TurnEventKind, TurnEventSink, TurnLifecycleEvent};
 pub use ids::{
-    AcceptedMessageRef, GateRef, IdempotencyKey, ReplyTargetBindingRef, SourceBindingRef,
-    TurnCheckpointId, TurnId, TurnLeaseToken, TurnRunId, TurnRunnerId,
+    AcceptedMessageRef, GateRef, IdempotencyKey, ReplyTargetBindingRef, RunProfileId,
+    RunProfileRequest, RunProfileVersion, SourceBindingRef, TurnCheckpointId, TurnId,
+    TurnLeaseToken, TurnRunId, TurnRunnerId,
 };
 pub use memory::InMemoryTurnStateStore;
-pub use request::{CancelRunRequest, GetRunStateRequest, ResumeTurnRequest, SubmitTurnRequest};
+pub use request::{
+    CancelRunRequest, GetRunStateRequest, ResumeTurnRequest, SubmitTurnRequest, TurnTimestamp,
+};
 pub use response::{CancelRunResponse, ResumeTurnResponse, SubmitTurnResponse, ThreadBusy};
 pub use scope::{TurnActor, TurnScope};
 pub use status::{
-    AdmissionRejection, BlockedReason, SanitizedCancelReason, SanitizedFailure, TurnError,
-    TurnRunProfile, TurnRunState, TurnStatus,
+    AdmissionRejection, AdmissionRejectionReason, BlockedReason, SanitizedCancelReason,
+    SanitizedFailure, TurnError, TurnErrorCategory, TurnRunProfile, TurnRunState, TurnStatus,
 };
 pub use store::TurnStateStore;

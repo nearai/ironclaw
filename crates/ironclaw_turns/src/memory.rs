@@ -6,11 +6,11 @@ use std::{
 };
 
 use crate::{
-    CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef,
-    ResumeTurnRequest, ResumeTurnResponse, SanitizedFailure, SourceBindingRef, SubmitTurnRequest,
-    SubmitTurnResponse, ThreadBusy, TurnActor, TurnCheckpointId, TurnError, TurnEventKind,
-    TurnLifecycleEvent, TurnRunId, TurnRunProfile, TurnRunState, TurnScope, TurnStateStore,
-    TurnStatus,
+    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey,
+    ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, SanitizedFailure,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
+    TurnAdmissionPolicy, TurnCheckpointId, TurnError, TurnEventKind, TurnLifecycleEvent, TurnRunId,
+    TurnRunProfile, TurnRunState, TurnScope, TurnStateStore, TurnStatus,
     events::EventCursor,
     runner::{
         BlockRunRequest, ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest,
@@ -48,6 +48,7 @@ struct RunRecord {
     run_id: TurnRunId,
     status: TurnStatus,
     profile: TurnRunProfile,
+    accepted_message_ref: AcceptedMessageRef,
     source_binding_ref: SourceBindingRef,
     reply_target_binding_ref: ReplyTargetBindingRef,
     checkpoint_id: Option<TurnCheckpointId>,
@@ -56,6 +57,7 @@ struct RunRecord {
     event_cursor: EventCursor,
     runner_id: Option<crate::TurnRunnerId>,
     lease_token: Option<crate::TurnLeaseToken>,
+    received_at: crate::TurnTimestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -93,7 +95,7 @@ impl InMemoryTurnStateStore {
     }
 
     fn lock_inner(&self) -> Result<MutexGuard<'_, Inner>, TurnError> {
-        self.inner.lock().map_err(|_| TurnError::Backend {
+        self.inner.lock().map_err(|_| TurnError::Unavailable {
             reason: "turn state store mutex poisoned".to_string(),
         })
     }
@@ -104,6 +106,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
     async fn submit_turn(
         &self,
         request: SubmitTurnRequest,
+        admission_policy: &dyn TurnAdmissionPolicy,
     ) -> Result<SubmitTurnResponse, TurnError> {
         let mut inner = self.lock_inner()?;
         let idempotency_key = SubmitIdempotencyKey {
@@ -112,6 +115,15 @@ impl TurnStateStore for InMemoryTurnStateStore {
         };
         if let Some(result) = inner.submit_idempotency.get(&idempotency_key) {
             return result.clone();
+        }
+
+        if let Err(rejection) = admission_policy.check_submit(&request) {
+            let response = Err(TurnError::AdmissionRejected(rejection));
+            inner
+                .submit_idempotency
+                .insert(idempotency_key, response.clone());
+            inner.prune_idempotency_records();
+            return response;
         }
 
         let lock_key = TurnLockKey::from(&request.scope);
@@ -129,13 +141,15 @@ impl TurnStateStore for InMemoryTurnStateStore {
         let turn_id = crate::TurnId::new();
         let run_id = TurnRunId::new();
         let cursor = inner.next_cursor();
+        let profile = TurnRunProfile::resolve(request.requested_run_profile.as_ref());
         let record = RunRecord {
             scope: request.scope.clone(),
             actor: request.actor,
             turn_id,
             run_id,
             status: TurnStatus::Queued,
-            profile: request.profile.clone(),
+            profile: profile.clone(),
+            accepted_message_ref: request.accepted_message_ref.clone(),
             source_binding_ref: request.source_binding_ref,
             reply_target_binding_ref: request.reply_target_binding_ref.clone(),
             checkpoint_id: None,
@@ -144,6 +158,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
             event_cursor: cursor,
             runner_id: None,
             lease_token: None,
+            received_at: request.received_at,
         };
         inner.active_locks.insert(lock_key, run_id);
         inner.queued_runs.push_back(run_id);
@@ -154,8 +169,10 @@ impl TurnStateStore for InMemoryTurnStateStore {
             turn_id,
             run_id,
             status: TurnStatus::Queued,
-            profile: request.profile,
+            resolved_run_profile_id: profile.id,
+            resolved_run_profile_version: profile.version,
             event_cursor: cursor,
+            accepted_message_ref: request.accepted_message_ref,
             reply_target_binding_ref: request.reply_target_binding_ref,
         });
         inner
@@ -214,7 +231,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
             .get(&request.run_id)
             .filter(|record| record.scope == request.scope)
             .map(RunRecord::state)
-            .ok_or(TurnError::NotFound)
+            .ok_or(TurnError::ScopeNotFound)
     }
 }
 
@@ -333,7 +350,7 @@ impl Inner {
     }
 
     fn take_record(&mut self, run_id: TurnRunId) -> Result<RunRecord, TurnError> {
-        self.records.remove(&run_id).ok_or(TurnError::NotFound)
+        self.records.remove(&run_id).ok_or(TurnError::ScopeNotFound)
     }
 
     fn pop_matching_queued_run(&mut self, scope_filter: Option<&TurnScope>) -> Option<TurnRunId> {
@@ -366,7 +383,7 @@ impl Inner {
         let mut record = self.take_record(request.run_id)?;
         let result = (|| {
             if record.scope != request.scope {
-                return Err(TurnError::NotFound);
+                return Err(TurnError::ScopeNotFound);
             }
             if !matches!(
                 record.status,
@@ -378,10 +395,12 @@ impl Inner {
                 });
             }
             if record.gate_ref.as_ref() != Some(&request.gate_resolution_ref) {
-                return Err(TurnError::NotFound);
+                return Err(TurnError::ScopeNotFound);
             }
             record.status = TurnStatus::Queued;
             record.gate_ref = None;
+            record.source_binding_ref = request.source_binding_ref.clone();
+            record.reply_target_binding_ref = request.reply_target_binding_ref.clone();
             record.event_cursor = self.next_cursor();
             self.queued_runs.push_back(record.run_id);
             let response = ResumeTurnResponse {
@@ -403,7 +422,7 @@ impl Inner {
         let mut record = self.take_record(request.run_id)?;
         let result = (|| {
             if record.scope != request.scope {
-                return Err(TurnError::NotFound);
+                return Err(TurnError::ScopeNotFound);
             }
             if record.status.is_terminal() {
                 return Ok(CancelRunResponse {
@@ -535,9 +554,12 @@ impl RunRecord {
             turn_id: self.turn_id,
             run_id: self.run_id,
             status: self.status,
-            profile: self.profile.clone(),
+            accepted_message_ref: self.accepted_message_ref.clone(),
             source_binding_ref: self.source_binding_ref.clone(),
             reply_target_binding_ref: self.reply_target_binding_ref.clone(),
+            resolved_run_profile_id: self.profile.id.clone(),
+            resolved_run_profile_version: self.profile.version,
+            received_at: self.received_at,
             checkpoint_id: self.checkpoint_id,
             gate_ref: self.gate_ref.clone(),
             failure: self.failure.clone(),

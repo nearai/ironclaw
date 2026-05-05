@@ -1,13 +1,18 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
+use chrono::{DateTime, TimeZone, Utc};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
-    AcceptedMessageRef, AdmissionRejection, BlockedReason, CancelRunRequest,
-    DefaultTurnCoordinator, GateRef, GetRunStateRequest, IdempotencyKey, InMemoryTurnEventSink,
-    InMemoryTurnStateStore, ReplyTargetBindingRef, ResumeTurnRequest, SanitizedCancelReason,
-    SanitizedFailure, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
-    TurnActor, TurnAdmissionPolicy, TurnCheckpointId, TurnCoordinator, TurnError, TurnEventKind,
-    TurnEventSink, TurnLeaseToken, TurnLifecycleEvent, TurnRunId, TurnRunProfile, TurnRunnerId,
+    AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, BlockedReason,
+    CancelRunRequest, DefaultTurnCoordinator, GateRef, GetRunStateRequest, IdempotencyKey,
+    InMemoryTurnEventSink, InMemoryTurnStateStore, ReplyTargetBindingRef, ResumeTurnRequest,
+    RunProfileRequest, RunProfileVersion, SanitizedCancelReason, SanitizedFailure,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
+    TurnAdmissionPolicy, TurnCheckpointId, TurnCoordinator, TurnError, TurnErrorCategory,
+    TurnEventKind, TurnEventSink, TurnLeaseToken, TurnLifecycleEvent, TurnRunId, TurnRunnerId,
     TurnScope, TurnStatus,
     events::EventCursor,
     runner::{
@@ -27,12 +32,16 @@ async fn submit_turn_accepts_only_canonical_refs_and_returns_redacted_metadata()
         turn_id: _,
         run_id,
         status,
-        profile,
+        resolved_run_profile_id,
+        resolved_run_profile_version,
         event_cursor,
+        accepted_message_ref,
         reply_target_binding_ref,
     } = response;
     assert_eq!(status, TurnStatus::Queued);
-    assert_eq!(profile.profile_name, "default");
+    assert_eq!(resolved_run_profile_id.as_str(), "default");
+    assert_eq!(resolved_run_profile_version, RunProfileVersion::new(1));
+    assert_eq!(accepted_message_ref, request.accepted_message_ref);
     assert_eq!(reply_target_binding_ref, request.reply_target_binding_ref);
     assert_eq!(event_cursor.0, 1);
 
@@ -44,9 +53,47 @@ async fn submit_turn_accepts_only_canonical_refs_and_returns_redacted_metadata()
         .await
         .unwrap();
     assert_eq!(state.status, TurnStatus::Queued);
+    assert_eq!(state.accepted_message_ref.as_str(), "message-thread-a");
     assert_eq!(state.source_binding_ref.as_str(), "source-web");
     assert_eq!(state.reply_target_binding_ref.as_str(), "reply-web");
+    assert_eq!(state.resolved_run_profile_id.as_str(), "default");
+    assert_eq!(
+        state.resolved_run_profile_version,
+        RunProfileVersion::new(1)
+    );
+    assert_eq!(state.received_at, received_at());
     assert_eq!(state.failure, None);
+}
+
+#[tokio::test]
+async fn requested_run_profile_is_a_hint_not_resolved_authority() {
+    let (coordinator, _store) = coordinator();
+    let mut request = submit_request("thread-a", "idem-profile-hint");
+    request.requested_run_profile = Some(RunProfileRequest::new("experimental-fast-lane").unwrap());
+
+    let response = coordinator.submit_turn(request.clone()).await.unwrap();
+
+    let SubmitTurnResponse::Accepted {
+        run_id,
+        resolved_run_profile_id,
+        resolved_run_profile_version,
+        ..
+    } = response;
+    assert_eq!(resolved_run_profile_id.as_str(), "default");
+    assert_eq!(resolved_run_profile_version, RunProfileVersion::new(1));
+
+    let state = coordinator
+        .get_run_state(GetRunStateRequest {
+            scope: request.scope,
+            run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(state.resolved_run_profile_id.as_str(), "default");
+    assert_eq!(
+        state.resolved_run_profile_version,
+        RunProfileVersion::new(1)
+    );
 }
 
 #[tokio::test]
@@ -67,7 +114,7 @@ async fn same_thread_active_run_returns_busy_but_different_threads_run_independe
         TurnError::ThreadBusy(ThreadBusy {
             active_run_id,
             status: TurnStatus::Queued,
-            ..
+            event_cursor: EventCursor(1),
         }) if active_run_id == first_run_id
     ));
 
@@ -135,6 +182,39 @@ async fn transient_busy_submit_is_not_cached_after_thread_unlocks() {
 }
 
 #[tokio::test]
+async fn submit_turn_idempotency_replays_before_policy_is_rechecked() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let coordinator = DefaultTurnCoordinator::new(store)
+        .with_admission_policy(Arc::new(AllowFirstThenDeny::default()));
+    let request = submit_request("thread-a", "idem-submit-a");
+
+    let first = coordinator.submit_turn(request.clone()).await.unwrap();
+    let duplicate = coordinator.submit_turn(request).await.unwrap();
+
+    assert_eq!(duplicate, first);
+}
+
+#[tokio::test]
+async fn submit_turn_idempotency_replays_same_admission_rejection() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let coordinator = DefaultTurnCoordinator::new(store.clone())
+        .with_admission_policy(Arc::new(DenyFirstThenAllow::default()));
+    let request = submit_request("thread-a", "idem-submit-rejected");
+
+    let first = coordinator.submit_turn(request.clone()).await.unwrap_err();
+    let duplicate = coordinator.submit_turn(request).await.unwrap_err();
+
+    assert_eq!(duplicate, first);
+    assert_eq!(
+        duplicate,
+        TurnError::AdmissionRejected(AdmissionRejection::new(
+            AdmissionRejectionReason::TenantLimit
+        ))
+    );
+    assert!(store.events().is_empty());
+}
+
+#[tokio::test]
 async fn submit_turn_idempotency_is_scoped_to_canonical_thread() {
     let (coordinator, _store) = coordinator();
     let first = coordinator
@@ -167,7 +247,9 @@ async fn get_run_state_wrong_scope_returns_not_found_without_leaking_existence()
         .await
         .unwrap_err();
 
-    assert_eq!(err, TurnError::NotFound);
+    assert_eq!(err, TurnError::ScopeNotFound);
+    assert_eq!(err.category(), TurnErrorCategory::ScopeNotFound);
+    assert_eq!(err.adapter_status_code(), 404);
 }
 
 #[tokio::test]
@@ -181,9 +263,28 @@ async fn admission_policy_rejection_is_typed_and_does_not_create_run() {
 
     assert_eq!(
         err,
-        TurnError::AdmissionRejected(AdmissionRejection::new("tenant_limit"))
+        TurnError::AdmissionRejected(AdmissionRejection::new(
+            AdmissionRejectionReason::TenantLimit
+        ))
     );
+    assert!(err.is_expected_admission_outcome());
+    assert_eq!(err.category(), TurnErrorCategory::AdmissionRejected);
+    assert_eq!(err.adapter_status_code(), 429);
     assert!(store.events().is_empty());
+    assert_eq!(
+        TurnError::AdmissionRejected(AdmissionRejection::new(
+            AdmissionRejectionReason::Unauthorized
+        ))
+        .adapter_status_code(),
+        403
+    );
+    assert_eq!(
+        TurnError::AdmissionRejected(AdmissionRejection::new(
+            AdmissionRejectionReason::Unavailable
+        ))
+        .adapter_status_code(),
+        503
+    );
     assert_eq!(
         coordinator
             .get_run_state(GetRunStateRequest {
@@ -192,7 +293,7 @@ async fn admission_policy_rejection_is_typed_and_does_not_create_run() {
             })
             .await
             .unwrap_err(),
-        TurnError::NotFound
+        TurnError::ScopeNotFound
     );
 }
 
@@ -286,16 +387,23 @@ async fn blocked_run_persists_checkpoint_and_keeps_same_thread_lock_until_resume
         .unwrap_err();
     assert!(matches!(busy, TurnError::ThreadBusy(_)));
 
+    let resume_request = ResumeTurnRequest {
+        scope: scope("thread-a"),
+        actor: actor(),
+        run_id,
+        gate_resolution_ref: gate_ref,
+        source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
+        idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
+    };
     let resumed = coordinator
-        .resume_turn(ResumeTurnRequest {
-            scope: scope("thread-a"),
-            actor: actor(),
-            run_id,
-            gate_resolution_ref: gate_ref,
-            idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
-        })
+        .resume_turn(resume_request.clone())
         .await
         .unwrap();
+    let event_count_after_resume = store.events().len();
+    let duplicate = coordinator.resume_turn(resume_request).await.unwrap();
+    assert_eq!(duplicate, resumed);
+    assert_eq!(store.events().len(), event_count_after_resume);
     assert_eq!(resumed.status, TurnStatus::Queued);
 }
 
@@ -426,6 +534,8 @@ fn bounded_refs_validate_during_deserialization() {
     assert!(serde_json::from_str::<AcceptedMessageRef>("\"message-ok\"").is_ok());
     assert!(serde_json::from_str::<AcceptedMessageRef>("\"\"").is_err());
     assert!(serde_json::from_str::<SourceBindingRef>("\"source\\nsecret\"").is_err());
+    assert!(serde_json::from_str::<RunProfileRequest>("\"default\"").is_ok());
+    assert!(serde_json::from_str::<RunProfileRequest>("\"profile\\nsecret\"").is_err());
     let oversized = format!("\"{}\"", "x".repeat(257));
     assert!(serde_json::from_str::<GateRef>(&oversized).is_err());
 }
@@ -526,9 +636,14 @@ fn submit_request(thread: &str, idempotency_key: &str) -> SubmitTurnRequest {
         accepted_message_ref: AcceptedMessageRef::new(format!("message-{thread}")).unwrap(),
         source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
         reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
-        profile: TurnRunProfile::new("default"),
+        requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
         idempotency_key: IdempotencyKey::new(idempotency_key).unwrap(),
+        received_at: received_at(),
     }
+}
+
+fn received_at() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 5, 5, 12, 0, 0).unwrap()
 }
 
 fn cancel_request(thread: &str, run_id: TurnRunId, idempotency_key: &str) -> CancelRunRequest {
@@ -559,10 +674,46 @@ fn actor() -> TurnActor {
     TurnActor::new(UserId::new("user1").unwrap())
 }
 
+#[derive(Default)]
+struct AllowFirstThenDeny {
+    calls: AtomicUsize,
+}
+
+impl TurnAdmissionPolicy for AllowFirstThenDeny {
+    fn check_submit(&self, _request: &SubmitTurnRequest) -> Result<(), AdmissionRejection> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            Ok(())
+        } else {
+            Err(AdmissionRejection::new(
+                AdmissionRejectionReason::TenantLimit,
+            ))
+        }
+    }
+}
+
+#[derive(Default)]
+struct DenyFirstThenAllow {
+    calls: AtomicUsize,
+}
+
+impl TurnAdmissionPolicy for DenyFirstThenAllow {
+    fn check_submit(&self, _request: &SubmitTurnRequest) -> Result<(), AdmissionRejection> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            Err(AdmissionRejection::new(
+                AdmissionRejectionReason::TenantLimit,
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
 struct DenyAll;
 
 impl TurnAdmissionPolicy for DenyAll {
     fn check_submit(&self, _request: &SubmitTurnRequest) -> Result<(), AdmissionRejection> {
-        Err(AdmissionRejection::new("tenant_limit"))
+        Err(AdmissionRejection::new(
+            AdmissionRejectionReason::TenantLimit,
+        ))
     }
 }
