@@ -1,0 +1,189 @@
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+use crate::{
+    GateRef, ReplyTargetBindingRef, SourceBindingRef, TurnCheckpointId, TurnId, TurnRunId,
+    TurnScope, events::EventCursor,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TurnStatus {
+    Queued,
+    Running,
+    BlockedApproval,
+    BlockedAuth,
+    BlockedResource,
+    CancelRequested,
+    Cancelled,
+    Completed,
+    Failed,
+    RecoveryRequired,
+}
+
+impl TurnStatus {
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Cancelled | Self::Completed | Self::Failed)
+    }
+
+    pub fn keeps_active_lock(self) -> bool {
+        !self.is_terminal()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnRunProfile {
+    pub profile_name: String,
+    pub allow_steering: bool,
+    pub auto_queue_followups: bool,
+}
+
+impl TurnRunProfile {
+    pub fn new(profile_name: impl Into<String>) -> Self {
+        Self {
+            profile_name: profile_name.into(),
+            allow_steering: false,
+            auto_queue_followups: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BlockedReason {
+    Approval { gate_ref: GateRef },
+    Auth { gate_ref: GateRef },
+    Resource { gate_ref: GateRef },
+}
+
+impl BlockedReason {
+    pub fn status(&self) -> TurnStatus {
+        match self {
+            Self::Approval { .. } => TurnStatus::BlockedApproval,
+            Self::Auth { .. } => TurnStatus::BlockedAuth,
+            Self::Resource { .. } => TurnStatus::BlockedResource,
+        }
+    }
+
+    pub fn gate_ref(&self) -> &GateRef {
+        match self {
+            Self::Approval { gate_ref } | Self::Auth { gate_ref } | Self::Resource { gate_ref } => {
+                gate_ref
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SanitizedFailure {
+    category: String,
+}
+
+impl SanitizedFailure {
+    pub fn new(category: impl Into<String>) -> Result<Self, String> {
+        let category = category.into();
+        validate_sanitized_category("failure_category", &category)?;
+        Ok(Self { category })
+    }
+
+    pub fn category(&self) -> &str {
+        &self.category
+    }
+
+    pub fn into_category(self) -> String {
+        self.category
+    }
+}
+
+impl<'de> Deserialize<'de> for SanitizedFailure {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireFailure {
+            category: String,
+        }
+
+        let wire = WireFailure::deserialize(deserializer)?;
+        Self::new(wire.category).map_err(serde::de::Error::custom)
+    }
+}
+
+fn validate_sanitized_category(kind: &'static str, value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err(format!("{kind} must not be empty"));
+    }
+    if value.len() > 256 {
+        return Err(format!("{kind} must be at most 256 bytes"));
+    }
+    if value.chars().any(|c| c == '\0' || c.is_control()) {
+        return Err(format!("{kind} must not contain control characters"));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SanitizedCancelReason {
+    UserRequested,
+    Superseded,
+    Timeout,
+    OperatorRequested,
+    Policy,
+}
+
+impl SanitizedCancelReason {
+    pub fn category(self) -> &'static str {
+        match self {
+            Self::UserRequested => "user_requested",
+            Self::Superseded => "superseded",
+            Self::Timeout => "timeout",
+            Self::OperatorRequested => "operator_requested",
+            Self::Policy => "policy",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionRejection {
+    pub reason: String,
+    pub retry_after_ms: Option<u64>,
+}
+
+impl AdmissionRejection {
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            retry_after_ms: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnRunState {
+    pub scope: TurnScope,
+    pub turn_id: TurnId,
+    pub run_id: TurnRunId,
+    pub status: TurnStatus,
+    pub profile: TurnRunProfile,
+    pub source_binding_ref: SourceBindingRef,
+    pub reply_target_binding_ref: ReplyTargetBindingRef,
+    pub checkpoint_id: Option<TurnCheckpointId>,
+    pub gate_ref: Option<GateRef>,
+    pub failure: Option<SanitizedFailure>,
+    pub event_cursor: EventCursor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum TurnError {
+    #[error("thread already has an active run")]
+    ThreadBusy(crate::response::ThreadBusy),
+    #[error("turn admission rejected: {0:?}")]
+    AdmissionRejected(AdmissionRejection),
+    #[error("turn run not found")]
+    NotFound,
+    #[error("invalid turn transition from {from:?} to {to:?}")]
+    InvalidTransition { from: TurnStatus, to: TurnStatus },
+    #[error("turn run lease mismatch")]
+    LeaseMismatch,
+    #[error("turn backend error: {reason}")]
+    Backend { reason: String },
+}
