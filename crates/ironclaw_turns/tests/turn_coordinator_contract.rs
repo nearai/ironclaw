@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
         mpsc,
     },
@@ -16,8 +16,9 @@ use ironclaw_turns::{
     ReplyTargetBindingRef, ResumeTurnRequest, RunProfileRequest, RunProfileVersion,
     SanitizedCancelReason, SanitizedFailure, SourceBindingRef, SubmitTurnRequest,
     SubmitTurnResponse, ThreadBusy, TurnActor, TurnAdmissionPolicy, TurnCheckpointId,
-    TurnCoordinator, TurnError, TurnErrorCategory, TurnEventKind, TurnEventSink, TurnLeaseToken,
-    TurnLifecycleEvent, TurnRunId, TurnRunnerId, TurnScope, TurnStatus,
+    TurnCoordinator, TurnError, TurnErrorCategory, TurnEventKind, TurnEventSink,
+    TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnLeaseToken, TurnLifecycleEvent,
+    TurnLockVersion, TurnRunId, TurnRunnerId, TurnScope, TurnStatus,
     events::EventCursor,
     runner::{
         BlockRunRequest, CancelRunCompletionRequest, ClaimRunRequest, CompleteRunRequest,
@@ -130,21 +131,86 @@ async fn same_thread_active_run_returns_busy_but_different_threads_run_independe
 }
 
 #[tokio::test]
-async fn submit_turn_idempotency_replays_same_success_result() {
+async fn submit_turn_persistence_snapshot_has_atomic_success_artifacts() {
+    let (coordinator, store) = coordinator();
+    let request = submit_request("thread-a", "idem-submit-a");
+
+    let response = coordinator.submit_turn(request.clone()).await.unwrap();
+    let SubmitTurnResponse::Accepted {
+        turn_id,
+        run_id,
+        status,
+        event_cursor,
+        ..
+    } = response;
+
+    let snapshot = store.persistence_snapshot();
+    assert_eq!(snapshot.turns.len(), 1);
+    assert_eq!(snapshot.runs.len(), 1);
+    assert_eq!(snapshot.active_locks.len(), 1);
+    assert_eq!(snapshot.checkpoints.len(), 0);
+    assert_eq!(snapshot.idempotency_records.len(), 1);
+
+    let turn = &snapshot.turns[0];
+    assert_eq!(turn.turn_id, turn_id);
+    assert_eq!(turn.scope, request.scope);
+    assert_eq!(turn.actor, request.actor);
+    assert_eq!(turn.accepted_message_ref, request.accepted_message_ref);
+    assert_eq!(turn.source_binding_ref, request.source_binding_ref);
+    assert_eq!(
+        turn.reply_target_binding_ref,
+        request.reply_target_binding_ref
+    );
+    assert_eq!(turn.created_at, request.received_at);
+
+    let run = &snapshot.runs[0];
+    assert_eq!(run.run_id, run_id);
+    assert_eq!(run.turn_id, turn_id);
+    assert_eq!(run.status, status);
+    assert_eq!(run.event_cursor, event_cursor);
+    assert_eq!(run.claim_count, 0);
+    assert_eq!(run.runner_id, None);
+    assert_eq!(run.lease_token, None);
+
+    let lock = &snapshot.active_locks[0];
+    assert_eq!(lock.key.scope, request.scope);
+    assert_eq!(lock.run_id, run_id);
+    assert_eq!(lock.status, TurnStatus::Queued);
+    assert_eq!(lock.lock_version, TurnLockVersion::new(1));
+    assert_eq!(lock.acquired_at, request.received_at);
+    assert_eq!(lock.updated_at, request.received_at);
+
+    let idempotency = &snapshot.idempotency_records[0];
+    assert_eq!(idempotency.scope, request.scope);
+    assert_eq!(idempotency.operation, TurnIdempotencyOperationKind::Submit);
+    assert_eq!(idempotency.key, request.idempotency_key);
+    assert_eq!(idempotency.turn_id, Some(turn_id));
+    assert_eq!(idempotency.run_id, Some(run_id));
+    assert_eq!(idempotency.outcome, TurnIdempotencyOutcomeKind::Accepted);
+    assert_eq!(idempotency.created_at, request.received_at);
+}
+
+#[tokio::test]
+async fn same_thread_lock_excludes_actor_identity() {
     let (coordinator, _store) = coordinator();
     let first = coordinator
         .submit_turn(submit_request("thread-a", "idem-submit-a"))
         .await
         .unwrap();
-    let duplicate = coordinator
-        .submit_turn(submit_request("thread-a", "idem-submit-a"))
-        .await
-        .unwrap();
-    assert_eq!(duplicate, first);
+    let first_run_id = accepted_run_id(&first);
+    let mut second_actor = submit_request("thread-a", "idem-submit-b");
+    second_actor.actor = TurnActor::new(UserId::new("user2").unwrap());
+
+    let busy = coordinator.submit_turn(second_actor).await.unwrap_err();
+
+    assert!(matches!(
+        busy,
+        TurnError::ThreadBusy(ThreadBusy { active_run_id, .. }) if active_run_id == first_run_id
+    ));
 }
 
 #[tokio::test]
-async fn transient_busy_submit_is_not_cached_after_thread_unlocks() {
+async fn submit_turn_busy_path_records_idempotent_thread_busy_without_new_run() {
     let (coordinator, store) = coordinator();
     let first_run_id = accepted_run_id(
         &coordinator
@@ -153,13 +219,31 @@ async fn transient_busy_submit_is_not_cached_after_thread_unlocks() {
             .unwrap(),
     );
     let busy_request = submit_request("thread-a", "idem-submit-b");
-    assert!(matches!(
-        coordinator
-            .submit_turn(busy_request.clone())
-            .await
-            .unwrap_err(),
-        TurnError::ThreadBusy(_)
-    ));
+
+    let busy = coordinator
+        .submit_turn(busy_request.clone())
+        .await
+        .unwrap_err();
+
+    let snapshot = store.persistence_snapshot();
+    assert_eq!(snapshot.turns.len(), 1);
+    assert_eq!(snapshot.runs.len(), 1);
+    let busy_idempotency = snapshot
+        .idempotency_records
+        .iter()
+        .find(|record| record.key == busy_request.idempotency_key)
+        .expect("busy submit idempotency result must be recorded");
+    assert_eq!(
+        busy_idempotency.operation,
+        TurnIdempotencyOperationKind::Submit
+    );
+    assert_eq!(busy_idempotency.turn_id, None);
+    assert_eq!(busy_idempotency.run_id, Some(first_run_id));
+    assert_eq!(
+        busy_idempotency.outcome,
+        TurnIdempotencyOutcomeKind::ThreadBusy
+    );
+    assert_eq!(busy_idempotency.created_at, busy_request.received_at);
 
     let runner_id = TurnRunnerId::new();
     let lease_token = TurnLeaseToken::new();
@@ -181,8 +265,300 @@ async fn transient_busy_submit_is_not_cached_after_thread_unlocks() {
         .await
         .unwrap();
 
-    let accepted_after_unlock = coordinator.submit_turn(busy_request).await.unwrap();
-    assert_ne!(accepted_run_id(&accepted_after_unlock), first_run_id);
+    let duplicate = coordinator.submit_turn(busy_request).await.unwrap_err();
+    assert_eq!(duplicate, busy);
+    assert_eq!(store.persistence_snapshot().turns.len(), 1);
+}
+
+#[tokio::test]
+async fn runner_claim_and_block_update_persistent_run_lock_and_checkpoint_records() {
+    let (coordinator, store) = coordinator();
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-a", "idem-submit-a"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    let claimed = store.persistence_snapshot();
+    let run = claimed
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .unwrap();
+    assert_eq!(run.status, TurnStatus::Running);
+    assert_eq!(run.runner_id, Some(runner_id));
+    assert_eq!(run.lease_token, Some(lease_token));
+    assert_eq!(run.claim_count, 1);
+    let lock = claimed
+        .active_locks
+        .iter()
+        .find(|lock| lock.run_id == run_id)
+        .unwrap();
+    assert_eq!(lock.status, TurnStatus::Running);
+    assert_eq!(lock.lock_version, TurnLockVersion::new(2));
+
+    let checkpoint_id = TurnCheckpointId::new();
+    let gate_ref = GateRef::new("approval-gate").unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id,
+            reason: BlockedReason::Approval {
+                gate_ref: gate_ref.clone(),
+            },
+        })
+        .await
+        .unwrap();
+
+    let blocked = store.persistence_snapshot();
+    let run = blocked
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .unwrap();
+    assert_eq!(run.status, TurnStatus::BlockedApproval);
+    assert_eq!(run.checkpoint_id, Some(checkpoint_id));
+    assert_eq!(run.gate_ref, Some(gate_ref.clone()));
+    assert_eq!(run.runner_id, None);
+    assert_eq!(run.lease_token, None);
+    let lock = blocked
+        .active_locks
+        .iter()
+        .find(|lock| lock.run_id == run_id)
+        .unwrap();
+    assert_eq!(lock.status, TurnStatus::BlockedApproval);
+    assert_eq!(lock.lock_version, TurnLockVersion::new(3));
+    assert_eq!(blocked.checkpoints.len(), 1);
+    let checkpoint = &blocked.checkpoints[0];
+    assert_eq!(checkpoint.checkpoint_id, checkpoint_id);
+    assert_eq!(checkpoint.run_id, run_id);
+    assert_eq!(checkpoint.sequence, 1);
+    assert_eq!(checkpoint.gate_ref, gate_ref);
+}
+
+#[tokio::test]
+async fn resume_updates_persisted_run_binding_refs_and_replay_envelope() {
+    let (coordinator, store) = coordinator();
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-a", "idem-submit-a"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let gate_ref = GateRef::new("approval-gate").unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            reason: BlockedReason::Approval {
+                gate_ref: gate_ref.clone(),
+            },
+        })
+        .await
+        .unwrap();
+    let resume_request = ResumeTurnRequest {
+        scope: scope("thread-a"),
+        actor: actor(),
+        run_id,
+        gate_resolution_ref: gate_ref,
+        source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
+        idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
+    };
+
+    let resumed = coordinator
+        .resume_turn(resume_request.clone())
+        .await
+        .unwrap();
+
+    let snapshot = store.persistence_snapshot();
+    let run = snapshot
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .unwrap();
+    assert_eq!(run.source_binding_ref, resume_request.source_binding_ref);
+    assert_eq!(
+        run.reply_target_binding_ref,
+        resume_request.reply_target_binding_ref
+    );
+    let replay_record = snapshot
+        .idempotency_records
+        .iter()
+        .find(|record| record.key == resume_request.idempotency_key)
+        .expect("resume idempotency record must be persisted");
+    assert_eq!(replay_record.replay_resume().unwrap(), Ok(resumed));
+}
+
+#[tokio::test]
+async fn persisted_submit_busy_and_cancel_replay_envelopes_are_reconstructable() {
+    let (coordinator, store) = coordinator();
+    let first_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-a", "idem-submit-a"))
+            .await
+            .unwrap(),
+    );
+    let busy_request = submit_request("thread-a", "idem-submit-b");
+    let busy = coordinator
+        .submit_turn(busy_request.clone())
+        .await
+        .unwrap_err();
+    let cancel = coordinator
+        .cancel_run(cancel_request(
+            "thread-a",
+            first_run_id,
+            "idem-cancel-running-a",
+        ))
+        .await
+        .unwrap();
+
+    let snapshot = store.persistence_snapshot();
+    let busy_record = snapshot
+        .idempotency_records
+        .iter()
+        .find(|record| record.key == busy_request.idempotency_key)
+        .expect("busy submit idempotency record must be persisted");
+    assert_eq!(busy_record.replay_submit().unwrap(), Err(busy));
+    let cancel_record = snapshot
+        .idempotency_records
+        .iter()
+        .find(|record| record.key == IdempotencyKey::new("idem-cancel-running-a").unwrap())
+        .expect("cancel idempotency record must be persisted");
+    assert_eq!(cancel_record.replay_cancel().unwrap(), Ok(cancel));
+}
+
+#[tokio::test]
+async fn submit_turn_idempotency_replays_same_success_result() {
+    let (coordinator, _store) = coordinator();
+    let first = coordinator
+        .submit_turn(submit_request("thread-a", "idem-submit-a"))
+        .await
+        .unwrap();
+    let duplicate = coordinator
+        .submit_turn(submit_request("thread-a", "idem-submit-a"))
+        .await
+        .unwrap();
+    assert_eq!(duplicate, first);
+}
+
+#[tokio::test]
+async fn submit_turn_busy_idempotency_replays_after_thread_unlocks() {
+    let (coordinator, store) = coordinator();
+    let first_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-a", "idem-submit-a"))
+            .await
+            .unwrap(),
+    );
+    let busy_request = submit_request("thread-a", "idem-submit-b");
+    let busy = coordinator
+        .submit_turn(busy_request.clone())
+        .await
+        .unwrap_err();
+    assert!(matches!(busy, TurnError::ThreadBusy(_)));
+
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .complete_run(CompleteRunRequest {
+            run_id: first_run_id,
+            runner_id,
+            lease_token,
+        })
+        .await
+        .unwrap();
+
+    let duplicate_after_unlock = coordinator.submit_turn(busy_request).await.unwrap_err();
+    assert_eq!(duplicate_after_unlock, busy);
+}
+
+#[test]
+fn concurrent_duplicate_submit_waits_for_in_flight_admission_result() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let policy = Arc::new(BlockingAdmissionPolicy {
+        calls: AtomicUsize::new(0),
+        entered: entered_tx,
+        release: Mutex::new(release_rx),
+    });
+
+    let first_store = store.clone();
+    let first_policy = policy.clone();
+    let first = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let coordinator =
+            DefaultTurnCoordinator::new(first_store).with_admission_policy(first_policy);
+        runtime
+            .block_on(coordinator.submit_turn(submit_request("thread-a", "idem-submit-concurrent")))
+    });
+    entered_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("first submit should enter admission policy");
+
+    let second_store = store.clone();
+    let second_policy = policy.clone();
+    let second = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let coordinator =
+            DefaultTurnCoordinator::new(second_store).with_admission_policy(second_policy);
+        runtime
+            .block_on(coordinator.submit_turn(submit_request("thread-a", "idem-submit-concurrent")))
+    });
+
+    std::thread::sleep(Duration::from_millis(50));
+    release_tx
+        .send(())
+        .expect("first submit should still be waiting for admission release");
+
+    let first = first.join().unwrap().unwrap();
+    let second = second.join().unwrap().unwrap();
+    assert_eq!(second, first);
+    assert_eq!(policy.calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -239,6 +615,190 @@ async fn submit_turn_idempotency_replays_same_admission_rejection() {
         ))
     );
     assert!(store.events().is_empty());
+}
+
+#[tokio::test]
+async fn idempotency_persistence_snapshot_retains_each_operation_kind_capacity() {
+    let store = Arc::new(InMemoryTurnStateStore::with_limits(
+        InMemoryTurnStateStoreLimits {
+            max_idempotency_records: 1,
+            ..InMemoryTurnStateStoreLimits::default()
+        },
+    ));
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-a", "idem-submit-a"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let gate_ref = GateRef::new("approval-gate").unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            reason: BlockedReason::Approval {
+                gate_ref: gate_ref.clone(),
+            },
+        })
+        .await
+        .unwrap();
+    coordinator
+        .resume_turn(ResumeTurnRequest {
+            scope: scope("thread-a"),
+            actor: actor(),
+            run_id,
+            gate_resolution_ref: gate_ref,
+            source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
+            idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
+        })
+        .await
+        .unwrap();
+    coordinator
+        .cancel_run(cancel_request("thread-a", run_id, "idem-cancel-a"))
+        .await
+        .unwrap();
+
+    let snapshot = store.persistence_snapshot();
+    assert_eq!(snapshot.idempotency_records.len(), 3);
+    assert!(snapshot.idempotency_records.iter().any(|record| {
+        record.operation == TurnIdempotencyOperationKind::Submit
+            && record.key == IdempotencyKey::new("idem-submit-a").unwrap()
+    }));
+    assert!(snapshot.idempotency_records.iter().any(|record| {
+        record.operation == TurnIdempotencyOperationKind::Resume
+            && record.key == IdempotencyKey::new("idem-resume-a").unwrap()
+    }));
+    assert!(snapshot.idempotency_records.iter().any(|record| {
+        record.operation == TurnIdempotencyOperationKind::Cancel
+            && record.key == IdempotencyKey::new("idem-cancel-a").unwrap()
+    }));
+}
+
+#[tokio::test]
+async fn idempotency_persistence_snapshot_drops_records_when_replay_cache_prunes_them() {
+    let store = Arc::new(InMemoryTurnStateStore::with_limits(
+        InMemoryTurnStateStoreLimits {
+            max_idempotency_records: 1,
+            ..InMemoryTurnStateStoreLimits::default()
+        },
+    ));
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+
+    coordinator
+        .submit_turn(submit_request("thread-a", "idem-submit-a"))
+        .await
+        .unwrap();
+    coordinator
+        .submit_turn(submit_request("thread-b", "idem-submit-b"))
+        .await
+        .unwrap();
+
+    let snapshot = store.persistence_snapshot();
+    assert!(!snapshot.idempotency_records.iter().any(|record| {
+        record.operation == TurnIdempotencyOperationKind::Submit
+            && record.key == IdempotencyKey::new("idem-submit-a").unwrap()
+    }));
+    assert!(snapshot.idempotency_records.iter().any(|record| {
+        record.operation == TurnIdempotencyOperationKind::Submit
+            && record.key == IdempotencyKey::new("idem-submit-b").unwrap()
+    }));
+}
+
+#[tokio::test]
+async fn idempotency_replay_helpers_require_matching_operation_kind() {
+    let (coordinator, store) = coordinator();
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-a", "idem-submit-a"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let gate_ref = GateRef::new("approval-gate").unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            reason: BlockedReason::Approval {
+                gate_ref: gate_ref.clone(),
+            },
+        })
+        .await
+        .unwrap();
+    coordinator
+        .resume_turn(ResumeTurnRequest {
+            scope: scope("thread-a"),
+            actor: actor(),
+            run_id,
+            gate_resolution_ref: gate_ref,
+            source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
+            idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
+        })
+        .await
+        .unwrap();
+    coordinator
+        .cancel_run(cancel_request("thread-a", run_id, "idem-cancel-a"))
+        .await
+        .unwrap();
+
+    let snapshot = store.persistence_snapshot();
+    let submit = snapshot
+        .idempotency_records
+        .iter()
+        .find(|record| record.operation == TurnIdempotencyOperationKind::Submit)
+        .unwrap();
+    assert!(submit.replay_submit().is_some());
+    let mut mislabeled_submit = submit.clone();
+    mislabeled_submit.operation = TurnIdempotencyOperationKind::Cancel;
+    assert!(mislabeled_submit.replay_submit().is_none());
+
+    let resume = snapshot
+        .idempotency_records
+        .iter()
+        .find(|record| record.operation == TurnIdempotencyOperationKind::Resume)
+        .unwrap();
+    assert!(resume.replay_resume().is_some());
+    let mut mislabeled_resume = resume.clone();
+    mislabeled_resume.operation = TurnIdempotencyOperationKind::Submit;
+    assert!(mislabeled_resume.replay_resume().is_none());
+
+    let cancel = snapshot
+        .idempotency_records
+        .iter()
+        .find(|record| record.operation == TurnIdempotencyOperationKind::Cancel)
+        .unwrap();
+    assert!(cancel.replay_cancel().is_some());
+    let mut mislabeled_cancel = cancel.clone();
+    mislabeled_cancel.operation = TurnIdempotencyOperationKind::Resume;
+    assert!(mislabeled_cancel.replay_cancel().is_none());
 }
 
 #[tokio::test]
@@ -767,11 +1327,16 @@ async fn cancelled_running_run_cannot_be_reopened_as_blocked() {
 }
 
 #[tokio::test]
-async fn sanitized_failure_rejects_empty_controlled_or_oversized_categories() {
+async fn sanitized_failure_rejects_empty_controlled_oversized_or_unsanitized_categories() {
     assert!(SanitizedFailure::new("policy").is_ok());
+    assert!(SanitizedFailure::new("policy_timeout").is_ok());
     assert!(SanitizedFailure::new("").is_err());
     assert!(SanitizedFailure::new("backend\nsecret=leaked").is_err());
     assert!(SanitizedFailure::new("x".repeat(257)).is_err());
+    assert!(SanitizedFailure::new("/Users/alice/.ssh/config").is_err());
+    assert!(SanitizedFailure::new("https://internal.example/error").is_err());
+    assert!(SanitizedFailure::new("openai api key sk-test failed").is_err());
+    assert!(SanitizedFailure::new("policy-timeout").is_err());
 }
 
 #[test]
@@ -917,6 +1482,26 @@ fn scope(thread: &str) -> TurnScope {
 
 fn actor() -> TurnActor {
     TurnActor::new(UserId::new("user1").unwrap())
+}
+
+struct BlockingAdmissionPolicy {
+    calls: AtomicUsize,
+    entered: mpsc::Sender<()>,
+    release: Mutex<mpsc::Receiver<()>>,
+}
+
+impl TurnAdmissionPolicy for BlockingAdmissionPolicy {
+    fn check_submit(&self, _request: &SubmitTurnRequest) -> Result<(), AdmissionRejection> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            let _ = self.entered.send(());
+            self.release
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(1))
+                .expect("test should release first admission check");
+        }
+        Ok(())
+    }
 }
 
 struct ReentrantStorePolicy {

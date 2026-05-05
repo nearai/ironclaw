@@ -121,6 +121,14 @@ fn validate_sanitized_category(kind: &'static str, value: &str) -> Result<(), St
     if value.chars().any(|c| c == '\0' || c.is_control()) {
         return Err(format!("{kind} must not contain control characters"));
     }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    {
+        return Err(format!(
+            "{kind} must contain only lowercase ASCII letters, digits, or underscores"
+        ));
+    }
     Ok(())
 }
 
