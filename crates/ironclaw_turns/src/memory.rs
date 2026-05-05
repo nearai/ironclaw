@@ -13,8 +13,8 @@ use crate::{
     TurnStatus,
     events::EventCursor,
     runner::{
-        BlockRunRequest, ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest,
-        HeartbeatRequest, TurnRunTransitionPort,
+        BlockRunRequest, CancelRunCompletionRequest, ClaimRunRequest, ClaimedTurnRun,
+        CompleteRunRequest, FailRunRequest, HeartbeatRequest, TurnRunTransitionPort,
     },
 };
 
@@ -22,9 +22,31 @@ const MAX_EVENTS: usize = 10_000;
 const MAX_TERMINAL_RECORDS: usize = 10_000;
 const MAX_IDEMPOTENCY_RECORDS: usize = 10_000;
 
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InMemoryTurnStateStoreLimits {
+    pub max_events: usize,
+    pub max_terminal_records: usize,
+    pub max_idempotency_records: usize,
+}
+
+impl Default for InMemoryTurnStateStoreLimits {
+    fn default() -> Self {
+        Self {
+            max_events: MAX_EVENTS,
+            max_terminal_records: MAX_TERMINAL_RECORDS,
+            max_idempotency_records: MAX_IDEMPOTENCY_RECORDS,
+        }
+    }
+}
+
 pub struct InMemoryTurnStateStore {
     inner: Mutex<Inner>,
+}
+
+impl Default for InMemoryTurnStateStore {
+    fn default() -> Self {
+        Self::with_limits(InMemoryTurnStateStoreLimits::default())
+    }
 }
 
 #[derive(Default)]
@@ -37,7 +59,11 @@ struct Inner {
     submit_idempotency: HashMap<SubmitIdempotencyKey, Result<SubmitTurnResponse, TurnError>>,
     resume_idempotency: HashMap<RunIdempotencyKey, Result<ResumeTurnResponse, TurnError>>,
     cancel_idempotency: HashMap<RunIdempotencyKey, Result<CancelRunResponse, TurnError>>,
+    submit_idempotency_order: VecDeque<SubmitIdempotencyKey>,
+    resume_idempotency_order: VecDeque<RunIdempotencyKey>,
+    cancel_idempotency_order: VecDeque<RunIdempotencyKey>,
     events: Vec<TurnLifecycleEvent>,
+    limits: InMemoryTurnStateStoreLimits,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +111,15 @@ struct RunIdempotencyKey {
 }
 
 impl InMemoryTurnStateStore {
+    pub fn with_limits(limits: InMemoryTurnStateStoreLimits) -> Self {
+        Self {
+            inner: Mutex::new(Inner {
+                limits,
+                ..Inner::default()
+            }),
+        }
+    }
+
     pub fn events(&self) -> Vec<TurnLifecycleEvent> {
         match self.inner.lock() {
             Ok(inner) => inner.events.clone(),
@@ -158,10 +193,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
             event_cursor: cursor,
             reply_target_binding_ref: request.reply_target_binding_ref,
         });
-        inner
-            .submit_idempotency
-            .insert(idempotency_key, response.clone());
-        inner.prune_idempotency_records();
+        inner.remember_submit_idempotency(idempotency_key, response.clone());
         response
     }
 
@@ -179,10 +211,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
             return result.clone();
         }
         let result = inner.resume_turn_once(&request);
-        inner
-            .resume_idempotency
-            .insert(idempotency_key, result.clone());
-        inner.prune_idempotency_records();
+        inner.remember_resume_idempotency(idempotency_key, result.clone());
         result
     }
 
@@ -200,10 +229,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
             return result.clone();
         }
         let result = inner.request_cancel_once(&request);
-        inner
-            .cancel_idempotency
-            .insert(idempotency_key, result.clone());
-        inner.prune_idempotency_records();
+        inner.remember_cancel_idempotency(idempotency_key, result.clone());
         result
     }
 
@@ -293,6 +319,14 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
         )
     }
 
+    async fn cancel_run(
+        &self,
+        request: CancelRunCompletionRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        let mut inner = self.lock_inner()?;
+        inner.cancel_completion_transition(request.run_id, request.runner_id, request.lease_token)
+    }
+
     async fn fail_run(&self, request: FailRunRequest) -> Result<TurnRunState, TurnError> {
         let mut inner = self.lock_inner()?;
         inner.terminal_transition(
@@ -326,10 +360,58 @@ impl Inner {
             kind,
             sanitized_reason,
         });
-        if self.events.len() > MAX_EVENTS {
-            let excess = self.events.len() - MAX_EVENTS;
+        if self.events.len() > self.limits.max_events {
+            let excess = self.events.len() - self.limits.max_events;
             self.events.drain(0..excess);
         }
+    }
+
+    fn remember_submit_idempotency(
+        &mut self,
+        key: SubmitIdempotencyKey,
+        result: Result<SubmitTurnResponse, TurnError>,
+    ) {
+        if !self.submit_idempotency.contains_key(&key) {
+            self.submit_idempotency_order.push_back(key.clone());
+        }
+        self.submit_idempotency.insert(key, result);
+        prune_ordered_map(
+            &mut self.submit_idempotency,
+            &mut self.submit_idempotency_order,
+            self.limits.max_idempotency_records,
+        );
+    }
+
+    fn remember_resume_idempotency(
+        &mut self,
+        key: RunIdempotencyKey,
+        result: Result<ResumeTurnResponse, TurnError>,
+    ) {
+        if !self.resume_idempotency.contains_key(&key) {
+            self.resume_idempotency_order.push_back(key.clone());
+        }
+        self.resume_idempotency.insert(key, result);
+        prune_ordered_map(
+            &mut self.resume_idempotency,
+            &mut self.resume_idempotency_order,
+            self.limits.max_idempotency_records,
+        );
+    }
+
+    fn remember_cancel_idempotency(
+        &mut self,
+        key: RunIdempotencyKey,
+        result: Result<CancelRunResponse, TurnError>,
+    ) {
+        if !self.cancel_idempotency.contains_key(&key) {
+            self.cancel_idempotency_order.push_back(key.clone());
+        }
+        self.cancel_idempotency.insert(key, result);
+        prune_ordered_map(
+            &mut self.cancel_idempotency,
+            &mut self.cancel_idempotency_order,
+            self.limits.max_idempotency_records,
+        );
     }
 
     fn take_record(&mut self, run_id: TurnRunId) -> Result<RunRecord, TurnError> {
@@ -459,6 +541,38 @@ impl Inner {
         result
     }
 
+    fn cancel_completion_transition(
+        &mut self,
+        run_id: TurnRunId,
+        runner_id: crate::TurnRunnerId,
+        lease_token: crate::TurnLeaseToken,
+    ) -> Result<TurnRunState, TurnError> {
+        let mut record = self.take_record(run_id)?;
+        let result = (|| {
+            ensure_lease(&record, runner_id, lease_token)?;
+            if record.status != TurnStatus::CancelRequested {
+                return Err(TurnError::InvalidTransition {
+                    from: record.status,
+                    to: TurnStatus::Cancelled,
+                });
+            }
+            record.status = TurnStatus::Cancelled;
+            record.failure = None;
+            record.runner_id = None;
+            record.lease_token = None;
+            record.event_cursor = self.next_cursor();
+            self.release_active_lock(&record);
+            self.remove_queued_run(record.run_id);
+            let state = record.state();
+            self.push_event(&record, TurnEventKind::Cancelled, None);
+            self.mark_terminal(record.run_id);
+            Ok(state)
+        })();
+        self.records.insert(record.run_id, record);
+        self.prune_terminal_records();
+        result
+    }
+
     fn terminal_transition(
         &mut self,
         run_id: TurnRunId,
@@ -471,7 +585,7 @@ impl Inner {
         let mut record = self.take_record(run_id)?;
         let result = (|| {
             ensure_lease(&record, runner_id, lease_token)?;
-            if record.status.is_terminal() {
+            if record.status == TurnStatus::CancelRequested || record.status.is_terminal() {
                 return Err(TurnError::InvalidTransition {
                     from: record.status,
                     to: status,
@@ -506,7 +620,7 @@ impl Inner {
     }
 
     fn prune_terminal_records(&mut self) {
-        while self.terminal_runs.len() > MAX_TERMINAL_RECORDS {
+        while self.terminal_runs.len() > self.limits.max_terminal_records {
             let Some(run_id) = self.terminal_runs.pop_front() else {
                 break;
             };
@@ -518,12 +632,6 @@ impl Inner {
                 self.records.remove(&run_id);
             }
         }
-    }
-
-    fn prune_idempotency_records(&mut self) {
-        prune_map(&mut self.submit_idempotency, MAX_IDEMPOTENCY_RECORDS);
-        prune_map(&mut self.resume_idempotency, MAX_IDEMPOTENCY_RECORDS);
-        prune_map(&mut self.cancel_idempotency, MAX_IDEMPOTENCY_RECORDS);
     }
 }
 
@@ -557,14 +665,18 @@ fn ensure_lease(
     Ok(())
 }
 
-fn prune_map<K, V>(map: &mut HashMap<K, V>, max_len: usize)
+fn prune_ordered_map<K, V>(map: &mut HashMap<K, V>, order: &mut VecDeque<K>, max_len: usize)
 where
-    K: Clone + Eq + Hash,
+    K: Eq + Hash,
 {
     while map.len() > max_len {
-        let Some(key) = map.keys().next().cloned() else {
+        let Some(key) = order.pop_front() else {
             break;
         };
         map.remove(&key);
+    }
+
+    while order.front().is_some_and(|key| !map.contains_key(key)) {
+        order.pop_front();
     }
 }

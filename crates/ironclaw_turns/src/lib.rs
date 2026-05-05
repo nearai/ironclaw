@@ -24,7 +24,7 @@ pub use ids::{
     AcceptedMessageRef, GateRef, IdempotencyKey, ReplyTargetBindingRef, SourceBindingRef,
     TurnCheckpointId, TurnId, TurnLeaseToken, TurnRunId, TurnRunnerId,
 };
-pub use memory::InMemoryTurnStateStore;
+pub use memory::{InMemoryTurnStateStore, InMemoryTurnStateStoreLimits};
 pub use request::{CancelRunRequest, GetRunStateRequest, ResumeTurnRequest, SubmitTurnRequest};
 pub use response::{CancelRunResponse, ResumeTurnResponse, SubmitTurnResponse, ThreadBusy};
 pub use scope::{TurnActor, TurnScope};
