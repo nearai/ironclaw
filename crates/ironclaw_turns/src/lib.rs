@@ -25,7 +25,7 @@ pub use ids::{
     RunProfileRequest, RunProfileVersion, SourceBindingRef, TurnCheckpointId, TurnId,
     TurnLeaseToken, TurnRunId, TurnRunnerId,
 };
-pub use memory::InMemoryTurnStateStore;
+pub use memory::{InMemoryTurnStateStore, InMemoryTurnStateStoreLimits};
 pub use request::{
     CancelRunRequest, GetRunStateRequest, ResumeTurnRequest, SubmitTurnRequest, TurnTimestamp,
 };

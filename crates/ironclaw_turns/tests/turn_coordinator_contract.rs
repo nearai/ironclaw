@@ -8,16 +8,16 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, BlockedReason,
     CancelRunRequest, DefaultTurnCoordinator, GateRef, GetRunStateRequest, IdempotencyKey,
-    InMemoryTurnEventSink, InMemoryTurnStateStore, ReplyTargetBindingRef, ResumeTurnRequest,
-    RunProfileRequest, RunProfileVersion, SanitizedCancelReason, SanitizedFailure,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
-    TurnAdmissionPolicy, TurnCheckpointId, TurnCoordinator, TurnError, TurnErrorCategory,
-    TurnEventKind, TurnEventSink, TurnLeaseToken, TurnLifecycleEvent, TurnRunId, TurnRunnerId,
-    TurnScope, TurnStatus,
+    InMemoryTurnEventSink, InMemoryTurnStateStore, InMemoryTurnStateStoreLimits,
+    ReplyTargetBindingRef, ResumeTurnRequest, RunProfileRequest, RunProfileVersion,
+    SanitizedCancelReason, SanitizedFailure, SourceBindingRef, SubmitTurnRequest,
+    SubmitTurnResponse, ThreadBusy, TurnActor, TurnAdmissionPolicy, TurnCheckpointId,
+    TurnCoordinator, TurnError, TurnErrorCategory, TurnEventKind, TurnEventSink, TurnLeaseToken,
+    TurnLifecycleEvent, TurnRunId, TurnRunnerId, TurnScope, TurnStatus,
     events::EventCursor,
     runner::{
-        BlockRunRequest, ClaimRunRequest, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        TurnRunTransitionPort,
+        BlockRunRequest, CancelRunCompletionRequest, ClaimRunRequest, CompleteRunRequest,
+        FailRunRequest, HeartbeatRequest, TurnRunTransitionPort,
     },
 };
 
@@ -212,6 +212,37 @@ async fn submit_turn_idempotency_replays_same_admission_rejection() {
         ))
     );
     assert!(store.events().is_empty());
+}
+
+#[tokio::test]
+async fn idempotency_retention_keeps_the_newest_result_when_pruned() {
+    let store = Arc::new(InMemoryTurnStateStore::with_limits(
+        InMemoryTurnStateStoreLimits {
+            max_idempotency_records: 2,
+            ..InMemoryTurnStateStoreLimits::default()
+        },
+    ));
+    let coordinator = DefaultTurnCoordinator::new(store);
+
+    coordinator
+        .submit_turn(submit_request("thread-a", "idem-submit-a"))
+        .await
+        .unwrap();
+    coordinator
+        .submit_turn(submit_request("thread-b", "idem-submit-b"))
+        .await
+        .unwrap();
+    let newest = coordinator
+        .submit_turn(submit_request("thread-c", "idem-submit-c"))
+        .await
+        .unwrap();
+
+    let duplicate_newest = coordinator
+        .submit_turn(submit_request("thread-c", "idem-submit-c"))
+        .await
+        .unwrap();
+
+    assert_eq!(duplicate_newest, newest);
 }
 
 #[tokio::test]
@@ -440,6 +471,49 @@ async fn cancel_run_is_idempotent_and_marks_running_run_cancel_requested_without
 }
 
 #[tokio::test]
+async fn runner_can_terminally_cancel_running_run_and_release_lock() {
+    let (coordinator, store) = coordinator();
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-a", "idem-submit-a"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    coordinator
+        .cancel_run(cancel_request("thread-a", run_id, "idem-cancel-a"))
+        .await
+        .unwrap();
+
+    let cancelled = store
+        .cancel_run(CancelRunCompletionRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(cancelled.status, TurnStatus::Cancelled);
+    assert!(cancelled.failure.is_none());
+    let next = coordinator
+        .submit_turn(submit_request("thread-a", "idem-submit-b"))
+        .await
+        .unwrap();
+    assert_ne!(accepted_run_id(&next), run_id);
+}
+
+#[tokio::test]
 async fn cancel_run_for_queued_run_terminally_cancels_and_releases_lock() {
     let (coordinator, store) = coordinator();
     let run_id = accepted_run_id(
@@ -490,6 +564,39 @@ async fn cancelled_running_run_cannot_be_reopened_as_blocked() {
         .cancel_run(cancel_request("thread-a", run_id, "idem-cancel-a"))
         .await
         .unwrap();
+
+    let completed_after_cancel = store
+        .complete_run(CompleteRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        completed_after_cancel,
+        TurnError::InvalidTransition {
+            from: TurnStatus::CancelRequested,
+            to: TurnStatus::Completed,
+        }
+    );
+
+    let failed_after_cancel = store
+        .fail_run(FailRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            failure: SanitizedFailure::new("late_failure").unwrap(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        failed_after_cancel,
+        TurnError::InvalidTransition {
+            from: TurnStatus::CancelRequested,
+            to: TurnStatus::Failed,
+        }
+    );
 
     let blocked_after_cancel = store
         .block_run(BlockRunRequest {
