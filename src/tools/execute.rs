@@ -17,12 +17,13 @@ use ironclaw_safety::SafetyLayer;
 /// This is the single canonical implementation of tool execution. All consumers
 /// (chat dispatcher, job worker, container runtime, scheduler subtasks) use this
 /// function instead of maintaining their own copies.
-pub async fn execute_tool_with_safety(
+async fn execute_tool_with_safety_impl(
     tools: &ToolRegistry,
     safety: &SafetyLayer,
     tool_name: &str,
     params: serde_json::Value,
     job_ctx: &JobContext,
+    include_job_only: bool,
 ) -> Result<String, Error> {
     if tool_name.is_empty() {
         return Err(crate::error::ToolError::NotFound {
@@ -30,12 +31,14 @@ pub async fn execute_tool_with_safety(
         }
         .into());
     }
-    let tool = tools
-        .get(tool_name)
-        .await
-        .ok_or_else(|| crate::error::ToolError::NotFound {
-            name: tool_name.to_string(),
-        })?;
+    let tool = if include_job_only {
+        tools.get_for_job(tool_name).await
+    } else {
+        tools.get(tool_name).await
+    }
+    .ok_or_else(|| crate::error::ToolError::NotFound {
+        name: tool_name.to_string(),
+    })?;
 
     let normalized_params = prepare_tool_params(tool.as_ref(), &params);
 
@@ -117,6 +120,27 @@ pub async fn execute_tool_with_safety(
     })
 }
 
+pub async fn execute_tool_with_safety(
+    tools: &ToolRegistry,
+    safety: &SafetyLayer,
+    tool_name: &str,
+    params: serde_json::Value,
+    job_ctx: &JobContext,
+) -> Result<String, Error> {
+    execute_tool_with_safety_impl(tools, safety, tool_name, params, job_ctx, false).await
+}
+
+/// Execute a tool for autonomous job/container contexts, allowing job-only tools.
+pub async fn execute_job_tool_with_safety(
+    tools: &ToolRegistry,
+    safety: &SafetyLayer,
+    tool_name: &str,
+    params: serde_json::Value,
+    job_ctx: &JobContext,
+) -> Result<String, Error> {
+    execute_tool_with_safety_impl(tools, safety, tool_name, params, job_ctx, true).await
+}
+
 /// Process a tool result into a `ChatMessage::tool_result` with safety sanitization.
 ///
 /// On success: sanitize → wrap → ChatMessage::tool_result.
@@ -151,6 +175,19 @@ pub async fn execute_tool_simple(
     job_ctx: &JobContext,
 ) -> Result<String, String> {
     execute_tool_with_safety(tools, safety, tool_name, params, job_ctx)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Execute a tool for autonomous job/container contexts, returning a string error.
+pub async fn execute_job_tool_simple(
+    tools: &ToolRegistry,
+    safety: &SafetyLayer,
+    tool_name: &str,
+    params: serde_json::Value,
+    job_ctx: &JobContext,
+) -> Result<String, String> {
+    execute_job_tool_with_safety(tools, safety, tool_name, params, job_ctx)
         .await
         .map_err(|e| e.to_string())
 }
@@ -433,6 +470,48 @@ mod tests {
             serde_json::from_str(&result).expect("tool result should be valid JSON"); // safety: test-only assertion
         assert_eq!(output["values"], serde_json::json!([1, 2, 3])); // safety: test-only assertion
     }
+
+    // --- Job-only tool resolution -------------------------------------------
+
+    #[tokio::test]
+    async fn test_job_only_tools_require_job_execution_path() {
+        let registry = ToolRegistry::new();
+        registry.register_builtin_tools();
+        let safety = test_safety();
+        let params = serde_json::json!({
+            "status": "completed",
+            "summary": "done"
+        });
+
+        let generic_result = execute_tool_with_safety(
+            &registry,
+            &safety,
+            "finish_job",
+            params.clone(),
+            &test_job_ctx(),
+        )
+        .await;
+        assert!(
+            matches!(
+                generic_result,
+                Err(crate::error::Error::Tool(
+                    crate::error::ToolError::NotFound { .. }
+                ))
+            ),
+            "generic execution path must not resolve job-only tools: {generic_result:?}"
+        );
+
+        let job_result =
+            execute_job_tool_with_safety(&registry, &safety, "finish_job", params, &test_job_ctx())
+                .await
+                .expect("job execution path should resolve finish_job"); // safety: test-only assertion
+        assert!(
+            job_result.contains("completed"),
+            "job execution path should execute finish_job: {job_result}"
+        );
+    }
+
+    // --- Tool result processing ---------------------------------------------
 
     #[test]
     fn test_process_tool_result_success() {

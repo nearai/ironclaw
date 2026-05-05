@@ -2,69 +2,67 @@ use crate::llm::{ResponseAnomaly, ResponseMetadata};
 
 pub(crate) const EMPTY_TOOL_COMPLETION_NUDGE: &str = "\
 Your previous tool-enabled response was empty or malformed.\n\
-If you need to use a tool, call it now with valid arguments.\n\
-Otherwise, provide a real status update about work already completed.";
+Call valid tool(s) now if more work is required.\n\
+If the job is done or blocked, call `finish_job` with valid `status` and `summary` arguments.";
 
-pub(crate) const FORCE_TEXT_RECOVERY_PROMPT: &str = "\
-Your previous tool-enabled responses were empty or malformed.\n\
-Do not call any more tools in the next reply.\n\
-Instead, provide a concise final status based only on work already completed.\n\
-If the job is complete, say so explicitly. If not, explain what blocked you.";
+pub(crate) const EMPTY_TOOL_COMPLETION_STRICT: &str = "\
+Your previous recovery attempts did not include valid tool calls.\n\
+In the next reply, you must either call valid tool(s) to continue your work \
+or call `finish_job` with valid `status` and `summary` arguments.";
 
-pub(crate) const EMPTY_TOOL_COMPLETION_FAILURE: &str = "the selected model repeatedly returned empty or malformed tool-completion responses and is not reliable for autonomous tool use.";
+pub(crate) const EMPTY_TOOL_COMPLETION_FAILURE: &str = "the selected model repeatedly returned invalid autonomous responses and is not reliable for autonomous tool use.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum RecoveryStage {
+    #[default]
+    Idle,
+    Nudged,
+    StrictPending,
+    StrictActive,
+}
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct AutonomousRecoveryState {
-    consecutive_empty_tool_completions: usize,
-    force_text_recovery_pending: bool,
-    force_text_recovery_active: bool,
+    stage: RecoveryStage,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AutonomousRecoveryAction {
     Continue,
     ToolModeNudge,
-    ForceTextRecovery,
+    StrictToolRecovery,
     Fail,
 }
 
 impl AutonomousRecoveryState {
     pub(crate) fn begin_iteration(&mut self) -> bool {
-        if self.force_text_recovery_pending {
-            self.force_text_recovery_pending = false;
-            self.force_text_recovery_active = true;
-            true
-        } else {
-            self.force_text_recovery_active
+        if self.stage == RecoveryStage::StrictPending {
+            self.stage = RecoveryStage::StrictActive;
         }
+        self.stage == RecoveryStage::StrictActive
     }
 
     pub(crate) fn on_text_response(
         &mut self,
         metadata: ResponseMetadata,
-        text: &str,
+        _text: &str,
     ) -> AutonomousRecoveryAction {
+        match self.stage {
+            RecoveryStage::StrictPending | RecoveryStage::StrictActive => {
+                self.reset();
+                return AutonomousRecoveryAction::Fail;
+            }
+            RecoveryStage::Nudged => {
+                self.stage = RecoveryStage::StrictPending;
+                return AutonomousRecoveryAction::StrictToolRecovery;
+            }
+            RecoveryStage::Idle => {}
+        }
+
         match metadata.anomaly {
             Some(ResponseAnomaly::EmptyToolCompletion) => {
-                self.consecutive_empty_tool_completions =
-                    self.consecutive_empty_tool_completions.saturating_add(1);
-                self.force_text_recovery_active = false;
-                match self.consecutive_empty_tool_completions {
-                    1 => AutonomousRecoveryAction::ToolModeNudge,
-                    2 => {
-                        self.force_text_recovery_pending = true;
-                        AutonomousRecoveryAction::ForceTextRecovery
-                    }
-                    _ => AutonomousRecoveryAction::Fail,
-                }
-            }
-            Some(ResponseAnomaly::EmptyTextResponse) if self.force_text_recovery_active => {
-                self.force_text_recovery_active = false;
-                AutonomousRecoveryAction::Fail
-            }
-            _ if !text.trim().is_empty() => {
-                self.reset();
-                AutonomousRecoveryAction::Continue
+                self.stage = RecoveryStage::Nudged;
+                AutonomousRecoveryAction::ToolModeNudge
             }
             _ => AutonomousRecoveryAction::Continue,
         }
@@ -75,9 +73,7 @@ impl AutonomousRecoveryState {
     }
 
     fn reset(&mut self) {
-        self.consecutive_empty_tool_completions = 0;
-        self.force_text_recovery_pending = false;
-        self.force_text_recovery_active = false;
+        self.stage = RecoveryStage::Idle;
     }
 }
 
@@ -103,23 +99,39 @@ mod tests {
     }
 
     #[test]
-    fn second_empty_tool_completion_schedules_text_recovery() {
+    fn second_invalid_response_after_nudge_schedules_strict_recovery() {
         let mut state = AutonomousRecoveryState::default();
         let _ = state.on_text_response(metadata(ResponseAnomaly::EmptyToolCompletion), "fallback");
-        let action =
-            state.on_text_response(metadata(ResponseAnomaly::EmptyToolCompletion), "fallback");
-        assert_eq!(action, AutonomousRecoveryAction::ForceTextRecovery);
+        let action = state.on_text_response(ResponseMetadata::default(), "still working");
+        assert_eq!(action, AutonomousRecoveryAction::StrictToolRecovery);
         assert!(state.begin_iteration());
     }
 
     #[test]
-    fn forced_text_recovery_fallback_fails() {
+    fn strict_recovery_fails_on_plain_text() {
         let mut state = AutonomousRecoveryState::default();
         let _ = state.on_text_response(metadata(ResponseAnomaly::EmptyToolCompletion), "fallback");
-        let _ = state.on_text_response(metadata(ResponseAnomaly::EmptyToolCompletion), "fallback");
+        let _ = state.on_text_response(ResponseMetadata::default(), "still working");
         assert!(state.begin_iteration());
-        let action =
-            state.on_text_response(metadata(ResponseAnomaly::EmptyTextResponse), "fallback");
+
+        let action = state.on_text_response(ResponseMetadata::default(), "done");
+        assert_eq!(action, AutonomousRecoveryAction::Fail);
+    }
+
+    #[test]
+    fn strict_recovery_fails_on_empty_tool_completion() {
+        let mut state = AutonomousRecoveryState::default();
+        let _ = state.on_text_response(metadata(ResponseAnomaly::EmptyToolCompletion), "fallback");
+        let _ = state.on_text_response(
+            metadata(ResponseAnomaly::EmptyToolCompletion),
+            "still malformed",
+        );
+        assert!(state.begin_iteration());
+
+        let action = state.on_text_response(
+            metadata(ResponseAnomaly::EmptyToolCompletion),
+            "still malformed",
+        );
         assert_eq!(action, AutonomousRecoveryAction::Fail);
     }
 
@@ -127,24 +139,18 @@ mod tests {
     fn valid_tool_call_resets_counter() {
         let mut state = AutonomousRecoveryState::default();
         let _ = state.on_text_response(metadata(ResponseAnomaly::EmptyToolCompletion), "fallback");
+        let _ = state.on_text_response(ResponseMetadata::default(), "still working");
         state.on_valid_tool_call();
+
         let action =
             state.on_text_response(metadata(ResponseAnomaly::EmptyToolCompletion), "fallback");
         assert_eq!(action, AutonomousRecoveryAction::ToolModeNudge);
     }
 
     #[test]
-    fn meaningful_text_after_text_recovery_resets_state() {
+    fn normal_text_outside_recovery_continues() {
         let mut state = AutonomousRecoveryState::default();
-        let _ = state.on_text_response(metadata(ResponseAnomaly::EmptyToolCompletion), "fallback");
-        let _ = state.on_text_response(metadata(ResponseAnomaly::EmptyToolCompletion), "fallback");
-        assert!(state.begin_iteration());
-
         let action = state.on_text_response(ResponseMetadata::default(), "Still working on step 2");
         assert_eq!(action, AutonomousRecoveryAction::Continue);
-
-        let next =
-            state.on_text_response(metadata(ResponseAnomaly::EmptyToolCompletion), "fallback");
-        assert_eq!(next, AutonomousRecoveryAction::ToolModeNudge);
     }
 }

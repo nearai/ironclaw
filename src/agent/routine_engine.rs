@@ -602,11 +602,17 @@ impl RoutineEngine {
             // Build summary
             let summary = if status == RunStatus::Failed {
                 match self.store.get_agent_job_failure_reason(job_id).await {
-                    Ok(Some(reason)) => format!("Job {job_id} failed: {reason}"),
-                    _ => format!("Job {job_id} {}", job.state),
+                    Ok(Some(reason)) => reason,
+                    _ => match self.store.get_agent_job_result_message(job_id).await {
+                        Ok(Some(message)) => message,
+                        _ => format!("Job {job_id} {}", job.state),
+                    },
                 }
             } else {
-                format!("Job {job_id} completed successfully")
+                match self.store.get_agent_job_result_message(job_id).await {
+                    Ok(Some(message)) => message,
+                    _ => format!("Job {job_id} {}", job.state),
+                }
             };
 
             self.complete_dispatched_run(&run, status, &summary).await;
@@ -1092,7 +1098,28 @@ impl FullJobWatcher {
             tokio::time::sleep(Self::POLL_INTERVAL).await;
         };
 
-        let summary = format!("Job {} finished ({})", self.job_id, final_status);
+        let summary = match final_status {
+            RunStatus::Ok => self
+                .store
+                .get_agent_job_result_message(self.job_id)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| format!("Job {} finished ({})", self.job_id, final_status)),
+            RunStatus::Failed => match self.store.get_agent_job_failure_reason(self.job_id).await {
+                Ok(Some(reason)) => reason,
+                _ => self
+                    .store
+                    .get_agent_job_result_message(self.job_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| format!("Job {} finished ({})", self.job_id, final_status)),
+            },
+            RunStatus::Attention | RunStatus::Running => {
+                format!("Job {} finished ({})", self.job_id, final_status)
+            }
+        };
         (final_status, Some(summary))
     }
 
@@ -2256,7 +2283,6 @@ mod tests {
     };
     use crate::channels::IncomingMessage;
     use crate::config::RoutineConfig;
-
     #[test]
     fn test_notification_gating() {
         let config = NotifyConfig {
@@ -2817,6 +2843,45 @@ mod tests {
             );
         }
     }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_full_job_watcher_uses_agent_result_message_on_completion() {
+        let (db, _tmp) = crate::testing::test_db().await;
+        let mut ctx = crate::context::JobContext::with_user("alice", "watch", "watch job");
+        let job_id = ctx.job_id;
+        ctx.transition_to(crate::context::JobState::InProgress, None)
+            .unwrap(); // safety: test
+        ctx.transition_to(
+            crate::context::JobState::Completed,
+            Some("Prepared the weekly digest".to_string()),
+        )
+        .unwrap(); // safety: test
+        db.save_job(&ctx).await.unwrap(); // safety: test
+        db.save_job_event(
+            job_id,
+            "result",
+            &serde_json::json!({
+                "status": "completed",
+                "success": true,
+                "message": "Prepared the weekly digest",
+            }),
+        )
+        .await
+        .unwrap(); // safety: test
+
+        let watcher = super::FullJobWatcher::new(
+            crate::tenant::SystemScope::new(db),
+            job_id,
+            "digest".to_string(),
+        );
+        let (status, summary) = watcher.wait_for_completion().await;
+
+        assert_eq!(status, RunStatus::Ok);
+        assert_eq!(summary.as_deref(), Some("Prepared the weekly digest"));
+    }
+
+    // --- Retry classification ------------------------------------------------
 
     /// Regression test for #1320: transient errors are retried for lightweight
     /// routines but not for full-job routines or hard failures.

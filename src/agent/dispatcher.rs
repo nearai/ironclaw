@@ -423,12 +423,14 @@ impl ChatDelegate<'_> {
 
 #[async_trait]
 impl<'a> LoopDelegate for ChatDelegate<'a> {
-    async fn check_signals(&self) -> LoopSignal {
+    type Outcome = LoopOutcome;
+
+    async fn check_signals(&self) -> LoopSignal<Self::Outcome> {
         let sess = self.session.lock().await;
         if let Some(thread) = sess.threads.get(&self.thread_id)
             && thread.state == ThreadState::Interrupted
         {
-            return LoopSignal::Stop;
+            return LoopSignal::Stop(LoopOutcome::Stopped);
         }
         LoopSignal::Continue
     }
@@ -744,7 +746,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         text: &str,
         _metadata: crate::llm::ResponseMetadata,
         _reason_ctx: &mut ReasoningContext,
-    ) -> TextAction {
+    ) -> TextAction<Self::Outcome> {
         // Strip internal "[Called tool ...]" text that can leak when
         // provider flattening (e.g. NEAR AI) converts tool_calls to
         // plain text and the LLM echoes it back.
@@ -1370,6 +1372,10 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         }
 
         Ok(None)
+    }
+
+    fn max_iterations_outcome(&self) -> Self::Outcome {
+        LoopOutcome::MaxIterations
     }
 }
 

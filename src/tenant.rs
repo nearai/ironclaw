@@ -133,6 +133,23 @@ impl TenantScope {
         self.inner.get_agent_job_failure_reason(id).await
     }
 
+    /// Fetch the latest persisted terminal result message for an agent job.
+    pub async fn get_agent_job_result_message(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<String>, DatabaseError> {
+        if self.get_job(id).await?.is_none() {
+            return Ok(None);
+        }
+
+        Ok(self
+            .inner
+            .get_latest_job_event_by_type(id, "result")
+            .await?
+            .as_ref()
+            .and_then(crate::history::job_result_event_message))
+    }
+
     pub async fn update_job_status(
         &self,
         id: Uuid,
@@ -797,6 +814,16 @@ impl SystemScope {
         self.inner.list_job_events(job_id, limit).await
     }
 
+    pub async fn get_latest_job_event_by_type(
+        &self,
+        job_id: Uuid,
+        event_type: &str,
+    ) -> Result<Option<crate::history::JobEventRecord>, DatabaseError> {
+        self.inner
+            .get_latest_job_event_by_type(job_id, event_type)
+            .await
+    }
+
     // === Job persistence (scheduler, worker) ===
 
     pub async fn get_job(&self, id: Uuid) -> Result<Option<JobContext>, DatabaseError> {
@@ -818,6 +845,18 @@ impl SystemScope {
             .await
     }
 
+    pub async fn record_job_terminal_result(
+        &self,
+        id: Uuid,
+        status: JobState,
+        failure_reason: Option<&str>,
+        result_payload: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        self.inner
+            .record_job_terminal_result(id, status, failure_reason, result_payload)
+            .await
+    }
+
     pub async fn mark_job_stuck(&self, id: Uuid) -> Result<(), DatabaseError> {
         self.inner.mark_job_stuck(id).await
     }
@@ -831,6 +870,19 @@ impl SystemScope {
         id: Uuid,
     ) -> Result<Option<String>, DatabaseError> {
         self.inner.get_agent_job_failure_reason(id).await
+    }
+
+    /// Fetch the latest persisted terminal result message for an agent job.
+    pub async fn get_agent_job_result_message(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<String>, DatabaseError> {
+        Ok(self
+            .inner
+            .get_latest_job_event_by_type(id, "result")
+            .await?
+            .as_ref()
+            .and_then(crate::history::job_result_event_message))
     }
 
     // === LLM call recording ===

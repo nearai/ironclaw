@@ -319,8 +319,22 @@ pub async fn load_cached_admin_tool_policy<'a>(
 /// Filter out tools blocked by the admin tool policy.
 ///
 /// Returns the input list unchanged for admin users or in single-tenant mode.
-/// When the policy failed to load or parse, returns an empty tool list
-/// (fail-closed) to preserve admin restrictions.
+/// When the policy failed to load or parse, preserves only autonomous control
+/// tools like `finish_job` so background jobs can still terminate cleanly
+/// without exposing any work-capable tools.
+fn is_autonomous_control_tool(name: &str) -> bool {
+    matches!(name, "finish_job")
+}
+
+fn retain_autonomous_control_tools(
+    tool_defs: Vec<crate::llm::ToolDefinition>,
+) -> Vec<crate::llm::ToolDefinition> {
+    tool_defs
+        .into_iter()
+        .filter(|def| is_autonomous_control_tool(&def.name))
+        .collect()
+}
+
 pub fn filter_admin_disabled_tools(
     tool_defs: Vec<crate::llm::ToolDefinition>,
     multi_tenant: bool,
@@ -335,7 +349,7 @@ pub fn filter_admin_disabled_tools(
     let admin_policy = match policy_state {
         AdminToolPolicyState::Missing => return tool_defs,
         AdminToolPolicyState::Loaded(policy) => policy,
-        AdminToolPolicyState::FailClosed => return Vec::new(),
+        AdminToolPolicyState::FailClosed => return retain_autonomous_control_tools(tool_defs),
     };
 
     if admin_policy.is_empty() {
@@ -353,6 +367,9 @@ pub fn filter_admin_disabled_tools(
     tool_defs
         .into_iter()
         .filter(|def| {
+            if is_autonomous_control_tool(&def.name) {
+                return true;
+            }
             if admin_policy.disabled_tools.contains(def.name.as_str())
                 || user_disabled.contains(def.name.as_str())
             {
@@ -368,7 +385,16 @@ pub fn filter_admin_disabled_tools(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::ToolDefinition;
     use crate::settings::Settings;
+
+    fn tool_def(name: &str) -> ToolDefinition {
+        ToolDefinition {
+            name: name.to_string(),
+            description: format!("{name} tool"),
+            parameters: serde_json::json!({"type": "object"}),
+        }
+    }
 
     #[test]
     fn test_effective_permission_user_override_wins() {
@@ -463,6 +489,46 @@ mod tests {
         assert!(policy.is_tool_disabled("tool_install", "any_user"));
         assert!(!policy.is_tool_disabled("shell", "any_user"));
     }
+
+    // --- Autonomous control tool exceptions ---------------------------------
+
+    #[test]
+    fn test_filter_admin_disabled_tools_fail_closed_preserves_finish_job_only() {
+        let filtered = filter_admin_disabled_tools(
+            vec![tool_def("shell"), tool_def("finish_job"), tool_def("http")],
+            true,
+            false,
+            "user_1",
+            &AdminToolPolicyState::FailClosed,
+        );
+
+        let names: Vec<&str> = filtered.iter().map(|def| def.name.as_str()).collect();
+        assert_eq!(names, vec!["finish_job"]);
+    }
+
+    #[test]
+    fn test_filter_admin_disabled_tools_loaded_policy_cannot_hide_finish_job() {
+        let policy = AdminToolPolicy {
+            disabled_tools: HashSet::from(["finish_job".to_string(), "shell".to_string()]),
+            user_disabled_tools: HashMap::from([(
+                "user_1".to_string(),
+                vec!["http".to_string(), "finish_job".to_string()],
+            )]),
+        };
+
+        let filtered = filter_admin_disabled_tools(
+            vec![tool_def("shell"), tool_def("finish_job"), tool_def("http")],
+            true,
+            false,
+            "user_1",
+            &AdminToolPolicyState::Loaded(policy),
+        );
+
+        let names: Vec<&str> = filtered.iter().map(|def| def.name.as_str()).collect();
+        assert_eq!(names, vec!["finish_job"]);
+    }
+
+    // --- Policy lookup -------------------------------------------------------
 
     #[test]
     fn test_admin_tool_policy_per_user_disabled() {

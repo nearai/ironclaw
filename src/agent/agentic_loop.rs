@@ -18,19 +18,19 @@ use crate::llm::{
 };
 
 /// Signal from the delegate indicating how the loop should proceed.
-pub enum LoopSignal {
+pub enum LoopSignal<O> {
     /// Continue normally.
     Continue,
     /// Stop the loop gracefully.
-    Stop,
+    Stop(O),
     /// Inject a user message into context and continue.
     InjectMessage(String),
 }
 
 /// Outcome of a text response from the LLM.
-pub enum TextAction {
+pub enum TextAction<O> {
     /// Return this as the final loop result.
-    Return(LoopOutcome),
+    Return(O),
     /// Continue the loop (text was handled but loop should proceed).
     Continue,
 }
@@ -77,16 +77,19 @@ impl Default for AgenticLoopConfig {
 ///
 /// # `Send + Sync` requirement
 ///
-/// This trait requires `Send + Sync` because the loop accepts `&dyn LoopDelegate`.
+/// This trait requires `Send + Sync` because loop delegates may be shared
+/// across async boundaries.
 /// Delegates using borrowed references (e.g. `ChatDelegate<'a>`) must ensure all
 /// borrowed fields are `Send + Sync`. This is a load-bearing constraint: if a
 /// delegate needs to be spawned into a detached task, it must use `Arc`-based
 /// ownership instead of borrows (as `JobDelegate` and `ContainerDelegate` do).
 #[async_trait]
 pub trait LoopDelegate: Send + Sync {
+    type Outcome: Send;
+
     /// Called at the start of each iteration. Check for external signals
     /// (cancellation, user messages, stop requests).
-    async fn check_signals(&self) -> LoopSignal;
+    async fn check_signals(&self) -> LoopSignal<Self::Outcome>;
 
     /// Called before the LLM call. Allows the delegate to refresh tool
     /// definitions, enforce cost guards, or inject messages.
@@ -95,7 +98,7 @@ pub trait LoopDelegate: Send + Sync {
         &self,
         reason_ctx: &mut ReasoningContext,
         iteration: usize,
-    ) -> Option<LoopOutcome>;
+    ) -> Option<Self::Outcome>;
 
     /// Call the LLM and return the result. Delegates own the LLM call
     /// to handle consumer-specific concerns (rate limiting, auto-compaction,
@@ -114,7 +117,7 @@ pub trait LoopDelegate: Send + Sync {
         text: &str,
         metadata: ResponseMetadata,
         reason_ctx: &mut ReasoningContext,
-    ) -> TextAction;
+    ) -> TextAction<Self::Outcome>;
 
     /// Execute tool calls and add results to context.
     /// Return `Some(outcome)` to break the loop (e.g. approval needed).
@@ -127,7 +130,10 @@ pub trait LoopDelegate: Send + Sync {
         tool_calls: Vec<crate::llm::ToolCall>,
         content: Option<String>,
         reason_ctx: &mut ReasoningContext,
-    ) -> Result<Option<LoopOutcome>, Error>;
+    ) -> Result<Option<Self::Outcome>, Error>;
+
+    /// Outcome returned when the shared loop exhausts its iteration budget.
+    fn max_iterations_outcome(&self) -> Self::Outcome;
 
     /// Called when the LLM expresses tool intent without actually calling a tool.
     /// Delegates can use this to emit events or log the nudge for observability.
@@ -210,12 +216,12 @@ impl DuplicateToolCallTracker {
 ///
 /// This is the single implementation used by all three consumers (chat, job, container).
 /// The `delegate` provides consumer-specific behavior via the `LoopDelegate` trait.
-pub async fn run_agentic_loop(
-    delegate: &dyn LoopDelegate,
+pub async fn run_agentic_loop<D: LoopDelegate + ?Sized>(
+    delegate: &D,
     reasoning: &Reasoning,
     reason_ctx: &mut ReasoningContext,
     config: &AgenticLoopConfig,
-) -> Result<LoopOutcome, Error> {
+) -> Result<D::Outcome, Error> {
     let mut consecutive_tool_intent_nudges: u32 = 0;
     // Accumulates across all iterations (not reset by text responses) so
     // non-consecutive truncations still escalate to force_text.
@@ -226,7 +232,7 @@ pub async fn run_agentic_loop(
         // Check for external signals (stop, cancellation, user messages)
         match delegate.check_signals().await {
             LoopSignal::Continue => {}
-            LoopSignal::Stop => return Ok(LoopOutcome::Stopped),
+            LoopSignal::Stop(outcome) => return Ok(outcome),
             LoopSignal::InjectMessage(msg) => {
                 reason_ctx.messages.push(ChatMessage::user(&msg));
             }
@@ -382,7 +388,7 @@ pub async fn run_agentic_loop(
         delegate.after_iteration(iteration).await;
     }
 
-    Ok(LoopOutcome::MaxIterations)
+    Ok(delegate.max_iterations_outcome())
 }
 
 /// Truncate a string for log/status previews.
@@ -443,7 +449,7 @@ mod tests {
 
     /// Configurable mock delegate for testing run_agentic_loop.
     struct MockDelegate {
-        signal: Mutex<LoopSignal>,
+        signal: Mutex<LoopSignal<LoopOutcome>>,
         llm_responses: Mutex<Vec<RespondOutput>>,
         tool_exec_count: AtomicUsize,
         tool_exec_outcome: Mutex<Option<LoopOutcome>>,
@@ -468,7 +474,7 @@ mod tests {
             }
         }
 
-        fn with_signal(mut self, signal: LoopSignal) -> Self {
+        fn with_signal(mut self, signal: LoopSignal<LoopOutcome>) -> Self {
             self.signal = Mutex::new(signal);
             self
         }
@@ -481,7 +487,9 @@ mod tests {
 
     #[async_trait]
     impl LoopDelegate for MockDelegate {
-        async fn check_signals(&self) -> LoopSignal {
+        type Outcome = LoopOutcome;
+
+        async fn check_signals(&self) -> LoopSignal<Self::Outcome> {
             let mut sig = self.signal.lock().await;
             std::mem::replace(&mut *sig, LoopSignal::Continue)
         }
@@ -520,7 +528,7 @@ mod tests {
             text: &str,
             _metadata: ResponseMetadata,
             _reason_ctx: &mut ReasoningContext,
-        ) -> TextAction {
+        ) -> TextAction<Self::Outcome> {
             TextAction::Return(LoopOutcome::Response(text.to_string()))
         }
 
@@ -537,6 +545,10 @@ mod tests {
             reason_ctx.last_tool_batch_all_failed = self.simulate_all_failed;
             let outcome = self.tool_exec_outcome.lock().await.take();
             Ok(outcome)
+        }
+
+        fn max_iterations_outcome(&self) -> Self::Outcome {
+            LoopOutcome::MaxIterations
         }
 
         async fn on_tool_intent_nudge(&self, _text: &str, _reason_ctx: &mut ReasoningContext) {
@@ -602,8 +614,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_stop_signal_exits_immediately() {
-        let delegate =
-            MockDelegate::new(vec![text_output("unreachable")]).with_signal(LoopSignal::Stop);
+        let delegate = MockDelegate::new(vec![text_output("unreachable")])
+            .with_signal(LoopSignal::Stop(LoopOutcome::Stopped));
         let reasoning = stub_reasoning();
         let mut ctx = ReasoningContext::new();
         let config = AgenticLoopConfig::default();
@@ -643,7 +655,9 @@ mod tests {
 
         #[async_trait]
         impl LoopDelegate for FailOnMalformedResponse {
-            async fn check_signals(&self) -> LoopSignal {
+            type Outcome = LoopOutcome;
+
+            async fn check_signals(&self) -> LoopSignal<Self::Outcome> {
                 LoopSignal::Continue
             }
 
@@ -676,7 +690,7 @@ mod tests {
                 _: &str,
                 metadata: ResponseMetadata,
                 _: &mut ReasoningContext,
-            ) -> TextAction {
+            ) -> TextAction<Self::Outcome> {
                 assert_eq!(metadata.anomaly, Some(ResponseAnomaly::EmptyToolCompletion));
                 TextAction::Return(LoopOutcome::Failure(
                     "malformed tool completion".to_string(),
@@ -690,6 +704,10 @@ mod tests {
                 _: &mut ReasoningContext,
             ) -> Result<Option<LoopOutcome>, crate::error::Error> {
                 Ok(None)
+            }
+
+            fn max_iterations_outcome(&self) -> Self::Outcome {
+                LoopOutcome::MaxIterations
             }
         }
 
@@ -716,7 +734,9 @@ mod tests {
 
         #[async_trait]
         impl LoopDelegate for ContinueDelegate {
-            async fn check_signals(&self) -> LoopSignal {
+            type Outcome = LoopOutcome;
+
+            async fn check_signals(&self) -> LoopSignal<Self::Outcome> {
                 LoopSignal::Continue
             }
             async fn before_llm_call(
@@ -739,7 +759,7 @@ mod tests {
                 _: &str,
                 _: ResponseMetadata,
                 ctx: &mut ReasoningContext,
-            ) -> TextAction {
+            ) -> TextAction<Self::Outcome> {
                 ctx.messages.push(ChatMessage::assistant("still working"));
                 TextAction::Continue
             }
@@ -750,6 +770,10 @@ mod tests {
                 _: &mut ReasoningContext,
             ) -> Result<Option<LoopOutcome>, crate::error::Error> {
                 Ok(None)
+            }
+
+            fn max_iterations_outcome(&self) -> Self::Outcome {
+                LoopOutcome::MaxIterations
             }
         }
 
@@ -1151,7 +1175,9 @@ mod tests {
 
         #[async_trait]
         impl LoopDelegate for DupResetDelegate {
-            async fn check_signals(&self) -> LoopSignal {
+            type Outcome = LoopOutcome;
+
+            async fn check_signals(&self) -> LoopSignal<Self::Outcome> {
                 LoopSignal::Continue
             }
             async fn before_llm_call(
@@ -1178,7 +1204,7 @@ mod tests {
                 text: &str,
                 _: ResponseMetadata,
                 ctx: &mut ReasoningContext,
-            ) -> TextAction {
+            ) -> TextAction<Self::Outcome> {
                 let count = self.text_response_count.fetch_add(1, Ordering::SeqCst);
                 if count >= 1 {
                     // Second text response — return final result
@@ -1198,6 +1224,10 @@ mod tests {
                 reason_ctx.messages.push(ChatMessage::user("tool error"));
                 reason_ctx.last_tool_batch_all_failed = true;
                 Ok(None)
+            }
+
+            fn max_iterations_outcome(&self) -> Self::Outcome {
+                LoopOutcome::MaxIterations
             }
         }
 
