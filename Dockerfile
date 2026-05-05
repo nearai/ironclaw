@@ -28,7 +28,6 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 COPY build.rs build.rs
 COPY src/ src/
-COPY tests/ tests/
 COPY migrations/ migrations/
 COPY registry/ registry/
 COPY channels-src/ channels-src/
@@ -56,7 +55,6 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 COPY build.rs build.rs
 COPY src/ src/
-COPY tests/ tests/
 COPY migrations/ migrations/
 COPY registry/ registry/
 COPY channels-src/ channels-src/

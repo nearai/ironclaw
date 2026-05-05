@@ -5,3 +5,11 @@ target/
 *.md
 !CLAUDE.md
 node_modules/
+tests/
+docs/
+skills/
+scripts/
+.github/
+deploy/
+fuzz/
+crates/ironclaw_safety/fuzz/
