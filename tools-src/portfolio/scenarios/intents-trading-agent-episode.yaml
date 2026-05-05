@@ -1,0 +1,74 @@
+id: intents-trading-agent-episode
+description: |
+  Validates an episode (candles + solver fixture + news context), then
+  replays it through backtest_suite. Verifies the shared episode shape
+  routes candles into the suite and surfaces the solver fixture intact.
+steps:
+  - name: validate
+    action: validate_episode
+    params:
+      episode:
+        id: near-usdc-2026-q1-mini
+        pair: NEAR/USDC
+        timeframe: "1d"
+        source: manual
+        generated_at: "2026-05-02T22:00:00Z"
+        notes: "Mini fixture for replay-suite coverage; not a real market window."
+        solver_fixture:
+          kind: swap
+          chain: near
+          from: NEAR
+          to: USDC
+          quote_amount: "0.05"
+        news_context:
+          - ts: "2026-04-30"
+            headline: "Hypothetical NEAR governance proposal opens"
+            url: "https://example.test/n1"
+            source: example
+            kind: governance
+        candles:
+          - {ts: "2026-04-01T00:00:00Z", open: 3.00, high: 3.05, low: 2.98, close: 3.02, volume: 1000}
+          - {ts: "2026-04-02T00:00:00Z", open: 3.02, high: 3.10, low: 3.00, close: 3.08, volume: 1100}
+          - {ts: "2026-04-03T00:00:00Z", open: 3.08, high: 3.15, low: 3.05, close: 3.12, volume: 1200}
+          - {ts: "2026-04-04T00:00:00Z", open: 3.12, high: 3.20, low: 3.10, close: 3.18, volume: 1300}
+          - {ts: "2026-04-05T00:00:00Z", open: 3.18, high: 3.25, low: 3.15, close: 3.22, volume: 1400}
+          - {ts: "2026-04-06T00:00:00Z", open: 3.22, high: 3.30, low: 3.20, close: 3.28, volume: 1500}
+          - {ts: "2026-04-07T00:00:00Z", open: 3.28, high: 3.35, low: 3.25, close: 3.32, volume: 1600}
+          - {ts: "2026-04-08T00:00:00Z", open: 3.32, high: 3.40, low: 3.30, close: 3.38, volume: 1700}
+    expect:
+      backtest_schema_version: intents-episode/1
+      episode_summary_candles: 8
+  - name: replay
+    action: replay_episode
+    params:
+      initial_cash_usd: 1000
+      fee_bps: 0
+      slippage_bps: 0
+      episode:
+        id: near-usdc-2026-q1-mini
+        pair: NEAR/USDC
+        timeframe: "1d"
+        source: manual
+        solver_fixture:
+          kind: swap
+          chain: near
+          from: NEAR
+          to: USDC
+        news_context: []
+        candles:
+          - {ts: "2026-04-01T00:00:00Z", open: 3.00, high: 3.05, low: 2.98, close: 3.02, volume: 1000}
+          - {ts: "2026-04-02T00:00:00Z", open: 3.02, high: 3.10, low: 3.00, close: 3.08, volume: 1100}
+          - {ts: "2026-04-03T00:00:00Z", open: 3.08, high: 3.15, low: 3.05, close: 3.12, volume: 1200}
+          - {ts: "2026-04-04T00:00:00Z", open: 3.12, high: 3.20, low: 3.10, close: 3.18, volume: 1300}
+          - {ts: "2026-04-05T00:00:00Z", open: 3.18, high: 3.25, low: 3.15, close: 3.22, volume: 1400}
+          - {ts: "2026-04-06T00:00:00Z", open: 3.22, high: 3.30, low: 3.20, close: 3.28, volume: 1500}
+          - {ts: "2026-04-07T00:00:00Z", open: 3.28, high: 3.35, low: 3.25, close: 3.32, volume: 1600}
+          - {ts: "2026-04-08T00:00:00Z", open: 3.32, high: 3.40, low: 3.30, close: 3.38, volume: 1700}
+      candidates:
+        - id: buy_hold
+          strategy:
+            kind: buy-hold
+    expect:
+      backtest_schema_version: intents-episode-replay/1
+      episode_replay_top_trades_min: 1
+      episode_replay_solver_kind: swap

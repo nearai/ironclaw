@@ -1,7 +1,7 @@
 {
   "version": "0.1.0",
   "wit_version": "0.3.0",
-  "description": "Cross-chain DeFi portfolio discovery, ranked rebalancing proposals, and unsigned NEAR Intent construction. Single tool with three operations: scan, propose, build_intent.",
+  "description": "Cross-chain DeFi portfolio discovery, ranked rebalancing proposals, unsigned NEAR Intent construction, deterministic spot strategy backtesting/suite ranking, paid research budgeting/attribution, nominal NEAR trial planning, and interactive NEAR Intents trading widget state.",
   "discovery_summary": {
     "always_required": [
       "action"
@@ -9,11 +9,25 @@
     "conditional_requirements": [
       "`scan` requires `addresses` (list of wallet addresses).",
       "`propose` requires `positions` (output of `scan`). `strategies` is optional — defaults to the bundled strategies (stablecoin-yield-floor, lending-health-guard, lp-impermanent-loss-watch, near-staking-yield, near-lending-yield, near-lp-yield) when omitted or empty. `config` is optional.",
-      "`build_intent` requires `plan` (a MovementPlan from a Proposal). `config` and `solver` are optional; `solver` defaults to `fixture`."
+      "`build_intent` requires `plan` (a MovementPlan from a Proposal). `config` and `solver` are optional; `solver` defaults to `fixture`.",
+      "`backtest` requires oldest-to-newest OHLCV `candles` plus a long-only spot `strategy` (`buy-hold`, `sma-cross`, `breakout`, `mean-reversion`, `momentum`, or `rsi-mean-reversion`). Fees, slippage, position size, stop-loss, and take-profit are optional.",
+      "`backtest_suite` requires oldest-to-newest OHLCV `candles` plus a `candidates` menu. It returns ranked strategy results and a basic intent-eligibility gate.",
+      "`backtest_walkforward` requires `candles`, a `strategy`, and `n_folds` >= 2. It splits the series into contiguous, non-overlapping fold windows, runs the same strategy on each fold's in-sample and out-of-sample ranges, and returns per-fold metrics plus an aggregate robustness verdict (`robust`, `fragile`, or `overfit`). Parameters are not refit.",
+      "`backtest_montecarlo` requires `trade_returns_pct` (per-trade percent returns from a prior backtest). It uses a seeded xorshift64* PRNG to resample (`shuffle`) or rearrange (`permute`) the trade order across `iterations` paths and returns return / drawdown / terminal-equity distributions plus loss probabilities.",
+      "`backtest_grid` requires `candles`, a `base` strategy, and at least one `axes` entry or sizing/stop/take-profit options. It enumerates the cartesian product, hands the resulting candidates to `backtest_suite`, and returns a ranked grid plus a flat cell table. The `max_cells` cap defaults to 1024.",
+      "`validate_episode` requires an `episode` (id, pair, candles; optional solver_fixture, news_context, timeframe, generated_at, source). It returns a deterministic summary; no backtest runs.",
+      "`replay_episode` requires an `episode` and `candidates` menu. It validates the episode, runs `backtest_suite` against the embedded candles, and surfaces the solver fixture and news context for the caller to route into `build_intent` and analyst memos.",
+      "`plan_paid_research` requires a `query` and optional candidate `sources`. It returns a budgeted paid-source plan with MPP/x402/NEAR rail attribution, autonomous-wallet policy gates, agentic-SEO trust gates, and NEAR funding-route hints; it does not fetch paywalled content or sign payments.",
+      "`plan_dripstack_browse` models DripStack's guided topic → publication → article flow from free catalog/post metadata. A selected article becomes a paid-source candidate for `plan_paid_research`; the tool never buys or fetches article bodies.",
+      "`fetch_dripstack_catalog` fetches DripStack's free publication catalog or free post-title metadata for one publication. It never calls paid article-body routes.",
+      "`prepare_dripstack_paid_fetch` requires one publication slug and post slug. It prepares the explicit confirmation, HTTP 402 challenge, and receipt-backed retry boundary for one paid article; it never signs or reads paid content by itself.",
+      "`plan_near_intents_trial` prepares a nominal-NEAR paper/quote rehearsal with wallet/funding setup steps, strategy-menu defaults, risk gates, and an unsigned build_intent request.",
+      "`format_intents_widget` requires a `pair` and optional backtest-suite output, trial plan, paid research plan, risk gates, and unsigned IntentBundle. It returns `intents-trading-widget/1` state for the interactive project widget."
     ],
     "notes": [
       "All operations are read-only and produce no signed payloads. The agent never holds private keys.",
       "Scan supports historical queries via the optional `at` field (block per chain or timestamp).",
+      "Backtest uses closed-candle signals with next-open execution to avoid lookahead and returns metrics under `intents-backtest/1`; suite ranking returns `intents-backtest-suite/1`; walk-forward returns `intents-walkforward/1`; Monte Carlo returns `intents-montecarlo/1`; grid sweeps return `intents-grid/1`; episode validation returns `intents-episode/1`; episode replay returns `intents-episode-replay/1`; paid research planning returns `paid-research-plan/1`; DripStack guided browse planning returns `dripstack-browse-plan/1`; free DripStack catalog fetch returns `dripstack-catalog/1`; paid fetch preparation returns `dripstack-paid-fetch-plan/1`; nominal NEAR trial planning returns `near-intents-trial-plan/1`; NEAR Intents trading console state returns `intents-trading-widget/1`.",
       "Sources: `fixture` (embedded test data), `dune` (EVM via Dune Sim), `near` (NEAR via FastNEAR+Intear), `auto` (detect per address).",
       "Use `tool_info(name: \"portfolio\", detail: \"schema\")` for the full schema before guessing fields."
     ],
@@ -29,6 +43,113 @@
         "positions": [],
         "strategies": [],
         "config": { "floor_apy": 0.04, "max_risk_score": 3 }
+      },
+      {
+        "action": "backtest_suite",
+        "candles": [],
+        "candidates": [
+          { "id": "sma_5_20", "strategy": { "kind": "sma-cross", "fast_window": 5, "slow_window": 20 } },
+          { "id": "buy_hold", "strategy": { "kind": "buy-hold" } }
+        ],
+        "fee_bps": 10,
+        "slippage_bps": 5
+      },
+      {
+        "action": "plan_near_intents_trial",
+        "mode": "paper",
+        "pair": "NEAR/USDC",
+        "nominal_near": 0.25,
+        "max_trade_near": 0.05,
+        "assumed_near_usd": 3.0
+      },
+      {
+        "action": "format_intents_widget",
+        "pair": "NEAR/BTC",
+        "mode": "paper",
+        "stance": "watch",
+        "risk_gates": [
+          { "name": "unsigned-only", "status": "pass", "detail": "Wallet signature required outside the agent." }
+        ]
+      },
+      {
+        "action": "plan_paid_research",
+        "query": "Should the NEAR/BTC paper intent pay for premium source research before quoting?",
+        "pair": "NEAR/BTC",
+        "budget_usd": 0.05,
+        "spending_mode": "quote",
+        "sources": [
+          {
+            "id": "premium-route-risk",
+            "title": "Intent route risk memo",
+            "author": "Researcher",
+            "url": "https://example.com/route-risk",
+            "tags": ["near-intents", "btc"],
+            "price_usd": 0.02,
+            "payment": { "protocol": "x402", "network": "base", "asset": "USDC" }
+          }
+        ]
+      },
+      {
+        "action": "plan_dripstack_browse",
+        "topic": "crypto market structure",
+        "publications": [
+          {
+            "slug": "premiumcrypto.substack.com",
+            "title": "Premium Crypto Notes",
+            "description": "Crypto market structure, liquidity, and onchain trading research."
+          }
+        ]
+      },
+      {
+        "action": "fetch_dripstack_catalog",
+        "publication_slug": "premiumcrypto.substack.com"
+      },
+      {
+        "action": "prepare_dripstack_paid_fetch",
+        "publication_slug": "premiumcrypto.substack.com",
+        "post_slug": "near-intents-liquidity",
+        "payment_protocol": "mpp",
+        "user_confirmed_purchase": false
+      },
+      {
+        "action": "backtest_walkforward",
+        "candles": [],
+        "strategy": { "kind": "sma-cross", "fast_window": 5, "slow_window": 20 },
+        "n_folds": 4,
+        "train_pct": 0.7,
+        "embargo": 1
+      },
+      {
+        "action": "backtest_montecarlo",
+        "trade_returns_pct": [1.5, -0.5, 2.0, -1.0, 0.8],
+        "initial_cash_usd": 1000,
+        "iterations": 1000,
+        "seed": 42,
+        "method": "shuffle"
+      },
+      {
+        "action": "backtest_grid",
+        "candles": [],
+        "base": { "kind": "sma-cross", "fast_window": 5, "slow_window": 20 },
+        "axes": [
+          { "param": "fast_window", "values": [3, 5, 8] },
+          { "param": "slow_window", "values": [15, 20, 30] }
+        ],
+        "max_cells": 32
+      },
+      {
+        "action": "replay_episode",
+        "episode": {
+          "id": "near-usdc-q1",
+          "pair": "NEAR/USDC",
+          "timeframe": "1d",
+          "candles": [],
+          "solver_fixture": null,
+          "news_context": []
+        },
+        "candidates": [
+          { "id": "buy_hold", "strategy": { "kind": "buy-hold" } }
+        ]
       }
     ]
   },
@@ -51,9 +172,14 @@
           "methods": ["GET"]
         },
         {
-          "host": "solver-relay.chaindefuser.com",
+          "host": "solver-relay-v2.chaindefuser.com",
           "path_prefix": "/rpc",
           "methods": ["POST"]
+        },
+        {
+          "host": "dripstack.xyz",
+          "path_prefix": "/api/v1/publications",
+          "methods": ["GET"]
         }
       ],
       "credentials": {

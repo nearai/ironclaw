@@ -1,0 +1,100 @@
+id: intents-trading-agent-dripstack-browse
+description: |
+  Models DripStack as a guided browse flow: topic shortlist, publication
+  choice, article choice, then a paid-source candidate with both MPP and
+  x402 options. The paid article body is never fetched by this tool.
+steps:
+  - name: ask_topic
+    action: plan_dripstack_browse
+    params: {}
+    expect:
+      dripstack_checkpoint: topic
+  - name: shortlist_publications
+    action: plan_dripstack_browse
+    params:
+      topic: "crypto market structure"
+      publications:
+        - slug: premiumcrypto.substack.com
+          title: "Premium Crypto Notes"
+          description: "Crypto market structure, liquidity, exchanges, stablecoins, and onchain trading research."
+          site_url: "https://premiumcrypto.substack.com"
+        - slug: culturesignals.substack.com
+          title: "Culture Signals"
+          description: "Culture, media, and technology essays."
+          site_url: "https://culturesignals.substack.com"
+    expect:
+      dripstack_checkpoint: publication
+      dripstack_publications_min: 1
+  - name: list_articles
+    action: plan_dripstack_browse
+    params:
+      topic: "crypto market structure"
+      selected_publication_slug: premiumcrypto.substack.com
+      publications:
+        - slug: premiumcrypto.substack.com
+          title: "Premium Crypto Notes"
+          description: "Crypto market structure, liquidity, exchanges, stablecoins, and onchain trading research."
+          site_url: "https://premiumcrypto.substack.com"
+      posts:
+        - slug: near-intents-liquidity
+          title: "NEAR Intents liquidity and solver-routing risk"
+          subtitle: "A short premium note on route expiry, taker depth, and BTC leg risk."
+          author: "Premium Crypto Writer"
+          price_usd: 0.01
+        - slug: exchange-fragmentation
+          title: "Exchange fragmentation and agent order flow"
+          subtitle: "How agent traffic changes exchange liquidity."
+          author: "Premium Crypto Writer"
+          price_usd: 0.02
+    expect:
+      dripstack_checkpoint: article
+      dripstack_posts_min: 2
+  - name: selected_article_candidate
+    action: plan_dripstack_browse
+    params:
+      topic: "crypto market structure"
+      selected_publication_slug: premiumcrypto.substack.com
+      selected_post_slug: near-intents-liquidity
+      publications:
+        - slug: premiumcrypto.substack.com
+          title: "Premium Crypto Notes"
+          description: "Crypto market structure, liquidity, exchanges, stablecoins, and onchain trading research."
+          site_url: "https://premiumcrypto.substack.com"
+      posts:
+        - slug: near-intents-liquidity
+          title: "NEAR Intents liquidity and solver-routing risk"
+          subtitle: "A short premium note on route expiry, taker depth, and BTC leg risk."
+          author: "Premium Crypto Writer"
+          price_usd: 0.01
+    capture:
+      dripstack_paid_source_var: drip_source
+    expect:
+      dripstack_checkpoint: purchase-confirmation
+      dripstack_has_paid_source_candidate: true
+  - name: plan_payment_for_selected_article
+    action: plan_paid_research
+    params:
+      query: "Use the selected DripStack article only if it clears wallet and receipt gates."
+      pair: NEAR/BTC
+      budget_usd: 0.05
+      max_sources: 1
+      min_relevance: 0.2
+      min_trust_score: 0.4
+      spending_mode: quote
+      preferred_payment_protocols: [mpp, x402]
+      agent_wallet:
+        provider: AgentCash
+        network: base
+        address: "0x3333333333333333333333333333333333333333"
+        balance_usd: 5.0
+        per_article_cap_usd: 0.05
+        daily_cap_usd: 1.0
+        max_wallet_balance_usd: 5.0
+      sources:
+        - "$drip_source"
+    expect:
+      paid_research_schema_version: paid-research-plan/1
+      paid_research_selected_min: 1
+      paid_research_allocated_le: 0.05
+      paid_research_has_rail: mpp
+      paid_research_near_funding_routes_min: 1
