@@ -1,5 +1,9 @@
 use async_trait::async_trait;
-use std::{collections::HashMap, sync::Mutex};
+use std::{
+    collections::{HashMap, VecDeque},
+    hash::Hash,
+    sync::{Mutex, MutexGuard},
+};
 
 use crate::{
     CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef,
@@ -14,6 +18,10 @@ use crate::{
     },
 };
 
+const MAX_EVENTS: usize = 10_000;
+const MAX_TERMINAL_RECORDS: usize = 10_000;
+const MAX_IDEMPOTENCY_RECORDS: usize = 10_000;
+
 #[derive(Default)]
 pub struct InMemoryTurnStateStore {
     inner: Mutex<Inner>,
@@ -23,6 +31,8 @@ pub struct InMemoryTurnStateStore {
 struct Inner {
     cursor: u64,
     records: HashMap<TurnRunId, RunRecord>,
+    queued_runs: VecDeque<TurnRunId>,
+    terminal_runs: VecDeque<TurnRunId>,
     active_locks: HashMap<TurnLockKey, TurnRunId>,
     submit_idempotency: HashMap<SubmitIdempotencyKey, Result<SubmitTurnResponse, TurnError>>,
     resume_idempotency: HashMap<RunIdempotencyKey, Result<ResumeTurnResponse, TurnError>>,
@@ -76,11 +86,16 @@ struct RunIdempotencyKey {
 
 impl InMemoryTurnStateStore {
     pub fn events(&self) -> Vec<TurnLifecycleEvent> {
-        self.inner
-            .lock()
-            .expect("turn store mutex poisoned")
-            .events
-            .clone()
+        match self.inner.lock() {
+            Ok(inner) => inner.events.clone(),
+            Err(poisoned) => poisoned.into_inner().events.clone(),
+        }
+    }
+
+    fn lock_inner(&self) -> Result<MutexGuard<'_, Inner>, TurnError> {
+        self.inner.lock().map_err(|_| TurnError::Backend {
+            reason: "turn state store mutex poisoned".to_string(),
+        })
     }
 }
 
@@ -90,7 +105,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
         &self,
         request: SubmitTurnRequest,
     ) -> Result<SubmitTurnResponse, TurnError> {
-        let mut inner = self.inner.lock().expect("turn store mutex poisoned");
+        let mut inner = self.lock_inner()?;
         let idempotency_key = SubmitIdempotencyKey {
             scope: request.scope.clone(),
             key: request.idempotency_key.clone(),
@@ -104,15 +119,11 @@ impl TurnStateStore for InMemoryTurnStateStore {
             && let Some(record) = inner.records.get(active_run_id)
             && record.status.keeps_active_lock()
         {
-            let result = Err(TurnError::ThreadBusy(ThreadBusy {
+            return Err(TurnError::ThreadBusy(ThreadBusy {
                 active_run_id: *active_run_id,
                 status: record.status,
                 event_cursor: record.event_cursor,
             }));
-            inner
-                .submit_idempotency
-                .insert(idempotency_key, result.clone());
-            return result;
         }
 
         let turn_id = crate::TurnId::new();
@@ -135,6 +146,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
             lease_token: None,
         };
         inner.active_locks.insert(lock_key, run_id);
+        inner.queued_runs.push_back(run_id);
         inner.records.insert(run_id, record.clone());
         inner.push_event(&record, TurnEventKind::Submitted, None);
 
@@ -149,6 +161,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
         inner
             .submit_idempotency
             .insert(idempotency_key, response.clone());
+        inner.prune_idempotency_records();
         response
     }
 
@@ -156,7 +169,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
         &self,
         request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError> {
-        let mut inner = self.inner.lock().expect("turn store mutex poisoned");
+        let mut inner = self.lock_inner()?;
         let idempotency_key = RunIdempotencyKey {
             scope: request.scope.clone(),
             run_id: request.run_id,
@@ -169,6 +182,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
         inner
             .resume_idempotency
             .insert(idempotency_key, result.clone());
+        inner.prune_idempotency_records();
         result
     }
 
@@ -176,7 +190,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
         &self,
         request: CancelRunRequest,
     ) -> Result<CancelRunResponse, TurnError> {
-        let mut inner = self.inner.lock().expect("turn store mutex poisoned");
+        let mut inner = self.lock_inner()?;
         let idempotency_key = RunIdempotencyKey {
             scope: request.scope.clone(),
             run_id: request.run_id,
@@ -189,11 +203,12 @@ impl TurnStateStore for InMemoryTurnStateStore {
         inner
             .cancel_idempotency
             .insert(idempotency_key, result.clone());
+        inner.prune_idempotency_records();
         result
     }
 
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
-        let inner = self.inner.lock().expect("turn store mutex poisoned");
+        let inner = self.lock_inner()?;
         inner
             .records
             .get(&request.run_id)
@@ -209,22 +224,11 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
         &self,
         request: ClaimRunRequest,
     ) -> Result<Option<ClaimedTurnRun>, TurnError> {
-        let mut inner = self.inner.lock().expect("turn store mutex poisoned");
-        let run_id = inner
-            .records
-            .iter()
-            .find(|(_, record)| {
-                record.status == TurnStatus::Queued
-                    && request
-                        .scope_filter
-                        .as_ref()
-                        .is_none_or(|scope| scope == &record.scope)
-            })
-            .map(|(run_id, _)| *run_id);
-        let Some(run_id) = run_id else {
+        let mut inner = self.lock_inner()?;
+        let Some(run_id) = inner.pop_matching_queued_run(request.scope_filter.as_ref()) else {
             return Ok(None);
         };
-        let mut record = inner.records.remove(&run_id).expect("run selected above");
+        let mut record = inner.take_record(run_id)?;
         record.status = TurnStatus::Running;
         record.runner_id = Some(request.runner_id);
         record.lease_token = Some(request.lease_token);
@@ -240,7 +244,7 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
     }
 
     async fn heartbeat(&self, request: HeartbeatRequest) -> Result<EventCursor, TurnError> {
-        let mut inner = self.inner.lock().expect("turn store mutex poisoned");
+        let mut inner = self.lock_inner()?;
         let mut record = inner.take_record(request.run_id)?;
         let result = (|| {
             ensure_lease(&record, request.runner_id, request.lease_token)?;
@@ -253,7 +257,7 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
     }
 
     async fn block_run(&self, request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
-        let mut inner = self.inner.lock().expect("turn store mutex poisoned");
+        let mut inner = self.lock_inner()?;
         let mut record = inner.take_record(request.run_id)?;
         let result = (|| {
             ensure_lease(&record, request.runner_id, request.lease_token)?;
@@ -281,7 +285,7 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
     }
 
     async fn complete_run(&self, request: CompleteRunRequest) -> Result<TurnRunState, TurnError> {
-        let mut inner = self.inner.lock().expect("turn store mutex poisoned");
+        let mut inner = self.lock_inner()?;
         inner.terminal_transition(
             request.run_id,
             request.runner_id,
@@ -293,7 +297,7 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
     }
 
     async fn fail_run(&self, request: FailRunRequest) -> Result<TurnRunState, TurnError> {
-        let mut inner = self.inner.lock().expect("turn store mutex poisoned");
+        let mut inner = self.lock_inner()?;
         inner.terminal_transition(
             request.run_id,
             request.runner_id,
@@ -325,10 +329,37 @@ impl Inner {
             kind,
             sanitized_reason,
         });
+        if self.events.len() > MAX_EVENTS {
+            let excess = self.events.len() - MAX_EVENTS;
+            self.events.drain(0..excess);
+        }
     }
 
     fn take_record(&mut self, run_id: TurnRunId) -> Result<RunRecord, TurnError> {
         self.records.remove(&run_id).ok_or(TurnError::NotFound)
+    }
+
+    fn pop_matching_queued_run(&mut self, scope_filter: Option<&TurnScope>) -> Option<TurnRunId> {
+        let queued_count = self.queued_runs.len();
+        for _ in 0..queued_count {
+            let run_id = self.queued_runs.pop_front()?;
+            let Some(record) = self.records.get(&run_id) else {
+                continue;
+            };
+            if record.status != TurnStatus::Queued {
+                continue;
+            }
+            if scope_filter.is_none_or(|scope| scope == &record.scope) {
+                return Some(run_id);
+            }
+            self.queued_runs.push_back(run_id);
+        }
+        None
+    }
+
+    fn remove_queued_run(&mut self, run_id: TurnRunId) {
+        self.queued_runs
+            .retain(|queued_run_id| *queued_run_id != run_id);
     }
 
     fn resume_turn_once(
@@ -355,6 +386,7 @@ impl Inner {
             record.status = TurnStatus::Queued;
             record.gate_ref = None;
             record.event_cursor = self.next_cursor();
+            self.queued_runs.push_back(record.run_id);
             let response = ResumeTurnResponse {
                 run_id: record.run_id,
                 status: record.status,
@@ -394,16 +426,19 @@ impl Inner {
                 | TurnStatus::RecoveryRequired => {
                     (TurnStatus::CancelRequested, TurnEventKind::CancelRequested)
                 }
-                TurnStatus::Cancelled | TurnStatus::Completed | TurnStatus::Failed => {
-                    unreachable!("terminal statuses returned above")
+                status => {
+                    return Ok(CancelRunResponse {
+                        run_id: record.run_id,
+                        status,
+                        event_cursor: record.event_cursor,
+                        already_terminal: true,
+                    });
                 }
             };
             record.status = next_status;
             if record.status.is_terminal() {
-                let lock_key = TurnLockKey::from(&record.scope);
-                if self.active_locks.get(&lock_key) == Some(&record.run_id) {
-                    self.active_locks.remove(&lock_key);
-                }
+                self.release_active_lock(&record);
+                self.remove_queued_run(record.run_id);
             }
             record.event_cursor = self.next_cursor();
             let response = CancelRunResponse {
@@ -417,9 +452,13 @@ impl Inner {
                 event_kind,
                 Some(request.reason.category().to_string()),
             );
+            if record.status.is_terminal() {
+                self.mark_terminal(record.run_id);
+            }
             Ok(response)
         })();
         self.records.insert(record.run_id, record);
+        self.prune_terminal_records();
         result
     }
 
@@ -446,16 +485,48 @@ impl Inner {
             record.runner_id = None;
             record.lease_token = None;
             record.event_cursor = self.next_cursor();
-            let lock_key = TurnLockKey::from(&record.scope);
-            if self.active_locks.get(&lock_key) == Some(&run_id) {
-                self.active_locks.remove(&lock_key);
-            }
+            self.release_active_lock(&record);
+            self.remove_queued_run(record.run_id);
             let state = record.state();
             self.push_event(&record, kind, failure.map(|failure| failure.category));
+            self.mark_terminal(record.run_id);
             Ok(state)
         })();
         self.records.insert(record.run_id, record);
+        self.prune_terminal_records();
         result
+    }
+
+    fn release_active_lock(&mut self, record: &RunRecord) {
+        let lock_key = TurnLockKey::from(&record.scope);
+        if self.active_locks.get(&lock_key) == Some(&record.run_id) {
+            self.active_locks.remove(&lock_key);
+        }
+    }
+
+    fn mark_terminal(&mut self, run_id: TurnRunId) {
+        self.terminal_runs.push_back(run_id);
+    }
+
+    fn prune_terminal_records(&mut self) {
+        while self.terminal_runs.len() > MAX_TERMINAL_RECORDS {
+            let Some(run_id) = self.terminal_runs.pop_front() else {
+                break;
+            };
+            if self
+                .records
+                .get(&run_id)
+                .is_some_and(|record| record.status.is_terminal())
+            {
+                self.records.remove(&run_id);
+            }
+        }
+    }
+
+    fn prune_idempotency_records(&mut self) {
+        prune_map(&mut self.submit_idempotency, MAX_IDEMPOTENCY_RECORDS);
+        prune_map(&mut self.resume_idempotency, MAX_IDEMPOTENCY_RECORDS);
+        prune_map(&mut self.cancel_idempotency, MAX_IDEMPOTENCY_RECORDS);
     }
 }
 
@@ -487,4 +558,16 @@ fn ensure_lease(
         return Err(TurnError::LeaseMismatch);
     }
     Ok(())
+}
+
+fn prune_map<K, V>(map: &mut HashMap<K, V>, max_len: usize)
+where
+    K: Clone + Eq + Hash,
+{
+    while map.len() > max_len {
+        let Some(key) = map.keys().next().cloned() else {
+            break;
+        };
+        map.remove(&key);
+    }
 }

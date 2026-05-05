@@ -77,7 +77,7 @@ async fn same_thread_active_run_returns_busy_but_different_threads_run_independe
 }
 
 #[tokio::test]
-async fn submit_turn_idempotency_replays_same_success_or_busy_result() {
+async fn submit_turn_idempotency_replays_same_success_result() {
     let (coordinator, _store) = coordinator();
     let first = coordinator
         .submit_turn(submit_request("thread-a", "idem-submit-a"))
@@ -88,16 +88,48 @@ async fn submit_turn_idempotency_replays_same_success_or_busy_result() {
         .await
         .unwrap();
     assert_eq!(duplicate, first);
+}
 
-    let busy = coordinator
-        .submit_turn(submit_request("thread-a", "idem-submit-b"))
+#[tokio::test]
+async fn transient_busy_submit_is_not_cached_after_thread_unlocks() {
+    let (coordinator, store) = coordinator();
+    let first_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-a", "idem-submit-a"))
+            .await
+            .unwrap(),
+    );
+    let busy_request = submit_request("thread-a", "idem-submit-b");
+    assert!(matches!(
+        coordinator
+            .submit_turn(busy_request.clone())
+            .await
+            .unwrap_err(),
+        TurnError::ThreadBusy(_)
+    ));
+
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
         .await
-        .unwrap_err();
-    let duplicate_busy = coordinator
-        .submit_turn(submit_request("thread-a", "idem-submit-b"))
+        .unwrap()
+        .unwrap();
+    store
+        .complete_run(CompleteRunRequest {
+            run_id: first_run_id,
+            runner_id,
+            lease_token,
+        })
         .await
-        .unwrap_err();
-    assert_eq!(duplicate_busy, busy);
+        .unwrap();
+
+    let accepted_after_unlock = coordinator.submit_turn(busy_request).await.unwrap();
+    assert_ne!(accepted_run_id(&accepted_after_unlock), first_run_id);
 }
 
 #[tokio::test]

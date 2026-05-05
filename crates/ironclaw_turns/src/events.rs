@@ -43,20 +43,20 @@ pub struct InMemoryTurnEventSink {
 
 impl InMemoryTurnEventSink {
     pub fn events(&self) -> Vec<TurnLifecycleEvent> {
-        self.events
-            .lock()
-            .expect("event sink mutex poisoned")
-            .clone()
+        match self.events.lock() {
+            Ok(events) => events.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
     }
 }
 
 #[async_trait]
 impl TurnEventSink for InMemoryTurnEventSink {
     async fn publish(&self, event: TurnLifecycleEvent) -> Result<(), TurnError> {
-        self.events
-            .lock()
-            .expect("event sink mutex poisoned")
-            .push(event);
+        let mut events = self.events.lock().map_err(|_| TurnError::Backend {
+            reason: "turn event sink mutex poisoned".to_string(),
+        })?;
+        events.push(event);
         Ok(())
     }
 }
