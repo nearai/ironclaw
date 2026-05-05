@@ -1,9 +1,12 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AcceptedMessageRef, GateRef, IdempotencyKey, ReplyTargetBindingRef, SanitizedCancelReason,
-    SourceBindingRef, TurnActor, TurnRunId, TurnRunProfile, TurnScope,
+    AcceptedMessageRef, GateRef, IdempotencyKey, ReplyTargetBindingRef, RunProfileRequest,
+    SanitizedCancelReason, SourceBindingRef, TurnActor, TurnRunId, TurnScope,
 };
+
+pub type TurnTimestamp = DateTime<Utc>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubmitTurnRequest {
@@ -12,8 +15,9 @@ pub struct SubmitTurnRequest {
     pub accepted_message_ref: AcceptedMessageRef,
     pub source_binding_ref: SourceBindingRef,
     pub reply_target_binding_ref: ReplyTargetBindingRef,
-    pub profile: TurnRunProfile,
+    pub requested_run_profile: Option<RunProfileRequest>,
     pub idempotency_key: IdempotencyKey,
+    pub received_at: TurnTimestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,6 +26,8 @@ pub struct ResumeTurnRequest {
     pub actor: TurnActor,
     pub run_id: TurnRunId,
     pub gate_resolution_ref: GateRef,
+    pub source_binding_ref: SourceBindingRef,
+    pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub idempotency_key: IdempotencyKey,
 }
 

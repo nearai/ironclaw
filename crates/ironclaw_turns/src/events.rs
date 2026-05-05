@@ -55,7 +55,7 @@ impl InMemoryTurnEventSink {
 #[async_trait]
 impl TurnEventSink for InMemoryTurnEventSink {
     async fn publish(&self, event: TurnLifecycleEvent) -> Result<(), TurnError> {
-        let mut events = self.events.lock().map_err(|_| TurnError::Backend {
+        let mut events = self.events.lock().map_err(|_| TurnError::Unavailable {
             reason: "turn event sink mutex poisoned".to_string(),
         })?;
         events.push(event);

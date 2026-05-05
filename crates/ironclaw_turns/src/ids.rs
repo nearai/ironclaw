@@ -156,6 +156,32 @@ bounded_ref!(SourceBindingRef, "source_binding_ref");
 bounded_ref!(ReplyTargetBindingRef, "reply_target_binding_ref");
 bounded_ref!(GateRef, "gate_ref");
 bounded_ref!(IdempotencyKey, "idempotency_key");
+bounded_ref!(RunProfileRequest, "run_profile_request");
+bounded_ref!(RunProfileId, "run_profile_id");
+
+impl RunProfileId {
+    pub fn default_profile() -> Self {
+        Self("default".to_string())
+    }
+
+    pub fn from_request(request: &RunProfileRequest) -> Self {
+        Self(request.as_str().to_string())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RunProfileVersion(u64);
+
+impl RunProfileVersion {
+    pub fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+}
 
 fn validate_ref(kind: &'static str, value: &str) -> Result<(), String> {
     if value.is_empty() {

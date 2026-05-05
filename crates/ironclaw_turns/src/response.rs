@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{ReplyTargetBindingRef, TurnRunId, TurnRunProfile, TurnStatus, events::EventCursor};
+use crate::{
+    AcceptedMessageRef, ReplyTargetBindingRef, RunProfileId, RunProfileVersion, TurnRunId,
+    TurnStatus, events::EventCursor,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SubmitTurnResponse {
@@ -8,8 +11,10 @@ pub enum SubmitTurnResponse {
         turn_id: crate::TurnId,
         run_id: TurnRunId,
         status: TurnStatus,
-        profile: TurnRunProfile,
+        resolved_run_profile_id: RunProfileId,
+        resolved_run_profile_version: RunProfileVersion,
         event_cursor: EventCursor,
+        accepted_message_ref: AcceptedMessageRef,
         reply_target_binding_ref: ReplyTargetBindingRef,
     },
 }
