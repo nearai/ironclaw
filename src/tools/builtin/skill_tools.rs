@@ -478,19 +478,61 @@ fn loaded_skill_name_for_source_url(
         return None;
     }
 
-    registry.skills().iter().find_map(|skill| {
-        let skill_dir = match &skill.source {
-            ironclaw_skills::SkillSource::Installed(path) => path,
-            _ => return None,
-        };
-        let metadata_path = skill_dir.join(INSTALL_METADATA_FILE_NAME);
-        let metadata_bytes = std::fs::read(metadata_path).ok()?;
-        let metadata: ironclaw_skills::registry::InstalledSkillMetadata =
-            serde_json::from_slice(&metadata_bytes).ok()?;
-        let source_url = metadata.source_url.as_deref()?;
-        (normalize_install_source_url(source_url) == requested_url)
-            .then(|| skill.name().to_string())
-    })
+    registry
+        .skills()
+        .iter()
+        .find_map(|skill| {
+            let skill_dir = match &skill.source {
+                ironclaw_skills::SkillSource::Installed(path) => path,
+                _ => return None,
+            };
+            installed_source_url_matches(skill_dir, &requested_url)
+                .then(|| skill.name().to_string())
+        })
+        .or_else(|| installed_skill_name_for_source_url_on_disk(registry, &requested_url))
+}
+
+fn installed_source_url_matches(skill_dir: &Path, requested_url: &str) -> bool {
+    let metadata_path = skill_dir.join(INSTALL_METADATA_FILE_NAME);
+    let Some(metadata) = std::fs::read(metadata_path).ok().and_then(|bytes| {
+        serde_json::from_slice::<ironclaw_skills::registry::InstalledSkillMetadata>(&bytes).ok()
+    }) else {
+        return false;
+    };
+    metadata
+        .source_url
+        .as_deref()
+        .is_some_and(|source_url| normalize_install_source_url(source_url) == requested_url)
+}
+
+fn installed_skill_name_for_source_url_on_disk(
+    registry: &SkillRegistry,
+    requested_url: &str,
+) -> Option<String> {
+    let entries = std::fs::read_dir(registry.install_target_dir()).ok()?;
+    for entry in entries.flatten() {
+        if !entry.file_type().ok()?.is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        if installed_source_url_matches(&path, requested_url)
+            && let Some(name) = entry.file_name().to_str().filter(|name| !name.is_empty())
+        {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
+fn installed_skill_dir_by_name(registry: &SkillRegistry, name: &str) -> Option<PathBuf> {
+    let mut components = Path::new(name).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) => {
+            let dir = registry.install_target_dir().join(name);
+            dir.join("SKILL.md").is_file().then_some(dir)
+        }
+        _ => None,
+    }
 }
 
 // ── skill_list ──────────────────────────────────────────────────────────
@@ -837,15 +879,23 @@ impl Tool for SkillInstallTool {
                 .read()
                 .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
 
-            if !install_dependencies
-                && let Some(url) = params.get("url").and_then(|v| v.as_str())
-                && let Some(installed_name) = loaded_skill_name_for_source_url(&guard, url)
-            {
-                let report = ChainInstallReport::default();
-                return Ok(ToolOutput::success(
-                    build_already_installed_output(&installed_name, &report),
-                    start.elapsed(),
-                ));
+            if !install_dependencies {
+                if let Some(url) = params.get("url").and_then(|v| v.as_str())
+                    && let Some(installed_name) = loaded_skill_name_for_source_url(&guard, url)
+                {
+                    let report = ChainInstallReport::default();
+                    return Ok(ToolOutput::success(
+                        build_already_installed_output(&installed_name, &report),
+                        start.elapsed(),
+                    ));
+                }
+                if installed_skill_dir_by_name(&guard, name).is_some() {
+                    let report = ChainInstallReport::default();
+                    return Ok(ToolOutput::success(
+                        build_already_installed_output(name, &report),
+                        start.elapsed(),
+                    ));
+                }
             }
 
             if let Some(loaded_skill) = guard.find_by_name(name) {
@@ -926,7 +976,8 @@ impl Tool for SkillInstallTool {
                 )
                 .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
-            if guard.has(&skill_name) {
+            if guard.has(&skill_name) || installed_skill_dir_by_name(&guard, &skill_name).is_some()
+            {
                 let report = ChainInstallReport::default();
                 return Ok(ToolOutput::success(
                     build_already_installed_output(&skill_name, &report),
@@ -1058,7 +1109,9 @@ impl Tool for SkillInstallTool {
                 .get("name")
                 .and_then(|v| v.as_str())
                 .filter(|name| !name.is_empty())
-                .is_some_and(|name| guard.has(name));
+                .is_some_and(|name| {
+                    guard.has(name) || installed_skill_dir_by_name(&guard, name).is_some()
+                });
             let source_url_is_loaded = params
                 .get("url")
                 .and_then(|v| v.as_str())
@@ -2134,6 +2187,42 @@ mod tests {
                 .unwrap()
                 .contains("no install needed")
         );
+    }
+
+    #[tokio::test]
+    async fn skill_install_disk_duplicate_is_idempotent_without_loaded_registry() {
+        use crate::tools::tool::ApprovalRequirement;
+
+        let registry = test_registry();
+        let source_url = "https://github.com/Pika-Labs/Pika-Skills";
+        {
+            let dir = registry.read().unwrap().install_target_dir().to_path_buf();
+            SkillRegistry::prepare_install_bundle_to_disk(
+                &dir,
+                "pikastream-video-meeting",
+                &skill_content("pikastream-video-meeting", &[]),
+                &[],
+                Some(&ironclaw_skills::registry::InstalledSkillMetadata {
+                    source_url: Some(source_url.to_string()),
+                    source_subdir: None,
+                }),
+            )
+            .await
+            .expect("prepare should succeed");
+        }
+        let tool = SkillInstallTool::new(Arc::clone(&registry), test_catalog());
+        let params = serde_json::json!({
+            "name": "pikastream-video-meeting",
+            "url": source_url,
+        });
+
+        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Never);
+        let output = tool
+            .execute(params, &JobContext::default())
+            .await
+            .expect("disk duplicate install should be a no-op");
+        assert_eq!(output.result["status"], "already_installed");
+        assert_eq!(output.result["name"], "pikastream-video-meeting");
     }
 
     #[tokio::test]
