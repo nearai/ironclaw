@@ -346,10 +346,18 @@ impl EffectBridgeAdapter {
             return Ok(());
         }
 
-        if matches!(
-            tool.requires_approval(approval.parameters),
-            ApprovalRequirement::Always
-        ) {
+        let approval_requirement = tool.requires_approval(approval.parameters);
+        // `skill_install` is parameter-sensitive: duplicate installs are a
+        // guaranteed no-op and deliberately return `ApprovalRequirement::Never`.
+        // Preserve that v1 contract even though the tool's default permission is
+        // ask-each-time for real installs.
+        if matches!(approval.lookup_name, "skill_install" | "skill-install")
+            && matches!(approval_requirement, ApprovalRequirement::Never)
+        {
+            return Ok(());
+        }
+
+        if matches!(approval_requirement, ApprovalRequirement::Always) {
             return Err(Self::gate_paused(
                 "approval",
                 approval.action_name,
