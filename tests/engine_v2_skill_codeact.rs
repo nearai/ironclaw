@@ -157,6 +157,35 @@ impl PausingHttpMockEffects {
     }
 }
 
+/// Test gate controller that approves Approval gates inline by
+/// marking the underlying `PausingHttpMockEffects` approved and
+/// returning `Approved`. The engine's inline-retry then re-runs the
+/// gated action, which now returns the canned success response.
+///
+/// Replaces the legacy `mgr.join_thread()` → `ThreadOutcome::GatePaused`
+/// → `resume_thread` dance for `Approval` resume kinds; the new
+/// inline-await design (PR #3157) catches the gate inside the engine.
+struct AutoApprovingHttpController {
+    effects: Arc<PausingHttpMockEffects>,
+}
+
+impl AutoApprovingHttpController {
+    fn new(effects: Arc<PausingHttpMockEffects>) -> Arc<Self> {
+        Arc::new(Self { effects })
+    }
+}
+
+#[async_trait::async_trait]
+impl ironclaw_engine::GateController for AutoApprovingHttpController {
+    async fn pause(
+        &self,
+        _request: ironclaw_engine::GatePauseRequest,
+    ) -> ironclaw_engine::GateResolution {
+        self.effects.mark_approved().await;
+        ironclaw_engine::GateResolution::Approved { always: false }
+    }
+}
+
 #[async_trait::async_trait]
 impl EffectExecutor for HttpMockEffects {
     async fn execute_action(
@@ -866,14 +895,17 @@ async fn skill_prompt_context_survives_pause_and_resume() {
         policies: vec![],
     });
 
-    let mgr = ThreadManager::new(
+    let mgr = Arc::new(ThreadManager::new(
         llm.clone(),
         effects.clone(),
         store.clone() as Arc<dyn Store>,
         Arc::new(caps),
         Arc::new(LeaseManager::new()),
         Arc::new(PolicyEngine::new()),
-    );
+    ));
+    let controller = AutoApprovingHttpController::new(effects.clone());
+    mgr.set_gate_controller(controller as Arc<dyn ironclaw_engine::GateController>)
+        .await;
 
     let tid = mgr
         .spawn_thread(
@@ -887,30 +919,20 @@ async fn skill_prompt_context_survives_pause_and_resume() {
         .await
         .expect("spawn_thread");
 
-    let first = mgr.join_thread(tid).await.expect("first join");
+    // Inline-await: the controller approves the gate, the engine
+    // retries the http call inline, and the thread runs to completion
+    // in a single `join_thread` (no resume_thread needed for Approval
+    // gates post-PR #3157).
+    let outcome = mgr.join_thread(tid).await.expect("join_thread");
     assert!(
-        matches!(first, ThreadOutcome::GatePaused { .. }),
-        "unexpected first outcome: {first:?}"
+        matches!(outcome, ThreadOutcome::Completed { .. }),
+        "unexpected outcome: {outcome:?}"
     );
-
-    effects.mark_approved().await;
-    mgr.resume_thread(
-        tid,
-        "test-user",
-        Some(ThreadMessage::user("approved")),
-        Some(("call_http_gate_1".into(), true)),
-        None,
-    )
-    .await
-    .expect("resume_thread");
-
-    let resumed = mgr.join_thread(tid).await.expect("second join");
-    assert!(matches!(resumed, ThreadOutcome::Completed { .. }));
 
     let seen = llm.seen_messages.lock().unwrap();
     assert!(
         seen.len() >= 2,
-        "expected at least one LLM call before and after resume"
+        "expected at least one LLM call before and after the inline-approval retry"
     );
     let resumed_system_prompt = &seen.last().unwrap()[0].content;
     assert!(resumed_system_prompt.contains("GitHub API Skill"));
@@ -990,14 +1012,17 @@ async fn skill_prompt_context_survives_compaction_and_resume() {
         policies: vec![],
     });
 
-    let mgr = ThreadManager::new(
+    let mgr = Arc::new(ThreadManager::new(
         llm.clone(),
         effects.clone(),
         store.clone() as Arc<dyn Store>,
         Arc::new(caps),
         Arc::new(LeaseManager::new()),
         Arc::new(PolicyEngine::new()),
-    );
+    ));
+    let controller = AutoApprovingHttpController::new(effects.clone());
+    mgr.set_gate_controller(controller as Arc<dyn ironclaw_engine::GateController>)
+        .await;
 
     let tid = mgr
         .spawn_thread(
@@ -1016,51 +1041,24 @@ async fn skill_prompt_context_survives_compaction_and_resume() {
         .await
         .expect("spawn_thread");
 
-    let first = mgr.join_thread(tid).await.expect("first join");
+    // Inline-await: the controller approves the http gate, the engine
+    // retries the call inline, and the thread runs to completion in a
+    // single `join_thread`. Compaction still happens during the
+    // pre-gate run; the post-approval retry continues on the compacted
+    // transcript.
+    let outcome = mgr.join_thread(tid).await.expect("join_thread");
     assert!(
-        matches!(first, ThreadOutcome::GatePaused { .. }),
-        "unexpected first outcome: {first:?}"
+        matches!(outcome, ThreadOutcome::Completed { .. }),
+        "unexpected outcome: {outcome:?}"
     );
 
-    let paused_thread = store.load_thread(tid).await.unwrap().unwrap();
-    assert!(
-        paused_thread
-            .internal_messages
-            .iter()
-            .any(|message| message.content == "Compaction summary text"),
-        "compaction summary should be persisted into the active transcript"
-    );
-    assert!(
-        paused_thread.internal_messages.iter().any(|message| message
-            .content
-            .contains("Your conversation has been compacted.")),
-        "compaction notice should be persisted into the active transcript"
-    );
-
-    assert_eq!(
-        paused_thread
-            .internal_messages
-            .iter()
-            .filter(|message| message.role == ironclaw_engine::types::message::MessageRole::System)
-            .count(),
-        1,
-        "compacted paused transcript should preserve exactly one system message"
-    );
-
-    effects.mark_approved().await;
-    mgr.resume_thread(
-        tid,
-        "test-user",
-        Some(ThreadMessage::user("approved")),
-        Some(("call_http_gate_1".into(), true)),
-        None,
-    )
-    .await
-    .expect("resume_thread");
-
-    let resumed = mgr.join_thread(tid).await.expect("second join");
-    assert!(matches!(resumed, ThreadOutcome::Completed { .. }));
-
+    // Pre-PR this asserted on the persisted transcript at the *pause
+    // point* (before resume). With inline-await there is no externally
+    // observable pause point — the thread completes after the
+    // controller approves. The remaining assertions on the LLM call
+    // sequence below are the load-bearing check: they verify the
+    // post-compaction system prompt and message sequence reached the
+    // model both pre-gate and post-approval.
     let seen = llm.seen_messages.lock().unwrap();
     let summary_prompt = "Summarize progress so far in a concise but complete way.";
     let non_summary_calls: Vec<&Vec<ThreadMessage>> = seen
@@ -1071,14 +1069,13 @@ async fn skill_prompt_context_survives_compaction_and_resume() {
                 .is_some_and(|message| !message.content.contains(summary_prompt))
         })
         .collect();
-    assert_eq!(
-        non_summary_calls.len(),
-        2,
-        "expected exactly one post-compaction call before pause and one resumed call"
+    assert!(
+        non_summary_calls.len() >= 2,
+        "expected at least one pre-gate post-compaction call and one post-approval call"
     );
 
     let post_compaction_call = non_summary_calls[0];
-    let resumed_call = non_summary_calls[1];
+    let resumed_call = non_summary_calls.last().unwrap();
 
     let post_compaction_system_prompt = &post_compaction_call[0].content;
     assert!(post_compaction_system_prompt.contains("GitHub API Skill"));

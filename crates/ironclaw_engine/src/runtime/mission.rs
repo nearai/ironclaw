@@ -2754,6 +2754,12 @@ async fn dispatch_protected_write(
         thread_goal: None,
         available_actions_snapshot: None,
         available_action_inventory_snapshot: None,
+        // Mission writes never gate (synthetic lease, internal path).
+        // If `memory_write` ever surfaces a gate it cancels cleanly via
+        // a typed denial rather than reproducing the legacy unwind bug.
+        gate_controller: crate::gate::CancellingGateController::arc(),
+        call_approval_granted: false,
+        conversation_id: None,
     };
 
     effects
