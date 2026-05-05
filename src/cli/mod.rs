@@ -22,7 +22,10 @@ mod config;
 mod doctor;
 pub mod fmt;
 mod hooks;
-#[cfg(feature = "import")]
+// `import` is no longer feature-gated at the module level: the
+// `Backup` variant inside ImportCommand restores `ironclaw backup`
+// archives and is always available. The `Openclaw` variant inside
+// the same enum stays gated by `feature = "import"`.
 pub mod import;
 mod logs;
 mod mcp;
@@ -43,8 +46,10 @@ pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
 pub use doctor::run_doctor_command;
 pub use hooks::{HooksCommand, run_hooks_command};
-#[cfg(feature = "import")]
-pub use import::{ImportCommand, run_import_command};
+// ImportCommand + run_import_command are always available now that the
+// `Backup` variant (always-on, restores `ironclaw backup` archives)
+// lives alongside the openclaw migration variant (still feature-gated).
+pub use import::{ImportCommand, run_import_backup, run_import_command};
 pub use logs::{LogsCommand, run_logs_command};
 pub use mcp::{McpCommand, run_mcp_command};
 pub use memory::MemoryCommand;
@@ -312,11 +317,13 @@ pub enum Command {
     Completion(Completion),
 
     /// Import data from other AI systems
-    #[cfg(feature = "import")]
+    // The Import subcommand is always available — its `Backup`
+    // variant restores `ironclaw backup` archives. The `Openclaw`
+    // variant inside ImportCommand is still feature-gated.
     #[command(
         subcommand,
-        about = "Import from other AI systems",
-        long_about = "Migrate data from other AI assistants like OpenClaw.\nExample: ironclaw import openclaw"
+        about = "Import or restore data",
+        long_about = "Restore an `ironclaw backup` archive, or migrate from another AI system.\nExamples:\n  ironclaw import backup ./snap.zip\n  ironclaw import openclaw    # requires the `import` feature"
     )]
     Import(ImportCommand),
 
