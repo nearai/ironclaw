@@ -14,7 +14,7 @@ use crate::secrets::SecretsStore;
 use crate::tools::mcp::{
     McpClient, McpProcessManager, McpServerConfig, McpSessionManager, OAuthConfig,
     auth::{authorize_mcp_server, is_authenticated},
-    config::{self, EffectiveTransport, McpServersFile},
+    config::{self, EffectiveTransport, McpServersFile, normalize_server_name},
     factory::create_client_from_config,
 };
 
@@ -250,6 +250,10 @@ async fn add_server(args: McpAddArgs) -> anyhow::Result<()> {
     // Validate
     config.validate()?;
     let has_custom_auth_header = config.has_custom_auth_header();
+    // Capture the canonical stored name so follow-up hints suggest the
+    // identifier as it was persisted (matches what `mcp auth <name>` expects
+    // and keeps the suggestion shell-safe).
+    let canonical_name = config.name.clone();
 
     // Save (DB if available, else disk)
     let (db, owner_id) = connect_db().await;
@@ -258,7 +262,7 @@ async fn add_server(args: McpAddArgs) -> anyhow::Result<()> {
     save_servers(db.as_deref(), &owner_id, &servers).await?;
 
     println!();
-    println!("  ✓ Added MCP server '{}'", name);
+    println!("  ✓ Added MCP server '{}'", canonical_name);
 
     match transport_lower.as_str() {
         "stdio" => {
@@ -280,7 +284,10 @@ async fn add_server(args: McpAddArgs) -> anyhow::Result<()> {
 
     if requires_auth && !has_custom_auth_header {
         println!();
-        println!("  Run 'ironclaw mcp auth {}' to authenticate.", name);
+        println!(
+            "  Run 'ironclaw mcp auth {}' to authenticate.",
+            canonical_name
+        );
     }
 
     println!();
@@ -290,6 +297,7 @@ async fn add_server(args: McpAddArgs) -> anyhow::Result<()> {
 
 /// Remove an MCP server.
 async fn remove_server(name: String) -> anyhow::Result<()> {
+    let name = normalize_server_name(&name);
     let (db, owner_id) = connect_db().await;
     let mut servers = load_servers(db.as_deref(), &owner_id).await?;
     if !servers.remove(&name) {
@@ -411,6 +419,7 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
 
 /// Authenticate with an MCP server.
 async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
+    let name = normalize_server_name(&name);
     // Get server config
     let (db, owner_id) = connect_db().await;
     let servers = load_servers(db.as_deref(), &owner_id).await?;
@@ -495,6 +504,7 @@ async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
 
 /// Test connection to an MCP server.
 async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
+    let name = normalize_server_name(&name);
     // Get server config
     let (db, owner_id) = connect_db().await;
     let servers = load_servers(db.as_deref(), &owner_id).await?;
@@ -513,10 +523,14 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
     let secrets = get_secrets_store().await?;
     let has_tokens = is_authenticated(&server, &secrets, &user_id).await;
 
-    let client = if has_tokens {
-        // We have stored tokens, use authenticated client
-        McpClient::new_authenticated(server.clone(), session_manager.clone(), secrets, user_id)
-    } else if server.has_custom_auth_header() {
+    // An explicit Authorization header means the user owns the credential
+    // path (API key, personal access token, etc.). It must win over any
+    // stored OAuth tokens — otherwise adding `Authorization: Bearer …` to
+    // an already-authenticated server silently keeps using the OAuth token
+    // and the explicit header is never sent. This matches the `requires_auth()`
+    // contract (returns false when an Authorization header is present) and
+    // the factory's own ordering in `create_client_from_config`.
+    let client = if server.has_custom_auth_header() {
         let process_manager = Arc::new(McpProcessManager::new());
         create_client_from_config(
             server.clone(),
@@ -527,6 +541,9 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
         )
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?
+    } else if has_tokens {
+        // We have stored tokens, use authenticated client
+        McpClient::new_authenticated(server.clone(), session_manager.clone(), secrets, user_id)
     } else if server.requires_auth() {
         // OAuth configured but no tokens - need to authenticate
         println!();
@@ -582,18 +599,22 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
             let err_str = e.to_string();
             // Check if server requires auth but we don't have valid tokens
             if crate::tools::mcp::is_auth_error_message(&err_str) {
-                if has_tokens {
-                    // We had tokens but they failed - need to re-authenticate
-                    println!(
-                        "  ✗ Authentication failed (token may be expired). Try re-authenticating:"
-                    );
-                    println!("    ironclaw mcp auth {}", name);
-                } else if server.has_custom_auth_header() {
+                // Match the construction-side ordering: an explicit
+                // Authorization header wins over stored OAuth tokens, so
+                // the failure message must point at the configured header
+                // first.
+                if server.has_custom_auth_header() {
                     println!("  ✗ Authentication failed.");
                     println!();
                     println!(
                         "  Check the configured Authorization header or API key for this server."
                     );
+                } else if has_tokens {
+                    // We had tokens but they failed - need to re-authenticate
+                    println!(
+                        "  ✗ Authentication failed (token may be expired). Try re-authenticating:"
+                    );
+                    println!("    ironclaw mcp auth {}", name);
                 } else {
                     // No tokens - server requires auth
                     println!("  ✗ Server requires authentication.");
@@ -613,6 +634,7 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
 
 /// Toggle server enabled/disabled state.
 async fn toggle_server(name: String, enable: bool, disable: bool) -> anyhow::Result<()> {
+    let name = normalize_server_name(&name);
     let (db, owner_id) = connect_db().await;
     let mut servers = load_servers(db.as_deref(), &owner_id).await?;
 

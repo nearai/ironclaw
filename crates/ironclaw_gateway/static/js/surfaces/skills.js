@@ -27,10 +27,27 @@ function installWasmExtension() {
   });
 }
 
+// Must mirror `normalize_server_name` in src/tools/mcp/config.rs, which
+// folds hyphens to underscores so the canonical form agrees with
+// `ExtensionName::new`. Treating `-` as a word char on the client would
+// let the web UI accept names (e.g. `foo--bar`, `-foo-`) that backend
+// canonicalization still rejects.
+function normalizeMcpServerName(raw) {
+  return raw.toLowerCase()
+    .replace(/[^a-z0-9_]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_|_$/g, '');
+}
+
 function addMcpServer() {
-  var name = document.getElementById('mcp-install-name').value.trim();
-  if (!name) {
+  var rawName = document.getElementById('mcp-install-name').value.trim();
+  if (!rawName) {
     showToast(I18n.t('mcp.serverNameRequired'), 'error');
+    return;
+  }
+  var name = normalizeMcpServerName(rawName);
+  if (!name) {
+    showToast('Server name contains no valid characters', 'error');
     return;
   }
   var url = document.getElementById('mcp-install-url').value.trim();

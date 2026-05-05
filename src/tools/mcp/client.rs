@@ -1590,9 +1590,11 @@ mod tests {
 
     #[test]
     fn new_with_config_falls_back_on_invalid_server_name() {
-        // `McpServerConfig::new` does not pre-validate the name, so the
-        // constructor receives a value that would fail the allowlist.
-        let config = McpServerConfig::new("bad name", "http://localhost:8080");
+        // `McpServerConfig::new` runs the input through `normalize_server_name`,
+        // so we override `.name` after construction to inject a value the
+        // allowlist still rejects (here: empty after normalization).
+        let mut config = McpServerConfig::new("placeholder", "http://localhost:8080");
+        config.name = "bad name".to_string();
         let client = McpClient::new_with_config(config).expect("HTTP transport accepted");
         assert_eq!(
             client.server_name(),
@@ -1609,7 +1611,8 @@ mod tests {
     /// client's name), silently breaking `Mcp-Session-Id` tracking.
     #[test]
     fn new_with_config_client_and_transport_server_name_agree() {
-        let invalid = McpServerConfig::new("bad name", "http://localhost:8080");
+        let mut invalid = McpServerConfig::new("placeholder", "http://localhost:8080");
+        invalid.name = "bad name".to_string();
         let client = McpClient::new_with_config(invalid).expect("HTTP transport accepted");
         // The client surface is the single source of truth for tests;
         // the transport validates the same input the client just
@@ -1630,7 +1633,8 @@ mod tests {
         let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
             Arc::new(crate::secrets::InMemorySecretsStore::new(crypto));
 
-        let config = McpServerConfig::new("bad name", "https://api.example.com");
+        let mut config = McpServerConfig::new("placeholder", "https://api.example.com");
+        config.name = "bad name".to_string();
         let client = McpClient::new_authenticated(config, session_manager, secrets, "test-user");
         assert_eq!(
             client.server_name(),

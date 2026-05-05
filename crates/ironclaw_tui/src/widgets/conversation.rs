@@ -867,7 +867,14 @@ impl ConversationWidget {
         let mut items_str = items.join(", ");
         // Truncate if too long
         if items_str.len() > 60 {
-            items_str.truncate(57);
+            // Use char_indices to find a safe truncation point (UTF-8 safe)
+            let truncate_at = items_str
+                .char_indices()
+                .map(|(i, _)| i)
+                .take_while(|&i| i <= 57)
+                .last()
+                .unwrap_or(0);
+            items_str.truncate(truncate_at);
             items_str.push_str("...");
         }
 
