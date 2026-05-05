@@ -25,8 +25,12 @@ pub(crate) async fn build_libsql_event_stores(
     path_or_url: String,
     auth_token: Option<SecretString>,
 ) -> Result<RebornEventStores, RebornEventStoreError> {
-    let db = build_database(&path_or_url, auth_token).await?;
-    let store = LibSqlStore::new(db);
+    let (db, kind) = build_database(&path_or_url, auth_token).await?;
+    let store = LibSqlStore::new(db, kind);
+    store
+        .initialize_pragmas()
+        .await
+        .map_err(|source| RebornEventStoreError::backend("libsql", "initialize pragmas", source))?;
     store
         .run_migrations()
         .await
@@ -37,12 +41,22 @@ pub(crate) async fn build_libsql_event_stores(
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LibSqlBackingKind {
+    /// File-backed local libSQL/SQLite database. Eligible for WAL.
+    LocalFile,
+    /// `:memory:` reference backend. WAL is not applicable.
+    LocalMemory,
+    /// Remote libSQL endpoint. WAL is managed server-side.
+    Remote,
+}
+
 async fn build_database(
     path_or_url: &str,
     auth_token: Option<SecretString>,
-) -> Result<Arc<Database>, RebornEventStoreError> {
-    let db = if is_remote_libsql(path_or_url) {
-        libsql::Builder::new_remote(
+) -> Result<(Arc<Database>, LibSqlBackingKind), RebornEventStoreError> {
+    let (db, kind) = if is_remote_libsql(path_or_url) {
+        let db = libsql::Builder::new_remote(
             path_or_url.to_string(),
             auth_token
                 .as_ref()
@@ -50,50 +64,130 @@ async fn build_database(
                 .unwrap_or_default(),
         )
         .build()
-        .await
+        .await;
+        (db, LibSqlBackingKind::Remote)
+    } else if path_or_url == ":memory:" {
+        (
+            libsql::Builder::new_local(path_or_url).build().await,
+            LibSqlBackingKind::LocalMemory,
+        )
     } else {
-        if path_or_url != ":memory:" {
-            let path = Path::new(path_or_url);
-            if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent).await.map_err(|source| {
-                    RebornEventStoreError::io("initialize libsql parent", source)
-                })?;
-            }
+        let path = Path::new(path_or_url);
+        // `Path::parent()` returns `Some("")` for a bare filename like
+        // `events.db`, and `create_dir_all("")` fails with ENOENT. Skip
+        // parent creation when the parent is empty so common configs like
+        // `path_or_url = "events.db"` work without forcing callers to
+        // write `./events.db`.
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|source| RebornEventStoreError::io("initialize libsql parent", source))?;
         }
-        libsql::Builder::new_local(path_or_url).build().await
+        (
+            libsql::Builder::new_local(path_or_url).build().await,
+            LibSqlBackingKind::LocalFile,
+        )
     };
-    db.map(Arc::new)
-        .map_err(|source| RebornEventStoreError::backend("libsql", "connect", source))
+    let db = db
+        .map(Arc::new)
+        .map_err(|source| RebornEventStoreError::backend("libsql", "connect", source))?;
+    Ok((db, kind))
 }
 
+/// Detect a remote libSQL endpoint by recognised URL scheme.
+///
+/// Scheme matching is case-insensitive: `HTTPS://...`, `LibSQL://...`, and
+/// `HTTP://...` would otherwise fall through to `Builder::new_local(...)` and
+/// silently create a node-local SQLite path like `HTTPS:/host/...`, stranding
+/// durable history on one node and ignoring the auth token.
+///
+/// A bare value with no scheme (e.g. `db.example.com` or `events.db`) is
+/// treated as local here — production composition (in `lib.rs`) is
+/// responsible for rejecting that ambiguity before we get this far. See
+/// `validate_production_libsql_target`.
 fn is_remote_libsql(path_or_url: &str) -> bool {
-    path_or_url.starts_with("libsql://")
-        || path_or_url.starts_with("https://")
-        || path_or_url.starts_with("http://")
+    let Some(scheme_end) = path_or_url.find("://") else {
+        return false;
+    };
+    let scheme = &path_or_url[..scheme_end];
+    scheme.eq_ignore_ascii_case("libsql")
+        || scheme.eq_ignore_ascii_case("https")
+        || scheme.eq_ignore_ascii_case("http")
 }
 
 #[derive(Clone)]
 struct LibSqlStore {
     db: Arc<Database>,
+    kind: LibSqlBackingKind,
 }
 
 impl LibSqlStore {
-    fn new(db: Arc<Database>) -> Self {
-        Self { db }
+    fn new(db: Arc<Database>, kind: LibSqlBackingKind) -> Self {
+        Self { db, kind }
     }
 
     async fn connect(&self) -> Result<Connection, EventError> {
-        let conn = self
-            .db
-            .connect()
-            .map_err(|_| durable_error("libsql event store failed to connect"))?;
-        conn.query("PRAGMA busy_timeout = 5000", ())
+        // Mirror the retry-on-transient-open-error pattern from the v1
+        // libSQL backend (`src/db/libsql/mod.rs::connect`): concurrent
+        // connection creation against a file-backed local DB occasionally
+        // fails with "unable to open database file". Without retries, that
+        // ordinary concurrent traffic turns into spurious append/replay
+        // failures. Three attempts with exponential backoff (50ms, 100ms)
+        // matches v1 so the binary doesn't ship two divergent open paths.
+        let mut last_err: Option<libsql::Error> = None;
+        for attempt in 0..3u32 {
+            match self.db.connect() {
+                Ok(conn) => {
+                    conn.query("PRAGMA busy_timeout = 5000", ())
+                        .await
+                        .map_err(|_| {
+                            durable_error("libsql event store failed to configure busy timeout")
+                        })?;
+                    conn.query("PRAGMA foreign_keys = ON", ())
+                        .await
+                        .map_err(|_| {
+                            durable_error("libsql event store failed to enable foreign keys")
+                        })?;
+                    return Ok(conn);
+                }
+                Err(error) => {
+                    last_err = Some(error);
+                    if attempt < 2 {
+                        tokio::time::sleep(std::time::Duration::from_millis(50u64 << attempt))
+                            .await;
+                    }
+                }
+            }
+        }
+        let _ = last_err; // redact: never surface the underlying connection error
+        Err(durable_error("libsql event store failed to connect"))
+    }
+
+    /// Apply persistent file-level pragmas once at build time.
+    ///
+    /// `journal_mode=WAL` lets readers and writers proceed concurrently:
+    /// without it, a long-running replay holds a read transaction that blocks
+    /// writer commits, and once writers exceed `busy_timeout` they fail. The
+    /// mode is persisted in the file header, so we apply it once and inherit
+    /// it on every subsequent `connect()`. `synchronous=NORMAL` is the
+    /// recommended pairing with WAL for durability/throughput balance: the
+    /// last commit can be lost on OS crash, but committed transactions
+    /// survive power loss because WAL frames are fsynced on checkpoint.
+    /// Remote libSQL manages WAL server-side; `:memory:` doesn't need it.
+    async fn initialize_pragmas(&self) -> Result<(), EventError> {
+        if self.kind != LibSqlBackingKind::LocalFile {
+            return Ok(());
+        }
+        let conn = self.connect().await?;
+        conn.query("PRAGMA journal_mode=WAL", ())
             .await
-            .map_err(|_| durable_error("libsql event store failed to configure busy timeout"))?;
-        conn.query("PRAGMA foreign_keys = ON", ())
+            .map_err(|_| durable_error("libsql event store failed to enable WAL"))?;
+        conn.query("PRAGMA synchronous=NORMAL", ())
             .await
-            .map_err(|_| durable_error("libsql event store failed to enable foreign keys"))?;
-        Ok(conn)
+            .map_err(|_| durable_error("libsql event store failed to set WAL synchronous mode"))?;
+        Ok(())
     }
 
     async fn run_migrations(&self) -> Result<(), EventError> {
@@ -435,6 +529,63 @@ impl LibSqlStore {
                 break;
             }
         }
+        // Detect cursor-contiguity gaps over the unfiltered scan window.
+        //
+        // The ReadScope predicates are pushed into the SQL `WHERE` clause, so
+        // the iteration above only sees rows that match the filter. JSONL
+        // catches `entries`-table corruption (a missing row, or streams /
+        // entries drift) by asserting every line's cursor equals the expected
+        // sequence; SQL must do the same out-of-band, otherwise a missing
+        // entry row would silently turn into history loss.
+        //
+        // Expected count in the unfiltered window `(after, last_scanned]` is
+        // exactly `last_scanned - after`, because cursors are dense within a
+        // stream by construction. A smaller actual count means at least one
+        // row in that range is missing.
+        if let Some(scanned) = last_scanned {
+            let scanned_i64 = i64::try_from(scanned.as_u64())
+                .map_err(|_| durable_error("libsql replay scanned cursor exceeds i64"))?;
+            let mut count_rows = conn
+                .query(
+                    r#"
+                    SELECT COUNT(*) FROM reborn_event_entries
+                    WHERE stream_kind = ?1
+                        AND tenant_id = ?2
+                        AND user_id = ?3
+                        AND agent_id = ?4
+                        AND cursor > ?5
+                        AND cursor <= ?6
+                    "#,
+                    params![
+                        kind,
+                        stream.tenant_id.as_str(),
+                        stream.user_id.as_str(),
+                        agent_id,
+                        after_i64,
+                        scanned_i64,
+                    ],
+                )
+                .await
+                .map_err(|_| durable_error("libsql event store failed to verify contiguity"))?;
+            let count_row = count_rows
+                .next()
+                .await
+                .map_err(|_| durable_error("libsql event store failed to verify contiguity"))?
+                .ok_or_else(|| durable_error("libsql contiguity count returned no row"))?;
+            let actual_count = u64::try_from(
+                count_row
+                    .get::<i64>(0)
+                    .map_err(|_| durable_error("libsql contiguity count has invalid type"))?,
+            )
+            .map_err(|_| durable_error("libsql contiguity count is negative"))?;
+            let expected = scanned.as_u64().saturating_sub(after.as_u64());
+            if actual_count != expected {
+                return Err(EventError::ReplayGap {
+                    requested: after,
+                    earliest: scanned,
+                });
+            }
+        }
         // Track the highest cursor we scanned so callers can advance past
         // records that were filtered out at the application layer. Without
         // this, a filtered-out record at the head of the stream would be
@@ -546,5 +697,45 @@ fn push_text_filter(
     if let Some(value) = value {
         query.push_str(&format!(" AND {column} = ?{}", params.len() + 1));
         params.push(libsql::Value::Text(value.to_string()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_remote_libsql;
+
+    #[test]
+    fn case_insensitive_remote_scheme_detection() {
+        // Regression for nearai/ironclaw#3171 review finding: mixed-case
+        // schemes previously fell through to `Builder::new_local`. The
+        // detector now matches scheme case-insensitively.
+        for url in [
+            "libsql://example.invalid",
+            "LIBSQL://example.invalid",
+            "LibSQL://example.invalid",
+            "https://example.invalid",
+            "HTTPS://example.invalid",
+            "Https://example.invalid",
+            "http://example.invalid",
+            "HTTP://example.invalid",
+        ] {
+            assert!(is_remote_libsql(url), "expected `{url}` to be remote");
+        }
+    }
+
+    #[test]
+    fn unscheme_values_are_local() {
+        // Bare values and explicit local-path syntax are not remote — the
+        // production gate in lib.rs handles ambiguity for production
+        // profiles separately.
+        for url in [
+            ":memory:",
+            "/var/lib/ironclaw/events.db",
+            "./events.db",
+            "events.db",
+            "db.example.com",
+        ] {
+            assert!(!is_remote_libsql(url), "expected `{url}` to be local");
+        }
     }
 }

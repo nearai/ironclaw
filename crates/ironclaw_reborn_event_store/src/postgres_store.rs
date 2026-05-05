@@ -141,12 +141,21 @@ pub(crate) async fn build_postgres_event_stores(
         recycling_method: RecyclingMethod::Fast,
     };
     let local = is_local_postgres_config(&pg_config);
-    let manager = if local {
+    let local_wants_tls = local && matches!(pg_config.get_ssl_mode(), SslMode::Require);
+    let manager = if local && !local_wants_tls {
+        // Local without an explicit `sslmode=require`: NoTls is acceptable
+        // because the connection never leaves the host.
         Manager::from_config(pg_config, NoTls, manager_config)
     } else {
-        // Remote: TLS is mandatory. Reject `sslmode=disable` and upgrade
-        // `Prefer` to `Require` before handing the config to the manager.
-        enforce_remote_ssl_mode(&mut pg_config)?;
+        if !local {
+            // Remote: TLS is mandatory. Reject `sslmode=disable` and upgrade
+            // `Prefer` to `Require` before handing the config to the manager.
+            enforce_remote_ssl_mode(&mut pg_config)?;
+        }
+        // For local-with-`sslmode=require` we pass the config through
+        // unchanged: the user explicitly opted in to TLS, so we route through
+        // the rustls connector. Use cases include TLS-only loopback Postgres
+        // and a local TLS-terminating proxy.
         let tls = make_rustls_connector()?;
         Manager::from_config(pg_config, tls, manager_config)
     };
@@ -428,6 +437,49 @@ impl PostgresStore {
                 break;
             }
         }
+        // Detect cursor-contiguity gaps over the unfiltered scan window. See
+        // the matching block in `libsql_store::read_after` for the rationale —
+        // ReadScope filtering is pushed into SQL, so the loop above never
+        // sees rows that don't match. JSONL catches table corruption by
+        // asserting each line's cursor equals the expected sequence; we have
+        // to do the same out-of-band here, otherwise a missing entry row
+        // would silently turn into history loss.
+        if let Some(scanned) = last_scanned {
+            let scanned_i64 = i64::try_from(scanned.as_u64())
+                .map_err(|_| durable_error("postgres replay scanned cursor exceeds i64"))?;
+            let count_row = client
+                .query_one(
+                    r#"
+                    SELECT COUNT(*)::bigint AS count
+                    FROM reborn_event_entries
+                    WHERE stream_kind = $1
+                        AND tenant_id = $2
+                        AND user_id = $3
+                        AND agent_id = $4
+                        AND cursor > $5
+                        AND cursor <= $6
+                    "#,
+                    &[
+                        &kind,
+                        &tenant_id,
+                        &user_id,
+                        &agent_id,
+                        &after_i64,
+                        &scanned_i64,
+                    ],
+                )
+                .await
+                .map_err(|_| durable_error("postgres event store failed to verify contiguity"))?;
+            let actual_count = u64::try_from(count_row.get::<_, i64>("count"))
+                .map_err(|_| durable_error("postgres contiguity count is negative"))?;
+            let expected = scanned.as_u64().saturating_sub(after.as_u64());
+            if actual_count != expected {
+                return Err(EventError::ReplayGap {
+                    requested: after,
+                    earliest: scanned,
+                });
+            }
+        }
         // Advance the cursor past records we scanned but filtered out, so the
         // next call does not rescan them forever. When no entries matched at
         // all, fall back to the stream head (`next_cursor` from the streams
@@ -659,5 +711,44 @@ mod tests {
         let mut config = parse("postgres://user@db.example.com/db?sslmode=require");
         enforce_remote_ssl_mode(&mut config).expect("require should pass through");
         assert!(matches!(config.get_ssl_mode(), SslMode::Require));
+    }
+
+    // --- libpq quoted / whitespace-tolerant keyword strings (issues #35, #47) ---
+
+    #[test]
+    fn libpq_quoted_socket_path_is_local() {
+        // Regression for review finding #35: a libpq DSN that quotes the
+        // socket path was previously misclassified as remote because the
+        // string-level detector saw the value as `'/var/run/postgresql'`
+        // (with the leading quote) instead of the unquoted path. Switching
+        // to `Config::get_hosts()` parses the libpq single-quote form
+        // correctly: the value is a `Host::Unix("/var/run/postgresql")`
+        // and the config is local. (libpq only recognises single quotes;
+        // double quotes are not a libpq quoting mechanism.)
+        let url = "host='/var/run/postgresql' user=ironclaw dbname=ironclaw";
+        assert!(
+            is_local(url),
+            "expected quoted-socket DSN `{url}` to be local"
+        );
+    }
+
+    #[test]
+    fn libpq_whitespace_around_equals_classifies_remote_correctly() {
+        // Regression for review finding #47: tokenising the raw DSN on
+        // whitespace and looking for `host=` previously caused a
+        // remote-host DSN with whitespace around `=` to be treated as
+        // having no host, falling through to NoTls. Parsing through
+        // `tokio_postgres::Config` normalises this — the resulting `Host`
+        // entry is a TCP host that fails the local-literal check.
+        for url in [
+            "host = db.internal user=ironclaw",
+            "host =db.internal user=ironclaw",
+            "host= db.internal user=ironclaw",
+        ] {
+            assert!(
+                !is_local(url),
+                "expected whitespace-keyword DSN `{url}` to require TLS"
+            );
+        }
     }
 }

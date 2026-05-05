@@ -754,3 +754,75 @@ async fn jsonl_bounded_replay_does_not_parse_the_whole_file() {
     assert_eq!(bounded.entries.len(), 1);
     assert_eq!(bounded.entries[0].cursor, EventCursor::new(1));
 }
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_replay_detects_missing_entry_row_as_replay_gap() {
+    // Regression for nearai/ironclaw#3171 review finding #37: SQL replay
+    // previously did not validate cursor contiguity. If a row in
+    // `reborn_event_entries` disappears (corruption, manual surgery,
+    // streams/entries drift), the read path silently returned later cursors
+    // and called it good. JSONL fails closed on the same invariant; SQL must
+    // do the same out-of-band, otherwise a missing entry row turns into
+    // history loss.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let db_path = temp.path().join("event-store.db");
+    let scope = scope_for("contig-alice", "project-a");
+    let stream = EventStreamKey::from_scope(&scope);
+
+    let stores = build_reborn_event_stores(
+        RebornProfile::Production,
+        RebornEventStoreConfig::Libsql {
+            path_or_url: db_path.display().to_string(),
+            auth_token: None,
+        },
+    )
+    .await
+    .expect("libsql stores");
+    for _ in 0..3 {
+        stores
+            .events
+            .append(RuntimeEvent::dispatch_requested(
+                scope.clone(),
+                capability_id(),
+            ))
+            .await
+            .expect("append");
+    }
+    drop(stores);
+
+    // Punch a hole: delete the middle entry row directly. The streams.next_cursor
+    // counter is unchanged (still 3), so a contiguity-aware replay must
+    // detect that the (after, last_scanned] window is missing a cursor.
+    let db = libsql::Builder::new_local(db_path.display().to_string())
+        .build()
+        .await
+        .expect("open libsql");
+    let conn = db.connect().expect("connect");
+    conn.execute(
+        "DELETE FROM reborn_event_entries WHERE cursor = 2",
+        libsql::params![],
+    )
+    .await
+    .expect("delete cursor 2");
+    drop(conn);
+    drop(db);
+
+    let stores = build_reborn_event_stores(
+        RebornProfile::Production,
+        RebornEventStoreConfig::Libsql {
+            path_or_url: db_path.display().to_string(),
+            auth_token: None,
+        },
+    )
+    .await
+    .expect("libsql stores after corruption");
+    let result = stores
+        .events
+        .read_after_cursor(&stream, &ReadScope::any(), None, 10)
+        .await;
+    assert!(
+        matches!(result, Err(EventError::ReplayGap { .. })),
+        "missing entry row must surface as ReplayGap, got {result:?}"
+    );
+}
