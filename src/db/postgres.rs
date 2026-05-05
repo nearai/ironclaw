@@ -274,6 +274,14 @@ impl ConversationStore for PgBackend {
         self.store.get_conversation_metadata(id).await
     }
 
+    async fn set_conversation_title_if_empty(
+        &self,
+        id: Uuid,
+        title: &str,
+    ) -> Result<bool, DatabaseError> {
+        self.store.set_conversation_title_if_empty(id, title).await
+    }
+
     async fn list_conversation_messages(
         &self,
         conversation_id: Uuid,

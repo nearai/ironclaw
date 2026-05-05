@@ -478,6 +478,18 @@ pub trait ConversationStore: Send + Sync {
         &self,
         id: Uuid,
     ) -> Result<Option<serde_json::Value>, DatabaseError>;
+    /// Atomically set `metadata.title` only if it is currently missing or empty.
+    ///
+    /// Returns `true` if this call actually wrote the title, `false` if the
+    /// title was already set (or the conversation does not exist). Used to
+    /// close the check-then-update race in [`set_title_if_missing`] where
+    /// two concurrent writes could both observe an empty title and race to
+    /// write different values.
+    async fn set_conversation_title_if_empty(
+        &self,
+        id: Uuid,
+        title: &str,
+    ) -> Result<bool, DatabaseError>;
     async fn list_conversation_messages(
         &self,
         conversation_id: Uuid,
@@ -492,6 +504,44 @@ pub trait ConversationStore: Send + Sync {
         &self,
         conversation_id: Uuid,
     ) -> Result<Option<String>, DatabaseError>;
+}
+
+/// Set a conversation title from user input if one hasn't been set yet.
+///
+/// Skips empty/whitespace-only input so that image-only or attachment-only
+/// messages don't permanently block title-setting with an empty string.
+/// Truncates to the first 100 characters for sidebar display.
+pub async fn set_title_if_missing(
+    store: &(dyn ConversationStore + Send + Sync),
+    conversation_id: Uuid,
+    user_input: &str,
+) {
+    let trimmed = user_input.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+
+    let title_text: String = trimmed
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(100)
+        .collect();
+
+    // Atomic conditional update. Both backends only write when
+    // `metadata.title` is NULL, missing, or an empty string, so two
+    // concurrent first-turn writes cannot race to overwrite each other —
+    // the first to commit wins, subsequent calls are no-ops.
+    match store
+        .set_conversation_title_if_empty(conversation_id, &title_text)
+        .await
+    {
+        Ok(_) => {}
+        Err(e) => {
+            tracing::debug!("failed to atomically set title: {e}");
+        }
+    }
 }
 
 #[async_trait]

@@ -170,13 +170,23 @@ impl ConversationStore for LibSqlBackend {
                 .and_then(|v| v.get("started_at"))
                 .and_then(|v| v.as_str())
                 .map(String::from);
-            let sql_title = get_opt_text(&row, 6);
-            let title = sql_title.or_else(|| {
-                metadata
-                    .get("routine_name")
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-            });
+            let sql_title = get_opt_text(&row, 6)
+                .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+                .filter(|s| !s.is_empty());
+            let title = sql_title
+                .or_else(|| {
+                    metadata
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(String::from)
+                })
+                .or_else(|| {
+                    metadata
+                        .get("routine_name")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                });
             results.push(ConversationSummary {
                 id: row
                     .get::<String>(0)
@@ -249,13 +259,23 @@ impl ConversationStore for LibSqlBackend {
                 .and_then(|v| v.get("started_at"))
                 .and_then(|v| v.as_str())
                 .map(String::from);
-            let sql_title = get_opt_text(&row, 6);
-            let title = sql_title.or_else(|| {
-                metadata
-                    .get("routine_name")
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-            });
+            let sql_title = get_opt_text(&row, 6)
+                .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+                .filter(|s| !s.is_empty());
+            let title = sql_title
+                .or_else(|| {
+                    metadata
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(String::from)
+                })
+                .or_else(|| {
+                    metadata
+                        .get("routine_name")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                });
             results.push(ConversationSummary {
                 id: row
                     .get::<String>(0)
@@ -586,6 +606,39 @@ impl ConversationStore for LibSqlBackend {
         .await
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(())
+    }
+
+    async fn set_conversation_title_if_empty(
+        &self,
+        id: Uuid,
+        title: &str,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.connect().await?;
+        // Atomic check-and-write: patch the metadata only when `title` is
+        // currently missing, NULL, or empty. Expressed as a single
+        // conditional UPDATE so two concurrent callers cannot both observe
+        // an empty title and race to overwrite each other.
+        //
+        // `json_extract(metadata, '$.title')` returns NULL when the key is
+        // absent, and the `IS NULL OR = ''` pair covers the "no title yet"
+        // cases. When metadata itself is NULL (legacy rows), we initialise
+        // it with `{"title": ?}` via COALESCE.
+        let patch = serde_json::json!({ "title": title }).to_string();
+        let affected = conn
+            .execute(
+                "UPDATE conversations \
+                 SET metadata = json_patch(COALESCE(metadata, '{}'), ?2) \
+                 WHERE id = ?1 \
+                   AND ( \
+                        metadata IS NULL \
+                        OR json_extract(metadata, '$.title') IS NULL \
+                        OR json_extract(metadata, '$.title') = '' \
+                   )",
+                params![id.to_string(), patch],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(affected > 0)
     }
 
     async fn get_conversation_metadata(
@@ -1008,5 +1061,188 @@ mod tests {
             Some("gateway"),
             "assistant thread lookup should backfill a legacy NULL source_channel"
         );
+    }
+
+    /// Regression test for #2237: conversations with a metadata title should
+    /// use it as a fallback when the message-derived title is NULL.
+    #[tokio::test]
+    async fn test_metadata_title_used_as_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_metadata_title.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let conv_id = Uuid::new_v4();
+        let user_id = "user-title-test";
+
+        // Create a conversation with no messages
+        backend
+            .ensure_conversation(conv_id, "gateway", user_id, None, Some("gateway"))
+            .await
+            .unwrap();
+
+        // Set a metadata title (simulating what persist_user_message does)
+        let title_val = serde_json::json!("What is the weather today?");
+        backend
+            .update_conversation_metadata_field(conv_id, "title", &title_val)
+            .await
+            .unwrap();
+
+        // List conversations -- title should come from metadata even without messages
+        let convs = backend
+            .list_conversations_all_channels(user_id, 50)
+            .await
+            .unwrap();
+
+        let conv = convs.iter().find(|c| c.id == conv_id).unwrap();
+        assert_eq!(
+            conv.title.as_deref(),
+            Some("What is the weather today?"),
+            "Conversation title should fall back to metadata title when no user messages exist"
+        );
+    }
+
+    /// Regression test for #2237: message-derived title takes precedence over metadata.
+    #[tokio::test]
+    async fn test_message_title_takes_precedence_over_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_message_title_precedence.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let conv_id = Uuid::new_v4();
+        let user_id = "user-title-precedence";
+
+        backend
+            .ensure_conversation(conv_id, "gateway", user_id, None, Some("gateway"))
+            .await
+            .unwrap();
+
+        // Set metadata title
+        let title_val = serde_json::json!("metadata title");
+        backend
+            .update_conversation_metadata_field(conv_id, "title", &title_val)
+            .await
+            .unwrap();
+
+        // Add a user message
+        backend
+            .add_conversation_message(conv_id, "user", "actual user message")
+            .await
+            .unwrap();
+
+        let convs = backend
+            .list_conversations_all_channels(user_id, 50)
+            .await
+            .unwrap();
+
+        let conv = convs.iter().find(|c| c.id == conv_id).unwrap();
+        assert_eq!(
+            conv.title.as_deref(),
+            Some("actual user message"),
+            "Message-derived title should take precedence over metadata title"
+        );
+    }
+
+    /// Regression test for the check-then-update race in
+    /// `set_title_if_missing`. Two concurrent callers both observe an
+    /// empty title; only the first conditional UPDATE must land.
+    #[tokio::test]
+    async fn test_set_title_if_empty_is_atomic_under_concurrency() {
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_title_race.db");
+        let backend = Arc::new(LibSqlBackend::new_local(&db_path).await.unwrap());
+        backend.run_migrations().await.unwrap();
+
+        let conv_id = Uuid::new_v4();
+        backend
+            .ensure_conversation(conv_id, "gateway", "racer", None, Some("gateway"))
+            .await
+            .unwrap();
+
+        let b1 = Arc::clone(&backend);
+        let b2 = Arc::clone(&backend);
+        let (r1, r2) = tokio::join!(
+            async move {
+                b1.set_conversation_title_if_empty(conv_id, "first title")
+                    .await
+            },
+            async move {
+                b2.set_conversation_title_if_empty(conv_id, "second title")
+                    .await
+            }
+        );
+        let won1 = r1.unwrap();
+        let won2 = r2.unwrap();
+        assert!(
+            won1 ^ won2,
+            "exactly one concurrent setter must win, got ({won1}, {won2})"
+        );
+
+        let meta = backend
+            .get_conversation_metadata(conv_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let title = meta.get("title").and_then(|v| v.as_str()).unwrap();
+        assert!(
+            title == "first title" || title == "second title",
+            "title must be one of the two candidates, got {title:?}"
+        );
+
+        // A third attempt on an already-titled conv must NOT overwrite.
+        let won3 = backend
+            .set_conversation_title_if_empty(conv_id, "third title")
+            .await
+            .unwrap();
+        assert!(!won3, "third attempt must be a no-op");
+        let meta = backend
+            .get_conversation_metadata(conv_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let title_after = meta.get("title").and_then(|v| v.as_str()).unwrap();
+        assert_eq!(title, title_after, "title must not change after first win");
+    }
+
+    /// Empty / NULL metadata must still be treated as "no title yet" so
+    /// a fresh conversation can claim the title slot on its first call.
+    #[tokio::test]
+    async fn test_set_title_if_empty_writes_when_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_title_unset.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let conv_id = Uuid::new_v4();
+        backend
+            .ensure_conversation(conv_id, "gateway", "u", None, Some("gateway"))
+            .await
+            .unwrap();
+
+        let won = backend
+            .set_conversation_title_if_empty(conv_id, "hello")
+            .await
+            .unwrap();
+        assert!(won);
+
+        // Pre-populate with empty-string title (regression for the
+        // `= ''` branch of the WHERE clause).
+        let conv2 = Uuid::new_v4();
+        backend
+            .ensure_conversation(conv2, "gateway", "u", None, Some("gateway"))
+            .await
+            .unwrap();
+        backend
+            .update_conversation_metadata_field(conv2, "title", &serde_json::json!(""))
+            .await
+            .unwrap();
+        let won_empty = backend
+            .set_conversation_title_if_empty(conv2, "real")
+            .await
+            .unwrap();
+        assert!(won_empty, "empty-string title must be treated as unset");
     }
 }
