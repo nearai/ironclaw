@@ -111,15 +111,11 @@ Both `analyze_transfer` and `validate_transfer_target` return `{"message": "..."
 
 ## Missions & Recurring Monitoring
 
-When the user wants to **monitor exchange rates** or get alerts on rate thresholds, create a mission with `mission_create` and set the goal to use `abound_rate_alert`:
+For wire-rate monitoring, **always use `abound_send_wire(action='wait', ...)`** — do not create the mission yourself with `mission_create`. The `wait` action embeds the wire details into the goal, sets cron + run-budget guardrails, and stamps routing identifiers on the mission so notifications fire from each spawned thread land back in the originating chat.
 
-- **`abound_rate_alert`** — Atomic check-and-notify tool. Fetches the current rate, compares against a threshold, and sends a notification if exceeded. All in one call — no parsing needed.
-  Params: `threshold` (required), `from_currency` (default USD), `to_currency` (default INR), `message_id` (default rate_alert).
+The mission spawned by `wait` calls `abound_exchange_rate` to fetch the current rate; if the threshold is met (or on the final hourly run as a status update) it calls `abound_send_wire(action='send', ...)`. The user then approves on their device and the originating chat finishes the flow with `abound_send_wire(action='execute', ...)`. Never have the mission call `execute` itself.
 
-Example mission goal for rate monitoring:
-> "On each run, use the `abound_rate_alert` tool through structured tool_calls with threshold 90, then report the returned message."
-
-**CRITICAL: For mission threads that monitor rates, always use `abound_rate_alert` — never chain `abound_exchange_rate` + `abound_create_notification` manually.** The single tool is deterministic and avoids parsing errors.
+Once a rate-watcher is set up, its **target rate and cadence are fixed**. If the user asks to change either (e.g. "change the threshold", "set cadence to 3 min", "every N hours"), tell them this isn't supported in chat and that they need to cancel the current monitor first. Do NOT offer to start a new transfer in the same turn — wait for the user to come back with a fresh request after cancelling. Do NOT call `abound_send_wire(action='wait')` again, `mission_create`, or `mission_update` to fake a change.
 
 ## Rules
 

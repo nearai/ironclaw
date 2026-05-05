@@ -845,6 +845,15 @@ impl EffectBridgeAdapter {
         if let Some(ref rid) = context.client_response_id {
             job_metadata["notify_response_id"] = serde_json::Value::String(rid.clone());
         }
+        // `spawning_mission_id` is stamped on every mission-spawned thread by
+        // `MissionManager::fire_mission`. Forward it so tools running inside
+        // a mission thread (e.g. `abound_send_wire(send)`) can complete the
+        // mission via `MissionManager::complete_mission` without the LLM
+        // threading the id through tool params. Absent for chat-initiated
+        // threads.
+        if let Some(ref mid) = context.spawning_mission_id {
+            job_metadata["spawning_mission_id"] = serde_json::Value::String(mid.clone());
+        }
         job_ctx.metadata = job_metadata;
         // Stamp the trace HTTP interceptor onto the per-call JobContext so
         // tools that respect it (http, web_fetch, etc.) route their outbound
@@ -1827,6 +1836,7 @@ mod tests {
             user_timezone: None,
             client_thread_id: None,
             client_response_id: None,
+            spawning_mission_id: None,
         }
     }
 
@@ -2550,6 +2560,7 @@ mod tests {
             user_timezone: None,
             client_thread_id: None,
             client_response_id: None,
+            spawning_mission_id: None,
         };
 
         let result = adapter.execute_action("http", params, &lease, &ctx).await;
@@ -2647,6 +2658,7 @@ mod tests {
             user_timezone: None,
             client_thread_id: None,
             client_response_id: None,
+            spawning_mission_id: None,
         };
 
         let result = adapter
@@ -2787,6 +2799,7 @@ mod tests {
             user_timezone: None,
             client_thread_id: Some(client_thread_id.clone()),
             client_response_id: None,
+            spawning_mission_id: None,
         };
 
         adapter
@@ -2903,6 +2916,7 @@ mod tests {
             user_timezone: None,
             client_thread_id: Some(client_thread_id.clone()),
             client_response_id: Some(client_response_id.clone()),
+            spawning_mission_id: None,
         };
 
         adapter
