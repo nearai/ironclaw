@@ -77,6 +77,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Linq | ✅ | ❌ | P3 | Real iMessage via API, no Mac required |
 | Feishu/Lark | ✅ | 🚧 | P3 | WASM channel with Event Subscription v2.0; Bitable/Docx tools planned |
 | LINE | ✅ | ❌ | P3 | |
+| WeChat (iLink bot) | ✅ | 🚧 | P2 | Extension-first channel (`channels-src/wechat`), single-account DM flow with QR login, typing, image send/receive, inbound file/voice/video handling, outbound image/video/file media, and SILK-to-WAV voice fallback; multi-account remains deferred |
 | WebChat | ✅ | ✅ | - | Web gateway chat |
 | Matrix | ✅ | ❌ | P3 | E2EE support |
 | Mattermost | ✅ | ❌ | P3 | Emoji reactions, interactive buttons, model picker |

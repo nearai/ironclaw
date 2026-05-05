@@ -78,6 +78,7 @@
 //! }
 //! ```
 
+mod attachment_hydration;
 mod bundled;
 mod capabilities;
 mod error;

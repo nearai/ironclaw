@@ -2133,6 +2133,7 @@ async fn send_notification(
         thread_id: thread_id
             .map(|s| ironclaw_common::ExternalThreadId::from_trusted(s.to_string())),
         attachments: Vec::new(),
+        inline_attachments: Vec::new(),
         metadata: serde_json::json!({
             "source": "routine",
             "routine_name": routine_name,

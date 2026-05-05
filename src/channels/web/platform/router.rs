@@ -78,8 +78,9 @@ use crate::channels::web::features::chat::{
 };
 use crate::channels::web::features::extensions::{
     extensions_activate_handler, extensions_install_handler, extensions_list_handler,
-    extensions_readiness_handler, extensions_registry_handler, extensions_remove_handler,
-    extensions_setup_handler, extensions_setup_submit_handler, extensions_tools_handler,
+    extensions_login_poll_handler, extensions_login_start_handler, extensions_readiness_handler,
+    extensions_registry_handler, extensions_remove_handler, extensions_setup_handler,
+    extensions_setup_submit_handler, extensions_tools_handler,
 };
 use crate::channels::web::features::logs::{
     logs_events_handler, logs_level_get_handler, logs_level_set_handler,
@@ -224,6 +225,14 @@ pub async fn start_server(
         .route(
             "/api/extensions/{name}/setup",
             get(extensions_setup_handler).post(extensions_setup_submit_handler),
+        )
+        .route(
+            "/api/extensions/{name}/login/start",
+            post(extensions_login_start_handler),
+        )
+        .route(
+            "/api/extensions/{name}/login/poll",
+            post(extensions_login_poll_handler),
         )
         // Pairing
         .route("/api/pairing/{channel}", get(pairing_list_handler))

@@ -443,6 +443,7 @@ pub fn classify_wasm_channel_activation(
     ext: &crate::extensions::InstalledExtension,
     has_paired: bool,
     has_owner_binding: bool,
+    requires_binding: bool,
 ) -> Option<ExtensionActivationStatus> {
     if ext.kind != crate::extensions::ExtensionKind::WasmChannel {
         return None;
@@ -453,7 +454,7 @@ pub fn classify_wasm_channel_activation(
     } else if !ext.authenticated {
         ExtensionActivationStatus::Installed
     } else if ext.active {
-        if has_paired || has_owner_binding {
+        if !requires_binding || has_paired || has_owner_binding {
             ExtensionActivationStatus::Active
         } else {
             ExtensionActivationStatus::Pairing
@@ -544,6 +545,7 @@ pub struct ExtensionSetupResponse {
     pub secrets: Vec<SecretFieldInfo>,
     pub fields: Vec<SetupFieldInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub interactive_login: Option<crate::extensions::InteractiveLoginInfo>,
     pub onboarding_state: Option<ChannelOnboardingState>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub onboarding: Option<ChannelOnboardingInfo>,
@@ -581,6 +583,32 @@ pub struct ExtensionSetupRequest {
     pub secrets: std::collections::HashMap<String, String>,
     #[serde(default)]
     pub fields: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExtensionInteractiveLoginStartRequest {
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExtensionInteractiveLoginPollRequest {
+    pub session_id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExtensionInteractiveLoginResponse {
+    pub success: bool,
+    pub status: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qr_code_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activated: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]

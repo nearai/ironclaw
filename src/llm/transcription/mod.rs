@@ -119,6 +119,7 @@ impl TranscriptionMiddleware {
                 Some(f) => f,
                 None => {
                     tracing::warn!(
+                        attachment_id = %attachment.id,
                         mime = %attachment.mime_type,
                         "Skipping audio attachment with unsupported format"
                     );
@@ -128,11 +129,6 @@ impl TranscriptionMiddleware {
 
             match self.provider.transcribe(&attachment.data, format).await {
                 Ok(text) => {
-                    tracing::info!(
-                        attachment_id = %attachment.id,
-                        text_len = text.len(),
-                        "Transcribed audio attachment"
-                    );
                     transcriptions.push((i, text));
                 }
                 Err(e) => {
