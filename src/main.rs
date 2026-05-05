@@ -306,6 +306,7 @@ async fn async_main() -> anyhow::Result<()> {
             channels_only,
             provider_only,
             quick,
+            non_interactive,
             step,
         }) => {
             #[cfg(any(feature = "postgres", feature = "libsql"))]
@@ -315,6 +316,7 @@ async fn async_main() -> anyhow::Result<()> {
                     channels_only: *channels_only,
                     provider_only: *provider_only,
                     quick: *quick,
+                    non_interactive: *non_interactive,
                     steps: step.clone(),
                 };
                 let mut wizard =
@@ -323,7 +325,14 @@ async fn async_main() -> anyhow::Result<()> {
             }
             #[cfg(not(any(feature = "postgres", feature = "libsql")))]
             {
-                let _ = (skip_auth, channels_only, provider_only, quick, step);
+                let _ = (
+                    skip_auth,
+                    channels_only,
+                    provider_only,
+                    quick,
+                    non_interactive,
+                    step,
+                );
                 eprintln!("Onboarding wizard requires the 'postgres' or 'libsql' feature.");
             }
             return Ok(());

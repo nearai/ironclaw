@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add a read-only Google Drive OAuth capability tier for onboarding pilots. Existing full-access installs continue to work; downgrading an existing Google token requires uninstalling the tool, reinstalling with the read-only tier, and re-authenticating.
+
 ## [0.27.0](https://github.com/nearai/ironclaw/compare/ironclaw-v0.26.0...ironclaw-v0.27.0) - 2026-04-29
 
 ### Added

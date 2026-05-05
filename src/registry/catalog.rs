@@ -835,6 +835,36 @@ mod tests {
     }
 
     #[test]
+    fn test_real_registry_discovers_google_drive_scope_variants() {
+        use crate::tools::wasm::{CapabilitiesFile, CapabilityTier};
+
+        let registry_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("registry");
+        let catalog = RegistryCatalog::load(&registry_dir).unwrap();
+
+        let full = catalog
+            .get("tools/google_drive")
+            .expect("full Drive manifest");
+        let readonly = catalog
+            .get("tools/google_drive_readonly")
+            .expect("readonly Drive manifest");
+        assert_eq!(full.display_name, "Google Drive");
+        assert_eq!(readonly.display_name, "Google Drive (Read-only)");
+
+        let source = readonly.source.as_ref().expect("readonly source spec");
+        let caps_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(&source.dir)
+            .join(&source.capabilities);
+        let caps = CapabilitiesFile::from_bytes(&fs::read(caps_path).unwrap()).unwrap();
+        let oauth = caps.auth.as_ref().unwrap().oauth.as_ref().unwrap();
+
+        assert_eq!(caps.tier, CapabilityTier::Readonly);
+        assert_eq!(
+            oauth.scopes,
+            vec!["https://www.googleapis.com/auth/drive.readonly"]
+        );
+    }
+
+    #[test]
     fn test_is_registry_accepts_tools_only_directory() {
         let tmp = tempfile::tempdir().unwrap();
         let registry_dir = tmp.path().join("registry");

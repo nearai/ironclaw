@@ -46,6 +46,23 @@ const CHANNEL_INDEX_HTTP: usize = 1;
 const CHANNEL_INDEX_SIGNAL: usize = 2;
 const QUICK_PROFILE_LOCAL: &str = "local";
 const QUICK_PROFILE_LOCAL_SANDBOX: &str = "local-sandbox";
+const GOOGLE_DRIVE_TOOL: &str = "google_drive";
+const GOOGLE_DRIVE_READONLY_TOOL: &str = "google_drive_readonly";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GoogleDriveScopeChoice {
+    Readonly,
+    Full,
+}
+
+impl GoogleDriveScopeChoice {
+    fn manifest_name(self) -> &'static str {
+        match self {
+            Self::Readonly => GOOGLE_DRIVE_READONLY_TOOL,
+            Self::Full => GOOGLE_DRIVE_TOOL,
+        }
+    }
+}
 
 /// Setup wizard error.
 #[derive(Debug, thiserror::Error)]
@@ -89,7 +106,9 @@ pub struct SetupConfig {
     pub provider_only: bool,
     /// Quick setup: auto-defaults everything except LLM provider and model.
     pub quick: bool,
-    /// Run only specific setup steps (e.g. "provider", "channels", "model", "database", "security").
+    /// Use environment/default choices for setup prompts where supported.
+    pub non_interactive: bool,
+    /// Run only specific setup steps (e.g. "provider", "channels", "model", "database", "security", "extensions").
     pub steps: Vec<String>,
 }
 
@@ -203,7 +222,14 @@ impl SetupWizard {
             // then run only the requested steps.
             self.reconnect_existing_db().await?;
 
-            let valid_steps = ["provider", "channels", "model", "database", "security"];
+            let valid_steps = [
+                "provider",
+                "channels",
+                "model",
+                "database",
+                "security",
+                "extensions",
+            ];
             for s in &self.config.steps {
                 if !valid_steps.contains(&s.as_str()) {
                     return Err(SetupError::Config(format!(
@@ -237,6 +263,10 @@ impl SetupWizard {
                     "channels" => {
                         print_step(step_num, total, "Channel Configuration");
                         self.step_channels().await?;
+                    }
+                    "extensions" => {
+                        print_step(step_num, total, "Extensions");
+                        self.step_extensions().await?;
                     }
                     _ => {} // already validated above
                 }
@@ -2819,6 +2849,7 @@ impl SetupWizard {
         let tools: Vec<_> = catalog
             .list(Some(crate::registry::manifest::ManifestKind::Tool), None)
             .into_iter()
+            .filter(|tool| tool.name != GOOGLE_DRIVE_READONLY_TOOL)
             .cloned()
             .collect();
 
@@ -2860,8 +2891,16 @@ impl SetupWizard {
         let options_refs: Vec<(&str, bool)> =
             options.iter().map(|(s, b)| (s.as_str(), *b)).collect();
 
-        let selected = select_many("Which tools do you want to install?", &options_refs)
-            .map_err(SetupError::Io)?;
+        let selected = if self.config.non_interactive {
+            options
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, (_, selected))| selected.then_some(idx))
+                .collect()
+        } else {
+            select_many("Which tools do you want to install?", &options_refs)
+                .map_err(SetupError::Io)?
+        };
 
         if selected.is_empty() {
             print_info("No tools selected.");
@@ -2880,7 +2919,14 @@ impl SetupWizard {
         let mut auth_needed: Vec<String> = Vec::new();
 
         for idx in &selected {
-            let tool = &tools[*idx];
+            let mut tool = &tools[*idx];
+            if tool.name == GOOGLE_DRIVE_TOOL {
+                if installed_tools.contains(&tool.name) {
+                    continue; // Existing full-access installs are not auto-downgraded.
+                }
+                tool = self.google_drive_manifest_for_scope(&catalog)?;
+            }
+
             if installed_tools.contains(&tool.name) {
                 continue; // Already installed, skip
             }
@@ -2929,6 +2975,40 @@ impl SetupWizard {
         }
 
         Ok(())
+    }
+
+    fn google_drive_manifest_for_scope<'a>(
+        &self,
+        catalog: &'a crate::registry::catalog::RegistryCatalog,
+    ) -> Result<&'a crate::registry::manifest::ExtensionManifest, SetupError> {
+        let choice = self.google_drive_scope_choice()?;
+        let manifest_name = choice.manifest_name();
+        catalog
+            .get(&format!("tools/{manifest_name}"))
+            .ok_or_else(|| {
+                SetupError::Config(format!(
+                    "Google Drive scope variant '{manifest_name}' is missing from the registry"
+                ))
+            })
+    }
+
+    fn google_drive_scope_choice(&self) -> Result<GoogleDriveScopeChoice, SetupError> {
+        if let Some(choice) = google_drive_scope_from_env()? {
+            return Ok(choice);
+        }
+
+        if self.config.non_interactive {
+            return Ok(GoogleDriveScopeChoice::Readonly);
+        }
+
+        loop {
+            let raw = input("Google Drive OAuth scope ([r]ead-only/[f]ull, default r)")
+                .map_err(SetupError::Io)?;
+            match parse_google_drive_scope_choice(&raw) {
+                Some(choice) => return Ok(choice),
+                None => print_error("Please enter 'r' for read-only or 'f' for full."),
+            }
+        }
     }
 
     /// Step 8: Docker Sandbox -- check Docker installation and availability.
@@ -3667,6 +3747,28 @@ impl Default for SetupWizard {
     }
 }
 
+fn google_drive_scope_from_env() -> Result<Option<GoogleDriveScopeChoice>, SetupError> {
+    let Ok(raw) = std::env::var("IRONCLAW_GDRIVE_SCOPE") else {
+        return Ok(None);
+    };
+
+    parse_google_drive_scope_choice(&raw)
+        .map(Some)
+        .ok_or_else(|| {
+            SetupError::Config("IRONCLAW_GDRIVE_SCOPE must be 'readonly' or 'full'".to_string())
+        })
+}
+
+fn parse_google_drive_scope_choice(raw: &str) -> Option<GoogleDriveScopeChoice> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "r" | "read" | "readonly" | "read-only" | "read_only" | "read only" => {
+            Some(GoogleDriveScopeChoice::Readonly)
+        }
+        "f" | "full" => Some(GoogleDriveScopeChoice::Full),
+        _ => None,
+    }
+}
+
 /// Mask password in a database URL for display.
 #[cfg(feature = "postgres")]
 fn mask_password_in_url(url: &str) -> String {
@@ -3992,6 +4094,7 @@ mod tests {
             channels_only: false,
             provider_only: false,
             quick: false,
+            non_interactive: false,
             steps: vec![],
         };
         let wizard = SetupWizard::with_config(config);
@@ -4060,6 +4163,38 @@ mod tests {
         assert!(
             !vars.iter().any(|(key, _)| key == "IRONCLAW_PROFILE"),
             "only a wizard-selected profile should be written back"
+        );
+    }
+
+    #[test]
+    fn test_non_interactive_gdrive_scope_env_picks_readonly_variant() {
+        let _guard = lock_env();
+        let _scope = EnvGuard::set("IRONCLAW_GDRIVE_SCOPE", "readonly");
+        let wizard = SetupWizard::with_config(SetupConfig {
+            non_interactive: true,
+            ..Default::default()
+        });
+        let catalog = load_registry_catalog().expect("registry catalog should load");
+
+        let manifest = wizard
+            .google_drive_manifest_for_scope(&catalog)
+            .expect("readonly Google Drive manifest should resolve");
+
+        assert_eq!(manifest.name, GOOGLE_DRIVE_READONLY_TOOL);
+        assert_eq!(
+            manifest
+                .source
+                .as_ref()
+                .map(|source| source.capabilities.as_str()),
+            Some("google-drive-readonly-tool.capabilities.json")
+        );
+    }
+
+    #[test]
+    fn test_google_drive_scope_parser_accepts_read_only_with_space() {
+        assert_eq!(
+            parse_google_drive_scope_choice(" read only "),
+            Some(GoogleDriveScopeChoice::Readonly)
         );
     }
 

@@ -1127,6 +1127,7 @@ async fn execute_pending_gate_action(
         .await
     {
         Ok(result) => {
+            let event_rx = state.thread_manager.subscribe_events();
             state
                 .thread_manager
                 .resume_thread(
@@ -1148,6 +1149,7 @@ async fn execute_pending_gate_action(
                 message,
                 pending.conversation_id,
                 pending.thread_id,
+                event_rx,
             )
             .await
         }
@@ -2412,6 +2414,8 @@ pub async fn resolve_gate(
             }
         })?;
 
+    let event_rx = state.thread_manager.subscribe_events();
+
     match resolution {
         ironclaw_engine::GateResolution::Approved { always } => {
             // Clamp the caller-supplied `always` flag to what the pending gate
@@ -2860,6 +2864,7 @@ pub async fn resolve_gate(
         message,
         pending.conversation_id,
         pending.thread_id,
+        event_rx,
     )
     .await
 }
@@ -3561,6 +3566,10 @@ async fn handle_with_engine_inner(
         cfg
     };
 
+    // Subscribe before spawning/resuming the engine thread so fast tool
+    // events are not lost before the bridge starts relaying them.
+    let event_rx = state.thread_manager.subscribe_events();
+
     // Handle the message — spawns a new thread or injects into active one
     let thread_id = state
         .conversation_manager
@@ -3617,7 +3626,7 @@ async fn handle_with_engine_inner(
     }
 
     debug!(thread_id = %thread_id, "engine v2: thread spawned");
-    await_thread_outcome(agent, state, message, conv_id, thread_id).await
+    await_thread_outcome(agent, state, message, conv_id, thread_id, event_rx).await
 }
 
 /// Fire active OnEvent missions whose pattern matches the inbound message.
@@ -3701,8 +3710,8 @@ async fn await_thread_outcome(
     message: &IncomingMessage,
     conv_id: ironclaw_engine::ConversationId,
     thread_id: ironclaw_engine::ThreadId,
+    mut event_rx: tokio::sync::broadcast::Receiver<ironclaw_engine::ThreadEvent>,
 ) -> Result<BridgeOutcome, Error> {
-    let mut event_rx = state.thread_manager.subscribe_events();
     let channels = &agent.channels;
     let channel_name = &message.channel;
     let metadata = &message.metadata;

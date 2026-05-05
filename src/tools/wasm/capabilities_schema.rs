@@ -39,9 +39,23 @@ use crate::tools::wasm::{
     ToolInvokeCapability, WebhookCapability, WorkspaceCapability,
 };
 
+/// High-level permission tier declared by a capabilities file.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CapabilityTier {
+    Readonly,
+    Scoped,
+    #[default]
+    Full,
+}
+
 /// Root schema for a capabilities JSON file.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CapabilitiesFile {
+    /// High-level permission tier. Legacy files default to full.
+    #[serde(default)]
+    pub tier: CapabilityTier,
+
     /// Human-readable description of what the tool does.
     /// Used as the `Tool::description()` return value.
     /// If omitted, a generic fallback is used (with a warning).
@@ -160,6 +174,7 @@ impl CapabilitiesFile {
             let inner = inner.resolve_nested_inner(depth + 1);
             self.description = self.description.or(inner.description);
             self.discovery_summary = self.discovery_summary.or(inner.discovery_summary);
+            self.tier = std::cmp::min(self.tier, inner.tier);
             self.http = self.http.or(inner.http);
             self.secrets = self.secrets.or(inner.secrets);
             self.tool_invoke = self.tool_invoke.or(inner.tool_invoke);
@@ -809,7 +824,9 @@ fn default_tool_setup_field_input_type() -> ToolSetupFieldInputType {
 mod tests {
     use serde_json::json;
 
-    use crate::tools::wasm::capabilities_schema::{CapabilitiesFile, CredentialLocationSchema};
+    use crate::tools::wasm::capabilities_schema::{
+        CapabilitiesFile, CapabilityTier, CredentialLocationSchema,
+    };
 
     #[test]
     fn test_parse_minimal() {
@@ -1260,6 +1277,19 @@ mod tests {
             http.allowlist[0].host, "deep.example.com",
             "Doubly-nested capabilities should be resolved"
         );
+    }
+
+    #[test]
+    fn test_resolve_nested_tier_uses_most_restrictive() {
+        let json = r#"{
+            "tier": "scoped",
+            "capabilities": {
+                "tier": "readonly"
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        assert_eq!(caps.tier, CapabilityTier::Readonly);
     }
 
     #[test]
