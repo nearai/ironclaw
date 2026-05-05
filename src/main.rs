@@ -71,7 +71,7 @@ fn format_top_level_error(err: &anyhow::Error) {
     } else if lower.contains("secrets_master_key") {
         Some("run `ironclaw onboard` or set SECRETS_MASTER_KEY in .env")
     } else if lower.contains("already running") {
-        Some("stop the other instance or remove the stale PID file")
+        Some("stop the other IronClaw process, or wait for it to exit")
     } else if lower.contains("onboard") {
         Some("run `ironclaw onboard` to complete setup")
     } else {
@@ -89,6 +89,15 @@ fn format_top_level_error(err: &anyhow::Error) {
 /// Signal, relay channels, gateway, managed tunnel, and sandbox orchestrator API.
 fn non_cli_channels_enabled(cli_only: bool) -> bool {
     !cli_only
+}
+
+#[cfg(unix)]
+fn interactive_tui_should_exit_on_sighup(
+    tui_enabled: bool,
+    has_one_shot_message: bool,
+    terminal_attached: bool,
+) -> bool {
+    tui_enabled && !has_one_shot_message && terminal_attached && cfg!(feature = "tui")
 }
 
 fn normalize_persisted_wasm_channel_names<I, S>(names: I) -> std::collections::HashSet<String>
@@ -334,7 +343,7 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     // ── PID lock (prevent multiple instances) ────────────────────────
-    let _pid_lock = match ironclaw::bootstrap::PidLock::acquire() {
+    let pid_lock = match ironclaw::bootstrap::PidLock::acquire() {
         Ok(lock) => Some(lock),
         Err(ironclaw::bootstrap::PidLockError::AlreadyRunning { pid }) => {
             anyhow::bail!(
@@ -350,6 +359,10 @@ async fn async_main() -> anyhow::Result<()> {
             None
         }
     };
+    #[cfg(unix)]
+    let mut _pid_lock = pid_lock;
+    #[cfg(not(unix))]
+    let _pid_lock = pid_lock;
 
     let startup_start = std::time::Instant::now();
 
@@ -428,6 +441,23 @@ async fn async_main() -> anyhow::Result<()> {
     .await?;
 
     let config = components.config;
+    #[cfg(unix)]
+    let exit_interactive_tui_on_sighup = {
+        use std::io::IsTerminal;
+
+        interactive_tui_should_exit_on_sighup(
+            config.channels.tui.is_some(),
+            cli.message.is_some(),
+            std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
+        )
+    };
+    #[cfg(unix)]
+    if exit_interactive_tui_on_sighup
+        && let Some(lock) = _pid_lock.as_mut()
+        && let Err(e) = lock.mark_interactive_tui()
+    {
+        tracing::warn!("Failed to mark PID lock as interactive TUI: {}", e);
+    }
 
     // ── Tunnel setup ───────────────────────────────────────────────────
 
@@ -1317,7 +1347,9 @@ async fn async_main() -> anyhow::Result<()> {
     // Give the agent the routine engine slot so it can expose the engine to the gateway.
     agent.set_routine_engine_slot(shared_routine_engine_slot);
 
-    // Prepare SIGHUP handler for hot-reloading HTTP webhook config
+    // Prepare SIGHUP handling. Daemon-style runs use it for hot reload, but
+    // interactive TUI runs should exit on terminal hangup instead of becoming
+    // orphaned background processes.
     // Broadcast channel for clean shutdown of background tasks
     let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
 
@@ -1334,6 +1366,7 @@ async fn async_main() -> anyhow::Result<()> {
         let sighup_secrets_store = components.secrets_store.clone();
         let sighup_owner_id = config.owner_id.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
+        let sighup_inject_tx = channels_for_warnings.inject_sender();
 
         tokio::spawn(async move {
             use tokio::signal::unix::{SignalKind, signal};
@@ -1344,6 +1377,20 @@ async fn async_main() -> anyhow::Result<()> {
                     return;
                 }
             };
+
+            if exit_interactive_tui_on_sighup {
+                if sighup.recv().await.is_some() {
+                    tracing::info!(
+                        "SIGHUP received for interactive TUI; requesting graceful shutdown"
+                    );
+                    let msg =
+                        ironclaw::channels::IncomingMessage::new("tui", &sighup_owner_id, "/quit");
+                    if let Err(e) = sighup_inject_tx.send(msg).await {
+                        tracing::warn!("Failed to request SIGHUP shutdown: {}", e);
+                    }
+                }
+                return;
+            }
 
             loop {
                 // Exit loop on shutdown signal or when SIGHUP is received
@@ -1587,6 +1634,15 @@ mod tests {
             non_cli_channels_enabled(false),
             "default mode should enable non-CLI channels"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn interactive_tui_exits_on_sighup_only_for_live_ui_session() {
+        assert!(interactive_tui_should_exit_on_sighup(true, false, true));
+        assert!(!interactive_tui_should_exit_on_sighup(true, true, true));
+        assert!(!interactive_tui_should_exit_on_sighup(false, false, true));
+        assert!(!interactive_tui_should_exit_on_sighup(true, false, false));
     }
 
     fn find_bytes(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {

@@ -53,6 +53,10 @@ impl ThemeColor {
             Self::Rgb { r, g, b } => Color::Rgb(*r, *g, *b),
         }
     }
+
+    fn is_reset(&self) -> bool {
+        matches!(self, Self::Named(name) if name == "reset")
+    }
 }
 
 impl Default for Theme {
@@ -67,13 +71,16 @@ impl Theme {
         Self {
             name: "dark".to_string(),
             bg: ThemeColor::Named("reset".to_string()),
-            fg: ThemeColor::Named("white".to_string()),
+            // Keep foreground paired with the reset background. Hard-coding
+            // white while leaving the background unset makes the default TUI
+            // unreadable in light terminal profiles.
+            fg: ThemeColor::Named("reset".to_string()),
             accent: ThemeColor::Rgb {
                 r: 52,
                 g: 211,
                 b: 153,
             },
-            dim: ThemeColor::Named("dark_gray".to_string()),
+            dim: ThemeColor::Named("reset".to_string()),
             success: ThemeColor::Named("green".to_string()),
             warning: ThemeColor::Named("yellow".to_string()),
             error: ThemeColor::Named("red".to_string()),
@@ -90,15 +97,35 @@ impl Theme {
             bg: ThemeColor::Named("white".to_string()),
             fg: ThemeColor::Named("black".to_string()),
             accent: ThemeColor::Rgb {
-                r: 16,
-                g: 163,
-                b: 127,
+                r: 4,
+                g: 120,
+                b: 87,
             },
-            dim: ThemeColor::Named("gray".to_string()),
-            success: ThemeColor::Named("green".to_string()),
-            warning: ThemeColor::Named("yellow".to_string()),
-            error: ThemeColor::Named("red".to_string()),
-            border: ThemeColor::Named("gray".to_string()),
+            dim: ThemeColor::Rgb {
+                r: 75,
+                g: 85,
+                b: 99,
+            },
+            success: ThemeColor::Rgb {
+                r: 22,
+                g: 101,
+                b: 52,
+            },
+            warning: ThemeColor::Rgb {
+                r: 146,
+                g: 64,
+                b: 14,
+            },
+            error: ThemeColor::Rgb {
+                r: 185,
+                g: 28,
+                b: 28,
+            },
+            border: ThemeColor::Rgb {
+                r: 107,
+                g: 114,
+                b: 128,
+            },
             header_bg: ThemeColor::Named("white".to_string()),
             status_bg: ThemeColor::Named("white".to_string()),
         }
@@ -111,7 +138,12 @@ impl Theme {
     }
 
     pub fn dim_style(&self) -> Style {
-        Style::default().fg(self.dim.to_color())
+        let style = Style::default().fg(self.dim.to_color());
+        if self.dim.is_reset() {
+            style.add_modifier(Modifier::DIM)
+        } else {
+            style
+        }
     }
 
     pub fn success_style(&self) -> Style {
@@ -166,9 +198,29 @@ mod tests {
     }
 
     #[test]
+    fn dark_theme_uses_terminal_foreground_with_reset_background() {
+        let theme = Theme::dark();
+        assert_eq!(theme.bg.to_color(), Color::Reset);
+        assert_eq!(theme.fg.to_color(), Color::Reset);
+
+        let dim_style = theme.dim_style();
+        assert_eq!(dim_style.fg, Some(Color::Reset));
+        assert!(dim_style.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
     fn light_theme_name() {
         let theme = Theme::light();
         assert_eq!(theme.name, "light");
+    }
+
+    #[test]
+    fn light_theme_uses_high_contrast_tokens() {
+        let theme = Theme::light();
+        assert_eq!(theme.accent.to_color(), Color::Rgb(4, 120, 87));
+        assert_eq!(theme.dim.to_color(), Color::Rgb(75, 85, 99));
+        assert_eq!(theme.warning.to_color(), Color::Rgb(146, 64, 14));
+        assert_eq!(theme.border.to_color(), Color::Rgb(107, 114, 128));
     }
 
     #[test]
