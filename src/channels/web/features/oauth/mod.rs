@@ -737,9 +737,21 @@ pub(crate) async fn slack_relay_oauth_callback_handler(
                 .unwrap_or_else(|| state.owner_id.clone());
             let _ = ext_mgr.secrets().delete(&state.owner_id, &user_key).await;
 
-            let Ok(user_id) =
-                crate::ownership::UserId::new(&oauth_user, crate::ownership::UserRole::Regular)
-            else {
+            let role = if let Some(ref db) = state.store {
+                db.get_user(&oauth_user)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|u| match u.role.as_str() {
+                        "owner" => crate::ownership::UserRole::Owner,
+                        "admin" => crate::ownership::UserRole::Admin,
+                        _ => crate::ownership::UserRole::Regular,
+                    })
+                    .unwrap_or(crate::ownership::UserRole::Regular)
+            } else {
+                crate::ownership::UserRole::Regular
+            };
+            let Ok(user_id) = crate::ownership::UserId::new(&oauth_user, role) else {
                 tracing::warn!(
                     oauth_user = %oauth_user,
                     "relay OAuth callback: invalid user_id for channel identity"
