@@ -439,6 +439,28 @@ function crOpenEngineThread(threadId) {
 
 var _projectWidgets = []; // { id, destroy }
 
+function projectWidgetScriptSource(manifest, js) {
+  return [
+    '(function() {',
+    '  var __script = document.currentScript;',
+    '  var __mountId = __script && __script.getAttribute("data-mount-id");',
+    '  var __registry = window.__IRONCLAW_PROJECT_WIDGET_MOUNTS || {};',
+    '  var __mount = __registry[__mountId];',
+    '  if (!__mount) throw new Error("Missing project widget mount: " + __mountId);',
+    '  try {',
+    '    var __destroy = (function(container, api, projectId) {',
+    js,
+    '    })(__mount.container, __mount.api, __mount.projectId);',
+    '    if (typeof __destroy === "function") __mount.destroy = __destroy;',
+    '    if (typeof __mount.onLoad === "function") __mount.onLoad();',
+    '  } catch (__err) {',
+    '    if (typeof __mount.onError === "function") { __mount.onError(__err); } else { throw __err; }',
+    '  }',
+    '})();',
+    '//# sourceURL=ironclaw-project-widget-' + manifest.id + '.js'
+  ].join('\n');
+}
+
 function loadProjectWidgets(projectId) {
   destroyProjectWidgets();
   apiFetch('/api/engine/projects/' + encodeURIComponent(projectId) + '/widgets')
@@ -466,24 +488,58 @@ function loadProjectWidgets(projectId) {
           document.head.appendChild(style);
         }
 
-        // Eval the JS module to register the widget.
+        // Run the widget as a blob-backed script. Project widget code is
+        // fetched through the authenticated API above, then executed as a
+        // same-page plugin without `unsafe-eval`.
+        var mountId = manifest.id + '-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+        var registry = window.__IRONCLAW_PROJECT_WIDGET_MOUNTS = window.__IRONCLAW_PROJECT_WIDGET_MOUNTS || {};
+        var objectUrl = null;
+        var script = null;
+        var mount = {
+          container: container,
+          api: typeof IronClaw !== 'undefined' ? IronClaw.api : null,
+          projectId: projectId,
+          destroy: null,
+          onError: function(err) {
+            console.error('[projects] Failed to mount widget ' + manifest.id + ':', err);
+            container.innerHTML = '<div class="cr-empty">Widget error: ' + manifest.id + '</div>';
+          }
+        };
+        registry[mountId] = mount;
+
         try {
-          var api = typeof IronClaw !== 'undefined' ? IronClaw.api : null;
-          var fn = new Function('container', 'api', 'projectId', w.js);
-          fn(container, api, projectId);
+          objectUrl = URL.createObjectURL(new Blob([
+            projectWidgetScriptSource(manifest, w.js)
+          ], { type: 'application/javascript' }));
+          script = document.createElement('script');
+          script.src = objectUrl;
+          script.async = false;
+          script.setAttribute('data-project-widget-script', manifest.id);
+          script.setAttribute('data-mount-id', mountId);
+          script.onerror = function() {
+            mount.onError(new Error('Failed to load widget script'));
+          };
+          document.head.appendChild(script);
 
           _projectWidgets.push({
             id: manifest.id,
             container: container,
             style: style || null,
             destroy: function() {
+              if (typeof mount.destroy === 'function') {
+                try { mount.destroy(); } catch (e) { /* ignore widget cleanup errors */ }
+              }
+              delete registry[mountId];
               container.remove();
               if (style) style.remove();
+              if (script) script.remove();
+              if (objectUrl) URL.revokeObjectURL(objectUrl);
             }
           });
         } catch (err) {
-          console.error('[projects] Failed to mount widget ' + manifest.id + ':', err);
-          container.innerHTML = '<div class="cr-empty">Widget error: ' + manifest.id + '</div>';
+          delete registry[mountId];
+          if (objectUrl) URL.revokeObjectURL(objectUrl);
+          mount.onError(err);
         }
       });
     })
@@ -1412,4 +1468,3 @@ function formatRelativeTime(isoString) {
 }
 
 // --- Users (admin) ---
-

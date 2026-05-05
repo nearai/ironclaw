@@ -1,0 +1,65 @@
+id: intents-trading-agent-walkforward
+description: |
+  Runs a fixed-strategy walk-forward across four contiguous folds on a
+  long-uptrend candle series. Buy-and-hold is the baseline because its
+  out-of-sample return is bounded by the fold window's drift, which keeps
+  the test deterministic. The aggregate robustness verdict is asserted to
+  fall in {robust, fragile} (overfit would indicate a regression).
+steps:
+  - name: walkforward_buy_hold
+    action: backtest_walkforward
+    params:
+      n_folds: 4
+      train_pct: 0.7
+      embargo: 1
+      initial_cash_usd: 1000
+      fee_bps: 0
+      slippage_bps: 0
+      max_position_pct: 1
+      strategy:
+        kind: buy-hold
+      candles:
+        - {ts: "2026-01-01T00:00:00Z", open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1000}
+        - {ts: "2026-01-02T00:00:00Z", open: 100.5, high: 101.5, low: 99.5, close: 101.0, volume: 1000}
+        - {ts: "2026-01-03T00:00:00Z", open: 101.5, high: 102.5, low: 100.5, close: 102.0, volume: 1000}
+        - {ts: "2026-01-04T00:00:00Z", open: 102.5, high: 103.5, low: 101.5, close: 103.0, volume: 1000}
+        - {ts: "2026-01-05T00:00:00Z", open: 103.5, high: 104.5, low: 102.5, close: 104.0, volume: 1000}
+        - {ts: "2026-01-06T00:00:00Z", open: 104.5, high: 105.5, low: 103.5, close: 105.0, volume: 1000}
+        - {ts: "2026-01-07T00:00:00Z", open: 105.5, high: 106.5, low: 104.5, close: 106.0, volume: 1000}
+        - {ts: "2026-01-08T00:00:00Z", open: 106.5, high: 107.5, low: 105.5, close: 107.0, volume: 1000}
+        - {ts: "2026-01-09T00:00:00Z", open: 107.5, high: 108.5, low: 106.5, close: 108.0, volume: 1000}
+        - {ts: "2026-01-10T00:00:00Z", open: 108.5, high: 109.5, low: 107.5, close: 109.0, volume: 1000}
+        - {ts: "2026-01-11T00:00:00Z", open: 109.5, high: 110.5, low: 108.5, close: 110.0, volume: 1000}
+        - {ts: "2026-01-12T00:00:00Z", open: 110.5, high: 111.5, low: 109.5, close: 111.0, volume: 1000}
+        - {ts: "2026-01-13T00:00:00Z", open: 111.5, high: 112.5, low: 110.5, close: 112.0, volume: 1000}
+        - {ts: "2026-01-14T00:00:00Z", open: 112.5, high: 113.5, low: 111.5, close: 113.0, volume: 1000}
+        - {ts: "2026-01-15T00:00:00Z", open: 113.5, high: 114.5, low: 112.5, close: 114.0, volume: 1000}
+        - {ts: "2026-01-16T00:00:00Z", open: 114.5, high: 115.5, low: 113.5, close: 115.0, volume: 1000}
+        - {ts: "2026-01-17T00:00:00Z", open: 115.5, high: 116.5, low: 114.5, close: 116.0, volume: 1000}
+        - {ts: "2026-01-18T00:00:00Z", open: 116.5, high: 117.5, low: 115.5, close: 117.0, volume: 1000}
+        - {ts: "2026-01-19T00:00:00Z", open: 117.5, high: 118.5, low: 116.5, close: 118.0, volume: 1000}
+        - {ts: "2026-01-20T00:00:00Z", open: 118.5, high: 119.5, low: 117.5, close: 119.0, volume: 1000}
+        - {ts: "2026-01-21T00:00:00Z", open: 119.5, high: 120.5, low: 118.5, close: 120.0, volume: 1000}
+        - {ts: "2026-01-22T00:00:00Z", open: 120.5, high: 121.5, low: 119.5, close: 121.0, volume: 1000}
+        - {ts: "2026-01-23T00:00:00Z", open: 121.5, high: 122.5, low: 120.5, close: 122.0, volume: 1000}
+        - {ts: "2026-01-24T00:00:00Z", open: 122.5, high: 123.5, low: 121.5, close: 123.0, volume: 1000}
+        - {ts: "2026-01-25T00:00:00Z", open: 123.5, high: 124.5, low: 122.5, close: 124.0, volume: 1000}
+        - {ts: "2026-01-26T00:00:00Z", open: 124.5, high: 125.5, low: 123.5, close: 125.0, volume: 1000}
+        - {ts: "2026-01-27T00:00:00Z", open: 125.5, high: 126.5, low: 124.5, close: 126.0, volume: 1000}
+        - {ts: "2026-01-28T00:00:00Z", open: 126.5, high: 127.5, low: 125.5, close: 127.0, volume: 1000}
+        - {ts: "2026-01-29T00:00:00Z", open: 127.5, high: 128.5, low: 126.5, close: 128.0, volume: 1000}
+        - {ts: "2026-01-30T00:00:00Z", open: 128.5, high: 129.5, low: 127.5, close: 129.0, volume: 1000}
+        - {ts: "2026-01-31T00:00:00Z", open: 129.5, high: 130.5, low: 128.5, close: 130.0, volume: 1000}
+        - {ts: "2026-02-01T00:00:00Z", open: 130.5, high: 131.5, low: 129.5, close: 131.0, volume: 1000}
+        - {ts: "2026-02-02T00:00:00Z", open: 131.5, high: 132.5, low: 130.5, close: 132.0, volume: 1000}
+        - {ts: "2026-02-03T00:00:00Z", open: 132.5, high: 133.5, low: 131.5, close: 133.0, volume: 1000}
+        - {ts: "2026-02-04T00:00:00Z", open: 133.5, high: 134.5, low: 132.5, close: 134.0, volume: 1000}
+        - {ts: "2026-02-05T00:00:00Z", open: 134.5, high: 135.5, low: 133.5, close: 135.0, volume: 1000}
+        - {ts: "2026-02-06T00:00:00Z", open: 135.5, high: 136.5, low: 134.5, close: 136.0, volume: 1000}
+        - {ts: "2026-02-07T00:00:00Z", open: 136.5, high: 137.5, low: 135.5, close: 137.0, volume: 1000}
+        - {ts: "2026-02-08T00:00:00Z", open: 137.5, high: 138.5, low: 136.5, close: 138.0, volume: 1000}
+        - {ts: "2026-02-09T00:00:00Z", open: 138.5, high: 139.5, low: 137.5, close: 139.0, volume: 1000}
+    expect:
+      backtest_schema_version: intents-walkforward/1
+      walkforward_folds_len: 4
+      walkforward_robustness_in: ["robust", "fragile"]

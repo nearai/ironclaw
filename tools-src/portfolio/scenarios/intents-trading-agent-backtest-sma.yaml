@@ -1,0 +1,40 @@
+id: intents-trading-agent-backtest-sma
+description: |
+  Backtests an SMA crossover strategy before it is eligible for
+  intent construction. This mirrors the TradingAgents flow where
+  the trader must clear a historical sanity check before the risk
+  manager allows a paper intent.
+steps:
+  - name: backtest_sma_cross
+    action: backtest
+    params:
+      initial_cash_usd: 1000
+      fee_bps: 10
+      slippage_bps: 5
+      max_position_pct: 1
+      stop_loss_bps: 1200
+      strategy:
+        kind: sma-cross
+        fast_window: 2
+        slow_window: 4
+      candles:
+        - {ts: "2026-01-01T00:00:00Z", open: 10.0, high: 10.2, low: 9.8, close: 10.0, volume: 1000}
+        - {ts: "2026-01-02T00:00:00Z", open: 10.0, high: 10.2, low: 9.8, close: 10.0, volume: 1000}
+        - {ts: "2026-01-03T00:00:00Z", open: 10.0, high: 10.2, low: 9.8, close: 10.0, volume: 1000}
+        - {ts: "2026-01-04T00:00:00Z", open: 10.0, high: 10.2, low: 9.8, close: 10.0, volume: 1000}
+        - {ts: "2026-01-05T00:00:00Z", open: 10.2, high: 10.7, low: 10.0, close: 10.5, volume: 1200}
+        - {ts: "2026-01-06T00:00:00Z", open: 10.6, high: 11.2, low: 10.5, close: 11.0, volume: 1300}
+        - {ts: "2026-01-07T00:00:00Z", open: 11.1, high: 12.1, low: 11.0, close: 12.0, volume: 1400}
+        - {ts: "2026-01-08T00:00:00Z", open: 12.1, high: 13.1, low: 12.0, close: 13.0, volume: 1500}
+        - {ts: "2026-01-09T00:00:00Z", open: 13.1, high: 14.1, low: 13.0, close: 14.0, volume: 1600}
+        - {ts: "2026-01-10T00:00:00Z", open: 13.8, high: 14.0, low: 12.8, close: 13.0, volume: 1500}
+        - {ts: "2026-01-11T00:00:00Z", open: 12.8, high: 13.0, low: 11.8, close: 12.0, volume: 1400}
+        - {ts: "2026-01-12T00:00:00Z", open: 11.8, high: 12.0, low: 10.8, close: 11.0, volume: 1300}
+        - {ts: "2026-01-13T00:00:00Z", open: 10.8, high: 11.0, low: 9.8, close: 10.0, volume: 1200}
+        - {ts: "2026-01-14T00:00:00Z", open: 9.8, high: 10.0, low: 8.8, close: 9.0, volume: 1100}
+    expect:
+      backtest_schema_version: intents-backtest/1
+      backtest_trades_min: 1
+      backtest_total_return_gt: 10
+      backtest_max_drawdown_le: 20
+      backtest_lookahead_safe: true

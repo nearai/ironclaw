@@ -1,0 +1,115 @@
+id: intents-trading-agent-near-trial
+description: |
+  Plans a nominal-NEAR rehearsal: rank strategies, prepare a small
+  paper/quote budget, keep the generated build_intent request unsigned,
+  and surface the trial state in the console widget.
+steps:
+  - name: rank_trial_strategies
+    action: backtest_suite
+    params:
+      initial_cash_usd: 1000
+      fee_bps: 10
+      slippage_bps: 5
+      candidates:
+        - id: buy_hold_baseline
+          strategy:
+            kind: buy-hold
+        - id: sma_cross_fast
+          max_position_pct: 0.8
+          stop_loss_bps: 1200
+          strategy:
+            kind: sma-cross
+            fast_window: 2
+            slow_window: 4
+        - id: momentum_rotation
+          max_position_pct: 0.8
+          stop_loss_bps: 1000
+          strategy:
+            kind: momentum
+            lookback_window: 3
+            threshold_bps: 500
+      candles:
+        - {ts: "2026-01-01T00:00:00Z", open: 10.0, high: 10.2, low: 9.8, close: 10.0, volume: 1000}
+        - {ts: "2026-01-02T00:00:00Z", open: 10.0, high: 10.2, low: 9.8, close: 10.0, volume: 1000}
+        - {ts: "2026-01-03T00:00:00Z", open: 10.0, high: 10.2, low: 9.8, close: 10.0, volume: 1000}
+        - {ts: "2026-01-04T00:00:00Z", open: 10.0, high: 10.2, low: 9.8, close: 10.0, volume: 1000}
+        - {ts: "2026-01-05T00:00:00Z", open: 10.2, high: 10.7, low: 10.0, close: 10.5, volume: 1200}
+        - {ts: "2026-01-06T00:00:00Z", open: 10.6, high: 11.2, low: 10.5, close: 11.0, volume: 1300}
+        - {ts: "2026-01-07T00:00:00Z", open: 11.1, high: 12.1, low: 11.0, close: 12.0, volume: 1400}
+        - {ts: "2026-01-08T00:00:00Z", open: 12.1, high: 13.1, low: 12.0, close: 13.0, volume: 1500}
+        - {ts: "2026-01-09T00:00:00Z", open: 13.1, high: 14.1, low: 13.0, close: 14.0, volume: 1600}
+        - {ts: "2026-01-10T00:00:00Z", open: 13.8, high: 14.0, low: 12.8, close: 13.0, volume: 1500}
+        - {ts: "2026-01-11T00:00:00Z", open: 12.8, high: 13.0, low: 11.8, close: 12.0, volume: 1400}
+        - {ts: "2026-01-12T00:00:00Z", open: 11.8, high: 12.0, low: 10.8, close: 11.0, volume: 1300}
+        - {ts: "2026-01-13T00:00:00Z", open: 10.8, high: 11.0, low: 9.8, close: 10.0, volume: 1200}
+        - {ts: "2026-01-14T00:00:00Z", open: 9.8, high: 10.0, low: 8.8, close: 9.0, volume: 1100}
+    capture:
+      backtest_suite_var: suite
+    expect:
+      backtest_suite_schema_version: intents-backtest-suite/1
+      backtest_suite_any_passes_basic_gate: true
+
+  - name: plan_nominal_near_trial
+    action: plan_near_intents_trial
+    params:
+      near_account_id: tester.near
+      mode: paper
+      pair: NEAR/USDC
+      nominal_near: 0.25
+      max_trade_near: 0.05
+      assumed_near_usd: 3.0
+      max_slippage_bps: 50
+      backtest_suite: "$suite"
+    capture:
+      trial_plan_var: trial
+    expect:
+      near_trial_schema_version: near-intents-trial-plan/1
+      near_trial_safe_to_quote: true
+      near_trial_build_solver: fixture
+
+  - name: widget_with_trial_plan
+    action: format_intents_widget
+    params:
+      generated_at: "2026-05-02T17:30:00Z"
+      project_id: intents-trading-agent
+      mode: paper
+      pair: NEAR/USDC
+      stance: paper-intent
+      confidence: 0.7
+      backtest_suite: "$suite"
+      trial_plan: "$trial"
+      risk_gates:
+        - name: unsigned-only
+          status: pass
+          detail: Wallet signature required outside the agent.
+      next_action: Run paper mode before requesting a live quote.
+    expect:
+      intents_widget_schema_version: intents-trading-widget/1
+      intents_widget_top_candidates_min: 1
+      intents_widget_trial_safe_to_quote: true
+
+  - name: paid_fetch_requires_confirmation
+    action: prepare_dripstack_paid_fetch
+    params:
+      publication_slug: premiumcrypto.substack.com
+      post_slug: near-intents-liquidity
+      title: NEAR Intents liquidity and solver-routing risk
+      price_usd: 0.01
+      payment_protocol: mpp
+      user_confirmed_purchase: false
+    expect:
+      dripstack_paid_fetch_status: needs-user-confirmation
+
+  - name: paid_fetch_with_receipt_header
+    action: prepare_dripstack_paid_fetch
+    params:
+      publication_slug: premiumcrypto.substack.com
+      post_slug: near-intents-liquidity
+      title: NEAR Intents liquidity and solver-routing risk
+      price_usd: 0.05
+      payment_protocol: mpp
+      user_confirmed_purchase: true
+      mpp_authorization: "signed-payment-credential-placeholder"
+    expect:
+      dripstack_paid_fetch_status: ready-to-retry-with-receipt
+      dripstack_paid_fetch_headers_min: 1

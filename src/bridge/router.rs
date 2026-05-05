@@ -5378,6 +5378,29 @@ pub async fn list_engine_thread_events(
 }
 
 /// List all projects.
+fn engine_project_info(project: ironclaw_engine::Project) -> EngineProjectInfo {
+    EngineProjectInfo {
+        id: project.id.to_string(),
+        name: project.name,
+        description: project.description,
+        goals: project.goals,
+        metrics: project.metrics,
+        created_at: project.created_at.to_rfc3339(),
+    }
+}
+
+fn extract_project_slug_from_workspace_path(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("projects/")?;
+    let (slug, remainder) = rest.split_once('/')?;
+    if slug.is_empty() || slug == "." || slug == ".." || slug.starts_with('.') {
+        return None;
+    }
+    if remainder.is_empty() {
+        return None;
+    }
+    Some(slug)
+}
+
 pub async fn list_engine_projects(user_id: &str) -> Result<Vec<EngineProjectInfo>, Error> {
     let Some(lock) = ENGINE_STATE.get() else {
         return Ok(Vec::new());
@@ -5393,17 +5416,60 @@ pub async fn list_engine_projects(user_id: &str) -> Result<Vec<EngineProjectInfo
         .await
         .map_err(|e| engine_err("list projects", e))?;
 
-    Ok(projects
-        .iter()
-        .map(|p| EngineProjectInfo {
-            id: p.id.to_string(),
-            name: p.name.clone(),
-            description: p.description.clone(),
-            goals: p.goals.clone(),
-            metrics: p.metrics.clone(),
-            created_at: p.created_at.to_rfc3339(),
-        })
-        .collect())
+    Ok(projects.into_iter().map(engine_project_info).collect())
+}
+
+/// Register a project implied by a workspace path such as
+/// `projects/<slug>/AGENTS.md`.
+///
+/// LLM-facing `memory_write` calls go through `EffectBridgeAdapter`, which
+/// already performs this auto-registration. The authenticated HTTP memory API
+/// writes directly to the workspace, so it needs the same bridge hook or
+/// project widgets installed via `/api/memory/write` stay invisible until a
+/// separate agent tool call happens to create the project.
+pub async fn register_engine_project_for_workspace_path(
+    path: &str,
+    user_id: &str,
+) -> Result<Option<EngineProjectInfo>, Error> {
+    let Some(slug) = extract_project_slug_from_workspace_path(path) else {
+        return Ok(None);
+    };
+
+    let Some(lock) = ENGINE_STATE.get() else {
+        return Ok(None);
+    };
+    let guard = lock.read().await;
+    let Some(state) = guard.as_ref() else {
+        return Ok(None);
+    };
+
+    let slug_lower = ironclaw_engine::types::slugify_simple(slug);
+    if slug_lower.is_empty() {
+        return Ok(None);
+    }
+
+    let existing = state
+        .store
+        .list_projects(user_id)
+        .await
+        .map_err(|e| engine_err("list projects", e))?;
+
+    if let Some(project) = existing.iter().find(|p| {
+        p.user_id == user_id
+            && (ironclaw_engine::types::slugify_simple(&p.name) == slug_lower
+                || p.name.eq_ignore_ascii_case(&slug_lower))
+    }) {
+        return Ok(Some(engine_project_info(project.clone())));
+    }
+
+    let project = ironclaw_engine::Project::new(user_id, slug, "");
+    state
+        .store
+        .save_project(&project)
+        .await
+        .map_err(|e| engine_err("register project", e))?;
+
+    Ok(Some(engine_project_info(project)))
 }
 
 /// Get a single project by ID.
@@ -5428,14 +5494,7 @@ pub async fn get_engine_project(
 
     Ok(project
         .filter(|p| p.is_owned_by(user_id))
-        .map(|p| EngineProjectInfo {
-            id: p.id.to_string(),
-            name: p.name,
-            description: p.description,
-            goals: p.goals,
-            metrics: p.metrics,
-            created_at: p.created_at.to_rfc3339(),
-        }))
+        .map(engine_project_info))
 }
 
 /// Projects overview — health, stats, attention items for all projects.
@@ -6319,6 +6378,72 @@ mod tests {
     // letting concurrent tests overwrite the shared `ENGINE_STATE` `OnceLock`.
     use super::test_support::ENGINE_STATE_TEST_LOCK;
     static CWD_TEST_LOCK: LazyLock<TokioMutex<()>> = LazyLock::new(|| TokioMutex::new(()));
+
+    #[test]
+    fn workspace_project_slug_extraction_matches_memory_write_shape() {
+        assert_eq!(
+            extract_project_slug_from_workspace_path("projects/intents-trading-agent/AGENTS.md"),
+            Some("intents-trading-agent")
+        );
+        assert_eq!(
+            extract_project_slug_from_workspace_path(
+                "projects/intents-trading-agent/.system/widgets/near-intents-console/index.js"
+            ),
+            Some("intents-trading-agent")
+        );
+        assert_eq!(extract_project_slug_from_workspace_path("projects"), None);
+        assert_eq!(
+            extract_project_slug_from_workspace_path("projects/foo"),
+            None
+        );
+        assert_eq!(
+            extract_project_slug_from_workspace_path("projects/.hidden/file.md"),
+            None
+        );
+        assert_eq!(
+            extract_project_slug_from_workspace_path("notes/projects/foo.md"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn http_workspace_project_registration_is_idempotent() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let store = Arc::new(TestStore::new());
+        let state = make_expected_test_state(Arc::clone(&store));
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+        *lock.write().await = Some(state);
+
+        let first = register_engine_project_for_workspace_path(
+            "projects/intents-trading-agent/AGENTS.md",
+            "alice",
+        )
+        .await
+        .expect("register ok")
+        .expect("project path should register");
+        let second = register_engine_project_for_workspace_path(
+            "projects/intents-trading-agent/.system/widgets/near-intents-console/index.js",
+            "alice",
+        )
+        .await
+        .expect("register ok")
+        .expect("same project path should resolve");
+
+        assert_eq!(first.id, second.id);
+        assert_eq!(first.name, "intents-trading-agent");
+        let projects = store.list_projects("alice").await.expect("list projects");
+        assert_eq!(projects.len(), 1);
+
+        let ignored =
+            register_engine_project_for_workspace_path("scratch/not-a-project.md", "alice")
+                .await
+                .expect("non-project write ok");
+        assert!(ignored.is_none());
+        assert_eq!(store.list_projects("alice").await.unwrap().len(), 1);
+
+        *lock.write().await = None;
+    }
 
     // ──────────────────────────────────────────────────────────────────
     // `bridge_outcome_for_failed_thread` — caller-level coverage.

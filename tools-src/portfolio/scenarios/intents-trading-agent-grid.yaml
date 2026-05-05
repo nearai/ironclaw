@@ -1,0 +1,57 @@
+id: intents-trading-agent-grid
+description: |
+  Cartesian sweep over fast_window x slow_window for an SMA-cross strategy
+  on a steady uptrend candle series. Verifies enumeration count, suite
+  ranking integration, and that at least one cell clears the basic gate.
+steps:
+  - name: sma_grid
+    action: backtest_grid
+    params:
+      base:
+        kind: sma-cross
+        fast_window: 5
+        slow_window: 20
+      axes:
+        - param: fast_window
+          values: [3, 5, 8]
+        - param: slow_window
+          values: [12, 20]
+      max_cells: 32
+      initial_cash_usd: 1000
+      fee_bps: 0
+      slippage_bps: 0
+      candles:
+        - {ts: "2026-01-01T00:00:00Z", open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1000}
+        - {ts: "2026-01-02T00:00:00Z", open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1000}
+        - {ts: "2026-01-03T00:00:00Z", open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1000}
+        - {ts: "2026-01-04T00:00:00Z", open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1000}
+        - {ts: "2026-01-05T00:00:00Z", open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1000}
+        - {ts: "2026-01-06T00:00:00Z", open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1000}
+        - {ts: "2026-01-07T00:00:00Z", open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1000}
+        - {ts: "2026-01-08T00:00:00Z", open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1000}
+        - {ts: "2026-01-09T00:00:00Z", open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1000}
+        - {ts: "2026-01-10T00:00:00Z", open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1000}
+        - {ts: "2026-01-11T00:00:00Z", open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1000}
+        - {ts: "2026-01-12T00:00:00Z", open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1000}
+        - {ts: "2026-01-13T00:00:00Z", open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1000}
+        - {ts: "2026-01-14T00:00:00Z", open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1000}
+        - {ts: "2026-01-15T00:00:00Z", open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1000}
+        - {ts: "2026-01-16T00:00:00Z", open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1000}
+        - {ts: "2026-01-17T00:00:00Z", open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1000}
+        - {ts: "2026-01-18T00:00:00Z", open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1000}
+        - {ts: "2026-01-19T00:00:00Z", open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1000}
+        - {ts: "2026-01-20T00:00:00Z", open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1000}
+        - {ts: "2026-01-21T00:00:00Z", open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1000}
+        - {ts: "2026-01-22T00:00:00Z", open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 1000}
+        - {ts: "2026-01-23T00:00:00Z", open: 102.0, high: 103.0, low: 101.0, close: 103.0, volume: 1000}
+        - {ts: "2026-01-24T00:00:00Z", open: 104.0, high: 105.0, low: 103.0, close: 105.0, volume: 1000}
+        - {ts: "2026-01-25T00:00:00Z", open: 106.0, high: 107.0, low: 105.0, close: 107.0, volume: 1000}
+        - {ts: "2026-01-26T00:00:00Z", open: 108.0, high: 109.0, low: 107.0, close: 109.0, volume: 1000}
+        - {ts: "2026-01-27T00:00:00Z", open: 110.0, high: 111.0, low: 109.0, close: 111.0, volume: 1000}
+        - {ts: "2026-01-28T00:00:00Z", open: 112.0, high: 113.0, low: 111.0, close: 113.0, volume: 1000}
+        - {ts: "2026-01-29T00:00:00Z", open: 114.0, high: 115.0, low: 113.0, close: 115.0, volume: 1000}
+        - {ts: "2026-01-30T00:00:00Z", open: 116.0, high: 117.0, low: 115.0, close: 117.0, volume: 1000}
+    expect:
+      backtest_schema_version: intents-grid/1
+      grid_cells_len: 6
+      grid_top_passes_basic_gate: true
