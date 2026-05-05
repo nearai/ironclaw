@@ -62,6 +62,7 @@ use serde::{Deserialize, Serialize};
 /// itself — this enum only carries the vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum DeploymentMode {
     /// Single user on a personal machine. Can host `Local*` profiles.
     LocalSingleUser,
@@ -126,6 +127,7 @@ impl std::str::FromStr for DeploymentMode {
 /// - `Experiment` is for disposable package-install/test/benchmark flows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum RuntimeProfile {
     /// Safe assistant default: scoped virtual filesystem, sandbox or
     /// disabled process, brokered network/secrets, policy-driven approvals.
@@ -305,7 +307,12 @@ impl std::str::FromStr for RuntimeProfile {
 
 /// Error returned by [`std::str::FromStr`] implementations on the runtime
 /// policy enums when the input doesn't match any known wire name.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Hash` is derived to match the `Hash` derives on the parsed enums so
+/// the error can sit in the same containers (e.g. a `HashSet` of
+/// "rejected wire values" during a config diff). `Copy` is intentionally
+/// not implemented because the type carries an owned `String`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ParseRuntimePolicyEnumError {
     pub kind: &'static str,
     pub value: String,
@@ -327,6 +334,7 @@ impl std::error::Error for ParseRuntimePolicyEnumError {}
 /// `TenantWorkspace` for hosted, `OrgDedicatedWorkspace` for enterprise).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum FilesystemBackendKind {
     /// Scoped virtual mounts only. No host filesystem reachable.
     ScopedVirtual,
@@ -363,6 +371,7 @@ impl std::fmt::Display for FilesystemBackendKind {
 /// the matching authority boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ProcessBackendKind {
     /// No process effects.
     None,
@@ -407,6 +416,7 @@ impl std::fmt::Display for ProcessBackendKind {
 /// in trusted local profiles; hosted multi-tenant must not select it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum NetworkMode {
     /// No outbound network.
     Deny,
@@ -446,6 +456,7 @@ impl std::fmt::Display for NetworkMode {
 /// multi-tenant deployments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum SecretMode {
     /// No secret access.
     Deny,
@@ -489,6 +500,7 @@ impl std::fmt::Display for SecretMode {
 /// `ironclaw_authorization`) still run on top.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ApprovalPolicy {
     /// Ask before every effectful action.
     AskAlways,
@@ -527,6 +539,7 @@ impl std::fmt::Display for ApprovalPolicy {
 /// Audit retention/redaction posture for an invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum AuditMode {
     /// Minimal local audit — invocation outcomes only.
     LocalMinimal,
@@ -579,8 +592,15 @@ pub struct EffectiveRuntimePolicy {
 
 impl EffectiveRuntimePolicy {
     /// `true` when the resolver had to narrow the requested profile to a
-    /// less-permissive one (deployment or tenant/org policy reduced
-    /// authority). Audit log surfaces should highlight this case.
+    /// less-permissive one because tenant/org policy ceiling reduced
+    /// authority *within the same family*.
+    ///
+    /// Note that deployment-mode reduction is impossible by construction:
+    /// the resolver returns `ResolveError::IncompatibleDeployment`
+    /// (fail-closed) for cross-family requests rather than narrowing them,
+    /// so `was_reduced()` only flags ceiling-driven within-family
+    /// narrowing (e.g. `LocalYolo` → `LocalDev` under an `AskDestructive`
+    /// org ceiling). Audit log surfaces should highlight this case.
     pub fn was_reduced(&self) -> bool {
         self.requested_profile != self.resolved_profile
     }

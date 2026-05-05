@@ -27,7 +27,7 @@
 
 use ironclaw_host_api::runtime_policy::{DeploymentMode, RuntimeProfile};
 use ironclaw_runtime_policy::{
-    EffectiveRuntimePolicy, OrgPolicy, ResolveError, ResolveRequest, resolve,
+    EffectiveRuntimePolicy, OrgPolicyConstraints, ResolveError, ResolveRequest, resolve,
 };
 
 use crate::error::ConfigError;
@@ -85,7 +85,7 @@ impl RuntimeConfig {
             // Surfacing it here without a place to write it would be
             // confusing; reserve it for the follow-up that wires the
             // settings store layer.
-            org_policy: OrgPolicy::default(),
+            org_policy: OrgPolicyConstraints::default(),
             yolo_disclosure_acknowledged,
         };
 
@@ -104,10 +104,10 @@ impl RuntimeConfig {
     pub fn safe_default() -> Self {
         let deployment = DeploymentMode::LocalSingleUser;
         let requested_profile = RuntimeProfile::SecureDefault;
-        // `(LocalSingleUser, SecureDefault, default OrgPolicy, no yolo disclosure)`
+        // `(LocalSingleUser, SecureDefault, default OrgPolicyConstraints, no yolo disclosure)`
         // is structurally guaranteed to resolve — `SecureDefault` is
         // deployment-agnostic in `is_compatible`, isn't yolo, and the empty
-        // `OrgPolicy` never narrows. Locked in by
+        // `OrgPolicyConstraints` never narrows. Locked in by
         // `every_valid_deployment_profile_pair_resolves` in
         // `ironclaw_runtime_policy::resolver::tests`.
         let effective_policy = resolve(ResolveRequest::new(deployment, requested_profile))
@@ -241,6 +241,53 @@ mod tests {
         assert_eq!(
             cfg.effective_policy.process_backend,
             ProcessBackendKind::TenantSandbox
+        );
+    }
+
+    #[test]
+    fn precedence_chain_cli_over_env_over_default_is_resolved_per_field() {
+        // zmanian test gap #1: walk the full precedence chain
+        // (CLI > env > default) for every field in one scenario so a
+        // regression that conflates two of the three layers is caught.
+        // Scenario:
+        //   - `deployment` is set on the CLI (CLI must win over env+default)
+        //   - `profile` is set in env only (env must win over default,
+        //     CLI must not silently overwrite when None)
+        //   - `yolo_disclosure_acknowledged` is set nowhere
+        //     (default `false` must surface)
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_env();
+        unsafe {
+            // CLI says LocalSingleUser; env tries to override it — CLI must win.
+            std::env::set_var("IRONCLAW_DEPLOYMENT_MODE", "hosted_multi_tenant");
+            // No CLI for profile — env must win over the SecureDefault default.
+            std::env::set_var("IRONCLAW_RUNTIME_PROFILE", "local_dev");
+            // No CLI / no env for yolo_disclosure — must fall through to false.
+        }
+        let cfg = RuntimeConfig::resolve_from(&RuntimeConfigOverrides {
+            deployment: Some(DeploymentMode::LocalSingleUser),
+            profile: None,
+            yolo_disclosure_acknowledged: None,
+        })
+        .unwrap();
+        clear_env();
+
+        // CLI wins for deployment.
+        assert_eq!(
+            cfg.deployment,
+            DeploymentMode::LocalSingleUser,
+            "CLI deployment override must beat env"
+        );
+        // Env wins for profile (no CLI override given).
+        assert_eq!(
+            cfg.requested_profile,
+            RuntimeProfile::LocalDev,
+            "env profile must beat default when CLI is None"
+        );
+        // Default wins for yolo_disclosure (neither CLI nor env supplied).
+        assert!(
+            !cfg.yolo_disclosure_acknowledged,
+            "yolo_disclosure must default to false when neither CLI nor env supplies it"
         );
     }
 

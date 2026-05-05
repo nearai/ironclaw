@@ -21,7 +21,7 @@
 //!   layer is responsible for actually obtaining the disclosure; the resolver
 //!   only enforces that it was provided.
 //! - **Enterprise direct-runner gate**: `EnterpriseYoloDedicated` additionally
-//!   requires `OrgPolicy::admin_approves_dedicated_yolo = true`.
+//!   requires `OrgPolicyConstraints::admin_approves_dedicated_yolo = true`.
 //! - **Hosted multi-tenant boundary**: `Local*` profiles never resolve under
 //!   `HostedMultiTenant`, and the produced policy never selects
 //!   `FilesystemBackendKind::HostWorkspace` or `ProcessBackendKind::LocalHost`
@@ -38,7 +38,7 @@
 
 mod resolver;
 
-pub use resolver::{OrgPolicy, ResolveError, ResolveRequest, resolve};
+pub use resolver::{OrgPolicyConstraints, ResolveError, ResolveRequest, resolve};
 
 // Re-export the host-api vocabulary so downstream callers don't need a
 // separate `use ironclaw_host_api::runtime_policy::*;`. Each item is a stable

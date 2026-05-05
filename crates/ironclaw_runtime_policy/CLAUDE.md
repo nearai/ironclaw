@@ -1,6 +1,6 @@
 # ironclaw_runtime_policy guardrails
 
-- Own the runtime policy resolver: `(DeploymentMode, RuntimeProfile, OrgPolicy) → EffectiveRuntimePolicy`.
+- Own the runtime policy resolver: `(DeploymentMode, RuntimeProfile, OrgPolicyConstraints) → EffectiveRuntimePolicy`.
 - Depend only on `ironclaw_host_api` for vocabulary and `serde`/`thiserror` for plumbing. Do not pull in runtime crates, host runtime, capability host, secrets, network, or product workflow crates.
 - Resolution must be **deterministic** and **monotonic with respect to safety**: deployment mode and tenant/org policy may *reduce* the requested profile's authority; they must never *increase* it.
 - Fail-closed by default: invalid `(deployment, profile)` pairs are an error, not a silent downgrade. Yolo profiles require explicit caller-supplied disclosure. `EnterpriseYoloDedicated` requires both `EnterpriseDedicated` deployment and explicit org admin approval.

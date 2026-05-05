@@ -4179,6 +4179,7 @@ dependencies = [
  "ironclaw_processes",
  "ironclaw_resources",
  "ironclaw_run_state",
+ "ironclaw_runtime_policy",
  "ironclaw_safety",
  "ironclaw_scripts",
  "ironclaw_secrets",

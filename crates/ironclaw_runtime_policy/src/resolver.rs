@@ -1,4 +1,4 @@
-//! Resolver: `(DeploymentMode, RuntimeProfile, OrgPolicy) → EffectiveRuntimePolicy`.
+//! Resolver: `(DeploymentMode, RuntimeProfile, OrgPolicyConstraints) → EffectiveRuntimePolicy`.
 
 use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
@@ -13,7 +13,7 @@ use thiserror::Error;
 /// mode itself enforces. Populated by the settings/blueprint layer when the
 /// tenant/org policy narrows authority.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OrgPolicy {
+pub struct OrgPolicyConstraints {
     /// Tenant/org-imposed profile ceiling. If set, the requested profile is
     /// narrowed to this value when more permissive *within the same family*.
     /// A `max_profile` from a different family than the requested profile is
@@ -27,11 +27,18 @@ pub struct OrgPolicy {
 }
 
 /// Caller request for runtime profile resolution.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize`/`Deserialize` are derived so the settings/blueprint
+/// layer can persist a full request shape (deployment + requested
+/// profile + org constraints + yolo disclosure ack) and replay it
+/// through the resolver during reload, rather than re-deriving each
+/// field from scratch each time. The wire shape is locked in by
+/// `resolve_request_round_trips_through_serde`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolveRequest {
     pub deployment: DeploymentMode,
     pub requested_profile: RuntimeProfile,
-    pub org_policy: OrgPolicy,
+    pub org_policy: OrgPolicyConstraints,
     /// Caller-supplied disclosure acknowledgement for `*Yolo*` profiles. The
     /// CLI / settings / blueprint surface must explicitly capture this from
     /// the operator (CLI flag, settings opt-in, blueprint field). The
@@ -40,13 +47,13 @@ pub struct ResolveRequest {
 }
 
 impl ResolveRequest {
-    /// Convenience constructor with empty `OrgPolicy` and no yolo disclosure.
+    /// Convenience constructor with empty `OrgPolicyConstraints` and no yolo disclosure.
     /// The caller must layer in tenant/org policy and disclosure separately.
     pub fn new(deployment: DeploymentMode, requested_profile: RuntimeProfile) -> Self {
         Self {
             deployment,
             requested_profile,
-            org_policy: OrgPolicy::default(),
+            org_policy: OrgPolicyConstraints::default(),
             yolo_disclosure_acknowledged: false,
         }
     }
@@ -80,7 +87,7 @@ pub enum ResolveError {
     )]
     DedicatedYoloRequiresOrgAdminApproval,
 
-    /// `OrgPolicy::max_profile` references a profile from a different family
+    /// `OrgPolicyConstraints::max_profile` references a profile from a different family
     /// than the requested profile (e.g. tenant ceiling is `HostedSafe` but
     /// the request is `LocalDev`). The settings/blueprint layer should have
     /// caught this at write time; surfacing it here is a fail-closed safety
@@ -103,7 +110,7 @@ pub enum ResolveError {
 /// (CLI error, settings rejection, blueprint apply error) and offer a
 /// compatible alternative. The resolver never silently downgrades to a
 /// less-privileged profile; narrowing only happens via an explicit
-/// `OrgPolicy::max_profile` ceiling within the same family.
+/// `OrgPolicyConstraints::max_profile` ceiling within the same family.
 pub fn resolve(req: ResolveRequest) -> Result<EffectiveRuntimePolicy, ResolveError> {
     if !is_compatible(req.deployment, req.requested_profile) {
         return Err(ResolveError::IncompatibleDeployment {
@@ -346,9 +353,18 @@ fn backends_for(
             ProcessBackendKind::OrgDedicatedRunner,
             NetworkMode::DirectLogged,
             SecretMode::OrgBroker,
-            // Approval ceiling is still org-policy-driven; orgs decide
-            // whether their dedicated yolo really means "no prompts" or
-            // "minimal prompts".
+            // **Approval-policy variance for the *Yolo* family**: this is
+            // the only `*Yolo*` profile that does NOT map to
+            // `ApprovalPolicy::Minimal`. Local and hosted yolo run inside
+            // a single boundary (the user's laptop, a tenant's sandbox)
+            // where the operator can credibly accept "no prompts."
+            // Enterprise dedicated yolo runs against a *shared org*
+            // boundary, so the approval ceiling is org-policy-driven —
+            // orgs decide whether their dedicated yolo really means "no
+            // prompts" or "minimal prompts." A consumer that assumes
+            // "yolo ⇒ Minimal" must special-case this variant; the
+            // `enterprise_yolo_dedicated_uses_org_policy_approvals_not_minimal`
+            // test locks the variance in.
             ApprovalPolicy::OrgPolicy,
             AuditMode::OrgPolicy,
         ),
@@ -374,30 +390,45 @@ fn backends_for(
             ApprovalPolicy::AskDestructive,
             audit_for(deployment),
         ),
+        // `RuntimeProfile` is `#[non_exhaustive]` so this wildcard is
+        // required to compile from a downstream crate. Reaching it means a
+        // new variant was added to `ironclaw_host_api::RuntimeProfile`
+        // without a corresponding case here — fail closed loudly so the
+        // gap surfaces in development rather than as a silent default.
+        _ => panic!(
+            "backends_for_profile: unhandled RuntimeProfile variant — update the resolver before adding new variants"
+        ),
     }
 }
 
-const fn sandboxed_filesystem_for(deployment: DeploymentMode) -> FilesystemBackendKind {
+// `DeploymentMode` is `#[non_exhaustive]` so each match below must include
+// a wildcard arm. We panic in the wildcard so a new `DeploymentMode`
+// variant added without updating these helpers fails loudly instead of
+// returning a silent default.
+fn sandboxed_filesystem_for(deployment: DeploymentMode) -> FilesystemBackendKind {
     match deployment {
         DeploymentMode::LocalSingleUser => FilesystemBackendKind::ScopedVirtual,
         DeploymentMode::HostedMultiTenant => FilesystemBackendKind::TenantWorkspace,
         DeploymentMode::EnterpriseDedicated => FilesystemBackendKind::OrgDedicatedWorkspace,
+        _ => panic!("sandboxed_filesystem_for: unhandled DeploymentMode variant"),
     }
 }
 
-const fn sandboxed_secret_for(deployment: DeploymentMode) -> SecretMode {
+fn sandboxed_secret_for(deployment: DeploymentMode) -> SecretMode {
     match deployment {
         DeploymentMode::LocalSingleUser => SecretMode::BrokeredHandles,
         DeploymentMode::HostedMultiTenant => SecretMode::TenantBroker,
         DeploymentMode::EnterpriseDedicated => SecretMode::OrgBroker,
+        _ => panic!("sandboxed_secret_for: unhandled DeploymentMode variant"),
     }
 }
 
-const fn audit_for(deployment: DeploymentMode) -> AuditMode {
+fn audit_for(deployment: DeploymentMode) -> AuditMode {
     match deployment {
         DeploymentMode::LocalSingleUser => AuditMode::LocalMinimal,
         DeploymentMode::HostedMultiTenant => AuditMode::Standard,
         DeploymentMode::EnterpriseDedicated => AuditMode::OrgPolicy,
+        _ => panic!("audit_for: unhandled DeploymentMode variant"),
     }
 }
 
@@ -537,9 +568,9 @@ mod tests {
         // With disclosure AND org admin approval: resolves.
         let request = ResolveRequest {
             yolo_disclosure_acknowledged: true,
-            org_policy: OrgPolicy {
+            org_policy: OrgPolicyConstraints {
                 admin_approves_dedicated_yolo: true,
-                ..OrgPolicy::default()
+                ..OrgPolicyConstraints::default()
             },
             ..ResolveRequest::new(
                 DeploymentMode::EnterpriseDedicated,
@@ -551,6 +582,46 @@ mod tests {
             policy.resolved_profile,
             RuntimeProfile::EnterpriseYoloDedicated
         );
+    }
+
+    #[test]
+    fn enterprise_yolo_dedicated_uses_org_policy_approvals_not_minimal() {
+        // Locks in the "yolo ⇒ Minimal approvals" exception zmanian
+        // flagged: every other `*Yolo*` profile maps to
+        // `ApprovalPolicy::Minimal`, but `EnterpriseYoloDedicated` runs
+        // inside a *shared org boundary* and defers the approval ceiling
+        // to org policy. A consumer that assumes "yolo means Minimal"
+        // will be wrong here. If a future variant changes this mapping,
+        // the assertion below is the canary.
+        let request = ResolveRequest {
+            yolo_disclosure_acknowledged: true,
+            org_policy: OrgPolicyConstraints {
+                admin_approves_dedicated_yolo: true,
+                ..OrgPolicyConstraints::default()
+            },
+            ..ResolveRequest::new(
+                DeploymentMode::EnterpriseDedicated,
+                RuntimeProfile::EnterpriseYoloDedicated,
+            )
+        };
+        let policy = resolve(request).unwrap();
+        assert_eq!(
+            policy.approval_policy,
+            ApprovalPolicy::OrgPolicy,
+            "EnterpriseYoloDedicated must defer approvals to org policy, not collapse to Minimal"
+        );
+        // For comparison: Local/Hosted yolo *do* collapse to Minimal,
+        // confirming this is a per-variant decision, not an accident.
+        for (deployment, profile) in [
+            (DeploymentMode::LocalSingleUser, RuntimeProfile::LocalYolo),
+            (
+                DeploymentMode::HostedMultiTenant,
+                RuntimeProfile::HostedYoloTenantScoped,
+            ),
+        ] {
+            let policy = resolve(req_yolo(deployment, profile)).unwrap();
+            assert_eq!(policy.approval_policy, ApprovalPolicy::Minimal);
+        }
     }
 
     // --- backend mapping ---------------------------------------------------
@@ -631,9 +702,9 @@ mod tests {
     fn org_policy_ceiling_within_family_narrows_resolved_profile() {
         // Tenant ceiling LocalSafe + requested LocalDev → resolved LocalSafe.
         let request = ResolveRequest {
-            org_policy: OrgPolicy {
+            org_policy: OrgPolicyConstraints {
                 max_profile: Some(RuntimeProfile::LocalSafe),
-                ..OrgPolicy::default()
+                ..OrgPolicyConstraints::default()
             },
             ..ResolveRequest::new(DeploymentMode::LocalSingleUser, RuntimeProfile::LocalDev)
         };
@@ -649,9 +720,9 @@ mod tests {
     fn org_policy_ceiling_at_or_below_request_keeps_request() {
         // Ceiling LocalDev + requested LocalSafe → keeps LocalSafe (already at/below ceiling).
         let request = ResolveRequest {
-            org_policy: OrgPolicy {
+            org_policy: OrgPolicyConstraints {
                 max_profile: Some(RuntimeProfile::LocalDev),
-                ..OrgPolicy::default()
+                ..OrgPolicyConstraints::default()
             },
             ..ResolveRequest::new(DeploymentMode::LocalSingleUser, RuntimeProfile::LocalSafe)
         };
@@ -667,9 +738,9 @@ mod tests {
         // profile must equal the requested profile, never the ceiling.
         // Ceilings can only reduce authority; they cannot raise it.
         let request = ResolveRequest {
-            org_policy: OrgPolicy {
+            org_policy: OrgPolicyConstraints {
                 max_profile: Some(RuntimeProfile::LocalYolo),
-                ..OrgPolicy::default()
+                ..OrgPolicyConstraints::default()
             },
             ..ResolveRequest::new(DeploymentMode::LocalSingleUser, RuntimeProfile::LocalSafe)
         };
@@ -683,9 +754,9 @@ mod tests {
     fn org_policy_ceiling_in_different_family_is_rejected() {
         // Hosted ceiling on a local request → family mismatch.
         let request = ResolveRequest {
-            org_policy: OrgPolicy {
+            org_policy: OrgPolicyConstraints {
                 max_profile: Some(RuntimeProfile::HostedSafe),
-                ..OrgPolicy::default()
+                ..OrgPolicyConstraints::default()
             },
             ..ResolveRequest::new(DeploymentMode::LocalSingleUser, RuntimeProfile::LocalDev)
         };
@@ -703,9 +774,9 @@ mod tests {
     fn org_policy_ceiling_to_deployment_agnostic_profile_is_rejected_as_family_mismatch() {
         // SecureDefault has no family, so it can't be a ceiling target.
         let request = ResolveRequest {
-            org_policy: OrgPolicy {
+            org_policy: OrgPolicyConstraints {
                 max_profile: Some(RuntimeProfile::SecureDefault),
-                ..OrgPolicy::default()
+                ..OrgPolicyConstraints::default()
             },
             ..ResolveRequest::new(DeploymentMode::LocalSingleUser, RuntimeProfile::LocalDev)
         };
@@ -735,6 +806,49 @@ mod tests {
         let json = serde_json::to_string(&policy).unwrap();
         let parsed: EffectiveRuntimePolicy = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, policy);
+    }
+
+    #[test]
+    fn org_policy_constraints_round_trips_through_serde() {
+        // zmanian test gap #4: the settings/blueprint layer persists
+        // org constraints; the wire shape must round-trip cleanly so a
+        // reload reproduces the same input to the resolver.
+        let original = OrgPolicyConstraints {
+            max_profile: Some(RuntimeProfile::LocalDev),
+            admin_approves_dedicated_yolo: true,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: OrgPolicyConstraints = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, original);
+
+        // Default round-trip (`max_profile = None`, `admin_approves =
+        // false`) must also work — the empty case is the most common
+        // shape from the settings layer.
+        let empty = OrgPolicyConstraints::default();
+        let json = serde_json::to_string(&empty).unwrap();
+        let parsed: OrgPolicyConstraints = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, empty);
+    }
+
+    #[test]
+    fn resolve_request_round_trips_through_serde() {
+        // zmanian test gap #4: the full resolver input must serde
+        // round-trip so settings/blueprint can persist it. Drive every
+        // field, including the yolo disclosure ack and a non-default
+        // org policy ceiling, so a regression that breaks any one
+        // field's serde derive is caught.
+        let original = ResolveRequest {
+            deployment: DeploymentMode::EnterpriseDedicated,
+            requested_profile: RuntimeProfile::EnterpriseYoloDedicated,
+            org_policy: OrgPolicyConstraints {
+                max_profile: Some(RuntimeProfile::EnterpriseDev),
+                admin_approves_dedicated_yolo: true,
+            },
+            yolo_disclosure_acknowledged: true,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: ResolveRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, original);
     }
 
     #[test]

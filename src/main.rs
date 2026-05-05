@@ -1294,6 +1294,12 @@ async fn async_main() -> anyhow::Result<()> {
             config.agent.max_llm_concurrent_per_user.unwrap_or(4),
             config.agent.max_jobs_concurrent_per_user.unwrap_or(3),
         )),
+        // Resolved at config load time by `Config::with_runtime_overrides`.
+        // The dispatcher routes the model-facing tool list through
+        // `tool_definitions_visible_under(policy)` so profile-impossible
+        // capabilities (e.g. provider-host shell under hosted multi-tenant)
+        // are hidden before the model call. (#3045 PR 4 + PR 5).
+        runtime_policy: Some(config.runtime.effective_policy.clone()),
     };
 
     let channels_for_warnings = Arc::clone(&channels);

@@ -450,6 +450,36 @@ impl ToolRegistry {
         self.tool_definitions_for_engine(self.engine_version).await
     }
 
+    /// Get tool definitions for LLM function calling, filtered by both engine
+    /// version *and* the resolved runtime policy (#3045 PR 4 + PR 5).
+    ///
+    /// This is the model-facing tool list path: tools whose
+    /// [`Tool::runtime_affordance`] cannot be granted by the resolved
+    /// `EffectiveRuntimePolicy` are hidden before the model call. The
+    /// hosted-multi-tenant security property ("no provider-host shell visible
+    /// to the model") is enforced here. Action-time authorization in
+    /// `ironclaw_authorization` / `CapabilityHost` still runs for every
+    /// invocation that reaches dispatch.
+    pub async fn tool_definitions_visible_under(
+        &self,
+        policy: &ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy,
+    ) -> Vec<ToolDefinition> {
+        let version = self.engine_version;
+        let mut defs: Vec<ToolDefinition> = self
+            .tools
+            .read()
+            .await
+            .values()
+            .filter(|tool| Self::is_engine_visible(tool.as_ref(), version))
+            .filter(|tool| {
+                crate::tools::runtime_filter::is_visible_under(policy, tool.runtime_affordance())
+            })
+            .map(Self::tool_definition)
+            .collect();
+        defs.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+        defs
+    }
+
     /// Get tool definitions filtered by engine version.
     ///
     /// Returns tools whose `engine_compatibility()` is `Both` or matches the

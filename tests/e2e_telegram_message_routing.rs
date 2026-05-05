@@ -204,6 +204,7 @@ mod tests {
             builder: None,
             llm_backend: "nearai".to_string(),
             tenant_rates: std::sync::Arc::new(ironclaw::tenant::TenantRateRegistry::new(4, 3)),
+            runtime_policy: None,
         };
 
         let gateway = Arc::new(TestChannel::new());
