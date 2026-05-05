@@ -90,7 +90,7 @@ ENG
 - "list my issues" / "what's assigned to me" → filter by `assignee: { id: { eq: "<cached user_id>" } }`, **not** by `assignee: { isMe: true }` (the `isMe` filter is not universally available and `viewer` round-trips are wasteful).
 - "create an issue in my team" → use cached `Default team` id without asking.
 - "create an issue in <team name>" → match against cached team names; ask only if no match.
-- Skills that import external work (`commitment-link`) must consume this cache rather than re-resolving identity per run.
+- Skills that import external work into Linear must consume this cache rather than re-resolving identity per run.
 
 
 ## API Patterns
