@@ -564,13 +564,17 @@ impl SystemScope {
         Self { inner: db }
     }
 
-    /// Read an arbitrary setting for a specific user from the shared database.
-    pub async fn get_setting_for_user(
+    /// Read the channel routing config for a specific user.
+    ///
+    /// Typed wrapper over the settings store so callers don't need to know the
+    /// raw settings key. Used by `ChannelRoutingConfig::load_from_system_scope`
+    /// for autonomous workers that hold a `SystemScope` rather than a raw
+    /// `SettingsStore`.
+    pub async fn get_channel_routing(
         &self,
         user_id: &str,
-        key: &str,
     ) -> Result<Option<serde_json::Value>, DatabaseError> {
-        self.inner.get_setting(user_id, key).await
+        self.inner.get_setting(user_id, "channel_routing").await
     }
 
     /// Construct a per-user workspace for system-process operations.
