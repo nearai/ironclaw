@@ -182,6 +182,17 @@ tar = "0.4"
 pdf-extract = "0.7"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
+# Temp directory for `ironclaw backup`'s VACUUM INTO snapshot. Already
+# present under [dev-dependencies] for tests; promoted here so the
+# production backup path can own a TempDir for the snapshot lifecycle.
+tempfile = "3"
+
+# Hostname lookup for the backup manifest. Calls `gethostname(2)` on
+# Unix and `GetComputerNameW` on Windows; macOS doesn't set $HOSTNAME
+# by default so the env-var fallback alone produced "unknown" on most
+# Apple machines.
+hostname = "0.4"
+
 # HTTP proxy for sandboxed network access
 hyper = { version = "1.5", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["server", "tokio", "http1", "http2"] }
