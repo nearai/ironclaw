@@ -6,6 +6,18 @@
   padding: var(--space-4);
 }
 
+/* The routines table has 8 columns and cannot fit a ≤768px viewport.
+   Allow horizontal scroll at the container level so the table remains
+   fully browsable without forcing the entire page to scroll sideways.
+   The stat-card summary above still lays out at the visible viewport
+   width (auto-fit grid) and only shifts when the user deliberately
+   scrolls to see more columns — standard mobile data-table UX. */
+@media (max-width: 768px) {
+  .routines-container {
+    overflow-x: auto;
+  }
+}
+
 .routines-summary {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));

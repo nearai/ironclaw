@@ -41,6 +41,8 @@ pub const APP_JS: &str = concat!(
     "\n",
     include_str!("../static/js/core/history.js"),
     "\n",
+    include_str!("../static/js/core/mobile-menu.js"),
+    "\n",
     include_str!("../static/js/surfaces/memory.js"),
     "\n",
     include_str!("../static/js/surfaces/logs.js"),

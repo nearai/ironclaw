@@ -74,11 +74,15 @@
   flex: 1;
 }
 
-.tab-bar .docs-link-btn {
+/* docs-link / status-logs-btn styling applies whether the element sits
+   in its original .tab-bar home OR has been relocated into the mobile
+   drawer footer by mobile-menu.js. Without :is(), the Docs pill-button
+   chrome would vanish on mobile. */
+:is(.tab-bar, .mobile-menu-footer) .docs-link-btn {
   text-decoration: none;
 }
 
-.tab-bar .status-logs-btn {
+:is(.tab-bar, .mobile-menu-footer) .status-logs-btn {
   padding: 4px 10px;
   background: none;
   border: 1px solid var(--border);
@@ -91,12 +95,12 @@
   transition: color 0.2s, border-color 0.2s, background 0.2s;
 }
 
-.tab-bar .status-logs-btn:hover {
+:is(.tab-bar, .mobile-menu-footer) .status-logs-btn:hover {
   color: var(--text);
   border-color: var(--text-secondary);
 }
 
-.tab-bar .status-logs-btn.active {
+:is(.tab-bar, .mobile-menu-footer) .status-logs-btn.active {
   color: var(--accent);
   border-color: var(--accent);
   background: var(--accent-tee-bg);
@@ -246,57 +250,12 @@
   to { width: 0%; }
 }
 
-/* Mobile bottom tab bar */
+/* Mobile: the desktop tab bar is replaced by the hamburger drawer in
+   base.css. mobile-menu.js clones tab buttons and relocates auxiliary
+   controls (docs/language/theme/tee-shield/user/restart) into the drawer. */
 @media (max-width: 768px) {
   .tab-bar {
-    position: fixed;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    top: auto;
-    z-index: 100;
-    border-bottom: none;
-    border-top: 1px solid var(--border);
-    padding-bottom: env(safe-area-inset-bottom);
-    overflow-x: visible;
-    background: var(--glass-bg);
-    backdrop-filter: var(--glass-blur);
-    -webkit-backdrop-filter: var(--glass-blur);
-    box-shadow: 0 -2px 12px rgba(0,0,0,0.15);
-  }
-
-  .tab-bar button:not(.status-logs-btn):not(.restart-btn):not(.language-btn) {
-    flex: 1;
-    text-align: center;
-    padding: 10px 4px;
-  }
-
-  .tab-bar .spacer,
-  .tab-bar .language-switcher,
-  .tab-bar .tee-shield,
-  .tab-bar .restart-btn {
     display: none;
-  }
-
-  .tab-bar .status {
-    display: none;
-  }
-
-  .tab-bar .status-logs-btn {
-    display: none;
-  }
-
-  .tab-bar .theme-toggle-btn {
-    display: none;
-  }
-
-  .tab-indicator {
-    top: 0;
-    bottom: auto;
-  }
-
-  #app {
-    padding-bottom: 52px;
   }
 }
 

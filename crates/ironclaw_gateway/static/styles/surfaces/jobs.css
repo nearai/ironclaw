@@ -5,6 +5,15 @@
   padding: var(--space-4);
 }
 
+/* Many-column job table overflows a ≤768px viewport — scroll
+   horizontally at the container level. See routines.css for the full
+   rationale (same pattern applied uniformly to all data tables). */
+@media (max-width: 768px) {
+  .jobs-container {
+    overflow-x: auto;
+  }
+}
+
 .jobs-summary {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
