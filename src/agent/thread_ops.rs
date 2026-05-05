@@ -715,9 +715,19 @@ impl Agent {
             .await;
 
         // Run the agentic tool execution loop
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        *self.active_cancel_token.lock().await = Some(cancel_token.clone());
         let result = self
-            .run_agentic_loop(message, tenant, session.clone(), thread_id, turn_messages)
+            .run_agentic_loop(
+                message,
+                tenant,
+                session.clone(),
+                thread_id,
+                turn_messages,
+                cancel_token,
+            )
             .await;
+        *self.active_cancel_token.lock().await = None;
 
         // Re-acquire lock and check if interrupted
         let mut sess = session.lock().await;
@@ -1316,6 +1326,9 @@ impl Agent {
                     .unwrap_or_else(|| "gateway".to_string());
                 thread.interrupt();
                 drop(sess);
+                if let Some(token) = self.active_cancel_token.lock().await.take() {
+                    token.cancel();
+                }
                 self.clear_conversation_live_state(thread_id, &channel, &user_id)
                     .await;
                 Ok(SubmissionResult::ok_with_message("Interrupted."))
@@ -2037,6 +2050,8 @@ impl Agent {
             }
 
             // Continue the agentic loop (a tool was already executed this turn)
+            let cancel_token = tokio_util::sync::CancellationToken::new();
+            *self.active_cancel_token.lock().await = Some(cancel_token.clone());
             let result = self
                 .run_agentic_loop(
                     message,
@@ -2044,8 +2059,10 @@ impl Agent {
                     session.clone(),
                     thread_id,
                     context_messages,
+                    cancel_token,
                 )
                 .await;
+            *self.active_cancel_token.lock().await = None;
 
             // Handle the result
             let mut sess = session.lock().await;
