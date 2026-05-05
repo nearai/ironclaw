@@ -8891,11 +8891,12 @@ mod tests {
     #[tokio::test]
     async fn latent_provider_actions_include_cached_inactive_mcp_tools() {
         let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
         let manager = make_test_manager_with_dirs(
             None,
             dir.path().join("tools"),
             dir.path().join("channels"),
-            None,
+            Some(store),
         );
 
         let mut server = McpServerConfig::new("notion", "https://mcp.notion.com/mcp");
@@ -8939,11 +8940,12 @@ mod tests {
     #[tokio::test]
     async fn latent_provider_actions_normalize_hyphenated_server_names() {
         let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
         let manager = make_test_manager_with_dirs(
             None,
             dir.path().join("tools"),
             dir.path().join("channels"),
-            None,
+            Some(store),
         );
 
         let mut server = McpServerConfig::new("my-mcp-server", "https://example.com/mcp");
@@ -9006,13 +9008,14 @@ mod tests {
     #[tokio::test]
     async fn latent_wasm_provider_actions_cache_invalidates_on_mcp_changes() {
         let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
         let tools_dir = write_test_tool(
             dir.path(),
             "warm_cache_tool",
             r#"{ "description": "warm the cache" }"#,
         );
         let manager =
-            make_test_manager_with_dirs(None, tools_dir, dir.path().join("channels"), None);
+            make_test_manager_with_dirs(None, tools_dir, dir.path().join("channels"), Some(store));
 
         // Warm the per-user latent cache.
         let _ = manager.latent_provider_actions("test").await;
@@ -9059,11 +9062,12 @@ mod tests {
     #[tokio::test]
     async fn latent_provider_action_resolves_cached_inactive_mcp_subtool_by_exact_name() {
         let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
         let manager = make_test_manager_with_dirs(
             None,
             dir.path().join("tools"),
             dir.path().join("channels"),
-            None,
+            Some(store),
         );
 
         let mut server = McpServerConfig::new("notion", "https://mcp.notion.com/mcp");

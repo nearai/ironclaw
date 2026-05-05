@@ -11,6 +11,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -43,6 +44,13 @@ class GatewayStack:
     gateway_proc: subprocess.Popen[str]
     mock_llm_proc: subprocess.Popen[str]
     tempdirs: list[tempfile.TemporaryDirectory[str]]
+    # http_url and channels_dir are populated when start_gateway_stack
+    # is invoked. http_url is the HTTP-channel webhook endpoint
+    # (separate from the gateway's REST API port). channels_dir is the
+    # WASM channels base directory — needed by Telegram-channel-install
+    # scenarios that patch the per-channel capabilities.json.
+    http_url: str = ""
+    channels_dir: str = ""
 
 
 def run(cmd: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None) -> None:
@@ -296,6 +304,10 @@ def build_gateway_env(
         "LLM_BACKEND": "openai_compatible",
         "LLM_BASE_URL": mock_llm_url,
         "LLM_MODEL": "mock-model",
+        # Even though the mock LLM ignores the API key, the
+        # openai_compatible provider refuses to instantiate without one.
+        # Without this the provider falls back to NearAI's DB default.
+        "LLM_API_KEY": "mock-api-key",
         "DATABASE_BACKEND": "libsql",
         "LIBSQL_PATH": str(db_path),
         "SECRETS_MASTER_KEY": secrets_master_key,
@@ -314,6 +326,62 @@ def build_gateway_env(
     return env
 
 
+async def _pin_mock_llm_settings(
+    base_url: str, gateway_token: str, mock_llm_url: str
+) -> None:
+    """Pin LLM backend/base_url/model via the settings API.
+
+    Required because the gateway's DB settings take priority over the
+    LLM_BACKEND / LLM_BASE_URL / LLM_MODEL env vars; the freshly-seeded
+    DB defaults llm_backend to `nearai`, which sends the agent into an
+    interactive auth flow that hangs in CI. See tests/e2e/CLAUDE.md.
+    """
+    import httpx  # local import: keep top-level import set unchanged
+
+    headers = {"Authorization": f"Bearer {gateway_token}"}
+    writes = [
+        ("llm_backend", "openai_compatible"),
+        ("openai_compatible_base_url", mock_llm_url),
+        ("selected_model", "mock-model"),
+    ]
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        for key, value in writes:
+            response = await client.put(
+                f"{base_url}/api/settings/{key}",
+                headers=headers,
+                json={"value": value},
+            )
+            if response.status_code not in (200, 201, 204):
+                raise CanaryError(
+                    f"Failed to pin LLM setting {key}: "
+                    f"{response.status_code} {response.text[:300]}"
+                )
+
+
+def _drain_to_file(stream: Any, path: Path) -> threading.Thread:
+    """Drain a subprocess stdout/stderr stream to a file in a daemon thread.
+
+    Without this, ``subprocess.Popen(stdout=PIPE)`` deadlocks: the kernel
+    pipe buffer (64 KiB on Linux, varies on macOS) fills under sustained
+    log output and the child blocks on its next write. That manifests on
+    CI as IronClaw freezing mid-request — locally the pipe fills more
+    slowly so the symptom is masked. See PR #2978-ish (this fix).
+    """
+
+    def _drain() -> None:
+        try:
+            with path.open("a", encoding="utf-8", errors="replace") as fh:
+                for line in stream:
+                    fh.write(line)
+                    fh.flush()
+        except Exception:  # noqa: BLE001
+            pass
+
+    thread = threading.Thread(target=_drain, daemon=True)
+    thread.start()
+    return thread
+
+
 async def start_gateway_stack(
     *,
     venv_dir: Path,
@@ -323,6 +391,7 @@ async def start_gateway_stack(
     gateway_token_prefix: str,
     extra_gateway_env: dict[str, str] | None = None,
     oauth_proxy: bool = False,
+    log_dir: Path | None = None,
 ) -> GatewayStack:
     secrets_master_key = secrets_master_key or generate_secrets_master_key()
     python = venv_python(venv_dir)
@@ -357,6 +426,14 @@ async def start_gateway_stack(
         )
         mock_llm_url = f"http://127.0.0.1:{match.group(1)}"
         await wait_for_ready(f"{mock_llm_url}/v1/models", timeout=30.0)
+
+        # Now that the port-discovery line has been consumed, drain the
+        # rest of mock_llm.py's stdout to a log file so the pipe never
+        # fills (64 KiB pipe buffers on Linux deadlock the child once
+        # full).
+        if log_dir is not None and mock_llm_proc.stdout is not None:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            _drain_to_file(mock_llm_proc.stdout, log_dir / "mock_llm.log")
 
         if oauth_proxy:
             proxy_env = {
@@ -393,8 +470,23 @@ async def start_gateway_stack(
             bufsize=1,
             env=env,
         )
+        # Same deadlock guard as mock_llm above — drain ironclaw's
+        # stdout/stderr so a chatty `RUST_LOG=info` doesn't fill the pipe
+        # buffer and freeze the request handler mid-response.
+        if log_dir is not None and gateway_proc.stdout is not None:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            _drain_to_file(gateway_proc.stdout, log_dir / "gateway.log")
         base_url = f"http://127.0.0.1:{gateway_port}"
         await wait_for_ready(f"{base_url}/api/health", timeout=60.0)
+
+        # Pin the LLM provider via the settings API. Setting LLM_BACKEND /
+        # LLM_BASE_URL / LLM_MODEL via env is not enough — IronClaw's DB
+        # setting takes priority over env, and the freshly-seeded DB
+        # defaults llm_backend to `nearai`, so the env config is ignored
+        # and the agent attempts an interactive NearAI auth flow that
+        # never completes in CI. Mirrors the pattern documented in
+        # tests/e2e/CLAUDE.md and used by test_v2_tool_activate_surface.py.
+        await _pin_mock_llm_settings(base_url, gateway_token, mock_llm_url)
         return GatewayStack(
             base_url=base_url,
             gateway_token=gateway_token,
@@ -403,6 +495,8 @@ async def start_gateway_stack(
             gateway_proc=gateway_proc,
             mock_llm_proc=mock_llm_proc,
             tempdirs=tempdirs,
+            http_url=f"http://127.0.0.1:{http_port}",
+            channels_dir=str(channels_tmp.name),
         )
     except Exception:
         stop_process(mock_llm_proc)
