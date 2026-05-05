@@ -66,7 +66,7 @@ pub async fn setup_wasm_channels(
     extension_manager: Option<&Arc<ExtensionManager>>,
     database: Option<&Arc<dyn Database>>,
     registered_channel_names: &[String],
-    startup_active_channel_names: Option<&HashSet<String>>,
+    startup_active_channel_names: &HashSet<String>,
     ownership_cache: Arc<crate::ownership::OwnershipCache>,
 ) -> Option<WasmChannelSetup> {
     let runtime = match WasmChannelRuntime::new(WasmChannelRuntimeConfig::default()) {
@@ -108,9 +108,11 @@ pub async fn setup_wasm_channels(
         discovered_channels
             .into_iter()
             .filter_map(|(name, discovered)| {
-                startup_active_channel_names
-                    .is_none_or(|active_names| active_names.contains(&name))
-                    .then_some((name, discovered.wasm_path, discovered.capabilities_path))
+                startup_active_channel_names.contains(&name).then_some((
+                    name,
+                    discovered.wasm_path,
+                    discovered.capabilities_path,
+                ))
             })
             .collect();
 
@@ -120,11 +122,6 @@ pub async fn setup_wasm_channels(
     let load_results = futures::future::join_all(load_futures).await;
 
     let mut loaded_channels = Vec::new();
-    let startup_load_error_message = if startup_active_channel_names.is_some() {
-        "Failed to load persisted-active WASM channel at startup"
-    } else {
-        "Failed to load WASM channel at startup"
-    };
     for ((name, wasm_path, _), result) in startup_entries.into_iter().zip(load_results) {
         match result {
             Ok(loaded) => loaded_channels.push(loaded),
@@ -133,7 +130,7 @@ pub async fn setup_wasm_channels(
                     channel = %name,
                     path = %wasm_path.display(),
                     error = %err,
-                    "{startup_load_error_message}"
+                    "Failed to load active WASM channel at startup"
                 );
             }
         }
