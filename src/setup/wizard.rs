@@ -2628,7 +2628,7 @@ impl SetupWizard {
             ("CLI/TUI (always enabled)".to_string(), true),
             (
                 "HTTP webhook".to_string(),
-                self.settings.channels.http_enabled,
+                self.settings.channels.http_enabled.unwrap_or(false),
             ),
             ("Signal".to_string(), self.settings.channels.signal_enabled),
         ];
@@ -2724,15 +2724,15 @@ impl SetupWizard {
             println!();
             if let Some(ref ctx) = secrets {
                 let result = setup_http(ctx).await?;
-                self.settings.channels.http_enabled = result.enabled;
+                self.settings.channels.http_enabled = Some(result.enabled);
                 self.settings.channels.http_port = Some(result.port);
             } else {
-                self.settings.channels.http_enabled = true;
+                self.settings.channels.http_enabled = Some(true);
                 self.settings.channels.http_port = Some(8080);
                 print_info("HTTP webhook enabled on port 8080 (set HTTP_WEBHOOK_SECRET in env)");
             }
         } else {
-            self.settings.channels.http_enabled = false;
+            self.settings.channels.http_enabled = Some(false);
         }
 
         // Signal channel

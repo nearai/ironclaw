@@ -78,7 +78,7 @@ impl Tunnel for CustomTunnel {
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
 
-        let mut public_url = format!("http://{local_host}:{local_port}");
+        let mut public_url = super::format_tunnel_origin(local_host, local_port);
         let mut drain_handle: Option<tokio::task::JoinHandle<()>> = None;
 
         if self.url_pattern.is_some()

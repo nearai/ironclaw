@@ -160,7 +160,7 @@ pub async fn run_status_command() -> anyhow::Result<()> {
         .clone()
         .unwrap_or_else(default_channels_dir);
     let mut channel_info = vec!["cli".to_string()];
-    if settings.channels.http_enabled {
+    if settings.channels.http_enabled.unwrap_or(false) {
         channel_info.push(format!(
             "http:{}",
             settings.channels.http_port.unwrap_or(3000)

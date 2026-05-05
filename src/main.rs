@@ -91,6 +91,46 @@ fn non_cli_channels_enabled(cli_only: bool) -> bool {
     !cli_only
 }
 
+fn webhook_listener_addr(
+    channels: &ironclaw::config::ChannelsConfig,
+) -> anyhow::Result<std::net::SocketAddr> {
+    format!(
+        "{}:{}",
+        channels.webhook_listener.host, channels.webhook_listener.port
+    )
+    .parse()
+    .map_err(|error| {
+        anyhow::anyhow!(
+            "Webhook listener host:port must be a valid SocketAddr: {}:{} ({error})",
+            channels.webhook_listener.host,
+            channels.webhook_listener.port
+        )
+    })
+}
+
+fn prepare_sighup_reload(
+    channels: &ironclaw::config::ChannelsConfig,
+) -> anyhow::Result<(std::net::SocketAddr, Option<secrecy::SecretString>)> {
+    use secrecy::ExposeSecret;
+
+    let rotated_secret = channels
+        .http
+        .as_ref()
+        .and_then(|http| http.webhook_secret.as_ref())
+        .map(|secret| secrecy::SecretString::from(secret.expose_secret().to_string()));
+
+    webhook_listener_addr(channels).map(|addr| (addr, rotated_secret))
+}
+
+fn gateway_public_base_url(
+    gateway: &ironclaw::config::GatewayConfig,
+    explicit_tunnel_public_url: Option<&str>,
+) -> String {
+    explicit_tunnel_public_url
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| oauth_base_url(&gateway.host, gateway.port))
+}
+
 fn normalize_persisted_wasm_channel_names<I, S>(names: I) -> std::collections::HashSet<String>
 where
     I: IntoIterator<Item = S>,
@@ -428,6 +468,7 @@ async fn async_main() -> anyhow::Result<()> {
     .await?;
 
     let config = components.config;
+    let explicit_tunnel_public_url = config.tunnel.public_url.clone();
 
     // ── Tunnel setup ───────────────────────────────────────────────────
 
@@ -731,41 +772,30 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     // Add HTTP channel if configured and not CLI-only mode.
-    let mut webhook_server_addr: Option<std::net::SocketAddr> = None;
+    let mut http_channel_enabled = false;
     #[cfg(unix)]
     let mut http_channel_state: Option<Arc<ironclaw::channels::HttpChannelState>> = None;
     if enable_non_cli && let Some(ref http_config) = config.channels.http {
         let http_channel = HttpChannel::new(http_config.clone());
+        http_channel_enabled = true;
         #[cfg(unix)]
         {
             http_channel_state = Some(http_channel.shared_state());
         }
         webhook_routes.push(http_channel.routes());
-        let (host, port) = http_channel.addr();
-        webhook_server_addr = Some(
-            format!("{}:{}", host, port)
-                .parse()
-                .expect("HttpConfig host:port must be a valid SocketAddr"),
-        );
         channel_names.push("http".to_string());
         channels.add(Box::new(http_channel)).await;
-        tracing::debug!(
-            "HTTP channel enabled on {}:{}",
-            http_config.host,
-            http_config.port
-        );
     }
 
     // Start the unified webhook server if any routes were registered.
     let webhook_server: Option<Arc<tokio::sync::Mutex<WebhookServer>>> = if !webhook_routes
         .is_empty()
     {
-        let addr = webhook_server_addr
-            .unwrap_or_else(|| std::net::SocketAddr::from(([127, 0, 0, 1], 8080)));
+        let addr = webhook_listener_addr(&config.channels)?;
         if addr.ip().is_unspecified() {
             tracing::warn!(
                 "Webhook server is binding to {} — it will be reachable from all network interfaces. \
-                 Set HTTP_HOST=127.0.0.1 to restrict to localhost.",
+                 Set WEBHOOK_HOST=127.0.0.1 to restrict to localhost.",
                 addr.ip()
             );
         }
@@ -774,6 +804,12 @@ async fn async_main() -> anyhow::Result<()> {
             server.add_routes(routes);
         }
         server.start().await?;
+        if http_channel_enabled {
+            tracing::info!(
+                "HTTP channel enabled; /webhook is served by the unified webhook listener on {}",
+                addr
+            );
+        }
         Some(Arc::new(tokio::sync::Mutex::new(server)))
     } else {
         None
@@ -866,12 +902,11 @@ async fn async_main() -> anyhow::Result<()> {
         }
         if let Some(ref ext_mgr) = components.extension_manager {
             // Enable gateway mode so MCP OAuth returns auth URLs to the frontend
-            // instead of calling open::that() on the server.
-            let gw_base = config
-                .tunnel
-                .public_url
-                .clone()
-                .unwrap_or_else(|| oauth_base_url(&gw_config.host, gw_config.port));
+            // instead of calling open::that() on the server. Use only an
+            // operator-configured static tunnel URL here: managed tunnels in
+            // this process target the unified webhook listener, not the gateway.
+            let gw_base =
+                gateway_public_base_url(&gw_config, explicit_tunnel_public_url.as_deref());
             ext_mgr.enable_gateway_mode(gw_base).await;
             gw = gw.with_extension_manager(Arc::clone(ext_mgr));
         }
@@ -1356,7 +1391,9 @@ async fn async_main() -> anyhow::Result<()> {
                         // Handle SIGHUP signal
                     }
                 }
-                tracing::info!("SIGHUP received — reloading HTTP webhook config");
+                tracing::info!(
+                    "SIGHUP received — reloading webhook listener and HTTP webhook config"
+                );
 
                 // Flush settings cache so direct DB edits are picked up.
                 if let Some(ref cache) = sighup_settings_cache {
@@ -1398,94 +1435,90 @@ async fn async_main() -> anyhow::Result<()> {
                     }
                 };
 
-                let new_http = match new_config.channels.http {
-                    Some(c) => c,
-                    None => {
-                        tracing::warn!("SIGHUP: HTTP channel no longer configured, skipping");
-                        continue;
+                // Atomic reload contract for the webhook surface:
+                // validate the replacement listener first, then only apply secret
+                // updates if listener validation and any required rebind succeed.
+                // Restart listener if addr changed. Two-phase approach: bind
+                // outside the lock, then swap under lock.
+                let mut restart_failed = false;
+                let (replacement_listener_addr, new_secret) = match prepare_sighup_reload(
+                    &new_config.channels,
+                ) {
+                    Ok((addr, secret)) => (Some(addr), secret),
+                    Err(error) => {
+                        tracing::error!(
+                            "SIGHUP: invalid webhook listener config; keeping existing listener and skipping secret rotation: {}",
+                            error
+                        );
+                        restart_failed = true;
+                        (None, None)
                     }
                 };
-
-                // Compute new socket addr
-                let new_addr: std::net::SocketAddr =
-                    match format!("{}:{}", new_http.host, new_http.port).parse() {
-                        Ok(a) => a,
-                        Err(e) => {
-                            tracing::error!("SIGHUP: invalid addr in config: {}", e);
-                            continue;
-                        }
-                    };
-
-                // Restart listener if addr changed.
-                // Two-phase approach: bind outside the lock, then swap under lock.
-                let mut restart_failed = false;
                 if let Some(ref ws_arc) = sighup_webhook_server {
                     let (old_addr, router) = {
                         let ws = ws_arc.lock().await;
                         (ws.current_addr(), ws.merged_router_clone())
                     }; // Lock released here
 
-                    if old_addr != new_addr {
-                        tracing::info!(
-                            "SIGHUP: HTTP addr {} -> {}, restarting listener",
-                            old_addr,
-                            new_addr
-                        );
+                    match replacement_listener_addr {
+                        Some(new_addr) if old_addr != new_addr => {
+                            tracing::info!(
+                                "SIGHUP: webhook listener addr {} -> {}, restarting listener",
+                                old_addr,
+                                new_addr
+                            );
 
-                        match router {
-                            Some(app) => {
-                                // Phase 1: Bind new listener WITHOUT holding the lock.
-                                match tokio::net::TcpListener::bind(new_addr).await {
-                                    Ok(listener) => {
-                                        // Phase 2: Swap state under lock (no await inside).
-                                        let (old_tx, old_handle) = {
-                                            let mut ws = ws_arc.lock().await;
-                                            ws.install_listener(new_addr, listener, app)
-                                        }; // Lock released here
+                            match router {
+                                Some(app) => {
+                                    // Phase 1: Bind new listener WITHOUT holding the lock.
+                                    match tokio::net::TcpListener::bind(new_addr).await {
+                                        Ok(listener) => {
+                                            // Phase 2: Swap state under lock (no await inside).
+                                            let (old_tx, old_handle) = {
+                                                let mut ws = ws_arc.lock().await;
+                                                ws.install_listener(new_addr, listener, app)
+                                            }; // Lock released here
 
-                                        // Phase 3: Shut down old listener outside the lock.
-                                        if let Some(tx) = old_tx {
-                                            let _ = tx.send(());
+                                            // Phase 3: Shut down old listener outside the lock.
+                                            if let Some(tx) = old_tx {
+                                                let _ = tx.send(());
+                                            }
+                                            if let Some(handle) = old_handle {
+                                                let _ = handle.await;
+                                            }
+
+                                            tracing::info!(
+                                                "SIGHUP: webhook server restarted on {}",
+                                                new_addr
+                                            );
                                         }
-                                        if let Some(handle) = old_handle {
-                                            let _ = handle.await;
+                                        Err(e) => {
+                                            tracing::error!(
+                                                "SIGHUP: failed to bind to {}: {}",
+                                                new_addr,
+                                                e
+                                            );
+                                            restart_failed = true;
                                         }
-
-                                        tracing::info!(
-                                            "SIGHUP: webhook server restarted on {}",
-                                            new_addr
-                                        );
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(
-                                            "SIGHUP: failed to bind to {}: {}",
-                                            new_addr,
-                                            e
-                                        );
-                                        restart_failed = true;
                                     }
                                 }
-                            }
-                            None => {
-                                tracing::error!(
-                                    "SIGHUP: cannot restart — server was never started"
-                                );
-                                restart_failed = true;
+                                None => {
+                                    tracing::error!(
+                                        "SIGHUP: cannot restart — server was never started"
+                                    );
+                                    restart_failed = true;
+                                }
                             }
                         }
-                    } else {
-                        tracing::debug!("SIGHUP: addr unchanged ({})", old_addr);
+                        Some(_) => {
+                            tracing::debug!("SIGHUP: addr unchanged ({})", old_addr);
+                        }
+                        None => {}
                     }
                 }
 
                 // Update secrets in all configured channels (if restart succeeded or wasn't needed)
                 if !restart_failed {
-                    use secrecy::{ExposeSecret, SecretString};
-                    let new_secret = new_http
-                        .webhook_secret
-                        .as_ref()
-                        .map(|s| SecretString::from(s.expose_secret().to_string()));
-
                     // Update all channels that support secret swapping
                     for updater in &secret_updaters {
                         updater.update_secret(new_secret.clone()).await;
@@ -1574,6 +1607,46 @@ fn oauth_base_url(host: &str, port: u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use secrecy::SecretString;
+
+    fn test_channels_config(
+        webhook_host: &str,
+        webhook_port: u16,
+    ) -> ironclaw::config::ChannelsConfig {
+        ironclaw::config::ChannelsConfig {
+            cli: ironclaw::config::CliConfig { enabled: false },
+            http: None,
+            webhook_listener: ironclaw::config::WebhookListenerConfig {
+                host: webhook_host.to_string(),
+                port: webhook_port,
+            },
+            gateway: Some(ironclaw::config::GatewayConfig {
+                host: "10.0.0.1".to_string(),
+                port: 3000,
+                auth_token: None,
+                max_connections: 100,
+                broadcast_buffer: ironclaw::channels::web::sse::DEFAULT_BROADCAST_BUFFER,
+                workspace_read_scopes: Vec::new(),
+                memory_layers: Vec::new(),
+                oidc: None,
+            }),
+            signal: None,
+            tui: None,
+            wasm_channels_dir: std::env::temp_dir().join("ironclaw-test-channels"),
+            wasm_channels_enabled: false,
+            configured_wasm_channels: Vec::new(),
+            wasm_channel_owner_ids: std::collections::HashMap::new(),
+        }
+    }
+
+    fn test_http_config(webhook_secret: &str) -> ironclaw::config::HttpConfig {
+        ironclaw::config::HttpConfig {
+            host: "127.0.0.1".to_string(),
+            port: 8080,
+            webhook_secret: Some(SecretString::from(webhook_secret.to_string())),
+            user_id: "test-user".to_string(),
+        }
+    }
 
     /// Regression test for <https://github.com/nearai/ironclaw/issues/1840>:
     /// `--cli-only` must suppress webhook server and all non-CLI channels.
@@ -1586,6 +1659,56 @@ mod tests {
         assert!(
             non_cli_channels_enabled(false),
             "default mode should enable non-CLI channels"
+        );
+    }
+
+    #[test]
+    fn webhook_listener_addr_uses_dedicated_listener_config() {
+        let channels = test_channels_config("127.0.0.1", 9091);
+        let addr =
+            webhook_listener_addr(&channels).expect("valid webhook listener config should resolve");
+
+        assert_eq!(addr, "127.0.0.1:9091".parse().expect("socket addr"));
+    }
+
+    // Use a double-port host string so the failure is unambiguously malformed
+    // socket syntax, not a hostname-validity question.
+    #[test]
+    fn webhook_listener_addr_returns_error_for_malformed_listener_config() {
+        let channels = test_channels_config("127.0.0.1:9091", 9092);
+        let result = webhook_listener_addr(&channels);
+
+        assert!(
+            result.is_err(),
+            "malformed webhook listener config should return an error"
+        );
+    }
+
+    #[test]
+    fn webhook_listener_sighup_reload_blocks_secret_rotation_when_listener_config_is_malformed() {
+        let mut channels = test_channels_config("127.0.0.1:9091", 9092);
+        channels.http = Some(test_http_config("rotated-secret"));
+
+        assert!(
+            prepare_sighup_reload(&channels).is_err(),
+            "malformed listener config must block secret rotation by failing reload preparation"
+        );
+    }
+
+    #[test]
+    fn gateway_oauth_base_defaults_to_gateway_bind_when_tunnel_public_url_came_from_managed_webhook_tunnel()
+     {
+        let gateway = test_channels_config("127.0.0.1", 9091)
+            .gateway
+            .expect("gateway config");
+
+        assert_eq!(
+            gateway_public_base_url(&gateway, None),
+            "http://10.0.0.1:3000"
+        );
+        assert_eq!(
+            gateway_public_base_url(&gateway, Some("https://gateway.example.com")),
+            "https://gateway.example.com"
         );
     }
 
