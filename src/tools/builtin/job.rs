@@ -317,10 +317,13 @@ impl CreateJobTool {
             .get("notify_metadata")
             .filter(|value| value.is_object())
             .unwrap_or(&null_metadata);
-        let routing_channel = routing_metadata
-            .get("channel")
-            .and_then(|v| v.as_str())
-            .or_else(|| ctx.metadata.get("notify_channel").and_then(|v| v.as_str()));
+        // Use the adapter channel name (notify_channel) as the routing key so
+        // is_dm() sees "slack-relay" / "telegram" etc., not the platform channel
+        // ID stored in notify_metadata.channel (e.g. "D..." for Slack DMs).
+        let routing_channel = ctx
+            .metadata
+            .get("notify_channel")
+            .and_then(|v| v.as_str());
 
         let routing_channel = match routing_channel {
             Some(ch) => ch,
@@ -437,8 +440,25 @@ impl CreateJobTool {
         if let Some(ref slot) = self.scheduler_slot
             && let Some(ref scheduler) = *slot.read().await
         {
+            // Propagate origin channel context so the spawned worker can apply
+            // channel routing. Without this, jobs dispatched from restricted
+            // channels lose their origin and run with the full tool set.
+            let channel_metadata = {
+                let mut m = serde_json::Map::new();
+                if let Some(ch) = ctx.metadata.get("notify_channel") {
+                    m.insert("notify_channel".to_string(), ch.clone());
+                }
+                if let Some(meta) = ctx.metadata.get("notify_metadata") {
+                    m.insert("notify_metadata".to_string(), meta.clone());
+                }
+                if m.is_empty() {
+                    None
+                } else {
+                    Some(serde_json::Value::Object(m))
+                }
+            };
             return match scheduler
-                .dispatch_job(&ctx.user_id, title, description, None)
+                .dispatch_job(&ctx.user_id, title, description, channel_metadata)
                 .await
             {
                 Ok(job_id) => {

@@ -119,13 +119,12 @@ impl Worker {
         let Ok(job_ctx) = self.context_manager().get_context(self.job_id).await else {
             return tool_defs;
         };
-        let Some(channel) = job_ctx
+
+        // Extract origin channel — may be absent for jobs spawned by routines/heartbeats.
+        let channel = job_ctx
             .metadata
             .get("notify_channel")
-            .and_then(|v| v.as_str())
-        else {
-            return tool_defs;
-        };
+            .and_then(|v| v.as_str());
 
         let null_metadata = serde_json::Value::Null;
         let routing_metadata = job_ctx
@@ -133,6 +132,7 @@ impl Worker {
             .get("notify_metadata")
             .filter(|value| value.is_object())
             .unwrap_or(&null_metadata);
+
         let Some(routing) =
             crate::agent::channel_routing::ChannelRoutingConfig::load_from_system_scope(
                 store,
@@ -143,13 +143,23 @@ impl Worker {
             return tool_defs;
         };
 
+        // Resolve routing channel: use origin channel if present; fall back to
+        // empty string so resolve_group() returns the default group (fail-closed).
+        let effective_channel = channel.unwrap_or("");
+
+        let builtin_names = self.tools().builtin_tool_names().await;
         let before = tool_defs.len();
-        let filtered = routing.filter_tool_defs(channel, routing_metadata, tool_defs);
+        let filtered = routing.filter_tool_defs(
+            effective_channel,
+            routing_metadata,
+            tool_defs,
+            &builtin_names,
+        );
         if filtered.len() < before {
             tracing::debug!(
                 job_id = %self.job_id,
-                channel,
-                group = routing.resolve_group(channel),
+                channel = effective_channel,
+                group = routing.resolve_group(effective_channel),
                 before,
                 after = filtered.len(),
                 "Job channel routing filtered tools"
@@ -2838,6 +2848,7 @@ mod tests {
         routing.save_to_store(&backend, "user-1").await.unwrap();
 
         let registry = ToolRegistry::new();
+        // MCP tools registered dynamically (async — not in builtin_tool_names).
         registry
             .register(Arc::new(SlowTool {
                 tool_name: "Notion_post_search".to_string(),
@@ -2850,12 +2861,12 @@ mod tests {
                 delay: Duration::ZERO,
             }))
             .await;
-        registry
-            .register(Arc::new(SlowTool {
-                tool_name: "memory_search".to_string(),
-                delay: Duration::ZERO,
-            }))
-            .await;
+        // Built-in tool registered at startup (register_sync — in builtin_tool_names).
+        // Matches production: memory_search is a startup built-in, not a dynamic MCP tool.
+        registry.register_sync(Arc::new(SlowTool {
+            tool_name: "memory_search".to_string(),
+            delay: Duration::ZERO,
+        }));
 
         let cm = Arc::new(crate::context::ContextManager::new(5));
         let job_id = cm.create_job("test", "test routed job").await.unwrap();

@@ -105,8 +105,9 @@ impl Agent {
     ) -> Vec<crate::llm::ToolDefinition> {
         let routing = { self.deps.channel_routing.read().await.clone() };
         if let Some(routing) = routing {
+            let builtin_names = self.deps.tools.builtin_tool_names().await;
             let before = tools.len();
-            let filtered = routing.filter_tool_defs(channel, metadata, tools);
+            let filtered = routing.filter_tool_defs(channel, metadata, tools, &builtin_names);
             if filtered.len() < before {
                 tracing::debug!(
                     channel,

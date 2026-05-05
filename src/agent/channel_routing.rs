@@ -360,13 +360,17 @@ impl ChannelRoutingConfig {
     /// Filter tool definitions based on channel routing rules.
     ///
     /// MCP tools are identified by having an underscore-separated server prefix
-    /// (e.g. `Notion_post_search` → server `Notion`). Tools without a known
-    /// server prefix are treated as built-in tools.
+    /// (e.g. `Notion_post_search` → server `Notion`). Tools not matching any
+    /// known MCP server prefix are checked against `builtin_names`; tools that
+    /// are neither a known MCP server NOR a registered built-in are blocked
+    /// (fail-closed) to prevent tools from unregistered MCP servers leaking
+    /// through as apparent built-ins.
     pub fn filter_tool_defs(
         &self,
         channel: &str,
         metadata: &serde_json::Value,
         tools: Vec<ToolDefinition>,
+        builtin_names: &std::collections::HashSet<String>,
     ) -> Vec<ToolDefinition> {
         if Self::is_dm(channel, metadata) {
             return tools;
@@ -391,6 +395,10 @@ impl ChannelRoutingConfig {
                         if self.extract_mcp_server(&tool.name).is_some() {
                             return false;
                         }
+                        // Fail-closed: unknown-source tools (not in builtin registry) are blocked.
+                        if !builtin_names.contains(&tool.name) {
+                            return false;
+                        }
                         match default_whitelist_set {
                             Some(set) => set.contains(tool.name.as_str()),
                             None => true,
@@ -407,11 +415,19 @@ impl ChannelRoutingConfig {
             .filter(|tool| {
                 if let Some(server) = self.extract_mcp_server(&tool.name) {
                     allowed_set.contains(server)
-                } else {
+                } else if builtin_names.contains(&tool.name) {
                     match builtin_set {
                         Some(set) => set.contains(tool.name.as_str()),
                         None => true,
                     }
+                } else {
+                    // Unknown MCP server not in any routing group — fail closed.
+                    tracing::debug!(
+                        tool_name = %tool.name,
+                        channel,
+                        "Channel routing: blocking unknown-source tool (not in any MCP group and not a built-in)"
+                    );
+                    false
                 }
             })
             .collect()
@@ -424,7 +440,12 @@ impl ChannelRoutingConfig {
     /// check metadata-based DM status (no metadata is available at dispatch
     /// time) — channels in `DM_EXACT` still bypass routing. This is the
     /// execution-layer enforcement called from [`crate::tools::dispatch::ToolDispatcher`].
-    pub fn is_tool_permitted(&self, channel: &str, tool_name: &str) -> bool {
+    pub fn is_tool_permitted(
+        &self,
+        channel: &str,
+        tool_name: &str,
+        builtin_names: &std::collections::HashSet<String>,
+    ) -> bool {
         // DM_EXACT channels bypass routing at execution layer too.
         if DM_EXACT.contains(&channel) {
             return true;
@@ -439,6 +460,9 @@ impl ChannelRoutingConfig {
                 if self.extract_mcp_server(tool_name).is_some() {
                     return false;
                 }
+                if !builtin_names.contains(tool_name) {
+                    return false;
+                }
                 return match self.builtin_whitelist_sets.get(&self.default_group) {
                     Some(set) => set.contains(tool_name),
                     None => true,
@@ -448,11 +472,13 @@ impl ChannelRoutingConfig {
 
         if let Some(server) = self.extract_mcp_server(tool_name) {
             allowed_set.contains(server)
-        } else {
+        } else if builtin_names.contains(tool_name) {
             match self.builtin_whitelist_sets.get(group) {
                 Some(set) => set.contains(tool_name),
                 None => true,
             }
+        } else {
+            false
         }
     }
 
@@ -504,6 +530,22 @@ mod tests {
             description: String::new(),
             parameters: serde_json::json!({}),
         }
+    }
+
+    /// Built-in tool names used across filter tests. MCP-prefixed tools
+    /// (Archon_*, Notion_*, etc.) must NOT appear here.
+    fn test_builtin_names() -> std::collections::HashSet<String> {
+        [
+            "memory_search",
+            "memory_write",
+            "create_job",
+            "shell",
+            "http_request",
+            "web_search",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
     }
 
     #[test]
@@ -598,8 +640,9 @@ mod tests {
             make_tool_def("shell"),
         ];
         let md = no_metadata();
-        assert_eq!(config.filter_tool_defs("tui", &md, tools.clone()).len(), 3);
-        assert_eq!(config.filter_tool_defs("http", &md, tools).len(), 3);
+        let bn = test_builtin_names();
+        assert_eq!(config.filter_tool_defs("tui", &md, tools.clone(), &bn).len(), 3);
+        assert_eq!(config.filter_tool_defs("http", &md, tools, &bn).len(), 3);
     }
 
     #[test]
@@ -626,7 +669,7 @@ mod tests {
             make_tool_def("Smartlead_send"),
         ];
         let md = no_metadata();
-        let filtered = config.filter_tool_defs("agentiffai-dev-issues", &md, tools);
+        let filtered = config.filter_tool_defs("agentiffai-dev-issues", &md, tools, &test_builtin_names());
         let names: Vec<&str> = filtered.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"Archon_list_tasks"));
         assert!(names.contains(&"Kiro_run_task"));
@@ -645,7 +688,7 @@ mod tests {
             make_tool_def("http_request"),
         ];
         let md = no_metadata();
-        let filtered = config.filter_tool_defs("unmapped-channel", &md, tools);
+        let filtered = config.filter_tool_defs("unmapped-channel", &md, tools, &test_builtin_names());
         let names: Vec<&str> = filtered.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"Archon_list_tasks"));
         assert!(names.contains(&"memory_search"));
@@ -663,7 +706,7 @@ mod tests {
             make_tool_def("memory_search"),
         ];
         let md = no_metadata();
-        let filtered = config.filter_tool_defs("agentiffai-dev-issues", &md, tools);
+        let filtered = config.filter_tool_defs("agentiffai-dev-issues", &md, tools, &test_builtin_names());
         assert_eq!(filtered.len(), 3);
     }
 
@@ -676,7 +719,7 @@ mod tests {
             make_tool_def("shell"),
         ];
         let md = no_metadata();
-        let filtered = config.filter_tool_defs("gateway", &md, tools);
+        let filtered = config.filter_tool_defs("gateway", &md, tools, &test_builtin_names());
         assert_eq!(filtered.len(), 3);
     }
 
@@ -817,7 +860,7 @@ mod tests {
             make_tool_def("shell"),
         ];
         let md = no_metadata();
-        let filtered = config.filter_tool_defs("hacked-channel", &md, tools);
+        let filtered = config.filter_tool_defs("hacked-channel", &md, tools, &test_builtin_names());
         let names: Vec<&str> = filtered.iter().map(|t| t.name.as_str()).collect();
         assert!(!names.contains(&"Archon_list_tasks"));
         assert!(names.contains(&"memory_search"));
@@ -866,7 +909,8 @@ mod tests {
             make_tool_def("create_job"),
         ];
 
-        let content_tools = config.filter_tool_defs("agentiffai-marketing", &md, all_tools.clone());
+        let bn = test_builtin_names();
+        let content_tools = config.filter_tool_defs("agentiffai-marketing", &md, all_tools.clone(), &bn);
         let content_names: Vec<&str> = content_tools.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(
             content_names,
@@ -880,7 +924,7 @@ mod tests {
         );
 
         // Dev channel: Archon+Kiro+Notion MCP tools, all builtins (no whitelist)
-        let dev_tools = config.filter_tool_defs("agentiffai-dev-issues", &md, all_tools.clone());
+        let dev_tools = config.filter_tool_defs("agentiffai-dev-issues", &md, all_tools.clone(), &bn);
         let dev_names: Vec<&str> = dev_tools.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(
             dev_names,
@@ -895,12 +939,12 @@ mod tests {
         );
 
         // DM (gateway): everything
-        let dm_tools = config.filter_tool_defs("gateway", &md, all_tools.clone());
+        let dm_tools = config.filter_tool_defs("gateway", &md, all_tools.clone(), &bn);
         assert_eq!(dm_tools.len(), 7);
 
         // Slack DM via metadata: everything
         let slack_dm_meta = serde_json::json!({"channel": "D12345"});
-        let slack_dm_tools = config.filter_tool_defs("slack", &slack_dm_meta, all_tools);
+        let slack_dm_tools = config.filter_tool_defs("slack", &slack_dm_meta, all_tools, &bn);
         assert_eq!(slack_dm_tools.len(), 7);
     }
 
@@ -1021,20 +1065,31 @@ mod tests {
         }"#;
         let config: ChannelRoutingConfig = serde_json::from_str(json).unwrap();
 
-        // DM_EXACT channels bypass routing.
-        assert!(config.is_tool_permitted("gateway", "Smartlead_send"));
-        assert!(config.is_tool_permitted("cli", "shell"));
+        let builtin_names: std::collections::HashSet<String> = [
+            "shell", "create_job", "memory_search", "web_search",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
 
-        // Dev channel: Archon + Kiro allowed, all builtins allowed.
-        assert!(config.is_tool_permitted("agentiffai-dev", "Archon_list"));
-        assert!(config.is_tool_permitted("agentiffai-dev", "Kiro_run"));
-        assert!(!config.is_tool_permitted("agentiffai-dev", "Smartlead_send"));
-        assert!(config.is_tool_permitted("agentiffai-dev", "shell")); // no whitelist → all
+        // DM_EXACT channels bypass routing entirely.
+        assert!(config.is_tool_permitted("gateway", "Smartlead_send", &builtin_names));
+        assert!(config.is_tool_permitted("cli", "shell", &builtin_names));
+
+        // Dev channel: Archon + Kiro allowed, all builtins allowed (no whitelist).
+        assert!(config.is_tool_permitted("agentiffai-dev", "Archon_list", &builtin_names));
+        assert!(config.is_tool_permitted("agentiffai-dev", "Kiro_run", &builtin_names));
+        assert!(!config.is_tool_permitted("agentiffai-dev", "Smartlead_send", &builtin_names));
+        assert!(config.is_tool_permitted("agentiffai-dev", "shell", &builtin_names)); // no whitelist → all builtins
 
         // Minimal (default) channel: Archon only, create_job built-in only.
-        assert!(config.is_tool_permitted("other-channel", "Archon_list"));
-        assert!(!config.is_tool_permitted("other-channel", "Kiro_run"));
-        assert!(config.is_tool_permitted("other-channel", "create_job"));
-        assert!(!config.is_tool_permitted("other-channel", "shell"));
+        assert!(config.is_tool_permitted("other-channel", "Archon_list", &builtin_names));
+        assert!(!config.is_tool_permitted("other-channel", "Kiro_run", &builtin_names));
+        assert!(config.is_tool_permitted("other-channel", "create_job", &builtin_names));
+        assert!(!config.is_tool_permitted("other-channel", "shell", &builtin_names));
+
+        // Unknown MCP server (not in any group, not a builtin) — fail closed.
+        assert!(!config.is_tool_permitted("other-channel", "Serpstat_keywords", &builtin_names));
+        assert!(!config.is_tool_permitted("agentiffai-dev", "Serpstat_keywords", &builtin_names));
     }
 }
