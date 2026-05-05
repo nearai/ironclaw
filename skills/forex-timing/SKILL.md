@@ -115,6 +115,8 @@ For wire-rate monitoring, **always use `abound_send_wire(action='wait', ...)`** 
 
 The mission spawned by `wait` calls `abound_exchange_rate` to fetch the current rate; if the threshold is met (or on the final hourly run as a status update) it calls `abound_send_wire(action='send', ...)`. The user then approves on their device and the originating chat finishes the flow with `abound_send_wire(action='execute', ...)`. Never have the mission call `execute` itself.
 
+Once a rate-watcher is set up, its **target rate and cadence are fixed**. If the user asks to change either (e.g. "change the threshold", "set cadence to 3 min", "every N hours"), tell them this isn't supported in chat and that they need to cancel the current monitor first. Do NOT offer to start a new transfer in the same turn — wait for the user to come back with a fresh request after cancelling. Do NOT call `abound_send_wire(action='wait')` again, `mission_create`, or `mission_update` to fake a change.
+
 ## Rules
 
 - **Never use `analyze_transfer` before `abound_send_wire` for a wire flow** — the analysis is built into `abound_send_wire` and runs automatically. Calling both wastes a step and breaks the flow.
