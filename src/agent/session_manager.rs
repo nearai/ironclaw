@@ -275,6 +275,63 @@ impl SessionManager {
         }
     }
 
+    /// Seed the thread map from persisted conversations at startup.
+    ///
+    /// Queries all conversations with a non-null `thread_id` (i.e. a
+    /// channel-native room/chat ID) and registers the
+    /// `(user_id, channel, external_thread_id) → conversation_uuid` mapping
+    /// so that messages arriving after a restart are routed to the correct
+    /// existing conversation rather than creating a duplicate.
+    ///
+    /// Only populates the thread map — it does **not** create `Session` or
+    /// `Thread` objects, which are created lazily on first use as usual.
+    pub async fn seed_from_db(&self, db: &Arc<dyn crate::db::Database>) {
+        match db.list_external_thread_mappings().await {
+            Ok(mappings) => {
+                let mut thread_map = self.thread_map.write().await;
+                let mut undo_managers = self.undo_managers.write().await;
+                for (conv_id, channel, user_id, external_thread_id) in mappings {
+                    let key = ThreadKey {
+                        user_id,
+                        channel,
+                        external_thread_id: Some(external_thread_id),
+                    };
+                    thread_map.entry(key).or_insert(conv_id);
+                    undo_managers
+                        .entry(conv_id)
+                        .or_insert_with(|| Arc::new(Mutex::new(UndoManager::new())));
+                }
+                tracing::debug!(
+                    count = thread_map.len(),
+                    "Seeded session manager thread map from DB"
+                );
+            }
+            Err(e) => {
+                tracing::warn!("Failed to seed thread map from DB: {}", e);
+            }
+        }
+    }
+
+    /// Look up the internal conversation UUID for a
+    /// `(user_id, channel, external_thread_id)` triple.
+    ///
+    /// Returns `None` if there is no mapping (the thread has never been seen
+    /// or was not seeded from the DB).
+    pub async fn lookup_thread_id(
+        &self,
+        user_id: &str,
+        channel: &str,
+        external_thread_id: &str,
+    ) -> Option<Uuid> {
+        let key = ThreadKey {
+            user_id: user_id.to_string(),
+            channel: channel.to_string(),
+            external_thread_id: Some(external_thread_id.to_string()),
+        };
+        let thread_map = self.thread_map.read().await;
+        thread_map.get(&key).copied()
+    }
+
     /// Get undo manager for a thread.
     pub async fn get_undo_manager(&self, thread_id: Uuid) -> Arc<Mutex<UndoManager>> {
         // Fast path
