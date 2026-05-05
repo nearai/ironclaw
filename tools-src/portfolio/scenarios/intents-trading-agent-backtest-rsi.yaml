@@ -1,0 +1,36 @@
+id: intents-trading-agent-backtest-rsi
+description: |
+  Backtests an RSI mean-reversion strategy. This gives users an
+  oscillator-style choice distinct from SMA, breakout, and momentum
+  strategies.
+steps:
+  - name: backtest_rsi_mean_reversion
+    action: backtest
+    params:
+      initial_cash_usd: 1000
+      fee_bps: 10
+      slippage_bps: 5
+      max_position_pct: 0.4
+      stop_loss_bps: 700
+      strategy:
+        kind: rsi-mean-reversion
+        lookback_window: 5
+        entry_threshold: 25
+        exit_threshold: 55
+      candles:
+        - {ts: "2026-05-01T00:00:00Z", open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 2000}
+        - {ts: "2026-05-02T00:00:00Z", open: 98.0, high: 99.0, low: 97.0, close: 98.0, volume: 2200}
+        - {ts: "2026-05-03T00:00:00Z", open: 96.0, high: 97.0, low: 95.0, close: 96.0, volume: 2400}
+        - {ts: "2026-05-04T00:00:00Z", open: 94.0, high: 95.0, low: 93.0, close: 94.0, volume: 2500}
+        - {ts: "2026-05-05T00:00:00Z", open: 92.0, high: 93.0, low: 91.0, close: 92.0, volume: 2600}
+        - {ts: "2026-05-06T00:00:00Z", open: 90.0, high: 91.0, low: 89.0, close: 90.0, volume: 2700}
+        - {ts: "2026-05-07T00:00:00Z", open: 91.0, high: 92.0, low: 90.0, close: 91.0, volume: 2500}
+        - {ts: "2026-05-08T00:00:00Z", open: 93.0, high: 94.0, low: 92.0, close: 93.0, volume: 2300}
+        - {ts: "2026-05-09T00:00:00Z", open: 95.0, high: 96.0, low: 94.0, close: 95.0, volume: 2200}
+        - {ts: "2026-05-10T00:00:00Z", open: 98.0, high: 99.0, low: 97.0, close: 98.0, volume: 2100}
+        - {ts: "2026-05-11T00:00:00Z", open: 101.0, high: 102.0, low: 100.0, close: 101.0, volume: 2000}
+    expect:
+      backtest_schema_version: intents-backtest/1
+      backtest_trades_min: 1
+      backtest_total_return_gt: 0
+      backtest_lookahead_safe: true

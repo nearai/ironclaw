@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NEAR Intents Strategy Lab</title>
+  <link rel="stylesheet" href="/experiments/near-intents.css">
+</head>
+<body>
+  <main class="lab-shell">
+    <section class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">Public experiment</p>
+        <h1>NEAR Intents Strategy Lab</h1>
+        <p class="lede">Run live-data paper strategies, inspect the signal, and produce an unsigned direct NEAR Intents trial payload.</p>
+        <div class="hero-actions">
+          <button id="runLiveBtn" class="primary-action" type="button">Run live strategy</button>
+          <a class="secondary-action" href="#paper">View paper intent</a>
+        </div>
+      </div>
+      <div class="market-strip" aria-label="Market snapshot">
+        <div>
+          <span>Source</span>
+          <strong id="sourceLabel">Waiting</strong>
+        </div>
+        <div>
+          <span id="priceCaption">Last price</span>
+          <strong id="priceLabel">-</strong>
+        </div>
+        <div>
+          <span>Signal</span>
+          <strong id="signalLabel">Idle</strong>
+        </div>
+      </div>
+    </section>
+
+    <section class="workspace" aria-label="Strategy workspace">
+      <aside class="controls" aria-label="Experiment controls">
+        <div class="control-block">
+          <p class="section-kicker">Market</p>
+          <label>
+            Pair
+            <select id="pairSelect">
+              <option value="NEAR-USD" selected>NEAR / USD</option>
+              <option value="BTC-USD">BTC / USD</option>
+              <option value="ETH-USD">ETH / USD</option>
+              <option value="SOL-USD">SOL / USD</option>
+            </select>
+          </label>
+          <label>
+            Lookback
+            <select id="lookbackSelect">
+              <option value="30" selected>30 days</option>
+              <option value="14">14 days</option>
+              <option value="7">7 days</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="control-block">
+          <p class="section-kicker">Strategy</p>
+          <div id="strategyList" class="strategy-list" role="radiogroup" aria-label="Strategy"></div>
+        </div>
+
+        <div class="control-block">
+          <p class="section-kicker">Trial ticket</p>
+          <label>
+            NEAR account
+            <input id="accountInput" type="text" placeholder="small-test.near" autocomplete="off">
+          </label>
+          <label>
+            Paper budget, USD
+            <input id="budgetInput" type="number" min="0.01" step="0.01" value="0.25">
+          </label>
+          <label>
+            Max trade, USD
+            <input id="tradeCapInput" type="number" min="0.01" step="0.01" value="0.05">
+          </label>
+          <label>
+            Slippage, bps
+            <input id="slippageInput" type="number" min="1" max="500" step="1" value="50">
+          </label>
+        </div>
+      </aside>
+
+      <section class="live-panel" aria-label="Live strategy output">
+        <div class="panel-header">
+          <div>
+            <p class="section-kicker">Live paper run</p>
+            <h2 id="strategyTitle">SMA Cross</h2>
+          </div>
+          <div id="statusPill" class="status-pill">Idle</div>
+        </div>
+
+        <div class="chart-wrap">
+          <canvas id="priceCanvas" width="1200" height="520" aria-label="Price chart"></canvas>
+        </div>
+
+        <div class="metrics-row" aria-label="Backtest metrics">
+          <div>
+            <span>Return</span>
+            <strong id="returnMetric">-</strong>
+          </div>
+          <div>
+            <span>Max drawdown</span>
+            <strong id="drawdownMetric">-</strong>
+          </div>
+          <div>
+            <span>Trades</span>
+            <strong id="tradesMetric">-</strong>
+          </div>
+          <div>
+            <span>Confidence</span>
+            <strong id="confidenceMetric">-</strong>
+          </div>
+        </div>
+
+        <div class="decision-grid">
+          <div>
+            <p class="section-kicker">Signal note</p>
+            <p id="signalNote" class="decision-copy">Run the strategy to load recent candles and generate a paper decision.</p>
+          </div>
+          <div>
+            <p class="section-kicker">Risk boundary</p>
+            <p class="decision-copy">This page never signs or broadcasts. It only creates an unsigned trial payload for review.</p>
+          </div>
+        </div>
+      </section>
+    </section>
+
+    <section id="paper" class="paper-band" aria-label="Paper intent">
+      <div class="paper-copy">
+        <p class="section-kicker">Unsigned NEAR Intents draft</p>
+        <h2>Show the strategy, not a custody flow.</h2>
+        <p>External viewers can see live data, the strategy decision, sizing, and the exact unsigned direct-intent payload. A wallet signature remains a separate explicit step.</p>
+      </div>
+      <div class="intent-console">
+        <div class="console-toolbar">
+          <button id="buildIntentBtn" type="button">Build paper intent</button>
+          <button id="copyIntentBtn" type="button">Copy JSON</button>
+        </div>
+        <pre id="intentOutput">Run a strategy to prepare an unsigned payload.</pre>
+      </div>
+    </section>
+  </main>
+  <script src="/experiments/near-intents.js"></script>
+</body>
+</html>

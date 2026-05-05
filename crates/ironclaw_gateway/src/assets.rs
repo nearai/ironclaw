@@ -172,3 +172,16 @@ pub const ADMIN_CSS: &str = include_str!("../static/admin/admin.css");
 
 /// Admin panel JavaScript.
 pub const ADMIN_JS: &str = include_str!("../static/admin/admin.js");
+
+// ==================== Public Experiments ====================
+
+/// Standalone NEAR Intents public experiment.
+pub const NEAR_INTENTS_EXPERIMENT_HTML: &str =
+    include_str!("../static/experiments/near-intents.html");
+
+/// Styles for the standalone NEAR Intents public experiment.
+pub const NEAR_INTENTS_EXPERIMENT_CSS: &str =
+    include_str!("../static/experiments/near-intents.css");
+
+/// JavaScript for the standalone NEAR Intents public experiment.
+pub const NEAR_INTENTS_EXPERIMENT_JS: &str = include_str!("../static/experiments/near-intents.js");

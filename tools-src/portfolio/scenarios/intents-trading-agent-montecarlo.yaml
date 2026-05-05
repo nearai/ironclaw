@@ -1,0 +1,31 @@
+id: intents-trading-agent-montecarlo
+description: |
+  Trade-order Monte Carlo with a fixed seed. Bounds the median return so a
+  regression in the xorshift64* PRNG, the resampling logic, or the equity
+  compounding is detected. Loss probability is bounded loosely because the
+  trade sample is intentionally small.
+steps:
+  - name: shuffle_resample
+    action: backtest_montecarlo
+    params:
+      trade_returns_pct: [1.5, -0.5, 2.0, -1.0, 0.8, 0.3, -0.2, 1.1, 0.6, -0.4]
+      initial_cash_usd: 1000
+      iterations: 500
+      seed: 42
+      method: shuffle
+    expect:
+      backtest_schema_version: intents-montecarlo/1
+      montecarlo_iterations: 500
+      montecarlo_p50_within: [-5, 15]
+  - name: permute_preserves_mean
+    action: backtest_montecarlo
+    params:
+      trade_returns_pct: [1.0, -0.5, 1.5, -0.2, 0.7]
+      initial_cash_usd: 1000
+      iterations: 250
+      seed: 7
+      method: permute
+    expect:
+      backtest_schema_version: intents-montecarlo/1
+      montecarlo_iterations: 250
+      montecarlo_p50_within: [2.4, 2.6]

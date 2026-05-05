@@ -1,0 +1,47 @@
+id: intents-trading-agent-dca-schedule
+description: |
+  Plans a 26-week DCA accumulation into NEAR funded by USDC at $100 per
+  period. Verifies the cron expression, schedule length, the embedded
+  build_intent template, and that all gates allow paper-mode quoting.
+steps:
+  - name: weekly_near_dca
+    action: plan_dca_schedule
+    params:
+      pair: NEAR/USDC
+      source_asset: USDC
+      destination_asset: NEAR
+      source_chain: near
+      destination_chain: near
+      notional_per_period_usd: 100
+      cadence: weekly
+      total_periods: 26
+      max_slippage_bps: 50
+      assumed_price_usd: 3.0
+      mode: paper
+      notional_currency: USDC
+    expect:
+      backtest_schema_version: intents-dca-schedule/1
+      dca_schedule_cron: "0 12 * * 1"
+      dca_schedule_periods_len: 26
+      dca_schedule_safe_to_quote: true
+      dca_schedule_template_action: build_intent
+  - name: monthly_btc_dca
+    action: plan_dca_schedule
+    params:
+      pair: BTC/USDC
+      source_asset: USDC
+      destination_asset: BTC
+      source_chain: near
+      destination_chain: bitcoin
+      notional_per_period_usd: 250
+      cadence: monthly
+      total_periods: 12
+      max_slippage_bps: 75
+      assumed_price_usd: 110000
+      mode: paper
+      notional_currency: USDC
+    expect:
+      backtest_schema_version: intents-dca-schedule/1
+      dca_schedule_cron: "0 12 1 * *"
+      dca_schedule_periods_len: 12
+      dca_schedule_template_action: build_intent

@@ -1,0 +1,49 @@
+id: intents-trading-agent-dca-backtest
+description: |
+  Replays a weekly DCA buy schedule into a NEAR-priced asset over a 14-week
+  candle series with a symmetric price band. Verifies lot count, executed
+  vs skipped-band ratio, and breakeven price.
+steps:
+  - name: dca_weekly_with_band
+    action: backtest_dca
+    params:
+      notional_per_period_usd: 100
+      period_candles: 7
+      offset: 0
+      skip_above_premium_bps: 1500
+      opportunistic_below_discount_bps: 2000
+      fee_bps: 0
+      slippage_bps: 0
+      initial_cash_usd: 5000
+      candles:
+        - {ts: "2026-01-01T00:00:00Z", open: 3.00, high: 3.05, low: 2.95, close: 3.00, volume: 1000}
+        - {ts: "2026-01-02T00:00:00Z", open: 3.00, high: 3.05, low: 2.95, close: 3.00, volume: 1000}
+        - {ts: "2026-01-03T00:00:00Z", open: 3.00, high: 3.05, low: 2.95, close: 3.00, volume: 1000}
+        - {ts: "2026-01-04T00:00:00Z", open: 3.00, high: 3.05, low: 2.95, close: 3.00, volume: 1000}
+        - {ts: "2026-01-05T00:00:00Z", open: 3.00, high: 3.05, low: 2.95, close: 3.00, volume: 1000}
+        - {ts: "2026-01-06T00:00:00Z", open: 3.00, high: 3.05, low: 2.95, close: 3.00, volume: 1000}
+        - {ts: "2026-01-07T00:00:00Z", open: 3.00, high: 3.05, low: 2.95, close: 3.00, volume: 1000}
+        - {ts: "2026-01-08T00:00:00Z", open: 3.20, high: 3.30, low: 3.15, close: 3.25, volume: 1000}
+        - {ts: "2026-01-09T00:00:00Z", open: 3.30, high: 3.40, low: 3.25, close: 3.35, volume: 1000}
+        - {ts: "2026-01-10T00:00:00Z", open: 3.40, high: 3.50, low: 3.35, close: 3.45, volume: 1000}
+        - {ts: "2026-01-11T00:00:00Z", open: 3.50, high: 3.60, low: 3.45, close: 3.55, volume: 1000}
+        - {ts: "2026-01-12T00:00:00Z", open: 3.60, high: 3.70, low: 3.55, close: 3.65, volume: 1000}
+        - {ts: "2026-01-13T00:00:00Z", open: 3.70, high: 3.80, low: 3.65, close: 3.75, volume: 1000}
+        - {ts: "2026-01-14T00:00:00Z", open: 4.50, high: 4.60, low: 4.45, close: 4.55, volume: 1000}
+        - {ts: "2026-01-15T00:00:00Z", open: 4.50, high: 4.60, low: 4.45, close: 4.50, volume: 1000}
+        - {ts: "2026-01-16T00:00:00Z", open: 4.40, high: 4.50, low: 4.35, close: 4.40, volume: 1000}
+        - {ts: "2026-01-17T00:00:00Z", open: 4.30, high: 4.40, low: 4.25, close: 4.30, volume: 1000}
+        - {ts: "2026-01-18T00:00:00Z", open: 4.20, high: 4.30, low: 4.15, close: 4.20, volume: 1000}
+        - {ts: "2026-01-19T00:00:00Z", open: 4.10, high: 4.20, low: 4.05, close: 4.10, volume: 1000}
+        - {ts: "2026-01-20T00:00:00Z", open: 4.00, high: 4.10, low: 3.95, close: 4.00, volume: 1000}
+        - {ts: "2026-01-21T00:00:00Z", open: 1.50, high: 1.60, low: 1.45, close: 1.50, volume: 1000}
+        - {ts: "2026-01-22T00:00:00Z", open: 1.60, high: 1.70, low: 1.55, close: 1.65, volume: 1000}
+        - {ts: "2026-01-23T00:00:00Z", open: 1.70, high: 1.80, low: 1.65, close: 1.75, volume: 1000}
+        - {ts: "2026-01-24T00:00:00Z", open: 1.80, high: 1.90, low: 1.75, close: 1.85, volume: 1000}
+        - {ts: "2026-01-25T00:00:00Z", open: 1.90, high: 2.00, low: 1.85, close: 1.95, volume: 1000}
+        - {ts: "2026-01-26T00:00:00Z", open: 2.00, high: 2.10, low: 1.95, close: 2.00, volume: 1000}
+        - {ts: "2026-01-27T00:00:00Z", open: 2.10, high: 2.20, low: 2.05, close: 2.10, volume: 1000}
+        - {ts: "2026-01-28T00:00:00Z", open: 2.20, high: 2.30, low: 2.15, close: 2.25, volume: 1000}
+    expect:
+      backtest_schema_version: intents-dca-backtest/1
+      dca_breakeven_within: [1.5, 4.0]

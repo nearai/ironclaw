@@ -1,0 +1,43 @@
+id: intents-trading-agent-dca-mission
+description: |
+  Plans a weekly NEAR DCA schedule, then turns that schedule into an
+  IronClaw mission scaffold. Verifies cron passthrough, status=paused
+  (so the engine never auto-fires), and that the YAML includes the
+  unsigned-only safety flag.
+steps:
+  - name: weekly_near_dca_plan
+    action: plan_dca_schedule
+    params:
+      pair: NEAR/USDC
+      source_asset: USDC
+      destination_asset: NEAR
+      source_chain: near
+      destination_chain: near
+      notional_per_period_usd: 100
+      cadence: weekly
+      total_periods: 26
+      max_slippage_bps: 50
+      assumed_price_usd: 3.0
+      mode: paper
+    expect:
+      backtest_schema_version: intents-dca-schedule/1
+      dca_schedule_cron: "0 12 * * 1"
+    capture:
+      trial_plan_var: dca_schedule
+  - name: scaffold_mission
+    action: format_dca_mission
+    params:
+      project_id: intents-trading-agent
+      timezone: UTC
+      cooldown_minutes: 30
+      schedule: $dca_schedule
+    expect:
+      backtest_schema_version: intents-dca-mission-scaffold/1
+      mission_cron: "0 12 * * 1"
+      mission_per_tick_calls: 2
+      mission_yaml_contains:
+        - "kind: mission"
+        - "status: paused"
+        - "unsigned_only: true"
+        - "0 12 * * 1"
+        - "intents-trading-agent"
