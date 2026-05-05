@@ -18,12 +18,10 @@
 //!   semantics. Append failures are propagated; replay against a cursor older
 //!   than the earliest retained entry returns [`EventError::ReplayGap`] so
 //!   transports can request a snapshot/rebase rather than silently lose data.
-//! - In-memory backends are provided for tests and reference loops.
-//!   Filesystem-backed JSONL backends and PostgreSQL/libSQL backends are
-//!   deliberately deferred to later grouped Reborn PRs that depend on
-//!   `ironclaw_filesystem` and the database substrates. The byte-level
-//!   [`parse_jsonl`] and [`replay_jsonl`] helpers are exposed so those later
-//!   backends can build on the same redaction and replay invariants.
+//! - In-memory backends are provided for tests and reference loops. Production
+//!   backend selection and durable adapters live outside this substrate crate
+//!   in `ironclaw_reborn_event_store`, which depends on these traits rather
+//!   than pulling storage drivers back into `ironclaw_events`.
 //!
 //! # Redaction invariants
 //!
@@ -1100,7 +1098,7 @@ impl DurableAuditLog for InMemoryDurableAuditLog {
 }
 
 // -----------------------------------------------------------------------------
-// JSONL byte-level helpers (exposed for downstream filesystem-backed sinks)
+// JSONL byte-level helpers (exposed for downstream durable sinks)
 // -----------------------------------------------------------------------------
 
 /// Parse a JSONL byte slice into a vector of typed records.
@@ -1127,7 +1125,7 @@ where
 
 /// Replay a JSONL byte slice after a cursor with a bounded limit.
 ///
-/// Used by JSONL-backed durable log adapters in later grouped Reborn PRs.
+/// Used by JSONL-backed durable log adapters and fixture readers.
 /// The cursor is the 1-based line index of the last consumed record.
 ///
 /// **Assumes uncompacted JSONL.** Backends that compact entries (drop old

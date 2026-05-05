@@ -4175,6 +4175,7 @@ dependencies = [
  "ironclaw_mcp",
  "ironclaw_network",
  "ironclaw_processes",
+ "ironclaw_reborn_event_store",
  "ironclaw_resources",
  "ironclaw_run_state",
  "ironclaw_safety",
@@ -4261,6 +4262,35 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+]
+
+[[package]]
+name = "ironclaw_reborn_event_store"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "deadpool-postgres",
+ "hex",
+ "ironclaw_events",
+ "ironclaw_host_api",
+ "libsql",
+ "rustls 0.23.37",
+ "rustls-native-certs 0.8.3",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-postgres",
+ "tokio-postgres-rustls",
+ "tracing",
+ "url",
+ "urlencoding",
+ "uuid",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
