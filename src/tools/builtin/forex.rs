@@ -16,7 +16,7 @@ use crate::context::JobContext;
 use crate::secrets::SecretsStore;
 use crate::tools::tool::{Tool, ToolDomain, ToolError, ToolOutput, require_str};
 
-use super::abound::{REMITTANCE_BASE, abound_get};
+use super::abound::{abound_get, remittance_base};
 use super::validate_currency_code;
 
 const MASSIVE_BASE: &str = "https://api.massive.com/v2/aggs/ticker";
@@ -572,8 +572,10 @@ pub async fn run_transfer_analysis(
 
     let bearer = massive_bearer(secrets, user_id).await?;
 
-    let abound_rate_url =
-        format!("{REMITTANCE_BASE}/exchange-rate?from_currency=USD&to_currency=INR");
+    let abound_rate_url = format!(
+        "{}/exchange-rate?from_currency=USD&to_currency=INR",
+        remittance_base()?
+    );
     let abound_rate_fut = async {
         let result = abound_get(client, secrets, user_id, &abound_rate_url)
             .await

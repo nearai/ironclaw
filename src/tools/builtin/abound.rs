@@ -39,10 +39,19 @@ fn normalize_exchange_rate_response(mut result: serde_json::Value) -> serde_json
 }
 use super::validate_currency_code;
 
-pub(crate) const REMITTANCE_BASE: &str =
-    "https://devneobank.timesclub.co/times/bank/remittance/agent";
-const NOTIFICATION_BASE: &str = "https://dev.timesclub.co/times/users/agent";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub(crate) fn remittance_base() -> Result<String, ToolError> {
+    std::env::var("ABOUND_REMITTANCE_BASE").map_err(|_| {
+        ToolError::ExecutionFailed("ABOUND_REMITTANCE_BASE env var not set".into())
+    })
+}
+
+fn notification_base() -> Result<String, ToolError> {
+    std::env::var("ABOUND_NOTIFICATION_BASE").map_err(|_| {
+        ToolError::ExecutionFailed("ABOUND_NOTIFICATION_BASE env var not set".into())
+    })
+}
 
 const WAIT_MISSION_GOAL_TEMPLATE: &str = include_str!("prompts/abound_wait_mission_goal.md");
 
@@ -275,7 +284,7 @@ impl Tool for AboundAccountInfoTool {
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = Instant::now();
-        let url = format!("{REMITTANCE_BASE}/account/info");
+        let url = format!("{}/account/info", remittance_base()?);
         let result = abound_get(&self.client, &*self.secrets, &ctx.user_id, &url).await?;
         Ok(ToolOutput::success(result, start.elapsed()))
     }
@@ -346,7 +355,10 @@ impl Tool for AboundExchangeRateTool {
         let start = Instant::now();
         let from = validate_currency_code(require_str(&params, "from_currency")?)?;
         let to = validate_currency_code(require_str(&params, "to_currency")?)?;
-        let url = format!("{REMITTANCE_BASE}/exchange-rate?from_currency={from}&to_currency={to}");
+        let url = format!(
+            "{}/exchange-rate?from_currency={from}&to_currency={to}",
+            remittance_base()?
+        );
         let result = abound_get(&self.client, &*self.secrets, &ctx.user_id, &url).await?;
         let result = normalize_exchange_rate_response(result);
         Ok(ToolOutput::success(result, start.elapsed()))
@@ -507,7 +519,7 @@ impl Tool for AboundSendWireTool {
                     "payment_reason_key": payment_reason,
                 },
             });
-            let notif_url = format!("{NOTIFICATION_BASE}/create-notification");
+            let notif_url = format!("{}/create-notification", notification_base()?);
 
             tracing::debug!(
                 url = %notif_url,
@@ -780,7 +792,7 @@ impl Tool for AboundSendWireTool {
                 &self.client,
                 &*self.secrets,
                 &ctx.user_id,
-                &format!("{REMITTANCE_BASE}/account/info"),
+                &format!("{}/account/info", remittance_base()?),
             )
             .await?;
             let account_str = account_info.to_string();
@@ -812,7 +824,7 @@ impl Tool for AboundSendWireTool {
                 "amount": amount,
                 "payment_reason_key": payment_reason_key,
             });
-            let url = format!("{REMITTANCE_BASE}/send-wire");
+            let url = format!("{}/send-wire", remittance_base()?);
             let wire_result =
                 abound_post_write(&self.client, &*self.secrets, &ctx.user_id, &url, &wire_body)
                     .await?;
@@ -869,7 +881,7 @@ impl Tool for AboundSendWireTool {
             &self.client,
             &*self.secrets,
             &ctx.user_id,
-            &format!("{REMITTANCE_BASE}/account/info"),
+            &format!("{}/account/info", remittance_base()?),
         )
         .await?;
         tracing::debug!(
@@ -1003,7 +1015,7 @@ impl Tool for AboundCreateNotificationTool {
             "meta_data": meta_data,
         });
 
-        let url = format!("{NOTIFICATION_BASE}/create-notification");
+        let url = format!("{}/create-notification", notification_base()?);
         let result = abound_post(&self.client, &*self.secrets, &ctx.user_id, &url, &body).await?;
         Ok(ToolOutput::success(result, start.elapsed()))
     }
