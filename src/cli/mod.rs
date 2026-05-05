@@ -36,6 +36,7 @@ mod service;
 mod skills;
 pub mod status;
 mod tool;
+mod traces;
 
 pub use acp::{AcpCommand, run_acp_command};
 pub use channels::{ChannelsCommand, run_channels_command};
@@ -58,6 +59,7 @@ pub use service::{ServiceCommand, run_service_command};
 pub use skills::{SkillsCommand, run_skills_command};
 pub use status::run_status_command;
 pub use tool::{ToolCommand, run_tool_command};
+pub use traces::{TracesCommand, run_traces_command};
 
 use std::sync::Arc;
 
@@ -280,6 +282,14 @@ pub enum Command {
     )]
     Models(ModelsCommand),
 
+    /// Manage opt-in trace contributions
+    #[command(
+        subcommand,
+        about = "Manage trace contributions",
+        long_about = "Create local redacted trace contribution previews, explicitly submit or revoke them, and operate private Trace Commons reviewer/admin APIs.\nExamples:\n  ironclaw traces preview --recorded-trace trace.json --output contribution.json\n  ironclaw traces submit --envelope contribution.json --endpoint https://example.internal/v1/traces\n  ironclaw traces ingest-health --endpoint https://example.internal"
+    )]
+    Traces(Box<TracesCommand>),
+
     /// Probe external dependencies and validate configuration
     #[command(
         about = "Run diagnostics (check if everything is configured correctly)",
@@ -469,6 +479,26 @@ mod tests {
     use clap::CommandFactory;
     use insta::assert_snapshot;
 
+    const CLI_HELP_RENDER_STACK_SIZE: usize = 8 * 1024 * 1024;
+
+    fn render_cli_help(long: bool) -> String {
+        // The generated Clap tree includes the Trace Commons subcommands and can
+        // overflow Rust's default test-thread stack while rendering snapshots.
+        std::thread::Builder::new()
+            .stack_size(CLI_HELP_RENDER_STACK_SIZE)
+            .spawn(move || {
+                let mut cmd = Cli::command();
+                if long {
+                    cmd.render_long_help().to_string()
+                } else {
+                    cmd.render_help().to_string()
+                }
+            })
+            .expect("CLI help render thread should spawn")
+            .join()
+            .expect("CLI help render thread should not panic")
+    }
+
     #[test]
     fn test_version() {
         let cmd = Cli::command();
@@ -481,32 +511,28 @@ mod tests {
     #[test]
     #[cfg(feature = "import")]
     fn test_help_output() {
-        let mut cmd = Cli::command();
-        let help = cmd.render_help().to_string();
+        let help = render_cli_help(false);
         assert_snapshot!(help);
     }
 
     #[test]
     #[cfg(not(feature = "import"))]
     fn test_help_output_without_import() {
-        let mut cmd = Cli::command();
-        let help = cmd.render_help().to_string();
+        let help = render_cli_help(false);
         assert_snapshot!(help);
     }
 
     #[test]
     #[cfg(feature = "import")]
     fn test_long_help_output() {
-        let mut cmd = Cli::command();
-        let help = cmd.render_long_help().to_string();
+        let help = render_cli_help(true);
         assert_snapshot!(help);
     }
 
     #[test]
     #[cfg(not(feature = "import"))]
     fn test_long_help_output_without_import() {
-        let mut cmd = Cli::command();
-        let help = cmd.render_long_help().to_string();
+        let help = render_cli_help(true);
         assert_snapshot!(help);
     }
 }

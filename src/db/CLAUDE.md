@@ -37,7 +37,7 @@ cargo check --all-features                            # both
 | `libsql_migrations.rs` | Consolidated libSQL schema (CREATE IF NOT EXISTS, no ALTER TABLE) |
 | `tls.rs` | TLS connector factory for PostgreSQL (`rustls` + system root certs) |
 
-PostgreSQL schema: `migrations/V1__initial.sql` through `V9__flexible_embedding_dimension.sql` (managed by `refinery`). V1 is the base schema; later migrations add tables, columns, and rename `claude_code_events` → `job_events`.
+PostgreSQL schema: `migrations/V1__initial.sql` and later versioned migrations (managed by `refinery`). V1 is the base schema; later migrations add tables, columns, rename `claude_code_events` → `job_events`, and add feature-specific storage such as the consolidated Trace Commons schema.
 
 ## Trait Structure
 

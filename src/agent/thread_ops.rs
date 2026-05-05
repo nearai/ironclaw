@@ -31,6 +31,18 @@ use ironclaw_common::truncate_preview;
 
 const FORGED_THREAD_ID_ERROR: &str = "Invalid or unauthorized thread ID.";
 const LIVE_STATE_METADATA_KEY: &str = "live_state";
+const INVALID_AUTH_TOKEN_MESSAGE: &str = "Invalid token. Please try again.";
+const TRACE_TURN_OUTCOME_SCHEMA_VERSION: &str = "ironclaw.turn_outcome.v1";
+
+pub(super) struct PersistToolCallsInput<'a> {
+    pub thread_id: Uuid,
+    pub channel: &'a str,
+    pub user_id: &'a str,
+    pub turn_number: usize,
+    pub tool_calls: &'a [crate::agent::session::TurnToolCall],
+    pub narrative: Option<&'a str>,
+    pub outcome: Option<serde_json::Value>,
+}
 
 struct ProcessingLiveState<'a> {
     turn_number: usize,
@@ -71,7 +83,6 @@ fn tool_result_content_for_rebuild(result: &str) -> String {
     sentinel.summary_for_context()
 }
 
-const INVALID_AUTH_TOKEN_MESSAGE: &str = "Invalid token. Please try again.";
 fn requires_preexisting_uuid_thread(channel: &str) -> bool {
     // Gateway-style channels send server-issued conversation UUIDs.
     // Unknown UUIDs should be rejected instead of silently creating a new thread.
@@ -197,6 +208,49 @@ fn pending_approval_message(pending: Option<&PendingApproval>) -> String {
         }
         None => "Waiting for approval. Use /interrupt to cancel.".to_string(),
     }
+}
+
+fn trace_turn_outcome_success() -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": TRACE_TURN_OUTCOME_SCHEMA_VERSION,
+        "state": "Completed",
+        "task_success": "success",
+        "error_taxonomy": [],
+        "failure_modes": [],
+    })
+}
+
+fn trace_turn_outcome_failure(error_message: &str) -> serde_json::Value {
+    let failure_mode = classify_trace_failure_mode(error_message);
+    serde_json::json!({
+        "schema_version": TRACE_TURN_OUTCOME_SCHEMA_VERSION,
+        "state": "Failed",
+        "task_success": "failure",
+        "error_message": truncate_preview(error_message, 500),
+        "error_taxonomy": ["runtime_error"],
+        "failure_modes": [failure_mode],
+    })
+}
+
+fn classify_trace_failure_mode(error_message: &str) -> &'static str {
+    let lower = error_message.to_ascii_lowercase();
+    if lower.contains("auth") || lower.contains("credential") || lower.contains("token") {
+        "environment_or_auth_failure"
+    } else if lower.contains("tool") {
+        "unrecoverable_tool_failure"
+    } else if lower.contains("interrupted")
+        || lower.contains("stopped")
+        || lower.contains("max iteration")
+    {
+        "premature_termination"
+    } else {
+        "runtime_failure"
+    }
+}
+
+#[cfg(test)]
+fn trace_credit_notice_message(summary: &crate::trace_contribution::CreditSummary) -> String {
+    crate::trace_contribution::trace_credit_notice_message(summary)
 }
 
 impl Agent {
@@ -785,14 +839,15 @@ impl Agent {
                 drop(sess);
 
                 // Persist tool calls then assistant response (user message already persisted at turn start)
-                self.persist_tool_calls(
+                self.persist_tool_calls(PersistToolCallsInput {
                     thread_id,
-                    &message.channel,
-                    &message.user_id,
+                    channel: &message.channel,
+                    user_id: &message.user_id,
                     turn_number,
-                    &tool_calls,
-                    narrative.as_deref(),
-                )
+                    tool_calls: &tool_calls,
+                    narrative: narrative.as_deref(),
+                    outcome: Some(trace_turn_outcome_success()),
+                })
                 .await;
                 self.persist_assistant_response(
                     thread_id,
@@ -816,6 +871,13 @@ impl Agent {
 
                 self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
                     .await;
+
+                self.spawn_autonomous_trace_contribution(
+                    message.user_id.clone(),
+                    thread_id,
+                    message.channel.clone(),
+                    message.metadata.clone(),
+                );
 
                 Ok(SubmissionResult::response(response))
             }
@@ -874,14 +936,15 @@ impl Agent {
                     .map(|t| (t.turn_number, t.tool_calls.clone(), t.narrative.clone()))
                     .unwrap_or_default();
                 drop(sess);
-                self.persist_tool_calls(
+                self.persist_tool_calls(PersistToolCallsInput {
                     thread_id,
-                    &message.channel,
-                    &message.user_id,
+                    channel: &message.channel,
+                    user_id: &message.user_id,
                     turn_number,
-                    &tool_calls,
-                    narrative.as_deref(),
-                )
+                    tool_calls: &tool_calls,
+                    narrative: narrative.as_deref(),
+                    outcome: None,
+                })
                 .await;
                 self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
                     .await;
@@ -890,19 +953,62 @@ impl Agent {
             Ok(AgenticLoopResult::Failed { error, turn_usage }) => {
                 self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
                     .await;
-                thread.conclude_turn(TurnOutcome::Failed(error.to_string()));
+                let error_message = error.to_string();
+                thread.conclude_turn(TurnOutcome::Failed(error_message.clone()));
+                let (turn_number, tool_calls, narrative) = thread
+                    .turns
+                    .last()
+                    .map(|t| (t.turn_number, t.tool_calls.clone(), t.narrative.clone()))
+                    .unwrap_or_default();
+                self.persist_tool_calls(PersistToolCallsInput {
+                    thread_id,
+                    channel: &message.channel,
+                    user_id: &message.user_id,
+                    turn_number,
+                    tool_calls: &tool_calls,
+                    narrative: narrative.as_deref(),
+                    outcome: Some(trace_turn_outcome_failure(&error_message)),
+                })
+                .await;
                 drop(sess);
                 self.clear_conversation_live_state(thread_id, &message.channel, &message.user_id)
                     .await;
-                Ok(SubmissionResult::error(error.to_string()))
+                self.spawn_autonomous_trace_contribution(
+                    message.user_id.clone(),
+                    thread_id,
+                    message.channel.clone(),
+                    message.metadata.clone(),
+                );
+                Ok(SubmissionResult::error(error_message))
             }
             Err(e) => {
-                thread.conclude_turn(TurnOutcome::Failed(e.to_string()));
+                let error_message = e.to_string();
+                thread.conclude_turn(TurnOutcome::Failed(error_message.clone()));
+                let (turn_number, tool_calls, narrative) = thread
+                    .turns
+                    .last()
+                    .map(|t| (t.turn_number, t.tool_calls.clone(), t.narrative.clone()))
+                    .unwrap_or_default();
+                self.persist_tool_calls(PersistToolCallsInput {
+                    thread_id,
+                    channel: &message.channel,
+                    user_id: &message.user_id,
+                    turn_number,
+                    tool_calls: &tool_calls,
+                    narrative: narrative.as_deref(),
+                    outcome: Some(trace_turn_outcome_failure(&error_message)),
+                })
+                .await;
                 drop(sess);
                 self.clear_conversation_live_state(thread_id, &message.channel, &message.user_id)
                     .await;
-                // User message already persisted at turn start; nothing else to save
-                Ok(SubmissionResult::error(e.to_string()))
+                self.spawn_autonomous_trace_contribution(
+                    message.user_id.clone(),
+                    thread_id,
+                    message.channel.clone(),
+                    message.metadata.clone(),
+                );
+                Ok(SubmissionResult::error(error_message))
             }
         }
     }
@@ -1135,6 +1241,168 @@ impl Agent {
         }
     }
 
+    fn spawn_autonomous_trace_contribution(
+        &self,
+        user_id: String,
+        thread_id: Uuid,
+        channel: String,
+        metadata: serde_json::Value,
+    ) {
+        let store = match self.store() {
+            Some(store) => Arc::clone(store),
+            None => return,
+        };
+        let channels = Arc::clone(&self.channels);
+
+        tokio::spawn(async move {
+            let trace_host = crate::trace_client::TraceClientHost;
+            let trace_scope = crate::trace_client::TraceClientScope::user(user_id.clone());
+
+            let policy = match crate::trace_contribution::read_trace_policy_for_scope(Some(
+                trace_scope.as_str(),
+            )) {
+                Ok(policy) => policy,
+                Err(error) => {
+                    tracing::debug!(%error, "Failed to read autonomous trace contribution policy");
+                    return;
+                }
+            };
+
+            let owned = match store
+                .conversation_belongs_to_user(thread_id, trace_scope.as_str())
+                .await
+            {
+                Ok(owned) => owned,
+                Err(error) => {
+                    tracing::debug!(%error, %thread_id, "Failed to verify trace thread ownership");
+                    return;
+                }
+            };
+            if !owned {
+                tracing::warn!(
+                    %thread_id,
+                    user_id = %trace_scope.as_str(),
+                    "Skipping autonomous trace contribution for unowned thread"
+                );
+                return;
+            }
+
+            let (messages, _) = match store
+                .list_conversation_messages_paginated(thread_id, None, 24)
+                .await
+            {
+                Ok(messages) => messages,
+                Err(error) => {
+                    tracing::debug!(%error, %thread_id, "Failed to load trace contribution messages");
+                    return;
+                }
+            };
+
+            let envelope = match trace_host
+                .prepare_autonomous_envelope_from_messages(
+                    crate::trace_client::TraceClientAutonomousCaptureRequest {
+                        scope: trace_scope.clone(),
+                        channel: crate::trace_client::trace_channel_from_host_channel(&channel),
+                        messages: &messages,
+                        policy: &policy,
+                        max_turns: 5,
+                    },
+                )
+                .await
+            {
+                Ok(crate::trace_client::TraceClientAutonomousCaptureOutcome::Submit(envelope)) => {
+                    Some(*envelope)
+                }
+                Ok(crate::trace_client::TraceClientAutonomousCaptureOutcome::Held {
+                    submission_id,
+                    reason,
+                }) => {
+                    tracing::debug!(
+                        %thread_id,
+                        %submission_id,
+                        reason = %reason,
+                        "Skipping autonomous trace queue by trace contribution policy"
+                    );
+                    None
+                }
+                Ok(crate::trace_client::TraceClientAutonomousCaptureOutcome::Skipped) => return,
+                Err(error) => {
+                    tracing::debug!(%error, %thread_id, "Failed to build autonomous trace envelope");
+                    return;
+                }
+            };
+
+            if let Some(envelope) = envelope
+                && let Err(error) = trace_host.queue_envelope_for_scope(&trace_scope, &envelope)
+            {
+                tracing::debug!(%error, %thread_id, "Failed to queue autonomous trace");
+                return;
+            }
+
+            match trace_host.flush_scope_queue(&trace_scope, 10).await {
+                Ok(_report) => {}
+                Err(error) => {
+                    tracing::debug!(%error, %thread_id, "Failed to flush autonomous trace queue");
+                }
+            }
+
+            let pending = match trace_host.pending_credit_notice_outbox_items(&trace_scope) {
+                Ok(pending) => pending,
+                Err(error) => {
+                    tracing::debug!(
+                        %error,
+                        %thread_id,
+                        "Failed to read autonomous trace credit notice outbox"
+                    );
+                    return;
+                }
+            };
+            for item in pending {
+                match channels
+                    .send_status(
+                        &channel,
+                        StatusUpdate::Status(item.message.clone()),
+                        &metadata,
+                    )
+                    .await
+                {
+                    Ok(()) => {
+                        if let Err(error) = trace_host.record_credit_notice_delivery_success(
+                            &trace_scope,
+                            &item.fingerprint,
+                            &channel,
+                        ) {
+                            tracing::debug!(
+                                %error,
+                                %thread_id,
+                                "Failed to record autonomous trace credit notice delivery"
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        tracing::debug!(
+                            %error,
+                            %thread_id,
+                            "Failed to send autonomous trace credit notice"
+                        );
+                        if let Err(record_error) = trace_host.record_credit_notice_delivery_failure(
+                            &trace_scope,
+                            &item.fingerprint,
+                            &channel,
+                            &error.to_string(),
+                        ) {
+                            tracing::debug!(
+                                %record_error,
+                                %thread_id,
+                                "Failed to record autonomous trace credit notice delivery failure"
+                            );
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     /// Persist tool call summaries to the DB as a `role="tool_calls"` message.
     ///
     /// Stored between the user and assistant messages so that
@@ -1142,16 +1410,18 @@ impl Agent {
     /// Content is a JSON object: `{ "calls": [...], "narrative": "..." }`.
     /// The `calls` array contains tool call summaries with optional `rationale`
     /// and `tool_call_id` fields. Legacy rows may be plain JSON arrays.
-    pub(super) async fn persist_tool_calls(
-        &self,
-        thread_id: Uuid,
-        channel: &str,
-        user_id: &str,
-        turn_number: usize,
-        tool_calls: &[crate::agent::session::TurnToolCall],
-        narrative: Option<&str>,
-    ) {
-        if tool_calls.is_empty() {
+    pub(super) async fn persist_tool_calls(&self, input: PersistToolCallsInput<'_>) {
+        let PersistToolCallsInput {
+            thread_id,
+            channel,
+            user_id,
+            turn_number,
+            tool_calls,
+            narrative,
+            outcome,
+        } = input;
+
+        if tool_calls.is_empty() && outcome.is_none() {
             return;
         }
 
@@ -1193,16 +1463,15 @@ impl Agent {
 
         // Wrap in an object with optional narrative so it can be reconstructed.
         // safety: no byte-index slicing here; comment describes JSON shape
-        let wrapper = if let Some(n) = narrative {
-            serde_json::json!({
-                "narrative": truncate_preview(n, 1000),
-                "calls": summaries,
-            })
-        } else {
-            serde_json::json!({
-                "calls": summaries,
-            })
-        };
+        let mut wrapper = serde_json::json!({
+            "calls": summaries,
+        });
+        if let Some(n) = narrative {
+            wrapper["narrative"] = serde_json::Value::String(truncate_preview(n, 1000));
+        }
+        if let Some(outcome) = outcome {
+            wrapper["outcome"] = outcome;
+        }
         let content = match serde_json::to_string(&wrapper) {
             Ok(c) => c,
             Err(e) => {
@@ -2068,14 +2337,15 @@ impl Agent {
                         .map(|t| (t.turn_number, t.tool_calls.clone(), t.narrative.clone()))
                         .unwrap_or_default();
                     // User message already persisted at turn start; save tool calls then assistant response
-                    self.persist_tool_calls(
+                    self.persist_tool_calls(PersistToolCallsInput {
                         thread_id,
-                        &message.channel,
-                        &message.user_id,
+                        channel: &message.channel,
+                        user_id: &message.user_id,
                         turn_number,
-                        &tool_calls,
-                        narrative.as_deref(),
-                    )
+                        tool_calls: &tool_calls,
+                        narrative: narrative.as_deref(),
+                        outcome: Some(trace_turn_outcome_success()),
+                    })
                     .await;
                     self.persist_assistant_response(
                         thread_id,
@@ -2096,6 +2366,13 @@ impl Agent {
                     }
                     self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
                         .await;
+                    drop(sess);
+                    self.spawn_autonomous_trace_contribution(
+                        message.user_id.clone(),
+                        thread_id,
+                        message.channel.clone(),
+                        message.metadata.clone(),
+                    );
                     Ok(SubmissionResult::response(response))
                 }
                 Ok(AgenticLoopResult::NeedApproval {
@@ -2147,14 +2424,15 @@ impl Agent {
                         .last()
                         .map(|t| (t.turn_number, t.tool_calls.clone(), t.narrative.clone()))
                         .unwrap_or_default();
-                    self.persist_tool_calls(
+                    self.persist_tool_calls(PersistToolCallsInput {
                         thread_id,
-                        &message.channel,
-                        &message.user_id,
+                        channel: &message.channel,
+                        user_id: &message.user_id,
                         turn_number,
-                        &tool_calls,
-                        narrative.as_deref(),
-                    )
+                        tool_calls: &tool_calls,
+                        narrative: narrative.as_deref(),
+                        outcome: None,
+                    })
                     .await;
                     self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
                         .await;
@@ -2163,7 +2441,23 @@ impl Agent {
                 Ok(AgenticLoopResult::Failed { error, turn_usage }) => {
                     self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
                         .await;
-                    thread.conclude_turn(TurnOutcome::Failed(error.to_string()));
+                    let error_message = error.to_string();
+                    thread.conclude_turn(TurnOutcome::Failed(error_message.clone()));
+                    let (turn_number, tool_calls, narrative) = thread
+                        .turns
+                        .last()
+                        .map(|t| (t.turn_number, t.tool_calls.clone(), t.narrative.clone()))
+                        .unwrap_or_default();
+                    self.persist_tool_calls(PersistToolCallsInput {
+                        thread_id,
+                        channel: &message.channel,
+                        user_id: &message.user_id,
+                        turn_number,
+                        tool_calls: &tool_calls,
+                        narrative: narrative.as_deref(),
+                        outcome: Some(trace_turn_outcome_failure(&error_message)),
+                    })
+                    .await;
                     drop(sess);
                     self.clear_conversation_live_state(
                         thread_id,
@@ -2171,10 +2465,32 @@ impl Agent {
                         &message.user_id,
                     )
                     .await;
-                    Ok(SubmissionResult::error(error.to_string()))
+                    self.spawn_autonomous_trace_contribution(
+                        message.user_id.clone(),
+                        thread_id,
+                        message.channel.clone(),
+                        message.metadata.clone(),
+                    );
+                    Ok(SubmissionResult::error(error_message))
                 }
                 Err(e) => {
-                    thread.conclude_turn(TurnOutcome::Failed(e.to_string()));
+                    let error_message = e.to_string();
+                    thread.conclude_turn(TurnOutcome::Failed(error_message.clone()));
+                    let (turn_number, tool_calls, narrative) = thread
+                        .turns
+                        .last()
+                        .map(|t| (t.turn_number, t.tool_calls.clone(), t.narrative.clone()))
+                        .unwrap_or_default();
+                    self.persist_tool_calls(PersistToolCallsInput {
+                        thread_id,
+                        channel: &message.channel,
+                        user_id: &message.user_id,
+                        turn_number,
+                        tool_calls: &tool_calls,
+                        narrative: narrative.as_deref(),
+                        outcome: Some(trace_turn_outcome_failure(&error_message)),
+                    })
+                    .await;
                     drop(sess);
                     self.clear_conversation_live_state(
                         thread_id,
@@ -2182,8 +2498,13 @@ impl Agent {
                         &message.user_id,
                     )
                     .await;
-                    // User message already persisted at turn start
-                    Ok(SubmissionResult::error(e.to_string()))
+                    self.spawn_autonomous_trace_contribution(
+                        message.user_id.clone(),
+                        thread_id,
+                        message.channel.clone(),
+                        message.metadata.clone(),
+                    );
+                    Ok(SubmissionResult::error(error_message))
                 }
             }
         } else {
@@ -2731,6 +3052,7 @@ mod tests {
     #[derive(Clone)]
     struct RecordingStatusChannel {
         statuses: Arc<TokioMutex<Vec<StatusUpdate>>>,
+        fail_status: bool,
     }
 
     #[async_trait::async_trait]
@@ -2756,6 +3078,12 @@ mod tests {
             status: StatusUpdate,
             _metadata: &serde_json::Value,
         ) -> Result<(), ChannelError> {
+            if self.fail_status {
+                return Err(ChannelError::SendFailed {
+                    name: "test".to_string(),
+                    reason: "forced status failure for test".to_string(),
+                });
+            }
             self.statuses.lock().await.push(status);
             Ok(())
         }
@@ -2813,6 +3141,7 @@ mod tests {
         channels
             .add(Box::new(RecordingStatusChannel {
                 statuses: Arc::clone(&statuses),
+                fail_status: false,
             }))
             .await;
 
@@ -3058,6 +3387,631 @@ mod tests {
         let turn_usage = turn_usage_from_result(&result).expect("usage should be present");
         assert_eq!(turn_usage.usage.input_tokens, 7);
         assert_eq!(turn_usage.usage.output_tokens, 2);
+    }
+
+    #[test]
+    fn test_persisted_trace_outcomes_enrich_capture_metadata() {
+        let messages = vec![
+            make_db_msg("user", "Summarize the plan"),
+            make_db_msg(
+                "tool_calls",
+                &serde_json::json!({
+                    "calls": [],
+                    "outcome": trace_turn_outcome_success(),
+                })
+                .to_string(),
+            ),
+            make_db_msg("assistant", "Plan summarized."),
+            make_db_msg("user", "Fetch the private calendar"),
+            make_db_msg(
+                "tool_calls",
+                &serde_json::json!({
+                    "calls": [],
+                    "outcome": trace_turn_outcome_failure("Tool calendar failed: auth token expired"),
+                })
+                .to_string(),
+            ),
+        ];
+
+        let (turns, outcome) =
+            crate::trace_client::capture_turns_from_conversation_messages_with_outcomes(&messages);
+
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].state.as_deref(), Some("Completed"));
+        assert_eq!(turns[1].state.as_deref(), Some("Failed"));
+        assert_eq!(
+            outcome.task_success,
+            crate::trace_contribution::TaskSuccess::Failure
+        );
+        assert!(
+            outcome
+                .error_taxonomy
+                .contains(&"runtime_error".to_string())
+        );
+        assert!(
+            outcome
+                .failure_modes
+                .contains(&crate::trace_contribution::TraceFailureMode::EnvironmentOrAuthFailure)
+        );
+    }
+
+    #[test]
+    fn test_trace_credit_notice_message_explains_delayed_and_final_credit() {
+        let message = trace_credit_notice_message(&crate::trace_contribution::CreditSummary {
+            submissions_total: 4,
+            submissions_submitted: 3,
+            submissions_revoked: 0,
+            submissions_expired: 0,
+            pending_credit: 12.5,
+            final_credit: 7.0,
+            delayed_credit_delta: 1.25,
+            credit_events_total: 3,
+            recent_explanations: vec![
+                "Replayable trace earned an initial estimate.".to_string(),
+                "Duplicate checks may adjust credit.".to_string(),
+            ],
+        });
+
+        assert!(message.contains("3 submitted, 0 expired (4 total)"));
+        assert!(message.contains("pending +12.50"));
+        assert!(message.contains("final confirmed +7.00"));
+        assert!(message.contains("delayed ledger +1.25"));
+        assert!(message.contains("3 credit event(s) recorded"));
+        assert!(message.contains("Delayed credit can change"));
+        assert!(message.contains("Recent factors: Replayable trace"));
+    }
+
+    #[cfg(feature = "libsql")]
+    async fn make_trace_capture_agent(
+        llm: Arc<dyn crate::llm::LlmProvider>,
+    ) -> (Agent, Arc<dyn crate::db::Database>, tempfile::TempDir) {
+        let (db, temp_dir) = crate::testing::test_db().await;
+        let channels = Arc::new(ChannelManager::new());
+        let deps = AgentDeps {
+            owner_id: "default".to_string(),
+            store: Some(Arc::clone(&db)),
+            settings_store: Some(Arc::clone(&db) as Arc<dyn crate::db::SettingsStore + Send + Sync>),
+            llm,
+            cheap_llm: None,
+            safety: Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 100_000,
+                injection_check_enabled: false,
+            })),
+            tools: Arc::new(ToolRegistry::new()),
+            workspace: None,
+            extension_manager: None,
+            skill_registry: None,
+            skill_catalog: None,
+            skills_config: SkillsConfig::default(),
+            hooks: Arc::new(HookRegistry::new()),
+            auth_manager: None,
+            cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
+            sse_tx: None,
+            http_interceptor: None,
+            transcription: None,
+            document_extraction: None,
+            sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
+            builder: None,
+            llm_backend: "nearai".to_string(),
+            tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+        };
+        let agent = Agent::new(
+            AgentConfig {
+                name: "trace-capture-test-agent".to_string(),
+                max_parallel_jobs: 1,
+                job_timeout: Duration::from_secs(60),
+                stuck_threshold: Duration::from_secs(60),
+                repair_check_interval: Duration::from_secs(30),
+                max_repair_attempts: 1,
+                use_planning: false,
+                session_idle_timeout: Duration::from_secs(300),
+                allow_local_tools: false,
+                max_cost_per_day_cents: None,
+                max_actions_per_hour: None,
+                max_cost_per_user_per_day_cents: None,
+                max_tool_iterations: 50,
+                auto_approve_tools: false,
+                default_timezone: "UTC".to_string(),
+                max_jobs_per_user: None,
+                max_tokens_per_job: 0,
+                multi_tenant: false,
+                max_llm_concurrent_per_user: None,
+                max_jobs_concurrent_per_user: None,
+                engine_v2: false,
+            },
+            deps,
+            channels,
+            None,
+            None,
+            None,
+            Some(Arc::new(ContextManager::new(1))),
+            None,
+        );
+
+        (agent, db, temp_dir)
+    }
+
+    #[cfg(feature = "libsql")]
+    async fn make_trace_capture_agent_with_status_channel(
+        llm: Arc<dyn crate::llm::LlmProvider>,
+        fail_status: bool,
+    ) -> (
+        Agent,
+        Arc<dyn crate::db::Database>,
+        tempfile::TempDir,
+        Arc<TokioMutex<Vec<StatusUpdate>>>,
+    ) {
+        let (db, temp_dir) = crate::testing::test_db().await;
+        let statuses = Arc::new(TokioMutex::new(Vec::new()));
+        let channels = Arc::new(ChannelManager::new());
+        channels
+            .add(Box::new(RecordingStatusChannel {
+                statuses: Arc::clone(&statuses),
+                fail_status,
+            }))
+            .await;
+        let deps = AgentDeps {
+            owner_id: "default".to_string(),
+            store: Some(Arc::clone(&db)),
+            settings_store: Some(Arc::clone(&db) as Arc<dyn crate::db::SettingsStore + Send + Sync>),
+            llm,
+            cheap_llm: None,
+            safety: Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 100_000,
+                injection_check_enabled: false,
+            })),
+            tools: Arc::new(ToolRegistry::new()),
+            workspace: None,
+            extension_manager: None,
+            skill_registry: None,
+            skill_catalog: None,
+            skills_config: SkillsConfig::default(),
+            hooks: Arc::new(HookRegistry::new()),
+            auth_manager: None,
+            cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
+            sse_tx: None,
+            http_interceptor: None,
+            transcription: None,
+            document_extraction: None,
+            sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
+            builder: None,
+            llm_backend: "nearai".to_string(),
+            tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+        };
+        let agent = Agent::new(
+            AgentConfig {
+                name: "trace-capture-status-test-agent".to_string(),
+                max_parallel_jobs: 1,
+                job_timeout: Duration::from_secs(60),
+                stuck_threshold: Duration::from_secs(60),
+                repair_check_interval: Duration::from_secs(30),
+                max_repair_attempts: 1,
+                use_planning: false,
+                session_idle_timeout: Duration::from_secs(300),
+                allow_local_tools: false,
+                max_cost_per_day_cents: None,
+                max_actions_per_hour: None,
+                max_cost_per_user_per_day_cents: None,
+                max_tool_iterations: 50,
+                auto_approve_tools: false,
+                default_timezone: "UTC".to_string(),
+                max_jobs_per_user: None,
+                max_tokens_per_job: 0,
+                multi_tenant: false,
+                max_llm_concurrent_per_user: None,
+                max_jobs_concurrent_per_user: None,
+                engine_v2: false,
+            },
+            deps,
+            channels,
+            None,
+            None,
+            None,
+            Some(Arc::new(ContextManager::new(1))),
+            None,
+        );
+
+        (agent, db, temp_dir, statuses)
+    }
+
+    #[cfg(feature = "libsql")]
+    async fn make_trace_capture_agent_with_statuses(
+        llm: Arc<dyn crate::llm::LlmProvider>,
+    ) -> (
+        Agent,
+        Arc<dyn crate::db::Database>,
+        tempfile::TempDir,
+        Arc<TokioMutex<Vec<StatusUpdate>>>,
+    ) {
+        make_trace_capture_agent_with_status_channel(llm, false).await
+    }
+
+    #[cfg(feature = "libsql")]
+    fn write_trace_notice_record_for_user(user_id: &str, pending: f32, final_credit: f32) {
+        let submission_id = Uuid::new_v4();
+        let record = crate::trace_contribution::LocalTraceSubmissionRecord {
+            submission_id,
+            trace_id: Uuid::new_v4(),
+            endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+            status: crate::trace_contribution::LocalTraceSubmissionStatus::Submitted,
+            server_status: Some("accepted".to_string()),
+            submitted_at: Some(chrono::Utc::now()),
+            revoked_at: None,
+            privacy_risk: "low".to_string(),
+            redaction_counts: std::collections::BTreeMap::new(),
+            credit_points_pending: pending,
+            credit_points_final: Some(final_credit),
+            credit_explanation: vec!["Delayed runtime credit posted.".to_string()],
+            credit_events: vec![crate::trace_contribution::TraceCreditEvent {
+                event_id: Uuid::new_v4(),
+                submission_id,
+                contributor_pseudonym: "test".to_string(),
+                kind: crate::trace_contribution::TraceCreditEventKind::CreditSynced,
+                points_delta: final_credit - pending,
+                reason: "Delayed runtime credit posted.".to_string(),
+                created_at: chrono::Utc::now(),
+            }],
+            history: Vec::new(),
+            last_credit_notice_at: None,
+            credit_notice_state: crate::trace_contribution::TraceCreditNoticeState::default(),
+        };
+        let path = crate::trace_contribution::trace_contribution_dir_for_scope(Some(user_id))
+            .join("submissions.json");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("trace submissions dir creates");
+        }
+        let body = serde_json::to_string_pretty(&vec![record]).expect("trace record serializes");
+        std::fs::write(path, body).expect("trace record writes");
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_process_user_input_persists_success_outcome_metadata() {
+        let (agent, db, _temp_dir) = make_trace_capture_agent(Arc::new(StubLlm::new("done"))).await;
+        let session = agent
+            .session_manager
+            .get_or_create_session("trace-user")
+            .await;
+        let thread_id = {
+            let mut sess = session.lock().await;
+            sess.create_thread(Some("test")).id
+        };
+        let message = IncomingMessage::new("test", "trace-user", "finish it");
+
+        let result = agent
+            .process_user_input(
+                &message,
+                agent.tenant_ctx("trace-user").await,
+                Arc::clone(&session),
+                thread_id,
+                "finish it",
+            )
+            .await
+            .expect("process user input");
+        assert!(matches!(result, SubmissionResult::Response { .. }));
+
+        let messages = db
+            .list_conversation_messages(thread_id)
+            .await
+            .expect("list persisted messages");
+        let (turns, outcome) =
+            crate::trace_client::capture_turns_from_conversation_messages_with_outcomes(&messages);
+
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].state.as_deref(), Some("Completed"));
+        assert_eq!(
+            outcome.task_success,
+            crate::trace_contribution::TaskSuccess::Success
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_process_user_input_persists_failed_outcome_metadata() {
+        let (agent, db, _temp_dir) =
+            make_trace_capture_agent(Arc::new(StubLlm::failing("failing-model"))).await;
+        let session = agent
+            .session_manager
+            .get_or_create_session("trace-user")
+            .await;
+        let thread_id = {
+            let mut sess = session.lock().await;
+            sess.create_thread(Some("test")).id
+        };
+        let message = IncomingMessage::new("test", "trace-user", "finish it");
+
+        let result = agent
+            .process_user_input(
+                &message,
+                agent.tenant_ctx("trace-user").await,
+                Arc::clone(&session),
+                thread_id,
+                "finish it",
+            )
+            .await
+            .expect("process user input");
+        assert!(matches!(result, SubmissionResult::Error { .. }));
+
+        let messages = db
+            .list_conversation_messages(thread_id)
+            .await
+            .expect("list persisted messages");
+        let (turns, outcome) =
+            crate::trace_client::capture_turns_from_conversation_messages_with_outcomes(&messages);
+
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].state.as_deref(), Some("Failed"));
+        assert_eq!(
+            outcome.task_success,
+            crate::trace_contribution::TaskSuccess::Failure
+        );
+        assert!(
+            outcome
+                .error_taxonomy
+                .contains(&"runtime_error".to_string())
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_process_user_input_emits_autonomous_trace_credit_notice() {
+        let (agent, _db, _temp_dir, statuses) =
+            make_trace_capture_agent_with_statuses(Arc::new(StubLlm::new("done"))).await;
+        let user_id = format!("trace-runtime-credit-user-{}", Uuid::new_v4());
+        let policy = crate::trace_contribution::StandingTraceContributionPolicy {
+            enabled: true,
+            ingestion_endpoint: Some("http://127.0.0.1:9/v1/traces".to_string()),
+            auto_submit_high_value_traces: true,
+            min_submission_score: 0.0,
+            credit_notice_interval_hours: 168,
+            ..Default::default()
+        };
+        crate::trace_contribution::write_trace_policy_for_scope(Some(&user_id), &policy)
+            .expect("trace policy writes");
+        write_trace_notice_record_for_user(&user_id, 4.0, 6.0);
+
+        let session = agent.session_manager.get_or_create_session(&user_id).await;
+        let thread_id = {
+            let mut sess = session.lock().await;
+            sess.create_thread(Some("test")).id
+        };
+        let message = IncomingMessage::new("test", &user_id, "finish it");
+
+        let result = agent
+            .process_user_input(
+                &message,
+                agent.tenant_ctx(&user_id).await,
+                Arc::clone(&session),
+                thread_id,
+                "finish it",
+            )
+            .await
+            .expect("process user input");
+        assert!(matches!(result, SubmissionResult::Response { .. }));
+
+        let notice_seen = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let statuses = statuses.lock().await;
+                if statuses.iter().any(|status| {
+                    matches!(
+                        status,
+                        StatusUpdate::Status(message)
+                            if message.contains("Trace contribution credit update")
+                                && message.contains("pending +4.00")
+                                && message.contains("final confirmed +6.00")
+                    )
+                }) {
+                    break true;
+                }
+                drop(statuses);
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap_or(false);
+
+        assert!(
+            notice_seen,
+            "autonomous trace credit status was not emitted"
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_autonomous_trace_credit_notice_failure_stays_pending_in_outbox() {
+        let (agent, _db, _temp_dir, _statuses) =
+            make_trace_capture_agent_with_status_channel(Arc::new(StubLlm::new("done")), true)
+                .await;
+        let user_id = format!("trace-runtime-credit-failure-user-{}", Uuid::new_v4());
+        let policy = crate::trace_contribution::StandingTraceContributionPolicy {
+            enabled: true,
+            ingestion_endpoint: Some("http://127.0.0.1:9/v1/traces".to_string()),
+            auto_submit_high_value_traces: true,
+            min_submission_score: 0.0,
+            credit_notice_interval_hours: 168,
+            ..Default::default()
+        };
+        crate::trace_contribution::write_trace_policy_for_scope(Some(&user_id), &policy)
+            .expect("trace policy writes");
+        write_trace_notice_record_for_user(&user_id, 4.0, 6.0);
+
+        let session = agent.session_manager.get_or_create_session(&user_id).await;
+        let thread_id = {
+            let mut sess = session.lock().await;
+            sess.create_thread(Some("test")).id
+        };
+        let message = IncomingMessage::new("test", &user_id, "finish it");
+
+        let result = agent
+            .process_user_input(
+                &message,
+                agent.tenant_ctx(&user_id).await,
+                Arc::clone(&session),
+                thread_id,
+                "finish it",
+            )
+            .await
+            .expect("process user input");
+        assert!(matches!(result, SubmissionResult::Response { .. }));
+
+        let failure_recorded = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let outbox = crate::trace_contribution::read_trace_credit_notice_outbox_for_scope(
+                    Some(&user_id),
+                )
+                .expect("credit notice outbox reads");
+                if outbox.iter().any(|item| {
+                    item.status == crate::trace_contribution::TraceCreditNoticeOutboxStatus::Pending
+                        && item.attempt_count == 1
+                        && item.delivery_attempts.iter().any(|attempt| {
+                            !attempt.succeeded
+                                && attempt
+                                    .error_hash
+                                    .as_deref()
+                                    .is_some_and(|hash| hash.starts_with("sha256:"))
+                                && attempt.error_kind.is_some()
+                        })
+                }) {
+                    break true;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap_or(false);
+
+        assert!(
+            failure_recorded,
+            "failed autonomous credit notice delivery should remain pending in the durable outbox"
+        );
+        let serialized = serde_json::to_string(
+            &crate::trace_contribution::read_trace_credit_notice_outbox_for_scope(Some(&user_id))
+                .expect("credit notice outbox reads"),
+        )
+        .expect("outbox serializes");
+        assert!(!serialized.contains("forced status failure for test"));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_autonomous_trace_requires_endpoint_before_queue() {
+        let (agent, _db, _temp_dir) =
+            make_trace_capture_agent(Arc::new(StubLlm::new("done"))).await;
+        let user_id = format!("trace-runtime-policy-user-{}", Uuid::new_v4());
+        let mut policy = crate::trace_contribution::StandingTraceContributionPolicy {
+            enabled: true,
+            ..Default::default()
+        };
+        policy.auto_submit_high_value_traces = true;
+        policy.min_submission_score = 0.0;
+        crate::trace_contribution::write_trace_policy_for_scope(Some(&user_id), &policy)
+            .expect("trace policy writes");
+
+        let session = agent.session_manager.get_or_create_session(&user_id).await;
+        let thread_id = {
+            let mut sess = session.lock().await;
+            sess.create_thread(Some("test")).id
+        };
+        let message = IncomingMessage::new("test", &user_id, "finish it");
+
+        let result = agent
+            .process_user_input(
+                &message,
+                agent.tenant_ctx(&user_id).await,
+                Arc::clone(&session),
+                thread_id,
+                "finish it",
+            )
+            .await
+            .expect("process user input");
+        assert!(matches!(result, SubmissionResult::Response { .. }));
+
+        let queued =
+            crate::trace_contribution::queued_trace_envelope_paths_for_scope(Some(&user_id))
+                .expect("read trace queue");
+        assert!(
+            queued.is_empty(),
+            "endpoint-less autonomous policy must not queue traces"
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_autonomous_trace_skips_ineligible_queue_but_emits_credit_notice() {
+        let (agent, _db, _temp_dir, statuses) =
+            make_trace_capture_agent_with_statuses(Arc::new(StubLlm::new("done"))).await;
+        let user_id = format!("trace-runtime-ineligible-policy-user-{}", Uuid::new_v4());
+        let policy = crate::trace_contribution::StandingTraceContributionPolicy {
+            enabled: true,
+            ingestion_endpoint: Some("http://127.0.0.1:9/v1/traces".to_string()),
+            auto_submit_failed_traces: false,
+            auto_submit_high_value_traces: false,
+            require_manual_approval_when_pii_detected: false,
+            min_submission_score: 0.0,
+            credit_notice_interval_hours: 168,
+            ..Default::default()
+        };
+        crate::trace_contribution::write_trace_policy_for_scope(Some(&user_id), &policy)
+            .expect("trace policy writes");
+        write_trace_notice_record_for_user(&user_id, 2.0, 3.5);
+
+        let session = agent.session_manager.get_or_create_session(&user_id).await;
+        let thread_id = {
+            let mut sess = session.lock().await;
+            sess.create_thread(Some("test")).id
+        };
+        let message = IncomingMessage::new("test", &user_id, "finish it");
+
+        let result = agent
+            .process_user_input(
+                &message,
+                agent.tenant_ctx(&user_id).await,
+                Arc::clone(&session),
+                thread_id,
+                "finish it",
+            )
+            .await
+            .expect("process user input");
+        assert!(matches!(result, SubmissionResult::Response { .. }));
+
+        let notice_seen = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let statuses = statuses.lock().await;
+                if statuses.iter().any(|status| {
+                    matches!(
+                        status,
+                        StatusUpdate::Status(message)
+                            if message.contains("Trace contribution credit update")
+                                && message.contains("pending +2.00")
+                                && message.contains("final confirmed +3.50")
+                    )
+                }) {
+                    break true;
+                }
+                drop(statuses);
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(
+            notice_seen,
+            "autonomous credit notice should still emit when the current trace is not queueable"
+        );
+
+        let queued =
+            crate::trace_contribution::queued_trace_envelope_paths_for_scope(Some(&user_id))
+                .expect("read trace queue");
+        assert!(
+            queued.is_empty(),
+            "ineligible autonomous trace should not leave a held queue file"
+        );
+        let held = crate::trace_contribution::read_trace_queue_holds_for_scope(Some(&user_id))
+            .expect("read trace queue holds");
+        assert!(
+            held.is_empty(),
+            "ineligible autonomous trace should not leave a hold sidecar"
+        );
     }
 
     #[test]
