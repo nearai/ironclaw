@@ -802,10 +802,37 @@ pub struct SafetySettings {
     /// Whether injection check is enabled.
     #[serde(default = "default_true")]
     pub injection_check_enabled: bool,
+
+    /// Whether the Tirith pre-exec scanner runs on shell tool calls.
+    /// See <https://github.com/sheeki03/tirith>.
+    #[serde(default = "default_true")]
+    pub tirith_enabled: bool,
+
+    /// Path or PATH-resolvable name of the Tirith binary.
+    #[serde(default = "default_tirith_bin")]
+    pub tirith_bin: String,
+
+    /// Subprocess timeout for a single Tirith scan, in milliseconds.
+    #[serde(default = "default_tirith_timeout_ms")]
+    pub tirith_timeout_ms: u64,
+
+    /// `true` (default): operational failures (missing binary, timeout, etc.)
+    /// fall through to the existing approval logic; `false`: operational
+    /// failures hard-deny the tool call.
+    #[serde(default = "default_true")]
+    pub tirith_fail_open: bool,
 }
 
 fn default_max_output_length() -> usize {
     100_000
+}
+
+fn default_tirith_bin() -> String {
+    "tirith".to_string()
+}
+
+fn default_tirith_timeout_ms() -> u64 {
+    5_000
 }
 
 impl Default for SafetySettings {
@@ -813,6 +840,10 @@ impl Default for SafetySettings {
         Self {
             max_output_length: default_max_output_length(),
             injection_check_enabled: true,
+            tirith_enabled: true,
+            tirith_bin: default_tirith_bin(),
+            tirith_timeout_ms: default_tirith_timeout_ms(),
+            tirith_fail_open: true,
         }
     }
 }

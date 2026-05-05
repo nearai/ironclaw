@@ -1,5 +1,8 @@
+use std::time::Duration;
+
 use crate::config::helpers::{db_first_bool, db_first_or_default};
 use crate::error::ConfigError;
+use crate::tools::builtin::TirithConfig;
 
 pub use ironclaw_safety::SafetyConfig;
 
@@ -18,6 +21,34 @@ pub(crate) fn resolve_safety_config(
             ss.injection_check_enabled,
             defaults.injection_check_enabled,
             "SAFETY_INJECTION_CHECK_ENABLED",
+        )?,
+    })
+}
+
+/// Resolve `TirithConfig` using the same DB-first → env → default precedence
+/// as the rest of the safety subsystem. See [`crate::tools::builtin::TirithConfig`].
+pub(crate) fn resolve_tirith_config(
+    settings: &crate::settings::Settings,
+) -> Result<TirithConfig, ConfigError> {
+    let ss = &settings.safety;
+    let defaults = crate::settings::SafetySettings::default();
+    let timeout_ms = db_first_or_default(
+        &ss.tirith_timeout_ms,
+        &defaults.tirith_timeout_ms,
+        "SAFETY_TIRITH_TIMEOUT_MS",
+    )?;
+    Ok(TirithConfig {
+        enabled: db_first_bool(
+            ss.tirith_enabled,
+            defaults.tirith_enabled,
+            "SAFETY_TIRITH_ENABLED",
+        )?,
+        bin: db_first_or_default(&ss.tirith_bin, &defaults.tirith_bin, "SAFETY_TIRITH_BIN")?,
+        timeout: Duration::from_millis(timeout_ms),
+        fail_open: db_first_bool(
+            ss.tirith_fail_open,
+            defaults.tirith_fail_open,
+            "SAFETY_TIRITH_FAIL_OPEN",
         )?,
     })
 }

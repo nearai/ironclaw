@@ -249,6 +249,7 @@ impl EffectExecutor for PausingHttpMockEffects {
                 }),
                 paused_lease: None,
                 resume_output: None,
+                reason: None,
             });
         }
 

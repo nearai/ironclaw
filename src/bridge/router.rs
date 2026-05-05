@@ -1159,6 +1159,7 @@ async fn execute_pending_gate_action(
             resume_kind,
             resume_output,
             paused_lease,
+            reason,
         }) => {
             let display_parameters = state
                 .effect_adapter
@@ -1178,11 +1179,17 @@ async fn execute_pending_gate_action(
                 call_id,
                 parameters: *parameters,
                 display_parameters,
-                description: format!(
-                    "Tool '{}' requires {}.",
-                    action_name,
-                    resume_kind.kind_name()
-                ),
+                // Prefer the engine-supplied reason (e.g. tirith finding
+                // text) and fall back to the generic "Tool 'X' requires Y."
+                // string when no reason was attached. The thread-outcome
+                // arm later in this file uses the same shape.
+                description: reason.as_deref().cloned().unwrap_or_else(|| {
+                    format!(
+                        "Tool '{}' requires {}.",
+                        action_name,
+                        resume_kind.kind_name()
+                    )
+                }),
                 resume_kind: *resume_kind,
                 created_at: chrono::Utc::now(),
                 expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
@@ -3994,6 +4001,7 @@ async fn await_thread_outcome(
             resume_kind,
             resume_output,
             paused_lease,
+            reason,
         } => {
             use crate::gate::pending::PendingGate;
 
@@ -4030,11 +4038,13 @@ async fn await_thread_outcome(
                 call_id,
                 parameters,
                 display_parameters: Some(redacted_params.clone()),
-                description: format!(
-                    "Tool '{}' requires {} (gate: {gate_name})",
-                    action_name,
-                    resume_kind.kind_name()
-                ),
+                description: reason.as_deref().cloned().unwrap_or_else(|| {
+                    format!(
+                        "Tool '{}' requires {} (gate: {gate_name})",
+                        action_name,
+                        resume_kind.kind_name()
+                    )
+                }),
                 resume_kind: resume_kind.clone(),
                 created_at: chrono::Utc::now(),
                 expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),

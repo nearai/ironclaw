@@ -143,6 +143,10 @@ pub struct ToolRegistry {
     /// Active engine version. Controls which tools are visible via
     /// `tool_definitions()`, `all()`, etc. Defaults to V1.
     engine_version: EngineVersion,
+    /// Configuration for the optional Tirith pre-exec scanner. `None` means
+    /// the scanner never runs (preserves the legacy behavior on bare
+    /// registries used in unit tests).
+    tirith_config: Option<crate::tools::builtin::TirithConfig>,
 }
 
 impl ToolRegistry {
@@ -172,6 +176,7 @@ impl ToolRegistry {
             http_interceptor: None,
             message_tool: RwLock::new(None),
             engine_version: EngineVersion::V1,
+            tirith_config: None,
         }
     }
 
@@ -213,6 +218,20 @@ impl ToolRegistry {
     /// Get the active engine version.
     pub fn engine_version(&self) -> EngineVersion {
         self.engine_version
+    }
+
+    /// Attach a [`TirithConfig`](crate::tools::builtin::TirithConfig) so that
+    /// the inline approval call sites can preflight shell tool calls. Bare
+    /// registries (most unit tests) leave this `None`, which short-circuits
+    /// the preflight to `Allow` without spawning anything.
+    pub fn with_tirith_config(mut self, cfg: crate::tools::builtin::TirithConfig) -> Self {
+        self.tirith_config = Some(cfg);
+        self
+    }
+
+    /// Borrow the tirith configuration, if one was attached.
+    pub fn tirith_config(&self) -> Option<&crate::tools::builtin::TirithConfig> {
+        self.tirith_config.as_ref()
     }
 
     /// Get a reference to the shared credential registry.

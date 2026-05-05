@@ -872,7 +872,8 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             usize,
             crate::llm::ToolCall,
             Arc<dyn crate::tools::Tool>,
-            bool, // allow_always
+            bool,           // allow_always
+            Option<String>, // optional tirith-supplied description override
         )> = None;
 
         for (idx, original_tc) in tool_calls.iter().enumerate() {
@@ -937,6 +938,80 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 _ => {}
             }
 
+            // Tirith pre-exec scan runs before the auto_approve_tools
+            // shortcut so a malicious shell command cannot be auto-approved
+            // around the scanner. The helper short-circuits to Allow when
+            // tirith is disabled, the tool is not "shell", or no command
+            // parameter is present.
+            let in_non_dm_relay = {
+                let is_relay = self.message.channel.ends_with("-relay");
+                let is_dm = self
+                    .message
+                    .metadata
+                    .get("event_type")
+                    .and_then(|v| v.as_str())
+                    == Some("direct_message");
+                is_relay && !is_dm
+            };
+
+            // Use the resolved tool's canonical `name()`, not `tc.name` —
+            // an alias the LLM used for `shell` would otherwise let the
+            // call sneak past the helper's `tool_name == "shell"` check.
+            let tirith_decision = match (tool_opt.as_ref(), self.agent.tools().tirith_config()) {
+                (Some(tool), Some(cfg)) => {
+                    crate::tools::builtin::tirith_preflight(tool.name(), &tc.arguments, cfg).await
+                }
+                _ => crate::tools::builtin::TirithPreflightDecision::Allow,
+            };
+
+            match tirith_decision {
+                crate::tools::builtin::TirithPreflightDecision::Allow => {}
+                crate::tools::builtin::TirithPreflightDecision::Approval { reason } => {
+                    // Tirith findings are approval-requiring. Apply the same
+                    // relay-channel auto-deny as plain approval-requiring
+                    // calls (anti-injection / stuck-AwaitingApproval reasons
+                    // apply equally to tirith findings).
+                    if in_non_dm_relay {
+                        // Tirith integration uses `tracing::debug!` per the
+                        // plan/repo guidance; do not promote to info even
+                        // though nearby non-tirith relay logging is at info.
+                        tracing::debug!(
+                            tool = %tc.name,
+                            channel = %self.message.channel,
+                            "Auto-denying tirith-flagged tool in non-DM relay channel"
+                        );
+                        let reject_msg = format!(
+                            "Tool '{}' was flagged by content scanning and cannot run in \
+                             shared channels. Ask the user to message me directly (DM) to \
+                             use this tool. Finding: {}",
+                            tc.name, reason
+                        );
+                        preflight.push((tc, PreflightOutcome::Rejected(reject_msg)));
+                        continue;
+                    }
+                    let Some(tool) = tool_opt.clone() else {
+                        // No tool registered for this name; let the existing
+                        // logic produce the standard "unknown tool" rejection
+                        // path instead of holding a tirith approval prompt.
+                        continue;
+                    };
+                    approval_needed = Some((idx, tc, tool, false, Some(reason)));
+                    break;
+                }
+                crate::tools::builtin::TirithPreflightDecision::Deny { reason } => {
+                    tracing::debug!(
+                        tool = %tc.name,
+                        "Tirith denied tool call (fail-closed)"
+                    );
+                    let reject_msg = format!(
+                        "Tool '{}' was rejected by content scanning: {}",
+                        tc.name, reason
+                    );
+                    preflight.push((tc, PreflightOutcome::Rejected(reject_msg)));
+                    continue;
+                }
+            }
+
             // Check if tool requires approval
             if !self.agent.config.auto_approve_tools
                 && let Some(tool) = tool_opt
@@ -956,14 +1031,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     // In non-DM relay channels, auto-deny approval-
                     // requiring tools to prevent stuck AwaitingApproval
                     // state and prompt injection from other users.
-                    let is_relay = self.message.channel.ends_with("-relay");
-                    let is_dm = self
-                        .message
-                        .metadata
-                        .get("event_type")
-                        .and_then(|v| v.as_str())
-                        == Some("direct_message");
-                    if is_relay && !is_dm {
+                    if in_non_dm_relay {
                         tracing::info!(
                             tool = %tc.name,
                             channel = %self.message.channel,
@@ -979,7 +1047,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     }
 
                     let allow_always = !matches!(requirement, ApprovalRequirement::Always);
-                    approval_needed = Some((idx, tc, tool, allow_always));
+                    approval_needed = Some((idx, tc, tool, allow_always, None));
                     break;
                 }
             }
@@ -1303,7 +1371,8 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         // Approval pauses take precedence over surfacing auth prompts. Persist
         // the prompt so it can be replayed after approval, and also emit it now
         // so the user sees the connect button alongside the approval card.
-        if let Some((approval_idx, tc, tool, allow_always)) = approval_needed {
+        if let Some((approval_idx, tc, tool, allow_always, description_override)) = approval_needed
+        {
             if let Some((ref ext_name, ref auth_data)) = selected_auth_prompt {
                 emit_auth_required_status(
                     &self.agent.channels,
@@ -1323,7 +1392,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 tool_name: tc.name.clone(),
                 parameters: tc.arguments.clone(),
                 display_parameters: display_params,
-                description: tool.description().to_string(),
+                description: description_override.unwrap_or_else(|| tool.description().to_string()),
                 tool_call_id: tc.id.clone(),
                 context_messages: reason_ctx.messages.clone(),
                 deferred_tool_calls: tool_calls[approval_idx + 1..].to_vec(),

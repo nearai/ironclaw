@@ -269,6 +269,7 @@ impl EffectExecutor for InstallThenAliasEffects {
                 }),
                 paused_lease: None,
                 resume_output: None,
+                reason: None,
             });
         }
 
@@ -347,6 +348,7 @@ impl EffectExecutor for GateMockEffects {
                     resume_kind: Box::new(ResumeKind::Approval { allow_always: true }),
                     paused_lease: None,
                     resume_output: None,
+                    reason: None,
                 });
             }
 
@@ -363,6 +365,7 @@ impl EffectExecutor for GateMockEffects {
                     }),
                     paused_lease: None,
                     resume_output: None,
+                    reason: None,
                 });
             }
         }
@@ -377,6 +380,7 @@ impl EffectExecutor for GateMockEffects {
                 resume_kind: Box::new(ResumeKind::Approval { allow_always: true }),
                 paused_lease: None,
                 resume_output: None,
+                reason: None,
             });
         }
 
@@ -394,6 +398,7 @@ impl EffectExecutor for GateMockEffects {
                 }),
                 paused_lease: None,
                 resume_output: None,
+                reason: None,
             });
         }
 
