@@ -31,8 +31,8 @@ docker run -d \
   # -v /var/run/docker.sock:/var/run/docker.sock \
   -p 3000:3000 \
   -p 8080:8080 \
-  # Pin to a specific IronClaw version for reproducible, rollback-friendly deployments.
-  nearaidev/ironclaw:latest 
+  # Replace :latest with a specific version tag for reproducible, rollback-friendly deployments.
+  nearaidev/ironclaw:latest
 ```
 
 ## Docker Compose
@@ -44,7 +44,7 @@ version: '3.8'
 
 services:
   ironclaw:
-    # Pin to a specific IronClaw version for reproducible, rollback-friendly deployments.
+    # Replace :latest with a specific version tag for reproducible, rollback-friendly deployments.
     image: nearaidev/ironclaw:latest
     container_name: ironclaw
     restart: unless-stopped
