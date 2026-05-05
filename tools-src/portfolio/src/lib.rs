@@ -5,7 +5,7 @@
 
 //! Portfolio WASM tool for IronClaw.
 //!
-//! Single tool with three operations:
+//! Single tool with multiple operations:
 //!
 //! - `scan` — discover positions across chains for one or more addresses
 //!   and classify them against the embedded protocol registry.
@@ -14,6 +14,12 @@
 //!   filter; LLM does the final ranking via the skill playbook).
 //! - `build_intent` — translate a movement plan into an unsigned NEAR
 //!   Intent bundle, applying bounded checks before returning.
+//! - `backtest` — run deterministic long-only spot strategy tests over
+//!   caller-provided OHLCV candles before any intent is built.
+//! - `backtest_suite` — rank several strategy candidates over the same
+//!   candle episode before any strategy is selected for paper intent work.
+//! - `format_intents_widget` — build the NEAR Intents trading console
+//!   view model consumed by the project widget.
 //!
 //! The agent never holds private keys. All output is read-only or
 //! unsigned.
@@ -27,7 +33,9 @@
 //! ├── indexer/            // scan: fetch + normalize raw positions
 //! ├── analyzer/           // classify raw positions via protocols/*.json
 //! ├── strategy/           // propose: parse strategy docs + filter
-//! └── intents/            // build_intent: solver call + bounded checks
+//! ├── intents/            // build_intent: solver call + bounded checks
+//! ├── backtest.rs         // paper strategy replay/ranking over OHLCV candles
+//! └── widget.rs           // web widget state formatters
 //! ```
 
 wit_bindgen::generate!({
@@ -38,6 +46,7 @@ wit_bindgen::generate!({
 use serde::{Deserialize, Serialize};
 
 mod analyzer;
+mod backtest;
 mod format;
 mod indexer;
 mod intents;
@@ -109,10 +118,28 @@ enum PortfolioAction {
     #[serde(rename = "progress")]
     Progress(format::ProgressInput),
 
+    /// Run deterministic long-only spot backtests over caller-provided
+    /// OHLCV candles. Used by the Intents Trading Agent before a
+    /// candidate trade is eligible for intent construction.
+    #[serde(rename = "backtest")]
+    Backtest(backtest::BacktestInput),
+
+    /// Run and rank several deterministic long-only spot strategy
+    /// candidates over the same OHLCV episode. Used to build a
+    /// menu of choices instead of blindly evaluating one strategy.
+    #[serde(rename = "backtest_suite")]
+    BacktestSuite(backtest::BacktestSuiteInput),
+
     /// Build the render-ready view model the web widget consumes.
     /// Writes to `projects/<id>/widgets/state.json`.
     #[serde(rename = "format_widget")]
     FormatWidget(widget::FormatWidgetInput),
+
+    /// Build the render-ready view model the Intents Trading Agent
+    /// project widget consumes. The caller persists it under
+    /// `projects/intents-trading-agent/widgets/state.json`.
+    #[serde(rename = "format_intents_widget")]
+    FormatIntentsWidget(widget::FormatIntentsTradingWidgetInput),
 }
 
 fn default_chains() -> ChainSelector {
@@ -184,7 +211,9 @@ impl exports::near::agent::tool::Guest for PortfolioTool {
         "Cross-chain DeFi portfolio analyzer. Discovers positions across chains, \
          classifies them against an embedded protocol registry, generates ranked \
          rebalancing proposals from declarative strategy docs, and builds unsigned \
-         NEAR Intent bundles. Three operations: scan, propose, build_intent. \
+         NEAR Intent bundles. Operations: scan, propose, build_intent, progress, \
+         backtest, backtest_suite, format_suggestion, format_widget, \
+         format_intents_widget. \
          Read-only and unsigned — the agent never holds private keys."
             .to_string()
     }
@@ -272,10 +301,24 @@ fn execute_inner(params: &str) -> Result<String, String> {
             let output = format::format_progress(input);
             serde_json::to_string(&output).map_err(|e| format!("Serialize progress response: {e}"))
         }
+        PortfolioAction::Backtest(input) => {
+            let output = backtest::run(input)?;
+            serde_json::to_string(&output).map_err(|e| format!("Serialize backtest response: {e}"))
+        }
+        PortfolioAction::BacktestSuite(input) => {
+            let output = backtest::run_suite(input)?;
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize backtest_suite response: {e}"))
+        }
         PortfolioAction::FormatWidget(input) => {
             let output = widget::format_widget(input);
             serde_json::to_string(&output)
                 .map_err(|e| format!("Serialize format_widget response: {e}"))
+        }
+        PortfolioAction::FormatIntentsWidget(input) => {
+            let output = widget::format_intents_trading_widget(input);
+            serde_json::to_string(&output)
+                .map_err(|e| format!("Serialize format_intents_widget response: {e}"))
         }
     }
 }

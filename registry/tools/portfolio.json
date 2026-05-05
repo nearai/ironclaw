@@ -2,9 +2,9 @@
   "name": "portfolio",
   "display_name": "Portfolio",
   "kind": "tool",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "wit_version": "0.3.0",
-  "description": "Cross-chain DeFi portfolio discovery, ranked rebalancing proposals, and unsigned NEAR Intent construction. Single tool with three operations: scan, propose, build_intent.",
+  "description": "Cross-chain DeFi portfolio discovery, ranked rebalancing proposals, unsigned NEAR Intent construction, deterministic spot strategy backtesting/suite ranking, and NEAR Intents trading widget state.",
   "keywords": [
     "defi",
     "portfolio",
@@ -12,7 +12,9 @@
     "wallet",
     "rebalance",
     "near-intents",
-    "crypto"
+    "crypto",
+    "backtesting",
+    "trading"
   ],
   "source": {
     "dir": "tools-src/portfolio",

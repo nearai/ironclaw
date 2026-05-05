@@ -109,6 +109,87 @@
     },
     {
       "properties": {
+        "action": { "const": "format_intents_widget" },
+        "generated_at": {
+          "type": "string",
+          "description": "ISO 8601 timestamp for the current strategy/intent report."
+        },
+        "project_id": {
+          "type": "string",
+          "description": "Project slug or id, usually intents-trading-agent."
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["paper", "quote", "execution"],
+          "default": "paper",
+          "description": "Trading workflow mode. Execution remains future wallet-only plumbing."
+        },
+        "pair": {
+          "type": "string",
+          "description": "Watched pair, for example NEAR/BTC."
+        },
+        "stance": {
+          "type": "string",
+          "enum": ["skip", "watch", "paper-intent", "quote-intent", "blocked"],
+          "default": "watch"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "backtest_suite": {
+          "type": "object",
+          "description": "Output from backtest_suite. Top five ranked candidates are extracted for the widget."
+        },
+        "risk_gates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "status": {
+                "type": "string",
+                "enum": ["pass", "warn", "fail", "blocked", "unknown"]
+              },
+              "detail": { "type": "string" }
+            },
+            "required": ["name", "status"]
+          },
+          "default": []
+        },
+        "intent": {
+          "type": "object",
+          "description": "Optional unsigned NEAR Intent bundle preview.",
+          "properties": {
+            "bundle": {
+              "type": "object",
+              "description": "IntentBundle returned from build_intent."
+            },
+            "status": {
+              "type": "string",
+              "enum": ["none", "paper-built", "live-quote-built", "awaiting-signature", "submitted", "failed", "blocked"],
+              "default": "none"
+            },
+            "route_label": { "type": "string" },
+            "quote_source": { "type": "string" }
+          },
+          "required": ["bundle"]
+        },
+        "research_sources": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": []
+        },
+        "next_action": {
+          "type": "string",
+          "description": "Operator-facing next step shown in the widget."
+        }
+      },
+      "required": ["action", "pair"]
+    },
+    {
+      "properties": {
         "action": { "const": "progress" },
         "history": {
           "type": "array",
@@ -128,6 +209,110 @@
         }
       },
       "required": ["action", "history", "config"]
+    },
+    {
+      "properties": {
+        "action": { "const": "backtest" },
+        "candles": {
+          "type": "array",
+          "description": "OHLCV candles sorted oldest to newest. Signals are formed on candle close and executed at the next candle open.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "ts": { "type": "string" },
+              "open": { "type": "number", "exclusiveMinimum": 0 },
+              "high": { "type": "number", "exclusiveMinimum": 0 },
+              "low": { "type": "number", "exclusiveMinimum": 0 },
+              "close": { "type": "number", "exclusiveMinimum": 0 },
+              "volume": { "type": "number" }
+            },
+            "required": ["ts", "open", "high", "low", "close"]
+          },
+          "minItems": 2
+        },
+        "strategy": {
+          "type": "object",
+          "description": "Long-only spot strategy config. Supported kinds: buy-hold, sma-cross, breakout, mean-reversion, momentum, rsi-mean-reversion.",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["buy-hold", "sma-cross", "breakout", "mean-reversion", "momentum", "rsi-mean-reversion"]
+            },
+            "fast_window": { "type": "integer", "minimum": 1 },
+            "slow_window": { "type": "integer", "minimum": 1 },
+            "lookback_window": { "type": "integer", "minimum": 1 },
+            "threshold_bps": { "type": "number", "minimum": 0 },
+            "entry_threshold": { "type": "number", "minimum": 0 },
+            "exit_threshold": { "type": "number", "minimum": 0 }
+          },
+          "required": ["kind"]
+        },
+        "initial_cash_usd": { "type": "number", "exclusiveMinimum": 0, "default": 10000 },
+        "fee_bps": { "type": "number", "minimum": 0, "default": 10 },
+        "slippage_bps": { "type": "number", "minimum": 0, "default": 5 },
+        "max_position_pct": { "type": "number", "exclusiveMinimum": 0, "maximum": 1, "default": 1 },
+        "stop_loss_bps": { "type": "number", "minimum": 0 },
+        "take_profit_bps": { "type": "number", "minimum": 0 }
+      },
+      "required": ["action", "candles", "strategy"]
+    },
+    {
+      "properties": {
+        "action": { "const": "backtest_suite" },
+        "candles": {
+          "type": "array",
+          "description": "OHLCV candles sorted oldest to newest. Every candidate is evaluated against this same market episode.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "ts": { "type": "string" },
+              "open": { "type": "number", "exclusiveMinimum": 0 },
+              "high": { "type": "number", "exclusiveMinimum": 0 },
+              "low": { "type": "number", "exclusiveMinimum": 0 },
+              "close": { "type": "number", "exclusiveMinimum": 0 },
+              "volume": { "type": "number" }
+            },
+            "required": ["ts", "open", "high", "low", "close"]
+          },
+          "minItems": 2
+        },
+        "candidates": {
+          "type": "array",
+          "description": "Strategy menu to rank. Each candidate may override position size, stop-loss, and take-profit.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "strategy": {
+                "type": "object",
+                "description": "Long-only spot strategy config. Supported kinds: buy-hold, sma-cross, breakout, mean-reversion, momentum, rsi-mean-reversion.",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": ["buy-hold", "sma-cross", "breakout", "mean-reversion", "momentum", "rsi-mean-reversion"]
+                  },
+                  "fast_window": { "type": "integer", "minimum": 1 },
+                  "slow_window": { "type": "integer", "minimum": 1 },
+                  "lookback_window": { "type": "integer", "minimum": 1 },
+                  "threshold_bps": { "type": "number", "minimum": 0 },
+                  "entry_threshold": { "type": "number", "minimum": 0 },
+                  "exit_threshold": { "type": "number", "minimum": 0 }
+                },
+                "required": ["kind"]
+              },
+              "max_position_pct": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
+              "stop_loss_bps": { "type": "number", "minimum": 0 },
+              "take_profit_bps": { "type": "number", "minimum": 0 }
+            },
+            "required": ["id", "strategy"]
+          },
+          "minItems": 1
+        },
+        "initial_cash_usd": { "type": "number", "exclusiveMinimum": 0, "default": 10000 },
+        "fee_bps": { "type": "number", "minimum": 0, "default": 10 },
+        "slippage_bps": { "type": "number", "minimum": 0, "default": 5 }
+      },
+      "required": ["action", "candles", "candidates"]
     },
     {
       "properties": {

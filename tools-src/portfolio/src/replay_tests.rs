@@ -365,6 +365,180 @@ fn check_expectations(path: &str, step: &Step, response: &Value, prior: &BTreeMa
                     step.name
                 );
             }
+            "bundle_first_leg_kind" => {
+                let kind = response
+                    .pointer("/bundle/legs/0/kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| {
+                        panic!("[{path}] step '{}': missing /bundle/legs/0/kind", step.name)
+                    });
+                let want = expected.as_str().expect("bundle_first_leg_kind: string");
+                assert_eq!(
+                    kind, want,
+                    "[{path}] step '{}': first bundle leg kind mismatch",
+                    step.name
+                );
+            }
+            "backtest_schema_version" => {
+                let v = response
+                    .get("schema_version")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| {
+                        panic!("[{path}] step '{}': missing schema_version", step.name)
+                    });
+                let want = expected.as_str().expect("backtest_schema_version: string");
+                assert_eq!(
+                    v, want,
+                    "[{path}] step '{}': backtest schema mismatch",
+                    step.name
+                );
+            }
+            "backtest_trades_min" => {
+                let trades = response
+                    .pointer("/metrics/trades")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or_else(|| {
+                        panic!("[{path}] step '{}': missing /metrics/trades", step.name)
+                    });
+                let want = expected.as_u64().expect("backtest_trades_min: number");
+                assert!(
+                    trades >= want,
+                    "[{path}] step '{}': backtest trades {} < min {}",
+                    step.name,
+                    trades,
+                    want
+                );
+            }
+            "backtest_total_return_gt" => {
+                let value = response
+                    .pointer("/metrics/total_return_pct")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "[{path}] step '{}': missing /metrics/total_return_pct",
+                            step.name
+                        )
+                    });
+                let want = expected.as_f64().expect("backtest_total_return_gt: number");
+                assert!(
+                    value > want,
+                    "[{path}] step '{}': total_return_pct {} <= {}",
+                    step.name,
+                    value,
+                    want
+                );
+            }
+            "backtest_max_drawdown_le" => {
+                let value = response
+                    .pointer("/metrics/max_drawdown_pct")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "[{path}] step '{}': missing /metrics/max_drawdown_pct",
+                            step.name
+                        )
+                    });
+                let want = expected.as_f64().expect("backtest_max_drawdown_le: number");
+                assert!(
+                    value <= want,
+                    "[{path}] step '{}': max_drawdown_pct {} > {}",
+                    step.name,
+                    value,
+                    want
+                );
+            }
+            "backtest_lookahead_safe" => {
+                let value = response
+                    .get("lookahead_safe")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or_else(|| {
+                        panic!("[{path}] step '{}': missing lookahead_safe", step.name)
+                    });
+                let want = expected.as_bool().expect("backtest_lookahead_safe: bool");
+                assert_eq!(
+                    value, want,
+                    "[{path}] step '{}': lookahead_safe mismatch",
+                    step.name
+                );
+            }
+            "backtest_suite_schema_version" => {
+                let v = response
+                    .get("schema_version")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| {
+                        panic!("[{path}] step '{}': missing schema_version", step.name)
+                    });
+                let want = expected
+                    .as_str()
+                    .expect("backtest_suite_schema_version: string");
+                assert_eq!(
+                    v, want,
+                    "[{path}] step '{}': backtest suite schema mismatch",
+                    step.name
+                );
+            }
+            "backtest_suite_ranked_min" => {
+                let ranked = response
+                    .get("ranked")
+                    .and_then(|v| v.as_array())
+                    .unwrap_or_else(|| {
+                        panic!("[{path}] step '{}': missing ranked array", step.name)
+                    });
+                let want = expected
+                    .as_u64()
+                    .expect("backtest_suite_ranked_min: number")
+                    as usize;
+                assert!(
+                    ranked.len() >= want,
+                    "[{path}] step '{}': ranked candidates {} < min {}",
+                    step.name,
+                    ranked.len(),
+                    want
+                );
+            }
+            "backtest_suite_top_trades_min" => {
+                let trades = response
+                    .pointer("/ranked/0/metrics/trades")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "[{path}] step '{}': missing /ranked/0/metrics/trades",
+                            step.name
+                        )
+                    });
+                let want = expected
+                    .as_u64()
+                    .expect("backtest_suite_top_trades_min: number");
+                assert!(
+                    trades >= want,
+                    "[{path}] step '{}': top-ranked trades {} < min {}",
+                    step.name,
+                    trades,
+                    want
+                );
+            }
+            "backtest_suite_any_passes_basic_gate" => {
+                let ranked = response
+                    .get("ranked")
+                    .and_then(|v| v.as_array())
+                    .unwrap_or_else(|| {
+                        panic!("[{path}] step '{}': missing ranked array", step.name)
+                    });
+                let got = ranked.iter().any(|result| {
+                    result
+                        .get("passes_basic_gate")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                });
+                let want = expected
+                    .as_bool()
+                    .expect("backtest_suite_any_passes_basic_gate: bool");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': basic-gate match mismatch",
+                    step.name
+                );
+            }
             "equal_to_step" => {
                 let other_step = expected.as_str().expect("equal_to_step: string");
                 let prior_resp = prior.get(other_step).unwrap_or_else(|| {
@@ -494,6 +668,54 @@ fn check_expectations(path: &str, step: &Step, response: &Value, prior: &BTreeMa
                 assert_eq!(
                     non_empty, want,
                     "[{path}] step '{}': widget_has_non_empty_totals mismatch",
+                    step.name
+                );
+            }
+            "intents_widget_schema_version" => {
+                let v = response
+                    .get("schema_version")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| {
+                        panic!("[{path}] step '{}': missing schema_version", step.name)
+                    });
+                let want = expected
+                    .as_str()
+                    .expect("intents_widget_schema_version: string");
+                assert_eq!(
+                    v, want,
+                    "[{path}] step '{}': intents widget schema mismatch",
+                    step.name
+                );
+            }
+            "intents_widget_top_candidates_min" => {
+                let len = response
+                    .get("top_candidates")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                let want = expected
+                    .as_u64()
+                    .expect("intents_widget_top_candidates_min: number")
+                    as usize;
+                assert!(
+                    len >= want,
+                    "[{path}] step '{}': intents widget top candidates {len} < min {want}",
+                    step.name
+                );
+            }
+            "intents_widget_intent_status" => {
+                let got = response
+                    .pointer("/intent/status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| {
+                        panic!("[{path}] step '{}': missing /intent/status", step.name)
+                    });
+                let want = expected
+                    .as_str()
+                    .expect("intents_widget_intent_status: string");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': intents widget intent status mismatch",
                     step.name
                 );
             }

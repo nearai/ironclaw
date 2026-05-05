@@ -1,0 +1,72 @@
+id: intents-trading-agent-backtest-suite
+description: |
+  Ranks a menu of deterministic spot strategies over the same candle
+  episode. This is the strategy-selection gate an autonomous intents
+  trading agent should clear before asking for any wallet-signed action.
+steps:
+  - name: rank_strategy_menu
+    action: backtest_suite
+    params:
+      initial_cash_usd: 1000
+      fee_bps: 10
+      slippage_bps: 5
+      candidates:
+        - id: buy_hold_baseline
+          strategy:
+            kind: buy-hold
+        - id: sma_cross_fast
+          max_position_pct: 1
+          stop_loss_bps: 1200
+          strategy:
+            kind: sma-cross
+            fast_window: 2
+            slow_window: 4
+        - id: breakout_short
+          max_position_pct: 0.8
+          stop_loss_bps: 1000
+          strategy:
+            kind: breakout
+            lookback_window: 3
+            threshold_bps: 25
+        - id: momentum_rotation
+          max_position_pct: 0.8
+          stop_loss_bps: 1000
+          strategy:
+            kind: momentum
+            lookback_window: 3
+            threshold_bps: 500
+        - id: mean_reversion_range
+          max_position_pct: 0.5
+          stop_loss_bps: 700
+          strategy:
+            kind: mean-reversion
+            lookback_window: 3
+            threshold_bps: 300
+        - id: rsi_reversion
+          max_position_pct: 0.5
+          stop_loss_bps: 700
+          strategy:
+            kind: rsi-mean-reversion
+            lookback_window: 5
+            entry_threshold: 25
+            exit_threshold: 55
+      candles:
+        - {ts: "2026-01-01T00:00:00Z", open: 10.0, high: 10.2, low: 9.8, close: 10.0, volume: 1000}
+        - {ts: "2026-01-02T00:00:00Z", open: 10.0, high: 10.2, low: 9.8, close: 10.0, volume: 1000}
+        - {ts: "2026-01-03T00:00:00Z", open: 10.0, high: 10.2, low: 9.8, close: 10.0, volume: 1000}
+        - {ts: "2026-01-04T00:00:00Z", open: 10.0, high: 10.2, low: 9.8, close: 10.0, volume: 1000}
+        - {ts: "2026-01-05T00:00:00Z", open: 10.2, high: 10.7, low: 10.0, close: 10.5, volume: 1200}
+        - {ts: "2026-01-06T00:00:00Z", open: 10.6, high: 11.2, low: 10.5, close: 11.0, volume: 1300}
+        - {ts: "2026-01-07T00:00:00Z", open: 11.1, high: 12.1, low: 11.0, close: 12.0, volume: 1400}
+        - {ts: "2026-01-08T00:00:00Z", open: 12.1, high: 13.1, low: 12.0, close: 13.0, volume: 1500}
+        - {ts: "2026-01-09T00:00:00Z", open: 13.1, high: 14.1, low: 13.0, close: 14.0, volume: 1600}
+        - {ts: "2026-01-10T00:00:00Z", open: 13.8, high: 14.0, low: 12.8, close: 13.0, volume: 1500}
+        - {ts: "2026-01-11T00:00:00Z", open: 12.8, high: 13.0, low: 11.8, close: 12.0, volume: 1400}
+        - {ts: "2026-01-12T00:00:00Z", open: 11.8, high: 12.0, low: 10.8, close: 11.0, volume: 1300}
+        - {ts: "2026-01-13T00:00:00Z", open: 10.8, high: 11.0, low: 9.8, close: 10.0, volume: 1200}
+        - {ts: "2026-01-14T00:00:00Z", open: 9.8, high: 10.0, low: 8.8, close: 9.0, volume: 1100}
+    expect:
+      backtest_suite_schema_version: intents-backtest-suite/1
+      backtest_suite_ranked_min: 6
+      backtest_suite_top_trades_min: 1
+      backtest_suite_any_passes_basic_gate: true
