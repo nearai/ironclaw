@@ -329,6 +329,26 @@ impl LlmProvider for FailoverProvider {
         Ok(response)
     }
 
+    async fn complete_stream(
+        &self,
+        request: CompletionRequest,
+        on_chunk: &mut (dyn FnMut(String) + Send),
+    ) -> Result<CompletionResponse, LlmError> {
+        self.providers[self.last_used.load(Ordering::Relaxed)]
+            .complete_stream(request, on_chunk)
+            .await
+    }
+
+    async fn complete_with_tools_stream(
+        &self,
+        request: ToolCompletionRequest,
+        on_chunk: &mut (dyn FnMut(String) + Send),
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.providers[self.last_used.load(Ordering::Relaxed)]
+            .complete_with_tools_stream(request, on_chunk)
+            .await
+    }
+
     fn active_model_name(&self) -> String {
         self.providers[self.last_used.load(Ordering::Relaxed)].active_model_name()
     }

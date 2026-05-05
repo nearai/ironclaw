@@ -319,6 +319,16 @@ fn normalized_tool_call_id(raw: Option<&str>, seed: usize) -> String {
     super::provider::generate_tool_call_id(seed, 0)
 }
 
+/// Normalize a streamed tool-call ID into the `[a-zA-Z0-9]{9}` shape that
+/// OpenAI-compatible backends require. Delegates to [`normalized_tool_call_id`].
+///
+/// `index` is the tool_call's position in the stream and is used as a
+/// deterministic seed when the upstream ID is absent or non-conforming.
+pub(crate) fn normalize_tool_call_id_for_streaming(raw: &str, index: usize) -> String {
+    let raw_opt = if raw.is_empty() { None } else { Some(raw) };
+    normalized_tool_call_id(raw_opt, index)
+}
+
 /// Convert IronClaw tool definitions to rig-core format.
 ///
 /// Applies `normalize_schema_strict` at the boundary, which both

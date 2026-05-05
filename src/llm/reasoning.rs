@@ -266,6 +266,12 @@ pub struct ReasoningContext {
     /// batch failed. Used by the duplicate tool call tracker in the agentic loop.
     /// Reset to `false` at the start of each iteration.
     pub last_tool_batch_all_failed: bool,
+    /// When set, each text token/chunk from streaming LLM calls is sent to this
+    /// channel so callers can forward it to the client in real time.
+    ///
+    /// Typically backed by a bounded channel to cap memory usage; chunks that
+    /// cannot be queued may be dropped when the buffer is full.
+    pub chunk_sender: Option<tokio::sync::mpsc::Sender<String>>,
 }
 
 impl ReasoningContext {
@@ -282,6 +288,7 @@ impl ReasoningContext {
             model_override: None,
             temperature: None,
             last_tool_batch_all_failed: false,
+            chunk_sender: None,
         }
     }
 
@@ -325,6 +332,15 @@ impl ReasoningContext {
     /// Set default temperature for LLM requests.
     pub fn with_temperature(mut self, temperature: f32) -> Self {
         self.temperature = Some(temperature);
+        self
+    }
+
+    /// Set a chunk sender for real-time token streaming to the client.
+    pub fn with_chunk_sender(
+        mut self,
+        sender: tokio::sync::mpsc::Sender<String>,
+    ) -> Self {
+        self.chunk_sender = Some(sender);
         self
     }
 }
@@ -805,7 +821,19 @@ Respond in JSON format:
                 request.model = Some(model.clone());
             }
 
-            let response = self.llm.complete_with_tools(request).await?;
+            let response = if let Some(ref sender) = context.chunk_sender {
+                let sender = sender.clone();
+                let mut on_chunk = move |chunk: String| {
+                    // Non-blocking send: drop on full/closed channel so the
+                    // sync callback never blocks the streaming task.
+                    if let Err(e) = sender.try_send(chunk) {
+                        tracing::trace!(error = %e, "stream chunk dropped (channel full/closed)");
+                    }
+                };
+                self.llm.complete_with_tools_stream(request, &mut on_chunk).await?
+            } else {
+                self.llm.complete_with_tools(request).await?
+            };
             let usage = TokenUsage {
                 input_tokens: response.input_tokens,
                 output_tokens: response.output_tokens,
@@ -921,7 +949,17 @@ Respond in JSON format:
                 request.model = Some(model.clone());
             }
 
-            let response = self.llm.complete(request).await?;
+            let response = if let Some(ref sender) = context.chunk_sender {
+                let sender = sender.clone();
+                let mut on_chunk = move |chunk: String| {
+                    if let Err(e) = sender.try_send(chunk) {
+                        tracing::trace!(error = %e, "stream chunk dropped (channel full/closed)");
+                    }
+                };
+                self.llm.complete_stream(request, &mut on_chunk).await?
+            } else {
+                self.llm.complete(request).await?
+            };
             let pre_truncated = truncate_at_tool_tags(&response.content);
             let cleaned = clean_response(&pre_truncated);
             let metadata = if cleaned.trim().is_empty() {

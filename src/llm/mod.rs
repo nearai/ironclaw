@@ -25,6 +25,7 @@ mod nearai_chat;
 pub mod oauth_helpers;
 pub mod openai_codex_provider;
 pub mod openai_codex_session;
+mod openai_compat_stream;
 mod provider;
 mod reasoning;
 pub mod recording;
@@ -294,7 +295,7 @@ fn create_openai_compat_from_registry(
         builder = builder.base_url(&base_url);
     }
     if !extra_headers.is_empty() {
-        builder = builder.http_headers(extra_headers);
+        builder = builder.http_headers(extra_headers.clone());
     }
 
     let client: openai::Client = builder.build().map_err(|e| LlmError::RequestFailed {
@@ -317,7 +318,41 @@ fn create_openai_compat_from_registry(
 
     let adapter = RigAdapter::new(model, &config.model)
         .with_unsupported_params(config.unsupported_params.clone());
-    Ok(Arc::new(adapter))
+    // Re-use the already-validated header map: iterate it to build the
+    // (String, String) pairs for the streaming provider, skipping any that
+    // produced warnings above.
+    let extra_headers_vec: Vec<(String, String)> = extra_headers
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|v| (name.as_str().to_string(), v.to_string()))
+        })
+        .collect();
+    let unsupported: std::collections::HashSet<String> =
+        config.unsupported_params.iter().cloned().collect();
+    // Normalize the base_url the same way the rig-core client does so the
+    // streaming path hits the exact same endpoint.
+    let streaming_base_url = if config.base_url.is_empty() {
+        String::new()
+    } else {
+        normalize_openai_base_url(&config.base_url)
+    };
+    let streaming = openai_compat_stream::OpenAiCompatStreamingProvider::new(
+        Arc::new(adapter),
+        api_key,
+        streaming_base_url,
+        config.model.clone(),
+        config.provider_id.clone(),
+        extra_headers_vec,
+        unsupported,
+    )
+    .map_err(|e| LlmError::RequestFailed {
+        provider: config.provider_id.clone(),
+        reason: format!("Failed to build streaming HTTP client: {e}"),
+    })?;
+    Ok(Arc::new(streaming))
 }
 
 fn create_anthropic_from_registry(
