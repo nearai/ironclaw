@@ -19,10 +19,10 @@ use crate::tools::builtin::{
     ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, ExtensionInfoTool, FileUndoTool,
     GlobTool, GrepTool, HttpTool, JobEventsTool, JobPromptTool, JobStatusTool, JsonTool,
     ListDirTool, ListJobsTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool,
-    PlanUpdateTool, PromptQueue, ReadFileTool, ShellTool, SkillInstallTool, SkillListTool,
-    SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool,
-    ToolListTool, ToolPermissionSetTool, ToolRemoveTool, ToolSearchTool, ToolUpgradeTool,
-    WriteFileTool, shared_file_history, shared_read_file_state,
+    PlanUpdateTool, PromptQueue, ReadFileTool, SharedFileHistory, SharedReadFileState, ShellTool,
+    SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool,
+    ToolAuthTool, ToolInstallTool, ToolListTool, ToolPermissionSetTool, ToolRemoveTool,
+    ToolSearchTool, ToolUpgradeTool, WriteFileTool, shared_file_history, shared_read_file_state,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{
@@ -143,6 +143,16 @@ pub struct ToolRegistry {
     /// Active engine version. Controls which tools are visible via
     /// `tool_definitions()`, `all()`, etc. Defaults to V1.
     engine_version: EngineVersion,
+    /// Shared file history for per-job cleanup on job completion.
+    ///
+    /// `std::sync::Mutex` (not tokio): set once during `register_dev_tools`
+    /// and read briefly during cleanup; no `.await` is ever held across
+    /// the lock. A tokio `RwLock` here panics when `register_dev_tools` is
+    /// called from inside a tokio runtime (e.g. `#[tokio::test]`) because
+    /// `blocking_write()` cannot run on a runtime worker thread.
+    file_history: std::sync::Mutex<Option<SharedFileHistory>>,
+    /// Shared read-file state for per-job cleanup on job completion.
+    read_state: std::sync::Mutex<Option<SharedReadFileState>>,
 }
 
 impl ToolRegistry {
@@ -172,6 +182,8 @@ impl ToolRegistry {
             http_interceptor: None,
             message_tool: RwLock::new(None),
             engine_version: EngineVersion::V1,
+            file_history: std::sync::Mutex::new(None),
+            read_state: std::sync::Mutex::new(None),
         }
     }
 
@@ -552,6 +564,15 @@ impl ToolRegistry {
         let file_history = shared_file_history();
         let read_state = shared_read_file_state();
 
+        // Store references for per-job cleanup. Using std::sync::Mutex so
+        // this is safe to call from inside a tokio runtime (see field doc).
+        if let Ok(mut fh) = self.file_history.lock() {
+            *fh = Some(Arc::clone(&file_history));
+        }
+        if let Ok(mut rs) = self.read_state.lock() {
+            *rs = Some(Arc::clone(&read_state));
+        }
+
         self.register_sync(Arc::new(ShellTool::new()));
         self.register_sync(Arc::new(
             ReadFileTool::new().with_read_state(Arc::clone(&read_state)),
@@ -572,6 +593,24 @@ impl ToolRegistry {
         self.register_sync(Arc::new(FileUndoTool::new(file_history)));
 
         tracing::debug!("Registered 8 development tools");
+    }
+
+    /// Clean up per-job file state (history snapshots and read-before-edit
+    /// entries) when a job completes. This prevents unbounded memory growth
+    /// from long-running processes that create many jobs.
+    pub async fn cleanup_job_file_state(&self, job_id: uuid::Uuid) {
+        // Clone the Arcs out of the std::sync::Mutex without holding it
+        // across an `.await`.
+        let history = self.file_history.lock().ok().and_then(|g| g.clone());
+        let read_state = self.read_state.lock().ok().and_then(|g| g.clone());
+        if let Some(history) = history {
+            let mut h = history.write().await;
+            h.cleanup_job(job_id);
+        }
+        if let Some(state) = read_state {
+            let mut s = state.write().await;
+            s.cleanup_job(&job_id);
+        }
     }
 
     /// Register memory tools with a workspace resolver.
