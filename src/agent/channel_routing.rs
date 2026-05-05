@@ -7,7 +7,7 @@
 //! A file-based loader ([`ChannelRoutingConfig::load`]) is available as
 //! a migration utility.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use serde::{Deserialize, Deserializer, Serialize};
@@ -43,6 +43,16 @@ pub struct ChannelRoutingConfig {
     /// Populated by `precompute_prefixes()` after deserialization.
     #[serde(skip)]
     sorted_prefixes: Vec<String>,
+
+    /// Per-group allowed-server sets for O(1) membership tests.
+    /// Mirrors `groups` values; populated by `precompute_prefixes()`.
+    #[serde(skip)]
+    allowed_servers_sets: HashMap<String, HashSet<String>>,
+
+    /// Per-group built-in whitelist sets for O(1) membership tests.
+    /// Mirrors `builtin_whitelist` values; populated by `precompute_prefixes()`.
+    #[serde(skip)]
+    builtin_whitelist_sets: HashMap<String, HashSet<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -66,6 +76,8 @@ impl<'de> Deserialize<'de> for ChannelRoutingConfig {
             channels: raw.channels,
             default_group: raw.default_group,
             sorted_prefixes: Vec::new(),
+            allowed_servers_sets: HashMap::new(),
+            builtin_whitelist_sets: HashMap::new(),
         };
         config.precompute_prefixes();
         Ok(config)
@@ -85,9 +97,6 @@ impl Eq for ChannelRoutingConfig {}
 
 /// Exact channel names that identify direct messages (bypass routing entirely).
 const DM_EXACT: &[&str] = &["gateway", "cli", "repl", "tui", "http"];
-
-/// Channel name prefixes (with delimiter) for relay DMs.
-const DM_RELAY_PREFIXES: &[&str] = &["slack-dm-", "telegram-dm-"];
 
 /// Channel-owned metadata bit for "this message is a DM".
 ///
@@ -188,7 +197,7 @@ impl ChannelRoutingConfig {
         store: &crate::tenant::SystemScope,
         user_id: &str,
     ) -> Option<Self> {
-        match store.get_setting_for_user(user_id, "channel_routing").await {
+        match store.get_channel_routing(user_id).await {
             Ok(Some(value)) => Self::parse_stored_value(value, "database"),
             Ok(None) => {
                 tracing::debug!("No channel routing config in database");
@@ -249,16 +258,29 @@ impl ChannelRoutingConfig {
     /// Pre-compute sorted MCP server prefixes (longest first) to avoid
     /// allocations on the hot path.
     fn precompute_prefixes(&mut self) {
+        // Sorted prefixes for longest-prefix-first MCP server extraction.
         let mut all_servers: Vec<String> = self
             .groups
             .values()
             .flatten()
             .cloned()
-            .collect::<std::collections::HashSet<_>>()
+            .collect::<HashSet<_>>()
             .into_iter()
             .collect();
         all_servers.sort_by_key(|s| std::cmp::Reverse(s.len()));
         self.sorted_prefixes = all_servers;
+
+        // Per-group HashSets for O(1) membership tests in filter_tool_defs.
+        self.allowed_servers_sets = self
+            .groups
+            .iter()
+            .map(|(group, servers)| (group.clone(), servers.iter().cloned().collect()))
+            .collect();
+        self.builtin_whitelist_sets = self
+            .builtin_whitelist
+            .iter()
+            .map(|(group, tools)| (group.clone(), tools.iter().cloned().collect()))
+            .collect();
     }
 
     fn parse_stored_value(value: serde_json::Value, source: &str) -> Option<Self> {
@@ -295,10 +317,6 @@ impl ChannelRoutingConfig {
     pub fn is_dm(channel: &str, metadata: &serde_json::Value) -> bool {
         // Exact matches for web/CLI channels
         if DM_EXACT.contains(&channel) {
-            return true;
-        }
-        // Prefix matches for relay DMs with delimiter
-        if DM_RELAY_PREFIXES.iter().any(|p| channel.starts_with(p)) {
             return true;
         }
         // Any trusted relay adapter can stamp this flag to bypass routing.
@@ -356,10 +374,12 @@ impl ChannelRoutingConfig {
 
         let group = self.resolve_group(channel);
 
-        let allowed_servers = match self.groups.get(group) {
-            Some(servers) => servers,
+        let allowed_set = match self.allowed_servers_sets.get(group) {
+            Some(set) => set,
             None => {
-                let default_builtin_whitelist = self.builtin_whitelist.get(&self.default_group);
+                let default_whitelist_set = self
+                    .builtin_whitelist_sets
+                    .get(&self.default_group);
                 tracing::warn!(
                     group,
                     default_group = %self.default_group,
@@ -371,8 +391,8 @@ impl ChannelRoutingConfig {
                         if self.extract_mcp_server(&tool.name).is_some() {
                             return false;
                         }
-                        match default_builtin_whitelist {
-                            Some(whitelist) => whitelist.iter().any(|w| w == &tool.name),
+                        match default_whitelist_set {
+                            Some(set) => set.contains(tool.name.as_str()),
                             None => true,
                         }
                     })
@@ -380,21 +400,60 @@ impl ChannelRoutingConfig {
             }
         };
 
-        let builtin_whitelist = self.builtin_whitelist.get(group);
+        let builtin_set = self.builtin_whitelist_sets.get(group);
 
         tools
             .into_iter()
             .filter(|tool| {
                 if let Some(server) = self.extract_mcp_server(&tool.name) {
-                    allowed_servers.iter().any(|s| s == server)
+                    allowed_set.contains(server)
                 } else {
-                    match builtin_whitelist {
-                        Some(whitelist) => whitelist.iter().any(|w| w == &tool.name),
+                    match builtin_set {
+                        Some(set) => set.contains(tool.name.as_str()),
                         None => true,
                     }
                 }
             })
             .collect()
+    }
+
+    /// Returns `true` if the named tool is permitted to execute on `channel`.
+    ///
+    /// Uses the same allowlist logic as [`Self::filter_tool_defs`] but for a
+    /// single tool name, without requiring a full `ToolDefinition`. Does NOT
+    /// check metadata-based DM status (no metadata is available at dispatch
+    /// time) — channels in `DM_EXACT` still bypass routing. This is the
+    /// execution-layer enforcement called from [`crate::tools::dispatch::ToolDispatcher`].
+    pub fn is_tool_permitted(&self, channel: &str, tool_name: &str) -> bool {
+        // DM_EXACT channels bypass routing at execution layer too.
+        if DM_EXACT.contains(&channel) {
+            return true;
+        }
+
+        let group = self.resolve_group(channel);
+
+        let allowed_set = match self.allowed_servers_sets.get(group) {
+            Some(set) => set,
+            None => {
+                // Unknown group — fail-closed: block MCP tools, apply default built-in policy.
+                if self.extract_mcp_server(tool_name).is_some() {
+                    return false;
+                }
+                return match self.builtin_whitelist_sets.get(&self.default_group) {
+                    Some(set) => set.contains(tool_name),
+                    None => true,
+                };
+            }
+        };
+
+        if let Some(server) = self.extract_mcp_server(tool_name) {
+            allowed_set.contains(server)
+        } else {
+            match self.builtin_whitelist_sets.get(group) {
+                Some(set) => set.contains(tool_name),
+                None => true,
+            }
+        }
     }
 
     /// Try to extract the MCP server name from a tool name.
@@ -918,5 +977,64 @@ mod tests {
                 .expect("should load saved config");
             assert_eq!(loaded, config);
         }
+    }
+
+    #[test]
+    fn test_extract_mcp_server_handles_multibyte_prefix() {
+        // Regression: tool_name.as_bytes()[server.len()] byte-indexes into the
+        // string. If `server` contains multi-byte chars (e.g. "Café"), its
+        // `.len()` is the *byte* length (5), not char length (4). The check
+        // `tool_name.as_bytes()[server.len()] == b'_'` correctly accesses byte 5,
+        // and `tool_name.get(..server.len())` is the UTF-8-safe slice that
+        // returns None rather than panicking on a non-char-boundary index.
+        // Both operations must not panic on multi-byte server names.
+        let json = r#"{
+            "groups": {
+                "all": ["Café"]
+            },
+            "channels": {},
+            "default_group": "all"
+        }"#;
+        let config: ChannelRoutingConfig = serde_json::from_str(json).unwrap();
+        // "Café" is 5 bytes (UTF-8: C, a, f, 0xc3, 0xa9).
+        // "Café_query" — byte 5 is '_'; server.len() == 5 → safe.
+        assert_eq!(config.extract_mcp_server("Café_query"), Some("Café"));
+        // Ensure non-matching multi-byte prefix doesn't panic either.
+        assert_eq!(config.extract_mcp_server("Cafe_query"), None);
+        assert_eq!(config.extract_mcp_server("Caf"), None);
+    }
+
+    #[test]
+    fn test_is_tool_permitted_enforces_routing() {
+        let json = r#"{
+            "groups": {
+                "minimal": ["Archon"],
+                "dev": ["Archon", "Kiro"]
+            },
+            "builtin_whitelist": {
+                "minimal": ["create_job"]
+            },
+            "channels": {
+                "agentiffai-dev": "dev"
+            },
+            "default_group": "minimal"
+        }"#;
+        let config: ChannelRoutingConfig = serde_json::from_str(json).unwrap();
+
+        // DM_EXACT channels bypass routing.
+        assert!(config.is_tool_permitted("gateway", "Smartlead_send"));
+        assert!(config.is_tool_permitted("cli", "shell"));
+
+        // Dev channel: Archon + Kiro allowed, all builtins allowed.
+        assert!(config.is_tool_permitted("agentiffai-dev", "Archon_list"));
+        assert!(config.is_tool_permitted("agentiffai-dev", "Kiro_run"));
+        assert!(!config.is_tool_permitted("agentiffai-dev", "Smartlead_send"));
+        assert!(config.is_tool_permitted("agentiffai-dev", "shell")); // no whitelist → all
+
+        // Minimal (default) channel: Archon only, create_job built-in only.
+        assert!(config.is_tool_permitted("other-channel", "Archon_list"));
+        assert!(!config.is_tool_permitted("other-channel", "Kiro_run"));
+        assert!(config.is_tool_permitted("other-channel", "create_job"));
+        assert!(!config.is_tool_permitted("other-channel", "shell"));
     }
 }
