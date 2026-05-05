@@ -58,7 +58,8 @@ use ironclaw_safety::sensitive_paths::is_sensitive_path;
 use crate::context::JobContext;
 use crate::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::tool::{
-    ApprovalRequirement, RiskLevel, Tool, ToolDomain, ToolError, ToolOutput, require_str,
+    ApprovalRequirement, RiskLevel, Tool, ToolDiscoverySummary, ToolDomain, ToolError, ToolOutput,
+    require_str,
 };
 
 /// Maximum output size before truncation (64KB).
@@ -1164,6 +1165,22 @@ impl Tool for ShellTool {
 
     fn rate_limit_config(&self) -> Option<crate::tools::tool::ToolRateLimitConfig> {
         Some(crate::tools::tool::ToolRateLimitConfig::new(30, 300))
+    }
+
+    fn discovery_summary(&self) -> Option<ToolDiscoverySummary> {
+        Some(ToolDiscoverySummary {
+            notes: vec![
+                "Prefer dedicated tools when one fits: read_file, write_file, apply_patch, list_dir, glob, grep, http, web_fetch".into(),
+                "Reserve shell for operations with no equivalent dedicated tool (build, test, version control, process management)".into(),
+                "Commands run through a sandbox; network and filesystem access depend on the configured SandboxPolicy".into(),
+                "Avoid long-running interactive commands; pass an explicit timeout and non-interactive flags (-y, --no-input, etc.)".into(),
+            ],
+            examples: vec![
+                serde_json::json!({"command": "cargo test -p ironclaw tools::builtin::file"}),
+                serde_json::json!({"command": "git status --short", "timeout": 10}),
+            ],
+            ..Default::default()
+        })
     }
 }
 

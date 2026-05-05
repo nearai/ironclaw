@@ -19,7 +19,7 @@ use crate::tools::builtin::file_edit_guard::{self, MatchMethod, SharedReadFileSt
 use crate::tools::builtin::file_history::FileHistory;
 use crate::tools::builtin::path_utils::{DEFAULT_EXCLUDED_DIRS, validate_path};
 use crate::tools::tool::{
-    ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput, require_str,
+    ApprovalRequirement, Tool, ToolDiscoverySummary, ToolDomain, ToolError, ToolOutput, require_str,
 };
 use crate::workspace::paths as ws_paths;
 
@@ -271,6 +271,22 @@ impl Tool for ReadFileTool {
     fn domain(&self) -> ToolDomain {
         ToolDomain::Container
     }
+
+    fn discovery_summary(&self) -> Option<ToolDiscoverySummary> {
+        Some(ToolDiscoverySummary {
+            notes: vec![
+                "Reads from the LOCAL FILESYSTEM; use memory_read for workspace memory files (HEARTBEAT, MEMORY, AGENTS, etc.)".into(),
+                "Defaults to first 2000 lines; pass offset+limit to page through large files".into(),
+                "Preferred over shell cat/head/tail/less — produces structured output and enforces size limits".into(),
+                "Call read_file before apply_patch on the same path so edits are validated against the most recent contents".into(),
+            ],
+            examples: vec![
+                serde_json::json!({"path": "src/main.rs"}),
+                serde_json::json!({"path": "Cargo.toml", "offset": 0, "limit": 50}),
+            ],
+            ..Default::default()
+        })
+    }
 }
 
 /// Write file contents tool.
@@ -438,6 +454,20 @@ impl Tool for WriteFileTool {
 
     fn rate_limit_config(&self) -> Option<crate::tools::tool::ToolRateLimitConfig> {
         Some(crate::tools::tool::ToolRateLimitConfig::new(20, 200))
+    }
+
+    fn discovery_summary(&self) -> Option<ToolDiscoverySummary> {
+        Some(ToolDiscoverySummary {
+            notes: vec![
+                "Use only for creating new files or complete rewrites; prefer apply_patch for targeted edits".into(),
+                "Writes to the LOCAL FILESYSTEM; never use for workspace memory (use memory_write with target='memory'|'heartbeat'|...)".into(),
+                "Creates parent directories automatically; content fully replaces any existing file at path".into(),
+            ],
+            examples: vec![
+                serde_json::json!({"path": "src/new_module.rs", "content": "// contents"}),
+            ],
+            ..Default::default()
+        })
     }
 }
 
@@ -916,6 +946,31 @@ impl Tool for ApplyPatchTool {
 
     fn rate_limit_config(&self) -> Option<crate::tools::tool::ToolRateLimitConfig> {
         Some(crate::tools::tool::ToolRateLimitConfig::new(20, 200))
+    }
+
+    fn discovery_summary(&self) -> Option<ToolDiscoverySummary> {
+        Some(ToolDiscoverySummary {
+            notes: vec![
+                "Preferred way to edit files — safer than write_file for targeted changes".into(),
+                "Call read_file first; apply_patch rejects edits when the on-disk contents changed since the last read".into(),
+                "old_string must match the file exactly once (including whitespace); include enough surrounding lines for uniqueness".into(),
+                "Set replace_all=true only when every occurrence should change; otherwise ensure old_string is unique".into(),
+            ],
+            examples: vec![
+                serde_json::json!({
+                    "path": "src/lib.rs",
+                    "old_string": "fn old_name(",
+                    "new_string": "fn new_name("
+                }),
+                serde_json::json!({
+                    "path": "src/lib.rs",
+                    "old_string": "DEBUG",
+                    "new_string": "INFO",
+                    "replace_all": true
+                }),
+            ],
+            ..Default::default()
+        })
     }
 }
 
