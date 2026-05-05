@@ -9,11 +9,11 @@ use ironclaw_memory::{
     MemoryAppendOutcome, MemoryBackend, MemoryBackendCapabilities, MemoryBackendFilesystemAdapter,
     MemoryContext, MemoryDocumentFilesystem, MemoryDocumentIndexer, MemoryDocumentPath,
     MemoryDocumentRepository, MemoryDocumentScope, MemorySearchRequest,
-    PromptProtectedPathRegistry, PromptSafetyAllowanceId, PromptSafetyReasonCode,
-    PromptSafetySeverity, PromptWriteOperation, PromptWriteSafetyDecision, PromptWriteSafetyError,
-    PromptWriteSafetyEvent, PromptWriteSafetyEventKind, PromptWriteSafetyEventSink,
-    PromptWriteSafetyPolicy, PromptWriteSafetyRequest, PromptWriteSource, RepositoryMemoryBackend,
-    chunk_document, content_sha256,
+    PromptProtectedPathRegistry, PromptSafetyAllowanceId, PromptSafetyPolicyVersion,
+    PromptSafetyReasonCode, PromptSafetySeverity, PromptWriteOperation, PromptWriteSafetyDecision,
+    PromptWriteSafetyError, PromptWriteSafetyEvent, PromptWriteSafetyEventKind,
+    PromptWriteSafetyEventSink, PromptWriteSafetyPolicy, PromptWriteSafetyRequest,
+    PromptWriteSource, RepositoryMemoryBackend, chunk_document, content_sha256,
 };
 
 #[tokio::test]
@@ -197,6 +197,121 @@ async fn configured_prompt_safety_event_sink_failure_blocks_bypass_persistence()
             .contains("prompt_write_safety_event_unavailable")
     );
     assert!(repository.read_document(&path).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn safety_event_records_classifying_registry_version_per_path() {
+    // zmanian test gap 4: policy-version reconciliation. The default
+    // registry owns `prompt-protected-paths:v1` and matches AGENTS.md /
+    // SOUL.md / etc.; a custom policy can ship its own registry with a
+    // different version that adds *new* protected paths. The audit event
+    // must record the version of whichever registry actually classified
+    // the path. A regression that always emits the default version
+    // would lose downstream consumers' ability to tell v1 from v2 for
+    // custom paths during a policy bump rollout.
+    let custom_version = PromptSafetyPolicyVersion::new("custom-paths:v2").unwrap();
+    let custom_registry = PromptProtectedPathRegistry::new(custom_version, ["custom/playbook.md"])
+        .expect("custom registry");
+    let policy = Arc::new(VersionedRegistryPolicy {
+        registry: custom_registry,
+    });
+    let repository = Arc::new(InMemoryMemoryDocumentRepository::new());
+    let events = Arc::new(RecordingPromptSafetyEventSink::default());
+    let backend = RepositoryMemoryBackend::new(repository.clone())
+        .with_prompt_write_safety_policy(policy)
+        .with_prompt_write_safety_event_sink(events.clone());
+    let context = MemoryContext::new(MemoryDocumentScope::new("tenant-a", "alice", None).unwrap());
+
+    // Write to a default-registry path: must emit with v1.
+    backend
+        .write_document(
+            &context,
+            &MemoryDocumentPath::new("tenant-a", "alice", None, "MEMORY.md").unwrap(),
+            b"benign default-path content",
+        )
+        .await
+        .unwrap();
+    // Write to the custom registry's added path: must emit with v2.
+    backend
+        .write_document(
+            &context,
+            &MemoryDocumentPath::new("tenant-a", "alice", None, "custom/playbook.md").unwrap(),
+            b"benign custom-path content",
+        )
+        .await
+        .unwrap();
+
+    let recorded = events.events();
+    assert_eq!(
+        recorded.len(),
+        2,
+        "expected one event per protected-path write"
+    );
+    let by_path: std::collections::HashMap<String, &str> = recorded
+        .iter()
+        .map(|event| {
+            let relative = event
+                .protected_path_class
+                .as_ref()
+                .map(|c| c.relative_path().to_string())
+                .unwrap_or_default();
+            (relative, event.policy_version.as_str())
+        })
+        .collect();
+    assert_eq!(
+        by_path.get("memory.md").copied(),
+        Some("prompt-protected-paths:v1"),
+        "default-registry path must record the default registry's version"
+    );
+    assert_eq!(
+        by_path.get("custom/playbook.md").copied(),
+        Some("custom-paths:v2"),
+        "custom-registry path must record the custom policy's version, not the default"
+    );
+}
+
+#[tokio::test]
+async fn bypass_allowed_with_empty_clear_persists_empty_content_and_records_event() {
+    // zmanian test gap 3(a): when `BypassAllowed` is the decision (here:
+    // empty content + empty_prompt_file_clear allowance on a protected
+    // path), the empty content must actually persist to the document and
+    // the audit event must record `BypassAllowed`. Without this test, a
+    // regression that errors out in the bypass path or skips the persist
+    // step would leave the document content stale while still appearing
+    // safety-clean to the caller.
+    let repository = Arc::new(InMemoryMemoryDocumentRepository::new());
+    let events = Arc::new(RecordingPromptSafetyEventSink::default());
+    let backend = RepositoryMemoryBackend::new(repository.clone())
+        .with_prompt_write_safety_event_sink(events.clone());
+    let context = MemoryContext::new(MemoryDocumentScope::new("tenant-a", "alice", None).unwrap())
+        .with_prompt_write_safety_allowance(PromptSafetyAllowanceId::empty_prompt_file_clear());
+    let path = MemoryDocumentPath::new("tenant-a", "alice", None, "BOOTSTRAP.md").unwrap();
+    // Pre-seed the row with non-empty content so the bypass write must
+    // overwrite it — verifies the persist actually flowed through, not
+    // that we observed an absent row.
+    repository
+        .write_document(&path, b"prior bootstrap")
+        .await
+        .unwrap();
+
+    backend.write_document(&context, &path, b"").await.unwrap();
+
+    assert_eq!(
+        repository.read_document(&path).await.unwrap(),
+        Some(Vec::new()),
+        "BypassAllowed must overwrite the prior content with the cleared (empty) content"
+    );
+    let recorded = events.events();
+    assert_eq!(recorded.len(), 1, "expected one BypassAllowed audit event");
+    assert_eq!(recorded[0].kind, PromptWriteSafetyEventKind::BypassAllowed);
+    assert_eq!(recorded[0].operation, PromptWriteOperation::Write);
+    assert_eq!(
+        recorded[0]
+            .protected_path_class
+            .as_ref()
+            .map(|c| c.relative_path()),
+        Some("bootstrap.md")
+    );
 }
 
 #[tokio::test]
@@ -1005,6 +1120,30 @@ impl PromptWriteSafetyPolicy for CustomPathEmptyClearPolicy {
                 .reason,
             });
         }
+        Ok(PromptWriteSafetyDecision::Allow)
+    }
+}
+
+/// Policy whose only job is to expose a registry with a custom
+/// `PromptSafetyPolicyVersion`, so the safety pipeline's per-path
+/// version reconciliation can be exercised directly.
+#[derive(Debug)]
+struct VersionedRegistryPolicy {
+    registry: PromptProtectedPathRegistry,
+}
+
+#[async_trait]
+impl PromptWriteSafetyPolicy for VersionedRegistryPolicy {
+    fn protected_path_registry(&self) -> Option<&PromptProtectedPathRegistry> {
+        Some(&self.registry)
+    }
+
+    async fn check_write(
+        &self,
+        _request: PromptWriteSafetyRequest<'_>,
+    ) -> Result<PromptWriteSafetyDecision, PromptWriteSafetyError> {
+        // Allow everything benign — this policy exists only to test the
+        // version-reconciliation path, not the decision logic.
         Ok(PromptWriteSafetyDecision::Allow)
     }
 }
