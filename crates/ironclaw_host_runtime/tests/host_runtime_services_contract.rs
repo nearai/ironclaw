@@ -18,12 +18,15 @@ use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationHandler, CancelReason, CancelRuntimeWorkRequest, CapabilitySurfaceVersion,
-    DefaultHostRuntime, HostRuntime, HostRuntimeServices, NetworkObligationPolicyStore,
-    ProcessObligationLifecycleStore, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeCapabilityResumeRequest, RuntimeFailureKind, RuntimeSecretInjectionStore,
-    RuntimeStatusRequest, RuntimeWorkId,
+    DefaultHostRuntime, HostHttpEgressService, HostRuntime, HostRuntimeServices,
+    NetworkObligationPolicyStore, ProcessObligationLifecycleStore, RuntimeCapabilityOutcome,
+    RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind,
+    RuntimeSecretInjectionStore, RuntimeStatusRequest, RuntimeWorkId,
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutionResult, McpExecutor};
+use ironclaw_network::{
+    NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
+};
 use ironclaw_processes::{
     BackgroundFailureStage, BackgroundProcessManager, InMemoryProcessResultStore,
     InMemoryProcessStore, ProcessError, ProcessExecutionRequest, ProcessExecutionResult,
@@ -37,7 +40,8 @@ use ironclaw_run_state::{
     InMemoryApprovalRequestStore, InMemoryRunStateStore, RunStateStore, RunStatus,
 };
 use ironclaw_scripts::{
-    ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptRuntime, ScriptRuntimeConfig,
+    ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptExecutionRequest,
+    ScriptExecutionResult, ScriptExecutor, ScriptRuntime, ScriptRuntimeConfig,
 };
 use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
 use ironclaw_trust::{
@@ -46,7 +50,7 @@ use ironclaw_trust::{
 };
 use ironclaw_wasm::{
     RecordingWasmHostHttp, WasmHostError, WasmHostHttp, WasmHttpRequest, WasmHttpResponse,
-    WitToolHost, WitToolRuntimeConfig,
+    WasmStagedRuntimeCredential, WasmStagedRuntimeCredentials, WitToolHost, WitToolRuntimeConfig,
 };
 use serde_json::json;
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
@@ -221,6 +225,97 @@ async fn host_runtime_services_writes_runtime_events_to_durable_event_log_metada
     assert!(serialized.contains("script.echo"));
     assert!(serialized.contains("dispatch_requested"));
     assert!(serialized.contains("dispatch_succeeded"));
+}
+
+#[tokio::test]
+async fn host_runtime_services_durable_event_replay_cursor_and_gap_behavior() {
+    let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    let script_runtime = Arc::new(ScriptRuntime::new(
+        ScriptRuntimeConfig::for_testing(),
+        EchoScriptBackend,
+    ));
+    let services = HostRuntimeServices::new(
+        registry,
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability],
+    )))
+    .with_durable_event_log(Arc::clone(&event_log))
+    .with_script_runtime(script_runtime);
+    let scope = sample_scope(InvocationId::new());
+    let stream = EventStreamKey::from_scope(&scope);
+
+    let outcome = services
+        .host_runtime()
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
+            script_capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "cursor replay"}),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, script_capability_id());
+            assert_eq!(completed.output, json!({"message": "cursor replay"}));
+        }
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+    let first_page = event_log
+        .read_after_cursor(&stream, &ReadScope::any(), None, 1)
+        .await
+        .unwrap();
+    assert_eq!(first_page.entries.len(), 1);
+    assert_eq!(
+        first_page.entries[0].record.kind,
+        RuntimeEventKind::DispatchRequested
+    );
+    let second_page = event_log
+        .read_after_cursor(&stream, &ReadScope::any(), Some(first_page.next_cursor), 10)
+        .await
+        .unwrap();
+    assert_eq!(second_page.entries.len(), 2);
+    assert_eq!(
+        second_page
+            .entries
+            .iter()
+            .map(|entry| entry.record.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            RuntimeEventKind::RuntimeSelected,
+            RuntimeEventKind::DispatchSucceeded,
+        ]
+    );
+    let empty_page = event_log
+        .read_after_cursor(
+            &stream,
+            &ReadScope::any(),
+            Some(second_page.next_cursor),
+            10,
+        )
+        .await
+        .unwrap();
+    assert!(empty_page.entries.is_empty());
+    assert_eq!(empty_page.next_cursor, second_page.next_cursor);
+
+    event_log
+        .truncate_before_or_at(&stream, first_page.next_cursor)
+        .unwrap();
+    let gap = event_log
+        .read_after_cursor(&stream, &ReadScope::any(), Some(EventCursor::origin()), 10)
+        .await
+        .expect_err("origin cursor should be stale after retention truncation");
+    assert!(matches!(gap, EventError::ReplayGap { .. }));
 }
 
 #[tokio::test]
@@ -673,6 +768,110 @@ async fn host_runtime_services_installs_builtin_obligation_handler_with_audit_si
 }
 
 #[tokio::test]
+async fn host_runtime_services_applies_scoped_mount_obligation_to_script_runtime() {
+    let scoped_mounts = mount_view(
+        "/workspace",
+        "/projects/demo",
+        MountPermissions::read_only(),
+    );
+    let mut context = execution_context_with_dispatch_grant(script_capability_id());
+    context.mounts = mount_view(
+        "/workspace",
+        "/projects/demo",
+        MountPermissions::read_write(),
+    );
+    let script_runtime = Arc::new(RecordingScriptExecutor::default());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ObligatingAuthorizer::new(vec![
+            Obligation::UseScopedMounts {
+                mounts: scoped_mounts.clone(),
+            },
+        ])),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability],
+    )))
+    .with_script_runtime(Arc::clone(&script_runtime));
+
+    let outcome = services
+        .host_runtime()
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context,
+            script_capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "mount narrowed"}),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, script_capability_id());
+            assert_eq!(completed.output, json!({"message": "mount narrowed"}));
+        }
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+    assert_eq!(script_runtime.recorded_mounts(), vec![Some(scoped_mounts)]);
+}
+
+#[tokio::test]
+async fn host_runtime_services_rejects_broader_scoped_mount_before_dispatch() {
+    let mut context = execution_context_with_dispatch_grant(script_capability_id());
+    context.mounts = mount_view(
+        "/workspace",
+        "/projects/demo",
+        MountPermissions::read_only(),
+    );
+    let script_runtime = Arc::new(RecordingScriptExecutor::default());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ObligatingAuthorizer::new(vec![
+            Obligation::UseScopedMounts {
+                mounts: mount_view(
+                    "/workspace",
+                    "/projects/demo",
+                    MountPermissions::read_write(),
+                ),
+            },
+        ])),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability],
+    )))
+    .with_script_runtime(Arc::clone(&script_runtime));
+
+    let outcome = services
+        .host_runtime()
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context,
+            script_capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "broader mount"}),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    assert_failed_outcome(outcome, RuntimeFailureKind::Authorization);
+    assert!(
+        script_runtime.recorded_mounts().is_empty(),
+        "broader mount obligation must fail before runtime dispatch"
+    );
+}
+
+#[tokio::test]
 async fn host_runtime_services_writes_obligation_audit_records_to_durable_log_metadata_only() {
     let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
     let filesystem = Arc::new(LocalFilesystem::new());
@@ -758,6 +957,142 @@ async fn host_runtime_services_writes_obligation_audit_records_to_durable_log_me
     assert!(serialized.contains("script.echo"));
     assert!(serialized.contains("audit_before"));
     assert!(serialized.contains("audit_after"));
+}
+
+#[tokio::test]
+async fn host_runtime_services_enforces_output_limit_and_reconciles_resource_usage() {
+    let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let scope = sample_scope(InvocationId::new());
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor.set_limit(
+        account.clone(),
+        ResourceLimits {
+            max_concurrency_slots: Some(1),
+            max_output_bytes: Some(10_000),
+            ..ResourceLimits::default()
+        },
+    );
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let reservation_id = ResourceReservationId::new();
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
+        Arc::new(ObligatingAuthorizer::new(vec![
+            Obligation::ReserveResources { reservation_id },
+            Obligation::EnforceOutputLimit { bytes: 8 },
+        ]));
+    let script_runtime = Arc::new(ScriptRuntime::new(
+        ScriptRuntimeConfig::for_testing(),
+        EchoScriptBackend,
+    ));
+    let services = HostRuntimeServices::new(
+        registry,
+        Arc::new(LocalFilesystem::new()),
+        Arc::clone(&governor),
+        authorizer,
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_run_state(Arc::clone(&run_state))
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability],
+    )))
+    .with_script_runtime(script_runtime);
+    let input = json!({"message": "this output is deliberately too large"});
+
+    let outcome = services
+        .host_runtime()
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
+            script_capability_id(),
+            ResourceEstimate {
+                concurrency_slots: Some(1),
+                output_bytes: Some(1024),
+                ..ResourceEstimate::default()
+            },
+            input,
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    assert_failed_outcome(outcome, RuntimeFailureKind::OutputTooLarge);
+    assert_eq!(governor.reserved_for(&account), Default::default());
+    assert!(
+        governor.usage_for(&account).output_bytes > 8,
+        "runtime usage should remain reconciled even when post-dispatch output limit blocks publication"
+    );
+    let run = run_state
+        .get(&scope, scope.invocation_id)
+        .await
+        .unwrap()
+        .expect("run state should record the failed invocation");
+    assert_eq!(run.status, RunStatus::Failed);
+    assert_eq!(run.error_kind.as_deref(), Some("ObligationFailed"));
+}
+
+#[tokio::test]
+async fn host_runtime_services_releases_reservation_when_dispatch_preflight_fails_after_obligations()
+ {
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let scope = sample_scope(InvocationId::new());
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor.set_limit(
+        account.clone(),
+        ResourceLimits {
+            max_concurrency_slots: Some(1),
+            ..ResourceLimits::default()
+        },
+    );
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let reservation_id = ResourceReservationId::new();
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::clone(&governor),
+        Arc::new(ObligatingAuthorizer::new(vec![
+            Obligation::ReserveResources { reservation_id },
+        ])),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_run_state(Arc::clone(&run_state))
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability],
+    )));
+
+    let outcome = services
+        .host_runtime()
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
+            script_capability_id(),
+            ResourceEstimate {
+                concurrency_slots: Some(1),
+                ..ResourceEstimate::default()
+            },
+            json!({"message": "missing runtime after reservation"}),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    assert_failed_outcome(outcome, RuntimeFailureKind::MissingRuntime);
+    assert_eq!(governor.reserved_for(&account), Default::default());
+    assert!(matches!(
+        governor.release(reservation_id).unwrap_err(),
+        ResourceError::ReservationClosed {
+            status: ReservationStatus::Released,
+            ..
+        }
+    ));
+    let run = run_state
+        .get(&scope, scope.invocation_id)
+        .await
+        .unwrap()
+        .expect("run state should record the failed invocation");
+    assert_eq!(run.status, RunStatus::Failed);
+    assert_eq!(run.error_kind.as_deref(), Some("Dispatch"));
 }
 
 #[tokio::test]
@@ -932,6 +1267,175 @@ async fn host_runtime_services_routes_cached_wasm_http_through_per_invocation_po
     assert_eq!(requests[1].scope, second_scope);
     assert_eq!(requests[0].network_policy, policy);
     assert_eq!(requests[1].network_policy, policy);
+}
+
+#[tokio::test]
+async fn host_runtime_services_routes_wasm_http_with_staged_network_and_secret_handoffs() {
+    let parsed_manifest = ExtensionManifest::parse(WASM_HTTP_SUCCESS_MANIFEST).unwrap();
+    let component = tool_component(HTTP_TOOL_WAT);
+    let filesystem = Arc::new(
+        filesystem_with_wasm_component(
+            parsed_manifest.id.as_str(),
+            "wasm/http-success.wasm",
+            &component,
+        )
+        .await,
+    );
+    let governor = Arc::new(governor_with_default_limit(sample_account()));
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_handle = SecretHandle::new("api-token").unwrap();
+    let policy = wasm_http_policy();
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
+        Arc::new(ObligatingAuthorizer::new(vec![
+            Obligation::ApplyNetworkPolicy {
+                policy: policy.clone(),
+            },
+            Obligation::InjectSecretOnce {
+                handle: secret_handle.clone(),
+            },
+        ]));
+    let network = RecordingNetworkHttpEgress::new();
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(WASM_HTTP_SUCCESS_MANIFEST)),
+        filesystem,
+        governor,
+        authorizer,
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_secret_store(Arc::clone(&secret_store))
+    .with_wasm_runtime_credential_provider(Arc::new(WasmStagedRuntimeCredentials::new(vec![
+        WasmStagedRuntimeCredential::for_exact_url(
+            secret_handle.clone(),
+            RuntimeCredentialTarget::Header {
+                name: "authorization".to_string(),
+                prefix: Some("Bearer ".to_string()),
+            },
+            true,
+            "https://example.test/api".to_string(),
+        ),
+    ])));
+    let runtime_http = Arc::new(
+        HostHttpEgressService::new_with_request_policy_for_tests(
+            network.clone(),
+            InMemorySecretStore::new(),
+        )
+        .with_secret_injection_store(services.secret_injection_store()),
+    );
+    let services = services
+        .with_runtime_http_egress(runtime_http)
+        .try_with_wasm_runtime(WitToolRuntimeConfig::for_testing(), WitToolHost::deny_all())
+        .unwrap();
+    let capability_id = CapabilityId::new("wasm-http.success").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    secret_store
+        .put(
+            scope.clone(),
+            secret_handle,
+            SecretMaterial::from("sk-vertical-secret"),
+        )
+        .await
+        .unwrap();
+
+    let outcome = services
+        .host_runtime()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope.clone(),
+            json!({"call": "http-success-with-secret"}),
+        ))
+        .await
+        .unwrap();
+
+    assert_completed_outcome(outcome, &capability_id);
+    let requests = network.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].scope, scope);
+    assert_eq!(requests[0].policy, policy);
+    assert_eq!(
+        requests[0]
+            .headers
+            .iter()
+            .find(|(name, _)| name == "authorization"),
+        Some(&(
+            "authorization".to_string(),
+            "Bearer sk-vertical-secret".to_string(),
+        ))
+    );
+}
+
+#[tokio::test]
+async fn host_runtime_services_wasm_http_missing_staged_secret_stays_before_transport() {
+    let parsed_manifest = ExtensionManifest::parse(WASM_HTTP_SUCCESS_MANIFEST).unwrap();
+    let component = tool_component(HTTP_TOOL_WAT);
+    let filesystem = Arc::new(
+        filesystem_with_wasm_component(
+            parsed_manifest.id.as_str(),
+            "wasm/http-success.wasm",
+            &component,
+        )
+        .await,
+    );
+    let governor = Arc::new(governor_with_default_limit(sample_account()));
+    let secret_handle = SecretHandle::new("api-token").unwrap();
+    let policy = wasm_http_policy();
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
+        Arc::new(ObligatingAuthorizer::new(vec![
+            Obligation::ApplyNetworkPolicy { policy },
+        ]));
+    let network = RecordingNetworkHttpEgress::new();
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(WASM_HTTP_SUCCESS_MANIFEST)),
+        filesystem,
+        governor,
+        authorizer,
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_wasm_runtime_credential_provider(Arc::new(WasmStagedRuntimeCredentials::new(vec![
+        WasmStagedRuntimeCredential::for_exact_url(
+            secret_handle,
+            RuntimeCredentialTarget::Header {
+                name: "authorization".to_string(),
+                prefix: Some("Bearer ".to_string()),
+            },
+            true,
+            "https://example.test/api".to_string(),
+        ),
+    ])));
+    let runtime_http = Arc::new(
+        HostHttpEgressService::new_with_request_policy_for_tests(
+            network.clone(),
+            InMemorySecretStore::new(),
+        )
+        .with_secret_injection_store(services.secret_injection_store()),
+    );
+    let services = services
+        .with_runtime_http_egress(runtime_http)
+        .try_with_wasm_runtime(WitToolRuntimeConfig::for_testing(), WitToolHost::deny_all())
+        .unwrap();
+    let capability_id = CapabilityId::new("wasm-http.success").unwrap();
+
+    let outcome = services
+        .host_runtime()
+        .invoke_capability(wasm_runtime_request(
+            capability_id.clone(),
+            json!({"call": "http-missing-staged-secret"}),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, capability_id);
+            assert_eq!(completed.usage.network_egress_bytes, 0);
+        }
+        other => panic!("expected guest to complete after host HTTP denial, got {other:?}"),
+    }
+    assert!(
+        network.requests().is_empty(),
+        "missing staged secret must be denied before outbound transport"
+    );
 }
 
 #[tokio::test]
@@ -2115,6 +2619,42 @@ impl TrustAwareCapabilityDispatchAuthorizer for ApprovalThenGrantAuthorizer {
     }
 }
 
+#[derive(Default)]
+struct RecordingScriptExecutor {
+    mounts: std::sync::Mutex<Vec<Option<MountView>>>,
+}
+
+impl RecordingScriptExecutor {
+    fn recorded_mounts(&self) -> Vec<Option<MountView>> {
+        self.mounts.lock().unwrap().clone()
+    }
+}
+
+impl ScriptExecutor for RecordingScriptExecutor {
+    fn execute_extension_json(
+        &self,
+        governor: &dyn ResourceGovernor,
+        request: ScriptExecutionRequest<'_>,
+    ) -> Result<ScriptExecutionResult, ironclaw_scripts::ScriptError> {
+        self.mounts.lock().unwrap().push(request.mounts.clone());
+        let reservation = match request.resource_reservation.clone() {
+            Some(reservation) => reservation,
+            None => governor.reserve(request.scope.clone(), request.estimate.clone())?,
+        };
+        let usage = ResourceUsage::default();
+        let receipt = governor.reconcile(reservation.id, usage.clone())?;
+        Ok(ScriptExecutionResult {
+            result: ironclaw_scripts::ScriptCapabilityResult {
+                output: request.invocation.input,
+                reservation_id: reservation.id,
+                usage,
+                output_bytes: 0,
+            },
+            receipt,
+        })
+    }
+}
+
 struct EchoScriptBackend;
 
 impl ScriptBackend for EchoScriptBackend {
@@ -2159,6 +2699,41 @@ struct ObligatingAuthorizer {
 impl ObligatingAuthorizer {
     fn new(obligations: Vec<Obligation>) -> Self {
         Self { obligations }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct RecordingNetworkHttpEgress {
+    requests: Arc<std::sync::Mutex<Vec<NetworkHttpRequest>>>,
+}
+
+impl RecordingNetworkHttpEgress {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn requests(&self) -> Vec<NetworkHttpRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+impl NetworkHttpEgress for RecordingNetworkHttpEgress {
+    fn execute(
+        &self,
+        request: NetworkHttpRequest,
+    ) -> Result<NetworkHttpResponse, NetworkHttpError> {
+        let request_bytes = request.body.len() as u64;
+        self.requests.lock().unwrap().push(request);
+        Ok(NetworkHttpResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: Vec::new(),
+            usage: NetworkUsage {
+                request_bytes,
+                response_bytes: 0,
+                resolved_ip: None,
+            },
+        })
     }
 }
 
@@ -2856,6 +3431,15 @@ fn capability_grants(capability: CapabilityId) -> CapabilitySet {
         },
     });
     grants
+}
+
+fn mount_view(alias: &str, target: &str, permissions: MountPermissions) -> MountView {
+    MountView::new(vec![MountGrant::new(
+        MountAlias::new(alias).unwrap(),
+        VirtualPath::new(target).unwrap(),
+        permissions,
+    )])
+    .unwrap()
 }
 
 fn local_manifest_trust_policy(

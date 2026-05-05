@@ -14,8 +14,8 @@ use std::{
 
 use ironclaw_extensions::{ExtensionPackage, ExtensionRuntime};
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, ResourceEstimate, ResourceReservation, ResourceReservationId,
-    ResourceScope, ResourceUsage, RuntimeHttpEgress, RuntimeHttpEgressError,
+    CapabilityId, ExtensionId, MountView, ResourceEstimate, ResourceReservation,
+    ResourceReservationId, ResourceScope, ResourceUsage, RuntimeHttpEgress, RuntimeHttpEgressError,
     RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind,
 };
 use ironclaw_resources::{ResourceError, ResourceGovernor, ResourceReceipt};
@@ -63,6 +63,7 @@ pub struct ScriptExecutionRequest<'a> {
     pub capability_id: &'a CapabilityId,
     pub scope: ResourceScope,
     pub estimate: ResourceEstimate,
+    pub mounts: Option<MountView>,
     pub resource_reservation: Option<ResourceReservation>,
     pub invocation: ScriptInvocation,
 }
@@ -609,17 +610,22 @@ fn bounded_lossy(bytes: &[u8], limit: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsString, fs, io::Cursor, sync::Mutex};
+    use std::io::Cursor;
 
+    #[cfg(unix)]
+    use std::{ffi::OsString, fs, sync::Mutex};
+
+    #[cfg(unix)]
+    use super::{DockerScriptBackend, ScriptBackend};
     use super::{
-        DockerScriptBackend, ScriptBackend, ScriptBackendRequest, docker_run_args, read_bounded,
-        validate_docker_image_reference,
+        ScriptBackendRequest, docker_run_args, read_bounded, validate_docker_image_reference,
     };
     use ironclaw_host_api::{CapabilityId, InvocationId, ResourceScope, TenantId, UserId};
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
+    #[cfg(unix)]
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
@@ -772,8 +778,10 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     struct EnvRestore(Vec<(&'static str, Option<OsString>)>);
 
+    #[cfg(unix)]
     impl Drop for EnvRestore {
         fn drop(&mut self) {
             for (key, value) in &self.0 {

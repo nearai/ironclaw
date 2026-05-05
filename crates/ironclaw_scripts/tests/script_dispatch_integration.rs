@@ -163,6 +163,7 @@ where
                     capability_id: request.capability_id,
                     scope: request.scope,
                     estimate: request.estimate,
+                    mounts: None,
                     resource_reservation: request.resource_reservation,
                     invocation: ScriptInvocation {
                         input: request.input,

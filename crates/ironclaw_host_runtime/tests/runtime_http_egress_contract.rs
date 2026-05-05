@@ -12,7 +12,10 @@ use ironclaw_host_runtime::{
     BuiltinObligationHandler, HostHttpEgressService, NetworkObligationPolicyStore,
     RuntimeSecretInjectionStore,
 };
-use ironclaw_mcp::{McpHostHttpRequest, McpRuntimeHttpAdapter};
+use ironclaw_mcp::{
+    McpClient, McpClientRequest, McpHostHttpClient, McpHostHttpEgressPlan, McpHostHttpRequest,
+    McpRuntimeHttpAdapter, StaticMcpHostHttpEgressPlanner,
+};
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
 };
@@ -22,6 +25,7 @@ use ironclaw_secrets::{
     SecretStoreError,
 };
 use ironclaw_wasm::{WasmHostHttp, WasmHttpRequest, WasmRuntimeHttpAdapter};
+use serde_json::{Value, json};
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
@@ -1033,7 +1037,7 @@ fn host_http_egress_without_policy_store_fails_closed_before_transport() {
 }
 
 #[test]
-fn host_http_egress_consumes_staged_network_policy_before_transport() {
+fn host_http_egress_borrows_staged_network_policy_before_transport() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -1074,13 +1078,13 @@ fn host_http_egress_consumes_staged_network_policy_before_transport() {
     assert_eq!(requests[0].policy, staged_policy);
     drop(requests);
     assert!(
-        policy_store.take(&scope, &capability_id).is_none(),
-        "runtime egress must consume staged policy exactly once"
+        policy_store.take(&scope, &capability_id).is_some(),
+        "runtime egress must leave staged policy for invocation/process lifecycle cleanup"
     );
 }
 
 #[test]
-fn wasm_http_adapter_consumes_real_host_staged_network_policy() {
+fn wasm_http_adapter_borrows_real_host_staged_network_policy() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -1124,11 +1128,11 @@ fn wasm_http_adapter_consumes_real_host_staged_network_policy() {
     assert_eq!(requests[0].url, "https://api.example.test/v1/run");
     assert_eq!(requests[0].body, b"hello".to_vec());
     drop(requests);
-    assert!(policy_store.take(&scope, &capability_id).is_none());
+    assert!(policy_store.take(&scope, &capability_id).is_some());
 }
 
 #[test]
-fn script_http_adapter_consumes_real_host_staged_network_policy() {
+fn script_http_adapter_borrows_real_host_staged_network_policy() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 202,
         headers: vec![],
@@ -1172,11 +1176,11 @@ fn script_http_adapter_consumes_real_host_staged_network_policy() {
     assert_eq!(requests[0].url, "https://api.example.test/v1/run");
     assert_eq!(requests[0].body, b"hello".to_vec());
     drop(requests);
-    assert!(policy_store.take(&scope, &capability_id).is_none());
+    assert!(policy_store.take(&scope, &capability_id).is_some());
 }
 
 #[test]
-fn mcp_http_adapter_consumes_real_host_staged_network_policy() {
+fn mcp_http_adapter_borrows_real_host_staged_network_policy() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 203,
         headers: vec![],
@@ -1220,7 +1224,65 @@ fn mcp_http_adapter_consumes_real_host_staged_network_policy() {
     assert_eq!(requests[0].url, "https://api.example.test/v1/run");
     assert_eq!(requests[0].body, b"hello".to_vec());
     drop(requests);
-    assert!(policy_store.take(&scope, &capability_id).is_none());
+    assert!(policy_store.take(&scope, &capability_id).is_some());
+}
+
+#[tokio::test]
+async fn mcp_http_client_reuses_real_host_staged_network_policy_for_json_rpc_session() {
+    let network = JsonRpcMcpNetwork::new();
+    let network_recorder = network.requests.clone();
+    let policy_store = Arc::new(NetworkObligationPolicyStore::new());
+    let scope = sample_scope();
+    let capability_id = CapabilityId::new("mcp.search").unwrap();
+    let staged_policy = sample_policy();
+    policy_store.insert(&scope, &capability_id, staged_policy.clone());
+    let service = HostHttpEgressService::new(network, InMemorySecretStore::new())
+        .with_network_policy_store(policy_store.clone());
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(service)),
+        StaticMcpHostHttpEgressPlanner::new(McpHostHttpEgressPlan {
+            network_policy: caller_supplied_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            timeout_ms: Some(1000),
+        }),
+    );
+
+    let output = client
+        .call_tool(McpClientRequest {
+            provider: ExtensionId::new("mcp").unwrap(),
+            capability_id: capability_id.clone(),
+            scope: scope.clone(),
+            transport: "http".to_string(),
+            command: None,
+            args: vec![],
+            url: Some("https://api.example.test/v1/run".to_string()),
+            input: json!({"query": "ironclaw"}),
+            max_output_bytes: 4096,
+        })
+        .await
+        .expect("one staged policy must cover the whole MCP JSON-RPC exchange");
+
+    assert_eq!(
+        output.output,
+        json!({"content":[{"type":"text","text":"ok"}],"isError":false})
+    );
+    let requests = network_recorder.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        3,
+        "initialize, initialized notification, and tools/call should all reach transport"
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.policy == staged_policy)
+    );
+    drop(requests);
+    assert!(
+        policy_store.take(&scope, &capability_id).is_some(),
+        "host egress should leave staged policies for invocation/process lifecycle cleanup"
+    );
 }
 
 #[test]
@@ -1957,6 +2019,11 @@ struct RecordingNetwork {
 }
 
 #[derive(Clone)]
+struct JsonRpcMcpNetwork {
+    requests: Arc<Mutex<Vec<NetworkHttpRequest>>>,
+}
+
+#[derive(Clone)]
 struct UrlEchoNetwork {
     requests: Arc<Mutex<Vec<NetworkHttpRequest>>>,
 }
@@ -1979,6 +2046,71 @@ impl NetworkHttpEgress for UrlEchoNetwork {
             reason: format!("upstream rejected {}", request.url),
             request_bytes: request.body.len() as u64,
             response_bytes: 0,
+        })
+    }
+}
+
+impl JsonRpcMcpNetwork {
+    fn new() -> Self {
+        Self {
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+impl NetworkHttpEgress for JsonRpcMcpNetwork {
+    fn execute(
+        &self,
+        request: NetworkHttpRequest,
+    ) -> Result<NetworkHttpResponse, NetworkHttpError> {
+        let request_bytes = request.body.len() as u64;
+        let body = serde_json::from_slice::<Value>(&request.body).map_err(|error| {
+            NetworkHttpError::Transport {
+                reason: format!("invalid JSON-RPC request: {error}"),
+                request_bytes,
+                response_bytes: 0,
+            }
+        })?;
+        let method = body
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let id = body.get("id").cloned().unwrap_or(Value::Null);
+        self.requests.lock().unwrap().push(request);
+
+        let (status, headers, response_body) = match method.as_str() {
+            "initialize" => (
+                200,
+                vec![("Mcp-Session-Id".to_string(), "session-123".to_string())],
+                json!({"jsonrpc":"2.0","id":id,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"test","version":"1"}}}),
+            ),
+            "notifications/initialized" => (202, Vec::new(), Value::Null),
+            "tools/call" => (
+                200,
+                Vec::new(),
+                json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":"ok"}],"isError":false}}),
+            ),
+            _ => (
+                500,
+                Vec::new(),
+                json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"method not found"}}),
+            ),
+        };
+        let body = if status == 202 {
+            Vec::new()
+        } else {
+            serde_json::to_vec(&response_body).unwrap()
+        };
+        Ok(NetworkHttpResponse {
+            status,
+            headers,
+            usage: NetworkUsage {
+                request_bytes,
+                response_bytes: body.len() as u64,
+                resolved_ip: None,
+            },
+            body,
         })
     }
 }

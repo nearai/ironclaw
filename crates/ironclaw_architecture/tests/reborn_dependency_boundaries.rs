@@ -74,6 +74,25 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
 }
 
 #[test]
+fn reborn_turns_public_surface_keeps_runner_api_explicit() {
+    let root = workspace_root();
+    let lib = std::fs::read_to_string(root.join("crates/ironclaw_turns/src/lib.rs"))
+        .expect("turns lib.rs must be readable");
+
+    let forbidden_public_exports = [
+        "pub use runner::",
+        "pub use crate::runner::",
+        "pub use self::runner::",
+    ];
+    for pattern in forbidden_public_exports {
+        assert!(
+            !lib.contains(pattern),
+            "ironclaw_turns public prelude must not re-export trusted runner transition API `{pattern}`; adapters must import ironclaw_turns::runner explicitly"
+        );
+    }
+}
+
+#[test]
 fn reborn_runtime_http_egress_has_single_network_boundary() {
     let forbidden = [
         ForbiddenRuntimeNetworkUse {
@@ -395,6 +414,25 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_mcp",
                 "ironclaw_run_state",
                 "ironclaw_scripts",
+                "ironclaw_wasm",
+            ],
+        },
+        BoundaryRule {
+            crate_name: "ironclaw_turns",
+            forbidden: vec![
+                "ironclaw_approvals",
+                "ironclaw_authorization",
+                "ironclaw_capabilities",
+                "ironclaw_dispatcher",
+                "ironclaw_extensions",
+                "ironclaw_filesystem",
+                "ironclaw_mcp",
+                "ironclaw_memory",
+                "ironclaw_network",
+                "ironclaw_processes",
+                "ironclaw_run_state",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
                 "ironclaw_wasm",
             ],
         },

@@ -1,4 +1,7 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::{
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{
@@ -178,6 +181,52 @@ async fn filesystem_run_state_rejects_duplicate_invocation_in_same_tenant_user()
 }
 
 #[tokio::test]
+async fn filesystem_run_state_duplicate_start_is_serialized_across_store_instances() {
+    let fs = ConcurrentMissingReadFilesystem::new(engine_filesystem());
+    let first_store = FilesystemRunStateStore::new(&fs);
+    let second_store = FilesystemRunStateStore::new(&fs);
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+
+    let (first, second) = tokio::join!(
+        first_store.start(RunStart {
+            invocation_id,
+            capability_id: CapabilityId::new("echo.one").unwrap(),
+            scope: scope.clone(),
+        }),
+        second_store.start(RunStart {
+            invocation_id,
+            capability_id: CapabilityId::new("echo.two").unwrap(),
+            scope: scope.clone(),
+        })
+    );
+
+    assert_eq!(
+        [&first, &second]
+            .into_iter()
+            .filter(|result| result.is_ok())
+            .count(),
+        1,
+        "only one filesystem-backed store instance may create a given invocation"
+    );
+    assert_eq!(
+        [&first, &second]
+            .into_iter()
+            .filter(|result| matches!(result, Err(RunStateError::InvocationAlreadyExists { invocation_id: id }) if *id == invocation_id))
+            .count(),
+        1,
+        "the losing store instance should observe the record created by the winner"
+    );
+    assert!(
+        first_store
+            .get(&scope, invocation_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
 async fn in_memory_run_state_allows_same_invocation_id_in_different_tenants() {
     let store = InMemoryRunStateStore::new();
     let invocation_id = InvocationId::new();
@@ -344,6 +393,45 @@ async fn filesystem_approval_request_store_persists_pending_requests_under_tenan
         .unwrap()
         .unwrap();
     assert_eq!(reloaded, record);
+}
+
+#[tokio::test]
+async fn filesystem_approval_request_duplicate_save_is_serialized_across_store_instances() {
+    let fs = ConcurrentMissingReadFilesystem::new(engine_filesystem());
+    let first_store = FilesystemApprovalRequestStore::new(&fs);
+    let second_store = FilesystemApprovalRequestStore::new(&fs);
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let approval = approval_request(invocation_id);
+
+    let (first, second) = tokio::join!(
+        first_store.save_pending(scope.clone(), approval.clone()),
+        second_store.save_pending(scope.clone(), approval.clone())
+    );
+
+    assert_eq!(
+        [&first, &second]
+            .into_iter()
+            .filter(|result| result.is_ok())
+            .count(),
+        1,
+        "only one filesystem-backed store instance may create a given approval request"
+    );
+    assert_eq!(
+        [&first, &second]
+            .into_iter()
+            .filter(|result| matches!(result, Err(RunStateError::ApprovalRequestAlreadyExists { request_id }) if *request_id == approval.id))
+            .count(),
+        1,
+        "the losing approval store instance should observe the winner's pending request"
+    );
+    assert!(
+        first_store
+            .get(&scope, approval.id)
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -695,6 +783,66 @@ async fn filesystem_approval_request_store_isolates_records_by_project_scope() {
         Vec::new()
     );
     assert_eq!(store.records_for_scope(&project_a).await.unwrap().len(), 1);
+}
+
+struct ConcurrentMissingReadFilesystem {
+    inner: LocalFilesystem,
+    missing_reads: AtomicUsize,
+}
+
+impl ConcurrentMissingReadFilesystem {
+    fn new(inner: LocalFilesystem) -> Self {
+        Self {
+            inner,
+            missing_reads: AtomicUsize::new(0),
+        }
+    }
+
+    fn should_race_missing_read(path: &VirtualPath) -> bool {
+        path.as_str().starts_with("/engine/") && path.as_str().ends_with(".json")
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for ConcurrentMissingReadFilesystem {
+    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+        match self.inner.read_file(path).await {
+            Ok(bytes) => Ok(bytes),
+            Err(error)
+                if matches!(error, FilesystemError::NotFound { .. })
+                    && Self::should_race_missing_read(path) =>
+            {
+                self.missing_reads.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(25));
+                Err(error)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
+        self.inner.write_file(path, bytes).await
+    }
+
+    async fn append_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
+        self.inner.append_file(path, bytes).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+
+    async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.create_dir_all(path).await
+    }
 }
 
 struct DisappearingApprovalReadFilesystem {

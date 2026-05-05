@@ -106,6 +106,7 @@ pub struct WasmRuntimeHttpAdapter<E> {
     capability_id: CapabilityId,
     network_policy: NetworkPolicy,
     credential_provider: Arc<dyn WasmRuntimeCredentialProvider>,
+    policy_discarder: Arc<dyn WasmRuntimePolicyDiscarder>,
     response_body_limit: Option<u64>,
 }
 
@@ -123,6 +124,17 @@ pub trait WasmRuntimeCredentialProvider: Send + Sync + std::fmt::Debug {
         &self,
         request: &WasmRuntimeCredentialRequest,
     ) -> Result<Vec<RuntimeCredentialInjection>, WasmHostError>;
+}
+
+pub trait WasmRuntimePolicyDiscarder: Send + Sync + std::fmt::Debug {
+    fn discard(&self, scope: &ResourceScope, capability_id: &CapabilityId);
+}
+
+#[derive(Debug, Default)]
+struct NoopWasmRuntimePolicyDiscarder;
+
+impl WasmRuntimePolicyDiscarder for NoopWasmRuntimePolicyDiscarder {
+    fn discard(&self, _scope: &ResourceScope, _capability_id: &CapabilityId) {}
 }
 
 #[derive(Debug, Default)]
@@ -249,6 +261,7 @@ where
             capability_id,
             network_policy,
             credential_provider: Arc::new(EmptyWasmRuntimeCredentials),
+            policy_discarder: Arc::new(NoopWasmRuntimePolicyDiscarder),
             response_body_limit: None,
         }
     }
@@ -266,9 +279,22 @@ where
         self
     }
 
+    pub fn with_policy_discarder(
+        mut self,
+        policy_discarder: Arc<dyn WasmRuntimePolicyDiscarder>,
+    ) -> Self {
+        self.policy_discarder = policy_discarder;
+        self
+    }
+
     pub fn with_response_body_limit(mut self, response_body_limit: Option<u64>) -> Self {
         self.response_body_limit = response_body_limit;
         self
+    }
+
+    fn discard_staged_policy(&self) {
+        self.policy_discarder
+            .discard(&self.scope, &self.capability_id);
     }
 }
 
@@ -277,19 +303,37 @@ where
     E: RuntimeHttpEgress,
 {
     fn request(&self, request: WasmHttpRequest) -> Result<WasmHttpResponse, WasmHostError> {
-        let method = wasm_network_method(&request.method)?;
-        let headers = decode_wasm_headers(&request.headers_json)?;
+        let method = match wasm_network_method(&request.method) {
+            Ok(method) => method,
+            Err(error) => {
+                self.discard_staged_policy();
+                return Err(error);
+            }
+        };
+        let headers = match decode_wasm_headers(&request.headers_json) {
+            Ok(headers) => headers,
+            Err(error) => {
+                self.discard_staged_policy();
+                return Err(error);
+            }
+        };
         let body = request.body.unwrap_or_default();
-        let credential_injections = self
-            .credential_provider
-            .credential_injections(&WasmRuntimeCredentialRequest {
-                scope: self.scope.clone(),
-                capability_id: self.capability_id.clone(),
-                method,
-                url: request.url.clone(),
-                headers: headers.clone(),
-            })
-            .map_err(wasm_credential_provider_error)?;
+        let credential_injections =
+            match self
+                .credential_provider
+                .credential_injections(&WasmRuntimeCredentialRequest {
+                    scope: self.scope.clone(),
+                    capability_id: self.capability_id.clone(),
+                    method,
+                    url: request.url.clone(),
+                    headers: headers.clone(),
+                }) {
+                Ok(injections) => injections,
+                Err(error) => {
+                    self.discard_staged_policy();
+                    return Err(wasm_credential_provider_error(error));
+                }
+            };
 
         let response = self
             .egress
