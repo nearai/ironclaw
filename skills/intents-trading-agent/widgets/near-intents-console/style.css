@@ -1,0 +1,584 @@
+.ita-console {
+  margin: 14px 0 18px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 94%, var(--surface) 6%);
+  color: var(--text);
+}
+
+.ita-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.ita-kicker {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.ita-head h3,
+.ita-empty h3 {
+  margin: 2px 0 0;
+  font-size: 22px;
+  line-height: 1.15;
+}
+
+.ita-head-actions,
+.ita-section-head,
+.ita-run-actions,
+.ita-segments {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ita-section-head {
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.ita-section-head p,
+.ita-empty p {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  margin: 2px 0 0;
+}
+
+.ita-console button {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--text-sm);
+  min-height: 32px;
+  padding: 6px 10px;
+}
+
+.ita-console button:hover {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+}
+
+.ita-console button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.ita-console button.is-selected,
+.ita-strategy-row.is-selected {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent-subtle) 72%, var(--surface) 28%);
+}
+
+.ita-pill {
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: var(--text-xs);
+  font-weight: 700;
+  justify-content: center;
+  min-height: 24px;
+  padding: 3px 9px;
+  text-transform: uppercase;
+}
+
+.ita-pill.is-pass,
+.ita-phase.is-pass span,
+.ita-strategy-row.is-pass .ita-pill {
+  border-color: color-mix(in srgb, var(--success) 45%, var(--border) 55%);
+  color: var(--success);
+}
+
+.ita-pill.is-warn,
+.ita-phase.is-warn span {
+  border-color: color-mix(in srgb, var(--warning) 45%, var(--border) 55%);
+  color: var(--warning);
+}
+
+.ita-pill.is-fail,
+.ita-phase.is-fail span {
+  border-color: color-mix(in srgb, var(--error) 45%, var(--border) 55%);
+  color: var(--error);
+}
+
+.ita-pill.is-neutral {
+  color: var(--text-secondary);
+}
+
+.ita-summary,
+.ita-phases,
+.ita-ticket-grid,
+.ita-run-grid,
+.ita-trial-bar,
+.ita-intent-grid,
+.ita-paid-bar {
+  display: grid;
+  gap: 8px;
+}
+
+.ita-summary {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-bottom: 14px;
+}
+
+.ita-summary > div,
+.ita-run-grid > div,
+.ita-trial-bar > div,
+.ita-intent-grid > div,
+.ita-paid-bar > div {
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.ita-summary span,
+.ita-run-grid span,
+.ita-trial-bar span,
+.ita-intent-grid span,
+.ita-paid-bar span,
+.ita-source-line span,
+.ita-wallet-line span,
+.ita-subtitle {
+  color: var(--text-muted);
+  display: block;
+  font-size: var(--text-xs);
+}
+
+.ita-summary strong,
+.ita-run-grid strong,
+.ita-trial-bar strong,
+.ita-intent-grid strong,
+.ita-paid-bar strong,
+.ita-source-line strong,
+.ita-rail-line strong,
+.ita-wallet-line strong {
+  color: var(--text);
+  display: block;
+  font-size: var(--text-sm);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ita-phases {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-bottom: 16px;
+}
+
+.ita-phase {
+  border-top: 1px solid var(--border);
+  min-height: 62px;
+  padding-top: 8px;
+}
+
+.ita-phase span {
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: var(--text-xs);
+  font-weight: 800;
+  height: 22px;
+  justify-content: center;
+  width: 22px;
+}
+
+.ita-phase strong,
+.ita-phase small {
+  display: block;
+}
+
+.ita-phase strong {
+  font-size: var(--text-sm);
+  margin-top: 6px;
+}
+
+.ita-phase small {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  margin-top: 2px;
+}
+
+.ita-workspace {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.8fr);
+}
+
+.ita-primary,
+.ita-secondary {
+  display: grid;
+  align-content: start;
+  gap: 18px;
+}
+
+.ita-ticket,
+.ita-strategy-lab,
+.ita-run-panel,
+.ita-setup,
+.ita-paid-panel {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.ita-section-title {
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 700;
+}
+
+.ita-tight-title {
+  margin-top: 14px;
+}
+
+.ita-ticket-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-bottom: 10px;
+}
+
+.ita-field span {
+  color: var(--text-muted);
+  display: block;
+  font-size: var(--text-xs);
+  margin-bottom: 4px;
+}
+
+.ita-field input {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font: inherit;
+  min-height: 34px;
+  padding: 6px 8px;
+  width: 100%;
+}
+
+.ita-field input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.ita-segments {
+  margin-top: 8px;
+}
+
+.ita-segments button {
+  min-width: 96px;
+}
+
+.ita-strategy-list {
+  display: grid;
+  gap: 6px;
+}
+
+.ita-strategy-row {
+  align-items: center;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 42px minmax(150px, 1.35fr) repeat(4, minmax(62px, 0.5fr)) 82px;
+  min-height: 58px;
+  padding: 8px;
+  text-align: left;
+}
+
+.ita-strategy-row em {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  font-style: normal;
+  grid-column: 2 / -1;
+  line-height: 1.35;
+}
+
+.ita-rank {
+  color: var(--accent);
+  font-weight: 800;
+}
+
+.ita-strategy-name strong,
+.ita-strategy-name small,
+.ita-strategy-row span small,
+.ita-strategy-row span strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ita-strategy-name small,
+.ita-strategy-row span small {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  margin-top: 2px;
+}
+
+.ita-run-grid,
+.ita-trial-bar,
+.ita-intent-grid,
+.ita-paid-bar {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.ita-trial,
+.ita-intent,
+.ita-paid {
+  border-top: 1px solid var(--border);
+  margin-top: 12px;
+  padding-top: 10px;
+}
+
+.ita-trial-next,
+.ita-next,
+.ita-intent-empty,
+.ita-empty-line,
+.ita-loading {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+.ita-trial-next,
+.ita-next {
+  border-top: 1px solid var(--border);
+  line-height: 1.5;
+  margin-top: 10px;
+  padding-top: 8px;
+}
+
+.ita-intent-main {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.ita-intent-main > span:last-child {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+.ita-minout {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.ita-minout span,
+.ita-warnings span {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  padding: 4px 8px;
+}
+
+.ita-run-actions {
+  margin-top: 12px;
+}
+
+.ita-steps {
+  display: grid;
+  gap: 8px;
+}
+
+.ita-steps > div {
+  border-top: 1px solid var(--border);
+  min-height: 64px;
+  padding-top: 8px;
+}
+
+.ita-steps span {
+  color: var(--accent);
+  display: block;
+  font-size: var(--text-xs);
+  font-weight: 800;
+}
+
+.ita-steps strong,
+.ita-steps small {
+  display: inline-block;
+}
+
+.ita-steps strong {
+  font-size: var(--text-sm);
+  margin: 2px 8px 0 0;
+}
+
+.ita-steps small {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+.ita-steps p {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  line-height: 1.45;
+  margin: 4px 0 0;
+}
+
+.ita-gates {
+  display: grid;
+  gap: 6px;
+}
+
+.ita-gate-row {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(120px, 1fr) auto;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+
+.ita-gate-name {
+  font-weight: 700;
+}
+
+.ita-gate-detail {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  grid-column: 1 / -1;
+  line-height: 1.4;
+}
+
+.ita-warnings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.ita-paid-query {
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  margin-top: 10px;
+}
+
+.ita-paid-lanes {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(0, 1.2fr) minmax(180px, 0.8fr);
+  margin-top: 12px;
+}
+
+.ita-subtitle {
+  font-weight: 700;
+  margin-bottom: 6px;
+  text-transform: uppercase;
+}
+
+.ita-source-line {
+  align-items: center;
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) 76px auto;
+  min-height: 48px;
+  padding: 8px 0;
+}
+
+.ita-source-price {
+  color: var(--accent);
+  font-size: var(--text-sm);
+  font-weight: 800;
+  text-align: right;
+}
+
+.ita-rail-line {
+  align-items: center;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  min-height: 36px;
+}
+
+.ita-rail-line span {
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.ita-wallet-line {
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) 84px;
+  margin-top: 12px;
+  min-height: 48px;
+  padding-top: 8px;
+}
+
+.ita-empty {
+  padding: 8px 0;
+}
+
+@media (max-width: 1080px) {
+  .ita-workspace,
+  .ita-paid-lanes {
+    grid-template-columns: 1fr;
+  }
+
+  .ita-ticket-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ita-strategy-row {
+    grid-template-columns: 38px minmax(140px, 1fr) repeat(3, minmax(62px, 0.5fr)) 82px;
+  }
+
+  .ita-strategy-row > span:nth-of-type(6) {
+    display: none;
+  }
+}
+
+@media (max-width: 720px) {
+  .ita-console {
+    padding: 12px;
+  }
+
+  .ita-head,
+  .ita-section-head,
+  .ita-intent-main {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .ita-summary,
+  .ita-phases,
+  .ita-ticket-grid,
+  .ita-run-grid,
+  .ita-trial-bar,
+  .ita-intent-grid,
+  .ita-paid-bar,
+  .ita-source-line,
+  .ita-wallet-line {
+    grid-template-columns: 1fr;
+  }
+
+  .ita-strategy-row {
+    grid-template-columns: 32px minmax(0, 1fr);
+  }
+
+  .ita-strategy-row > span:not(.ita-rank):not(.ita-strategy-name),
+  .ita-strategy-row .ita-pill,
+  .ita-strategy-row em {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .ita-source-price {
+    text-align: left;
+  }
+}

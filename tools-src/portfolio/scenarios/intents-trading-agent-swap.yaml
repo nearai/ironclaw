@@ -1,0 +1,46 @@
+id: intents-trading-agent-swap
+description: |
+  Smoke test for the Intents Trading Agent skill. A paper-mode
+  TradingAgents-style workflow drafts a spot swap MovementPlan
+  (USDC -> BTC on NEAR) and asks portfolio.build_intent to turn it
+  into an unsigned portfolio-intent/1 bundle. The replay solver fixture
+  keeps the test deterministic while exercising the same parser and
+  bounded checks used by live solver responses.
+steps:
+  - name: build_paper_swap_intent
+    action: build_intent
+    params:
+      plan:
+        proposal_id: ita-swap-near-usdc-btc
+        legs:
+          - kind: swap
+            chain: near
+            from_token:
+              symbol: USDC
+              chain: near
+              amount: "100.00"
+              value_usd: "100.00"
+            to_token:
+              symbol: BTC
+              chain: near
+              amount: "0.00100000"
+              value_usd: "98.50"
+            description: Swap 100 USDC to BTC through a NEAR Intents route
+        expected_out:
+          symbol: BTC
+          chain: near
+          amount: "0.00100000"
+          value_usd: "98.50"
+        expected_cost_usd: "1.50"
+      config:
+        floor_apy: 0.04
+        max_risk_score: 3
+        notify_threshold_usd: 25
+        auto_intent_ceiling_usd: 100
+        max_slippage_bps: 50
+        allowed_chains: ["near"]
+      solver: replay
+    expect:
+      bundle_legs_min: 1
+      bundle_first_leg_kind: swap
+      bundle_schema_version: portfolio-intent/1

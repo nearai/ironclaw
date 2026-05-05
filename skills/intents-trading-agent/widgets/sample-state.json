@@ -1,0 +1,217 @@
+{
+  "schema_version": "intents-trading-widget/1",
+  "generated_at": "2026-05-02T16:30:00Z",
+  "project_id": "intents-trading-agent",
+  "mode": "paper",
+  "pair": "NEAR/BTC",
+  "stance": "paper-intent",
+  "confidence": 0.74,
+  "top_candidates": [
+    {
+      "rank": 1,
+      "id": "sma_cross_fast",
+      "strategy_kind": "sma-cross",
+      "selection_score": 18.5,
+      "passes_basic_gate": true,
+      "total_return_pct": 12.0,
+      "alpha_vs_buy_hold_pct": 3.0,
+      "max_drawdown_pct": 8.0,
+      "trades": 6
+    }
+  ],
+  "risk_gates": [
+    {
+      "name": "unsigned-only",
+      "status": "pass",
+      "detail": "Wallet signature required outside the agent."
+    },
+    {
+      "name": "live-quote",
+      "status": "warn",
+      "detail": "Live NEAR Intents quote requires explicit user approval."
+    }
+  ],
+  "intent": {
+    "id": "intent-widget-fixture",
+    "status": "paper-built",
+    "route_label": "NEAR -> BTC via NEAR Intents",
+    "quote_source": "fixture",
+    "schema_version": "portfolio-intent/1",
+    "legs": 1,
+    "total_cost_usd": "0.42",
+    "expires_at": 1775000000,
+    "signer_placeholder": "<signed-by-user>",
+    "min_out": [
+      {
+        "symbol": "BTC",
+        "chain": "near",
+        "amount": "0.001",
+        "value_usd": "70.00"
+      }
+    ]
+  },
+  "source_count": 2,
+  "research_sources": [
+    "https://docs.near-intents.org/near-intents/market-makers/bus/solver-relay",
+    "https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint"
+  ],
+  "trial_plan": {
+    "schema_version": "near-intents-trial-plan/1",
+    "mode": "paper",
+    "pair": "NEAR/USDC",
+    "nominal_near": 0.25,
+    "max_trade_near": 0.05,
+    "assumed_near_usd": 3.0,
+    "max_trade_usd": 0.15,
+    "safe_to_quote": true,
+    "safe_to_execute": false,
+    "recommended_strategy_id": "sma_cross_fast",
+    "strategy_menu": [
+      {
+        "id": "buy_hold_baseline",
+        "kind": "buy-hold",
+        "position_size_pct": 1.0,
+        "note": "Baseline for comparing active signals."
+      },
+      {
+        "id": "sma_cross_fast",
+        "kind": "sma-cross",
+        "position_size_pct": 0.8,
+        "stop_loss_bps": 1200.0,
+        "note": "Trend-following candidate for clean spot rotations."
+      },
+      {
+        "id": "mean_reversion_range",
+        "kind": "mean-reversion",
+        "position_size_pct": 0.5,
+        "stop_loss_bps": 700.0,
+        "note": "Range strategy for pullback entries."
+      }
+    ],
+    "setup_steps": [
+      {
+        "order": 1,
+        "name": "Use a small wallet",
+        "status": "manual",
+        "detail": "Fund a separate NEAR account with only the amount you are willing to test."
+      },
+      {
+        "order": 2,
+        "name": "Choose funding path",
+        "status": "manual",
+        "detail": "Use 1Click or the Deposit/Withdrawal Service for managed routing, or wrap native NEAR into wNEAR before a direct verifier deposit."
+      },
+      {
+        "order": 3,
+        "name": "Deposit to verifier",
+        "status": "manual",
+        "detail": "For a direct Verifier-contract deposit, deposit wNEAR into intents.near with ft_transfer_call; do not send raw native NEAR directly."
+      }
+    ],
+    "risk_gates": [
+      {
+        "name": "trade-cap",
+        "status": "pass",
+        "detail": "Single trial trade is capped at 0.05 NEAR."
+      },
+      {
+        "name": "signing-boundary",
+        "status": "pass",
+        "detail": "IronClaw returns unsigned payloads only."
+      }
+    ],
+    "warnings": [
+      "This is not financial advice and it is not an execution bot. Treat every quote as experimental."
+    ],
+    "next_action": "Run backtest_suite with fresh candles before any live quote."
+  },
+  "paid_research": {
+    "schema_version": "paid-research-plan/1",
+    "query": "Should the NEAR/BTC paper intent use premium route and liquidity research before quoting?",
+    "budget_usd": 0.05,
+    "allocated_usd": 0.04,
+    "unspent_usd": 0.01,
+    "selected_count": 2,
+    "ready_for_paid_fetch": true,
+    "ready_for_trade_research": true,
+    "payment_rails": [
+      {
+        "protocol": "mpp",
+        "count": 1,
+        "allocated_usd": 0.02
+      },
+      {
+        "protocol": "x402",
+        "count": 1,
+        "allocated_usd": 0.02
+      }
+    ],
+    "payable_sources": [
+      {
+        "id": "premium-near-liquidity",
+        "title": "NEAR/BTC solver liquidity note",
+        "author": "Premium Macro Writer",
+        "protocol": "mpp",
+        "network": "tempo",
+        "amount_usd": 0.02,
+        "evidence_weight": 0.52,
+        "receipt_required": true
+      },
+      {
+        "id": "base-x402-route-risk",
+        "title": "Intent route risk memo",
+        "author": "Onchain Researcher",
+        "protocol": "x402",
+        "network": "base",
+        "amount_usd": 0.02,
+        "evidence_weight": 0.48,
+        "receipt_required": true
+      }
+    ],
+    "near_funding_routes": [
+      {
+        "target_protocol": "mpp",
+        "target_network": "tempo",
+        "amount_usd": 0.02,
+        "via": "near-intents"
+      },
+      {
+        "target_protocol": "x402",
+        "target_network": "base",
+        "amount_usd": 0.02,
+        "via": "near-intents"
+      }
+    ],
+    "policy_gates": [
+      {
+        "name": "receipt-before-use",
+        "status": "pass",
+        "detail": "Paywalled source text is used only after a payment receipt."
+      },
+      {
+        "name": "trade-gate",
+        "status": "pass",
+        "detail": "Premium research does not bypass backtest or risk gates."
+      }
+    ],
+    "wallet_policy": {
+      "provider": "AgentCash",
+      "address": "0x3333333333333333333333333333333333333333",
+      "network": "base",
+      "balance_usd": 5.0,
+      "default_article_price_usd": 0.01,
+      "max_articles_at_default_price": 500,
+      "per_article_cap_usd": 0.05,
+      "daily_cap_usd": 1.0,
+      "max_wallet_balance_usd": 5.0,
+      "safe_to_autopay": true,
+      "audit_urls": [
+        "https://mppscan.com/",
+        "https://www.x402scan.com/"
+      ],
+      "warnings": []
+    },
+    "warnings": []
+  },
+  "next_action": "Ask the user before requesting a live NEAR Intents quote."
+}
