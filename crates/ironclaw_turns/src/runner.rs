@@ -52,8 +52,16 @@ pub struct FailRunRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelRunCompletionRequest {
+    pub run_id: TurnRunId,
+    pub runner_id: TurnRunnerId,
+    pub lease_token: TurnLeaseToken,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TurnRunnerOutcome {
     Completed,
+    Cancelled,
     Blocked {
         checkpoint_id: TurnCheckpointId,
         reason: BlockedReason,
@@ -75,6 +83,11 @@ pub trait TurnRunTransitionPort: Send + Sync {
     async fn block_run(&self, request: BlockRunRequest) -> Result<TurnRunState, TurnError>;
 
     async fn complete_run(&self, request: CompleteRunRequest) -> Result<TurnRunState, TurnError>;
+
+    async fn cancel_run(
+        &self,
+        request: CancelRunCompletionRequest,
+    ) -> Result<TurnRunState, TurnError>;
 
     async fn fail_run(&self, request: FailRunRequest) -> Result<TurnRunState, TurnError>;
 }
