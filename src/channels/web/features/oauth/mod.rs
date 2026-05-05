@@ -414,8 +414,10 @@ pub(crate) async fn oauth_callback_handler(
                 request_id,
             }) => {
                 if let Some(tx) = state.msg_tx.read().await.as_ref().cloned() {
-                    let callback =
-                        crate::agent::submission::Submission::ExternalCallback { request_id };
+                    let callback = crate::agent::submission::Submission::ExternalCallback {
+                        request_id,
+                        payload: None,
+                    };
                     match serde_json::to_string(&callback) {
                         Ok(content) => {
                             let msg = web_incoming_message(

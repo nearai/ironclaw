@@ -302,10 +302,20 @@ pub enum Submission {
         always: bool,
     },
 
-    /// External system resolved a pending gate (for example an OAuth callback).
+    /// External system resolved a pending gate (for example an OAuth
+    /// callback or a caller-executed tool result).
     ExternalCallback {
         /// ID of the pending gate request being resolved.
         request_id: Uuid,
+        /// Optional payload supplied alongside the resolution. OAuth-style
+        /// callbacks (the original use case) pass `None`; caller-executed
+        /// external tool calls in the Responses API pass a JSON object
+        /// describing the tool outputs.
+        ///
+        /// Defaults to `None` on the wire so existing OAuth callers don't
+        /// need to be updated.
+        #[serde(default)]
+        payload: Option<serde_json::Value>,
     },
 
     /// Resolve an authentication gate with an exact request id.

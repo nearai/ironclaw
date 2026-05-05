@@ -1710,6 +1710,115 @@ pub(crate) fn recover_tool_calls_from_content(
         }
     }
 
+    // Markdown fenced format that some models (notably some
+    // OpenAI-compatible chat-completions endpoints) emit instead of
+    // structured `tool_calls`:
+    //
+    //     ```tool_call
+    //     {"name": "get_balances", "arguments": {}}
+    //     ```
+    //
+    // Also accepts `function_call` and `tool_calls` as fence info
+    // strings, plus opening fences with extra spaces or backticks.
+    for tag in TOOL_TAGS {
+        let mut search_from = 0;
+        while search_from < content.len() {
+            // Find opening fence with this tag as info string. Must
+            // be on its own line — the fence must come right after
+            // a newline or at content start.
+            let opening_pat = format!("```{tag}");
+            let Some(rel_offset) = content[search_from..].find(&opening_pat) else {
+                break;
+            };
+            let abs_open = search_from + rel_offset;
+            // Confirm the opening backticks are at the start of a
+            // line (avoid matching `inline ```tool_call` references
+            // inside prose). Either the absolute offset is 0 or the
+            // preceding character is a newline.
+            let at_line_start = abs_open == 0
+                || content[..abs_open]
+                    .chars()
+                    .last()
+                    .is_some_and(|c| c == '\n');
+            // The character after the tag must be whitespace or
+            // newline — otherwise `tool_callX` would falsely match.
+            let after_tag = &content[abs_open + opening_pat.len()..];
+            let valid_terminator = after_tag
+                .chars()
+                .next()
+                .is_none_or(|c| c == '\n' || c.is_whitespace());
+            if !at_line_start || !valid_terminator {
+                search_from = abs_open + opening_pat.len();
+                continue;
+            }
+            // Skip the rest of the opening line.
+            let body_start = match after_tag.find('\n') {
+                Some(nl) => abs_open + opening_pat.len() + nl + 1,
+                None => {
+                    search_from = abs_open + opening_pat.len();
+                    continue;
+                }
+            };
+            // Find the closing fence (a line that starts with ```).
+            let close_search = &content[body_start..];
+            let mut close_rel: Option<usize> = None;
+            let mut idx = 0usize;
+            while idx <= close_search.len() {
+                let line_start = idx;
+                let line_end = close_search[idx..]
+                    .find('\n')
+                    .map(|n| idx + n)
+                    .unwrap_or(close_search.len());
+                let line = &close_search[line_start..line_end];
+                if line.trim_start().starts_with("```") {
+                    close_rel = Some(line_start);
+                    break;
+                }
+                if line_end == close_search.len() {
+                    break;
+                }
+                idx = line_end + 1;
+            }
+            let Some(close_rel) = close_rel else {
+                break;
+            };
+            let body_end = body_start + close_rel;
+            // Advance past the closing fence line so the next
+            // iteration doesn't re-match the same block.
+            let after_close = body_end
+                + close_search[close_rel..]
+                    .find('\n')
+                    .map(|n| n + 1)
+                    .unwrap_or_else(|| close_search.len() - close_rel);
+            search_from = after_close;
+
+            let inner = content[body_start..body_end].trim();
+            if inner.is_empty() {
+                continue;
+            }
+
+            // Try JSON: {"name": "x", "arguments": {...}}
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(inner)
+                && let Some(name) = parsed.get("name").and_then(|v| v.as_str())
+                && tool_names.contains(name)
+            {
+                let arguments = parsed
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Object(Default::default()));
+                calls.push(ToolCall {
+                    id: super::provider::generate_tool_call_id(
+                        calls.len(),
+                        RECOVERED_TOOL_CALL_SEED,
+                    ),
+                    name: name.to_string(),
+                    arguments,
+                    reasoning: None,
+                });
+            }
+        }
+    }
+
     calls
 }
 
@@ -1756,8 +1865,99 @@ pub(crate) fn clean_response(text: &str) -> String {
     // 6b. Strip bracket-format inline tool calls: [Called tool `name` with arguments: {...}]
     result = strip_bracket_tool_calls(&result);
 
+    // 6c. Strip markdown-fenced tool calls: ```tool_call\n{json}\n```
+    // These pass cleanly through the XML/pipe strippers because they
+    // use backticks instead of angle brackets, but they're still
+    // tool-call syntax that should never reach the user. Recovery
+    // (`recover_tool_calls_from_content`) extracts the JSON above; this
+    // strips any leftover residue (malformed JSON, repeated emissions,
+    // model echo) so the user-visible text is clean.
+    for tag in TOOL_TAGS {
+        result = strip_markdown_fence_block(&result, tag);
+    }
+
     // 7. Collapse triple+ newlines, trim
     collapse_newlines(&result)
+}
+
+/// Strip markdown-fenced tool-call blocks like ` ```tool_call\n{...}\n``` `.
+///
+/// Mirrors the recovery pass in `recover_tool_calls_from_content` so the
+/// user-visible text has no fence residue when the LLM emits a markdown
+/// fence instead of a structured tool call. Only fences with the exact
+/// `tag` info string at line start are removed — inline backtick spans
+/// (`` `like this` ``) and other unrelated fenced code stay intact.
+fn strip_markdown_fence_block(text: &str, tag: &str) -> String {
+    let opening_pat = format!("```{tag}");
+    let mut result = String::with_capacity(text.len());
+    let mut remaining = text;
+    loop {
+        let Some(rel_offset) = remaining.find(&opening_pat) else {
+            result.push_str(remaining);
+            return result;
+        };
+        let abs_open = rel_offset;
+        // Opening must be at line start (avoid inline backtick spans
+        // and code-comment references like ` ```tool_call ` shown
+        // inside another fenced block).
+        let at_line_start = abs_open == 0
+            || remaining[..abs_open]
+                .chars()
+                .last()
+                .is_some_and(|c| c == '\n');
+        // Character right after the tag must be whitespace/newline so
+        // we don't accidentally match `tool_callX`.
+        let after_tag = &remaining[abs_open + opening_pat.len()..];
+        let valid_terminator = after_tag
+            .chars()
+            .next()
+            .is_none_or(|c| c == '\n' || c.is_whitespace());
+        if !at_line_start || !valid_terminator {
+            // Skip past this false match and keep scanning.
+            let consumed = abs_open + opening_pat.len();
+            result.push_str(&remaining[..consumed]);
+            remaining = &remaining[consumed..];
+            continue;
+        }
+
+        // Push everything before the fence opener (including the
+        // newline that put us at line start) so we don't leave a
+        // stray blank line.
+        let trim_to = remaining[..abs_open].trim_end_matches('\n').len();
+        result.push_str(&remaining[..trim_to]);
+
+        // Walk forward to the closing fence line.
+        let body_start = match after_tag.find('\n') {
+            Some(nl) => abs_open + opening_pat.len() + nl + 1,
+            None => {
+                // Unterminated opener; drop the rest.
+                return result;
+            }
+        };
+        let close_search = &remaining[body_start..];
+        let mut idx = 0usize;
+        let mut consumed_to = remaining.len();
+        while idx <= close_search.len() {
+            let line_start = idx;
+            let line_end = close_search[idx..]
+                .find('\n')
+                .map(|n| idx + n)
+                .unwrap_or(close_search.len());
+            let line = &close_search[line_start..line_end];
+            if line.trim_start().starts_with("```") {
+                // Skip past the closing fence's trailing newline (if
+                // any) so the next chunk starts cleanly.
+                consumed_to = body_start + line_end + usize::from(line_end < close_search.len());
+                break;
+            }
+            if line_end == close_search.len() {
+                // Reached EOF without a closing fence — drop the rest.
+                return result;
+            }
+            idx = line_end + 1;
+        }
+        remaining = &remaining[consumed_to..];
+    }
 }
 
 /// Strip bracket-format inline tool calls produced by `flatten_tool_messages`.
@@ -2564,6 +2764,96 @@ That's my plan."#;
         let content = "Just a normal response.";
         let calls = recover_tool_calls_from_content(content, &tools);
         assert!(calls.is_empty());
+    }
+
+    /// Markdown-fenced form is what some OpenAI-compatible models emit
+    /// when they aren't given native `tool_calls` output. The recovery
+    /// must extract the call so the engine can dispatch it instead of
+    /// passing the fence through to the user (PR #3122 review report).
+    #[test]
+    fn test_recover_markdown_fence_tool_call() {
+        let tools = make_tools(&["get_balances"]);
+        let content =
+            "Here you go:\n\n```tool_call\n{\"name\": \"get_balances\", \"arguments\": {}}\n```\n";
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert_eq!(calls.len(), 1, "markdown fence must produce 1 call");
+        assert_eq!(calls[0].name, "get_balances");
+        assert_eq!(calls[0].arguments, serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_recover_markdown_fence_with_arguments() {
+        let tools = make_tools(&["lookup"]);
+        let content = "```tool_call\n{\"name\":\"lookup\",\"arguments\":{\"q\":\"x\"}}\n```";
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].arguments, serde_json::json!({"q": "x"}));
+    }
+
+    #[test]
+    fn test_recover_markdown_fence_function_call_alias() {
+        let tools = make_tools(&["lookup"]);
+        let content = "```function_call\n{\"name\":\"lookup\",\"arguments\":{}}\n```";
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert_eq!(calls.len(), 1, "function_call alias should also recover");
+        assert_eq!(calls[0].name, "lookup");
+    }
+
+    #[test]
+    fn test_recover_markdown_fence_unknown_tool_ignored() {
+        let tools = make_tools(&["lookup"]);
+        let content = "```tool_call\n{\"name\":\"nonexistent\",\"arguments\":{}}\n```";
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert!(
+            calls.is_empty(),
+            "unknown tool name in fence must be ignored"
+        );
+    }
+
+    #[test]
+    fn test_recover_markdown_fence_inline_reference_ignored() {
+        // An inline reference like `text ```tool_call ... ``` text`
+        // is NOT an opening fence at line start, so we should not
+        // accidentally recover from it.
+        let tools = make_tools(&["lookup"]);
+        let content = "Use ```tool_call\\n{\\\"name\\\":\\\"lookup\\\"}\\n``` to call it";
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert!(
+            calls.is_empty(),
+            "inline reference must not be treated as a fence"
+        );
+    }
+
+    /// `clean_response` must strip a markdown-fenced tool-call block
+    /// even when the JSON inside is malformed (so recovery would have
+    /// skipped it). Otherwise the fence syntax leaks to the user.
+    #[test]
+    fn test_clean_response_strips_markdown_fenced_tool_call() {
+        let input =
+            "Here you go:\n\n```tool_call\n{\"name\":\"get_balances\",\"arguments\":{}}\n```\n";
+        let cleaned = clean_response(input);
+        assert!(
+            !cleaned.contains("```"),
+            "markdown fence must be stripped: {cleaned:?}"
+        );
+        assert!(
+            !cleaned.contains("get_balances"),
+            "JSON body inside fence must be stripped: {cleaned:?}"
+        );
+        assert!(
+            cleaned.contains("Here you go"),
+            "prose outside the fence must remain: {cleaned:?}"
+        );
+    }
+
+    #[test]
+    fn test_clean_response_strips_malformed_markdown_fence() {
+        // Even malformed JSON inside the fence must be stripped —
+        // recovery skips it but the user must not see it.
+        let input = "Reply\n```tool_call\nNOT JSON\n```\n";
+        let cleaned = clean_response(input);
+        assert!(!cleaned.contains("```"), "fence must go: {cleaned:?}");
+        assert!(!cleaned.contains("NOT JSON"), "body must go: {cleaned:?}");
     }
 
     #[test]

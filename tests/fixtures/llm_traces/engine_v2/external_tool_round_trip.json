@@ -1,0 +1,42 @@
+{
+  "model_name": "v2-external-tool-roundtrip",
+  "turns": [
+    {
+      "user_input": "Look up the weather in NYC.",
+      "steps": [
+        {
+          "request_hint": {
+            "last_user_message_contains": "weather"
+          },
+          "response": {
+            "type": "tool_calls",
+            "tool_calls": [
+              {
+                "id": "call_ext_lookup_1",
+                "name": "lookup_weather",
+                "arguments": { "city": "NYC" }
+              }
+            ],
+            "input_tokens": 100,
+            "output_tokens": 30
+          }
+        },
+        {
+          "request_hint": {
+            "min_messages": 3
+          },
+          "response": {
+            "type": "text",
+            "content": "Per the lookup, the weather in NYC is sunny and 72F.",
+            "input_tokens": 150,
+            "output_tokens": 25
+          }
+        }
+      ],
+      "expects": {
+        "response_contains": ["sunny", "72F"],
+        "min_responses": 1
+      }
+    }
+  ]
+}

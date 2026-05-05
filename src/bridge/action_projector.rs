@@ -654,6 +654,7 @@ mod tests {
             thread_goal: None,
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            conversation_scope: None,
         }
     }
 
