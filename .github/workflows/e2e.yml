@@ -12,7 +12,7 @@ on:
         type: string
         default: full
   schedule:
-    - cron: "0 6 * * 1"  # Weekly Monday 6 AM UTC
+    - cron: "0 3 * * *"  # Nightly full E2E at 03:00 UTC
   workflow_dispatch:
 
 permissions:
