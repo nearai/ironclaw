@@ -415,8 +415,12 @@ fn create_ollama_from_registry(
         "Using Ollama provider"
     );
 
+    // Ollama's native /api/chat requires `think: true` to enable extended
+    // reasoning for thinking models (Qwen3, DeepSeek-R1, Gemma 4, etc.).
+    // Non-thinking models ignore the parameter harmlessly.
     let adapter = RigAdapter::new(model, &config.model)
-        .with_unsupported_params(config.unsupported_params.clone());
+        .with_unsupported_params(config.unsupported_params.clone())
+        .with_additional_params(serde_json::json!({ "think": true }));
     Ok(Arc::new(adapter))
 }
 

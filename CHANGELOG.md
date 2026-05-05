@@ -7,10 +7,115 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.0](https://github.com/nearai/ironclaw/compare/ironclaw-v0.26.0...ironclaw-v0.27.0) - 2026-04-29
+
+### Added
+
+- *(engine-v2)* add canonical capability status vocabulary for the v2 runtime contract ([#2825](https://github.com/nearai/ironclaw/pull/2825))
+- *(engine-v2)* centralize action-vs-capability surface policy across the prompt, runtime, bridge projection, and tool surface ([#2827](https://github.com/nearai/ironclaw/pull/2827))
+- *(bridge)* project 3 previously dropped engine events into AppEvents for gateway/runtime consumers ([#2797](https://github.com/nearai/ironclaw/pull/2797))
+- *(bridge)* project 7 additional engine events into AppEvents, expanding runtime event visibility ([#2844](https://github.com/nearai/ironclaw/pull/2844))
+- *(debug-panel)* expand Activity tab coverage for CodeAct execution, warnings, and richer event display ([#2850](https://github.com/nearai/ironclaw/pull/2850))
+- *(missions)* redesign the Missions overview surface with richer mission dossiers and project/thread context ([#2894](https://github.com/nearai/ironclaw/pull/2894))
+- *(credentials)* add path-based credential matching for per-endpoint auth and route the credential scope through WASM tools, HTTP tools, and sandbox proxy policy ([#2168](https://github.com/nearai/ironclaw/pull/2168))
+- *(engine)* add short-title support for v2 threads so sidebars and thread lists can display concise labels ([#2776](https://github.com/nearai/ironclaw/pull/2776))
+- *(tooling)* add fork support to the GitHub tool ([#2139](https://github.com/nearai/ironclaw/pull/2139))
+- *(canary)* add canary reporting for live workflow coverage ([#2874](https://github.com/nearai/ironclaw/pull/2874))
+
+### Fixed
+
+- *(auth)* prevent OAuth URL parameter truncation in callback and launch flows ([#2746](https://github.com/nearai/ironclaw/pull/2746))
+- *(auth)* harden error boundaries, TEE secrets, pairing, auth rehydration, and related bug-bash failures ([#2753](https://github.com/nearai/ironclaw/pull/2753))
+- *(bridge)* surface latent WASM provider actions to the LLM instead of hiding available provider affordances ([#2891](https://github.com/nearai/ironclaw/pull/2891))
+- *(bridge)* fix restart approval floor handling so restart requests keep the correct permission baseline ([#2978](https://github.com/nearai/ironclaw/pull/2978))
+- *(engine)* recover flattened tool calls in the v2 adapter path ([#2757](https://github.com/nearai/ironclaw/pull/2757))
+- *(engine)* stop failed missions from respawning after terminal failure ([#2760](https://github.com/nearai/ironclaw/pull/2760))
+- *(engine)* enforce real tool use for stop, pause, and cancel commands ([#2814](https://github.com/nearai/ironclaw/pull/2814))
+- *(engine)* make mission `threads_today` reset with timezone-aware boundaries ([#2989](https://github.com/nearai/ironclaw/pull/2989))
+- *(engine)* centralize tool permission defaults to avoid drift between projection and execution paths ([#3041](https://github.com/nearai/ironclaw/pull/3041))
+- *(gateway)* serve Responses API routes under the `/api/v1/` prefix ([#2748](https://github.com/nearai/ironclaw/pull/2748))
+- *(gateway)* use conversation-only chat sidebar state and remove non-conversation entries from chat history navigation ([#2867](https://github.com/nearai/ironclaw/pull/2867))
+- *(gateway)* resolve empty "Fetch available models" results for NEAR AI in settings ([#2890](https://github.com/nearai/ironclaw/pull/2890))
+- *(gateway)* drop `plan_update` and `approval_needed` SSE events that do not carry a thread id ([#2986](https://github.com/nearai/ironclaw/pull/2986))
+- *(gateway)* keep the Routines tab visible after engine v1 to v2 upgrades ([#2992](https://github.com/nearai/ironclaw/pull/2992))
+- *(gateway)* surface the NEAR AI session token to the configure UI ([#3014](https://github.com/nearai/ironclaw/pull/3014))
+- *(llm)* shape tool schemas correctly for NEAR AI provider compatibility ([#2951](https://github.com/nearai/ironclaw/pull/2951))
+- *(llm/config)* harden model provider configuration across web and CLI paths ([#2572](https://github.com/nearai/ironclaw/pull/2572))
+- *(tools)* fix v2 `tool_info` action inventory lookup ([#2994](https://github.com/nearai/ironclaw/pull/2994))
+- *(tools)* make available actions callable-only for providers blocked from executing unavailable tools ([#2868](https://github.com/nearai/ironclaw/pull/2868))
+- *(wasm)* remove the stale 10M fuel limit from settings databases and align libSQL migrations ([#2851](https://github.com/nearai/ironclaw/pull/2851))
+- *(cli)* fix `-m` handling so it does not quit unexpectedly ([#2150](https://github.com/nearai/ironclaw/pull/2150))
+- *(release)* correct the staged `ironclaw` version after a bad release metadata state ([#2981](https://github.com/nearai/ironclaw/pull/2981))
+
+### Security
+
+- *(document-extraction)* prevent zip-bomb denial of service while extracting uploaded documents ([#2093](https://github.com/nearai/ironclaw/pull/2093))
+- *(orchestrator)* scope orchestrator credentials to the job creator so sandboxed jobs cannot reuse another user's credentials ([#2698](https://github.com/nearai/ironclaw/pull/2698))
+- *(safety)* add projection-exempt linting for gateway event sources to keep event projection coverage explicit and auditable ([#2840](https://github.com/nearai/ironclaw/pull/2840))
+- *(auth/live-canary)* tighten auth flows and unify live canary coverage for auth-sensitive runtime paths ([#2367](https://github.com/nearai/ironclaw/pull/2367))
+
 ### Changed
 
-- *(web)* gateway onboarding/auth SSE now uses the unified `onboarding_state` event; external SSE clients should migrate from the older auth/pairing event names. Legacy WebSocket `auth_token` and `auth_cancel` client messages remain accepted during the temporary web v1-auth compatibility window.
-- *(web)* extension setup/auth `ActionResponse` payloads no longer include the legacy `verification` field; clients should use `onboarding_state` / `onboarding` data instead of that deprecated wire field.
+- *(engine)* bump Monty to `v0.0.16` and update CodeAct orchestration docs and prompts to match the runtime ([#2784](https://github.com/nearai/ironclaw/pull/2784))
+- *(registry)* update WASM artifact SHA256 checksums for Feishu, Slack, Telegram, GitHub, and Portfolio artifacts ([#2775](https://github.com/nearai/ironclaw/pull/2775))
+- *(registry)* bump GitHub tool and Slack channel registry versions after artifact/source updates ([#3057](https://github.com/nearai/ironclaw/pull/3057))
+- *(rust)* update the documented minimum Rust version to 1.92 ([#2931](https://github.com/nearai/ironclaw/pull/2931))
+
+### CI / Release
+
+- *(docker)* release versioned Docker images from the release process ([#2795](https://github.com/nearai/ironclaw/pull/2795))
+- *(live-canary)* consolidate Live Canary scheduling into one daily 02:00 UTC slot ([#2831](https://github.com/nearai/ironclaw/pull/2831))
+- *(release)* stop tracking ignored live trace `.log` diagnostics so release-plz can create clean release PRs ([#3058](https://github.com/nearai/ironclaw/pull/3058))
+
+### Docs
+
+- *(architecture)* update the engine v2 architecture plan to match verified runtime behavior ([#2801](https://github.com/nearai/ironclaw/pull/2801))
+- *(reborn)* add the contract-freeze review packet for filesystem, runtime, host API, auth, tool, and storage contracts ([#2983](https://github.com/nearai/ironclaw/pull/2983))
+
+### Tests
+
+- *(tests)* close the staging test backlog and bring the full suite back to green ([#2744](https://github.com/nearai/ironclaw/pull/2744))
+- *(e2e)* stabilize multi-tenant widget isolation and portfolio nudge recovery ([#2790](https://github.com/nearai/ironclaw/pull/2790))
+- *(test-harness)* add Phase 2 replay and gateway coverage ([#2896](https://github.com/nearai/ironclaw/pull/2896))
+- *(e2e)* update approval E2E expectations for the latest approval and gate flows ([#3054](https://github.com/nearai/ironclaw/pull/3054))
+
+## [0.26.0](https://github.com/nearai/ironclaw/compare/ironclaw-v0.25.0...ironclaw-v0.26.0) - 2026-04-21
+
+### Added
+
+- *(engine-v2)* add per-project sandbox with mission lifecycle and cost tracking ([#2211](https://github.com/nearai/ironclaw/pull/2211)) ([#2660](https://github.com/nearai/ironclaw/pull/2660))
+- *(llm)* hot-reload provider chain from settings ([#2673](https://github.com/nearai/ironclaw/pull/2673))
+- *(bridge)* add workspace-backed project registration and mission result retrieval ([#2533](https://github.com/nearai/ironclaw/pull/2533)) ([#2549](https://github.com/nearai/ironclaw/pull/2549))
+- *(engine)* require a tool attempt for explicit user commands and add code execution failure categorization ([#2539](https://github.com/nearai/ironclaw/pull/2539)) ([#2483](https://github.com/nearai/ironclaw/pull/2483))
+- *(gate)* persist "always approve" decisions in the v2 engine path ([#2428](https://github.com/nearai/ironclaw/pull/2428))
+- *(memory)* add configurable insights interval, session summaries, and reasoning-augmented recall ([#2336](https://github.com/nearai/ironclaw/pull/2336))
+- *(gateway)* add attachment flows, document uploads, rich history tool cards, debug inspector, and admin tooling UI ([#2385](https://github.com/nearai/ironclaw/pull/2385)) ([#2332](https://github.com/nearai/ironclaw/pull/2332)) ([#2477](https://github.com/nearai/ironclaw/pull/2477)) ([#1873](https://github.com/nearai/ironclaw/pull/1873)) ([#1963](https://github.com/nearai/ironclaw/pull/1963))
+- *(tui)* support multiline drafting and input handling improvements ([#2449](https://github.com/nearai/ironclaw/pull/2449)) ([#2462](https://github.com/nearai/ironclaw/pull/2462))
+- *(skills)* add new-project/template resolution, setup-marker lifecycle, working-directory source discovery, and activation feedback pipeline ([#2353](https://github.com/nearai/ironclaw/pull/2353)) ([#2268](https://github.com/nearai/ironclaw/pull/2268)) ([#2396](https://github.com/nearai/ironclaw/pull/2396)) ([#2530](https://github.com/nearai/ironclaw/pull/2530))
+- *(portfolio)* complete the portfolio tool, widget, and share-gains flow ([#2368](https://github.com/nearai/ironclaw/pull/2368))
+- *(cli)* add `logs --grep`, `profile list`, user-facing temperature setting, and local-profile onboarding prompts ([#1533](https://github.com/nearai/ironclaw/pull/1533)) ([#2288](https://github.com/nearai/ironclaw/pull/2288)) ([#2275](https://github.com/nearai/ironclaw/pull/2275)) ([#2389](https://github.com/nearai/ironclaw/pull/2389))
+- *(runtime)* default `CLI_MODE` to TUI and show the commit hash in non-tagged gateway builds ([#2329](https://github.com/nearai/ironclaw/pull/2329)) ([#2486](https://github.com/nearai/ironclaw/pull/2486))
+
+### Fixed
+
+- *(gateway)* repair web login, onboarding, pairing, and v2 extension auth resume flows; the web API now uses unified onboarding state events instead of the older auth/pairing event split ([#2592](https://github.com/nearai/ironclaw/pull/2592)) ([#2594](https://github.com/nearai/ironclaw/pull/2594)) ([#2515](https://github.com/nearai/ironclaw/pull/2515)) ([#2622](https://github.com/nearai/ironclaw/pull/2622))
+- *(gateway)* fix disappearing messages, stale in-progress state, assistant-thread routing, approval scoping, reconnect history reloads, browser crashers, and chat refresh issues ([#2498](https://github.com/nearai/ironclaw/pull/2498)) ([#2517](https://github.com/nearai/ironclaw/pull/2517)) ([#2444](https://github.com/nearai/ironclaw/pull/2444)) ([#2267](https://github.com/nearai/ironclaw/pull/2267)) ([#2415](https://github.com/nearai/ironclaw/pull/2415)) ([#2441](https://github.com/nearai/ironclaw/pull/2441)) ([#2330](https://github.com/nearai/ironclaw/pull/2330))
+- *(gateway)* fix slash autocomplete, attachment rendering, missions navigation, settings search/auth state, active-work pills, tool output timing, and historical/live tool call correlation ([#2763](https://github.com/nearai/ironclaw/pull/2763)) ([#2745](https://github.com/nearai/ironclaw/pull/2745)) ([#2518](https://github.com/nearai/ironclaw/pull/2518)) ([#2709](https://github.com/nearai/ironclaw/pull/2709)) ([#2671](https://github.com/nearai/ironclaw/pull/2671)) ([#2555](https://github.com/nearai/ironclaw/pull/2555)) ([#2182](https://github.com/nearai/ironclaw/pull/2182))
+- *(engine)* harden the v2 orchestrator, improve action failure handling, preserve paused auth leases, avoid orphaned approval gates, and prevent runaway or no-op mission execution paths ([#1958](https://github.com/nearai/ironclaw/pull/1958)) ([#2326](https://github.com/nearai/ironclaw/pull/2326)) ([#2338](https://github.com/nearai/ironclaw/pull/2338)) ([#2458](https://github.com/nearai/ironclaw/pull/2458)) ([#2531](https://github.com/nearai/ironclaw/pull/2531)) ([#2570](https://github.com/nearai/ironclaw/pull/2570)) ([#2631](https://github.com/nearai/ironclaw/pull/2631)) ([#2347](https://github.com/nearai/ironclaw/pull/2347)) ([#2328](https://github.com/nearai/ironclaw/pull/2328)) ([#2460](https://github.com/nearai/ironclaw/pull/2460))
+- *(llm)* fix image generation and image-detail handling, normalize NEAR AI tool schemas, surface 413s as context-length errors, and remove duplicate `reasoning_content` fields ([#1819](https://github.com/nearai/ironclaw/pull/1819)) ([#2380](https://github.com/nearai/ironclaw/pull/2380)) ([#1940](https://github.com/nearai/ironclaw/pull/1940)) ([#2463](https://github.com/nearai/ironclaw/pull/2463)) ([#2339](https://github.com/nearai/ironclaw/pull/2339)) ([#2493](https://github.com/nearai/ironclaw/pull/2493))
+- *(security)* add inbound secret scanning, redact HTTP credentials in recordings, fail closed on WASM scope fallback, harden approval thread safety, and scan pre-injection channel headers for leaks ([#2494](https://github.com/nearai/ironclaw/pull/2494)) ([#2529](https://github.com/nearai/ironclaw/pull/2529)) ([#2465](https://github.com/nearai/ironclaw/pull/2465)) ([#2366](https://github.com/nearai/ironclaw/pull/2366)) ([#1377](https://github.com/nearai/ironclaw/pull/1377))
+- *(channels)* fix active WASM channel restore/status tracking plus Slack, Telegram, and Feishu auth/routing edge cases ([#2563](https://github.com/nearai/ironclaw/pull/2563)) ([#2562](https://github.com/nearai/ironclaw/pull/2562)) ([#2420](https://github.com/nearai/ironclaw/pull/2420)) ([#2471](https://github.com/nearai/ironclaw/pull/2471)) ([#2512](https://github.com/nearai/ironclaw/pull/2512)) ([#1540](https://github.com/nearai/ironclaw/pull/1540)) ([#2513](https://github.com/nearai/ironclaw/pull/2513)) ([#1943](https://github.com/nearai/ironclaw/pull/1943)) ([#2652](https://github.com/nearai/ironclaw/pull/2652)) ([#2349](https://github.com/nearai/ironclaw/pull/2349)) ([#2443](https://github.com/nearai/ironclaw/pull/2443)) ([#2454](https://github.com/nearai/ironclaw/pull/2454))
+- *(cli/setup)* improve auth UX, avoid UTF-8 panics, suppress non-CLI listeners under `--cli-only`, validate strict MCP server names, install the NEAR AI MCP server from env config, and run migrations during onboarding when `DATABASE_URL` is preset ([#2315](https://github.com/nearai/ironclaw/pull/2315)) ([#2008](https://github.com/nearai/ironclaw/pull/2008)) ([#1869](https://github.com/nearai/ironclaw/pull/1869)) ([#2400](https://github.com/nearai/ironclaw/pull/2400)) ([#2181](https://github.com/nearai/ironclaw/pull/2181)) ([#2309](https://github.com/nearai/ironclaw/pull/2309))
+- *(sandbox/docker)* improve Docker and deployment behavior by preferring the Docker socket when available and restoring the staging runtime target for Railway builds ([#2467](https://github.com/nearai/ironclaw/pull/2467)) ([#2244](https://github.com/nearai/ironclaw/pull/2244))
+
+### Other
+
+- *(gateway)* continue the web gateway slice extraction and boundary cleanup across platform, chat, oauth, settings, jobs, and routines modules ([#2628](https://github.com/nearai/ironclaw/pull/2628)) ([#2643](https://github.com/nearai/ironclaw/pull/2643)) ([#2644](https://github.com/nearai/ironclaw/pull/2644)) ([#2645](https://github.com/nearai/ironclaw/pull/2645)) ([#2665](https://github.com/nearai/ironclaw/pull/2665)) ([#2680](https://github.com/nearai/ironclaw/pull/2680)) ([#2683](https://github.com/nearai/ironclaw/pull/2683)) ([#2687](https://github.com/nearai/ironclaw/pull/2687)) ([#2704](https://github.com/nearai/ironclaw/pull/2704)) ([#2706](https://github.com/nearai/ironclaw/pull/2706)) ([#2712](https://github.com/nearai/ironclaw/pull/2712)) ([#2647](https://github.com/nearai/ironclaw/pull/2647))
+- *(types)* adopt typed mission, external-thread, event-status, onboarding, and ownership models across the runtime ([#2681](https://github.com/nearai/ironclaw/pull/2681)) ([#2685](https://github.com/nearai/ironclaw/pull/2685)) ([#2678](https://github.com/nearai/ironclaw/pull/2678)) ([#2607](https://github.com/nearai/ironclaw/pull/2607)) ([#2677](https://github.com/nearai/ironclaw/pull/2677)) ([#2611](https://github.com/nearai/ironclaw/pull/2611)) ([#2617](https://github.com/nearai/ironclaw/pull/2617))
+- *(ci)* add replay snapshot gating, speed up feedback loops, improve cache reuse, validate release versions in Docker workflows, and stabilize staging promotion checks ([#2621](https://github.com/nearai/ironclaw/pull/2621)) ([#2566](https://github.com/nearai/ironclaw/pull/2566)) ([#2609](https://github.com/nearai/ironclaw/pull/2609)) ([#2610](https://github.com/nearai/ironclaw/pull/2610)) ([#2742](https://github.com/nearai/ironclaw/pull/2742)) ([#2576](https://github.com/nearai/ironclaw/pull/2576)) ([#2661](https://github.com/nearai/ironclaw/pull/2661)) ([#2773](https://github.com/nearai/ironclaw/pull/2773))
+- *(docker/ops)* add hourly image builds, release-process image builds, and historical image rebuild workflows ([#2519](https://github.com/nearai/ironclaw/pull/2519)) ([#2507](https://github.com/nearai/ironclaw/pull/2507)) ([#2509](https://github.com/nearai/ironclaw/pull/2509)) ([#2321](https://github.com/nearai/ironclaw/pull/2321))
+- *(docs)* expand MCP, hosting, Responses API, setup, contributor-review, and architecture documentation ([#1138](https://github.com/nearai/ironclaw/pull/1138)) ([#2262](https://github.com/nearai/ironclaw/pull/2262)) ([#2440](https://github.com/nearai/ironclaw/pull/2440)) ([#2427](https://github.com/nearai/ironclaw/pull/2427)) ([#2714](https://github.com/nearai/ironclaw/pull/2714)) ([#2365](https://github.com/nearai/ironclaw/pull/2365))
+
 ## [0.25.0](https://github.com/nearai/ironclaw/compare/ironclaw-v0.24.0...ironclaw-v0.25.0) - 2026-04-11
 
 ### Added

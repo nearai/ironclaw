@@ -561,6 +561,64 @@ async def handle_google_popup(popup: Any, case_key: str) -> None:
 
     await popup.wait_for_load_state("domcontentloaded", timeout=30000)
 
+    # Account picker — when storage_state carries a logged-in session,
+    # Google often lands on "Choose an account" instead of jumping straight
+    # to consent. Try a sequence of selectors so we cope with Google's UI
+    # changes; the picker rows are sometimes div[role="link"], sometimes
+    # role="button", and the text node is sometimes a child of the
+    # clickable element. Clicking an email-looking child works because
+    # Playwright bubbles the click to the nearest interactive ancestor.
+    try:
+        await popup.get_by_text(
+            re.compile(r"Choose an account", re.I)
+        ).first.wait_for(state="visible", timeout=5000)
+        print("[auth-canary] account picker detected, attempting click", flush=True)
+        # Strategies, in order — first that produces a visible match wins.
+        candidates = []
+        if username:
+            candidates.append(popup.get_by_text(username, exact=False).first)
+            candidates.append(
+                popup.locator(f'[data-identifier="{username}"]').first
+            )
+        # Generic fallback when no username is configured: pick the first
+        # visible interactive element (link/button) whose accessible text
+        # looks like an email address. Filtering by ARIA role excludes
+        # spurious matches against `<style>` blocks (CSS at-rules contain
+        # `@`) and other non-clickable text nodes that would otherwise
+        # match a naive `:has-text` filter.
+        email_pattern = re.compile(r"\S+@\S+\.\S+")
+        candidates.append(
+            popup.get_by_role("link")
+            .filter(has_text=email_pattern)
+            .filter(has_not_text=re.compile(r"Use another account", re.I))
+            .first
+        )
+        candidates.append(
+            popup.get_by_role("button")
+            .filter(has_text=email_pattern)
+            .filter(has_not_text=re.compile(r"Use another account", re.I))
+            .first
+        )
+        for idx, candidate in enumerate(candidates):
+            try:
+                await candidate.wait_for(state="visible", timeout=3000)
+                await candidate.click(timeout=3000)
+                print(
+                    f"[auth-canary] account picker: clicked candidate {idx}",
+                    flush=True,
+                )
+                await popup.wait_for_load_state("domcontentloaded", timeout=15000)
+                break
+            except Exception as exc:
+                print(
+                    f"[auth-canary] account picker candidate {idx} skipped: {exc}",
+                    flush=True,
+                )
+                continue
+    except Exception:
+        # No picker visible — proceed to email/password/consent.
+        pass
+
     if username:
         email_input = popup.locator('input[type="email"]').first
         try:
@@ -609,6 +667,21 @@ async def handle_notion_popup(popup: Any, case_key: str) -> None:
             await click_first_button_with_text(popup, ["Continue", "Sign in", "Log in"])
         except Exception:
             pass
+
+    # Notion's MCP consent screen gates the Continue button behind an
+    # "I recognize and trust this URL" checkbox — confirmed via the
+    # canary's CI screenshot. Without ticking it, Continue stays disabled
+    # and the handler's button click is a no-op.
+    try:
+        consent_checkbox = popup.get_by_text(
+            re.compile(r"I recognize and trust this URL", re.I)
+        ).first
+        await consent_checkbox.wait_for(state="visible", timeout=5000)
+        print("[auth-canary] notion 'trust URL' checkbox detected", flush=True)
+        await consent_checkbox.click(timeout=3000)
+        print("[auth-canary] notion 'trust URL' checkbox clicked", flush=True)
+    except Exception as exc:
+        print(f"[auth-canary] notion checkbox skipped: {exc}", flush=True)
 
     await click_first_button_with_text(
         popup,
@@ -770,13 +843,18 @@ async def browser_oauth_probe(
                 },
             )
         )
+        # Case-insensitive substring match on the assistant text — real LLM
+        # responses vary in capitalization ("Inbox" vs "inbox", "Gmail" vs
+        # "gmail") and the canary's value is in confirming the tool ran and
+        # the response references it, not in matching exact wording.
         results.append(
             ProbeResult(
                 provider=case.key,
                 mode="browser_chat",
                 success=(
                     case.expected_tool_name in tool_names
-                    and case.expected_text in chat_result.get("text", "")
+                    and case.expected_text.lower()
+                    in chat_result.get("text", "").lower()
                 ),
                 latency_ms=latency_ms,
                 details={
@@ -927,7 +1005,9 @@ def parse_args() -> argparse.Namespace:
             "Mutating lifecycle cases — must be opted in explicitly, never "
             "run by default: gmail_roundtrip, google_calendar_lifecycle, "
             "notion_search_lifecycle. "
-            "For browser mode: google, github, notion."
+            "For browser mode: google, notion. "
+            "(github browser coverage is intentionally absent — the github "
+            "WASM tool is PAT-only, not OAuth; see SEEDED_CASES instead.)"
         ),
     )
     parser.add_argument(
@@ -1073,6 +1153,7 @@ async def async_main(args: argparse.Namespace) -> int:
         gateway_token_prefix=mode_cfg["gateway_token_prefix"],
         extra_gateway_env=extra_gateway_env,
         oauth_proxy=(args.mode == "seeded"),
+        log_dir=args.output_dir,
     )
     try:
         if args.mode == "seeded":

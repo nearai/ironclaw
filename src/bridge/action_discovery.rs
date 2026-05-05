@@ -164,6 +164,13 @@ mod tests {
         }
     }
 
+    fn action_with_schema(name: &str, schema: serde_json::Value) -> ActionDef {
+        ActionDef {
+            parameters_schema: schema,
+            ..action(name)
+        }
+    }
+
     #[test]
     fn resolves_underscored_and_hyphenated_names() {
         let actions = vec![action("mission_create")];
@@ -237,6 +244,117 @@ mod tests {
         .expect("action should resolve");
 
         assert_eq!(output.result["name"], serde_json::json!("mission_create"));
+    }
+
+    #[test]
+    fn tool_info_schema_detail_returns_full_schema() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "goal": {"type": "string"},
+                "cadence": {"type": "string"}
+            },
+            "required": ["name", "goal", "cadence"]
+        });
+        let output = ActionDiscovery::tool_info(
+            &serde_json::json!({"name": "mission_create", "detail": "schema"}),
+            &ActionInventory {
+                inline: vec![action_with_schema("mission_create", schema.clone())],
+                discoverable: Vec::new(),
+            },
+        )
+        .expect("tool_info should succeed")
+        .expect("action should resolve");
+
+        assert_eq!(output.result["name"], serde_json::json!("mission_create"));
+        assert_eq!(output.result["schema"], schema);
+        assert_eq!(
+            output.result["schema"]["required"],
+            serde_json::json!(["name", "goal", "cadence"])
+        );
+    }
+
+    #[test]
+    fn tool_info_include_schema_alias_returns_schema_detail() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"}
+            },
+            "required": ["query"]
+        });
+        let output = ActionDiscovery::tool_info(
+            &serde_json::json!({"name": "custom_provider_send", "include_schema": true}),
+            &ActionInventory {
+                inline: vec![action_with_schema("custom_provider_send", schema.clone())],
+                discoverable: Vec::new(),
+            },
+        )
+        .expect("tool_info should succeed")
+        .expect("action should resolve");
+
+        assert_eq!(output.result["schema"], schema);
+    }
+
+    #[test]
+    fn tool_info_schema_uses_discovery_schema_override() {
+        let mut action = action_with_schema(
+            "custom_provider_send",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "raw": {"type": "string"}
+                },
+                "required": ["raw"]
+            }),
+        );
+        let discovery_schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "message": {"type": "string"},
+                "recipient": {"type": "string"}
+            },
+            "required": ["message", "recipient"]
+        });
+        action.discovery = Some(ActionDiscoveryMetadata {
+            name: "custom_provider_send".to_string(),
+            summary: None,
+            schema_override: Some(discovery_schema.clone()),
+        });
+
+        let output = ActionDiscovery::tool_info(
+            &serde_json::json!({"name": "custom-provider-send", "detail": "schema"}),
+            &ActionInventory {
+                inline: vec![action],
+                discoverable: Vec::new(),
+            },
+        )
+        .expect("tool_info should succeed")
+        .expect("action should resolve");
+
+        assert_eq!(output.result["schema"], discovery_schema);
+        assert_eq!(
+            output.result["parameters"],
+            serde_json::json!(["message", "recipient"])
+        );
+    }
+
+    #[test]
+    fn tool_info_names_detail_omits_summary_and_schema() {
+        let output = ActionDiscovery::tool_info(
+            &serde_json::json!({"name": "mission-create", "detail": "names"}),
+            &ActionInventory {
+                inline: vec![action("mission_create")],
+                discoverable: Vec::new(),
+            },
+        )
+        .expect("tool_info should succeed")
+        .expect("action should resolve");
+
+        assert_eq!(output.result["name"], serde_json::json!("mission_create"));
+        assert!(output.result.get("summary").is_none());
+        assert!(output.result.get("schema").is_none());
     }
 
     #[test]

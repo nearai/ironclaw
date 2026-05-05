@@ -706,6 +706,24 @@ async fn repository_memory_backend_search_fails_closed_until_provider_is_supplie
     );
 }
 
+#[test]
+fn memory_search_request_clamps_limits_to_db_safe_bounds() {
+    let request = MemorySearchRequest::new("needle")
+        .unwrap()
+        .with_limit(usize::MAX)
+        .with_pre_fusion_limit(usize::MAX);
+
+    assert_eq!(request.limit(), 1_000);
+    assert_eq!(request.pre_fusion_limit(), 5_000);
+
+    let request = MemorySearchRequest::new("needle")
+        .unwrap()
+        .with_limit(900)
+        .with_pre_fusion_limit(10);
+    assert_eq!(request.limit(), 900);
+    assert_eq!(request.pre_fusion_limit(), 900);
+}
+
 #[tokio::test]
 async fn repository_memory_backend_reports_write_success_when_indexer_fails_after_persist() {
     let repository = Arc::new(InMemoryMemoryDocumentRepository::new());

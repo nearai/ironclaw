@@ -720,7 +720,7 @@ impl<N, S> HostHttpEgressService<N, S> {
     ) -> Result<NetworkPolicy, RuntimeHttpEgressError> {
         if let Some(store) = &self.network_policy_store {
             return store
-                .take(&request.scope, &request.capability_id)
+                .get(&request.scope, &request.capability_id)
                 .ok_or_else(|| RuntimeHttpEgressError::Network {
                     reason: "network_policy_missing".to_string(),
                     request_bytes: 0,
@@ -739,6 +739,12 @@ impl<N, S> HostHttpEgressService<N, S> {
             }
         }
     }
+
+    fn discard_staged_policy_for_request(&self, request: &RuntimeHttpEgressRequest) {
+        if let Some(store) = &self.network_policy_store {
+            store.discard_for_capability(&request.scope, &request.capability_id);
+        }
+    }
 }
 
 impl<N, S> RuntimeHttpEgress for HostHttpEgressService<N, S>
@@ -751,23 +757,36 @@ where
         mut request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
         let network_policy = self.network_policy_for_request(&mut request)?;
-        validate_runtime_request(&request)?;
+        if let Err(error) = validate_runtime_request(&request) {
+            self.discard_staged_policy_for_request(&request);
+            return Err(error);
+        }
 
         let mut redaction_values = Vec::new();
         let mut credential_materials = Vec::new();
         let credential_injections = std::mem::take(&mut request.credential_injections);
         for injection in &credential_injections {
-            let Some(value) = credential_value_for_injection(
+            let value = match credential_value_for_injection(
                 &mut credential_materials,
                 &self.secrets,
                 self.secret_injections.as_deref(),
                 &request,
                 injection,
-            )?
-            else {
+            ) {
+                Ok(value) => value,
+                Err(error) => {
+                    self.discard_staged_policy_for_request(&request);
+                    return Err(error);
+                }
+            };
+            let Some(value) = value else {
                 continue;
             };
-            apply_credential_injection(&mut request, &injection.target, &value)?;
+            if let Err(error) = apply_credential_injection(&mut request, &injection.target, &value)
+            {
+                self.discard_staged_policy_for_request(&request);
+                return Err(error);
+            }
             redaction_values.extend(redaction_values_for_secret(&value));
         }
 
