@@ -441,6 +441,8 @@ pub struct ExtensionManager {
     /// Stored here so the web gateway can verify incoming callbacks without
     /// any env var or shared secret.
     relay_signing_secret_cache: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+    /// PairingStore for multi-tenant relay identity resolution.
+    pairing_store: Option<Arc<crate::pairing::PairingStore>>,
     /// When `true`, OAuth flows always return an auth URL to the caller
     /// instead of opening a browser on the server via `open::that()`.
     /// Set by the web gateway at startup via `enable_gateway_mode()`.
@@ -670,6 +672,7 @@ impl ExtensionManager {
             relay_config: crate::config::RelayConfig::from_env(),
             relay_event_tx: Arc::new(tokio::sync::Mutex::new(None)),
             relay_signing_secret_cache: Arc::new(std::sync::Mutex::new(None)),
+            pairing_store: None,
             gateway_mode: std::sync::atomic::AtomicBool::new(false),
             gateway_base_url: RwLock::new(None),
             channel_activation_locks: RwLock::new(HashMap::new()),
@@ -1156,6 +1159,10 @@ impl ExtensionManager {
         &self.secrets
     }
 
+    pub fn pairing_store(&self) -> Option<&Arc<crate::pairing::PairingStore>> {
+        self.pairing_store.as_ref()
+    }
+
     /// Expose the per-user MCP client store. Tool wrappers registered in
     /// the global `ToolRegistry` hold an `Arc<McpClientStore>` and resolve
     /// the caller's client at dispatch time via
@@ -1409,6 +1416,11 @@ impl ExtensionManager {
         store: Arc<dyn crate::db::SettingsStore + Send + Sync>,
     ) -> Self {
         self.settings_override = Some(store);
+        self
+    }
+
+    pub fn with_pairing_store(mut self, store: Arc<crate::pairing::PairingStore>) -> Self {
+        self.pairing_store = Some(store);
         self
     }
 
@@ -6462,6 +6474,20 @@ impl ExtensionManager {
                 ExtensionError::AuthFailed(format!("Failed to store OAuth state: {e}"))
             })?;
 
+        // Store the initiating user_id so the OAuth callback knows which IronClaw
+        // user to pair with the Slack authed_user_id.
+        let user_key = format!("relay:{}:oauth_user", name);
+        let _ = self.secrets.delete(&self.user_id, &user_key).await;
+        self.secrets
+            .create(
+                &self.user_id,
+                CreateSecretParams::new(&user_key, user_id),
+            )
+            .await
+            .map_err(|e| {
+                ExtensionError::AuthFailed(format!("Failed to store OAuth user: {e}"))
+            })?;
+
         // Channel-relay derives all URLs from trusted instance_url in chat-api.
         // We only pass the nonce for CSRF validation on the callback.
         tracing::trace!(
@@ -6612,7 +6638,7 @@ impl ExtensionManager {
         // Create the event channel for webhook callbacks
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
 
-        let channel = crate::channels::relay::RelayChannel::new_with_provider(
+        let mut channel = crate::channels::relay::RelayChannel::new_with_provider(
             client.clone(),
             crate::channels::relay::channel::RelayProvider::Slack,
             team_id.clone(),
@@ -6620,6 +6646,9 @@ impl ExtensionManager {
             event_tx.clone(),
             event_rx,
         );
+        if let Some(ref ps) = self.pairing_store {
+            channel = channel.with_pairing_store(Arc::clone(ps));
+        }
 
         // Hot-add to channel manager
         let cm_guard = self.relay_channel_manager.read().await;

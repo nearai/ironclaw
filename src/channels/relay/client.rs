@@ -238,6 +238,18 @@ impl RelayClient {
         method: &str,
         body: serde_json::Value,
     ) -> Result<serde_json::Value, RelayError> {
+        self.proxy_provider_with_user(provider, team_id, method, body, None)
+            .await
+    }
+
+    pub async fn proxy_provider_with_user(
+        &self,
+        provider: &str,
+        team_id: &str,
+        method: &str,
+        body: serde_json::Value,
+        slack_user_id: Option<&str>,
+    ) -> Result<serde_json::Value, RelayError> {
         let url = format!("{}/proxy/{}/{}", self.base_url, provider, method);
         tracing::trace!(
             relay_url = %url,
@@ -245,7 +257,10 @@ impl RelayClient {
             method = %method,
             "RelayClient::proxy_provider: sending request"
         );
-        let query: Vec<(&str, &str)> = vec![("team_id", team_id)];
+        let mut query: Vec<(&str, &str)> = vec![("team_id", team_id)];
+        if let Some(uid) = slack_user_id {
+            query.push(("slack_user_id", uid));
+        }
         let resp = self
             .http
             .post(&url)
