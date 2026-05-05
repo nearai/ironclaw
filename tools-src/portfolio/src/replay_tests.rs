@@ -365,6 +365,180 @@ fn check_expectations(path: &str, step: &Step, response: &Value, prior: &BTreeMa
                     step.name
                 );
             }
+            "bundle_first_leg_kind" => {
+                let kind = response
+                    .pointer("/bundle/legs/0/kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| {
+                        panic!("[{path}] step '{}': missing /bundle/legs/0/kind", step.name)
+                    });
+                let want = expected.as_str().expect("bundle_first_leg_kind: string");
+                assert_eq!(
+                    kind, want,
+                    "[{path}] step '{}': first bundle leg kind mismatch",
+                    step.name
+                );
+            }
+            "backtest_schema_version" => {
+                let v = response
+                    .get("schema_version")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| {
+                        panic!("[{path}] step '{}': missing schema_version", step.name)
+                    });
+                let want = expected.as_str().expect("backtest_schema_version: string");
+                assert_eq!(
+                    v, want,
+                    "[{path}] step '{}': backtest schema mismatch",
+                    step.name
+                );
+            }
+            "backtest_trades_min" => {
+                let trades = response
+                    .pointer("/metrics/trades")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or_else(|| {
+                        panic!("[{path}] step '{}': missing /metrics/trades", step.name)
+                    });
+                let want = expected.as_u64().expect("backtest_trades_min: number");
+                assert!(
+                    trades >= want,
+                    "[{path}] step '{}': backtest trades {} < min {}",
+                    step.name,
+                    trades,
+                    want
+                );
+            }
+            "backtest_total_return_gt" => {
+                let value = response
+                    .pointer("/metrics/total_return_pct")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "[{path}] step '{}': missing /metrics/total_return_pct",
+                            step.name
+                        )
+                    });
+                let want = expected.as_f64().expect("backtest_total_return_gt: number");
+                assert!(
+                    value > want,
+                    "[{path}] step '{}': total_return_pct {} <= {}",
+                    step.name,
+                    value,
+                    want
+                );
+            }
+            "backtest_max_drawdown_le" => {
+                let value = response
+                    .pointer("/metrics/max_drawdown_pct")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "[{path}] step '{}': missing /metrics/max_drawdown_pct",
+                            step.name
+                        )
+                    });
+                let want = expected.as_f64().expect("backtest_max_drawdown_le: number");
+                assert!(
+                    value <= want,
+                    "[{path}] step '{}': max_drawdown_pct {} > {}",
+                    step.name,
+                    value,
+                    want
+                );
+            }
+            "backtest_lookahead_safe" => {
+                let value = response
+                    .get("lookahead_safe")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or_else(|| {
+                        panic!("[{path}] step '{}': missing lookahead_safe", step.name)
+                    });
+                let want = expected.as_bool().expect("backtest_lookahead_safe: bool");
+                assert_eq!(
+                    value, want,
+                    "[{path}] step '{}': lookahead_safe mismatch",
+                    step.name
+                );
+            }
+            "backtest_suite_schema_version" => {
+                let v = response
+                    .get("schema_version")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| {
+                        panic!("[{path}] step '{}': missing schema_version", step.name)
+                    });
+                let want = expected
+                    .as_str()
+                    .expect("backtest_suite_schema_version: string");
+                assert_eq!(
+                    v, want,
+                    "[{path}] step '{}': backtest suite schema mismatch",
+                    step.name
+                );
+            }
+            "backtest_suite_ranked_min" => {
+                let ranked = response
+                    .get("ranked")
+                    .and_then(|v| v.as_array())
+                    .unwrap_or_else(|| {
+                        panic!("[{path}] step '{}': missing ranked array", step.name)
+                    });
+                let want = expected
+                    .as_u64()
+                    .expect("backtest_suite_ranked_min: number")
+                    as usize;
+                assert!(
+                    ranked.len() >= want,
+                    "[{path}] step '{}': ranked candidates {} < min {}",
+                    step.name,
+                    ranked.len(),
+                    want
+                );
+            }
+            "backtest_suite_top_trades_min" => {
+                let trades = response
+                    .pointer("/ranked/0/metrics/trades")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "[{path}] step '{}': missing /ranked/0/metrics/trades",
+                            step.name
+                        )
+                    });
+                let want = expected
+                    .as_u64()
+                    .expect("backtest_suite_top_trades_min: number");
+                assert!(
+                    trades >= want,
+                    "[{path}] step '{}': top-ranked trades {} < min {}",
+                    step.name,
+                    trades,
+                    want
+                );
+            }
+            "backtest_suite_any_passes_basic_gate" => {
+                let ranked = response
+                    .get("ranked")
+                    .and_then(|v| v.as_array())
+                    .unwrap_or_else(|| {
+                        panic!("[{path}] step '{}': missing ranked array", step.name)
+                    });
+                let got = ranked.iter().any(|result| {
+                    result
+                        .get("passes_basic_gate")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                });
+                let want = expected
+                    .as_bool()
+                    .expect("backtest_suite_any_passes_basic_gate: bool");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': basic-gate match mismatch",
+                    step.name
+                );
+            }
             "equal_to_step" => {
                 let other_step = expected.as_str().expect("equal_to_step: string");
                 let prior_resp = prior.get(other_step).unwrap_or_else(|| {
@@ -497,6 +671,690 @@ fn check_expectations(path: &str, step: &Step, response: &Value, prior: &BTreeMa
                     step.name
                 );
             }
+            "intents_widget_schema_version" => {
+                let v = response
+                    .get("schema_version")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| {
+                        panic!("[{path}] step '{}': missing schema_version", step.name)
+                    });
+                let want = expected
+                    .as_str()
+                    .expect("intents_widget_schema_version: string");
+                assert_eq!(
+                    v, want,
+                    "[{path}] step '{}': intents widget schema mismatch",
+                    step.name
+                );
+            }
+            "intents_widget_top_candidates_min" => {
+                let len = response
+                    .get("top_candidates")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                let want = expected
+                    .as_u64()
+                    .expect("intents_widget_top_candidates_min: number")
+                    as usize;
+                assert!(
+                    len >= want,
+                    "[{path}] step '{}': intents widget top candidates {len} < min {want}",
+                    step.name
+                );
+            }
+            "intents_widget_intent_status" => {
+                let got = response
+                    .pointer("/intent/status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| {
+                        panic!("[{path}] step '{}': missing /intent/status", step.name)
+                    });
+                let want = expected
+                    .as_str()
+                    .expect("intents_widget_intent_status: string");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': intents widget intent status mismatch",
+                    step.name
+                );
+            }
+            "paid_research_schema_version" => {
+                let v = response
+                    .get("schema_version")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| {
+                        panic!("[{path}] step '{}': missing schema_version", step.name)
+                    });
+                let want = expected
+                    .as_str()
+                    .expect("paid_research_schema_version: string");
+                assert_eq!(
+                    v, want,
+                    "[{path}] step '{}': paid research schema mismatch",
+                    step.name
+                );
+            }
+            "paid_research_selected_min" => {
+                let len = response
+                    .get("selected_sources")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                let want = expected
+                    .as_u64()
+                    .expect("paid_research_selected_min: number")
+                    as usize;
+                assert!(
+                    len >= want,
+                    "[{path}] step '{}': paid research selected {len} < min {want}",
+                    step.name
+                );
+            }
+            "paid_research_allocated_le" => {
+                let allocated = response
+                    .get("allocated_usd")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or_else(|| {
+                        panic!("[{path}] step '{}': missing allocated_usd", step.name)
+                    });
+                let want = expected
+                    .as_f64()
+                    .expect("paid_research_allocated_le: number");
+                assert!(
+                    allocated <= want + f64::EPSILON,
+                    "[{path}] step '{}': paid research allocated {allocated} > {want}",
+                    step.name
+                );
+            }
+            "paid_research_has_rail" => {
+                let rail = expected.as_str().expect("paid_research_has_rail: string");
+                let rails = response
+                    .get("payment_rails")
+                    .and_then(|v| v.as_array())
+                    .unwrap_or_else(|| {
+                        panic!("[{path}] step '{}': missing payment_rails", step.name)
+                    });
+                let found = rails
+                    .iter()
+                    .any(|item| item.get("protocol").and_then(|v| v.as_str()) == Some(rail));
+                assert!(
+                    found,
+                    "[{path}] step '{}': paid research rail '{rail}' not found",
+                    step.name
+                );
+            }
+            "paid_research_near_funding_routes_min" => {
+                let len = response
+                    .get("near_funding_routes")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                let want = expected
+                    .as_u64()
+                    .expect("paid_research_near_funding_routes_min: number")
+                    as usize;
+                assert!(
+                    len >= want,
+                    "[{path}] step '{}': NEAR funding routes {len} < min {want}",
+                    step.name
+                );
+            }
+            "intents_widget_paid_sources_min" => {
+                let len = response
+                    .pointer("/paid_research/payable_sources")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                let want = expected
+                    .as_u64()
+                    .expect("intents_widget_paid_sources_min: number")
+                    as usize;
+                assert!(
+                    len >= want,
+                    "[{path}] step '{}': intents widget paid sources {len} < min {want}",
+                    step.name
+                );
+            }
+            "intents_widget_paid_ready" => {
+                let got = response
+                    .pointer("/paid_research/ready_for_paid_fetch")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let want = expected.as_bool().expect("intents_widget_paid_ready: bool");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': paid research ready mismatch",
+                    step.name
+                );
+            }
+            "dripstack_checkpoint" => {
+                let got = response
+                    .get("checkpoint")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| panic!("[{path}] step '{}': missing checkpoint", step.name));
+                let want = expected.as_str().expect("dripstack_checkpoint: string");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': dripstack checkpoint mismatch",
+                    step.name
+                );
+            }
+            "dripstack_publications_min" => {
+                let len = response
+                    .get("matched_publications")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                let want = expected
+                    .as_u64()
+                    .expect("dripstack_publications_min: number")
+                    as usize;
+                assert!(
+                    len >= want,
+                    "[{path}] step '{}': matched publications {len} < min {want}",
+                    step.name
+                );
+            }
+            "dripstack_posts_min" => {
+                let len = response
+                    .get("post_candidates")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                let want = expected.as_u64().expect("dripstack_posts_min: number") as usize;
+                assert!(
+                    len >= want,
+                    "[{path}] step '{}': post candidates {len} < min {want}",
+                    step.name
+                );
+            }
+            "dripstack_has_paid_source_candidate" => {
+                let got = response.get("paid_source_candidate").is_some();
+                let want = expected
+                    .as_bool()
+                    .expect("dripstack_has_paid_source_candidate: bool");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': paid source candidate presence mismatch",
+                    step.name
+                );
+            }
+            "dripstack_paid_fetch_status" => {
+                let got = response
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| panic!("[{path}] step '{}': missing status", step.name));
+                let want = expected
+                    .as_str()
+                    .expect("dripstack_paid_fetch_status: string");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': paid fetch status mismatch",
+                    step.name
+                );
+            }
+            "dripstack_paid_fetch_headers_min" => {
+                let len = response
+                    .get("request_headers")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                let want = expected
+                    .as_u64()
+                    .expect("dripstack_paid_fetch_headers_min: number")
+                    as usize;
+                assert!(
+                    len >= want,
+                    "[{path}] step '{}': paid fetch headers {len} < min {want}",
+                    step.name
+                );
+            }
+            "near_trial_schema_version" => {
+                let got = response
+                    .get("schema_version")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| {
+                        panic!("[{path}] step '{}': missing schema_version", step.name)
+                    });
+                let want = expected
+                    .as_str()
+                    .expect("near_trial_schema_version: string");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': near trial schema mismatch",
+                    step.name
+                );
+            }
+            "near_trial_safe_to_quote" => {
+                let got = response
+                    .get("safe_to_quote")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let want = expected.as_bool().expect("near_trial_safe_to_quote: bool");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': near trial quote readiness mismatch",
+                    step.name
+                );
+            }
+            "near_trial_build_solver" => {
+                let got = response
+                    .pointer("/build_intent_request/solver")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "[{path}] step '{}': missing /build_intent_request/solver",
+                            step.name
+                        )
+                    });
+                let want = expected.as_str().expect("near_trial_build_solver: string");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': near trial build solver mismatch",
+                    step.name
+                );
+            }
+            "intents_widget_trial_safe_to_quote" => {
+                let got = response
+                    .pointer("/trial_plan/safe_to_quote")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let want = expected
+                    .as_bool()
+                    .expect("intents_widget_trial_safe_to_quote: bool");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': widget trial quote readiness mismatch",
+                    step.name
+                );
+            }
+            "walkforward_folds_len" => {
+                let len = response
+                    .get("folds")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                let want = expected.as_u64().expect("walkforward_folds_len: number") as usize;
+                assert_eq!(
+                    len, want,
+                    "[{path}] step '{}': walkforward folds {len} != {want}",
+                    step.name
+                );
+            }
+            "walkforward_robustness_in" => {
+                let got = response
+                    .pointer("/aggregate/robustness")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "[{path}] step '{}': missing /aggregate/robustness",
+                            step.name
+                        )
+                    });
+                let allowed: Vec<String> = expected
+                    .as_array()
+                    .expect("walkforward_robustness_in: array")
+                    .iter()
+                    .map(|v| v.as_str().expect("string").to_string())
+                    .collect();
+                assert!(
+                    allowed.iter().any(|v| v == got),
+                    "[{path}] step '{}': robustness '{got}' not in {:?}",
+                    step.name,
+                    allowed
+                );
+            }
+            "montecarlo_iterations" => {
+                let got = response
+                    .get("iterations")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let want = expected.as_u64().expect("montecarlo_iterations: number");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': montecarlo iterations mismatch",
+                    step.name
+                );
+            }
+            "montecarlo_p50_within" => {
+                let bounds = expected
+                    .as_array()
+                    .expect("montecarlo_p50_within: [low, high]");
+                let low = bounds[0].as_f64().expect("low number");
+                let high = bounds[1].as_f64().expect("high number");
+                let got = response
+                    .pointer("/return_distribution/p50")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "[{path}] step '{}': missing /return_distribution/p50",
+                            step.name
+                        )
+                    });
+                assert!(
+                    got >= low && got <= high,
+                    "[{path}] step '{}': montecarlo p50 {got} not in [{low}, {high}]",
+                    step.name
+                );
+            }
+            "grid_cells_len" => {
+                let len = response
+                    .get("cells")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                let want = expected.as_u64().expect("grid_cells_len: number") as usize;
+                assert_eq!(
+                    len, want,
+                    "[{path}] step '{}': grid cells {len} != {want}",
+                    step.name
+                );
+            }
+            "grid_top_passes_basic_gate" => {
+                let got = response
+                    .pointer("/ranked/0/passes_basic_gate")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let want = expected
+                    .as_bool()
+                    .expect("grid_top_passes_basic_gate: bool");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': grid top passes_basic_gate mismatch",
+                    step.name
+                );
+            }
+            "episode_summary_candles" => {
+                let got = response
+                    .get("candles")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let want = expected.as_u64().expect("episode_summary_candles: number");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': episode candles count mismatch",
+                    step.name
+                );
+            }
+            "episode_replay_top_trades_min" => {
+                let trades = response
+                    .pointer("/backtest_suite/ranked/0/metrics/trades")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let want = expected
+                    .as_u64()
+                    .expect("episode_replay_top_trades_min: number");
+                assert!(
+                    trades >= want,
+                    "[{path}] step '{}': episode replay top trades {trades} < {want}",
+                    step.name
+                );
+            }
+            "episode_replay_solver_kind" => {
+                let got = response
+                    .pointer("/episode/solver_fixture_kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "[{path}] step '{}': missing /episode/solver_fixture_kind",
+                            step.name
+                        )
+                    });
+                let want = expected
+                    .as_str()
+                    .expect("episode_replay_solver_kind: string");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': episode solver kind mismatch",
+                    step.name
+                );
+            }
+            "dca_periods_executed" => {
+                let got = response
+                    .get("periods_executed")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let want = expected.as_u64().expect("dca_periods_executed: number");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': dca executed {got} != {want}",
+                    step.name
+                );
+            }
+            "dca_periods_skipped_band_min" => {
+                let got = response
+                    .get("periods_skipped_band")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let want = expected
+                    .as_u64()
+                    .expect("dca_periods_skipped_band_min: number");
+                assert!(
+                    got >= want,
+                    "[{path}] step '{}': dca skipped-band {got} < {want}",
+                    step.name
+                );
+            }
+            "dca_total_invested_lt" => {
+                let invested = response
+                    .get("total_invested_usd")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0);
+                let want = expected.as_f64().expect("dca_total_invested_lt: number");
+                assert!(
+                    invested < want,
+                    "[{path}] step '{}': dca total invested {invested} >= {want}",
+                    step.name
+                );
+            }
+            "dca_breakeven_within" => {
+                let bounds = expected
+                    .as_array()
+                    .expect("dca_breakeven_within: [low, high]");
+                let low = bounds[0].as_f64().expect("low");
+                let high = bounds[1].as_f64().expect("high");
+                let got = response
+                    .get("breakeven_price_usd")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0);
+                assert!(
+                    got >= low && got <= high,
+                    "[{path}] step '{}': dca breakeven {got} not in [{low}, {high}]",
+                    step.name
+                );
+            }
+            "dca_schedule_cron" => {
+                let got = response
+                    .get("cron")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| panic!("[{path}] step '{}': missing cron", step.name));
+                let want = expected.as_str().expect("dca_schedule_cron: string");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': dca cron mismatch",
+                    step.name
+                );
+            }
+            "dca_schedule_safe_to_quote" => {
+                let got = response
+                    .get("safe_to_quote")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let want = expected
+                    .as_bool()
+                    .expect("dca_schedule_safe_to_quote: bool");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': dca safe_to_quote mismatch",
+                    step.name
+                );
+            }
+            "dca_schedule_periods_len" => {
+                let len = response
+                    .get("schedule")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                let want = expected.as_u64().expect("dca_schedule_periods_len: number") as usize;
+                assert_eq!(
+                    len, want,
+                    "[{path}] step '{}': dca schedule periods {len} != {want}",
+                    step.name
+                );
+            }
+            "dca_schedule_template_action" => {
+                let got = response
+                    .pointer("/build_intent_request_template/action")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "[{path}] step '{}': missing build_intent_request_template/action",
+                            step.name
+                        )
+                    });
+                let want = expected
+                    .as_str()
+                    .expect("dca_schedule_template_action: string");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': dca template action mismatch",
+                    step.name
+                );
+            }
+            "nl_intent_kind" => {
+                let got = response
+                    .get("intent_kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| {
+                        panic!("[{path}] step '{}': missing intent_kind", step.name)
+                    });
+                let want = expected.as_str().expect("nl_intent_kind: string");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': nl intent_kind mismatch",
+                    step.name
+                );
+            }
+            "nl_recommended_action" => {
+                let got = response
+                    .get("recommended_action")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| {
+                        panic!("[{path}] step '{}': missing recommended_action", step.name)
+                    });
+                let want = expected.as_str().expect("nl_recommended_action: string");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': nl recommended_action mismatch",
+                    step.name
+                );
+            }
+            "nl_param_eq" => {
+                let pairs = expected
+                    .as_object()
+                    .expect("nl_param_eq: object of {pointer: expected}");
+                for (pointer, want) in pairs {
+                    let got = response
+                        .pointer(&format!("/recommended_params/{pointer}"))
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "[{path}] step '{}': missing recommended_params/{pointer}",
+                                step.name
+                            )
+                        });
+                    assert_eq!(
+                        got, want,
+                        "[{path}] step '{}': nl_param_eq[{pointer}] mismatch",
+                        step.name
+                    );
+                }
+            }
+            "nl_confidence_min" => {
+                let got = response
+                    .get("confidence")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                let want = expected.as_f64().expect("nl_confidence_min: number");
+                assert!(
+                    got >= want,
+                    "[{path}] step '{}': nl confidence {got} < {want}",
+                    step.name
+                );
+            }
+            "validation_eligibility" => {
+                let got = response
+                    .get("eligibility")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| {
+                        panic!("[{path}] step '{}': missing eligibility", step.name)
+                    });
+                let want = expected.as_str().expect("validation_eligibility: string");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': validation eligibility mismatch",
+                    step.name
+                );
+            }
+            "validation_has_walkforward" => {
+                let got = response
+                    .get("walkforward")
+                    .map(|v| !v.is_null())
+                    .unwrap_or(false);
+                let want = expected
+                    .as_bool()
+                    .expect("validation_has_walkforward: bool");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': validation walkforward presence mismatch",
+                    step.name
+                );
+            }
+            "validation_has_montecarlo" => {
+                let got = response
+                    .get("montecarlo")
+                    .map(|v| !v.is_null())
+                    .unwrap_or(false);
+                let want = expected.as_bool().expect("validation_has_montecarlo: bool");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': validation montecarlo presence mismatch",
+                    step.name
+                );
+            }
+            "doc_kind" => {
+                let got = response
+                    .get("kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| panic!("[{path}] step '{}': missing kind", step.name));
+                let want = expected.as_str().expect("doc_kind: string");
+                assert_eq!(
+                    got, want,
+                    "[{path}] step '{}': doc kind mismatch",
+                    step.name
+                );
+            }
+            "doc_markdown_contains" => {
+                let needles: Vec<String> = expected
+                    .as_array()
+                    .expect("doc_markdown_contains: array")
+                    .iter()
+                    .map(|v| v.as_str().expect("string").to_string())
+                    .collect();
+                let md = response
+                    .get("markdown")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                for needle in &needles {
+                    assert!(
+                        md.contains(needle.as_str()),
+                        "[{path}] step '{}': markdown missing '{needle}'",
+                        step.name
+                    );
+                }
+            }
             other => panic!(
                 "[{path}] step '{}': unknown expectation key '{other}'",
                 step.name
@@ -516,6 +1374,18 @@ fn capture_vars(path: &str, step: &Step, response: &Value, vars: &mut BTreeMap<S
                 .get("proposals")
                 .cloned()
                 .unwrap_or(Value::Array(Vec::new())),
+            "backtest_suite_var" => response.clone(),
+            "paid_research_plan_var" => response.clone(),
+            "trial_plan_var" => response.clone(),
+            "dripstack_paid_source_var" => response
+                .get("paid_source_candidate")
+                .cloned()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "[{path}] step '{}': missing paid_source_candidate to capture",
+                        step.name
+                    )
+                }),
             "first_ready_plan_var" => response
                 .get("proposals")
                 .and_then(|v| v.as_array())

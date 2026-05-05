@@ -171,6 +171,7 @@ pub async fn memory_write_handler(
             };
             (status, e.to_string())
         })?;
+        register_project_write(&req.path, &user.user_id).await;
         return Ok(Json(MemoryWriteResponse {
             path: req.path,
             status: "written",
@@ -192,12 +193,24 @@ pub async fn memory_write_handler(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
 
+    register_project_write(&req.path, &user.user_id).await;
+
     Ok(Json(MemoryWriteResponse {
         path: req.path,
         status: "written",
         redirected: None,
         actual_layer: None,
     }))
+}
+
+async fn register_project_write(path: &str, user_id: &str) {
+    if let Err(e) = crate::bridge::register_engine_project_for_workspace_path(path, user_id).await {
+        tracing::debug!(
+            path,
+            user_id,
+            "memory write succeeded but project auto-registration failed: {e}"
+        );
+    }
 }
 
 pub async fn memory_search_handler(
