@@ -26,8 +26,9 @@ use crate::search::{
 };
 
 use super::{
-    MemoryDocumentRepository, ensure_document_path_does_not_conflict, reborn_agent_id_db_value,
-    reborn_memory_document_from_row, reborn_project_id_db_value,
+    MemoryAppendOutcome, MemoryDocumentRepository, ensure_document_path_does_not_conflict,
+    reborn_agent_id_db_value, reborn_memory_document_from_row, reborn_project_id_db_value,
+    scoped_memory_owner_key,
 };
 
 /// Reborn-native libSQL repository for `reborn_memory_*` tables.
@@ -132,7 +133,16 @@ impl MemoryDocumentRepository for RebornLibSqlMemoryDocumentRepository {
         path: &MemoryDocumentPath,
         bytes: &[u8],
     ) -> Result<(), FilesystemError> {
-        self.write_document_with_options(path, bytes, &MemoryWriteOptions::default())
+        // Direct repository writes go through the same archive path as
+        // backend/filesystem writes; without `changed_by` the version row
+        // gets `NULL`. The scoped owner key matches the legacy libSQL
+        // direct-write behavior so version history stays attributable when
+        // operators bypass the higher backend seam.
+        let options = MemoryWriteOptions {
+            changed_by: Some(scoped_memory_owner_key(path.scope())),
+            ..MemoryWriteOptions::default()
+        };
+        self.write_document_with_options(path, bytes, &options)
             .await
     }
 
@@ -258,6 +268,149 @@ impl MemoryDocumentRepository for RebornLibSqlMemoryDocumentRepository {
                     memory_error(
                         virtual_path.clone(),
                         FilesystemOperation::WriteFile,
+                        error.to_string(),
+                    )
+                })?;
+        } else {
+            let _ = conn.execute("ROLLBACK", libsql::params![]).await;
+        }
+        result
+    }
+
+    async fn compare_and_append_document_with_options(
+        &self,
+        path: &MemoryDocumentPath,
+        expected_previous_hash: Option<&str>,
+        bytes: &[u8],
+        options: &MemoryWriteOptions,
+    ) -> Result<MemoryAppendOutcome, FilesystemError> {
+        let virtual_path = path.virtual_path().unwrap_or_else(|_| valid_memory_path());
+        let append_content = std::str::from_utf8(bytes).map_err(|_| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::AppendFile,
+                "memory document content must be UTF-8",
+            )
+        })?;
+        let conn = self
+            .connect(virtual_path.clone(), FilesystemOperation::AppendFile)
+            .await?;
+        let scope = path.scope();
+        let agent_id_db = reborn_agent_id_db_value(scope);
+        let project_id_db = reborn_project_id_db_value(scope);
+
+        conn.execute("BEGIN IMMEDIATE", libsql::params![])
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::AppendFile,
+                    error.to_string(),
+                )
+            })?;
+
+        let result: Result<MemoryAppendOutcome, FilesystemError> = async {
+            let existing = reborn_libsql_existing_document(
+                &conn,
+                scope,
+                path.relative_path(),
+                &virtual_path,
+                FilesystemOperation::AppendFile,
+            )
+            .await?;
+            // Compare against the row's stored content (recomputing the hash
+            // here matches the legacy direct-libsql append path which also
+            // hashes the previous content rather than trusting a stored
+            // column — keeps the contract identical even if the column
+            // were ever stale).
+            let current_hash = existing
+                .as_ref()
+                .map(|(_, content)| content_sha256(content));
+            if current_hash.as_deref() != expected_previous_hash {
+                return Ok(MemoryAppendOutcome::Conflict);
+            }
+
+            if let Some((document_id, previous_content)) = existing {
+                let combined = format!("{previous_content}{append_content}");
+                let new_content_hash = content_sha256(&combined);
+                let should_version = options.metadata.skip_versioning != Some(true)
+                    && previous_content != combined
+                    && !previous_content.is_empty();
+                if should_version {
+                    reborn_libsql_save_document_version(
+                        &conn,
+                        &virtual_path,
+                        &document_id,
+                        &previous_content,
+                        options.changed_by.as_deref(),
+                    )
+                    .await?;
+                }
+                conn.execute(
+                    "UPDATE reborn_memory_documents \
+                     SET content = ?2, content_hash = ?3, \
+                         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+                     WHERE id = ?1",
+                    libsql::params![document_id.as_str(), combined, new_content_hash.as_str()],
+                )
+                .await
+                .map_err(|error| {
+                    memory_error(
+                        virtual_path.clone(),
+                        FilesystemOperation::AppendFile,
+                        error.to_string(),
+                    )
+                })?;
+            } else {
+                let documents = reborn_libsql_list_paths_for_scope(
+                    &conn,
+                    scope,
+                    &virtual_path,
+                    FilesystemOperation::AppendFile,
+                )
+                .await?;
+                ensure_document_path_does_not_conflict(
+                    path,
+                    &documents,
+                    FilesystemOperation::AppendFile,
+                )?;
+                let new_content_hash = content_sha256(append_content);
+                conn.execute(
+                    "INSERT INTO reborn_memory_documents \
+                         (id, tenant_id, user_id, agent_id, project_id, path, \
+                          content, content_hash, metadata) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, '{}')",
+                    libsql::params![
+                        uuid::Uuid::new_v4().to_string(),
+                        scope.tenant_id(),
+                        scope.user_id(),
+                        agent_id_db,
+                        project_id_db,
+                        path.relative_path(),
+                        append_content,
+                        new_content_hash.as_str(),
+                    ],
+                )
+                .await
+                .map_err(|error| {
+                    memory_error(
+                        virtual_path.clone(),
+                        FilesystemOperation::AppendFile,
+                        error.to_string(),
+                    )
+                })?;
+            }
+            Ok(MemoryAppendOutcome::Appended)
+        }
+        .await;
+
+        if result.is_ok() {
+            conn.execute("COMMIT", libsql::params![])
+                .await
+                .map_err(|error| {
+                    memory_error(
+                        virtual_path.clone(),
+                        FilesystemOperation::AppendFile,
                         error.to_string(),
                     )
                 })?;

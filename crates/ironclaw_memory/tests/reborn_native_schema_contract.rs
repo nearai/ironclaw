@@ -169,8 +169,7 @@ async fn reborn_postgres_run_migrations_creates_native_substrate_idempotently() 
     }
 
     // The `reborn_memory_chunks.content_tsv` generated column exists with
-    // type `tsvector`. The reviewer specifically called out that triggers,
-    // generated TSVECTOR, and HNSW DDL must not be left compile-only.
+    // type `tsvector`. Generated TSVECTOR DDL must not be left compile-only.
     let tsv_row = client
         .query_one(
             "SELECT data_type, is_generated FROM information_schema.columns \
@@ -185,20 +184,48 @@ async fn reborn_postgres_run_migrations_creates_native_substrate_idempotently() 
     assert_eq!(data_type, "tsvector");
     assert_eq!(is_generated, "ALWAYS");
 
-    // The HNSW vector index on the embedding column exists.
-    let hnsw_row = client
+    // `reborn_memory_chunks.embedding` is the *unbounded* `vector` type so
+    // any provider dimension (Ollama 768/1024-dim, OpenAI 1536/3072-dim,
+    // …) is accepted. pgvector renders unbounded vectors as `udt_name =
+    // 'vector'` with a NULL `character_maximum_length` and no dimension
+    // suffix on the formatted type. Match either of the two equivalent
+    // ways pgvector reports an unbounded column.
+    let embedding_row = client
         .query_one(
-            "SELECT indexdef FROM pg_indexes \
+            "SELECT format_type(a.atttypid, a.atttypmod) AS formatted \
+             FROM pg_attribute a \
+             JOIN pg_class c ON c.oid = a.attrelid \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = 'public' \
+               AND c.relname = 'reborn_memory_chunks' \
+               AND a.attname = 'embedding'",
+            &[],
+        )
+        .await
+        .expect("reborn_memory_chunks.embedding column must exist");
+    let embedding_type: String = embedding_row.get("formatted");
+    assert_eq!(
+        embedding_type, "vector",
+        "embedding column must be unbounded `vector`, not a fixed-dimension \
+         `vector(N)` — provider dimension flexibility is part of the contract"
+    );
+
+    // No HNSW index — unbounded vectors require linear scan but accept any
+    // dimension. Verify the index from the previous fixed-dim shape is not
+    // present so a future re-introduction without dimension constraint
+    // changes is caught.
+    let hnsw_present = client
+        .query_opt(
+            "SELECT 1 FROM pg_indexes \
              WHERE schemaname = 'public' \
                AND indexname = 'idx_reborn_memory_chunks_embedding'",
             &[],
         )
         .await
-        .expect("HNSW embedding index must exist after migration");
-    let indexdef: String = hnsw_row.get("indexdef");
+        .expect("hnsw index lookup");
     assert!(
-        indexdef.to_lowercase().contains("hnsw"),
-        "embedding index must use HNSW; got: {indexdef}"
+        hnsw_present.is_none(),
+        "no HNSW index should exist on unbounded vector embedding"
     );
 
     // The legacy `memory_documents` table must NOT be created by the native

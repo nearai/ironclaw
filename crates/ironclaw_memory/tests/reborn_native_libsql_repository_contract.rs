@@ -6,10 +6,10 @@
 use std::sync::Arc;
 
 use ironclaw_memory::{
-    ChunkConfig, ChunkingMemoryDocumentIndexer, DocumentMetadata, FusionStrategy, MemoryChunkWrite,
-    MemoryDocumentIndexRepository, MemoryDocumentIndexer, MemoryDocumentPath,
-    MemoryDocumentRepository, MemoryDocumentScope, MemorySearchRequest, MemoryWriteOptions,
-    RebornLibSqlMemoryDocumentRepository, content_sha256,
+    ChunkConfig, ChunkingMemoryDocumentIndexer, DocumentMetadata, FusionStrategy,
+    MemoryAppendOutcome, MemoryChunkWrite, MemoryDocumentIndexRepository, MemoryDocumentIndexer,
+    MemoryDocumentPath, MemoryDocumentRepository, MemoryDocumentScope, MemorySearchRequest,
+    MemoryWriteOptions, RebornLibSqlMemoryDocumentRepository, content_sha256,
 };
 
 struct Fixture {
@@ -514,7 +514,202 @@ async fn fts_query_with_only_stopwords_does_not_error() {
     }
 }
 
+#[tokio::test]
+async fn compare_and_append_appends_then_conflicts_on_stale_hash() {
+    // The native repository must implement the optimistic atomic append
+    // contract directly — the trait default would silently degrade to
+    // an unsupported error. Drive it through `compare_and_append_*` to
+    // lock in the hash-conflict + append-on-match behavior on the
+    // Reborn-native libSQL backend.
+    let f = fresh_repository().await;
+    let path = MemoryDocumentPath::new("tenant-a", "alice", None, "append/race.md").expect("path");
+
+    f.repo.write_document(&path, b"base").await.unwrap();
+    let stale_hash = content_sha256("base");
+
+    let first = f
+        .repo
+        .compare_and_append_document_with_options(
+            &path,
+            Some(&stale_hash),
+            b" first",
+            &MemoryWriteOptions::default(),
+        )
+        .await
+        .unwrap();
+    let second = f
+        .repo
+        .compare_and_append_document_with_options(
+            &path,
+            Some(&stale_hash),
+            b" second",
+            &MemoryWriteOptions::default(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(first, MemoryAppendOutcome::Appended);
+    assert_eq!(
+        second,
+        MemoryAppendOutcome::Conflict,
+        "second append must observe a stale hash and refuse to append"
+    );
+    assert_eq!(
+        f.repo.read_document(&path).await.unwrap().as_deref(),
+        Some(b"base first".as_slice()),
+        "row content must reflect the first append, not the conflicting second"
+    );
+}
+
+#[tokio::test]
+async fn compare_and_append_creates_row_with_path_conflict_check_when_absent() {
+    // For a fresh path, the append contract must *create* the row
+    // (None previous hash matches None current hash) and still run the
+    // file/directory prefix-conflict check so the new row cannot
+    // shadow an existing ancestor.
+    let f = fresh_repository().await;
+    let parent_file = MemoryDocumentPath::new("tenant-a", "alice", None, "notes").expect("path");
+    f.repo
+        .write_document(&parent_file, b"plain ancestor")
+        .await
+        .unwrap();
+
+    // Append onto a child path that would conflict with the existing
+    // file ancestor — must fail the path-conflict check rather than
+    // creating a shadow row.
+    let child = MemoryDocumentPath::new("tenant-a", "alice", None, "notes/child.md").expect("path");
+    let err = f
+        .repo
+        .compare_and_append_document_with_options(
+            &child,
+            None,
+            b"new",
+            &MemoryWriteOptions::default(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("existing file ancestor"),
+        "path-conflict check must fire on append-create: {err}"
+    );
+
+    // A fresh sibling path with no conflict creates the row.
+    let fresh_path =
+        MemoryDocumentPath::new("tenant-a", "alice", None, "fresh/append.md").expect("path");
+    let outcome = f
+        .repo
+        .compare_and_append_document_with_options(
+            &fresh_path,
+            None,
+            b"hello",
+            &MemoryWriteOptions::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, MemoryAppendOutcome::Appended);
+    assert_eq!(
+        f.repo.read_document(&fresh_path).await.unwrap().as_deref(),
+        Some(b"hello".as_slice())
+    );
+}
+
+#[tokio::test]
+async fn compare_and_append_archives_previous_content_with_changed_by_attribution() {
+    // The append archival path must populate `changed_by` so version
+    // history stays attributable. Reviewer flagged that direct repo
+    // writes with `MemoryWriteOptions::default()` previously stored a
+    // NULL `changed_by`.
+    let f = fresh_repository().await;
+    let path = MemoryDocumentPath::new("tenant-a", "alice", None, "append/attr.md").expect("path");
+
+    f.repo.write_document(&path, b"base").await.unwrap();
+    let base_hash = content_sha256("base");
+
+    let opts = MemoryWriteOptions {
+        metadata: DocumentMetadata::default(),
+        changed_by: Some("test:append-actor".to_string()),
+    };
+    let outcome = f
+        .repo
+        .compare_and_append_document_with_options(&path, Some(&base_hash), b" added", &opts)
+        .await
+        .unwrap();
+    assert_eq!(outcome, MemoryAppendOutcome::Appended);
+
+    let rows = read_version_rows_with_changed_by(&f.db, &path).await;
+    assert_eq!(
+        rows.len(),
+        1,
+        "append must archive exactly one prior version"
+    );
+    let (_version, content, _hash, changed_by) = &rows[0];
+    assert_eq!(content, "base");
+    assert_eq!(
+        changed_by.as_deref(),
+        Some("test:append-actor"),
+        "version row must record the supplied `changed_by` actor"
+    );
+}
+
+#[tokio::test]
+async fn direct_write_attributes_version_to_scoped_owner_key() {
+    // `MemoryDocumentRepository::write_document()` is the bypass surface
+    // for operators who don't go through the backend/filesystem seam.
+    // The version row must still be attributable: the repo populates
+    // `changed_by` from a deterministic scoped owner key.
+    let f = fresh_repository().await;
+    let path = MemoryDocumentPath::new("tenant-a", "alice", None, "attr.md").expect("path");
+
+    f.repo.write_document(&path, b"v1").await.unwrap();
+    f.repo.write_document(&path, b"v2").await.unwrap();
+
+    let rows = read_version_rows_with_changed_by(&f.db, &path).await;
+    assert_eq!(rows.len(), 1);
+    let (_, content, _, changed_by) = &rows[0];
+    assert_eq!(content, "v1");
+    assert_eq!(
+        changed_by.as_deref(),
+        Some("tenant:tenant-a:user:alice:project:_none"),
+        "direct write must attribute to scoped owner key, not NULL"
+    );
+}
+
 // --- helpers --------------------------------------------------------------
+
+async fn read_version_rows_with_changed_by(
+    db: &Arc<libsql::Database>,
+    path: &MemoryDocumentPath,
+) -> Vec<(i64, String, String, Option<String>)> {
+    let conn = db.connect().expect("connect");
+    let scope = path.scope();
+    let mut rows = conn
+        .query(
+            "SELECT v.version, v.content, v.content_hash, v.changed_by \
+             FROM reborn_memory_document_versions v \
+             JOIN reborn_memory_documents d ON d.id = v.document_id \
+             WHERE d.tenant_id = ?1 AND d.user_id = ?2 AND d.agent_id = ?3 \
+               AND d.project_id = ?4 AND d.path = ?5 \
+             ORDER BY v.version",
+            libsql::params![
+                scope.tenant_id(),
+                scope.user_id(),
+                scope.agent_id().unwrap_or(""),
+                scope.project_id().unwrap_or(""),
+                path.relative_path(),
+            ],
+        )
+        .await
+        .unwrap();
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        let v: i64 = row.get(0).unwrap();
+        let c: String = row.get(1).unwrap();
+        let h: String = row.get(2).unwrap();
+        let cb: Option<String> = row.get(3).ok();
+        out.push((v, c, h, cb));
+    }
+    out
+}
 
 async fn count_versions(db: &Arc<libsql::Database>, path: &MemoryDocumentPath) -> i64 {
     let conn = db.connect().expect("connect");

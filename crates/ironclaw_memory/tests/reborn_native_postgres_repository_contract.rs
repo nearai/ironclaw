@@ -17,10 +17,10 @@
 use std::sync::Arc;
 
 use ironclaw_memory::{
-    ChunkConfig, ChunkingMemoryDocumentIndexer, DocumentMetadata, FusionStrategy, MemoryChunkWrite,
-    MemoryDocumentIndexRepository, MemoryDocumentIndexer, MemoryDocumentPath,
-    MemoryDocumentRepository, MemoryDocumentScope, MemorySearchRequest, MemoryWriteOptions,
-    RebornPostgresMemoryDocumentRepository, content_sha256,
+    ChunkConfig, ChunkingMemoryDocumentIndexer, DocumentMetadata, FusionStrategy,
+    MemoryAppendOutcome, MemoryChunkWrite, MemoryDocumentIndexRepository, MemoryDocumentIndexer,
+    MemoryDocumentPath, MemoryDocumentRepository, MemoryDocumentScope, MemorySearchRequest,
+    MemoryWriteOptions, RebornPostgresMemoryDocumentRepository, content_sha256,
 };
 
 fn pool() -> deadpool_postgres::Pool {
@@ -597,7 +597,248 @@ async fn fts_query_with_only_stopwords_does_not_error() {
     cleanup_tenant(&pool(), tenant).await;
 }
 
+#[tokio::test]
+async fn compare_and_append_appends_then_conflicts_on_stale_hash() {
+    // Same optimistic atomic append contract that the libSQL native
+    // repository implements, locked in for Postgres. Reviewer
+    // explicitly required parity across both backends.
+    let tenant = "reborn-pg-append-stale";
+    let Some(repo) = fresh_repository(tenant).await else {
+        return;
+    };
+    let path = MemoryDocumentPath::new(tenant, "alice", None, "append/race.md").expect("path");
+
+    repo.write_document(&path, b"base").await.unwrap();
+    let stale_hash = content_sha256("base");
+
+    let first = repo
+        .compare_and_append_document_with_options(
+            &path,
+            Some(&stale_hash),
+            b" first",
+            &MemoryWriteOptions::default(),
+        )
+        .await
+        .unwrap();
+    let second = repo
+        .compare_and_append_document_with_options(
+            &path,
+            Some(&stale_hash),
+            b" second",
+            &MemoryWriteOptions::default(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(first, MemoryAppendOutcome::Appended);
+    assert_eq!(
+        second,
+        MemoryAppendOutcome::Conflict,
+        "second append must observe a stale hash and refuse to append"
+    );
+    assert_eq!(
+        repo.read_document(&path).await.unwrap().as_deref(),
+        Some(b"base first".as_slice())
+    );
+    cleanup_tenant(&pool(), tenant).await;
+}
+
+#[tokio::test]
+async fn compare_and_append_creates_row_with_path_conflict_check_when_absent() {
+    // Append against a brand-new path must create the row but still
+    // run the prefix-conflict check so the new row cannot shadow an
+    // existing ancestor under the same scope.
+    let tenant = "reborn-pg-append-create";
+    let Some(repo) = fresh_repository(tenant).await else {
+        return;
+    };
+    let parent_file = MemoryDocumentPath::new(tenant, "alice", None, "notes").expect("path");
+    repo.write_document(&parent_file, b"plain ancestor")
+        .await
+        .unwrap();
+
+    let child = MemoryDocumentPath::new(tenant, "alice", None, "notes/child.md").expect("path");
+    let err = repo
+        .compare_and_append_document_with_options(
+            &child,
+            None,
+            b"new",
+            &MemoryWriteOptions::default(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("existing file ancestor"),
+        "path-conflict check must fire on append-create: {err}"
+    );
+
+    let fresh_path =
+        MemoryDocumentPath::new(tenant, "alice", None, "fresh/append.md").expect("path");
+    let outcome = repo
+        .compare_and_append_document_with_options(
+            &fresh_path,
+            None,
+            b"hello",
+            &MemoryWriteOptions::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, MemoryAppendOutcome::Appended);
+    assert_eq!(
+        repo.read_document(&fresh_path).await.unwrap().as_deref(),
+        Some(b"hello".as_slice())
+    );
+    cleanup_tenant(&pool(), tenant).await;
+}
+
+#[tokio::test]
+async fn compare_and_append_archives_previous_content_with_changed_by_attribution() {
+    // The append archival path must populate `changed_by` exactly as
+    // the libSQL native repository does. NULL `changed_by` was the
+    // root cause of the reviewer-flagged attribution gap.
+    let tenant = "reborn-pg-append-attr";
+    let Some(repo) = fresh_repository(tenant).await else {
+        return;
+    };
+    let path = MemoryDocumentPath::new(tenant, "alice", None, "append/attr.md").expect("path");
+
+    repo.write_document(&path, b"base").await.unwrap();
+    let base_hash = content_sha256("base");
+
+    let opts = MemoryWriteOptions {
+        metadata: DocumentMetadata::default(),
+        changed_by: Some("test:append-actor".to_string()),
+    };
+    let outcome = repo
+        .compare_and_append_document_with_options(&path, Some(&base_hash), b" added", &opts)
+        .await
+        .unwrap();
+    assert_eq!(outcome, MemoryAppendOutcome::Appended);
+
+    let rows = read_version_rows_with_changed_by(&pool(), tenant, &path).await;
+    assert_eq!(
+        rows.len(),
+        1,
+        "append must archive exactly one prior version"
+    );
+    let (_version, content, _hash, changed_by) = &rows[0];
+    assert_eq!(content, "base");
+    assert_eq!(
+        changed_by.as_deref(),
+        Some("test:append-actor"),
+        "version row must record the supplied `changed_by` actor"
+    );
+    cleanup_tenant(&pool(), tenant).await;
+}
+
+#[tokio::test]
+async fn direct_write_attributes_version_to_scoped_owner_key() {
+    // `MemoryDocumentRepository::write_document()` is the bypass
+    // surface for operators not going through the backend/filesystem
+    // seam. The repo must populate `changed_by` deterministically so
+    // version history is never NULL-attributed.
+    let tenant = "reborn-pg-direct-attr";
+    let Some(repo) = fresh_repository(tenant).await else {
+        return;
+    };
+    let path = MemoryDocumentPath::new(tenant, "alice", None, "attr.md").expect("path");
+
+    repo.write_document(&path, b"v1").await.unwrap();
+    repo.write_document(&path, b"v2").await.unwrap();
+
+    let rows = read_version_rows_with_changed_by(&pool(), tenant, &path).await;
+    assert_eq!(rows.len(), 1);
+    let (_, content, _, changed_by) = &rows[0];
+    assert_eq!(content, "v1");
+    let expected = format!("tenant:{tenant}:user:alice:project:_none");
+    assert_eq!(
+        changed_by.as_deref(),
+        Some(expected.as_str()),
+        "direct write must attribute to scoped owner key, not NULL"
+    );
+    cleanup_tenant(&pool(), tenant).await;
+}
+
+#[tokio::test]
+async fn embedding_column_accepts_non_1536_dimension_vectors() {
+    // The native Postgres schema declares `embedding vector` (unbounded)
+    // so providers with non-1536 dimensions (Ollama 768/1024, OpenAI
+    // 3072, Claude 1024, …) write and read without a hard-coded
+    // dimension constraint. Drive a 5-dim chunk write to exercise the
+    // same column the search path queries.
+    let tenant = "reborn-pg-vector-nondefault";
+    let Some(repo) = fresh_repository(tenant).await else {
+        return;
+    };
+    let path = MemoryDocumentPath::new(tenant, "alice", None, "vec.md").expect("path");
+    repo.write_document(&path, b"vector dimension test")
+        .await
+        .unwrap();
+    let hash = content_sha256("vector dimension test");
+
+    let chunks = vec![
+        MemoryChunkWrite {
+            content: "vector dimension".to_string(),
+            // 5 dimensions — would fail under a hard-coded `vector(1536)`.
+            embedding: Some(vec![0.1, 0.2, 0.3, 0.4, 0.5]),
+        },
+        MemoryChunkWrite {
+            content: "test".to_string(),
+            // 7 dimensions, deliberately different from the previous
+            // chunk to lock in that the column never narrows to a
+            // single per-table dimension either.
+            embedding: Some(vec![1.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.0]),
+        },
+    ];
+    repo.replace_document_chunks_if_current(&path, &hash, &chunks)
+        .await
+        .unwrap();
+
+    let stored_chunks = count_chunks(&pool(), tenant, &path).await;
+    assert_eq!(
+        stored_chunks, 2,
+        "expected 2 chunks persisted with mixed-dimension embeddings; got {stored_chunks}"
+    );
+    cleanup_tenant(&pool(), tenant).await;
+}
+
 // --- helpers --------------------------------------------------------------
+
+async fn read_version_rows_with_changed_by(
+    pool: &deadpool_postgres::Pool,
+    tenant_id: &str,
+    path: &MemoryDocumentPath,
+) -> Vec<(i32, String, String, Option<String>)> {
+    let client = pool.get().await.expect("get client");
+    let scope = path.scope();
+    let rows = client
+        .query(
+            "SELECT v.version, v.content, v.content_hash, v.changed_by \
+             FROM reborn_memory_document_versions v \
+             JOIN reborn_memory_documents d ON d.id = v.document_id \
+             WHERE d.tenant_id = $1 AND d.user_id = $2 AND d.agent_id = $3 \
+               AND d.project_id = $4 AND d.path = $5 \
+             ORDER BY v.version",
+            &[
+                &tenant_id,
+                &scope.user_id(),
+                &scope.agent_id().unwrap_or(""),
+                &scope.project_id().unwrap_or(""),
+                &path.relative_path(),
+            ],
+        )
+        .await
+        .expect("read versions with changed_by");
+    rows.into_iter()
+        .map(|row| {
+            let v: i32 = row.get(0);
+            let c: String = row.get(1);
+            let h: String = row.get(2);
+            let cb: Option<String> = row.get(3);
+            (v, c, h, cb)
+        })
+        .collect()
+}
 
 async fn count_versions(
     pool: &deadpool_postgres::Pool,

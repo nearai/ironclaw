@@ -22,8 +22,9 @@ use crate::search::{
 };
 
 use super::{
-    MemoryDocumentRepository, ensure_document_path_does_not_conflict, reborn_agent_id_db_value,
-    reborn_memory_document_from_row, reborn_project_id_db_value,
+    MemoryAppendOutcome, MemoryDocumentRepository, ensure_document_path_does_not_conflict,
+    reborn_agent_id_db_value, reborn_memory_document_from_row, reborn_project_id_db_value,
+    scoped_memory_owner_key,
 };
 
 /// Reborn-native PostgreSQL repository for `reborn_memory_*` tables.
@@ -139,7 +140,16 @@ impl MemoryDocumentRepository for RebornPostgresMemoryDocumentRepository {
         path: &MemoryDocumentPath,
         bytes: &[u8],
     ) -> Result<(), FilesystemError> {
-        self.write_document_with_options(path, bytes, &MemoryWriteOptions::default())
+        // Direct repository writes go through the same archive path as
+        // backend/filesystem writes; without `changed_by` the version row
+        // gets `NULL`. The scoped owner key matches the legacy Postgres
+        // direct-write behavior so version history stays attributable
+        // when operators bypass the higher backend seam.
+        let options = MemoryWriteOptions {
+            changed_by: Some(scoped_memory_owner_key(path.scope())),
+            ..MemoryWriteOptions::default()
+        };
+        self.write_document_with_options(path, bytes, &options)
             .await
     }
 
@@ -277,6 +287,162 @@ impl MemoryDocumentRepository for RebornPostgresMemoryDocumentRepository {
             )
         })?;
         Ok(())
+    }
+
+    async fn compare_and_append_document_with_options(
+        &self,
+        path: &MemoryDocumentPath,
+        expected_previous_hash: Option<&str>,
+        bytes: &[u8],
+        options: &MemoryWriteOptions,
+    ) -> Result<MemoryAppendOutcome, FilesystemError> {
+        let virtual_path = path.virtual_path().unwrap_or_else(|_| valid_memory_path());
+        let append_content = std::str::from_utf8(bytes).map_err(|_| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::AppendFile,
+                "memory document content must be UTF-8",
+            )
+        })?;
+        let mut client = self
+            .client(virtual_path.clone(), FilesystemOperation::AppendFile)
+            .await?;
+        let scope = path.scope();
+        let agent_id_db = reborn_agent_id_db_value(scope);
+        let project_id_db = reborn_project_id_db_value(scope);
+        let txn = client.transaction().await.map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::AppendFile,
+                error.to_string(),
+            )
+        })?;
+        // SHARE ROW EXCLUSIVE keeps concurrent appends serialized; FOR UPDATE
+        // on the SELECT pins the specific row across the transaction.
+        txn.batch_execute("LOCK TABLE reborn_memory_documents IN SHARE ROW EXCLUSIVE MODE")
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::AppendFile,
+                    error.to_string(),
+                )
+            })?;
+        let existing = txn
+            .query_opt(
+                "SELECT id, content FROM reborn_memory_documents \
+                 WHERE tenant_id = $1 AND user_id = $2 AND agent_id = $3 \
+                   AND project_id = $4 AND path = $5 \
+                 FOR UPDATE",
+                &[
+                    &scope.tenant_id(),
+                    &scope.user_id(),
+                    &agent_id_db,
+                    &project_id_db,
+                    &path.relative_path(),
+                ],
+            )
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::AppendFile,
+                    error.to_string(),
+                )
+            })?;
+        let current_hash = existing.as_ref().map(|row| {
+            let previous_content: String = row.get("content");
+            content_sha256(&previous_content)
+        });
+        if current_hash.as_deref() != expected_previous_hash {
+            txn.commit().await.map_err(|error| {
+                memory_error(
+                    virtual_path,
+                    FilesystemOperation::AppendFile,
+                    error.to_string(),
+                )
+            })?;
+            return Ok(MemoryAppendOutcome::Conflict);
+        }
+
+        if let Some(row) = existing {
+            let document_id: uuid::Uuid = row.get("id");
+            let previous_content: String = row.get("content");
+            let combined = format!("{previous_content}{append_content}");
+            let new_content_hash = content_sha256(&combined);
+            let should_version = options.metadata.skip_versioning != Some(true)
+                && previous_content != combined
+                && !previous_content.is_empty();
+            if should_version {
+                reborn_postgres_save_document_version(
+                    &txn,
+                    &virtual_path,
+                    document_id,
+                    &previous_content,
+                    options.changed_by.as_deref(),
+                )
+                .await?;
+            }
+            txn.execute(
+                "UPDATE reborn_memory_documents \
+                 SET content = $2, content_hash = $3, updated_at = NOW() \
+                 WHERE id = $1",
+                &[&document_id, &combined, &new_content_hash],
+            )
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::AppendFile,
+                    error.to_string(),
+                )
+            })?;
+        } else {
+            let documents = reborn_postgres_list_paths_for_scope(
+                &txn,
+                scope,
+                &virtual_path,
+                FilesystemOperation::AppendFile,
+            )
+            .await?;
+            ensure_document_path_does_not_conflict(
+                path,
+                &documents,
+                FilesystemOperation::AppendFile,
+            )?;
+            let new_content_hash = content_sha256(append_content);
+            txn.execute(
+                "INSERT INTO reborn_memory_documents \
+                     (tenant_id, user_id, agent_id, project_id, path, \
+                      content, content_hash, metadata) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, '{}'::jsonb)",
+                &[
+                    &scope.tenant_id(),
+                    &scope.user_id(),
+                    &agent_id_db,
+                    &project_id_db,
+                    &path.relative_path(),
+                    &append_content,
+                    &new_content_hash,
+                ],
+            )
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::AppendFile,
+                    error.to_string(),
+                )
+            })?;
+        }
+        txn.commit().await.map_err(|error| {
+            memory_error(
+                virtual_path,
+                FilesystemOperation::AppendFile,
+                error.to_string(),
+            )
+        })?;
+        Ok(MemoryAppendOutcome::Appended)
     }
 
     async fn read_document_metadata(
@@ -775,17 +941,21 @@ CREATE TABLE IF NOT EXISTS reborn_memory_chunks (
     content TEXT NOT NULL,
     content_hash TEXT NOT NULL,
     content_tsv TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
-    embedding VECTOR(1536),
+    -- Unbounded `vector` so any provider dimension is accepted (Ollama
+    -- 768/1024-dim, OpenAI 1536/3072-dim, etc.). pgvector's HNSW index
+    -- requires a fixed dimension, so we omit it here and rely on exact
+    -- (sequential) cosine distance at search time. This matches the
+    -- legacy migration `migrations/V9__flexible_embedding_dimension.sql`
+    -- decision: for a personal-assistant-scale dataset the linear scan
+    -- has negligible impact, and provider flexibility is the higher-value
+    -- contract.
+    embedding vector,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT reborn_memory_chunks_unique_chunk_per_doc UNIQUE (document_id, chunk_index)
 );
 
 CREATE INDEX IF NOT EXISTS idx_reborn_memory_chunks_tsv
     ON reborn_memory_chunks USING GIN(content_tsv);
-CREATE INDEX IF NOT EXISTS idx_reborn_memory_chunks_embedding
-    ON reborn_memory_chunks
-    USING hnsw(embedding vector_cosine_ops)
-    WITH (m = 16, ef_construction = 64);
 CREATE INDEX IF NOT EXISTS idx_reborn_memory_chunks_document
     ON reborn_memory_chunks(document_id);
 

@@ -193,6 +193,53 @@ async fn libsql_lists_direct_children_through_composite_mount() {
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
+async fn libsql_append_file_through_composite_mount_extends_existing_document() {
+    // Reviewer required exercising `append_file` through the composite
+    // mount caller (not the helper in isolation) because the optimistic
+    // append contract on the native repository is the load-bearing
+    // implementation behind every filesystem-side append. Without this
+    // test, a regression that drops the `compare_and_append_*` override
+    // and silently falls back to the trait default would still pass
+    // unit tests on the helper alone.
+    let (composite, repo, _backend, _dir) = libsql_compose().await;
+    let path = vpath("/tenants/tenant-a/users/alice/agents/_none/projects/_none/notes/journal.md");
+
+    composite.write_file(&path, b"line one").await.unwrap();
+    composite.append_file(&path, b"\nline two").await.unwrap();
+    composite.append_file(&path, b"\nline three").await.unwrap();
+
+    let stored = composite.read_file(&path).await.unwrap();
+    assert_eq!(stored, b"line one\nline two\nline three");
+
+    // Confirm persistence reaches the native row, not just the
+    // adapter cache: a regression where appends silently no-op would
+    // be caught by re-reading through the repository directly.
+    let document_path =
+        MemoryDocumentPath::new("tenant-a", "alice", None, "notes/journal.md").unwrap();
+    assert_eq!(
+        repo.read_document(&document_path).await.unwrap().as_deref(),
+        Some(b"line one\nline two\nline three".as_slice())
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_append_file_through_composite_mount_creates_new_document() {
+    // Append-when-absent must create the row through the native
+    // repository's path-conflict-checked insert branch. Drive it
+    // through the composite mount to lock in the create-on-append
+    // path's compatibility with the filesystem adapter.
+    let (composite, _repo, _backend, _dir) = libsql_compose().await;
+    let path = vpath("/tenants/tenant-a/users/alice/agents/_none/projects/_none/fresh/start.md");
+
+    composite.append_file(&path, b"first append").await.unwrap();
+
+    let stored = composite.read_file(&path).await.unwrap();
+    assert_eq!(stored, b"first append");
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
 async fn libsql_search_through_composite_mount_returns_only_same_scope_results() {
     let (composite, _repo, backend, _dir) = libsql_compose().await;
 
@@ -438,6 +485,50 @@ async fn postgres_round_trips_authorized_read_write_through_composite_mount() {
         .expect("write must succeed");
     let stored = composite.read_file(&path).await.expect("read");
     assert_eq!(stored, b"first welcome note");
+    pg_cleanup_tenant(&pg_pool(), tenant).await;
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_append_file_through_composite_mount_extends_existing_document() {
+    let tenant = "reborn-pg-vert-append";
+    let Some((composite, repo, _backend)) = pg_compose(tenant).await else {
+        return;
+    };
+    let path = vpath(&format!(
+        "/tenants/{tenant}/users/alice/agents/_none/projects/_none/notes/journal.md"
+    ));
+
+    composite.write_file(&path, b"line one").await.unwrap();
+    composite.append_file(&path, b"\nline two").await.unwrap();
+    composite.append_file(&path, b"\nline three").await.unwrap();
+
+    let stored = composite.read_file(&path).await.unwrap();
+    assert_eq!(stored, b"line one\nline two\nline three");
+
+    let document_path = MemoryDocumentPath::new(tenant, "alice", None, "notes/journal.md").unwrap();
+    assert_eq!(
+        repo.read_document(&document_path).await.unwrap().as_deref(),
+        Some(b"line one\nline two\nline three".as_slice())
+    );
+    pg_cleanup_tenant(&pg_pool(), tenant).await;
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_append_file_through_composite_mount_creates_new_document() {
+    let tenant = "reborn-pg-vert-append-create";
+    let Some((composite, _repo, _backend)) = pg_compose(tenant).await else {
+        return;
+    };
+    let path = vpath(&format!(
+        "/tenants/{tenant}/users/alice/agents/_none/projects/_none/fresh/start.md"
+    ));
+
+    composite.append_file(&path, b"first append").await.unwrap();
+
+    let stored = composite.read_file(&path).await.unwrap();
+    assert_eq!(stored, b"first append");
     pg_cleanup_tenant(&pg_pool(), tenant).await;
 }
 
