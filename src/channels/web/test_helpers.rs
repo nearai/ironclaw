@@ -26,6 +26,7 @@ use crate::channels::web::platform::router::start_server;
 use crate::channels::web::platform::state::{GatewayState, PerUserRateLimiter, RateLimiter};
 use crate::channels::web::sse::SseManager;
 use crate::channels::web::ws::WsConnectionTracker;
+use crate::extensions::ExtensionManager;
 
 #[cfg(test)]
 use crate::channels::web::auth::DbAuthenticator;
@@ -33,8 +34,6 @@ use crate::channels::web::auth::DbAuthenticator;
 use crate::channels::web::platform::state::ActiveConfigSnapshot;
 #[cfg(test)]
 use crate::db::Database;
-#[cfg(test)]
-use crate::extensions::ExtensionManager;
 #[cfg(test)]
 use crate::tools::ToolRegistry;
 
@@ -46,6 +45,7 @@ use crate::tools::ToolRegistry;
 pub struct TestGatewayBuilder {
     msg_tx: Option<mpsc::Sender<IncomingMessage>>,
     llm_provider: Option<Arc<dyn crate::llm::LlmProvider>>,
+    extension_manager: Option<Arc<ExtensionManager>>,
     user_id: String,
 }
 
@@ -54,6 +54,7 @@ impl Default for TestGatewayBuilder {
         Self {
             msg_tx: None,
             llm_provider: None,
+            extension_manager: None,
             user_id: "test-user".to_string(),
         }
     }
@@ -84,6 +85,13 @@ impl TestGatewayBuilder {
         self
     }
 
+    /// Wire an `ExtensionManager` into the gateway state. Needed by tests
+    /// that exercise `/api/extensions/*` or `/api/prompts` end-to-end.
+    pub fn extension_manager(mut self, ext_mgr: Arc<ExtensionManager>) -> Self {
+        self.extension_manager = Some(ext_mgr);
+        self
+    }
+
     /// Build the `Arc<GatewayState>` without starting a server.
     pub fn build(self) -> Arc<GatewayState> {
         Arc::new(GatewayState {
@@ -95,7 +103,7 @@ impl TestGatewayBuilder {
             session_manager: None,
             log_broadcaster: None,
             log_level_handle: None,
-            extension_manager: None,
+            extension_manager: self.extension_manager,
             tool_registry: None,
             store: None,
             settings_cache: None,

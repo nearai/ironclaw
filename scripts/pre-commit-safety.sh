@@ -334,12 +334,13 @@ fi
 #    same audit trail and safety pipeline as agent-initiated tool calls.
 #    See `.claude/rules/tools.md` "Everything Goes Through Tools".
 #
-#    The check looks at .rs files under src/channels/web/handlers/ and
-#    src/cli/ for newly-added lines that touch direct manager fields on the
-#    gateway state. Suppress with "// dispatch-exempt: <reason>".
-DISPATCH_DIFF=$(git diff --cached -U0 -- 'src/channels/web/handlers/*.rs' 'src/cli/*.rs' 2>/dev/null || true)
+#    The check looks at .rs files under src/channels/web/handlers/,
+#    src/channels/web/features/, and src/cli/ for newly-added lines that
+#    touch direct manager fields on the gateway state. Suppress with
+#    "// dispatch-exempt: <reason>".
+DISPATCH_DIFF=$(git diff --cached -U0 -- 'src/channels/web/handlers/*.rs' 'src/channels/web/features/**/*.rs' 'src/cli/*.rs' 2>/dev/null || true)
 if [ -z "$DISPATCH_DIFF" ]; then
-    DISPATCH_DIFF=$(git diff "$(resolve_base_ref)" -U0 -- 'src/channels/web/handlers/*.rs' 'src/cli/*.rs' 2>/dev/null || true)
+    DISPATCH_DIFF=$(git diff "$(resolve_base_ref)" -U0 -- 'src/channels/web/handlers/*.rs' 'src/channels/web/features/**/*.rs' 'src/cli/*.rs' 2>/dev/null || true)
 fi
 if [ -n "$DISPATCH_DIFF" ]; then
     DISPATCH_HITS=$(echo "$DISPATCH_DIFF" | grep -nE '^\+' \

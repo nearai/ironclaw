@@ -25,6 +25,7 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | `features/logs/` | `GET /api/logs/events` + `GET/PUT /api/logs/level` — runtime log stream and log-level knob. Migrated from `server.rs` in ironclaw#2599 stage 4b. |
 | `features/oauth/` | First feature slice landed per ironclaw#2599 stage 4a: OAuth callback (`/oauth/callback`), channel-relay event webhook (`/relay/events`), and the Slack-specific relay OAuth completion flow (`/oauth/slack/callback`). Owns its private helpers (`oauth_error_page`, `redact_oauth_state_for_logs`). |
 | `features/pairing/` | `GET /api/pairing/{channel}` + `POST /api/pairing/{channel}/approve` — WASM channel pairing approvals. Validates the URL path through `ExtensionName::new` at the handler boundary so invalid channel names reject with 400 instead of silently routing to a lookup-miss. Migrated from `server.rs` in ironclaw#2599 stage 4b. |
+| `features/prompts/` | `GET /api/prompts` + `POST /api/prompts/get` — MCP prompts discovery/fetch. Delegates multi-tenancy scoping to `ExtensionManager::{list,get}_prompt_for_user`, shared with the `/prompts` slash command and the dispatcher's `/server:prompt-name` mention expander. |
 | `features/status/` | `GET /api/gateway/status` — runtime snapshot for the admin dashboard (uptime, SSE/WS counts, cost / usage aggregates, active config). Owns the `GatewayStatusResponse` DTO. Migrated from `server.rs` in ironclaw#2599 stage 4b. |
 | `handlers/` | Transitional feature handlers that haven't migrated to `features/<slice>/` yet: `auth`, `engine`, `frontend`, `llm`, `memory`, `secrets`, `skills`, `system_prompt`, `tokens`, `tool_policy`, `users`, `webhooks`. Targeted for migration per ironclaw#2599 if churn / slice-boundary pressure justifies it. |
 | `openai_compat.rs` | OpenAI-compatible proxy (`/v1/chat/completions`, `/v1/models`) |
@@ -112,6 +113,12 @@ subset that can later be replaced by a typed `Deps` alias.
 | POST | `/api/skills/search` | Search ClawHub registry + local skills |
 | POST | `/api/skills/install` | Install a skill from ClawHub or by URL/content |
 | DELETE | `/api/skills/{name}` | Remove an installed skill |
+
+### Prompts
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/prompts` | List MCP prompts across the caller's active servers |
+| POST | `/api/prompts/get` | Fetch a specific MCP prompt's rendered messages |
 
 ### Extensions
 | Method | Path | Description |
@@ -300,6 +307,7 @@ The SSE contract — every field is `#[serde(tag = "type")]`:
 | `approval_needed` | Legacy approval event |
 | `onboarding_state` | Unified extension/channel onboarding state update (`setup_required`, `auth_required`, `pairing_required`, `ready`, `failed`) |
 | `extension_status` | WASM channel activation status changed |
+| `mcp_prompts_expanded` | `/server:prompt-name` mentions were expanded in-place in a user message |
 | `error` | Error from agent or gateway |
 | `heartbeat` | SSE keepalive (empty payload) |
 

@@ -18,7 +18,8 @@ use crate::tools::mcp::auth::refresh_access_token;
 use crate::tools::mcp::config::McpServerConfig;
 use crate::tools::mcp::http_transport::HttpMcpTransport;
 use crate::tools::mcp::protocol::{
-    CallToolResult, InitializeResult, ListToolsResult, McpRequest, McpResponse, McpTool,
+    CallToolResult, GetPromptResult, InitializeResult, ListPromptsResult, ListToolsResult,
+    McpPrompt, McpRequest, McpResponse, McpTool,
 };
 use crate::tools::mcp::session::McpSessionManager;
 use crate::tools::mcp::transport::McpTransport;
@@ -72,6 +73,9 @@ pub struct McpClient {
 
     /// Cached tools.
     tools_cache: RwLock<Option<Vec<McpTool>>>,
+
+    /// Cached prompts. Populated lazily on the first `list_prompts()` call.
+    prompts_cache: RwLock<Option<Vec<McpPrompt>>>,
 
     /// Session manager (shared across clients).
     session_manager: Option<Arc<McpSessionManager>>,
@@ -136,6 +140,7 @@ impl McpClient {
             server_name: name,
             next_id: AtomicU64::new(1),
             tools_cache: RwLock::new(None),
+            prompts_cache: RwLock::new(None),
             session_manager: None,
             secrets: None,
             // TODO(ownership): unauthenticated constructor; user_id set properly via
@@ -178,6 +183,7 @@ impl McpClient {
             server_name: name,
             next_id: AtomicU64::new(1),
             tools_cache: RwLock::new(None),
+            prompts_cache: RwLock::new(None),
             session_manager: None,
             secrets: None,
             // TODO(ownership): unauthenticated constructor; user_id set properly via
@@ -240,6 +246,7 @@ impl McpClient {
             server_name: validated_name,
             next_id: AtomicU64::new(1),
             tools_cache: RwLock::new(None),
+            prompts_cache: RwLock::new(None),
             session_manager: None,
             secrets: None,
             // TODO(ownership): unauthenticated constructor; user_id set properly via
@@ -294,6 +301,7 @@ impl McpClient {
             server_name: validated_name,
             next_id: AtomicU64::new(1),
             tools_cache: RwLock::new(None),
+            prompts_cache: RwLock::new(None),
             session_manager: Some(session_manager),
             secrets: Some(secrets),
             user_id: user_id_str,
@@ -351,6 +359,7 @@ impl McpClient {
             server_name: name,
             next_id: AtomicU64::new(1),
             tools_cache: RwLock::new(None),
+            prompts_cache: RwLock::new(None),
             session_manager,
             secrets,
             user_id: user_id.into(),
@@ -731,6 +740,164 @@ impl McpClient {
         *self.tools_cache.write().await = None;
     }
 
+    /// Clear the prompts cache. Called on re-activation and on cache
+    /// invalidation events (e.g. `notifications/prompts/list_changed`
+    /// when that's implemented).
+    pub async fn clear_prompts_cache(&self) {
+        *self.prompts_cache.write().await = None;
+    }
+
+    /// Server-supplied instructions from the initialize handshake.
+    ///
+    /// Returns `None` if the server has not been initialized yet or did not
+    /// include an `instructions` field in its `InitializeResult`. Consumers
+    /// must treat this as untrusted external text: it is shown informationally
+    /// in the `/prompts` listing but NOT injected into the system prompt
+    /// without a trust model (see `.claude/rules/safety-and-sandbox.md`).
+    pub fn instructions(&self) -> Option<&str> {
+        self.initialized
+            .get()
+            .and_then(|r| r.instructions.as_deref())
+    }
+
+    /// List prompts advertised by the MCP server.
+    ///
+    /// Gated on `ServerCapabilities.prompts`: if the server didn't advertise
+    /// the capability on initialize, returns an empty list without sending a
+    /// request. Results are cached per-client (which is per-`(user_id,
+    /// server_name)` in `McpClientStore`), so repeated calls within a session
+    /// hit the cache.
+    pub async fn list_prompts(&self) -> Result<Vec<McpPrompt>, ToolError> {
+        if let Some(prompts) = self.prompts_cache.read().await.as_ref() {
+            return Ok(prompts.clone());
+        }
+
+        let init = self.initialize().await?;
+        if init.capabilities.prompts.is_none() {
+            // Server doesn't support prompts. Do NOT cache the empty
+            // result: if the server later advertises `prompts` across a
+            // re-handshake (same `Arc<McpClient>`, cleared
+            // `initialized` OnceCell, or a future
+            // `notifications/prompts/list_changed` hook), a persisted
+            // empty cache would mask the upgrade until the client was
+            // rebuilt. `initialize()` itself is OnceCell-memoized, so
+            // skipping the cache costs only the branch check — no wire
+            // traffic.
+            return Ok(Vec::new());
+        }
+
+        let request = McpRequest::list_prompts(self.next_request_id());
+        let response = self.send_request(request).await?;
+
+        if let Some(error) = response.error {
+            return Err(ToolError::ExternalService(format!(
+                "MCP error: {} (code {})",
+                error.message, error.code
+            )));
+        }
+
+        let result: ListPromptsResult = response
+            .result
+            .ok_or_else(|| ToolError::ExternalService("No result in MCP response".to_string()))
+            .and_then(|r| {
+                serde_json::from_value(r)
+                    .map_err(|e| ToolError::ExternalService(format!("Invalid prompts list: {}", e)))
+            })?;
+
+        *self.prompts_cache.write().await = Some(result.prompts.clone());
+        Ok(result.prompts)
+    }
+
+    /// Return any required arguments declared by `prompt_name` that
+    /// aren't present in `arguments`.
+    ///
+    /// This is the typed half of the client-side arg check:
+    /// [`McpClient::get_prompt`] also runs it as a pre-flight (so a
+    /// direct caller still short-circuits before any wire traffic), but
+    /// higher layers like
+    /// [`crate::extensions::ExtensionManager::get_prompt_for_user`]
+    /// should call this *first* so they can surface a typed
+    /// `MissingRequiredArgs` variant to the HTTP boundary instead of
+    /// string-matching a `ToolError::ExecutionFailed` message.
+    ///
+    /// Returns `Ok(empty)` if the prompt is not advertised or declares
+    /// no required args — both cases let the caller proceed, and any
+    /// downstream failure (unknown prompt name, server-side validation)
+    /// surfaces through `get_prompt` itself. Callers that need to
+    /// distinguish "prompt not found" from "all required args supplied"
+    /// should call [`McpClient::list_prompts`] explicitly and match the
+    /// name before invoking this helper — the manager layer
+    /// (`get_prompt_for_user`) does exactly that so it can emit a
+    /// typed `PromptNotFound` variant.
+    pub async fn missing_required_args(
+        &self,
+        prompt_name: &str,
+        arguments: &serde_json::Value,
+    ) -> Result<Vec<String>, ToolError> {
+        let prompts = self.list_prompts().await?;
+        let Some(prompt) = prompts.iter().find(|p| p.name == prompt_name) else {
+            return Ok(Vec::new());
+        };
+        let Some(args_def) = &prompt.arguments else {
+            return Ok(Vec::new());
+        };
+        let supplied = arguments.as_object();
+        Ok(args_def
+            .iter()
+            .filter(|a| a.required)
+            .filter(|a| supplied.is_none_or(|o| !o.contains_key(&a.name)))
+            .map(|a| a.name.clone())
+            .collect())
+    }
+
+    /// Fetch a specific prompt's rendered messages.
+    ///
+    /// Validates required arguments client-side against the cached prompt
+    /// list before sending the request — missing required args produce a
+    /// descriptive `ToolError::ExecutionFailed` with zero wire traffic.
+    ///
+    /// Note: the first call after activation or `clear_prompts_cache`
+    /// pays an extra `prompts/list` round-trip to populate the cache
+    /// the validation reads from.
+    pub async fn get_prompt(
+        &self,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<GetPromptResult, ToolError> {
+        // Pre-flight: required-arg check against the advertised schema.
+        // Kept as a defence-in-depth fallback for callers that bypass the
+        // typed `missing_required_args` helper (e.g. direct client users
+        // inside tests). The canonical path — `ExtensionManager` — checks
+        // first and emits a typed error before reaching here.
+        let missing = self.missing_required_args(name, &arguments).await?;
+        if !missing.is_empty() {
+            return Err(ToolError::ExecutionFailed(format!(
+                "MCP prompt '{}' missing required arguments: {}",
+                name,
+                missing.join(", ")
+            )));
+        }
+
+        let request = McpRequest::get_prompt(self.next_request_id(), name, arguments);
+        let response = self.send_request(request).await?;
+
+        if let Some(error) = response.error {
+            return Err(ToolError::ExecutionFailed(format!(
+                "MCP prompt error: {} (code {})",
+                error.message, error.code
+            )));
+        }
+
+        response
+            .result
+            .ok_or_else(|| ToolError::ExternalService("No result in MCP response".to_string()))
+            .and_then(|r| {
+                serde_json::from_value(r).map_err(|e| {
+                    ToolError::ExternalService(format!("Invalid prompt result: {}", e))
+                })
+            })
+    }
+
     /// Create Tool implementations for all MCP tools that resolve the
     /// per-user `McpClient` through `store` at dispatch time.
     ///
@@ -824,6 +991,7 @@ impl Clone for McpClient {
             server_name: self.server_name.clone(),
             next_id: AtomicU64::new(self.next_id.load(Ordering::SeqCst)),
             tools_cache: RwLock::new(None),
+            prompts_cache: RwLock::new(None),
             session_manager: self.session_manager.clone(),
             secrets: self.secrets.clone(),
             user_id: self.user_id.clone(),
@@ -2174,6 +2342,340 @@ mod tests {
             headers.get("Authorization").unwrap(), // safety: test
             "Bearer gho_abc123",
             "Token must be trimmed before use in Authorization header"
+        );
+    }
+
+    // ── MCP prompts ──────────────────────────────────────────────────────
+
+    fn init_response_with_capabilities(id: u64, capabilities: serde_json::Value) -> McpResponse {
+        McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(id),
+            result: Some(serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": capabilities,
+                "serverInfo": {"name": "test", "version": "1.0"}
+            })),
+            error: None,
+        }
+    }
+
+    fn notification_ack() -> McpResponse {
+        McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: None,
+            result: None,
+            error: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn list_prompts_respects_capability_gate() {
+        // Server advertises no `prompts` capability → list_prompts must
+        // return Ok(vec![]) without sending a prompts/list request. The
+        // only outbound traffic should be the initialize handshake.
+        let transport = Arc::new(MockTransport::new(
+            false,
+            vec![
+                init_response_with_capabilities(1, serde_json::json!({})),
+                notification_ack(),
+            ],
+        ));
+        let client = McpClient::new_with_transport(
+            "test-nocaps",
+            transport.clone(),
+            None,
+            None,
+            "default",
+            None,
+        );
+
+        let prompts = client.list_prompts().await.expect("list_prompts ok");
+        assert!(prompts.is_empty());
+
+        // 2 sends: initialize + notifications/initialized. No prompts/list.
+        assert_eq!(transport.recorded_headers().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn list_prompts_caches_result() {
+        // Two consecutive calls to list_prompts → exactly one prompts/list
+        // request on the wire (the cache absorbs the second call).
+        let list_response = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(2),
+            result: Some(serde_json::json!({
+                "prompts": [
+                    { "name": "greet", "description": "Say hi" }
+                ]
+            })),
+            error: None,
+        };
+        let transport = Arc::new(MockTransport::new(
+            false,
+            vec![
+                init_response_with_capabilities(
+                    1,
+                    serde_json::json!({ "prompts": { "listChanged": false } }),
+                ),
+                notification_ack(),
+                list_response,
+            ],
+        ));
+        let client = McpClient::new_with_transport(
+            "test-cache",
+            transport.clone(),
+            None,
+            None,
+            "default",
+            None,
+        );
+
+        let first = client.list_prompts().await.expect("first ok");
+        let second = client.list_prompts().await.expect("second ok");
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_eq!(first[0].name, "greet");
+
+        // 3 sends: initialize + notifications/initialized + ONE prompts/list.
+        assert_eq!(transport.recorded_headers().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn get_prompt_client_side_validates_required_args() {
+        // Server declares a required `parent_id` argument. A get_prompt call
+        // that omits it must fail fast WITHOUT sending a prompts/get request
+        // — same shape nearai/ironclaw#1948 demonstrated on a separate MCP
+        // helper.
+        let list_response = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(2),
+            result: Some(serde_json::json!({
+                "prompts": [
+                    {
+                        "name": "create-page",
+                        "arguments": [
+                            { "name": "parent_id", "required": true },
+                            { "name": "title", "required": true },
+                            { "name": "body" }
+                        ]
+                    }
+                ]
+            })),
+            error: None,
+        };
+        let transport = Arc::new(MockTransport::new(
+            false,
+            vec![
+                init_response_with_capabilities(
+                    1,
+                    serde_json::json!({ "prompts": { "listChanged": false } }),
+                ),
+                notification_ack(),
+                list_response,
+            ],
+        ));
+        let client = McpClient::new_with_transport(
+            "test-argcheck",
+            transport.clone(),
+            None,
+            None,
+            "default",
+            None,
+        );
+
+        let err = client
+            .get_prompt("create-page", serde_json::json!({ "body": "hi" }))
+            .await
+            .expect_err("must reject missing required args");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("parent_id") && msg.contains("title"),
+            "error must name both missing required args, got: {msg}"
+        );
+
+        // 3 sends: initialize + notifications/initialized + prompts/list
+        // (from the client-side validation pre-flight). No prompts/get.
+        assert_eq!(transport.recorded_headers().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn get_prompt_forwards_arguments_to_server() {
+        // Required args are all supplied → prompts/get is sent and its
+        // `params.arguments` carries every key the caller passed.
+        let list_response = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(2),
+            result: Some(serde_json::json!({
+                "prompts": [
+                    {
+                        "name": "create-page",
+                        "arguments": [
+                            { "name": "parent_id", "required": true },
+                            { "name": "title", "required": true }
+                        ]
+                    }
+                ]
+            })),
+            error: None,
+        };
+        let get_response = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(3),
+            result: Some(serde_json::json!({
+                "description": "Create-page prompt",
+                "messages": [
+                    { "role": "user", "content": { "type": "text", "text": "ok" } }
+                ]
+            })),
+            error: None,
+        };
+
+        // Capture outbound requests via a recording transport.
+        struct RecordingMock {
+            responses: std::sync::Mutex<Vec<McpResponse>>,
+            requests: std::sync::Mutex<Vec<McpRequest>>,
+        }
+        #[async_trait]
+        impl McpTransport for RecordingMock {
+            async fn send(
+                &self,
+                request: &McpRequest,
+                _headers: &HashMap<String, String>,
+            ) -> Result<McpResponse, ToolError> {
+                self.requests.lock().unwrap().push(request.clone());
+                let mut responses = self.responses.lock().unwrap();
+                if responses.is_empty() {
+                    return Err(ToolError::ExternalService(
+                        "No more mock responses".to_string(),
+                    ));
+                }
+                Ok(responses.remove(0))
+            }
+            async fn shutdown(&self) -> Result<(), ToolError> {
+                Ok(())
+            }
+            fn supports_http_features(&self) -> bool {
+                false
+            }
+        }
+
+        let transport = Arc::new(RecordingMock {
+            responses: std::sync::Mutex::new(vec![
+                init_response_with_capabilities(
+                    1,
+                    serde_json::json!({ "prompts": { "listChanged": false } }),
+                ),
+                notification_ack(),
+                list_response,
+                get_response,
+            ]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let client = McpClient::new_with_transport(
+            "test-forward",
+            transport.clone(),
+            None,
+            None,
+            "default",
+            None,
+        );
+
+        let result = client
+            .get_prompt(
+                "create-page",
+                serde_json::json!({ "parent_id": "abc", "title": "Q2 Review" }),
+            )
+            .await
+            .expect("get_prompt ok");
+        assert_eq!(result.messages.len(), 1);
+
+        let recorded = transport.requests.lock().unwrap().clone();
+        // Find the prompts/get request specifically — index depends on how
+        // many initialize / notification sends happened.
+        let get_req = recorded
+            .iter()
+            .find(|r| r.method == "prompts/get")
+            .expect("prompts/get request was sent");
+        let params = get_req.params.as_ref().expect("params present");
+        assert_eq!(params["name"], serde_json::json!("create-page"));
+        assert_eq!(params["arguments"]["parent_id"], serde_json::json!("abc"));
+        assert_eq!(params["arguments"]["title"], serde_json::json!("Q2 Review"));
+    }
+
+    #[tokio::test]
+    async fn clear_prompts_cache_forces_refetch() {
+        // After clear_prompts_cache(), a subsequent list_prompts() must hit
+        // the wire again. Protects against a stale cache lingering across
+        // server re-activation.
+        let list_response_1 = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(2),
+            result: Some(serde_json::json!({ "prompts": [{ "name": "v1" }] })),
+            error: None,
+        };
+        let list_response_2 = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(3),
+            result: Some(serde_json::json!({ "prompts": [{ "name": "v2" }] })),
+            error: None,
+        };
+        let transport = Arc::new(MockTransport::new(
+            false,
+            vec![
+                init_response_with_capabilities(
+                    1,
+                    serde_json::json!({ "prompts": { "listChanged": false } }),
+                ),
+                notification_ack(),
+                list_response_1,
+                list_response_2,
+            ],
+        ));
+        let client = McpClient::new_with_transport(
+            "test-clear",
+            transport.clone(),
+            None,
+            None,
+            "default",
+            None,
+        );
+
+        let first = client.list_prompts().await.expect("first ok");
+        assert_eq!(first[0].name, "v1");
+        client.clear_prompts_cache().await;
+        let second = client.list_prompts().await.expect("second ok");
+        assert_eq!(second[0].name, "v2");
+
+        // init + notif + 2× prompts/list
+        assert_eq!(transport.recorded_headers().len(), 4);
+    }
+
+    /// Regression: the no-capability branch must not persist an empty
+    /// cache — otherwise a post-handshake capability upgrade is shadowed.
+    #[tokio::test]
+    async fn list_prompts_does_not_persist_empty_cache_when_no_capability() {
+        let transport = Arc::new(MockTransport::new(
+            false,
+            vec![
+                init_response_with_capabilities(1, serde_json::json!({})),
+                notification_ack(),
+            ],
+        ));
+        let client = McpClient::new_with_transport(
+            "test-no-cap-cache",
+            transport.clone(),
+            None,
+            None,
+            "default",
+            None,
+        );
+
+        let prompts = client.list_prompts().await.expect("list_prompts ok");
+        assert!(prompts.is_empty());
+        assert!(
+            client.prompts_cache.read().await.is_none(),
+            "no-capability branch must NOT persist an empty cache"
         );
     }
 }

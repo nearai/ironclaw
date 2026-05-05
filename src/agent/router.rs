@@ -60,15 +60,37 @@ impl Router {
 
     /// Route an explicit command to determine its intent.
     ///
-    /// Returns `None` if the message is not a command.
-    /// For non-commands, use `IntentClassifier::classify()` instead.
+    /// Known job intents (`/job`, `/status`, `/cancel`, `/list`,
+    /// `/help <id>`) return `Some(intent)`. Mention-shaped inputs
+    /// (`/skill-name`, `/server:prompt-name`) return `None` so the
+    /// dispatcher's mention extractors handle them. Everything else
+    /// (`/foo!`, `/foo/bar`, plain typos) returns `Some(Command {...})`
+    /// so the `Unknown command` handler fires instead of paying for an
+    /// LLM turn.
+    ///
+    /// Inbound safety scan runs before this function is called (see
+    /// `thread_ops::process_user_input`), so the fall-through path
+    /// isn't an unscanned ingress.
     pub fn route_command(&self, message: &IncomingMessage) -> Option<MessageIntent> {
         let content = message.content.trim();
 
-        if content.starts_with(&self.command_prefix) {
-            Some(self.parse_command(content))
-        } else {
-            None
+        if !content.starts_with(&self.command_prefix) {
+            return None;
+        }
+        match self.parse_command(content) {
+            MessageIntent::Unknown => {
+                if first_token_is_mention_shape(content) {
+                    return None;
+                }
+                let rest = content
+                    .strip_prefix(&self.command_prefix)
+                    .unwrap_or(content);
+                let mut parts = rest.split_whitespace();
+                let command = parts.next().unwrap_or("").to_string();
+                let args: Vec<String> = parts.map(|s| s.to_string()).collect();
+                Some(MessageIntent::Command { command, args })
+            }
+            intent => Some(intent),
         }
     }
 
@@ -116,10 +138,13 @@ impl Router {
                     }
                 }
             }
-            Some(cmd) => MessageIntent::Command {
-                command: cmd.to_string(),
-                args: parts[1..].iter().map(|s| s.to_string()).collect(),
-            },
+            // Unknown `/xxx` is not a Router concern. The dispatcher's
+            // `extract_skill_mentions` handles `/skill-name` and
+            // `resolve_prompt_mentions` handles `/server:prompt`; plain
+            // typos are better answered by the LLM than by a canned
+            // "Unknown command" error. Return `Unknown` so
+            // `route_command` can lift it to `None`.
+            Some(_) => MessageIntent::Unknown,
             None => MessageIntent::Unknown,
         }
     }
@@ -129,6 +154,30 @@ impl Default for Router {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Return true when `content` starts with a `/<identifier>` (optionally
+/// followed by `:<identifier>`) token — the shape the dispatcher's skill
+/// and prompt mention extractors expect.
+///
+/// Reuses the prompt extractor's byte class so the router can't drift
+/// from what the extractor actually accepts (per `.claude/rules/types.md`
+/// "same-shape predicates drifting" bug class).
+fn first_token_is_mention_shape(content: &str) -> bool {
+    let Some(rest) = content.trim_start().strip_prefix('/') else {
+        return false;
+    };
+    let first = rest.split_whitespace().next().unwrap_or("");
+    let mut halves = first.splitn(2, ':');
+    let head = halves.next().unwrap_or("");
+    let tail = halves.next();
+    is_ident(head) && tail.is_none_or(is_ident)
+}
+
+fn is_ident(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(crate::tools::mcp::prompt_mentions::is_prompt_ident_byte)
 }
 
 #[cfg(test)]
@@ -196,5 +245,67 @@ mod tests {
             }
             _ => panic!("Expected ListJobs intent"),
         }
+    }
+
+    /// Mention-shaped slash prefixes must fall through so the
+    /// dispatcher's skill / prompt extractors get a chance:
+    /// - `/skill-name` → `extract_skill_mentions` force-activates
+    /// - `/server:prompt` → `resolve_prompt_mentions` splices the block
+    #[test]
+    fn test_mention_shaped_slash_prefix_falls_through_to_dispatcher() {
+        let router = Router::new();
+
+        for content in [
+            "/github fetch issues",
+            "/notion:search docs",
+            "/notion:create-page title=foo",
+            "/unknown-thing",
+        ] {
+            let msg = IncomingMessage::new("test", "user", content);
+            assert!(
+                router.route_command(&msg).is_none(),
+                "router must not intercept `{content}` — dispatcher handles it",
+            );
+        }
+    }
+
+    /// Non-mention-shaped `/xxx` takes the stock Unknown command
+    /// path. Otherwise every typo burns a full LLM turn for no benefit.
+    #[test]
+    fn test_non_mention_slash_prefix_returns_unknown_command() {
+        let router = Router::new();
+
+        for content in [
+            "/foo!",        // trailing punctuation — not an identifier
+            "/foo/bar",     // two segments with slash — not `:`-shaped
+            "/!!!",         // no identifier at all
+            "/foo:bar:baz", // three colons — mention shape is two halves
+        ] {
+            let msg = IncomingMessage::new("test", "user", content);
+            let intent = router.route_command(&msg);
+            assert!(
+                matches!(intent, Some(MessageIntent::Command { .. })),
+                "non-mention-shaped `{content}` must synthesize an Unknown command, got: {intent:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_first_token_is_mention_shape() {
+        assert!(first_token_is_mention_shape("/github"));
+        assert!(first_token_is_mention_shape("/github fetch issues"));
+        assert!(first_token_is_mention_shape("/notion:search"));
+        assert!(first_token_is_mention_shape(
+            "/notion:create-page title=foo"
+        ));
+        assert!(first_token_is_mention_shape("/my_skill.v2"));
+
+        assert!(!first_token_is_mention_shape("hello"));
+        assert!(!first_token_is_mention_shape("/"));
+        assert!(!first_token_is_mention_shape("/foo!"));
+        assert!(!first_token_is_mention_shape("/foo/bar"));
+        assert!(!first_token_is_mention_shape("/foo:bar:baz"));
+        assert!(!first_token_is_mention_shape("/:foo"));
+        assert!(!first_token_is_mention_shape("/foo:"));
     }
 }
