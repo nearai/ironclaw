@@ -6,6 +6,11 @@ on:
         description: Commit SHA or ref to test
         required: false
         type: string
+      include_docker:
+        description: Include Docker image build in this reusable test run
+        required: false
+        type: boolean
+        default: true
   pull_request:
     branches:
       - main
@@ -417,7 +422,10 @@ jobs:
   docker-build:
     name: Docker Build
     needs: changes
-    if: needs.changes.outputs.docs_only != 'true' && github.event_name != 'pull_request'
+    if: >
+      needs.changes.outputs.docs_only != 'true' &&
+      github.event_name != 'pull_request' &&
+      (github.event_name != 'workflow_call' || inputs.include_docker)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -578,7 +586,7 @@ jobs:
             require_success "wasm-wit-compat" "${{ needs.wasm-wit-compat.result }}"
           fi
 
-          if [[ "$event" != "pull_request" ]]; then
+          if [[ "$event" != "pull_request" && "${{ inputs.include_docker != false }}" == "true" ]]; then
             require_success "docker-build" "${{ needs.docker-build.result }}"
           fi
 
