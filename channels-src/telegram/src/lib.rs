@@ -283,6 +283,18 @@ const BOT_USERNAME_PATH: &str = "state/bot_username";
 /// Workspace path for persisting respond_to_all_group_messages flag.
 const RESPOND_TO_ALL_GROUP_PATH: &str = "state/respond_to_all_group_messages";
 
+/// Workspace path for persisting observe_mode flag.
+const OBSERVE_MODE_PATH: &str = "state/observe_mode";
+
+/// Workspace path for persisting observe buffer size.
+const OBSERVE_BUFFER_SIZE_PATH: &str = "state/observe_buffer_size";
+
+/// Workspace path for persisting observe_groups allowlist (JSON array of i64).
+const OBSERVE_GROUPS_PATH: &str = "state/observe_groups";
+
+/// Workspace path prefix for observe buffers (one file per group chat ID).
+const OBSERVE_BUFFER_PREFIX: &str = "observe/";
+
 // ============================================================================
 // Channel Metadata
 // ============================================================================
@@ -337,6 +349,10 @@ where
 ///
 /// The host injects runtime values like tunnel_url and webhook_secret.
 /// Telegram defaults to polling; webhook mode must be enabled explicitly.
+fn default_observe_buffer_size() -> usize {
+    50
+}
+
 #[derive(Debug, Deserialize)]
 struct TelegramConfig {
     /// Bot username (without @) for mention detection in groups.
@@ -361,6 +377,24 @@ struct TelegramConfig {
     /// Whether to respond to all group messages (not just mentions).
     #[serde(default)]
     respond_to_all_group_messages: bool,
+
+    /// When enabled, the bot silently observes all group messages and stores
+    /// them in a ring buffer. When the bot is @mentioned, recent messages from
+    /// the buffer are injected as context so the bot has conversation history.
+    /// Only applies in groups where the bot is not responding to all messages.
+    #[serde(default)]
+    observe_mode: bool,
+
+    /// Max number of messages to keep in the observe buffer per group.
+    /// Default: 50. Only relevant when observe_mode is enabled.
+    #[serde(default = "default_observe_buffer_size")]
+    observe_buffer_size: usize,
+
+    /// Restrict observe mode to specific group chat IDs. If non-empty, only
+    /// messages from these groups are buffered. Empty or missing = observe all
+    /// groups (when observe_mode is enabled).
+    #[serde(default)]
+    observe_groups: Option<Vec<i64>>,
 
     /// Public tunnel URL for webhook mode (injected by host from global settings).
     #[serde(default)]
@@ -621,6 +655,30 @@ impl Guest for TelegramChannel {
             RESPOND_TO_ALL_GROUP_PATH,
             &config.respond_to_all_group_messages.to_string(),
         );
+
+        // Persist observe_mode flag
+        let _ = channel_host::workspace_write(
+            OBSERVE_MODE_PATH,
+            &config.observe_mode.to_string(),
+        );
+        if config.observe_mode {
+            channel_host::log(
+                channel_host::LogLevel::Info,
+                "Observe mode enabled — bot will listen to group messages and inject context on mention",
+            );
+        }
+
+        // Persist observe buffer size
+        let _ = channel_host::workspace_write(
+            OBSERVE_BUFFER_SIZE_PATH,
+            &config.observe_buffer_size.to_string(),
+        );
+
+        // Persist observe_groups allowlist
+        let observe_groups_json =
+            serde_json::to_string(&config.observe_groups.clone().unwrap_or_default())
+                .unwrap_or_else(|_| "[]".to_string());
+        let _ = channel_host::workspace_write(OBSERVE_GROUPS_PATH, &observe_groups_json);
 
         let webhook_mode = webhook_mode(&config);
 
@@ -2129,6 +2187,80 @@ fn download_and_store_documents(attachments: &mut [InboundAttachment]) {
     }
 }
 
+// ============================================================================
+// Observe Mode — ring buffer for group message context
+// ============================================================================
+
+/// A single observed message stored in the ring buffer.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ObservedMessage {
+    user_id: i64,
+    user_name: String,
+    content: String,
+    ts: i64,
+}
+
+/// Append a message to the observe buffer for a group chat.
+/// Reads existing buffer, appends, trims to configured max size, writes back.
+fn observe_append(chat_id: i64, user_id: i64, user_name: &str, content: &str) {
+    let buffer_path = format!("{}{}.json", OBSERVE_BUFFER_PREFIX, chat_id);
+
+    let max_size = channel_host::workspace_read(OBSERVE_BUFFER_SIZE_PATH)
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(50);
+
+    let mut entries: Vec<ObservedMessage> = channel_host::workspace_read(&buffer_path)
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default();
+
+    entries.push(ObservedMessage {
+        user_id,
+        user_name: user_name.to_string(),
+        content: content.to_string(),
+        ts: channel_host::now_millis() as i64,
+    });
+
+    // Trim to max size (keep most recent)
+    if entries.len() > max_size {
+        let start = entries.len() - max_size;
+        entries = entries.split_off(start);
+    }
+
+    if let Ok(json) = serde_json::to_string(&entries) {
+        let _ = channel_host::workspace_write(&buffer_path, &json);
+    }
+}
+
+/// Read recent messages from the observe buffer for a group chat.
+/// Returns a formatted context string to prepend to the agent message.
+/// Format observed messages into a context string for the agent.
+/// Pure function — no host calls, fully testable.
+fn format_observe_context(entries: &[ObservedMessage]) -> Option<String> {
+    if entries.is_empty() {
+        return None;
+    }
+
+    let lines: Vec<String> = entries
+        .iter()
+        .map(|e| format!("[{}] {}: {}", e.user_name, e.user_id, e.content))
+        .collect();
+
+    Some(format!(
+        "[Recent group messages you observed but did not respond to:]\n{}\n[End of observed messages]\n",
+        lines.join("\n")
+    ))
+}
+
+fn observe_context(chat_id: i64) -> Option<String> {
+    let buffer_path = format!("{}{}.json", OBSERVE_BUFFER_PREFIX, chat_id);
+
+    let entries: Vec<ObservedMessage> = channel_host::workspace_read(&buffer_path)
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default();
+
+    format_observe_context(&entries)
+}
+
 /// Process a single message.
 fn handle_message(message: TelegramMessage) {
     // Extract attachments from media fields (pure data mapping, no host calls)
@@ -2145,7 +2277,7 @@ fn handle_message(message: TelegramMessage) {
 
     // Use text or caption (for media messages)
     let has_voice = message.voice.is_some();
-    let content = message
+    let mut content = message
         .text
         .filter(|t| !t.is_empty())
         .or_else(|| message.caption.filter(|c| !c.is_empty()))
@@ -2264,12 +2396,57 @@ fn handle_message(message: TelegramMessage) {
                 content.to_lowercase().contains(&mention.to_lowercase())
             };
 
+            let observe_enabled = channel_host::workspace_read(OBSERVE_MODE_PATH)
+                .as_deref()
+                .unwrap_or("false")
+                == "true";
+
+            // Check if this group is in the observe allowlist
+            let observe_for_group = if observe_enabled {
+                let allowed = channel_host::workspace_read(OBSERVE_GROUPS_PATH)
+                    .and_then(|json| serde_json::from_str::<Vec<i64>>(&json).ok())
+                    .unwrap_or_default();
+                allowed.is_empty() || allowed.contains(&message.chat.id)
+            } else {
+                false
+            };
+
             if !has_command && !has_bot_mention {
-                channel_host::log(
-                    channel_host::LogLevel::Debug,
-                    &format!("Ignoring group message without mention: {}", content),
-                );
+                if observe_for_group {
+                    // Observe mode: store message in ring buffer instead of dropping
+                    let user_name = if let Some(ref last) = from.last_name {
+                        format!("{} {}", from.first_name, last)
+                    } else {
+                        from.first_name.clone()
+                    };
+                    observe_append(message.chat.id, from.id, &user_name, &content);
+                    channel_host::log(
+                        channel_host::LogLevel::Debug,
+                        "Observed group message (stored in buffer)",
+                    );
+                } else {
+                    channel_host::log(
+                        channel_host::LogLevel::Debug,
+                        &format!("Ignoring group message without mention: {}", content),
+                    );
+                }
                 return;
+            }
+
+            // Bot was mentioned or commanded — inject observe buffer as context
+            if observe_for_group {
+                if let Some(context) = observe_context(message.chat.id) {
+                    channel_host::log(
+                        channel_host::LogLevel::Debug,
+                        &format!(
+                            "Injecting observe context for chat {}: {} chars",
+                            message.chat.id,
+                            context.len()
+                        ),
+                    );
+                    // Prepend context to content so the agent sees conversation history
+                    content.insert_str(0, &context);
+                }
             }
         }
     }
@@ -3382,5 +3559,67 @@ mod tests {
                 half_limit,
             );
         }
+    }
+
+    // =========================================================================
+    // observe mode tests
+    // =========================================================================
+
+    #[test]
+    fn test_format_observe_context_empty() {
+        assert_eq!(format_observe_context(&[]), None);
+    }
+
+    #[test]
+    fn test_format_observe_context_single_message() {
+        let entries = vec![ObservedMessage {
+            user_id: 123,
+            user_name: "Alice".to_string(),
+            content: "hello".to_string(),
+            ts: 1000,
+        }];
+        let ctx = format_observe_context(&entries).unwrap();
+        assert!(ctx.contains("[Alice] 123: hello"));
+        assert!(ctx.contains("[Recent group messages you observed but did not respond to:]"));
+        assert!(ctx.contains("[End of observed messages]"));
+    }
+
+    #[test]
+    fn test_format_observe_context_multiple_messages() {
+        let entries = vec![
+            ObservedMessage {
+                user_id: 123,
+                user_name: "Alice".to_string(),
+                content: "hello".to_string(),
+                ts: 1000,
+            },
+            ObservedMessage {
+                user_id: 456,
+                user_name: "Bob".to_string(),
+                content: "hi there".to_string(),
+                ts: 2000,
+            },
+        ];
+        let ctx = format_observe_context(&entries).unwrap();
+        let lines: Vec<&str> = ctx.lines().collect();
+        // Header line + 2 message lines + footer line = 4
+        assert_eq!(lines.len(), 4);
+        assert!(lines[1].contains("[Alice] 123: hello"));
+        assert!(lines[2].contains("[Bob] 456: hi there"));
+    }
+
+    #[test]
+    fn test_format_observe_context_preserves_order() {
+        let entries = vec![
+            ObservedMessage { user_id: 1, user_name: "First".to_string(), content: "a".to_string(), ts: 1 },
+            ObservedMessage { user_id: 2, user_name: "Second".to_string(), content: "b".to_string(), ts: 2 },
+            ObservedMessage { user_id: 3, user_name: "Third".to_string(), content: "c".to_string(), ts: 3 },
+        ];
+        let ctx = format_observe_context(&entries).unwrap();
+        let first_pos = ctx.find("[First]").unwrap();
+        let second_pos = ctx.find("[Second]").unwrap();
+        let third_pos = ctx.find("[Third]").unwrap();
+        assert!(first_pos < second_pos);
+        assert!(second_pos < third_pos);
     }
 }
