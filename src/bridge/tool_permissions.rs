@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::settings::Settings;
 use crate::tools::ToolRegistry;
-use crate::tools::permissions::{PermissionState, effective_permission};
+use crate::tools::permissions::{PermissionState, seeded_default_permission};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ToolPermissionResolution {
@@ -37,28 +37,78 @@ impl ToolPermissionSnapshot {
     }
 
     pub(crate) fn resolve_permission(&self, tool_name: &str) -> ToolPermissionResolution {
-        let explicit = self.explicit_permission(tool_name);
-        let effective = explicit.unwrap_or_else(|| {
-            effective_permission(&canonical_tool_name(tool_name), &self.overrides)
-        });
+        let canonical = canonical_tool_name(tool_name);
+        let hyphenated = canonical.replace('_', "-");
+        let explicit = self.explicit_permission_with_names(tool_name, &canonical, &hyphenated);
+        let effective = explicit
+            .or_else(|| seeded_default_permission(&canonical))
+            .unwrap_or(PermissionState::AskEachTime);
         ToolPermissionResolution {
             effective,
             explicit,
         }
     }
 
-    pub(crate) fn explicit_permission(&self, tool_name: &str) -> Option<PermissionState> {
-        let canonical = canonical_tool_name(tool_name);
-        let hyphenated = canonical.replace('_', "-");
-
+    fn explicit_permission_with_names(
+        &self,
+        tool_name: &str,
+        canonical: &str,
+        hyphenated: &str,
+    ) -> Option<PermissionState> {
         self.overrides
             .get(tool_name)
             .copied()
-            .or_else(|| self.overrides.get(&canonical).copied())
-            .or_else(|| self.overrides.get(&hyphenated).copied())
+            .or_else(|| self.overrides.get(canonical).copied())
+            .or_else(|| self.overrides.get(hyphenated).copied())
     }
 }
 
 pub(crate) fn canonical_tool_name(tool_name: &str) -> String {
     tool_name.replace('-', "_")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_http_permission_uses_seeded_default() {
+        let snapshot = ToolPermissionSnapshot::default();
+
+        assert_eq!(
+            snapshot.resolve_permission("http"),
+            ToolPermissionResolution {
+                effective: PermissionState::AlwaysAllow,
+                explicit: None,
+            }
+        );
+    }
+
+    #[test]
+    fn saved_http_permission_wins_over_seeded_default() {
+        let snapshot = ToolPermissionSnapshot {
+            overrides: HashMap::from([("http".to_string(), PermissionState::AskEachTime)]),
+        };
+
+        assert_eq!(
+            snapshot.resolve_permission("http"),
+            ToolPermissionResolution {
+                effective: PermissionState::AskEachTime,
+                explicit: Some(PermissionState::AskEachTime),
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_tool_defaults_to_ask_each_time() {
+        let snapshot = ToolPermissionSnapshot::default();
+
+        assert_eq!(
+            snapshot.resolve_permission("unknown_tool"),
+            ToolPermissionResolution {
+                effective: PermissionState::AskEachTime,
+                explicit: None,
+            }
+        );
+    }
 }

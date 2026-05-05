@@ -1,14 +1,20 @@
 //! Per-user tool permission system.
 //!
 //! Each tool has a `PermissionState` that controls whether it runs without
-//! confirmation, asks the user each time, or is fully disabled.  A static
-//! table of tier defaults (`TOOL_RISK_DEFAULTS`) is used as the fallback when
-//! no per-user override exists.
+//! confirmation, asks the user each time, or is fully disabled. Persisted
+//! settings are the source of truth; absent entries fall back to the seeded
+//! baseline for well-known tools, then to asking for unknown tools.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
+
+use super::tool::{ApprovalRequirement, Tool};
+
+/// User-visible reason shown when a tool's permission cannot be set to
+/// `always_allow`.
+pub const TOOL_PERMISSION_LOCKED_REASON: &str =
+    "This tool always requires explicit approval and cannot be set to always_allow.";
 
 /// How a tool may be invoked by the agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,74 +28,66 @@ pub enum PermissionState {
     Disabled,
 }
 
-/// Static map of built-in tool names → their default `PermissionState`.
+/// Seed-time baseline for well-known built-in tool permissions.
 ///
-/// Tools present here default to `AlwaysAllow` (read-only / low-risk) or
-/// `AskEachTime` (write / destructive / network).  Tools **absent** from the
-/// map fall back to `AskEachTime` in `effective_permission`.
-pub static TOOL_RISK_DEFAULTS: LazyLock<HashMap<&'static str, PermissionState>> =
-    LazyLock::new(|| {
-        let mut m = HashMap::new();
+/// This is used when initializing DB rows and when displaying the baseline
+/// default in settings. Runtime resolution also uses this baseline when a
+/// persisted row is missing, so non-owner users and pre-seed accounts see the
+/// same permission behavior as seeded users.
+pub fn seeded_default_permission(tool_name: &str) -> Option<PermissionState> {
+    let canonical = tool_name.replace('-', "_");
+    seeded_default_permission_canonical(&canonical)
+}
 
-        // --- AlwaysAllow: informational, low-risk, or safe writes ---
-        for name in &[
-            "echo",
-            "time",
-            "json",
-            "memory_search",
-            "memory_read",
-            "memory_write",
-            "memory_tree",
-            "tool_list",
-            "tool_info",
-            "tool_search",
-            "skill_list",
-            "skill_search",
-            "list_jobs",
-            "job_status",
-            "job_events",
-            "image_analyze",
-            "message",
-        ] {
-            m.insert(*name, PermissionState::AlwaysAllow);
-        }
+fn seeded_default_permission_canonical(canonical_tool_name: &str) -> Option<PermissionState> {
+    match canonical_tool_name {
+        "echo" | "time" | "json" | "memory_search" | "memory_read" | "memory_write"
+        | "memory_tree" | "tool_list" | "tool_info" | "tool_search" | "tool_activate"
+        | "skill_list" | "skill_search" | "http" | "list_jobs" | "job_status" | "job_events"
+        | "image_analyze" | "message" => Some(PermissionState::AlwaysAllow),
+        "shell"
+        | "read_file"
+        | "write_file"
+        | "list_dir"
+        | "apply_patch"
+        | "create_job"
+        | "event_emit"
+        | "routine_create"
+        | "routine_update"
+        | "cancel_job"
+        | "job_prompt"
+        | "routine_delete"
+        | "routine_fire"
+        | "tool_install"
+        | "tool_auth"
+        | "tool_remove"
+        | "tool_upgrade"
+        | "skill_install"
+        | "skill_remove"
+        | "secret_list"
+        | "secret_delete"
+        | "image_generate"
+        | "image_edit"
+        | "restart"
+        | "build_software"
+        | "tool_permission_set" => Some(PermissionState::AskEachTime),
+        _ => None,
+    }
+}
 
-        // --- AskEachTime: write, destructive, code-execution, or network ---
-        for name in &[
-            "shell",
-            "read_file",
-            "write_file",
-            "list_dir",
-            "apply_patch",
-            "http",
-            "create_job",
-            "event_emit",
-            "routine_create",
-            "routine_update",
-            "cancel_job",
-            "job_prompt",
-            "routine_delete",
-            "routine_fire",
-            "tool_install",
-            "tool_auth",
-            "tool_activate",
-            "tool_remove",
-            "tool_upgrade",
-            "skill_install",
-            "skill_remove",
-            "secret_list",
-            "secret_delete",
-            "image_generate",
-            "image_edit",
-            "restart",
-            "build_software",
-            "tool_permission_set",
-        ] {
-            m.insert(*name, PermissionState::AskEachTime);
-        }
-
-        m
-    });
+/// Returns true when a tool is intrinsically always-gated.
+///
+/// Parameter-sensitive tools such as `shell`, `memory_write`, and
+/// `skill_install` may return `Always` for specific invocations, but remain
+/// configurable at the whole-tool permission level. The empty-parameter check
+/// is the existing runtime signal for tools that always require explicit
+/// approval.
+pub fn tool_permission_locked(tool: &dyn Tool) -> bool {
+    matches!(
+        tool.requires_approval(&serde_json::Value::Object(serde_json::Map::new())),
+        ApprovalRequirement::Always
+    )
+}
 
 // ---------------------------------------------------------------------------
 // Admin tool policy
@@ -263,20 +261,23 @@ pub fn parse_admin_tool_policy(
 /// Return the effective `PermissionState` for `tool_name`.
 ///
 /// Lookup order:
-/// 1. Per-user `overrides` map (highest priority).
-/// 2. `TOOL_RISK_DEFAULTS` static table.
-/// 3. `AskEachTime` as the safe fallback for any unknown tool.
+/// 1. Persisted tool permission map.
+/// 2. Seeded baseline for well-known tools.
+/// 3. `AskEachTime` as the safe fallback for unknown tools.
 pub fn effective_permission(
     tool_name: &str,
     overrides: &HashMap<String, PermissionState>,
 ) -> PermissionState {
-    if let Some(state) = overrides.get(tool_name) {
-        return *state;
-    }
-    if let Some(state) = TOOL_RISK_DEFAULTS.get(tool_name) {
-        return *state;
-    }
-    PermissionState::AskEachTime
+    let canonical = tool_name.replace('-', "_");
+    let hyphenated = canonical.replace('_', "-");
+
+    overrides
+        .get(tool_name)
+        .copied()
+        .or_else(|| overrides.get(&canonical).copied())
+        .or_else(|| overrides.get(&hyphenated).copied())
+        .or_else(|| seeded_default_permission_canonical(&canonical))
+        .unwrap_or(PermissionState::AskEachTime)
 }
 
 // ---------------------------------------------------------------------------
@@ -378,26 +379,63 @@ mod tests {
         assert_eq!(
             effective_permission("shell", &overrides),
             PermissionState::AlwaysAllow,
-            "user override should take precedence over tier default"
+            "persisted user value should take precedence"
         );
     }
 
     #[test]
-    fn test_effective_permission_tier_default_fallback() {
+    fn test_effective_permission_missing_tool_uses_seeded_default() {
         let overrides = HashMap::new();
 
-        // "echo" has AlwaysAllow in the defaults table.
         assert_eq!(
             effective_permission("echo", &overrides),
             PermissionState::AlwaysAllow,
-            "tier default should be returned when no user override exists"
+            "missing persisted permission should use the seeded default for echo"
         );
 
-        // "shell" has AskEachTime in the defaults table.
         assert_eq!(
             effective_permission("shell", &overrides),
             PermissionState::AskEachTime,
-            "tier default should be returned when no user override exists"
+            "missing persisted permission should use the seeded default for shell"
+        );
+
+        assert_eq!(
+            effective_permission("http", &overrides),
+            PermissionState::AlwaysAllow,
+            "missing persisted permission should use the seeded default for http"
+        );
+    }
+
+    #[test]
+    fn test_effective_permission_saved_http_override_wins() {
+        let mut overrides = HashMap::new();
+        overrides.insert("http".to_string(), PermissionState::AskEachTime);
+
+        assert_eq!(
+            effective_permission("http", &overrides),
+            PermissionState::AskEachTime,
+            "saved http permission should take precedence over the seeded default"
+        );
+    }
+
+    #[test]
+    fn test_effective_permission_checks_tool_name_aliases() {
+        let mut overrides = HashMap::new();
+        overrides.insert("tool-activate".to_string(), PermissionState::Disabled);
+
+        assert_eq!(
+            effective_permission("tool_activate", &overrides),
+            PermissionState::Disabled,
+            "hyphenated saved override should apply to underscore runtime lookup"
+        );
+
+        overrides.clear();
+        overrides.insert("tool_activate".to_string(), PermissionState::AskEachTime);
+
+        assert_eq!(
+            effective_permission("tool-activate", &overrides),
+            PermissionState::AskEachTime,
+            "underscore saved override should apply to hyphenated runtime lookup"
         );
     }
 

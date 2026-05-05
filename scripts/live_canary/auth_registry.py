@@ -164,20 +164,16 @@ BROWSER_CASES: dict[str, BrowserProviderCase] = {
         install_url=None,
         trigger_prompt="check gmail unread",
         expected_tool_name="gmail",
-        expected_text="Gmail",
+        expected_text="gmail",
         auth_extension_name="gmail",
     ),
-    "github": BrowserProviderCase(
-        key="github",
-        extension_name="github",
-        expected_extension_name="github",
-        install_kind=None,
-        install_url=None,
-        trigger_prompt="read github issue owner/repo#1",
-        expected_tool_name="github",
-        expected_text="github",
-        auth_extension_name="github",
-    ),
+    # NOTE: `github` was previously listed here, but the released github
+    # WASM tool registers as `auth_summary.method = "manual"` — PAT paste,
+    # not OAuth. Activating the extension returns `awaiting_token: True`
+    # with no `auth_url`, so the browser-consent probe has nothing to drive.
+    # Coverage for github lives in SEEDED_CASES instead, which seeds the
+    # PAT directly. Re-add here only after the github tool ships an OAuth
+    # flow and the registry's `auth_summary.method` flips to "oauth".
     "notion": BrowserProviderCase(
         key="notion",
         extension_name="notion",
@@ -292,15 +288,6 @@ def configured_browser_cases(selected: list[str] | None) -> list[BrowserProvider
     names = selected or list(BROWSER_CASES)
     for name in names:
         case = BROWSER_CASES[name]
-        if name == "github":
-            if not env_str("GITHUB_OAUTH_CLIENT_ID") or not env_str("GITHUB_OAUTH_CLIENT_SECRET"):
-                continue
-            owner = env_str("AUTH_BROWSER_GITHUB_OWNER")
-            repo = env_str("AUTH_BROWSER_GITHUB_REPO")
-            issue_number = env_str("AUTH_BROWSER_GITHUB_ISSUE_NUMBER")
-            if not owner or not repo or not issue_number:
-                continue
-            case = replace(case, trigger_prompt=f"read github issue {owner}/{repo}#{issue_number}")
         if env_str(f"AUTH_BROWSER_{name.upper()}_STORAGE_STATE_PATH") or env_str(
             f"AUTH_BROWSER_{name.upper()}_USERNAME"
         ):

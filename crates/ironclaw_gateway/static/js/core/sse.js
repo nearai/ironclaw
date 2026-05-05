@@ -390,8 +390,6 @@ function connectSSE(lastEventIdOverride) {
 
   addTrackedEventListener('approval_needed', (e) => {
     const data = JSON.parse(e.data);
-    const hasThread = !!data.thread_id;
-    const forCurrentThread = !hasThread || isCurrentThread(data.thread_id);
     if (data.thread_id) {
       activeWorkStore.updateThread(data.thread_id, {
         statusText: ActivityEntry.t('activity.waitingApproval', 'Waiting for approval'),
@@ -399,9 +397,9 @@ function connectSSE(lastEventIdOverride) {
       });
     }
 
-    if (forCurrentThread) {
+    if (isCurrentThread(data.thread_id)) {
       showApproval(data);
-    } else {
+    } else if (data.thread_id) {
       // Keep thread list fresh when approval is requested in a background thread.
       unreadThreads.set(data.thread_id, (unreadThreads.get(data.thread_id) || 0) + 1);
       debouncedLoadThreads();
@@ -545,7 +543,7 @@ function connectSSE(lastEventIdOverride) {
   // Plan progress checklist
   addTrackedEventListener('plan_update', (e) => {
     const data = JSON.parse(e.data);
-    if (data.thread_id && !isCurrentThread(data.thread_id)) return;
+    if (!isCurrentThread(data.thread_id)) return;
     renderPlanChecklist(data);
   });
 }

@@ -564,9 +564,11 @@ impl LlmProvider for NearAiChatProvider {
             reasoning,
             ..
         } = choice.message;
-        let content = content
-            .or(reasoning_content.or(reasoning))
-            .unwrap_or_default();
+        let reasoning_fallback = reasoning_content
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| reasoning.filter(|s| !s.trim().is_empty()));
+        emit_reasoning_trace(reasoning_fallback.as_deref());
+        let content = content.or(reasoning_fallback).unwrap_or_default();
         let finish_reason = match choice.finish_reason.as_deref() {
             Some("stop") => FinishReason::Stop,
             Some("length") => FinishReason::Length,
@@ -635,7 +637,10 @@ impl LlmProvider for NearAiChatProvider {
             tool_calls: message_tool_calls,
             ..
         } = choice.message;
-        let reasoning_fallback = reasoning_content.or(reasoning);
+        let reasoning_fallback = reasoning_content
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| reasoning.filter(|s| !s.trim().is_empty()));
+        emit_reasoning_trace(reasoning_fallback.as_deref());
 
         let tool_calls: Vec<ToolCall> = message_tool_calls
             .unwrap_or_default()
@@ -1189,6 +1194,22 @@ struct ChatCompletionUsage {
 
 fn saturate_u32(val: u64) -> u32 {
     val.min(u32::MAX as u64) as u32
+}
+
+/// Emit reasoning content (chain-of-thought from reasoning models — GLM-5,
+/// DeepSeek, OpenAI o-series, Qwen reasoning variants) on a dedicated tracing
+/// target so observability layers can capture it without coupling to the
+/// response type.
+///
+/// Subscribers attach a `tracing_subscriber::Layer` filtered on target
+/// `ironclaw::llm::reasoning`. Emitted at `TRACE` level so default loggers
+/// don't surface potentially large chain-of-thought traces.
+///
+/// No-op when reasoning is `None` or empty.
+fn emit_reasoning_trace(reasoning: Option<&str>) {
+    if let Some(rc) = reasoning.filter(|s| !s.is_empty()) {
+        tracing::trace!(target: "ironclaw::llm::reasoning", "{rc}");
+    }
 }
 
 fn parse_usage(usage: Option<&ChatCompletionUsage>) -> (u32, u32) {
@@ -1878,6 +1899,44 @@ mod tests {
             "reasoning (alias) should NOT leak into tool-call responses"
         );
         assert_eq!(tool_calls.len(), 1);
+    }
+
+    /// Smoke test: non-empty reasoning content produces a trace event on the
+    /// dedicated `ironclaw::llm::reasoning` target.
+    #[test]
+    #[tracing_test::traced_test]
+    fn reasoning_content_emits_trace_event() {
+        emit_reasoning_trace(Some("step 1: weigh the options carefully"));
+        assert!(
+            logs_contain("step 1: weigh the options carefully"),
+            "expected reasoning emission to appear in captured logs"
+        );
+    }
+
+    /// Empty and absent reasoning emit nothing — subscribers shouldn't see
+    /// noise events for responses where no reasoning was returned.
+    #[test]
+    #[tracing_test::traced_test]
+    fn empty_reasoning_emits_no_event() {
+        emit_reasoning_trace(None);
+        emit_reasoning_trace(Some(""));
+        assert!(
+            !logs_contain("ironclaw::llm::reasoning"),
+            "empty/absent reasoning should not emit any event"
+        );
+    }
+
+    /// The dedicated target is what subscribers filter on; verify the
+    /// emission carries the right target metadata, not just the right body.
+    #[test]
+    #[tracing_test::traced_test]
+    fn reasoning_emission_uses_dedicated_target() {
+        emit_reasoning_trace(Some("trace-target-marker"));
+        assert!(
+            logs_contain("ironclaw::llm::reasoning"),
+            "emission should use ironclaw::llm::reasoning target"
+        );
+        assert!(logs_contain("trace-target-marker"));
     }
 
     /// Regression: payloads that include BOTH reasoning fields must parse

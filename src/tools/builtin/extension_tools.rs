@@ -14,7 +14,10 @@ use async_trait::async_trait;
 
 use crate::context::JobContext;
 use crate::extensions::{EnsureReadyIntent, EnsureReadyOutcome, ExtensionKind, ExtensionManager};
-use crate::tools::permissions::{TOOL_RISK_DEFAULTS, effective_permission};
+use crate::tools::permissions::{
+    PermissionState, TOOL_PERMISSION_LOCKED_REASON, effective_permission,
+    seeded_default_permission, tool_permission_locked,
+};
 use crate::tools::registry::ToolRegistry;
 use crate::tools::tool::{
     ApprovalRequirement, EngineCompatibility, Tool, ToolError, ToolOutput, require_str,
@@ -110,8 +113,9 @@ impl Tool for ToolSearchTool {
     fn description(&self) -> &str {
         "Search for available extensions to add new capabilities. Extensions include \
          channels (Telegram, Slack, Discord — connect messaging platforms so IronClaw can \
-         receive and reply there), tools, and MCP servers. When you want to make a discovered \
-         integration usable, call `tool_activate(name=\"...\")`. Use the `message` tool for \
+         receive and reply there), tools, and MCP servers. Use `tool_install` for explicit \
+         installation, then call `tool_activate(name=\"...\")` to make a discovered \
+         integration usable. Use the `message` tool for \
          proactive outbound sends. Use discover:true to search online if the built-in registry \
          has no results."
     }
@@ -488,27 +492,22 @@ impl Tool for ToolListTool {
         if want_builtin && let Some(ref registry) = self.registry {
             let builtin_names = registry.builtin_tool_names().await;
             let tools = registry.all().await;
-            let empty_params = serde_json::json!({});
             let builtin_list: Vec<serde_json::Value> = tools
                 .iter()
                 .filter(|tool| builtin_names.contains(tool.name()))
                 .map(|tool| {
                     let name = tool.name().to_string();
                     let perm_state = effective_permission(&name, &perm_overrides);
-                    let default_state = TOOL_RISK_DEFAULTS
-                        .get(name.as_str())
-                        .copied()
-                        .unwrap_or(crate::tools::permissions::PermissionState::AskEachTime);
-                    let locked = matches!(
-                        tool.requires_approval(&empty_params),
-                        ApprovalRequirement::Always
-                    );
+                    let default_state =
+                        seeded_default_permission(&name).unwrap_or(PermissionState::AskEachTime);
+                    let locked = tool_permission_locked(tool.as_ref());
                     serde_json::json!({
                         "name": name,
                         "description": tool.description(),
                         "permission_state": perm_state,
                         "default_state": default_state,
                         "locked": locked,
+                        "locked_reason": locked.then_some(TOOL_PERMISSION_LOCKED_REASON),
                     })
                 })
                 .collect();
@@ -793,6 +792,7 @@ impl Tool for ToolPermissionSetTool {
             self.registry.get(tool_name).await.ok_or_else(|| {
                 ToolError::InvalidParameters(format!("Unknown tool: '{tool_name}'"))
             })?;
+        let locked = tool_permission_locked(target_tool.as_ref());
 
         // Load current settings for the user.
         let settings = if let Some(ref store) = self.settings_store {
@@ -814,18 +814,14 @@ impl Tool for ToolPermissionSetTool {
         // Read-only mode when no state param; reject non-string state values.
         let state_str = match params.get("state") {
             None => {
-                let default_state = TOOL_RISK_DEFAULTS
-                    .get(tool_name)
-                    .copied()
-                    .unwrap_or(crate::tools::permissions::PermissionState::AskEachTime);
+                let default_state =
+                    seeded_default_permission(tool_name).unwrap_or(PermissionState::AskEachTime);
                 let output = serde_json::json!({
                     "tool_name": tool_name,
                     "current_state": prev_state,
                     "default_state": default_state,
-                    "locked": matches!(
-                        target_tool.requires_approval(&serde_json::json!({})),
-                        ApprovalRequirement::Always
-                    ),
+                    "locked": locked,
+                    "locked_reason": locked.then_some(TOOL_PERMISSION_LOCKED_REASON),
                 });
                 return Ok(ToolOutput::success(output, start.elapsed()));
             }
@@ -837,29 +833,22 @@ impl Tool for ToolPermissionSetTool {
             })?,
         };
 
-        // Check that the target tool doesn't always require approval (locked tools
-        // cannot have their permission lowered — they will always prompt).
-        let empty_params = serde_json::json!({});
-        if matches!(
-            target_tool.requires_approval(&empty_params),
-            ApprovalRequirement::Always
-        ) {
-            return Err(ToolError::InvalidParameters(format!(
-                "'{tool_name}' always requires approval and its permission cannot be changed"
-            )));
-        }
-
         // Parse the requested new state.
         let new_state = match state_str {
-            "always_allow" => crate::tools::permissions::PermissionState::AlwaysAllow,
-            "ask_each_time" => crate::tools::permissions::PermissionState::AskEachTime,
-            "disabled" => crate::tools::permissions::PermissionState::Disabled,
+            "always_allow" => PermissionState::AlwaysAllow,
+            "ask_each_time" => PermissionState::AskEachTime,
+            "disabled" => PermissionState::Disabled,
             other => {
                 return Err(ToolError::InvalidParameters(format!(
                     "Invalid state '{other}'; expected always_allow, ask_each_time, or disabled"
                 )));
             }
         };
+        if locked && matches!(new_state, PermissionState::AlwaysAllow) {
+            return Err(ToolError::InvalidParameters(format!(
+                "'{tool_name}' always requires approval and cannot be set to always_allow"
+            )));
+        }
 
         // Persist the updated permission.
         if let Some(ref store) = self.settings_store {
@@ -1212,8 +1201,37 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "libsql")]
     #[tokio::test]
-    async fn test_tool_permission_set_locked_tool_rejected() {
+    async fn test_tool_permission_set_rejects_intrinsic_approval_override() {
+        use crate::context::JobContext;
+        use crate::db::SettingsStore;
+        use crate::tools::ToolRegistry;
+
+        let registry = Arc::new(ToolRegistry::new());
+        registry.register(Arc::new(LockedTool)).await;
+        let (db, _tmp) = crate::testing::test_db().await;
+        let store: Arc<dyn SettingsStore + Send + Sync> = db;
+
+        let tool = ToolPermissionSetTool::new(Arc::clone(&registry), Some(store));
+        let ctx = JobContext::default();
+
+        let result = tool
+            .execute(
+                serde_json::json!({"tool_name": "locked_tool", "state": "always_allow"}),
+                &ctx,
+            )
+            .await
+            .expect_err("locked tool should reject always_allow");
+
+        assert!(
+            matches!(result, ToolError::InvalidParameters(_)),
+            "expected InvalidParameters for locked always_allow, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_permission_set_reports_locked_metadata() {
         use crate::context::JobContext;
         use crate::tools::ToolRegistry;
 
@@ -1223,21 +1241,41 @@ mod tests {
         let tool = ToolPermissionSetTool::new(Arc::clone(&registry), None);
         let ctx = JobContext::default();
 
-        // Trying to change the permission state of a locked tool must fail.
+        let result = tool
+            .execute(serde_json::json!({"tool_name": "locked_tool"}), &ctx)
+            .await
+            .expect("read-only permission lookup should succeed without store");
+
+        assert_eq!(result.result["tool_name"], "locked_tool");
+        assert_eq!(result.result["locked"], true);
+        assert!(
+            result.result["locked_reason"].is_string(),
+            "locked read path should include locked_reason"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_permission_set_without_store_returns_error() {
+        use crate::context::JobContext;
+        use crate::tools::ToolRegistry;
+
+        let registry = Arc::new(ToolRegistry::new());
+        registry.register(Arc::new(NormalTool)).await;
+
+        let tool = ToolPermissionSetTool::new(Arc::clone(&registry), None);
+        let ctx = JobContext::default();
+
         let result = tool
             .execute(
-                serde_json::json!({"tool_name": "locked_tool", "state": "always_allow"}),
+                serde_json::json!({"tool_name": "normal_tool", "state": "always_allow"}),
                 &ctx,
             )
             .await;
-        assert!(
-            result.is_err(),
-            "locked tool permission change must be rejected"
-        );
+        assert!(result.is_err(), "missing settings store should be rejected");
         let err = result.unwrap_err();
         assert!(
-            matches!(err, ToolError::InvalidParameters(_)),
-            "expected InvalidParameters for locked tool, got {err:?}"
+            matches!(err, ToolError::ExecutionFailed(_)),
+            "expected ExecutionFailed for missing store, got {err:?}"
         );
     }
 
@@ -1262,6 +1300,7 @@ mod tests {
         let registry = Arc::new(ToolRegistry::new());
         // Use register_sync (built-in path) so the tool appears in builtin_tool_names().
         registry.register_sync(Arc::new(NormalTool));
+        registry.register_sync(Arc::new(LockedTool));
 
         let manager = test_manager_stub();
         let list_tool = ToolListTool::new(manager).with_registry(Arc::clone(&registry));
@@ -1287,6 +1326,10 @@ mod tests {
             names.contains(&"normal_tool"),
             "registered normal_tool should appear in builtins listing"
         );
+        assert!(
+            names.contains(&"locked_tool"),
+            "registered locked_tool should appear in builtins listing"
+        );
         // Each entry must have required fields.
         for entry in builtins {
             assert!(entry.get("name").is_some(), "missing name field");
@@ -1304,6 +1347,20 @@ mod tests {
             );
             assert!(entry.get("locked").is_some(), "missing locked field");
         }
+        let locked_entry = builtins
+            .iter()
+            .find(|entry| entry["name"] == "locked_tool")
+            .expect("locked_tool entry should be present");
+        assert_eq!(locked_entry["locked"], true);
+        assert!(
+            locked_entry["locked_reason"].is_string(),
+            "locked builtin entry should include locked_reason"
+        );
+        let normal_entry = builtins
+            .iter()
+            .find(|entry| entry["name"] == "normal_tool")
+            .expect("normal_tool entry should be present");
+        assert_eq!(normal_entry["locked"], false);
         // Extensions should not be present for kind=builtin.
         assert!(
             result.result.get("extensions").is_none(),

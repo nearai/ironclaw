@@ -2273,8 +2273,16 @@ mod tests {
         assert_ne!(state, state_2, "State must be unique per request");
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_refresh_access_token_direct_includes_stored_client_secret() {
+        // Serialize against any other test that mutates IRONCLAW_OAUTH_* env vars,
+        // and explicitly clear them so refresh_access_token takes the direct path
+        // instead of routing through whatever proxy URL a parallel test left set.
+        let _env_guard = lock_env();
+        let _proxy_url_guard = set_env_var("IRONCLAW_OAUTH_EXCHANGE_URL", None);
+        let _proxy_token_guard = set_env_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN", None);
+
         let secrets = test_secrets_store();
         let user_id = "test-user";
         let Some((base_url, state)) = start_refresh_server().await else {

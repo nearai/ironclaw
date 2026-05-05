@@ -39,7 +39,8 @@ use ironclaw_secrets::SecretStore;
 use ironclaw_trust::{HostTrustPolicy, TrustPolicy};
 use ironclaw_wasm::{
     DenyWasmHostHttp, PreparedWitTool, WasmError, WasmRuntimeCredentialProvider,
-    WasmRuntimeHttpAdapter, WitToolHost, WitToolRequest, WitToolRuntime, WitToolRuntimeConfig,
+    WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder, WitToolHost, WitToolRequest,
+    WitToolRuntime, WitToolRuntimeConfig,
 };
 
 use crate::{
@@ -638,7 +639,7 @@ impl WasmRuntimeAdapter {
 
     fn host_for_scope(&self, scope: &ResourceScope, capability_id: &CapabilityId) -> WitToolHost {
         let egress = runtime_http_egress(&self.runtime_http_egress);
-        let Some(policy) = self.network_policy_store.take(scope, capability_id) else {
+        let Some(policy) = self.network_policy_store.get(scope, capability_id) else {
             return if egress.is_some() {
                 self.host.clone().with_http(Arc::new(DenyWasmHostHttp))
             } else {
@@ -649,7 +650,10 @@ impl WasmRuntimeAdapter {
             return self.host.clone().with_http(Arc::new(DenyWasmHostHttp));
         };
         let mut adapter =
-            WasmRuntimeHttpAdapter::new(egress, scope.clone(), capability_id.clone(), policy);
+            WasmRuntimeHttpAdapter::new(egress, scope.clone(), capability_id.clone(), policy)
+                .with_policy_discarder(Arc::new(NetworkPolicyDiscarder {
+                    store: Arc::clone(&self.network_policy_store),
+                }));
         if let Some(provider) = &self.credential_provider {
             adapter = adapter.with_credential_provider(Arc::clone(provider));
         }
@@ -722,6 +726,17 @@ where
     }
 }
 
+#[derive(Debug, Clone)]
+struct NetworkPolicyDiscarder {
+    store: Arc<NetworkObligationPolicyStore>,
+}
+
+impl WasmRuntimePolicyDiscarder for NetworkPolicyDiscarder {
+    fn discard(&self, scope: &ResourceScope, capability_id: &CapabilityId) {
+        self.store.discard_for_capability(scope, capability_id);
+    }
+}
+
 #[derive(Clone)]
 struct RuntimeDispatchProcessExecutor {
     dispatcher: Arc<dyn CapabilityDispatcher>,
@@ -748,8 +763,8 @@ impl ProcessExecutor for RuntimeDispatchProcessExecutor {
                 capability_id: request.capability_id,
                 scope: request.scope,
                 estimate: request.estimate,
-                mounts: None,
-                resource_reservation: None,
+                mounts: Some(request.mounts),
+                resource_reservation: request.resource_reservation,
                 input: request.input,
             })
             .await

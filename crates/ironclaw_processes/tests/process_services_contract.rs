@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
@@ -103,6 +103,44 @@ async fn filesystem_process_services_store_output_refs() {
     );
 }
 
+#[tokio::test]
+async fn background_manager_passes_spawn_mounts_and_reservation_to_executor() {
+    let services = ProcessServices::in_memory();
+    let executor = Arc::new(RecordingHandoffExecutor::default());
+    let manager = services.background_manager(Arc::clone(&executor));
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let mounts = mount_view(
+        "/workspace",
+        "/projects/project1",
+        MountPermissions::read_only(),
+    );
+    let estimate = ResourceEstimate {
+        process_count: Some(1),
+        concurrency_slots: Some(1),
+        ..ResourceEstimate::default()
+    };
+    let reservation_id = ResourceReservationId::new();
+    let mut start = process_start(process_id, invocation_id, scope.clone());
+    start.mounts = mounts.clone();
+    start.estimated_resources = estimate.clone();
+    start.resource_reservation_id = Some(reservation_id);
+
+    manager.spawn(start).await.unwrap();
+
+    let request = executor.wait_for_request().await;
+    assert_eq!(request.process_id, process_id);
+    assert_eq!(request.scope, scope);
+    assert_eq!(request.mounts, mounts);
+    let reservation = request
+        .resource_reservation
+        .expect("prepared reservation id from spawn must reach the executor");
+    assert_eq!(reservation.id, reservation_id);
+    assert_eq!(reservation.scope, request.scope);
+    assert_eq!(reservation.estimate, estimate);
+}
+
 struct SuccessExecutor;
 
 #[async_trait]
@@ -122,6 +160,38 @@ impl ProcessExecutor for SuccessExecutor {
 struct CancellationAwareExecutor {
     cancellations: AtomicUsize,
     notified: Notify,
+}
+
+#[derive(Default)]
+struct RecordingHandoffExecutor {
+    request: Mutex<Option<ProcessExecutionRequest>>,
+    notified: Notify,
+}
+
+impl RecordingHandoffExecutor {
+    async fn wait_for_request(&self) -> ProcessExecutionRequest {
+        loop {
+            let notified = self.notified.notified();
+            if let Some(request) = self.request.lock().unwrap().clone() {
+                return request;
+            }
+            notified.await;
+        }
+    }
+}
+
+#[async_trait]
+impl ProcessExecutor for RecordingHandoffExecutor {
+    async fn execute(
+        &self,
+        request: ProcessExecutionRequest,
+    ) -> Result<ProcessExecutionResult, ProcessExecutionError> {
+        *self.request.lock().unwrap() = Some(request);
+        self.notified.notify_waiters();
+        Ok(ProcessExecutionResult {
+            output: json!({"ok": true}),
+        })
+    }
 }
 
 impl CancellationAwareExecutor {
@@ -149,6 +219,15 @@ impl ProcessExecutor for CancellationAwareExecutor {
             output: json!({"cancelled": true}),
         })
     }
+}
+
+fn mount_view(alias: &str, target: &str, permissions: MountPermissions) -> MountView {
+    MountView::new(vec![MountGrant::new(
+        MountAlias::new(alias).unwrap(),
+        VirtualPath::new(target).unwrap(),
+        permissions,
+    )])
+    .unwrap()
 }
 
 fn process_start(
