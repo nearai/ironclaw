@@ -38,6 +38,9 @@ jobs:
   coverage:
     name: Coverage (${{ matrix.name }})
     runs-on: ubuntu-latest
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     permissions:
       id-token: write
       contents: read
