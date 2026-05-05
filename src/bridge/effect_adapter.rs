@@ -1965,14 +1965,37 @@ fn word_set(text: &str) -> HashSet<&str> {
         .collect()
 }
 
-/// Strictly extract a u64 from a JSON value, rejecting wrong types.
+/// Extract a u64 from a JSON value, accepting both JSON numbers and
+/// strings that parse as a u64 (e.g. `"120"`).
+///
+/// Resolves issue #3132: LLMs frequently emit numeric tool params as
+/// JSON strings (DeepSeek + Kimi do this routinely), even though the
+/// tool schema says "integer". The previous behavior fully rejected
+/// strings, which blocked otherwise-valid mission_create / _update
+/// calls. Silently coercing without bounds was the *original* bug —
+/// silent failures meant `mission_update` returned `{"status":"updated"}`
+/// while changing nothing in the database. The fix here keeps the
+/// loud-failure semantics for genuinely wrong inputs (booleans, arrays,
+/// objects, non-numeric strings, signed/decimal strings) but accepts
+/// the one ambiguous case the LLMs actually produce: a numeric string.
 fn strict_u64(params: &serde_json::Value, key: &str) -> Result<Option<u64>, String> {
     match params.get(key) {
         None => Ok(None),
-        Some(v) => v
-            .as_u64()
-            .map(Some)
-            .ok_or_else(|| format!("'{key}' must be an integer, got {v}")),
+        Some(v) => {
+            if let Some(n) = v.as_u64() {
+                return Ok(Some(n));
+            }
+            // String-of-int: only accept if the *trimmed* value parses
+            // cleanly as a u64. Trim handles `" 120"` from sloppy
+            // serialization. We reject `"-1"` (signed), `"12.5"`
+            // (decimal), `"abc"`, and `""` because `u64::from_str` does.
+            if let Some(s) = v.as_str()
+                && let Ok(n) = s.trim().parse::<u64>()
+            {
+                return Ok(Some(n));
+            }
+            Err(format!("'{key}' must be an integer, got {v}"))
+        }
     }
 }
 
@@ -4686,21 +4709,65 @@ mod tests {
     }
 
     #[test]
-    fn extract_guardrails_rejects_string_typed_integers() {
-        // Regression: LLMs pass numeric params as strings (e.g. cooldown_secs="0").
-        // The old code silently ignored the wrong type, so mission_update
-        // returned {"status":"updated"} but changed nothing in the database.
-        let params = serde_json::json!({"cooldown_secs": "0", "max_concurrent": "2"});
-        let mut updates = ironclaw_engine::MissionUpdate::default();
-        let err = extract_guardrails(&params, &mut updates).unwrap_err();
-        assert!(err.contains("must be an integer"), "got: {err}");
+    fn extract_guardrails_accepts_numeric_strings_and_rejects_garbage() {
+        // Issue #3132: LLMs pass numeric params as strings
+        // (e.g. cooldown_secs="120"). The earlier "reject loudly" fix
+        // (#???) was correct in principle but blocked real mission_create
+        // calls. We now coerce numeric strings while still failing
+        // loudly on non-numeric strings, decimals, signed ints, or
+        // structurally wrong types.
 
-        // Integer values must succeed.
+        // (1) JSON numbers continue to work.
         let params = serde_json::json!({"cooldown_secs": 0, "max_concurrent": 2});
         let mut updates = ironclaw_engine::MissionUpdate::default();
-        extract_guardrails(&params, &mut updates).expect("should succeed");
+        extract_guardrails(&params, &mut updates).expect("ints must succeed");
         assert_eq!(updates.cooldown_secs, Some(0));
         assert_eq!(updates.max_concurrent, Some(2));
+
+        // (2) String-of-int (the #3132 bug shape) is now accepted.
+        let params = serde_json::json!({"cooldown_secs": "120", "max_concurrent": "5"});
+        let mut updates = ironclaw_engine::MissionUpdate::default();
+        extract_guardrails(&params, &mut updates).expect("numeric strings must coerce");
+        assert_eq!(updates.cooldown_secs, Some(120));
+        assert_eq!(updates.max_concurrent, Some(5));
+
+        // (3) Trimmed numeric strings (sloppy LLM serialization).
+        let params = serde_json::json!({"cooldown_secs": "  300  "});
+        let mut updates = ironclaw_engine::MissionUpdate::default();
+        extract_guardrails(&params, &mut updates).expect("trimmed strings coerce");
+        assert_eq!(updates.cooldown_secs, Some(300));
+
+        // (4) Non-numeric strings still fail loudly.
+        for bad in ["abc", "12.5", "-1", "", "1e3"] {
+            let params = serde_json::json!({"cooldown_secs": bad});
+            let mut updates = ironclaw_engine::MissionUpdate::default();
+            let err = extract_guardrails(&params, &mut updates)
+                .expect_err(&format!("expected loud-failure for {bad:?}"));
+            assert!(
+                err.contains("must be an integer"),
+                "expected 'must be an integer' for {bad:?}, got: {err}"
+            );
+        }
+
+        // (5) Structurally wrong types still fail loudly.
+        for bad in [
+            serde_json::json!(true),
+            serde_json::json!([1, 2, 3]),
+            serde_json::json!({"nested": "obj"}),
+            serde_json::json!(null),
+        ] {
+            // Nulls are dropped by `params.get(key)` → Some(Null), and
+            // Null does not match either as_u64 or as_str, so we get
+            // the loud error. This pin guarantees nulls never silently
+            // become "no override" via JSON's null/missing equivalence.
+            let params = serde_json::json!({"cooldown_secs": bad});
+            let mut updates = ironclaw_engine::MissionUpdate::default();
+            let err = extract_guardrails(&params, &mut updates).unwrap_err();
+            assert!(
+                err.contains("must be an integer"),
+                "expected loud-failure for {bad:?}, got: {err}"
+            );
+        }
     }
 
     #[test]
@@ -7303,10 +7370,12 @@ Use this skill to set up a Pika meeting.
         );
     }
 
-    /// Regression: mission_create with string-typed guardrails (e.g.
-    /// cooldown_secs="0") must be caught before creating the mission.
+    /// Issue #3132: mission_create with a numeric-string guardrail
+    /// (`cooldown_secs="300"`) must succeed — LLMs serialize numeric
+    /// tool params as strings, and rejecting blocks valid usage.
+    /// Garbage strings still fail (verified at the unit-test layer).
     #[tokio::test]
-    async fn mission_create_string_guardrails_rejected_via_execute_action() {
+    async fn mission_create_numeric_string_guardrails_accepted_via_execute_action() {
         let adapter = make_adapter_with_missions().await;
         let result = adapter
             .execute_action(
@@ -7321,16 +7390,11 @@ Use this skill to set up a Pika meeting.
                 &exec_ctx(ironclaw_engine::ThreadId::new(), Some("c3")),
             )
             .await
-            .expect("should return Ok with is_error=true");
+            .expect("should return Ok with is_error=false");
 
-        assert!(result.is_error);
         assert!(
-            result
-                .output
-                .get("error")
-                .and_then(|v| v.as_str())
-                .is_some_and(|s| s.contains("must be an integer")),
-            "got: {}",
+            !result.is_error,
+            "numeric-string guardrails must coerce, not reject: {}",
             result.output
         );
     }
@@ -7367,10 +7431,14 @@ Use this skill to set up a Pika meeting.
         );
     }
 
-    /// Regression: mission_update with string-typed guardrails must be
-    /// caught at the execute_action level, not silently ignored.
+    /// Issue #3132: mission_update with a numeric-string guardrail
+    /// (`max_concurrent="5"`) is now coerced and applied. The earlier
+    /// strict-rejection behavior was correct for null / boolean /
+    /// object inputs but blocked LLMs that routinely emit numeric tool
+    /// params as strings. Garbage strings still fail at the unit-test
+    /// layer (see `extract_guardrails_accepts_numeric_strings_and_rejects_garbage`).
     #[tokio::test]
-    async fn mission_update_string_guardrails_rejected_via_execute_action() {
+    async fn mission_update_numeric_string_guardrails_accepted_via_execute_action() {
         let adapter = make_adapter_with_missions().await;
         let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("u1"));
 
@@ -7395,7 +7463,7 @@ Use this skill to set up a Pika meeting.
             .and_then(|v| v.as_str())
             .expect("should have mission_id");
 
-        // Now update with string-typed guardrails — should fail.
+        // Now update with string-typed guardrails — should succeed.
         let update_result = adapter
             .execute_action(
                 "mission_update",
@@ -7407,20 +7475,11 @@ Use this skill to set up a Pika meeting.
                 &ctx,
             )
             .await
-            .expect("should return Ok with is_error=true");
+            .expect("should return Ok with is_error=false");
 
         assert!(
-            update_result.is_error,
-            "string guardrails should fail: {}",
-            update_result.output
-        );
-        assert!(
-            update_result
-                .output
-                .get("error")
-                .and_then(|v| v.as_str())
-                .is_some_and(|s| s.contains("must be an integer")),
-            "got: {}",
+            !update_result.is_error,
+            "numeric-string guardrails must coerce, not reject: {}",
             update_result.output
         );
     }
