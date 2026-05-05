@@ -114,6 +114,8 @@ irm https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-install
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-installer.sh | sh
 ```
+
+Supports `x86_64`/`aarch64` on macOS (Darwin), Linux (glibc & musl), and Windows via WSL. Windows (native) also has a [PowerShell installer](#install-via-powershell-script-windows).
 </details>
 
 <details>
