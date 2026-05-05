@@ -498,6 +498,11 @@ fn apply_eip712_signing(
             ))
         })?;
 
+    let body_json = parse_body_json_if_needed(
+        primary.fields.iter().map(|f| &f.source),
+        body,
+    )?;
+
     let mut field_value_buf: Vec<u8> = Vec::with_capacity(32 + primary.fields.len() * 32);
     let type_string = encode_eip712_type_string(primary);
     let type_hash = keccak256(type_string.as_bytes());
@@ -508,6 +513,7 @@ fn apply_eip712_signing(
             Some(&address_hex),
             &public_key_hex,
             body,
+            body_json.as_ref(),
             timestamp_secs,
             nonce_bytes,
         )?;
@@ -585,11 +591,23 @@ fn apply_nep413_signing(
         bs58::encode(verifying_key.as_bytes()).into_string()
     );
 
+    let body_json = parse_body_json_if_needed(
+        [
+            Some(&spec.recipient_source),
+            Some(&spec.message_source),
+            spec.callback_url_source.as_ref(),
+        ]
+        .into_iter()
+        .flatten(),
+        body,
+    )?;
+
     let recipient = resolve_field_source(
         &spec.recipient_source,
         None,
         &public_key_b58,
         body,
+        body_json.as_ref(),
         timestamp_secs,
         nonce_bytes,
     )?;
@@ -598,6 +616,7 @@ fn apply_nep413_signing(
         None,
         &public_key_b58,
         body,
+        body_json.as_ref(),
         timestamp_secs,
         nonce_bytes,
     )?;
@@ -607,6 +626,7 @@ fn apply_nep413_signing(
             None,
             &public_key_b58,
             body,
+            body_json.as_ref(),
             timestamp_secs,
             nonce_bytes,
         )?),
@@ -770,14 +790,7 @@ fn encode_eip712_field_value(type_name: &str, value: &str) -> Result<[u8; 32], S
             padded[12..].copy_from_slice(&addr);
             Ok(padded)
         }
-        "uint256" => {
-            let num: u128 = value
-                .parse()
-                .map_err(|e| SignerError::InvalidField(format!("uint256 parse: {e}")))?;
-            let mut padded = [0u8; 32];
-            padded[16..].copy_from_slice(&num.to_be_bytes());
-            Ok(padded)
-        }
+        "uint256" => parse_uint256_be(value),
         "bytes32" => {
             let trimmed = value.trim_start_matches("0x");
             let bytes = hex::decode(trimmed)
@@ -796,6 +809,31 @@ fn encode_eip712_field_value(type_name: &str, value: &str) -> Result<[u8; 32], S
             "unsupported eip712 type: {other}"
         ))),
     }
+}
+
+fn parse_uint256_be(value: &str) -> Result<[u8; 32], SignerError> {
+    let s = value.trim();
+    if s.is_empty() {
+        return Err(SignerError::InvalidField("uint256 is empty".into()));
+    }
+    let mut bytes = [0u8; 32];
+    for ch in s.chars() {
+        let digit = ch.to_digit(10).ok_or_else(|| {
+            SignerError::InvalidField(format!("uint256 contains non-digit '{ch}' in '{s}'"))
+        })?;
+        let mut carry: u32 = digit;
+        for byte in bytes.iter_mut().rev() {
+            let v = u32::from(*byte) * 10 + carry;
+            *byte = (v & 0xff) as u8;
+            carry = v >> 8;
+        }
+        if carry != 0 {
+            return Err(SignerError::InvalidField(format!(
+                "uint256 overflow: '{s}' exceeds 2^256 - 1"
+            )));
+        }
+    }
+    Ok(bytes)
 }
 
 fn parse_eth_address(value: &str) -> Result<[u8; 20], SignerError> {
@@ -848,6 +886,7 @@ fn resolve_field_source(
     signer_address: Option<&str>,
     signer_public_key: &str,
     body: Option<&[u8]>,
+    body_json: Option<&serde_json::Value>,
     timestamp_secs: u64,
     nonce_bytes: &[u8; 32],
 ) -> Result<String, SignerError> {
@@ -876,7 +915,7 @@ fn resolve_field_source(
             })
         }
         FieldSource::Bytes32Keccak256OfBytes { parts } => {
-            let assembled = assemble_bytes_for_keccak(parts, body)?;
+            let assembled = assemble_bytes_for_keccak(parts, body_json)?;
             let h = keccak256(&assembled);
             Ok(format!("0x{}", hex::encode(h)))
         }
@@ -1013,31 +1052,41 @@ fn apply_body_mutations(
     Ok(())
 }
 
+fn parse_body_json_if_needed<'a, I>(
+    sources: I,
+    body: Option<&[u8]>,
+) -> Result<Option<serde_json::Value>, SignerError>
+where
+    I: IntoIterator<Item = &'a crate::secrets::FieldSource>,
+{
+    use crate::secrets::{BytesPart, FieldSource};
+    let needs = sources.into_iter().any(|s| match s {
+        FieldSource::Bytes32Keccak256OfBytes { parts } => parts
+            .iter()
+            .any(|p| !matches!(p, BytesPart::LiteralHex { .. })),
+        _ => false,
+    });
+    if !needs {
+        return Ok(None);
+    }
+    let bytes = body.ok_or_else(|| {
+        SignerError::UnsupportedSource(
+            "body-derived signer source declared but no request body provided".into(),
+        )
+    })?;
+    Ok(Some(
+        serde_json::from_slice::<serde_json::Value>(bytes)
+            .map_err(|e| SignerError::InvalidField(format!("body not json: {e}")))?,
+    ))
+}
+
 fn assemble_bytes_for_keccak(
     parts: &[crate::secrets::BytesPart],
-    body: Option<&[u8]>,
+    body_json: Option<&serde_json::Value>,
 ) -> Result<Vec<u8>, SignerError> {
-    use crate::secrets::BytesPart;
-    let needs_body = parts
-        .iter()
-        .any(|p| !matches!(p, BytesPart::LiteralHex { .. }));
-    let body_json = if needs_body {
-        let bytes = body.ok_or_else(|| {
-            SignerError::UnsupportedSource(
-                "body-derived bytes_part declared but no request body provided".into(),
-            )
-        })?;
-        Some(
-            serde_json::from_slice::<serde_json::Value>(bytes)
-                .map_err(|e| SignerError::InvalidField(format!("body not json: {e}")))?,
-        )
-    } else {
-        None
-    };
-
     let mut out: Vec<u8> = Vec::new();
     for part in parts {
-        let bytes = evaluate_bytes_part(part, body_json.as_ref())?;
+        let bytes = evaluate_bytes_part(part, body_json)?;
         out.extend_from_slice(&bytes);
     }
     Ok(out)
@@ -4101,6 +4150,42 @@ mod tests {
             recovered_addr, expected_address,
             "signature must recover to the signer address"
         );
+    }
+
+    #[test]
+    fn parse_uint256_handles_zero_small_max_and_overflow() {
+        let zero = super::parse_uint256_be("0").unwrap();
+        assert_eq!(zero, [0u8; 32]);
+
+        let one = super::parse_uint256_be("1").unwrap();
+        let mut expected_one = [0u8; 32];
+        expected_one[31] = 1;
+        assert_eq!(one, expected_one);
+
+        let above_u128 = "340282366920938463463374607431768211457";
+        let result = super::parse_uint256_be(above_u128).unwrap();
+        let mut expected = [0u8; 32];
+        expected[15] = 1;
+        expected[31] = 1;
+        assert_eq!(
+            result, expected,
+            "value just above 2^128 must encode without overflow"
+        );
+
+        let max = "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+        let max_bytes = super::parse_uint256_be(max).unwrap();
+        assert_eq!(max_bytes, [0xffu8; 32]);
+
+        let overflow = "115792089237316195423570985008687907853269984665640564039457584007913129639936";
+        let err = super::parse_uint256_be(overflow).unwrap_err();
+        assert!(
+            matches!(err, super::SignerError::InvalidField(ref m) if m.contains("overflow")),
+            "expected overflow error, got {err:?}"
+        );
+
+        assert!(super::parse_uint256_be("").is_err());
+        assert!(super::parse_uint256_be("12a3").is_err());
+        assert!(super::parse_uint256_be("-1").is_err());
     }
 
     #[test]
