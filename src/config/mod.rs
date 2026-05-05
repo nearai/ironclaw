@@ -27,6 +27,7 @@ pub(crate) mod embeddings;
 mod heartbeat;
 pub(crate) mod helpers;
 mod hygiene;
+pub(crate) mod image;
 pub(crate) mod llm;
 mod missions;
 pub mod oauth;
@@ -60,6 +61,7 @@ pub use self::database::{DatabaseBackend, DatabaseConfig, SslMode, default_libsq
 pub use self::embeddings::{DEFAULT_EMBEDDING_CACHE_SIZE, EmbeddingsConfig};
 pub use self::heartbeat::HeartbeatConfig;
 pub use self::hygiene::HygieneConfig;
+pub use self::image::ImageConfig;
 pub use self::llm::default_session_path;
 pub use self::missions::MissionsConfig;
 pub use self::oauth::OAuthConfig;
@@ -105,6 +107,7 @@ pub struct Config {
     pub database: DatabaseConfig,
     pub llm: LlmConfig,
     pub embeddings: EmbeddingsConfig,
+    pub image: ImageConfig,
     pub tunnel: TunnelConfig,
     pub channels: ChannelsConfig,
     pub agent: AgentConfig,
@@ -189,6 +192,7 @@ impl Config {
             },
             llm: LlmConfig::for_testing(),
             embeddings: EmbeddingsConfig::default(),
+            image: ImageConfig::default(),
             tunnel: TunnelConfig::default(),
             channels: ChannelsConfig {
                 cli: CliConfig { enabled: false },
@@ -360,12 +364,12 @@ impl Config {
         Ok(())
     }
 
-    /// Re-resolve only the LLM config after credential injection.
+    /// Re-resolve the LLM config and dependent image-tool config after credential injection.
     ///
     /// Called by `AppBuilder::init_secrets()` after injecting API keys into
-    /// the env overlay. Only rebuilds `self.llm` — all other config fields
-    /// are unaffected, preserving values from the initial config load (or
-    /// from `Config::for_testing()` in test mode).
+    /// the env overlay. Rebuilds `self.llm` plus `self.image`, because image
+    /// tools may inherit the active LLM endpoint/key when no dedicated image
+    /// endpoint is configured.
     pub async fn re_resolve_llm(
         &mut self,
         store: Option<&(dyn crate::db::SettingsStore + Sync)>,
@@ -389,8 +393,17 @@ impl Config {
         secrets: Option<&(dyn crate::secrets::SecretsStore + Send + Sync)>,
         is_operator: bool,
     ) -> Result<(), ConfigError> {
-        self.llm =
-            Self::resolve_llm_with_secrets(store, user_id, toml_path, secrets, is_operator).await?;
+        let (llm, image) = Self::resolve_llm_and_image_with_secrets_inner(
+            store,
+            user_id,
+            toml_path,
+            secrets,
+            is_operator,
+            false,
+        )
+        .await?;
+        self.llm = llm;
+        self.image = image;
         Ok(())
     }
 
@@ -455,14 +468,14 @@ impl Config {
         Ok(settings)
     }
 
-    async fn resolve_llm_with_secrets_inner(
+    async fn load_settings_with_optional_secrets(
         store: Option<&(dyn crate::db::SettingsStore + Sync)>,
         user_id: &str,
         toml_path: Option<&std::path::Path>,
         secrets: Option<&(dyn crate::secrets::SecretsStore + Send + Sync)>,
         is_operator: bool,
         strict_db_reads: bool,
-    ) -> Result<LlmConfig, ConfigError> {
+    ) -> Result<Settings, ConfigError> {
         let mut settings = if let Some(store) = store {
             Self::load_db_backed_settings(store, user_id, toml_path, is_operator, strict_db_reads)
                 .await?
@@ -477,6 +490,27 @@ impl Config {
             hydrate_llm_keys_from_secrets(&mut settings, secrets, user_id).await;
         }
 
+        Ok(settings)
+    }
+
+    async fn resolve_llm_and_image_with_secrets_inner(
+        store: Option<&(dyn crate::db::SettingsStore + Sync)>,
+        user_id: &str,
+        toml_path: Option<&std::path::Path>,
+        secrets: Option<&(dyn crate::secrets::SecretsStore + Send + Sync)>,
+        is_operator: bool,
+        strict_db_reads: bool,
+    ) -> Result<(LlmConfig, ImageConfig), ConfigError> {
+        let settings = Self::load_settings_with_optional_secrets(
+            store,
+            user_id,
+            toml_path,
+            secrets,
+            is_operator,
+            strict_db_reads,
+        )
+        .await?;
+
         // Startup path (non-strict): fall back to NearAI if the user-configured
         // backend is unusable. This prevents the #2514 crash-loop and keeps the
         // instance runnable while the user fixes their provider configuration.
@@ -487,7 +521,9 @@ impl Config {
         // saved "openrouter", runtime would switch to NearAI, the UI would
         // show NearAI, and the user would wonder where their selection went.
         if strict_db_reads {
-            return LlmConfig::resolve(&settings);
+            let llm = LlmConfig::resolve(&settings)?;
+            let image = ImageConfig::resolve(&settings, &llm)?;
+            return Ok((llm, image));
         }
 
         let configured_backend = settings.llm_backend.clone();
@@ -533,25 +569,9 @@ impl Config {
             }
         }
 
-        Ok(cfg)
-    }
+        let image = ImageConfig::resolve(&settings, &cfg)?;
 
-    /// Resolve only the LLM configuration from the current source stack.
-    ///
-    /// This is used by hot reload paths that need the exact owner/admin merge
-    /// semantics from startup without rebuilding unrelated config sections.
-    /// Non-strict mode: applies `resolve_with_fallback`, so an unusable user
-    /// backend downgrades to NearAI at startup instead of crash-looping
-    /// (#2514). Use [`resolve_llm_with_secrets_strict`] for hot-reload paths.
-    pub(crate) async fn resolve_llm_with_secrets(
-        store: Option<&(dyn crate::db::SettingsStore + Sync)>,
-        user_id: &str,
-        toml_path: Option<&std::path::Path>,
-        secrets: Option<&(dyn crate::secrets::SecretsStore + Send + Sync)>,
-        is_operator: bool,
-    ) -> Result<LlmConfig, ConfigError> {
-        Self::resolve_llm_with_secrets_inner(store, user_id, toml_path, secrets, is_operator, false)
-            .await
+        Ok((cfg, image))
     }
 
     /// Resolve LLM configuration for hot reload paths that must fail closed on
@@ -566,8 +586,16 @@ impl Config {
         secrets: Option<&(dyn crate::secrets::SecretsStore + Send + Sync)>,
         is_operator: bool,
     ) -> Result<LlmConfig, ConfigError> {
-        Self::resolve_llm_with_secrets_inner(store, user_id, toml_path, secrets, is_operator, true)
-            .await
+        let settings = Self::load_settings_with_optional_secrets(
+            store,
+            user_id,
+            toml_path,
+            secrets,
+            is_operator,
+            true,
+        )
+        .await?;
+        LlmConfig::resolve(&settings)
     }
 
     /// Build config from settings (shared by from_env and from_db).
@@ -583,11 +611,15 @@ impl Config {
         // handled separately by WorkspacePool.
         let workspace = WorkspaceConfig::resolve(&owner_id)?;
 
+        let llm = LlmConfig::resolve(settings)?;
+        let image = ImageConfig::resolve(settings, &llm)?;
+
         Ok(Self {
             owner_id: owner_id.clone(),
             database: DatabaseConfig::resolve()?,
-            llm: LlmConfig::resolve(settings)?,
+            llm,
             embeddings: EmbeddingsConfig::resolve(settings)?,
+            image,
             tunnel,
             channels,
             agent: AgentConfig::resolve(settings)?,
@@ -729,6 +761,7 @@ pub async fn inject_llm_keys_from_secrets(
     let mut mappings: Vec<(&str, &str)> = vec![
         ("llm_nearai_api_key", "NEARAI_API_KEY"),
         ("llm_anthropic_oauth_token", "ANTHROPIC_OAUTH_TOKEN"),
+        ("image_api_key", "IMAGE_API_KEY"),
     ];
 
     // Dynamically discover secret->env mappings from the provider registry.

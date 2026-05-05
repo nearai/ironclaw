@@ -185,6 +185,10 @@ pub struct Settings {
     #[serde(default)]
     pub embeddings: EmbeddingsSettings,
 
+    /// Image generation, editing, and vision-tool configuration.
+    #[serde(default)]
+    pub image: ImageSettings,
+
     // === Step 6: Channels ===
     /// Tunnel configuration for public webhook endpoints.
     #[serde(default)]
@@ -307,6 +311,41 @@ impl Default for EmbeddingsSettings {
             enabled: false,
             provider: default_embeddings_provider(),
             model: default_embeddings_model(),
+        }
+    }
+}
+
+/// Image generation, editing, and vision-tool configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageSettings {
+    /// Whether image tools are enabled when a usable endpoint is configured.
+    #[serde(default = "default_image_tools_enabled")]
+    pub enabled: bool,
+
+    /// OpenAI-compatible base URL for image and vision tools.
+    #[serde(default)]
+    pub base_url: Option<String>,
+
+    /// Model used by image_generate and image_edit.
+    #[serde(default)]
+    pub model: Option<String>,
+
+    /// Model used by image_analyze.
+    #[serde(default)]
+    pub vision_model: Option<String>,
+}
+
+fn default_image_tools_enabled() -> bool {
+    true
+}
+
+impl Default for ImageSettings {
+    fn default() -> Self {
+        Self {
+            enabled: default_image_tools_enabled(),
+            base_url: None,
+            model: None,
+            vision_model: None,
         }
     }
 }
