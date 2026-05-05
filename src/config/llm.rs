@@ -140,7 +140,11 @@ impl LlmConfig {
             .llm_custom_providers
             .iter()
             .any(|c| c.id == provider.provider_id);
-        let is_ollama = matches!(provider.protocol, ProviderProtocol::Ollama);
+        let api_key_required = if matches!(provider.protocol, ProviderProtocol::Ollama) {
+            false
+        } else {
+            provider.api_key_required
+        };
 
         // Custom providers have no hardcoded base URL in the client layer —
         // an empty `base_url` here means requests will be sent to a bare
@@ -149,9 +153,11 @@ impl LlmConfig {
             return Some("missing base URL");
         }
 
-        // Ollama runs locally and has no API key concept. Every other
-        // provider needs at least one form of authentication.
-        if !is_ollama
+        // Respect the registry's auth policy. Generic OpenAI-compatible
+        // endpoints intentionally allow auth-less localhost/private-network
+        // backends (used by Ollama bridges and the E2E mock LLM), so only
+        // providers that explicitly require credentials should fall back.
+        if api_key_required
             && provider.api_key.is_none()
             && provider.oauth_token.is_none()
             && provider.refresh_token.is_none()
@@ -635,6 +641,7 @@ impl LlmConfig {
         Ok(RegistryProviderConfig {
             protocol,
             provider_id: custom.id.clone(),
+            api_key_required: !matches!(protocol, ProviderProtocol::Ollama),
             api_key,
             base_url,
             model,
@@ -862,6 +869,7 @@ impl LlmConfig {
         Ok(RegistryProviderConfig {
             protocol,
             provider_id: canonical_id.to_string(),
+            api_key_required,
             api_key,
             base_url,
             model,
@@ -2688,6 +2696,62 @@ mod tests {
         let cfg = LlmConfig::resolve_with_fallback(&settings)
             .expect("resolve should succeed via fallback");
         assert_eq!(cfg.backend, "nearai");
+    }
+
+    #[test]
+    fn resolve_does_not_fall_back_for_openai_compatible_without_api_key() {
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("LLM_API_KEY");
+            std::env::remove_var("LLM_BASE_URL");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            openai_compatible_base_url: Some("http://localhost:11434/v1".to_string()),
+            selected_model: Some("mock-model".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve_with_fallback(&settings)
+            .expect("auth-less local openai_compatible endpoint should stay selected");
+        assert_eq!(cfg.backend, "openai_compatible");
+        let provider = cfg.provider.expect("provider config");
+        assert_eq!(provider.provider_id, "openai_compatible");
+        assert!(
+            provider.api_key.is_none(),
+            "local mock endpoints should not require an API key"
+        );
+    }
+
+    #[test]
+    fn resolve_does_not_fall_back_for_unknown_backend_using_openai_compatible_without_api_key() {
+        let _guard = lock_env();
+        clear_openai_compatible_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("LLM_BACKEND", "some_custom_provider");
+            std::env::set_var("LLM_BASE_URL", "http://localhost:8080/v1");
+        }
+
+        let settings = Settings::default();
+        let cfg = LlmConfig::resolve_with_fallback(&settings)
+            .expect("unknown backend should inherit openai_compatible auth policy");
+        assert_eq!(cfg.backend, "openai_compatible");
+        let provider = cfg.provider.expect("provider config");
+        assert_eq!(provider.provider_id, "openai_compatible");
+        assert!(
+            provider.api_key.is_none(),
+            "unknown backend resolved via openai_compatible must not require an API key"
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("LLM_BASE_URL");
+        }
     }
 
     #[test]

@@ -140,6 +140,7 @@ impl GatewayWorkflowHarness {
         config.llm.provider = Some(RegistryProviderConfig {
             protocol: ProviderProtocol::OpenAiCompletions,
             provider_id: "openai_compatible".to_string(),
+            api_key_required: false,
             api_key: Some(SecretString::from("dummy".to_string())),
             base_url: base_url.to_string(),
             model: model.to_string(),

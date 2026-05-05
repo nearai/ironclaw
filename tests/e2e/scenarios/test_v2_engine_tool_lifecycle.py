@@ -207,7 +207,8 @@ async def _wait_for_response(
         turns = last_history.get("turns", [])
         if turns:
             last = turns[-1]
-            debug_info = f"\nLast response: {last.get('response', '')[:200]!r}"
+            last_response = last.get("response")
+            debug_info = f"\nLast response: {repr(last_response)[:200]}"
 
     raise AssertionError(
         f"Timed out waiting for response in thread {thread_id}: "
