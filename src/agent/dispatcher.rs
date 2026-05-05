@@ -20,7 +20,9 @@ use ironclaw_common::ExtensionName;
 use crate::agent::agentic_loop::{
     AgenticLoopConfig, LoopDelegate, LoopOutcome, LoopSignal, TextAction,
 };
-use crate::generated_images::GeneratedImageSentinel;
+use crate::generated_images::{
+    GeneratedImageSentinel, image_tool_event_id, persist_sentinel_image_artifact,
+};
 use crate::llm::{ChatMessage, Reasoning, ReasoningContext, TokenUsage};
 use crate::tools::permissions::{PermissionState, effective_permission};
 use crate::tools::redact_params;
@@ -269,11 +271,20 @@ impl Agent {
         let force_text_at = max_tool_iterations;
         let nudge_at = max_tool_iterations.saturating_sub(1);
 
+        let turn_number = {
+            let sess = session.lock().await;
+            sess.threads
+                .get(&thread_id)
+                .and_then(|thread| thread.turns.last().map(|turn| turn.turn_number))
+                .unwrap_or_default()
+        };
+
         let delegate = ChatDelegate {
             agent: self,
             tenant,
             session: session.clone(),
             thread_id,
+            turn_number,
             message,
             job_ctx,
             active_skills,
@@ -388,6 +399,7 @@ struct ChatDelegate<'a> {
     tenant: crate::tenant::TenantCtx,
     session: Arc<Mutex<Session>>,
     thread_id: Uuid,
+    turn_number: usize,
     message: &'a IncomingMessage,
     job_ctx: JobContext,
     active_skills: Vec<ironclaw_skills::LoadedSkill>,
@@ -1150,7 +1162,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     reason_ctx.messages.push(tool_message);
                 }
                 PreflightOutcome::Runnable => {
-                    let tool_result = exec_results[pf_idx].take().unwrap_or_else(|| {
+                    let mut tool_result = exec_results[pf_idx].take().unwrap_or_else(|| {
                         Err(crate::error::ToolError::ExecutionFailed {
                             name: tc.name.clone(),
                             reason: "No result available".to_string(),
@@ -1158,39 +1170,20 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         .into())
                     });
 
-                    // Detect image generation sentinel
-                    let image_sentinel = if let Ok(ref output) = tool_result
-                        && matches!(tc.name.as_str(), "image_generate" | "image_edit")
-                    {
-                        if let Some(sentinel) = GeneratedImageSentinel::from_output(output) {
-                            let data_url = sentinel.data_url().unwrap_or_default().to_string();
-                            let path = sentinel.path().map(String::from);
-                            if data_url.is_empty() {
-                                tracing::warn!(
-                                    "Image generation sentinel has empty data URL, skipping broadcast"
-                                );
-                            } else {
-                                let _ = self
-                                    .agent
-                                    .channels
-                                    .send_status(
-                                        &self.message.channel,
-                                        StatusUpdate::ImageGenerated {
-                                            event_id: tc.id.clone(),
-                                            data_url,
-                                            path,
-                                        },
-                                        &self.message.metadata,
-                                    )
-                                    .await;
-                            }
-                            Some(sentinel)
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    };
+                    let image_sentinel = enrich_image_tool_result(
+                        ImageToolResultContext::new(
+                            &self.agent.channels,
+                            &self.message.channel,
+                            &self.message.metadata,
+                            &self.message.user_id,
+                            self.thread_id,
+                            self.turn_number,
+                        ),
+                        &tc.name,
+                        &tc.id,
+                        &mut tool_result,
+                    )
+                    .await;
 
                     // Send ToolResult preview
                     if image_sentinel.is_none()
@@ -1774,7 +1767,117 @@ pub(crate) fn strip_suggestions(text: &str) -> String {
     extract_suggestions(text).0
 }
 
-fn image_generation_summary_tool_message(
+pub(super) struct ImageToolResultContext<'a> {
+    channels: &'a ChannelManager,
+    channel: &'a str,
+    metadata: &'a serde_json::Value,
+    user_id: &'a str,
+    thread_id: Uuid,
+    turn_number: usize,
+    artifact_root: Option<&'a std::path::Path>,
+}
+
+impl<'a> ImageToolResultContext<'a> {
+    pub(super) fn new(
+        channels: &'a ChannelManager,
+        channel: &'a str,
+        metadata: &'a serde_json::Value,
+        user_id: &'a str,
+        thread_id: Uuid,
+        turn_number: usize,
+    ) -> Self {
+        Self {
+            channels,
+            channel,
+            metadata,
+            user_id,
+            thread_id,
+            turn_number,
+            artifact_root: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_artifact_root(mut self, artifact_root: &'a std::path::Path) -> Self {
+        self.artifact_root = Some(artifact_root);
+        self
+    }
+}
+
+pub(super) async fn enrich_image_tool_result(
+    ctx: ImageToolResultContext<'_>,
+    tool_name: &str,
+    tool_call_id: &str,
+    tool_result: &mut Result<String, Error>,
+) -> Option<GeneratedImageSentinel> {
+    if !matches!(tool_name, "image_generate" | "image_edit") {
+        return None;
+    }
+    let Ok(output) = tool_result.as_ref() else {
+        return None;
+    };
+    let event_id = image_tool_event_id(ctx.turn_number, tool_call_id);
+    let sentinel = GeneratedImageSentinel::from_output(output)?.with_event_id(event_id.clone());
+    let data_url = sentinel.data_url().unwrap_or_default().to_string();
+    let enriched = match persist_sentinel_image_artifact(
+        ctx.artifact_root,
+        &sentinel,
+        ctx.user_id,
+        ctx.thread_id,
+        &event_id,
+    )
+    .await
+    {
+        Ok(enriched) => enriched,
+        Err(err) => {
+            tracing::warn!(
+                tool = %tool_name,
+                tool_call_id = %tool_call_id,
+                error = %err,
+                "Failed to persist generated image artifact"
+            );
+            sentinel
+        }
+    };
+
+    if let Some(data_url) = (!data_url.is_empty()).then_some(data_url) {
+        let mut status_metadata = match ctx.metadata.clone() {
+            serde_json::Value::Object(map) => serde_json::Value::Object(map),
+            _ => serde_json::json!({}),
+        };
+        if let Some(object) = status_metadata.as_object_mut() {
+            object.insert("user_id".to_string(), serde_json::json!(ctx.user_id));
+            object.insert(
+                "thread_id".to_string(),
+                serde_json::json!(ctx.thread_id.to_string()),
+            );
+        }
+
+        let _ = ctx
+            .channels
+            .send_status(
+                ctx.channel,
+                StatusUpdate::ImageGenerated {
+                    event_id,
+                    data_url,
+                    path: enriched.path().map(String::from),
+                },
+                &status_metadata,
+            )
+            .await;
+    } else {
+        tracing::warn!(
+            tool = %tool_name,
+            tool_call_id = %tool_call_id,
+            "Image generation sentinel has empty data URL, skipping broadcast"
+        );
+    }
+
+    *tool_result = Ok(enriched.value.to_string());
+    Some(enriched)
+}
+
+pub(super) fn image_generation_summary_tool_message(
     safety: &ironclaw_safety::SafetyLayer,
     tool_name: &str,
     tool_call_id: &str,
@@ -1803,13 +1906,13 @@ fn image_generation_summary_tool_message(
     ChatMessage::tool_result(tool_call_id, tool_name, content)
 }
 
-fn image_generation_record_content(sentinel: &GeneratedImageSentinel) -> String {
+pub(super) fn image_generation_record_content(sentinel: &GeneratedImageSentinel) -> String {
     sentinel.record_content_for_thread_state()
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex as StdMutex};
     use std::time::Duration;
 
     use async_trait::async_trait;
@@ -1818,9 +1921,12 @@ mod tests {
     use crate::agent::agent_loop::{Agent, AgentDeps};
     use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
     use crate::agent::session::Session;
-    use crate::channels::ChannelManager;
+    use crate::channels::{
+        Channel, ChannelManager, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
+    };
     use crate::config::{AgentConfig, SafetyConfig, SkillsConfig};
     use crate::context::{ContextManager, JobContext};
+    use crate::error::ChannelError;
     use crate::error::Error;
     use crate::hooks::HookRegistry;
     use crate::llm::{
@@ -2059,6 +2165,46 @@ mod tests {
 
         fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
             ApprovalRequirement::UnlessAutoApproved
+        }
+    }
+
+    struct StatusCaptureChannel {
+        name: String,
+        statuses: Arc<StdMutex<Vec<(StatusUpdate, serde_json::Value)>>>,
+    }
+
+    #[async_trait]
+    impl Channel for StatusCaptureChannel {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        async fn start(&self) -> Result<MessageStream, ChannelError> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        async fn respond(
+            &self,
+            _msg: &IncomingMessage,
+            _response: OutgoingResponse,
+        ) -> Result<(), ChannelError> {
+            Ok(())
+        }
+
+        async fn send_status(
+            &self,
+            status: StatusUpdate,
+            metadata: &serde_json::Value,
+        ) -> Result<(), ChannelError> {
+            self.statuses
+                .lock()
+                .expect("statuses mutex")
+                .push((status, metadata.clone()));
+            Ok(())
+        }
+
+        async fn health_check(&self) -> Result<(), ChannelError> {
+            Ok(())
         }
     }
 
@@ -3999,6 +4145,70 @@ mod tests {
         assert!(!message.content.contains("data:image"));
         assert!(message.content.contains("\"type\":\"image_generated\""));
         assert!(message.content.contains("\"media_type\":\"image/png\""));
+    }
+
+    #[tokio::test]
+    async fn test_enrich_image_tool_result_persists_path_and_emits_status() {
+        use base64::Engine as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let statuses = Arc::new(StdMutex::new(Vec::new()));
+        let manager = ChannelManager::new();
+        manager
+            .add(Box::new(StatusCaptureChannel {
+                name: "test".to_string(),
+                statuses: Arc::clone(&statuses),
+            }))
+            .await;
+        let data_url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(b"png-bytes")
+        );
+        let mut tool_result = Ok(serde_json::json!({
+            "type": "image_generated",
+            "data": data_url,
+            "media_type": "image/png",
+        })
+        .to_string());
+
+        let thread_id = uuid::Uuid::new_v4();
+        let metadata = serde_json::json!({
+            "chat_type": "direct",
+            "user_id": "untrusted-user",
+            "thread_id": "untrusted-thread",
+        });
+        let sentinel = super::enrich_image_tool_result(
+            super::ImageToolResultContext::new(
+                &manager,
+                "test",
+                &metadata,
+                "test-user",
+                thread_id,
+                42,
+            )
+            .with_artifact_root(dir.path()),
+            "image_generate",
+            "call_img_0",
+            &mut tool_result,
+        )
+        .await
+        .expect("sentinel");
+
+        let path = sentinel.path().expect("path");
+        assert_eq!(tokio::fs::read(path).await.expect("read"), b"png-bytes");
+        assert!(tool_result.expect("tool result").contains("\"path\""));
+        let expected_thread_id = thread_id.to_string();
+        let statuses = statuses.lock().expect("statuses mutex");
+        assert!(matches!(
+            statuses.as_slice(),
+            [(StatusUpdate::ImageGenerated { event_id, data_url, path: Some(status_path) }, status_metadata)]
+                if event_id == "turn-42-call_img_0"
+                    && data_url.starts_with("data:image/png;base64,")
+                    && status_path == path
+                    && status_metadata.get("thread_id").and_then(|v| v.as_str()) == Some(expected_thread_id.as_str())
+                    && status_metadata.get("user_id").and_then(|v| v.as_str()) == Some("test-user")
+                    && status_metadata.get("chat_type").and_then(|v| v.as_str()) == Some("direct")
+        ));
     }
 
     #[test]

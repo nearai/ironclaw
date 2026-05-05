@@ -23,6 +23,15 @@ pub fn augment_with_attachments(
     content: &str,
     attachments: &[IncomingAttachment],
 ) -> Option<AugmentResult> {
+    augment_with_attachment_local_paths(content, attachments, &[])
+}
+
+/// Process attachments with caller-provided local path overrides.
+pub fn augment_with_attachment_local_paths(
+    content: &str,
+    attachments: &[IncomingAttachment],
+    local_paths: &[Option<String>],
+) -> Option<AugmentResult> {
     if attachments.is_empty() {
         return None;
     }
@@ -34,7 +43,11 @@ pub fn augment_with_attachments(
 
     for (i, att) in attachments.iter().enumerate() {
         text.push('\n');
-        text.push_str(&format_attachment(i + 1, att));
+        let local_path = local_paths
+            .get(i)
+            .and_then(|path| path.as_deref())
+            .or(att.local_path.as_deref());
+        text.push_str(&format_attachment(i + 1, att, local_path));
 
         // Build multimodal image part when image data is available
         if att.kind == AttachmentKind::Image && !att.data.is_empty() {
@@ -68,12 +81,10 @@ fn escape_xml_text(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
-fn format_attachment(index: usize, att: &IncomingAttachment) -> String {
+fn format_attachment(index: usize, att: &IncomingAttachment, local_path: Option<&str>) -> String {
     let filename = escape_xml_attr(att.filename.as_deref().unwrap_or("unknown"));
     let mime = escape_xml_attr(&att.mime_type);
-    let project_path_attr = att
-        .local_path
-        .as_deref()
+    let project_path_attr = local_path
         .map(|path| format!(" project_path=\"{}\"", escape_xml_attr(path)))
         .unwrap_or_default();
 
@@ -89,7 +100,7 @@ fn format_attachment(index: usize, att: &IncomingAttachment) -> String {
                 .unwrap_or_default();
 
             let body = format_attachment_body(
-                att.local_path.as_deref(),
+                local_path,
                 match &att.extracted_text {
                     Some(text) => format!("Transcript: {}", escape_xml_text(text)),
                     None => "Audio transcript unavailable.".to_string(),
@@ -108,23 +119,16 @@ fn format_attachment(index: usize, att: &IncomingAttachment) -> String {
                 .map(|s| format!(" size=\"{}\"", format_size(s)))
                 .unwrap_or_default();
 
-            // Pick the right prompt for the agent based on whether the
-            // image bytes reached the model. Engine v2 persists the file to
-            // disk but leaves `data` populated so `augment_with_attachments`
-            // can emit a multimodal `image_parts` entry — that's the path
-            // that actually sends the image to the LLM. An empty `data`
-            // with a `local_path` set can only happen if a downstream
-            // caller cleared the buffer (or if the channel elided it); in
-            // that case the model doesn't see the pixels and must go
-            // through the project file path instead.
-            let body = if !att.data.is_empty() {
-                "[Image attached — you can already see this image directly in the conversation. Do NOT use image_analyze or try to find this file on disk — it exists only in memory. Analyze it using your vision capabilities.]"
-            } else if att.local_path.is_some() {
+            let body = if !att.data.is_empty() && local_path.is_some() {
+                "[Image attached — you can already see this image directly in the conversation. If the user asks to edit it, use image_edit with the saved project file path above as image_path.]"
+            } else if !att.data.is_empty() {
+                "[Image attached — you can already see this image directly in the conversation. No editable file path is available in this turn; analyze it using your vision capabilities.]"
+            } else if local_path.is_some() {
                 "[Image attached — the raw bytes are not in this turn's multimodal context, but the file has been persisted at the project file path above. Reference that path when you need the image.]"
             } else {
                 "[Image attached — visual content not available in this conversation.]"
             };
-            let body = format_attachment_body(att.local_path.as_deref(), body.to_string());
+            let body = format_attachment_body(local_path, body.to_string());
 
             format!(
                 "<attachment index=\"{index}\" type=\"image\" filename=\"{filename}\" mime=\"{mime}\"{project_path_attr}{size_attr}>\n\
@@ -134,16 +138,14 @@ fn format_attachment(index: usize, att: &IncomingAttachment) -> String {
         }
         AttachmentKind::Document => {
             let body: String = match &att.extracted_text {
-                Some(text) => {
-                    format_attachment_body(att.local_path.as_deref(), escape_xml_text(text))
-                }
+                Some(text) => format_attachment_body(local_path, escape_xml_text(text)),
                 None => {
                     let size_info = att
                         .size_bytes
                         .map(|s| format!(" size=\"{}\"", format_size(s)))
                         .unwrap_or_default();
                     let body = format_attachment_body(
-                        att.local_path.as_deref(),
+                        local_path,
                         "[Document attached — text extraction unavailable]".to_string(),
                     );
                     return format!(
@@ -286,6 +288,50 @@ mod tests {
             }
             other => panic!("Expected ImageUrl, got: {:?}", other),
         }
+    }
+
+    #[test]
+    fn image_with_data_and_project_path_mentions_image_edit_path() {
+        let mut att = make_attachment(AttachmentKind::Image);
+        att.filename = Some("photo.png".to_string());
+        att.mime_type = "image/png".to_string();
+        att.local_path = Some("/tmp/photo.png".to_string());
+        att.data = vec![0x89, 0x50, 0x4E, 0x47];
+
+        let result = augment_with_attachments("edit this", &[att]).unwrap();
+
+        assert!(
+            result
+                .text
+                .contains("Saved to project file: /tmp/photo.png")
+        );
+        assert!(result.text.contains("use image_edit"));
+        assert!(result.text.contains("image_path"));
+        assert_eq!(result.image_parts.len(), 1);
+    }
+
+    #[test]
+    fn image_local_path_override_mentions_image_edit_path() {
+        let mut att = make_attachment(AttachmentKind::Image);
+        att.filename = Some("photo.png".to_string());
+        att.mime_type = "image/png".to_string();
+        att.data = vec![0x89, 0x50, 0x4E, 0x47];
+
+        let result = augment_with_attachment_local_paths(
+            "edit this",
+            std::slice::from_ref(&att),
+            &[Some("/tmp/persisted-photo.png".to_string())],
+        )
+        .unwrap();
+
+        assert!(att.local_path.is_none());
+        assert!(
+            result
+                .text
+                .contains("Saved to project file: /tmp/persisted-photo.png")
+        );
+        assert!(result.text.contains("use image_edit"));
+        assert_eq!(result.image_parts.len(), 1);
     }
 
     #[test]

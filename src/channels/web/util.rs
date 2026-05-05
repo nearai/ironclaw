@@ -456,18 +456,28 @@ fn generated_image_event_id(
     turn_number: usize,
     result_index: usize,
     preferred_id: Option<&str>,
+    sentinel: &GeneratedImageSentinel,
 ) -> String {
-    preferred_id
+    sentinel
+        .event_id()
         .filter(|id| !id.is_empty())
         .map(str::to_string)
+        .or_else(|| {
+            preferred_id
+                .filter(|id| !id.is_empty())
+                .map(|id| crate::generated_images::image_tool_event_id(turn_number, id))
+        })
         .unwrap_or_else(|| format!("turn-{turn_number}-image-{result_index}"))
 }
 
 fn parse_image_generated_sentinel_from_value(
     value: &serde_json::Value,
-    event_id: String,
+    turn_number: usize,
+    result_index: usize,
+    preferred_id: Option<&str>,
 ) -> Option<GeneratedImageInfo> {
     let sentinel = GeneratedImageSentinel::from_value(value)?;
+    let event_id = generated_image_event_id(turn_number, result_index, preferred_id, &sentinel);
     let data_url = sentinel
         .data_url()
         .filter(|data_url| !data_url.is_empty())
@@ -488,10 +498,7 @@ pub fn collect_generated_images_from_tool_results<'a>(
         .into_iter()
         .enumerate()
         .filter_map(|(result_index, (event_id, result))| {
-            parse_image_generated_sentinel_from_value(
-                result?,
-                generated_image_event_id(turn_number, result_index, event_id),
-            )
+            parse_image_generated_sentinel_from_value(result?, turn_number, result_index, event_id)
         })
         .collect()
 }
@@ -962,7 +969,7 @@ mod tests {
         );
 
         assert_eq!(images.len(), 1);
-        assert_eq!(images[0].event_id, "call_img_1");
+        assert_eq!(images[0].event_id, "turn-7-call_img_1");
         assert_eq!(
             images[0].data_url.as_deref(),
             Some("data:image/jpeg;base64,abc123")
@@ -1035,7 +1042,7 @@ mod tests {
             collect_generated_images_from_tool_results(4, [(Some("call_img_3"), Some(&sentinel))]);
 
         assert_eq!(images.len(), 1);
-        assert_eq!(images[0].event_id, "call_img_3");
+        assert_eq!(images[0].event_id, "turn-4-call_img_3");
         assert!(images[0].data_url.is_none());
         assert_eq!(images[0].path.as_deref(), Some("/tmp/cat.png"));
     }
@@ -1080,11 +1087,58 @@ mod tests {
         let turns = build_turns_from_db_messages(&messages);
 
         assert_eq!(turns.len(), 2);
-        assert_eq!(turns[0].generated_images[0].event_id, "call_turn_1");
-        assert_eq!(turns[1].generated_images[0].event_id, "call_turn_2");
+        assert_eq!(turns[0].generated_images[0].event_id, "turn-0-call_turn_1");
+        assert_eq!(turns[1].generated_images[0].event_id, "turn-1-call_turn_2");
         assert_ne!(
             turns[0].generated_images[0].event_id,
             turns[1].generated_images[0].event_id
+        );
+    }
+
+    #[test]
+    fn test_build_turns_scopes_reused_image_tool_call_ids_by_turn() {
+        let shared_tool_id = "00000001B";
+        let turn_one_calls = serde_json::json!({
+            "calls": [{
+                "name": "image_generate",
+                "tool_call_id": shared_tool_id,
+                "result_preview": "Generated image",
+                "result": serde_json::json!({
+                    "type": "image_generated",
+                    "data": "data:image/png;base64,original",
+                    "media_type": "image/png"
+                }).to_string()
+            }]
+        });
+        let turn_two_calls = serde_json::json!({
+            "calls": [{
+                "name": "image_edit",
+                "tool_call_id": shared_tool_id,
+                "result_preview": "Generated image",
+                "result": serde_json::json!({
+                    "type": "image_generated",
+                    "data": "data:image/png;base64,edited",
+                    "media_type": "image/png"
+                }).to_string()
+            }]
+        });
+        let messages = vec![
+            make_msg("user", "Draw one", 0),
+            make_msg("tool_calls", &turn_one_calls.to_string(), 500),
+            make_msg("assistant", "Done", 1000),
+            make_msg("user", "Edit it", 2000),
+            make_msg("tool_calls", &turn_two_calls.to_string(), 2500),
+            make_msg("assistant", "Done again", 3000),
+        ];
+
+        let turns = build_turns_from_db_messages(&messages);
+
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].generated_images[0].event_id, "turn-0-00000001B");
+        assert_eq!(turns[1].generated_images[0].event_id, "turn-1-00000001B");
+        assert_eq!(
+            turns[1].generated_images[0].data_url.as_deref(),
+            Some("data:image/png;base64,edited")
         );
     }
 
