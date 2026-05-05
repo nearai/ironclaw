@@ -32,6 +32,33 @@ pub enum ChannelsCommand {
         #[arg(long)]
         json: bool,
     },
+
+    /// Install IronClaw into a workspace channel (currently: `slack`).
+    ///
+    /// Prints the Slack app manifest to upload at api.slack.com/apps,
+    /// persists the workspace identity, and prints the slash-command
+    /// target URL the installer pastes into the Slack app config.
+    ///
+    /// Example: `ironclaw channels install slack T0XXXX --base-url https://ironclaw.example.com`
+    Install {
+        /// Channel name. Currently only `slack` is supported.
+        #[arg(required = true)]
+        channel: String,
+
+        /// Slack workspace/team id (`T…`) or Enterprise Grid id (`E…`).
+        #[arg(required = true)]
+        workspace_id: String,
+
+        /// Public HTTPS origin Slack will reach for events, slash commands,
+        /// and the OAuth install callback. No trailing slash required.
+        #[arg(long)]
+        base_url: String,
+
+        /// Emit only the manifest JSON to stdout (for piping into `jq` or
+        /// saving). Suppresses the "next steps" banner.
+        #[arg(long, default_value_t = false)]
+        manifest_only: bool,
+    },
 }
 
 /// Run the channels CLI subcommand.
@@ -45,7 +72,133 @@ pub async fn run_channels_command(
 
     match cmd {
         ChannelsCommand::List { verbose, json } => cmd_list(&config.channels, verbose, json).await,
+        ChannelsCommand::Install {
+            channel,
+            workspace_id,
+            base_url,
+            manifest_only,
+        } => {
+            // Only `slack` lands in this commit. `telegram`/`signal` go through
+            // the existing onboard wizard and don't yet have a workspace-scoped
+            // install path. Reject other channel names so callers get a clear
+            // error rather than a silently-wrong manifest.
+            let channel_norm = channel.to_ascii_lowercase();
+            if channel_norm != "slack" {
+                anyhow::bail!(
+                    "install: channel '{channel}' is not supported. Currently only 'slack' \
+                     supports `channels install`; other channels are configured via \
+                     `ironclaw onboard --step channels`."
+                );
+            }
+            cmd_install_slack(&config, &workspace_id, &base_url, manifest_only).await
+        }
     }
+}
+
+/// Install the Slack channel for a workspace.
+///
+/// Workflow:
+///   1. Ensure the deployment owner user row exists (FK requirement on
+///      `channel_identities.owner_id`).
+///   2. Idempotently upsert `(channel='slack', external_id=workspace_id,
+///      owner_id=deployment_owner)` into `channel_identities`.
+///   3. Generate the Slack app manifest with minimal scopes.
+///   4. Print operator-facing instructions: upload manifest, complete OAuth,
+///      paste the slash-command URL into the Slack app config.
+///
+/// `--manifest-only` short-circuits steps (1)-(2) and emits only the JSON,
+/// for piping into another tool.
+async fn cmd_install_slack(
+    config: &crate::config::Config,
+    workspace_id: &str,
+    base_url: &str,
+    manifest_only: bool,
+) -> anyhow::Result<()> {
+    use crate::channels::slack::{generate_manifest, manifest::slash_command_url};
+
+    let workspace_id = workspace_id.trim();
+    if workspace_id.is_empty() {
+        anyhow::bail!("install slack: workspace_id is required");
+    }
+    // Slack team ids start with `T`, Enterprise Grid ids with `E`. Catch the
+    // "ABC123" / numeric typo before we write a junk row to the DB.
+    let first = workspace_id.chars().next().unwrap_or('?');
+    if first != 'T' && first != 'E' {
+        anyhow::bail!(
+            "install slack: workspace_id '{workspace_id}' does not look like a Slack \
+             team id (expected `T…`) or Enterprise Grid id (expected `E…`)"
+        );
+    }
+
+    let manifest = generate_manifest(base_url);
+    let manifest_json = serde_json::to_string_pretty(&manifest)
+        .map_err(|e| anyhow::anyhow!("failed to serialize manifest: {e}"))?;
+
+    if manifest_only {
+        println!("{manifest_json}");
+        return Ok(());
+    }
+
+    // Persist workspace identity. Mirror the pairing CLI's approach: ensure
+    // the deployment-owner user row exists first (FK on channel_identities).
+    let db = crate::db::connect_from_config(&config.database)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to connect to database: {e}"))?;
+
+    db.get_or_create_user(crate::db::UserRecord {
+        id: config.owner_id.clone(),
+        role: crate::ownership::UserRole::Owner.as_db_role().to_string(),
+        display_name: "Owner".to_string(),
+        status: "active".to_string(),
+        email: None,
+        last_login_at: None,
+        created_by: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        metadata: serde_json::Value::Object(Default::default()),
+    })
+    .await
+    .ok();
+
+    let was_new = db
+        .upsert_channel_identity("slack", workspace_id, &config.owner_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to persist workspace identity: {e}"))?;
+
+    let slash_url = slash_command_url(base_url);
+    let install_url = format!(
+        "{}/auth/slack/install/callback",
+        base_url.trim_end_matches('/')
+    );
+
+    println!("Slack workspace install for {workspace_id}");
+    println!(
+        "  identity:    {}",
+        if was_new {
+            "registered (new)"
+        } else {
+            "already registered (owner refreshed)"
+        }
+    );
+    println!("  owner:       {}", config.owner_id);
+    println!();
+    println!("Next steps:");
+    println!("  1. Open https://api.slack.com/apps?new_app=1 and choose \"From an app manifest\".");
+    println!("  2. Paste the manifest below into the workspace of your choice.");
+    println!(
+        "  3. After Slack creates the app, install it. Slack will redirect to:\n     {install_url}"
+    );
+    println!("  4. The bot token will be captured by the redirect handler. Subsequent");
+    println!("     follow-up commits on this branch land the slash-command surface and");
+    println!("     audit log; this commit ships the install path only.");
+    println!();
+    println!("Slash-command URL (paste into Slack app config):");
+    println!("  {slash_url}");
+    println!();
+    println!("Manifest JSON:");
+    println!("{manifest_json}");
+
+    Ok(())
 }
 
 /// Channel entry for display.

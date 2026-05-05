@@ -462,6 +462,78 @@ impl ChannelPairingStore for LibSqlBackend {
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(())
     }
+
+    async fn upsert_channel_identity(
+        &self,
+        channel: &str,
+        external_id: &str,
+        owner_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        let channel = crate::pairing::normalize_channel_name(channel);
+        let conn = self.connect().await?;
+
+        // SELECT-then-INSERT/UPDATE so we can report inserted-vs-updated to
+        // the operator. Wrapped in IMMEDIATE so a concurrent install of the
+        // same workspace can't race us into a duplicate row.
+        conn.execute("BEGIN IMMEDIATE", ())
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let result = async {
+            let mut rows = conn
+                .query(
+                    "SELECT owner_id FROM channel_identities
+                     WHERE channel = ?1 AND external_id = ?2 LIMIT 1",
+                    params![channel.as_str(), external_id],
+                )
+                .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            let existing = rows
+                .next()
+                .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+            if existing.is_some() {
+                conn.execute(
+                    "UPDATE channel_identities SET owner_id = ?1
+                     WHERE channel = ?2 AND external_id = ?3",
+                    params![owner_id, channel.as_str(), external_id],
+                )
+                .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+                Ok::<bool, DatabaseError>(false)
+            } else {
+                let identity_id = uuid::Uuid::new_v4().to_string();
+                conn.execute(
+                    "INSERT INTO channel_identities (id, owner_id, channel, external_id)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        identity_id.as_str(),
+                        owner_id,
+                        channel.as_str(),
+                        external_id
+                    ],
+                )
+                .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+                Ok(true)
+            }
+        }
+        .await;
+
+        match result {
+            Ok(was_new) => {
+                conn.execute("COMMIT", ())
+                    .await
+                    .map_err(|e| DatabaseError::Query(e.to_string()))?;
+                Ok(was_new)
+            }
+            Err(e) => {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                Err(e)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
