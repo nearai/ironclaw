@@ -417,7 +417,7 @@ async fn async_main() -> anyhow::Result<()> {
     // ── Phase 1-5: Build all core components via AppBuilder ────────────
 
     let flags = AppBuilderFlags { no_db: cli.no_db };
-    let components = AppBuilder::new(
+    let mut components = AppBuilder::new(
         config,
         flags,
         toml_path.map(std::path::PathBuf::from),
@@ -1522,6 +1522,9 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Signal background tasks (SIGHUP handler, etc.) to gracefully shut down
     let _ = shutdown_tx.send(());
+
+    // Stop app-level background tasks tied to AppComponents, such as startup MCP retries.
+    components.background_tasks.shutdown().await;
 
     // Shut down all stdio MCP server child processes.
     components.mcp_process_manager.shutdown_all().await;

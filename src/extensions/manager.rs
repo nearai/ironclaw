@@ -2865,7 +2865,7 @@ impl ExtensionManager {
     /// `provider_extension_for_tool()` returns the normalized form, so
     /// callers like `ensure_extension_ready → activate_mcp` may pass
     /// `my_server` when the persisted config is keyed as `my-server`.
-    async fn get_mcp_server(
+    pub(crate) async fn get_mcp_server(
         &self,
         name: &str,
         user_id: &str,
@@ -2882,7 +2882,7 @@ impl ExtensionManager {
             return Ok(config.clone());
         }
         // Try normalized alias (hyphens → underscores)
-        let underscore_alias = name.replace('-', "_");
+        let underscore_alias = crate::tools::mcp::normalize_server_name(name);
         if underscore_alias != name
             && let Some(config) = servers.get(&underscore_alias)
         {
@@ -5495,7 +5495,7 @@ impl ExtensionManager {
         ))
     }
 
-    async fn activate_mcp(
+    pub(crate) async fn activate_mcp(
         &self,
         name: &str,
         user_id: &str,

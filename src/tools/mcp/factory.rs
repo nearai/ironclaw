@@ -10,7 +10,9 @@ use ironclaw_common::McpServerName;
 use crate::secrets::SecretsStore;
 use crate::tools::mcp::config::{EffectiveTransport, McpServerConfig};
 use crate::tools::mcp::http_transport::HttpMcpTransport;
-use crate::tools::mcp::{McpClient, McpProcessManager, McpSessionManager, McpTransport};
+use crate::tools::mcp::{
+    McpClient, McpProcessManager, McpSessionManager, McpTransport, normalize_server_name,
+};
 
 /// Error returned when MCP client creation fails.
 #[derive(Debug, thiserror::Error)]
@@ -39,7 +41,7 @@ pub async fn create_client_from_config(
     // tool prefixes.  This must happen before any branch so that the OAuth
     // early-return via `McpClient::new_authenticated(server, ..)` also
     // receives the normalised name.
-    server.name = server.name.replace('-', "_");
+    server.name = normalize_server_name(&server.name);
     let server_name = server.name.clone();
 
     // Re-validate through `McpServerName::new` so a malformed name (e.g.
