@@ -8,8 +8,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_wasm::{
     WasmHostError, WasmHostHttp, WasmHttpRequest, WasmRuntimeCredentialProvider,
-    WasmRuntimeCredentialRequest, WasmRuntimeHttpAdapter, WasmStagedRuntimeCredential,
-    WasmStagedRuntimeCredentials,
+    WasmRuntimeCredentialRequest, WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder,
+    WasmStagedRuntimeCredential, WasmStagedRuntimeCredentials,
 };
 use serde_json::{Value, json};
 
@@ -536,6 +536,79 @@ fn wasm_runtime_http_adapter_redacts_credential_provider_errors() {
     assert!(!rendered.contains("sk-test-secret"));
 }
 
+#[test]
+fn wasm_runtime_http_adapter_discards_staged_policy_on_pre_egress_request_failure() {
+    let egress = RecordingRuntimeEgress::ok(RuntimeHttpEgressResponse {
+        status: 200,
+        headers: vec![],
+        body: b"ok".to_vec(),
+        request_bytes: 0,
+        response_bytes: 2,
+        redaction_applied: false,
+    });
+    let discarder = Arc::new(RecordingPolicyDiscarder::default());
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let adapter = WasmRuntimeHttpAdapter::new(
+        Arc::new(egress.clone()),
+        scope.clone(),
+        capability_id.clone(),
+        sample_policy(),
+    )
+    .with_policy_discarder(discarder.clone());
+
+    let error = adapter
+        .request(WasmHttpRequest {
+            method: "TRACE".to_string(),
+            url: "https://wasm-api.example.test/run".to_string(),
+            headers_json: "{}".to_string(),
+            body: None,
+            timeout_ms: Some(1000),
+        })
+        .expect_err("unsupported methods should fail before shared egress");
+
+    assert!(matches!(error, WasmHostError::Denied(_)));
+    assert!(egress.requests.lock().unwrap().is_empty());
+    assert_eq!(discarder.discards(), vec![(scope, capability_id)]);
+}
+
+#[test]
+fn wasm_runtime_http_adapter_discards_staged_policy_on_credential_provider_failure() {
+    let egress = RecordingRuntimeEgress::ok(RuntimeHttpEgressResponse {
+        status: 200,
+        headers: vec![],
+        body: b"ok".to_vec(),
+        request_bytes: 0,
+        response_bytes: 2,
+        redaction_applied: false,
+    });
+    let discarder = Arc::new(RecordingPolicyDiscarder::default());
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let adapter = WasmRuntimeHttpAdapter::new(
+        Arc::new(egress.clone()),
+        scope.clone(),
+        capability_id.clone(),
+        sample_policy(),
+    )
+    .with_policy_discarder(discarder.clone())
+    .with_credential_provider(Arc::new(FailingCredentialProvider));
+
+    let error = adapter
+        .request(WasmHttpRequest {
+            method: "GET".to_string(),
+            url: "https://wasm-api.example.test/run".to_string(),
+            headers_json: "{}".to_string(),
+            body: None,
+            timeout_ms: Some(1000),
+        })
+        .expect_err("credential provider failures should fail before shared egress");
+
+    assert!(matches!(error, WasmHostError::Unavailable(_)));
+    assert!(egress.requests.lock().unwrap().is_empty());
+    assert_eq!(discarder.discards(), vec![(scope, capability_id)]);
+}
+
 #[derive(Clone)]
 struct RecordingRuntimeEgress {
     response: Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError>,
@@ -565,6 +638,26 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
         self.requests.lock().unwrap().push(request);
         self.response.clone()
+    }
+}
+
+#[derive(Debug, Default)]
+struct RecordingPolicyDiscarder {
+    discards: Mutex<Vec<(ResourceScope, CapabilityId)>>,
+}
+
+impl RecordingPolicyDiscarder {
+    fn discards(&self) -> Vec<(ResourceScope, CapabilityId)> {
+        self.discards.lock().unwrap().clone()
+    }
+}
+
+impl WasmRuntimePolicyDiscarder for RecordingPolicyDiscarder {
+    fn discard(&self, scope: &ResourceScope, capability_id: &CapabilityId) {
+        self.discards
+            .lock()
+            .unwrap()
+            .push((scope.clone(), capability_id.clone()));
     }
 }
 
