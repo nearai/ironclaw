@@ -22,7 +22,7 @@ use crate::tools::builtin::{
     PlanUpdateTool, PromptQueue, ReadFileTool, ShellTool, SkillInstallTool, SkillListTool,
     SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool,
     ToolListTool, ToolPermissionSetTool, ToolRemoveTool, ToolSearchTool, ToolUpgradeTool,
-    WriteFileTool, shared_file_history, shared_read_file_state,
+    WebFetchTool, WriteFileTool, shared_file_history, shared_read_file_state,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{
@@ -138,6 +138,8 @@ pub struct ToolRegistry {
     rate_limiter: RateLimiter,
     /// Optional HTTP interceptor propagated into registered WASM wrappers.
     http_interceptor: Option<Arc<dyn HttpInterceptor>>,
+    /// Secondary model used by built-in tools that need concise LLM transforms.
+    summary_llm: Option<Arc<dyn LlmProvider>>,
     /// Reference to the message tool for setting context per-turn.
     message_tool: RwLock<Option<Arc<crate::tools::builtin::MessageTool>>>,
     /// Active engine version. Controls which tools are visible via
@@ -170,6 +172,7 @@ impl ToolRegistry {
             db: None,
             rate_limiter: RateLimiter::new(),
             http_interceptor: None,
+            summary_llm: None,
             message_tool: RwLock::new(None),
             engine_version: EngineVersion::V1,
         }
@@ -236,6 +239,12 @@ impl ToolRegistry {
 
     pub fn role_lookup(&self) -> Option<&Arc<dyn UserStore>> {
         self.role_lookup.as_ref()
+    }
+
+    /// Attach the secondary LLM used by built-in tools that perform summaries.
+    pub fn with_summary_llm(mut self, llm: Arc<dyn LlmProvider>) -> Self {
+        self.summary_llm = Some(llm);
+        self
     }
 
     /// Register a tool. Rejects dynamic tools that try to shadow a protected built-in name.
@@ -453,6 +462,17 @@ impl ToolRegistry {
             http = http.with_role_lookup(Arc::clone(role_lookup));
         }
         self.register_sync(Arc::new(http));
+
+        if let Some(summary_llm) = &self.summary_llm {
+            let mut web_fetch = WebFetchTool::new(Arc::clone(summary_llm));
+            if let (Some(cr), Some(ss)) = (&self.credential_registry, &self.secrets_store) {
+                web_fetch = web_fetch.with_credentials(Arc::clone(cr), Arc::clone(ss));
+            }
+            if let Some(role_lookup) = &self.role_lookup {
+                web_fetch = web_fetch.with_role_lookup(Arc::clone(role_lookup));
+            }
+            self.register_sync(Arc::new(web_fetch));
+        }
 
         tracing::debug!("Registered {} built-in tools", self.count());
     }
@@ -1130,8 +1150,50 @@ impl std::fmt::Debug for ToolRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::{
+        CompletionRequest, CompletionResponse, FinishReason, ToolCompletionRequest,
+        ToolCompletionResponse,
+    };
     use crate::tools::registry::EchoTool;
     use crate::tools::tool::{EngineCompatibility, ToolDiscoverySummary};
+    use rust_decimal::Decimal;
+
+    struct TestSummaryLlm;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for TestSummaryLlm {
+        fn model_name(&self) -> &str {
+            "test-summary-model"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, crate::error::LlmError> {
+            Ok(CompletionResponse {
+                content: "summary".to_string(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, crate::error::LlmError> {
+            Err(crate::error::LlmError::RequestFailed {
+                provider: "test".to_string(),
+                reason: "not used".to_string(),
+            })
+        }
+    }
 
     #[tokio::test]
     async fn test_register_and_get() {
@@ -1382,6 +1444,21 @@ mod tests {
 
         let builtins = registry.builtin_tool_names().await;
         assert!(builtins.contains("owner_gate"));
+    }
+
+    #[tokio::test]
+    async fn register_builtin_tools_includes_web_fetch_when_summary_llm_is_configured() {
+        let registry =
+            ToolRegistry::new().with_summary_llm(Arc::new(TestSummaryLlm) as Arc<dyn LlmProvider>);
+        registry.register_builtin_tools();
+
+        let builtins = registry.builtin_tool_names().await;
+        assert!(builtins.contains("web_fetch"));
+
+        let defs = registry.tool_definitions_for(&["web_fetch"]).await;
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "web_fetch");
+        assert!(defs[0].parameters["properties"].get("prompt").is_some());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

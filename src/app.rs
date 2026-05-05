@@ -523,6 +523,8 @@ impl AppBuilder {
         if let Some(ref ss) = self.secrets_store {
             registry = registry.with_credentials(Arc::clone(&credential_registry), Arc::clone(ss));
         }
+        let summary_llm = cheap_llm.map(Arc::clone).unwrap_or_else(|| Arc::clone(llm));
+        registry = registry.with_summary_llm(summary_llm);
         // Test-only HTTP host remapping. Gated to debug/test builds so a stray
         // `IRONCLAW_TEST_HTTP_REMAP` env var on a release deployment cannot
         // silently redirect outbound HTTP from production to a test endpoint.
