@@ -659,31 +659,22 @@ pub async fn run_transfer_analysis(
     let could_save = amount.map(|a| ((target_rate - current_rate) * a * 100.0).round() / 100.0);
     let could_save_str = could_save.map(|s| format!("₹{}", format_rate(s)));
 
-    let action_verb = if recommend == "now" {
-        "Transfer now"
+    let hr_pct = (hr * 10.0).round() / 10.0;
+    let mut message = if recommend == "now" {
+        format!(
+            "Great news! The current rate (₹{}/USD) looks good today. \
+             The chance of getting a better rate in the next few days is low ({hr_pct}%), \
+             so waiting isn't likely to pay off.",
+            format_rate(current_rate),
+        )
     } else {
-        "Wait — hold off"
+        format!(
+            "The current rate is ₹{}/USD. There's a high chance ({hr_pct}%) the rate \
+             may improve in the next few days to target rate ₹{}. Worth waiting if you're not in a rush.",
+            format_rate(current_rate),
+            format_rate(target_rate),
+        )
     };
-    let mut message = format!(
-        "{action_verb}. USD/INR is at ₹{}; target ₹{}. \
-         Regime: {vb} volatility, RSI {} ({rb}), DXY {dxy_dir}. \
-         Hit-rate for this regime: {:.1}%.",
-        format_rate(current_rate),
-        format_rate(target_rate),
-        rsi_rounded
-            .map(|r| format!("{r}"))
-            .unwrap_or_else(|| "N/A".into()),
-        (hr * 10.0).round() / 10.0,
-    );
-    if recommend == "wait"
-        && let Some(save) = could_save
-        && save > 0.0
-    {
-        message.push_str(&format!(
-            " If you wait, you could get ₹{} more on your transfer.",
-            format_rate(save)
-        ));
-    }
     if for_wire {
         message.push_str(
             " — Send now or wait? Reply **send now** to proceed with the transfer, \

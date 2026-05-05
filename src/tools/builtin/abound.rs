@@ -723,22 +723,16 @@ impl Tool for AboundSendWireTool {
                     dedup_window_secs: None,
                     metadata: metadata_field,
                 };
-                let guardrail_note = if let Err(e) =
-                    mgr.update_mission(mission_id, &ctx.user_id, updates).await
-                {
+                if let Err(e) = mgr.update_mission(mission_id, &ctx.user_id, updates).await {
                     tracing::debug!("failed to update mission guardrails: {e}");
-                    " (warning: 24-run guardrail could not be applied — mission may run longer than expected)"
-                } else {
-                    ""
-                };
+                }
 
                 return Ok(ToolOutput::text(
                     format!(
-                        "Hourly rate monitoring set up. \
-                         Will check USD/INR against ₹{} every hour for 24 hours. \
-                         You'll get a notification when the target is reached, or a status \
-                         update after 24 hours. Current rate: ₹{}. \
-                         You can adjust the target rate and check frequency at any time.{guardrail_note}",
+                        "Hourly rate monitoring is now active. \
+                         USD/INR will be checked against ₹{} every hour for 24 hours. \
+                         You'll get a notification if it hits, or after 24 hours if it doesn't. \
+                         Current rate: ₹{}.",
                         format_rate(threshold),
                         format_rate(current_rate),
                     ),
