@@ -381,9 +381,8 @@ impl ChannelRoutingConfig {
         let allowed_set = match self.allowed_servers_sets.get(group) {
             Some(set) => set,
             None => {
-                let default_whitelist_set = self
-                    .builtin_whitelist_sets
-                    .get(&self.default_group);
+                let default_whitelist_set =
+                    self.builtin_whitelist_sets.get(&self.default_group);
                 tracing::warn!(
                     group,
                     default_group = %self.default_group,
@@ -641,7 +640,12 @@ mod tests {
         ];
         let md = no_metadata();
         let bn = test_builtin_names();
-        assert_eq!(config.filter_tool_defs("tui", &md, tools.clone(), &bn).len(), 3);
+        assert_eq!(
+            config
+                .filter_tool_defs("tui", &md, tools.clone(), &bn)
+                .len(),
+            3
+        );
         assert_eq!(config.filter_tool_defs("http", &md, tools, &bn).len(), 3);
     }
 
@@ -669,7 +673,8 @@ mod tests {
             make_tool_def("Smartlead_send"),
         ];
         let md = no_metadata();
-        let filtered = config.filter_tool_defs("agentiffai-dev-issues", &md, tools, &test_builtin_names());
+        let filtered =
+            config.filter_tool_defs("agentiffai-dev-issues", &md, tools, &test_builtin_names());
         let names: Vec<&str> = filtered.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"Archon_list_tasks"));
         assert!(names.contains(&"Kiro_run_task"));
@@ -688,7 +693,8 @@ mod tests {
             make_tool_def("http_request"),
         ];
         let md = no_metadata();
-        let filtered = config.filter_tool_defs("unmapped-channel", &md, tools, &test_builtin_names());
+        let filtered =
+            config.filter_tool_defs("unmapped-channel", &md, tools, &test_builtin_names());
         let names: Vec<&str> = filtered.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"Archon_list_tasks"));
         assert!(names.contains(&"memory_search"));
@@ -706,7 +712,8 @@ mod tests {
             make_tool_def("memory_search"),
         ];
         let md = no_metadata();
-        let filtered = config.filter_tool_defs("agentiffai-dev-issues", &md, tools, &test_builtin_names());
+        let filtered =
+            config.filter_tool_defs("agentiffai-dev-issues", &md, tools, &test_builtin_names());
         assert_eq!(filtered.len(), 3);
     }
 
