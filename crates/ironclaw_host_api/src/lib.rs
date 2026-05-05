@@ -25,6 +25,9 @@
 //! - [`audit`]: redacted durable audit envelope shapes.
 //! - [`trust`]: requested-trust vocabulary and `PackageIdentity` consumed by
 //!   the host trust policy engine in `ironclaw_trust`.
+//! - [`runtime_policy`]: deployment mode, runtime profile, and effective
+//!   runtime policy vocabulary consumed by the resolver in
+//!   `ironclaw_runtime_policy` and the host runtime planner.
 
 pub mod action;
 pub mod approval;
@@ -39,6 +42,7 @@ pub mod mount;
 pub mod path;
 pub mod resource;
 pub mod runtime;
+pub mod runtime_policy;
 pub mod scope;
 pub mod trust;
 
@@ -58,6 +62,7 @@ pub use mount::*;
 pub use path::*;
 pub use resource::*;
 pub use runtime::*;
+pub use runtime_policy::*;
 pub use scope::*;
 pub use trust::*;
 

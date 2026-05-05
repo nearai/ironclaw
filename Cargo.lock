@@ -3911,6 +3911,8 @@ dependencies = [
  "ironclaw_common",
  "ironclaw_engine",
  "ironclaw_gateway",
+ "ironclaw_host_api",
+ "ironclaw_runtime_policy",
  "ironclaw_safety",
  "ironclaw_skills",
  "ironclaw_tui",
@@ -4177,6 +4179,7 @@ dependencies = [
  "ironclaw_processes",
  "ironclaw_resources",
  "ironclaw_run_state",
+ "ironclaw_runtime_policy",
  "ironclaw_safety",
  "ironclaw_scripts",
  "ironclaw_secrets",
@@ -4285,6 +4288,16 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+]
+
+[[package]]
+name = "ironclaw_runtime_policy"
+version = "0.1.0"
+dependencies = [
+ "ironclaw_host_api",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

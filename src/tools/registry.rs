@@ -366,6 +366,29 @@ impl ToolRegistry {
             .collect()
     }
 
+    /// List tool names visible in the current engine version *and* under
+    /// the given resolved runtime policy (#3045 PR 4).
+    ///
+    /// Tools whose [`Tool::runtime_affordance`] cannot be granted by the
+    /// resolved policy are hidden. This is a UX/visibility filter only —
+    /// action-time authorization still runs on every invocation.
+    pub async fn list_visible_under(
+        &self,
+        policy: &ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy,
+    ) -> Vec<String> {
+        let version = self.engine_version;
+        self.tools
+            .read()
+            .await
+            .values()
+            .filter(|tool| Self::is_engine_visible(tool.as_ref(), version))
+            .filter(|tool| {
+                crate::tools::runtime_filter::is_visible_under(policy, tool.runtime_affordance())
+            })
+            .map(|tool| tool.name().to_string())
+            .collect()
+    }
+
     /// Retain only tools whose names are in the given allowlist.
     ///
     /// If `names` is empty, this is a no-op (all tools are kept).
@@ -395,6 +418,25 @@ impl ToolRegistry {
             .collect()
     }
 
+    /// Get all tools visible in the current engine version *and* under
+    /// the given resolved runtime policy (#3045 PR 4).
+    pub async fn all_visible_under(
+        &self,
+        policy: &ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy,
+    ) -> Vec<Arc<dyn Tool>> {
+        let version = self.engine_version;
+        self.tools
+            .read()
+            .await
+            .values()
+            .filter(|tool| Self::is_engine_visible(tool.as_ref(), version))
+            .filter(|tool| {
+                crate::tools::runtime_filter::is_visible_under(policy, tool.runtime_affordance())
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Get the set of built-in tool names currently registered.
     pub async fn builtin_tool_names(&self) -> std::collections::HashSet<String> {
         self.builtin_names.read().await.clone()
@@ -406,6 +448,36 @@ impl ToolRegistry {
     /// don't need to know which engine is active.
     pub async fn tool_definitions(&self) -> Vec<ToolDefinition> {
         self.tool_definitions_for_engine(self.engine_version).await
+    }
+
+    /// Get tool definitions for LLM function calling, filtered by both engine
+    /// version *and* the resolved runtime policy (#3045 PR 4 + PR 5).
+    ///
+    /// This is the model-facing tool list path: tools whose
+    /// [`Tool::runtime_affordance`] cannot be granted by the resolved
+    /// `EffectiveRuntimePolicy` are hidden before the model call. The
+    /// hosted-multi-tenant security property ("no provider-host shell visible
+    /// to the model") is enforced here. Action-time authorization in
+    /// `ironclaw_authorization` / `CapabilityHost` still runs for every
+    /// invocation that reaches dispatch.
+    pub async fn tool_definitions_visible_under(
+        &self,
+        policy: &ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy,
+    ) -> Vec<ToolDefinition> {
+        let version = self.engine_version;
+        let mut defs: Vec<ToolDefinition> = self
+            .tools
+            .read()
+            .await
+            .values()
+            .filter(|tool| Self::is_engine_visible(tool.as_ref(), version))
+            .filter(|tool| {
+                crate::tools::runtime_filter::is_visible_under(policy, tool.runtime_affordance())
+            })
+            .map(Self::tool_definition)
+            .collect();
+        defs.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+        defs
     }
 
     /// Get tool definitions filtered by engine version.
