@@ -8,6 +8,7 @@ use ironclaw_events::{
 };
 use ironclaw_host_api::AuditEnvelope;
 use secrecy::{ExposeSecret, SecretString};
+use tokio_postgres::config::{Host, SslMode};
 use tokio_postgres::{Config, NoTls, types::ToSql};
 use tokio_postgres_rustls::MakeRustlsConnect;
 
@@ -23,40 +24,48 @@ use crate::{
 const POSTGRES_EVENT_STORE_SCHEMA: &str =
     include_str!("../migrations/postgres/001_initial_event_store.sql");
 
-/// Returns true if the supplied Postgres connection string targets a loopback
-/// host (or a Unix socket). Anything else is treated as remote and must use TLS.
+/// Returns true if the parsed Postgres `Config` targets only loopback hosts
+/// or Unix sockets. Anything else — including mixed lists where a remote
+/// host appears alongside a socket path — is treated as remote and must
+/// use TLS.
 ///
-/// Conservative: an unparseable URL is treated as remote (fail closed).
+/// We inspect the parsed `Config` rather than re-parsing the raw connection
+/// string so that all libpq forms are normalised:
+/// - `host=db.example.com` (keyword TCP)
+/// - `hostaddr=10.0.0.5` (numeric-IP keyword, returns no `Host` entry but
+///   does add a hostaddr)
+/// - `postgresql:///db?host=db.example.com` (URL with empty authority +
+///   `host` query param)
+/// - `host=/var/run/postgresql,db.example.com` (mixed list)
 ///
-/// Two connection-string forms are supported:
-/// - URL form (`postgres://host:5432/db`): parsed via `url::Url`.
-/// - libpq keyword form (`host=db.example.com user=...`): walked keyword-by-
-///   keyword. A keyword string without `host=` (libpq default) or with
-///   `host=/...` (socket directory) is a Unix-socket connection; anything
-///   else is routed to a network host and must use TLS.
-fn is_local_postgres_url(url: &str) -> bool {
-    if url.contains("://") {
-        let parsed = match url::Url::parse(url) {
-            Ok(parsed) => parsed,
-            Err(_) => return false,
-        };
-        return match parsed.host_str() {
-            // libpq treats an empty host as a Unix-socket connection.
-            None | Some("") => true,
-            Some(host) => is_local_host_literal(host),
-        };
+/// The check fails closed on any TCP host that isn't a loopback literal,
+/// any non-loopback `hostaddr`, and on configs with no host at all.
+fn is_local_postgres_config(config: &Config) -> bool {
+    let hosts = config.get_hosts();
+    let hostaddrs = config.get_hostaddrs();
+
+    // Empty host list means libpq's compiled-in default socket directory —
+    // treat as local only if there are no overriding hostaddrs.
+    if hosts.is_empty() && hostaddrs.is_empty() {
+        return true;
     }
-    let mut host: Option<&str> = None;
-    for token in url.split_ascii_whitespace() {
-        if let Some(value) = token.strip_prefix("host=") {
-            host = Some(value);
+
+    for host in hosts {
+        match host {
+            Host::Unix(_) => continue,
+            Host::Tcp(name) => {
+                if !is_local_host_literal(name) {
+                    return false;
+                }
+            }
         }
     }
-    match host {
-        None => true,
-        Some(host) if host.is_empty() || host.starts_with('/') => true,
-        Some(host) => is_local_host_literal(host),
+    for addr in hostaddrs {
+        if !addr.is_loopback() && !addr.is_unspecified() {
+            return false;
+        }
     }
+    true
 }
 
 fn is_local_host_literal(host: &str) -> bool {
@@ -64,6 +73,30 @@ fn is_local_host_literal(host: &str) -> bool {
         host,
         "localhost" | "127.0.0.1" | "::1" | "[::1]" | "0.0.0.0"
     )
+}
+
+/// Reject `sslmode=disable` for any non-local Postgres config.
+///
+/// Passing a rustls connector to `tokio-postgres` is not enough on its own:
+/// the connector is *only* used when `Config::ssl_mode` is `Prefer` or
+/// `Require`. An explicit `sslmode=disable` in the connection string returns
+/// a plaintext stream before the connector is consulted, so a misconfigured
+/// production URL can silently downgrade. We reject that here, and force
+/// `Require` if the config left the default `Prefer` in place — otherwise
+/// `tokio-postgres` would still complete a `Prefer` connection that the
+/// server happens to refuse TLS on.
+fn enforce_remote_ssl_mode(config: &mut Config) -> Result<(), RebornEventStoreError> {
+    match config.get_ssl_mode() {
+        SslMode::Disable => Err(RebornEventStoreError::RemotePostgresClearTextDisabled),
+        SslMode::Prefer => {
+            config.ssl_mode(SslMode::Require);
+            Ok(())
+        }
+        SslMode::Require => Ok(()),
+        // Forward-compat: future tokio-postgres SslMode variants we don't
+        // recognise are treated as already strict.
+        _ => Ok(()),
+    }
 }
 
 /// Build a rustls TLS connector for remote Postgres connections.
@@ -101,15 +134,19 @@ pub(crate) async fn build_postgres_event_stores(
     url: SecretString,
 ) -> Result<RebornEventStores, RebornEventStoreError> {
     let raw_url = url.expose_secret();
-    let pg_config: Config = raw_url.parse().map_err(|source| {
+    let mut pg_config: Config = raw_url.parse().map_err(|source| {
         RebornEventStoreError::backend("postgres", "parse connection string", source)
     })?;
     let manager_config = ManagerConfig {
         recycling_method: RecyclingMethod::Fast,
     };
-    let manager = if is_local_postgres_url(raw_url) {
+    let local = is_local_postgres_config(&pg_config);
+    let manager = if local {
         Manager::from_config(pg_config, NoTls, manager_config)
     } else {
+        // Remote: TLS is mandatory. Reject `sslmode=disable` and upgrade
+        // `Prefer` to `Require` before handing the config to the manager.
+        enforce_remote_ssl_mode(&mut pg_config)?;
         let tls = make_rustls_connector()?;
         Manager::from_config(pg_config, tls, manager_config)
     };
@@ -488,7 +525,19 @@ impl DurableAuditLog for PostgresDurableAuditLog {
 
 #[cfg(test)]
 mod tests {
-    use super::is_local_postgres_url;
+    use super::{Config, enforce_remote_ssl_mode, is_local_postgres_config};
+    use crate::RebornEventStoreError;
+    use tokio_postgres::config::SslMode;
+
+    fn parse(url: &str) -> Config {
+        url.parse::<Config>().unwrap_or_else(|e| {
+            panic!("test connection string `{url}` failed to parse: {e}");
+        })
+    }
+
+    fn is_local(url: &str) -> bool {
+        is_local_postgres_config(&parse(url))
+    }
 
     #[test]
     fn local_postgres_urls_are_recognised() {
@@ -501,10 +550,7 @@ mod tests {
             // Unix-socket-style: libpq treats these as local.
             "host=/var/run/postgresql user=ironclaw dbname=ironclaw",
         ] {
-            assert!(
-                is_local_postgres_url(url),
-                "expected `{url}` to be detected as local"
-            );
+            assert!(is_local(url), "expected `{url}` to be detected as local");
         }
     }
 
@@ -514,21 +560,10 @@ mod tests {
             "postgres://user:pass@db.internal/db",
             "postgres://user@10.0.0.5:5432/db",
             "postgresql://user@managed-postgres.example.com/db",
-            "postgres://user@2001:db8::1/db",
+            "postgres://user@[2001:db8::1]/db",
         ] {
-            assert!(
-                !is_local_postgres_url(url),
-                "expected `{url}` to require TLS"
-            );
+            assert!(!is_local(url), "expected `{url}` to require TLS");
         }
-    }
-
-    #[test]
-    fn unparseable_postgres_url_with_scheme_falls_closed_to_remote() {
-        // An unparseable URL with a scheme is treated as remote so that
-        // production cannot accidentally end up with a NoTls connector
-        // because of a typo in the connection string.
-        assert!(!is_local_postgres_url("postgres://%%%not-a-host"));
     }
 
     #[test]
@@ -542,7 +577,7 @@ mod tests {
             "user=ironclaw host=managed-pg.internal",
         ] {
             assert!(
-                !is_local_postgres_url(url),
+                !is_local(url),
                 "expected libpq keyword string `{url}` to require TLS"
             );
         }
@@ -559,10 +594,70 @@ mod tests {
             "host=localhost user=ironclaw",
             "host=127.0.0.1 user=ironclaw",
         ] {
-            assert!(
-                is_local_postgres_url(url),
-                "expected `{url}` to be detected as local"
-            );
+            assert!(is_local(url), "expected `{url}` to be detected as local");
         }
+    }
+
+    #[test]
+    fn libpq_hostaddr_to_remote_address_requires_tls() {
+        // Regression for the High-severity finding (round 2) on PR #3171:
+        // hostaddr= is a libpq keyword that bypassed the previous raw-string
+        // detector entirely; switching to Config::get_hostaddrs() catches it.
+        assert!(!is_local("hostaddr=10.0.0.5 user=ironclaw"));
+        assert!(!is_local("hostaddr=2001:db8::1 user=ironclaw"));
+    }
+
+    #[test]
+    fn libpq_hostaddr_to_loopback_is_local() {
+        assert!(is_local("hostaddr=127.0.0.1 user=ironclaw"));
+        assert!(is_local("hostaddr=::1 user=ironclaw"));
+    }
+
+    #[test]
+    fn libpq_mixed_socket_and_remote_host_list_requires_tls() {
+        // host=/var/run/postgresql,db.example.com — first socket, second TCP.
+        // tokio-postgres parses this as two Host entries; if any TCP host
+        // isn't loopback the whole config is remote.
+        assert!(!is_local(
+            "host=/var/run/postgresql,db.example.com user=ironclaw"
+        ));
+    }
+
+    #[test]
+    fn url_with_empty_authority_and_query_host_uses_query_host() {
+        // postgresql:///db?host=db.example.com — empty authority routes to a
+        // host listed in the query string, which the parsed Config exposes
+        // as a TCP Host entry.
+        assert!(!is_local(
+            "postgresql:///db?host=db.example.com&user=ironclaw"
+        ));
+    }
+
+    #[test]
+    fn enforce_remote_ssl_mode_rejects_disable() {
+        let mut config = parse("postgres://user@db.example.com/db?sslmode=disable");
+        let err = enforce_remote_ssl_mode(&mut config)
+            .expect_err("sslmode=disable on remote must be rejected");
+        assert!(matches!(
+            err,
+            RebornEventStoreError::RemotePostgresClearTextDisabled
+        ));
+    }
+
+    #[test]
+    fn enforce_remote_ssl_mode_upgrades_prefer_to_require() {
+        // Default sslmode is `prefer`, which silently downgrades when the
+        // server declines TLS — for remote we force `require`.
+        let mut config = parse("postgres://user@db.example.com/db");
+        assert!(matches!(config.get_ssl_mode(), SslMode::Prefer));
+        enforce_remote_ssl_mode(&mut config).expect("default prefer must upgrade to require");
+        assert!(matches!(config.get_ssl_mode(), SslMode::Require));
+    }
+
+    #[test]
+    fn enforce_remote_ssl_mode_keeps_require() {
+        let mut config = parse("postgres://user@db.example.com/db?sslmode=require");
+        enforce_remote_ssl_mode(&mut config).expect("require should pass through");
+        assert!(matches!(config.get_ssl_mode(), SslMode::Require));
     }
 }

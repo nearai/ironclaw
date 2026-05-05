@@ -78,6 +78,10 @@ pub enum RebornEventStoreError {
     ProductionJsonlRequiresAcceptance,
     #[error("production Reborn event store cannot use cleartext http:// libSQL URL")]
     ProductionLibsqlClearTextDisabled,
+    #[error(
+        "remote Reborn Postgres event store requires sslmode=require (sslmode=disable rejected)"
+    )]
+    RemotePostgresClearTextDisabled,
     #[error("{backend} Reborn event store backend is not enabled in this build")]
     BackendUnavailable { backend: &'static str },
     #[error("{backend} Reborn event store failed during {operation}")]
@@ -629,6 +633,14 @@ where
 {
     use std::io::Write;
 
+    // Track whether we're about to create the file so we know to fsync the
+    // parent directory afterwards. On POSIX, `sync_data()` on the file
+    // contents is not enough for crash durability — the parent directory
+    // entry that names the new file must also be fsynced, otherwise the
+    // first append can disappear after a power loss even though `append()`
+    // returned success.
+    let is_first_create = !path.exists();
+
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .read(true)
@@ -654,6 +666,15 @@ where
         .map_err(|_| durable_error("jsonl event store failed to flush record"))?;
     file.sync_data()
         .map_err(|_| durable_error("jsonl event store failed to sync record"))?;
+
+    if is_first_create && let Some(parent) = path.parent() {
+        // `File::open` on a directory + `sync_all` is the portable way to
+        // fsync the directory entry on POSIX. Best-effort on platforms that
+        // don't support it (e.g. Windows handles this implicitly).
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
     // Lock releases when `file` drops at end of scope.
     Ok(next_cursor)
 }
