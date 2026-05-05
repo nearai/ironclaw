@@ -735,10 +735,9 @@ impl Tool for AboundSendWireTool {
                 return Ok(ToolOutput::text(
                     format!(
                         "Hourly rate monitoring set up. \
-                         Will check USD/INR against ₹{} every hour for 24 hours. \
-                         You'll get a notification when the target is reached, or a status \
-                         update after 24 hours. Current rate: ₹{}. \
-                         You can adjust the target rate and check frequency at any time.{guardrail_note}",
+                         I'll check USD/INR against ₹{} every hour for 24 hours, and notify you \
+                         as soon as it hits — or send a status update at 24 hours if it doesn't. \
+                         Current rate: ₹{}.",
                         format_rate(threshold),
                         format_rate(current_rate),
                     ),
