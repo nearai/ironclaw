@@ -1283,6 +1283,7 @@ async fn async_main() -> anyhow::Result<()> {
     };
 
     let channels_for_warnings = Arc::clone(&channels);
+    let channels_for_reborn_transport = Arc::clone(&channels);
     let mut agent = Agent::new(
         config.agent.clone(),
         deps,
@@ -1514,6 +1515,15 @@ async fn async_main() -> anyhow::Result<()> {
             };
             let _ = channels_ref.broadcast_all("default", response).await;
         });
+    }
+
+    if config.agent.reborn_transport {
+        tracing::debug!("Reborn transport adapter runtime enabled");
+        let source = ironclaw::reborn::transport::start_legacy_agent_transport_source(
+            channels_for_reborn_transport.as_ref(),
+        )
+        .await?;
+        agent.use_reborn_transport_source(source);
     }
 
     agent.run().await?;

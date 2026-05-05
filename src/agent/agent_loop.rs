@@ -264,6 +264,8 @@ pub struct Agent {
     /// Engine v2 mission manager for firing learning missions (set after engine init).
     pub(crate) mission_manager_slot:
         Arc<tokio::sync::RwLock<Option<Arc<ironclaw_engine::MissionManager>>>>,
+    reborn_transport_source:
+        tokio::sync::Mutex<Option<crate::reborn::transport::LegacyAgentTransportSource>>,
 }
 
 impl Agent {
@@ -336,7 +338,15 @@ impl Agent {
             routine_config,
             routine_engine_slot: Arc::new(tokio::sync::RwLock::new(None)),
             mission_manager_slot: Arc::new(tokio::sync::RwLock::new(None)),
+            reborn_transport_source: tokio::sync::Mutex::new(None),
         }
+    }
+
+    pub fn use_reborn_transport_source(
+        &mut self,
+        source: crate::reborn::transport::LegacyAgentTransportSource,
+    ) {
+        *self.reborn_transport_source.get_mut() = Some(source);
     }
 
     /// Replace the routine-engine slot with a shared one so the gateway and
@@ -738,7 +748,7 @@ impl Agent {
     }
 
     /// Run the agent main loop.
-    pub async fn run(self) -> Result<(), Error> {
+    pub async fn run(mut self) -> Result<(), Error> {
         // Eagerly initialize engine v2 so gateway API endpoints can serve
         // data (projects, missions, threads) before the first chat message.
         if self.config.engine_v2
@@ -747,8 +757,12 @@ impl Agent {
             tracing::debug!("engine v2: eager init failed: {e}");
         }
 
-        // Start channels
-        let mut message_stream = self.channels.start_all().await?;
+        let (mut message_stream, reborn_transport_runtime) =
+            if let Some(source) = self.reborn_transport_source.get_mut().take() {
+                (source.messages, Some(source.runtime))
+            } else {
+                (self.channels.start_all().await?, None)
+            };
 
         // Start self-repair task with notification forwarding
         let mut self_repair = DefaultSelfRepair::new(
@@ -1302,7 +1316,17 @@ impl Agent {
             cron_handle.abort();
         }
         self.scheduler.stop_all().await;
-        self.channels.shutdown_all().await?;
+        if let Some(runtime) = reborn_transport_runtime {
+            // Order matters: shut adapters down (which aborts their pump
+            // tasks and calls Channel::shutdown) BEFORE clearing the egress
+            // registry. If we cleared the registry first and the runtime
+            // shutdown later errored, adapter background tasks would leak.
+            let shutdown_result = runtime.shutdown().await;
+            self.channels.clear_transport_egress_registry().await;
+            shutdown_result?;
+        } else {
+            self.channels.shutdown_all().await?;
+        }
 
         Ok(())
     }
@@ -2280,6 +2304,7 @@ mod tests {
                 max_llm_concurrent_per_user: None,
                 max_jobs_concurrent_per_user: None,
                 engine_v2: false,
+                reborn_transport: false,
             },
             deps,
             Arc::new(crate::channels::ChannelManager::new()),
@@ -2289,6 +2314,79 @@ mod tests {
             Some(Arc::new(crate::context::ContextManager::new(1))),
             None,
         )
+    }
+
+    #[tokio::test]
+    async fn run_consumes_reborn_transport_source_without_direct_channel_start() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct QuitOnStartChannel {
+            started_count: Arc<AtomicUsize>,
+            shutdown_count: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl crate::channels::Channel for QuitOnStartChannel {
+            fn name(&self) -> &str {
+                "reborn-test"
+            }
+
+            async fn start(&self) -> Result<crate::channels::MessageStream, ChannelError> {
+                self.started_count.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::pin(tokio_stream::once(IncomingMessage::new(
+                    "reborn-test",
+                    "user",
+                    "/quit",
+                ))))
+            }
+
+            async fn respond(
+                &self,
+                _msg: &IncomingMessage,
+                _response: crate::channels::OutgoingResponse,
+            ) -> Result<(), ChannelError> {
+                Ok(())
+            }
+
+            async fn send_status(
+                &self,
+                _status: crate::channels::StatusUpdate,
+                _metadata: &serde_json::Value,
+            ) -> Result<(), ChannelError> {
+                Ok(())
+            }
+
+            async fn health_check(&self) -> Result<(), ChannelError> {
+                Ok(())
+            }
+
+            async fn shutdown(&self) -> Result<(), ChannelError> {
+                self.shutdown_count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let mut agent = make_legacy_handle_message_test_agent();
+        let channels = Arc::clone(&agent.channels);
+        let started_count = Arc::new(AtomicUsize::new(0));
+        let shutdown_count = Arc::new(AtomicUsize::new(0));
+        channels
+            .add(Box::new(QuitOnStartChannel {
+                started_count: Arc::clone(&started_count),
+                shutdown_count: Arc::clone(&shutdown_count),
+            }))
+            .await;
+
+        let source =
+            crate::reborn::transport::start_legacy_agent_transport_source(channels.as_ref())
+                .await
+                .expect("reborn transport source");
+        agent.use_reborn_transport_source(source);
+
+        agent.run().await.expect("agent run");
+
+        assert_eq!(started_count.load(Ordering::SeqCst), 1);
+        assert_eq!(shutdown_count.load(Ordering::SeqCst), 1);
     }
 
     #[test]
