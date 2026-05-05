@@ -89,7 +89,9 @@ Run selected auth provider cases:
 
 ```bash
 LANE=auth-live-seeded CASES=gmail,github scripts/live-canary/run.sh
-LANE=auth-browser-consent CASES=google,github scripts/live-canary/run.sh
+LANE=auth-browser-consent CASES=google,notion scripts/live-canary/run.sh
+# Browser cases: google, notion only. github is PAT-only (not OAuth) so
+# it lives in auth-live-seeded instead — see scripts/live_canary/auth_registry.py.
 ```
 
 Use CI-style browser installation for auth browser lanes:

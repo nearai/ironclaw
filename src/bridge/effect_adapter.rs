@@ -35,9 +35,10 @@ use crate::context::JobContext;
 use crate::extensions::InstalledExtension;
 use crate::extensions::naming::extension_name_candidates;
 use crate::hooks::{HookEvent, HookOutcome, HookRegistry};
+use crate::tools::ToolRegistry;
 use crate::tools::permissions::PermissionState;
 use crate::tools::rate_limiter::RateLimiter;
-use crate::tools::{ApprovalRequirement, Tool, ToolRegistry};
+use crate::tools::{ApprovalRequirement, Tool};
 use ironclaw_safety::SafetyLayer;
 
 /// Wraps the existing tool pipeline to implement the engine's `EffectExecutor`.
@@ -263,6 +264,16 @@ impl EffectBridgeAdapter {
         )
     }
 
+    async fn resolved_user_permission_for_tool(
+        &self,
+        lookup_name: &str,
+        context: &ThreadExecutionContext,
+    ) -> ToolPermissionResolution {
+        ToolPermissionSnapshot::load(self.tools.as_ref(), &context.user_id)
+            .await
+            .resolve_permission(lookup_name)
+    }
+
     async fn tool_activate_requires_install_approval(
         &self,
         lookup_name: &str,
@@ -306,26 +317,6 @@ impl EffectBridgeAdapter {
         matching_extension_requires_install_approval(requested_name, &extensions).unwrap_or(false)
     }
 
-    async fn resolved_user_permission_for_tool(
-        &self,
-        lookup_name: &str,
-        context: &ThreadExecutionContext,
-    ) -> ToolPermissionResolution {
-        ToolPermissionSnapshot::load(self.tools.as_ref(), &context.user_id)
-            .await
-            .resolve_permission(lookup_name)
-    }
-
-    fn apply_user_permission_override(
-        base_requirement: ApprovalRequirement,
-        explicit_user_permission: Option<PermissionState>,
-    ) -> ApprovalRequirement {
-        match explicit_user_permission {
-            Some(PermissionState::AskEachTime) => ApprovalRequirement::Always,
-            _ => base_requirement,
-        }
-    }
-
     fn ensure_tool_not_disabled(
         action_name: &str,
         user_permission: ToolPermissionResolution,
@@ -338,81 +329,87 @@ impl EffectBridgeAdapter {
         Ok(())
     }
 
-    async fn effective_tool_approval_requirement(
-        &self,
-        lookup_name: &str,
-        tool: &dyn Tool,
-        parameters: &serde_json::Value,
-        context: &ThreadExecutionContext,
-        user_permission: ToolPermissionResolution,
-        include_install_approval: bool,
-    ) -> ApprovalRequirement {
-        let base_requirement = if include_install_approval
-            && self
-                .tool_activate_requires_install_approval(lookup_name, parameters, context)
-                .await
-        {
-            ApprovalRequirement::UnlessAutoApproved
-        } else {
-            tool.requires_approval(parameters)
-        };
-        Self::apply_user_permission_override(base_requirement, user_permission.explicit)
-    }
-
-    async fn enforce_tool_approval(
+    async fn enforce_tool_permission(
         &self,
         approval: &ToolApprovalContext<'_>,
         tool: &dyn Tool,
         user_permission: ToolPermissionResolution,
-        include_install_approval: bool,
     ) -> Result<(), EngineError> {
-        let requirement = self
-            .effective_tool_approval_requirement(
+        match user_permission.effective {
+            PermissionState::Disabled => {
+                Self::ensure_tool_not_disabled(approval.action_name, user_permission)?
+            }
+            PermissionState::AlwaysAllow | PermissionState::AskEachTime => {}
+        }
+
+        if approval.approval_already_granted {
+            return Ok(());
+        }
+
+        if matches!(
+            tool.requires_approval(approval.parameters),
+            ApprovalRequirement::Always
+        ) {
+            return Err(Self::gate_paused(
+                "approval",
+                approval.action_name,
+                approval.context.current_call_id.as_deref(),
+                approval.parameters.clone(),
+                ironclaw_engine::ResumeKind::Approval {
+                    allow_always: false,
+                },
+                None,
+                Some(approval.lease.clone()),
+            ));
+        }
+
+        if self
+            .tool_activate_requires_install_approval(
                 approval.lookup_name,
-                tool,
                 approval.parameters,
                 approval.context,
-                user_permission,
-                include_install_approval,
             )
-            .await;
-        match requirement {
-            ApprovalRequirement::Always => {
-                if !approval.approval_already_granted {
-                    return Err(Self::gate_paused(
-                        "approval",
-                        approval.action_name,
-                        approval.context.current_call_id.as_deref(),
-                        approval.parameters.clone(),
-                        ironclaw_engine::ResumeKind::Approval {
-                            allow_always: false,
-                        },
-                        None,
-                        Some(approval.lease.clone()),
-                    ));
-                }
-            }
-            ApprovalRequirement::UnlessAutoApproved => {
-                let is_approved = self.auto_approve_tools
+            .await
+        {
+            return Err(Self::gate_paused(
+                "approval",
+                approval.action_name,
+                approval.context.current_call_id.as_deref(),
+                approval.parameters.clone(),
+                ironclaw_engine::ResumeKind::Approval {
+                    allow_always: false,
+                },
+                None,
+                Some(approval.lease.clone()),
+            ));
+        }
+
+        if matches!(user_permission.effective, PermissionState::AlwaysAllow) {
+            return Ok(());
+        }
+
+        if matches!(user_permission.effective, PermissionState::AskEachTime) {
+            let is_explicit_ask =
+                matches!(user_permission.explicit, Some(PermissionState::AskEachTime));
+            let is_approved = !is_explicit_ask
+                && (self.auto_approve_tools
                     || self
                         .auto_approved
                         .read()
                         .await
-                        .contains(approval.lookup_name)
-                    || matches!(user_permission.effective, PermissionState::AlwaysAllow);
-                if !is_approved && !approval.approval_already_granted {
-                    return Err(Self::gate_paused(
-                        "approval",
-                        approval.action_name,
-                        approval.context.current_call_id.as_deref(),
-                        approval.parameters.clone(),
-                        ironclaw_engine::ResumeKind::Approval { allow_always: true },
-                        None,
-                        Some(approval.lease.clone()),
-                    ));
-                }
+                        .contains(approval.lookup_name));
+            if is_approved {
+                return Ok(());
             }
-            ApprovalRequirement::Never => {}
+            return Err(Self::gate_paused(
+                "approval",
+                approval.action_name,
+                approval.context.current_call_id.as_deref(),
+                approval.parameters.clone(),
+                ironclaw_engine::ResumeKind::Approval { allow_always: true },
+                None,
+                Some(approval.lease.clone()),
+            ));
         }
         Ok(())
     }
@@ -447,7 +444,7 @@ impl EffectBridgeAdapter {
         Self::ensure_tool_not_disabled(tool_info.action_name, user_permission)?;
 
         if let Some((_, tool)) = resolved_tool.as_ref() {
-            self.enforce_tool_approval(
+            self.enforce_tool_permission(
                 &ToolApprovalContext {
                     action_name: tool_info.action_name,
                     lookup_name: tool_info.lookup_name,
@@ -458,26 +455,29 @@ impl EffectBridgeAdapter {
                 },
                 tool.as_ref(),
                 user_permission,
-                false,
             )
             .await?;
         }
 
-        let snapshot_result = tool_info
+        let snapshot_result = if let Some(inventory) = tool_info
             .context
             .available_action_inventory_snapshot
             .as_deref()
-            .map(|inventory| ActionDiscovery::tool_info(tool_info.parameters, inventory))
-            .or_else(|| {
-                tool_info
-                    .context
-                    .available_actions_snapshot
-                    .as_deref()
-                    .map(|actions| {
-                        ActionDiscovery::tool_info_from_actions(tool_info.parameters, actions)
-                    })
-            })
-            .unwrap_or(Ok(None));
+        {
+            ActionDiscovery::tool_info(tool_info.parameters, inventory)
+        } else if let Some(actions) = tool_info.context.available_actions_snapshot.as_deref() {
+            ActionDiscovery::tool_info_from_actions(tool_info.parameters, actions)
+        } else {
+            let error_msg = "tool_info: action inventory unavailable in this execution context";
+            let sanitized = self.safety.sanitize_tool_output("tool_info", error_msg);
+            return Ok(Self::snapshot_action_result(
+                tool_info.context,
+                tool_info.canonical_action_name,
+                serde_json::json!({"error": sanitized.content}),
+                true,
+                tool_info.started_at,
+            ));
+        };
 
         match snapshot_result {
             Ok(Some(output)) => Ok(Self::snapshot_action_result(
@@ -1443,7 +1443,7 @@ impl EffectBridgeAdapter {
         }
 
         if let Some((_, tool)) = resolved_tool.as_ref() {
-            self.enforce_tool_approval(
+            self.enforce_tool_permission(
                 &ToolApprovalContext {
                     action_name,
                     lookup_name: &lookup_name,
@@ -1454,7 +1454,6 @@ impl EffectBridgeAdapter {
                 },
                 tool.as_ref(),
                 user_permission,
-                true,
             )
             .await?;
         }
@@ -2583,8 +2582,7 @@ pub(crate) fn is_v1_auth_tool(name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::context::JobContext;
-    use crate::extensions::ExtensionKind;
-    use crate::tools::{Tool, ToolError, ToolOutput};
+    use crate::tools::{ApprovalRequirement, Tool, ToolError, ToolOutput};
     use async_trait::async_trait;
 
     fn make_adapter() -> EffectBridgeAdapter {
@@ -2598,24 +2596,6 @@ mod tests {
             Arc::new(SafetyLayer::new(&config)),
             Arc::new(HookRegistry::default()),
         )
-    }
-
-    fn installed_extension(name: &str) -> InstalledExtension {
-        InstalledExtension {
-            name: name.to_string(),
-            kind: ExtensionKind::McpServer,
-            display_name: Some(name.to_string()),
-            description: Some(format!("{name} integration")),
-            url: None,
-            authenticated: true,
-            active: true,
-            tools: Vec::new(),
-            needs_setup: false,
-            has_auth: true,
-            installed: true,
-            activation_error: None,
-            version: None,
-        }
     }
 
     /// Verify that reset_call_count resets the counter to zero,
@@ -2887,6 +2867,24 @@ mod tests {
         }
     }
 
+    fn installed_extension(name: &str) -> InstalledExtension {
+        InstalledExtension {
+            name: name.to_string(),
+            kind: crate::extensions::ExtensionKind::McpServer,
+            display_name: Some(name.to_string()),
+            description: Some(format!("{name} description")),
+            url: None,
+            authenticated: true,
+            active: true,
+            tools: vec![format!("{name}_search")],
+            needs_setup: false,
+            has_auth: true,
+            installed: true,
+            activation_error: None,
+            version: None,
+        }
+    }
+
     async fn make_tool_info_adapter_with_permission(
         permission: crate::tools::permissions::PermissionState,
     ) -> EffectBridgeAdapter {
@@ -2947,6 +2945,42 @@ mod tests {
 
         let tools = Arc::new(ToolRegistry::new().with_database(db));
         tools.register(Arc::new(ApprovalTestTool)).await;
+        EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        )
+    }
+
+    async fn make_always_approval_test_adapter_with_permission(
+        permission: Option<crate::tools::permissions::PermissionState>,
+    ) -> EffectBridgeAdapter {
+        let db_path = std::env::temp_dir().join(format!(
+            "ironclaw-always-approval-test-permissions-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let db = crate::db::connect_from_config(&crate::config::DatabaseConfig::from_libsql_path(
+            db_path.to_str().expect("db path"),
+            None,
+            None,
+        ))
+        .await
+        .expect("db");
+        if let Some(permission) = permission {
+            db.set_setting(
+                "test_user",
+                "tool_permissions.always_approval_test",
+                &serde_json::to_value(permission).expect("serialize permission"),
+            )
+            .await
+            .expect("save tool permission");
+        }
+
+        let tools = Arc::new(ToolRegistry::new().with_database(db));
+        tools.register(Arc::new(AlwaysApprovalTestTool)).await;
         EffectBridgeAdapter::new(
             tools,
             Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
@@ -3083,6 +3117,122 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tool_info_schema_reads_action_inventory_for_engine_native_actions() {
+        let adapter = make_adapter();
+        let mut ctx = exec_ctx(
+            ironclaw_engine::ThreadId::new(),
+            Some("call_tool_info_schema"),
+        );
+        ctx.available_action_inventory_snapshot = Some(Arc::new(ActionInventory {
+            inline: vec![
+                ActionDef {
+                    name: "tool_info".to_string(),
+                    description: "Inspect actions".to_string(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![],
+                    requires_approval: false,
+                    model_tool_surface: ModelToolSurface::FullSchema,
+                    discovery: None,
+                },
+                ActionDef {
+                    name: "mission_create".to_string(),
+                    description: "Create a mission".to_string(),
+                    parameters_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "goal": {"type": "string"},
+                            "cadence": {"type": "string"}
+                        },
+                        "required": ["name", "goal", "cadence"]
+                    }),
+                    effects: vec![],
+                    requires_approval: false,
+                    model_tool_surface: ModelToolSurface::CompactToolInfo,
+                    discovery: None,
+                },
+            ],
+            discoverable: Vec::new(),
+        }));
+
+        let result = adapter
+            .execute_action(
+                "tool_info",
+                serde_json::json!({"name": "mission-create", "detail": "schema"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("tool_info should succeed through action inventory discovery");
+
+        assert!(!result.is_error);
+        assert_eq!(result.output["name"], serde_json::json!("mission_create"));
+        assert_eq!(
+            result.output["schema"]["required"],
+            serde_json::json!(["name", "goal", "cadence"])
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_info_reads_non_registry_action_from_current_inventory() {
+        let adapter = make_adapter();
+        let mut ctx = exec_ctx(
+            ironclaw_engine::ThreadId::new(),
+            Some("call_tool_info_custom_action"),
+        );
+        ctx.available_action_inventory_snapshot = Some(Arc::new(ActionInventory {
+            inline: vec![
+                ActionDef {
+                    name: "tool_info".to_string(),
+                    description: "Inspect actions".to_string(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![],
+                    requires_approval: false,
+                    model_tool_surface: ModelToolSurface::FullSchema,
+                    discovery: None,
+                },
+                ActionDef {
+                    name: "custom_provider_send".to_string(),
+                    description: "Send through a provider action".to_string(),
+                    parameters_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "recipient": {"type": "string"},
+                            "message": {"type": "string"}
+                        },
+                        "required": ["recipient", "message"]
+                    }),
+                    effects: vec![],
+                    requires_approval: false,
+                    model_tool_surface: ModelToolSurface::CompactToolInfo,
+                    discovery: None,
+                },
+            ],
+            discoverable: Vec::new(),
+        }));
+
+        let result = adapter
+            .execute_action(
+                "tool_info",
+                serde_json::json!({"name": "custom-provider-send", "detail": "schema"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("tool_info should resolve non-registry action from inventory");
+
+        assert!(!result.is_error);
+        assert_eq!(
+            result.output["name"],
+            serde_json::json!("custom_provider_send")
+        );
+        assert_eq!(
+            result.output["schema"]["required"],
+            serde_json::json!(["recipient", "message"])
+        );
+    }
+
+    #[tokio::test]
     async fn tool_info_rejects_actions_outside_callable_snapshot() {
         let adapter = make_adapter();
         let mut ctx = exec_ctx(
@@ -3125,6 +3275,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tool_info_does_not_fall_back_to_registry_when_snapshot_omits_tool() {
+        let adapter = make_tool_info_registry_adapter().await;
+        let mut ctx = exec_ctx(
+            ironclaw_engine::ThreadId::new(),
+            Some("call_tool_info_registry_fallback_guard"),
+        );
+        ctx.available_action_inventory_snapshot = Some(Arc::new(ActionInventory {
+            inline: vec![ActionDef {
+                name: "tool_info".to_string(),
+                description: "Inspect actions".to_string(),
+                parameters_schema: serde_json::json!({"type": "object"}),
+                effects: vec![],
+                requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
+            }],
+            discoverable: Vec::new(),
+        }));
+
+        let result = adapter
+            .execute_action(
+                "tool_info",
+                serde_json::json!({"name": "approval_test", "detail": "schema"}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("tool_info should return an error result for out-of-snapshot action");
+
+        assert!(result.is_error);
+        let error = result.output["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("no callable or discoverable action named 'approval_test'"),
+            "unexpected error output: {:?}",
+            result.output
+        );
+        assert!(
+            !error.contains("No tool named 'approval_test' is registered"),
+            "registry-backed tool_info leaked through: {error}"
+        );
+    }
+
+    #[tokio::test]
     async fn tool_info_rejects_registered_tools_when_snapshots_are_missing() {
         let adapter = make_tool_info_registry_adapter().await;
         let ctx = exec_ctx(
@@ -3148,7 +3341,7 @@ mod tests {
             result.output["error"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("no callable or discoverable action named 'approval_test'"),
+                .contains("action inventory unavailable in this execution context"),
             "unexpected error output: {:?}",
             result.output
         );
@@ -3375,6 +3568,93 @@ mod tests {
         }
     }
 
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn restart_explicit_always_allow_override_bypasses_default_gate() {
+        let _guard = crate::config::helpers::lock_env();
+        let original_in_docker = std::env::var_os("IRONCLAW_IN_DOCKER");
+        let original_disable_restart = std::env::var_os("IRONCLAW_DISABLE_RESTART");
+        // SAFETY: This test serializes env access with lock_env().
+        unsafe {
+            std::env::set_var("IRONCLAW_IN_DOCKER", "true");
+            std::env::set_var("IRONCLAW_DISABLE_RESTART", "true");
+        }
+
+        let adapter = make_restart_adapter_with_permission(Some(
+            crate::tools::permissions::PermissionState::AlwaysAllow,
+        ))
+        .await;
+
+        let result = adapter
+            .execute_action(
+                "restart",
+                serde_json::json!({"delay_secs": 1}),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_restart_explicit_allow_floor"),
+                ),
+            )
+            .await
+            .expect("explicit always_allow should bypass the default approval gate");
+
+        // SAFETY: This test serializes env access with lock_env().
+        unsafe {
+            if let Some(value) = original_in_docker {
+                std::env::set_var("IRONCLAW_IN_DOCKER", value);
+            } else {
+                std::env::remove_var("IRONCLAW_IN_DOCKER");
+            }
+            if let Some(value) = original_disable_restart {
+                std::env::set_var("IRONCLAW_DISABLE_RESTART", value);
+            } else {
+                std::env::remove_var("IRONCLAW_DISABLE_RESTART");
+            }
+        }
+
+        assert!(!result.is_error);
+    }
+
+    #[tokio::test]
+    async fn explicit_always_allow_override_preserves_intrinsic_always_approval() {
+        let adapter = make_always_approval_test_adapter_with_permission(Some(
+            crate::tools::permissions::PermissionState::AlwaysAllow,
+        ))
+        .await;
+
+        let err = adapter
+            .execute_action(
+                "always_approval_test",
+                serde_json::json!({"value": "x"}),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_explicit_always_allow_intrinsic_always"),
+                ),
+            )
+            .await
+            .expect_err("explicit always_allow must not bypass intrinsic Always approval");
+
+        match err {
+            EngineError::GatePaused {
+                gate_name,
+                action_name,
+                resume_kind,
+                ..
+            } => {
+                assert_eq!(gate_name, "approval");
+                assert_eq!(action_name, "always_approval_test");
+                match *resume_kind {
+                    ironclaw_engine::ResumeKind::Approval { allow_always } => {
+                        assert!(!allow_always);
+                    }
+                    other => panic!("expected approval resume kind, got {other:?}"),
+                }
+            }
+            other => panic!("expected approval gate pause, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn explicit_always_allow_override_beats_ask_each_time_fallback() {
         let adapter = make_approval_test_adapter_with_permission(Some(
@@ -3573,20 +3853,14 @@ mod tests {
         assert!(matches!(third, Err(EngineError::GatePaused { .. })));
     }
 
-    /// End-to-end gate verification for the real `MemoryWriteTool`.
+    /// End-to-end permission verification for the real `MemoryWriteTool`.
     ///
-    /// PR #1958 reviewer-flagged regression: the original effect bridge
-    /// mapped `ApprovalRequirement::Always` to `LeaseDenied` (a hard
-    /// refusal). Round 3 fixed both sides: the bridge now maps `Always`
-    /// to `GatePaused(Approval { allow_always: false })`, and
-    /// `MemoryWriteTool::requires_approval` returns `Always` for
-    /// protected orchestrator targets so session auto-approve cannot
-    /// silently skip the gate. This test asserts the full path:
-    /// `requires_approval` → adapter → gate, with the real tool wired
-    /// into a real registry.
+    /// Engine v2 resolves missing `memory_write` rows through the seeded
+    /// `AlwaysAllow` default, but protected targets still raise a per-call
+    /// `Always` floor that must not be bypassed.
     #[cfg(feature = "libsql")]
     #[tokio::test]
-    async fn memory_write_orchestrator_target_paused_for_approval_when_self_modify_enabled() {
+    async fn memory_write_orchestrator_target_preserves_always_approval_floor() {
         use crate::db::Database;
         use crate::db::libsql::LibSqlBackend;
         use crate::tools::builtin::memory::MemoryWriteTool;
@@ -3633,30 +3907,20 @@ mod tests {
         match result {
             Err(EngineError::GatePaused {
                 gate_name,
+                action_name,
                 resume_kind,
                 ..
             }) => {
                 assert_eq!(gate_name, "approval");
+                assert_eq!(action_name, "memory_write");
                 match *resume_kind {
                     ironclaw_engine::ResumeKind::Approval { allow_always } => {
-                        assert!(
-                            !allow_always,
-                            "protected orchestrator writes must set allow_always=false \
-                             to prevent session auto-approve bypass"
-                        );
+                        assert!(!allow_always);
                     }
-                    other => panic!("expected Approval resume kind, got {other:?}"),
+                    other => panic!("expected approval resume kind, got {other:?}"),
                 }
             }
-            Err(EngineError::LeaseDenied { reason }) => {
-                panic!(
-                    "memory_write protected target was hard-denied (LeaseDenied) \
-                     instead of pausing for approval — this is the regression \
-                     that PR #1958's Always fix is meant to prevent. \
-                     Reason: {reason}"
-                );
-            }
-            other => panic!("expected GatePaused(approval), got {other:?}"),
+            other => panic!("expected approval gate pause, got {other:?}"),
         }
     }
 
@@ -5044,7 +5308,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_activate_awaiting_authorization_becomes_auth_gate() {
+    async fn tool_activate_seeded_always_allow_reaches_auth_gate() {
+        use crate::secrets::InMemorySecretsStore;
+        use crate::secrets::SecretsCrypto;
+
         struct ActivateTool;
 
         #[async_trait]
@@ -5086,14 +5353,25 @@ mod tests {
         tools.register(Arc::new(ActivateTool)).await;
 
         let adapter = EffectBridgeAdapter::new(
-            tools,
+            Arc::clone(&tools),
             Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
                 max_output_length: 10_000,
                 injection_check_enabled: false,
             })),
             Arc::new(HookRegistry::default()),
-        )
-        .with_global_auto_approve(true);
+        );
+        let key = secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
+        let crypto = Arc::new(SecretsCrypto::new(key).expect("crypto"));
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(crypto));
+        adapter
+            .set_auth_manager(Arc::new(AuthManager::new(
+                secrets,
+                None,
+                None,
+                Some(Arc::clone(&tools)),
+            )))
+            .await;
 
         let lease = ironclaw_engine::CapabilityLease {
             id: ironclaw_engine::types::capability::LeaseId::new(),
@@ -5156,7 +5434,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_activate_requires_approval_before_auto_installing_integration() {
+    async fn tool_activate_requires_install_approval_before_auto_installing_integration() {
         use crate::extensions::{AuthHint, ExtensionKind, ExtensionSource, RegistryEntry};
         use crate::secrets::InMemorySecretsStore;
         use crate::secrets::SecretsCrypto;
@@ -5241,7 +5519,7 @@ mod tests {
                 assert_eq!(action_name, "tool_activate");
                 match *resume_kind {
                     ironclaw_engine::ResumeKind::Approval { allow_always } => {
-                        assert!(allow_always);
+                        assert!(!allow_always);
                     }
                     other => panic!("expected approval resume kind, got {other:?}"),
                 }
@@ -5251,13 +5529,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_activate_requires_approval_when_install_state_is_unavailable() {
+    async fn tool_activate_respects_ask_each_time_when_install_state_is_unavailable() {
         use crate::extensions::{AuthHint, ExtensionKind, ExtensionSource, RegistryEntry};
         use crate::secrets::InMemorySecretsStore;
         use crate::secrets::SecretsCrypto;
         use crate::tools::builtin::extension_tools::ToolActivateTool;
         use crate::tools::mcp::process::McpProcessManager;
         use crate::tools::mcp::session::McpSessionManager;
+        use crate::tools::permissions::PermissionState;
 
         let dir = tempfile::tempdir().expect("temp dir");
 
@@ -5266,7 +5545,26 @@ mod tests {
         let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
             Arc::new(InMemorySecretsStore::new(crypto));
 
-        let tools = Arc::new(ToolRegistry::new());
+        let db_path = std::env::temp_dir().join(format!(
+            "ironclaw-tool-activate-permissions-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let db = crate::db::connect_from_config(&crate::config::DatabaseConfig::from_libsql_path(
+            db_path.to_str().expect("db path"),
+            None,
+            None,
+        ))
+        .await
+        .expect("db");
+        db.set_setting(
+            "test_user",
+            "tool_permissions.tool_activate",
+            &serde_json::to_value(PermissionState::AskEachTime).expect("serialize permission"),
+        )
+        .await
+        .expect("save tool permission");
+
+        let tools = Arc::new(ToolRegistry::new().with_database(db));
         let ext_mgr = Arc::new(crate::extensions::ExtensionManager::new(
             Arc::new(McpSessionManager::new()),
             Arc::new(McpProcessManager::new()),
@@ -5328,7 +5626,7 @@ mod tests {
                 assert_eq!(action_name, "tool_activate");
                 match *resume_kind {
                     ironclaw_engine::ResumeKind::Approval { allow_always } => {
-                        assert!(allow_always);
+                        assert!(!allow_always);
                     }
                     other => panic!("expected approval resume kind, got {other:?}"),
                 }
@@ -5387,7 +5685,8 @@ mod tests {
                 injection_check_enabled: false,
             })),
             Arc::new(HookRegistry::default()),
-        );
+        )
+        .with_global_auto_approve(true);
 
         let lease = ironclaw_engine::CapabilityLease {
             id: ironclaw_engine::types::capability::LeaseId::new(),
@@ -6091,7 +6390,8 @@ Use this skill to set up a Pika meeting.
                 injection_check_enabled: false,
             })),
             Arc::new(HookRegistry::default()),
-        );
+        )
+        .with_global_auto_approve(true);
         let store: Arc<dyn Store> = Arc::new(crate::bridge::store_adapter::HybridStore::new(None));
         adapter.set_engine_store(Arc::clone(&store)).await;
         adapter
