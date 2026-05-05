@@ -381,8 +381,7 @@ impl ChannelRoutingConfig {
         let allowed_set = match self.allowed_servers_sets.get(group) {
             Some(set) => set,
             None => {
-                let default_whitelist_set =
-                    self.builtin_whitelist_sets.get(&self.default_group);
+                let default_whitelist_set = self.builtin_whitelist_sets.get(&self.default_group);
                 tracing::warn!(
                     group,
                     default_group = %self.default_group,
@@ -917,7 +916,8 @@ mod tests {
         ];
 
         let bn = test_builtin_names();
-        let content_tools = config.filter_tool_defs("agentiffai-marketing", &md, all_tools.clone(), &bn);
+        let content_tools =
+            config.filter_tool_defs("agentiffai-marketing", &md, all_tools.clone(), &bn);
         let content_names: Vec<&str> = content_tools.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(
             content_names,
@@ -931,7 +931,8 @@ mod tests {
         );
 
         // Dev channel: Archon+Kiro+Notion MCP tools, all builtins (no whitelist)
-        let dev_tools = config.filter_tool_defs("agentiffai-dev-issues", &md, all_tools.clone(), &bn);
+        let dev_tools =
+            config.filter_tool_defs("agentiffai-dev-issues", &md, all_tools.clone(), &bn);
         let dev_names: Vec<&str> = dev_tools.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(
             dev_names,
@@ -1072,12 +1073,11 @@ mod tests {
         }"#;
         let config: ChannelRoutingConfig = serde_json::from_str(json).unwrap();
 
-        let builtin_names: std::collections::HashSet<String> = [
-            "shell", "create_job", "memory_search", "web_search",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+        let builtin_names: std::collections::HashSet<String> =
+            ["shell", "create_job", "memory_search", "web_search"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
 
         // DM_EXACT channels bypass routing entirely.
         assert!(config.is_tool_permitted("gateway", "Smartlead_send", &builtin_names));
