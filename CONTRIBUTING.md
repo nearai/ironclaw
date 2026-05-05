@@ -163,3 +163,39 @@ To make sure you did not break any internal links, do:
 cd docs
 mint broken-links
 ```
+
+---
+
+## Adding Skills
+
+Skills extend IronClaw with domain-specific workflows. See `skills/SKILL_TEMPLATE.md` for the format.
+
+### Quick Start
+
+1. Copy `skills/SKILL_TEMPLATE.md` to `skills/<name>/SKILL.md`
+2. Fill in the template with your skill's workflow
+3. Validate: `cargo test -p ironclaw_skills`
+4. Add behavioral test: see `tests/e2e/scenarios/test_skills.py`
+5. Open PR
+
+### Skill Validation Checklist
+
+Before opening a PR:
+
+- [ ] Skill parses without errors (`cargo test -p ironclaw_skills`)
+- [ ] `activation` block is present and non-empty
+- [ ] All tools referenced in skill are available in IronClaw
+- [ ] Behavioral test added to `tests/e2e/scenarios/test_skills.py`
+- [ ] Description accurately reflects skill purpose
+
+### Tool Name Reference
+
+| Claude Code | IronClaw |
+|-------------|----------|
+| `Bash` | `shell` |
+| `Read` | `read_file` |
+| `Write` | `write_file` |
+| `Edit` | `apply_patch` |
+| `Grep` | `grep` |
+| `Glob` | `glob` |
+| `WebFetch` | `http` |

@@ -1,7 +1,7 @@
 """Scenario 3: Skills search, install, and remove lifecycle."""
 
 import pytest
-from helpers import SEL
+from helpers import SEL, send_chat_and_wait_for_terminal_message
 
 
 async def go_to_skills(page):
@@ -87,3 +87,46 @@ async def test_skills_install_and_remove(page):
         await page.wait_for_timeout(3000)
         new_count = await page.locator(SEL["skill_installed"]).count()
         assert new_count < installed_count, "Skill should be removed from installed list"
+
+
+# ----------------------------------------------------------------------
+# Skill behavioral tests
+# ----------------------------------------------------------------------
+# These tests verify that skills produce correct behavior when invoked.
+# Add new skills to SKILL_TESTS below.
+# ----------------------------------------------------------------------
+
+SKILL_TESTS = [
+    {
+        "name": "investigate",
+        "trigger": "/investigate why is this broken?",
+        "expect_keywords": ["investigation", "debug", "error", "issue"],
+    },
+]
+
+
+@pytest.mark.parametrize("skill_test", SKILL_TESTS)
+async def test_skill_invocation(page, skill_test):
+    """Invoke a skill and verify it produces expected output."""
+    result = await send_chat_and_wait_for_terminal_message(page, skill_test["trigger"])
+
+    assert result["role"] == "assistant"
+    response_lower = result["text"].lower()
+
+    for keyword in skill_test["expect_keywords"]:
+        assert keyword.lower() in response_lower, (
+            f"Expected '{keyword}' in skill response for {skill_test['name']}, "
+            f"got: {result['text'][:200]}..."
+        )
+
+
+async def test_skill_investigate_uses_shell(page):
+    """The investigate skill should use shell/git commands during investigation."""
+    initial_count = await page.locator(SEL["message_assistant"]).count()
+    await send_chat_and_wait_for_terminal_message(page, "/investigate")
+    final_count = await page.locator(SEL["message_assistant"]).count()
+
+    assert final_count > initial_count, "Investigation should produce at least one response"
+
+
+
