@@ -35,6 +35,14 @@ const STATE_REPLAY_PAGE_LIMIT: usize = 256;
 /// run-state view.
 const STATE_REPLAY_MAX_EVENTS: usize = 100_000;
 
+/// Maximum page size accepted by the projection service.
+///
+/// `ProjectionRequest.limit` is reserved for product adapters; a caller-
+/// controlled limit must not be allowed to force the durable log to scan
+/// or return an arbitrarily large page. Requests above this bound are
+/// rejected with [`ProjectionError::InvalidRequest`] before any read.
+pub const MAX_PROJECTION_PAGE_LIMIT: usize = 1_000;
+
 /// Scoped projection request authority.
 ///
 /// The stream key selects the durable `(tenant, user, agent)` partition. The
@@ -249,6 +257,11 @@ impl ReplayEventProjectionService {
         if request.limit == 0 {
             return Err(ProjectionError::InvalidRequest {
                 reason: "limit must be greater than zero",
+            });
+        }
+        if request.limit > MAX_PROJECTION_PAGE_LIMIT {
+            return Err(ProjectionError::InvalidRequest {
+                reason: "limit exceeds MAX_PROJECTION_PAGE_LIMIT",
             });
         }
         let fetch_limit = request

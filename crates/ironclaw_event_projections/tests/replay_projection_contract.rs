@@ -3,8 +3,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_event_projections::{
-    EventProjectionService, ProjectionCursor, ProjectionError, ProjectionRequest, ProjectionScope,
-    ReplayEventProjectionService, RunProjectionStatus, TimelineEntryKind,
+    EventProjectionService, MAX_PROJECTION_PAGE_LIMIT, ProjectionCursor, ProjectionError,
+    ProjectionRequest, ProjectionScope, ReplayEventProjectionService, RunProjectionStatus,
+    TimelineEntryKind,
 };
 use ironclaw_events::{
     DurableEventLog, EventCursor, EventError, EventLogEntry, EventReplay, EventStreamKey,
@@ -714,4 +715,67 @@ impl DurableEventLog for StaticDurableEventLog {
             next_cursor,
         })
     }
+}
+
+// -----------------------------------------------------------------------------
+// Regression: PR #3212 review feedback — bounded projection page size
+// -----------------------------------------------------------------------------
+
+fn projection_request_with_limit(limit: usize) -> ProjectionRequest {
+    ProjectionRequest {
+        scope: ProjectionScope::from_resource_scope(&scope_for_thread(
+            ThreadId::new("thread-limit").unwrap(),
+        )),
+        after: None,
+        limit,
+    }
+}
+
+#[tokio::test]
+async fn replay_projection_rejects_zero_limit() {
+    let service = ReplayEventProjectionService::new(Arc::new(InMemoryDurableEventLog::new()));
+    let err = service
+        .snapshot(projection_request_with_limit(0))
+        .await
+        .expect_err("limit=0 must be rejected");
+    assert!(matches!(err, ProjectionError::InvalidRequest { .. }));
+}
+
+#[tokio::test]
+async fn replay_projection_accepts_limit_at_max() {
+    let service = ReplayEventProjectionService::new(Arc::new(InMemoryDurableEventLog::new()));
+    service
+        .snapshot(projection_request_with_limit(MAX_PROJECTION_PAGE_LIMIT))
+        .await
+        .expect("limit at MAX_PROJECTION_PAGE_LIMIT must be accepted");
+}
+
+#[tokio::test]
+async fn replay_projection_rejects_limit_above_max() {
+    let service = ReplayEventProjectionService::new(Arc::new(InMemoryDurableEventLog::new()));
+    let err = service
+        .snapshot(projection_request_with_limit(MAX_PROJECTION_PAGE_LIMIT + 1))
+        .await
+        .expect_err("limit > MAX_PROJECTION_PAGE_LIMIT must be rejected");
+    assert!(matches!(err, ProjectionError::InvalidRequest { .. }));
+}
+
+#[tokio::test]
+async fn replay_projection_rejects_usize_max_limit() {
+    let service = ReplayEventProjectionService::new(Arc::new(InMemoryDurableEventLog::new()));
+    let err = service
+        .snapshot(projection_request_with_limit(usize::MAX))
+        .await
+        .expect_err("limit=usize::MAX must be rejected");
+    assert!(matches!(err, ProjectionError::InvalidRequest { .. }));
+}
+
+#[tokio::test]
+async fn replay_projection_updates_rejects_limit_above_max() {
+    let service = ReplayEventProjectionService::new(Arc::new(InMemoryDurableEventLog::new()));
+    let err = service
+        .updates(projection_request_with_limit(MAX_PROJECTION_PAGE_LIMIT + 1))
+        .await
+        .expect_err("updates() must enforce the same cap as snapshot()");
+    assert!(matches!(err, ProjectionError::InvalidRequest { .. }));
 }
