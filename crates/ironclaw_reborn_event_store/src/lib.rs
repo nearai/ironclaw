@@ -76,6 +76,8 @@ pub enum RebornEventStoreError {
     ProductionInMemoryDisabled,
     #[error("production JSONL event store requires explicit single-node durable acceptance")]
     ProductionJsonlRequiresAcceptance,
+    #[error("production Reborn event store cannot use cleartext http:// libSQL URL")]
+    ProductionLibsqlClearTextDisabled,
     #[error("{backend} Reborn event store backend is not enabled in this build")]
     BackendUnavailable { backend: &'static str },
     #[error("{backend} Reborn event store failed during {operation}")]
@@ -150,6 +152,9 @@ pub async fn build_reborn_event_stores(
             path_or_url,
             auth_token,
         } => {
+            if profile == RebornProfile::Production && path_or_url.starts_with("http://") {
+                return Err(RebornEventStoreError::ProductionLibsqlClearTextDisabled);
+            }
             #[cfg(feature = "libsql")]
             {
                 libsql_store::build_libsql_event_stores(path_or_url, auth_token).await
@@ -711,5 +716,41 @@ mod tests {
 
         let _lock_b = store.stream_lock(StreamKind::Runtime, &stream_b).await;
         assert_eq!(store.locks.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn production_rejects_cleartext_http_libsql_url() {
+        let result = build_reborn_event_stores(
+            RebornProfile::Production,
+            RebornEventStoreConfig::Libsql {
+                path_or_url: "http://libsql.example.com:8080".to_string(),
+                auth_token: None,
+            },
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(RebornEventStoreError::ProductionLibsqlClearTextDisabled)
+        ));
+    }
+
+    #[tokio::test]
+    async fn local_dev_allows_cleartext_http_libsql_url() {
+        // Non-production profiles can still use http:// for local sqld.
+        // The build call will fail on the actual connection attempt below
+        // for an unreachable address, but it must NOT fail with the
+        // cleartext-disabled error.
+        let result = build_reborn_event_stores(
+            RebornProfile::LocalDev,
+            RebornEventStoreConfig::Libsql {
+                path_or_url: "http://127.0.0.1:1".to_string(),
+                auth_token: None,
+            },
+        )
+        .await;
+        assert!(!matches!(
+            result,
+            Err(RebornEventStoreError::ProductionLibsqlClearTextDisabled)
+        ));
     }
 }

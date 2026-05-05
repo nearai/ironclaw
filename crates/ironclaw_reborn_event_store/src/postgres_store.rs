@@ -22,27 +22,47 @@ use crate::{
 const POSTGRES_EVENT_STORE_SCHEMA: &str =
     include_str!("../migrations/postgres/001_initial_event_store.sql");
 
-/// Returns true if the supplied Postgres URL targets a loopback host (or a
-/// Unix socket). Anything else is treated as remote and must use TLS.
+/// Returns true if the supplied Postgres connection string targets a loopback
+/// host (or a Unix socket). Anything else is treated as remote and must use TLS.
 ///
 /// Conservative: an unparseable URL is treated as remote (fail closed).
+///
+/// Two connection-string forms are supported:
+/// - URL form (`postgres://host:5432/db`): parsed via `url::Url`.
+/// - libpq keyword form (`host=db.example.com user=...`): walked keyword-by-
+///   keyword. A keyword string without `host=` (libpq default) or with
+///   `host=/...` (socket directory) is a Unix-socket connection; anything
+///   else is routed to a network host and must use TLS.
 fn is_local_postgres_url(url: &str) -> bool {
-    // Unix socket connections (`host=/var/run/...`) have no `://` host.
-    if !url.contains("://") {
-        return true;
+    if url.contains("://") {
+        let parsed = match url::Url::parse(url) {
+            Ok(parsed) => parsed,
+            Err(_) => return false,
+        };
+        return match parsed.host_str() {
+            // libpq treats an empty host as a Unix-socket connection.
+            None | Some("") => true,
+            Some(host) => is_local_host_literal(host),
+        };
     }
-    let parsed = match url::Url::parse(url) {
-        Ok(parsed) => parsed,
-        Err(_) => return false,
-    };
-    match parsed.host_str() {
-        // libpq treats an empty host as a Unix-socket connection.
-        None | Some("") => true,
-        Some(host) => matches!(
-            host,
-            "localhost" | "127.0.0.1" | "::1" | "[::1]" | "0.0.0.0"
-        ),
+    let mut host: Option<&str> = None;
+    for token in url.split_ascii_whitespace() {
+        if let Some(value) = token.strip_prefix("host=") {
+            host = Some(value);
+        }
     }
+    match host {
+        None => true,
+        Some(host) if host.is_empty() || host.starts_with('/') => true,
+        Some(host) => is_local_host_literal(host),
+    }
+}
+
+fn is_local_host_literal(host: &str) -> bool {
+    matches!(
+        host,
+        "localhost" | "127.0.0.1" | "::1" | "[::1]" | "0.0.0.0"
+    )
 }
 
 /// Build a rustls TLS connector for remote Postgres connections.
@@ -505,5 +525,40 @@ mod tests {
         // production cannot accidentally end up with a NoTls connector
         // because of a typo in the connection string.
         assert!(!is_local_postgres_url("postgres://%%%not-a-host"));
+    }
+
+    #[test]
+    fn libpq_keyword_strings_to_remote_hosts_require_tls() {
+        // Regression for the High-severity finding on PR #3171: libpq
+        // keyword form was previously treated as local because the original
+        // check fired on `!url.contains("://")`.
+        for url in [
+            "host=db.example.com user=event_user dbname=ironclaw",
+            "host=10.0.0.5 port=5432 user=ironclaw",
+            "user=ironclaw host=managed-pg.internal",
+        ] {
+            assert!(
+                !is_local_postgres_url(url),
+                "expected libpq keyword string `{url}` to require TLS"
+            );
+        }
+    }
+
+    #[test]
+    fn libpq_keyword_strings_without_host_or_with_socket_path_are_local() {
+        for url in [
+            // No host= keyword: libpq default = local socket.
+            "user=ironclaw dbname=ironclaw",
+            // Socket directory.
+            "host=/var/run/postgresql user=ironclaw dbname=ironclaw",
+            // Localhost literal.
+            "host=localhost user=ironclaw",
+            "host=127.0.0.1 user=ironclaw",
+        ] {
+            assert!(
+                is_local_postgres_url(url),
+                "expected `{url}` to be detected as local"
+            );
+        }
     }
 }
