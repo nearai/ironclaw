@@ -376,7 +376,8 @@ async fn forward_request(
                 | CredentialLocation::UrlPath { .. }
                 | CredentialLocation::HmacSignedHeader { .. }
                 | CredentialLocation::Eip712SignedHeader { .. }
-                | CredentialLocation::Nep413SignedHeader { .. } => {
+                | CredentialLocation::Nep413SignedHeader { .. }
+                | CredentialLocation::SolanaSignedTransaction { .. } => {
                     tracing::warn!(
                         "Proxy: credential location {:?} not supported for forward proxy, skipping",
                         location

@@ -475,6 +475,12 @@ pub enum CredentialLocationSchema {
         callback_url_source: Option<FieldSource>,
         output_headers: Vec<HeaderOutput>,
     },
+
+    /// Solana transaction signing with ed25519.
+    SolanaSignedTransaction {
+        message_source: FieldSource,
+        output_body_fields: Vec<BodyJsonOutput>,
+    },
 }
 
 impl CredentialLocationSchema {
@@ -526,6 +532,13 @@ impl CredentialLocationSchema {
                 message_source: message_source.clone(),
                 callback_url_source: callback_url_source.clone(),
                 output_headers: output_headers.clone(),
+            },
+            CredentialLocationSchema::SolanaSignedTransaction {
+                message_source,
+                output_body_fields,
+            } => CredentialLocation::SolanaSignedTransaction {
+                message_source: message_source.clone(),
+                output_body_fields: output_body_fields.clone(),
             },
         }
     }
