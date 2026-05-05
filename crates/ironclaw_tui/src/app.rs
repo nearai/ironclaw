@@ -9,7 +9,10 @@
 //! The app owns the terminal, manages alternate screen / raw mode, and
 //! renders frames at ~30fps using a tick timer.
 
+use std::future::Future;
 use std::io::{self, Write};
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use ratatui::Terminal;
@@ -55,11 +58,26 @@ pub struct TuiAppHandle {
     pub join_handle: std::thread::JoinHandle<()>,
 }
 
+/// Narrow out-of-band interrupt hook supplied by the host crate.
+///
+/// The TUI crate stays decoupled from the agent and engine crates; it only
+/// knows that Esc can ask the host to interrupt the active channel/user work.
+pub trait InterruptHandle: Send + Sync {
+    fn interrupt_active<'a>(
+        &'a self,
+        user_id: &'a str,
+        channel: &'a str,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+}
+
 /// Configuration for creating a TuiApp.
 pub struct TuiAppConfig {
+    pub user_id: String,
+    pub channel: String,
     pub version: String,
     pub model: String,
     pub layout: TuiLayout,
+    pub interrupt_handle: Option<Arc<dyn InterruptHandle>>,
     /// Maximum context window size in tokens (e.g., 128_000, 200_000).
     pub context_window: u64,
     /// Tool categories for the welcome screen.
@@ -134,6 +152,10 @@ async fn run_tui(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
+
+    let interrupt_handle = config.interrupt_handle.clone();
+    let interrupt_user_id = config.user_id.clone();
+    let interrupt_channel = config.channel.clone();
 
     // State
     let mut state = AppState {
@@ -266,7 +288,16 @@ async fn run_tui(
                 let Some(event) = event else {
                     break; // Channel closed
                 };
-                handle_event(event, &mut state, &mut widgets, &msg_tx, &layout).await;
+                let interrupt_requested =
+                    handle_event(event, &mut state, &mut widgets, &msg_tx, &layout).await;
+                if interrupt_requested {
+                    dispatch_out_of_band_interrupt(
+                        interrupt_handle.as_ref(),
+                        &interrupt_user_id,
+                        &interrupt_channel,
+                    )
+                    .await;
+                }
             }
         }
 
@@ -358,7 +389,9 @@ async fn handle_event(
     widgets: &mut BuiltinWidgets,
     msg_tx: &mpsc::Sender<TuiUserMessage>,
     layout: &TuiLayout,
-) {
+) -> bool {
+    let mut interrupt_requested = false;
+
     match event {
         TuiEvent::Paste(text) => {
             let approval_active = state.pending_approval.is_some();
@@ -503,6 +536,7 @@ async fn handle_event(
                         )
                         .await;
                     state.status_text.clear();
+                    interrupt_requested = true;
                 }
                 InputAction::ApprovalUp => {
                     if let Some(ref mut ap) = state.pending_approval {
@@ -1445,6 +1479,18 @@ async fn handle_event(
                 created_at: chrono::Utc::now(),
             });
         }
+    }
+
+    interrupt_requested
+}
+
+async fn dispatch_out_of_band_interrupt(
+    interrupt_handle: Option<&Arc<dyn InterruptHandle>>,
+    user_id: &str,
+    channel: &str,
+) {
+    if let Some(handle) = interrupt_handle {
+        handle.interrupt_active(user_id, channel).await;
     }
 }
 
@@ -2528,6 +2574,7 @@ mod tests {
     use crate::widgets::{ActiveTab, ApprovalRequest, MessageRole, ThreadStatus};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::layout::Rect;
+    use std::sync::Mutex as StdMutex;
 
     async fn apply_event(state: &mut AppState, event: TuiEvent) {
         let layout = TuiLayout::default();
@@ -2550,6 +2597,66 @@ mod tests {
             messages.push(message);
         }
         messages
+    }
+
+    struct RecordingInterruptHandle {
+        calls: Arc<StdMutex<Vec<(String, String)>>>,
+    }
+
+    impl InterruptHandle for RecordingInterruptHandle {
+        fn interrupt_active<'a>(
+            &'a self,
+            user_id: &'a str,
+            channel: &'a str,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+            Box::pin(async move {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push((user_id.to_string(), channel.to_string()));
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn esc_requests_interrupt_and_keeps_message_fallback() {
+        let mut state = AppState {
+            current_thread_id: Some("thread-123".to_string()),
+            ..Default::default()
+        };
+        let layout = TuiLayout::default();
+        let mut widgets = create_default_widgets(&layout);
+        let (msg_tx, mut msg_rx) = mpsc::channel(4);
+
+        let interrupt_requested = handle_event(
+            TuiEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            &mut state,
+            &mut widgets,
+            &msg_tx,
+            &layout,
+        )
+        .await;
+
+        assert!(interrupt_requested);
+        let message = msg_rx.try_recv().unwrap();
+        assert_eq!(message.text, "/interrupt");
+        assert_eq!(message.thread_id.as_deref(), Some("thread-123"));
+    }
+
+    #[tokio::test]
+    async fn out_of_band_interrupt_dispatches_user_and_channel() {
+        let calls = Arc::new(StdMutex::new(Vec::new()));
+        let handle: Arc<dyn InterruptHandle> = Arc::new(RecordingInterruptHandle {
+            calls: Arc::clone(&calls),
+        });
+
+        dispatch_out_of_band_interrupt(Some(&handle), "user-1", "tui").await;
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(
+            calls.as_slice(),
+            &[("user-1".to_string(), "tui".to_string())]
+        );
     }
 
     fn make_snapshot(width: u16, height: u16) -> ScreenSnapshot {

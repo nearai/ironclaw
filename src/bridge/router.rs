@@ -2864,6 +2864,52 @@ pub async fn resolve_gate(
     .await
 }
 
+async fn stop_active_engine_threads(
+    state: &EngineState,
+    channel: &str,
+    user_id: &str,
+) -> Result<u32, Error> {
+    let conv_id = state
+        .conversation_manager
+        .get_or_create_conversation(channel, user_id)
+        .await
+        .map_err(|e| engine_err("conversation error", e))?;
+
+    let conv = state.conversation_manager.get_conversation(conv_id).await;
+    let active_threads = conv
+        .as_ref()
+        .map(|c| c.active_threads.clone())
+        .unwrap_or_default();
+
+    let mut stopped = 0u32;
+    for tid in &active_threads {
+        if state.thread_manager.is_running(*tid).await {
+            if let Err(e) = state.thread_manager.stop_thread(*tid, user_id).await {
+                debug!(thread_id = %tid, error = %e, "engine v2: failed to stop thread");
+            } else {
+                stopped += 1;
+            }
+        }
+    }
+
+    Ok(stopped)
+}
+
+/// Stop active engine threads for a channel/user without going through the
+/// agent message queue. Used by interactive surfaces that need Esc/cancel to
+/// bypass a blocked dispatch loop.
+pub async fn interrupt_active_engine_threads(channel: &str, user_id: &str) -> Result<u32, Error> {
+    let Some(lock) = ENGINE_STATE.get() else {
+        return Ok(0);
+    };
+    let guard = lock.read().await;
+    let Some(state) = guard.as_ref() else {
+        return Ok(0);
+    };
+
+    stop_active_engine_threads(state, channel, user_id).await
+}
+
 /// Handle an interrupt submission — stop active engine threads.
 pub async fn handle_interrupt(
     agent: &Agent,
@@ -2879,32 +2925,7 @@ pub async fn handle_interrupt(
         .as_ref()
         .ok_or_else(|| engine_err("init", "engine state is empty"))?;
 
-    let conv_id = state
-        .conversation_manager
-        .get_or_create_conversation(&message.channel, &message.user_id)
-        .await
-        .map_err(|e| engine_err("conversation error", e))?;
-
-    let conv = state.conversation_manager.get_conversation(conv_id).await;
-    let active_threads = conv
-        .as_ref()
-        .map(|c| c.active_threads.clone())
-        .unwrap_or_default();
-
-    let mut stopped = 0u32;
-    for tid in &active_threads {
-        if state.thread_manager.is_running(*tid).await {
-            if let Err(e) = state
-                .thread_manager
-                .stop_thread(*tid, &message.user_id)
-                .await
-            {
-                debug!(thread_id = %tid, error = %e, "engine v2: failed to stop thread");
-            } else {
-                stopped += 1;
-            }
-        }
-    }
+    let stopped = stop_active_engine_threads(state, &message.channel, &message.user_id).await?;
 
     if stopped > 0 {
         debug!(stopped, "engine v2: interrupted running threads");

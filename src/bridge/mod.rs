@@ -61,6 +61,7 @@ pub use router::{
     has_pending_auth,
     // Initialization
     init_engine,
+    interrupt_active_engine_threads,
     is_engine_v2_enabled,
     list_engine_missions,
     list_engine_projects,

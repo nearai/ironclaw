@@ -4,7 +4,9 @@
 //! between the agent's `Channel` trait and `ironclaw_tui`'s event/message
 //! channels.
 
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -12,7 +14,9 @@ use async_trait::async_trait;
 use tokio::sync::{Mutex, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
-use ironclaw_tui::{SkillCategory, ToolCategory, TuiAppConfig, TuiEvent, TuiLayout, start_tui};
+use ironclaw_tui::{
+    InterruptHandle, SkillCategory, ToolCategory, TuiAppConfig, TuiEvent, TuiLayout, start_tui,
+};
 
 use crate::channels::web::log_layer::LogBroadcaster;
 use crate::channels::{
@@ -194,6 +198,28 @@ fn build_engine_thread_detail_event(detail: crate::bridge::EngineThreadDetail) -
     }
 }
 
+struct EngineInterruptHandle;
+
+impl InterruptHandle for EngineInterruptHandle {
+    fn interrupt_active<'a>(
+        &'a self,
+        user_id: &'a str,
+        channel: &'a str,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            if let Err(err) = crate::bridge::interrupt_active_engine_threads(channel, user_id).await
+            {
+                tracing::warn!(
+                    channel,
+                    user_id,
+                    error = %err,
+                    "TUI out-of-band interrupt failed"
+                );
+            }
+        })
+    }
+}
+
 /// TUI channel backed by `ironclaw_tui`.
 pub struct TuiChannel {
     user_id: String,
@@ -308,9 +334,12 @@ impl Channel for TuiChannel {
         }
 
         let config = TuiAppConfig {
+            user_id: self.user_id.clone(),
+            channel: "tui".to_string(),
             version: self.version.clone(),
             model: self.model.clone(),
             layout: self.layout.clone(),
+            interrupt_handle: Some(Arc::new(EngineInterruptHandle)),
             context_window: self.context_window,
             tools: self.tools.clone(),
             skills: self.skills.clone(),

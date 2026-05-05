@@ -150,9 +150,12 @@ fn mock_skill_categories() -> Vec<SkillCategory> {
 
 fn main() {
     let config = TuiAppConfig {
+        user_id: "dev-user".into(),
+        channel: "tui".into(),
         version: "0.22.0-dev".into(),
         model: "gpt-5.4".into(),
         layout: TuiLayout::default(),
+        interrupt_handle: None,
         context_window: 128_000,
         tools: mock_tool_categories(),
         skills: mock_skill_categories(),
