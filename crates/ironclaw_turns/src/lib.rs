@@ -35,4 +35,9 @@ pub use status::{
     AdmissionRejection, AdmissionRejectionReason, BlockedReason, SanitizedCancelReason,
     SanitizedFailure, TurnError, TurnErrorCategory, TurnRunProfile, TurnRunState, TurnStatus,
 };
-pub use store::TurnStateStore;
+pub use store::{
+    TurnActiveLockKey, TurnActiveLockRecord, TurnCheckpointRecord, TurnIdempotencyErrorReplay,
+    TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnIdempotencyRecord,
+    TurnIdempotencyReplay, TurnLockVersion, TurnPersistenceSnapshot, TurnRecord, TurnRunRecord,
+    TurnStateStore,
+};

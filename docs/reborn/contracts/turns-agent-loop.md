@@ -2,7 +2,7 @@
 
 **Status:** Contract-freeze draft
 **Date:** 2026-04-25
-**Depends on:** [`host-api.md`](host-api.md), [`capabilities.md`](capabilities.md), [`memory.md`](memory.md), [`events-projections.md`](events-projections.md), [`processes.md`](processes.md)
+**Depends on:** [`host-api.md`](host-api.md), [`capabilities.md`](capabilities.md), [`memory.md`](memory.md), [`events-projections.md`](events-projections.md), [`processes.md`](processes.md), [`turn-persistence.md`](turn-persistence.md)
 
 ---
 
@@ -124,6 +124,7 @@ running -> completed|failed|cancelled
 
 Rules:
 
+- persistence records, active-lock ownership, runner lease fields, checkpoints, and idempotency outcomes follow [`turn-persistence.md`](turn-persistence.md);
 - state transitions are persisted before externally visible side effects where needed for recovery;
 - approval-blocked turns persist enough fingerprint metadata to resume without raw input leakage;
 - cancellation requests propagate to running process/capability work when possible;
