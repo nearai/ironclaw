@@ -483,7 +483,9 @@ impl Inner {
                 });
             }
             if record.gate_ref.as_ref() != Some(&request.gate_resolution_ref) {
-                return Err(TurnError::ScopeNotFound);
+                return Err(TurnError::InvalidRequest {
+                    reason: "gate resolution reference mismatch".to_string(),
+                });
             }
             record.status = TurnStatus::Queued;
             record.gate_ref = None;

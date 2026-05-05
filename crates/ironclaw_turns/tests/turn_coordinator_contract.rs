@@ -336,7 +336,7 @@ fn admission_rejection_reason_status_mapping_is_user_actionable() {
     assert_eq!(
         TurnError::AdmissionRejected(AdmissionRejection::new(AdmissionRejectionReason::Policy))
             .adapter_status_code(),
-        429
+        403
     );
     assert_eq!(
         TurnError::AdmissionRejected(AdmissionRejection::new(
@@ -379,6 +379,18 @@ async fn admission_policy_rejection_is_typed_and_does_not_create_run() {
         ))
         .adapter_status_code(),
         403
+    );
+    assert_eq!(
+        TurnError::AdmissionRejected(AdmissionRejection::new(AdmissionRejectionReason::Policy))
+            .adapter_status_code(),
+        403
+    );
+    assert_eq!(
+        TurnError::AdmissionRejected(AdmissionRejection::new(
+            AdmissionRejectionReason::ProfileRejected
+        ))
+        .adapter_status_code(),
+        400
     );
     assert_eq!(
         TurnError::AdmissionRejected(AdmissionRejection::new(
@@ -507,6 +519,61 @@ async fn blocked_run_persists_checkpoint_and_keeps_same_thread_lock_until_resume
     assert_eq!(duplicate, resumed);
     assert_eq!(store.events().len(), event_count_after_resume);
     assert_eq!(resumed.status, TurnStatus::Queued);
+}
+
+#[tokio::test]
+async fn resume_turn_with_wrong_gate_resolution_ref_is_invalid_request() {
+    let (coordinator, store) = coordinator();
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-a", "idem-submit-a"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            reason: BlockedReason::Approval {
+                gate_ref: GateRef::new("approval-gate").unwrap(),
+            },
+        })
+        .await
+        .unwrap();
+
+    let err = coordinator
+        .resume_turn(ResumeTurnRequest {
+            scope: scope("thread-a"),
+            actor: actor(),
+            run_id,
+            gate_resolution_ref: GateRef::new("wrong-gate").unwrap(),
+            source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
+            idempotency_key: IdempotencyKey::new("idem-resume-wrong-gate").unwrap(),
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        err,
+        TurnError::InvalidRequest {
+            reason: "gate resolution reference mismatch".to_string(),
+        }
+    );
+    assert_eq!(err.adapter_status_code(), 400);
 }
 
 #[tokio::test]

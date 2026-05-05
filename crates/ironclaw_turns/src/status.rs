@@ -244,12 +244,12 @@ impl TurnError {
         match self {
             Self::ThreadBusy(_) => TurnErrorCategory::ThreadBusy,
             Self::AdmissionRejected(rejection) => match rejection.reason {
-                AdmissionRejectionReason::Unauthorized => TurnErrorCategory::Unauthorized,
-                AdmissionRejectionReason::Unavailable => TurnErrorCategory::Unavailable,
+                AdmissionRejectionReason::TenantLimit => TurnErrorCategory::AdmissionRejected,
                 AdmissionRejectionReason::ProfileRejected => TurnErrorCategory::InvalidRequest,
-                AdmissionRejectionReason::TenantLimit | AdmissionRejectionReason::Policy => {
-                    TurnErrorCategory::AdmissionRejected
+                AdmissionRejectionReason::Policy | AdmissionRejectionReason::Unauthorized => {
+                    TurnErrorCategory::Unauthorized
                 }
+                AdmissionRejectionReason::Unavailable => TurnErrorCategory::Unavailable,
             },
             Self::ScopeNotFound => TurnErrorCategory::ScopeNotFound,
             Self::Unauthorized => TurnErrorCategory::Unauthorized,
