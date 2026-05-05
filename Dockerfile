@@ -7,8 +7,13 @@
 # threading issues when statically linked against musl (segfault on
 # database reopen), so we use glibc.
 #
-# Build:
-#   docker build --platform linux/amd64 --target runtime -t ironclaw:latest .
+# Build (host arch — produces an image for whatever platform you're on):
+#   docker build --target runtime -t ironclaw:latest .
+#
+# Build (multi-arch — requires Buildx + QEMU):
+#   docker buildx build \
+#     --platform linux/amd64,linux/arm64 \
+#     --target runtime -t ironclaw:latest --push .
 #
 # Run:
 #   docker run --env-file .env -p 3000:3000 ironclaw:latest
