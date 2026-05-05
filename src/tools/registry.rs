@@ -366,6 +366,29 @@ impl ToolRegistry {
             .collect()
     }
 
+    /// List tool names visible in the current engine version *and* under
+    /// the given resolved runtime policy (#3045 PR 4).
+    ///
+    /// Tools whose [`Tool::runtime_affordance`] cannot be granted by the
+    /// resolved policy are hidden. This is a UX/visibility filter only —
+    /// action-time authorization still runs on every invocation.
+    pub async fn list_visible_under(
+        &self,
+        policy: &ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy,
+    ) -> Vec<String> {
+        let version = self.engine_version;
+        self.tools
+            .read()
+            .await
+            .values()
+            .filter(|tool| Self::is_engine_visible(tool.as_ref(), version))
+            .filter(|tool| {
+                crate::tools::runtime_filter::is_visible_under(policy, tool.runtime_affordance())
+            })
+            .map(|tool| tool.name().to_string())
+            .collect()
+    }
+
     /// Retain only tools whose names are in the given allowlist.
     ///
     /// If `names` is empty, this is a no-op (all tools are kept).
@@ -391,6 +414,25 @@ impl ToolRegistry {
             .await
             .values()
             .filter(|tool| Self::is_engine_visible(tool.as_ref(), version))
+            .cloned()
+            .collect()
+    }
+
+    /// Get all tools visible in the current engine version *and* under
+    /// the given resolved runtime policy (#3045 PR 4).
+    pub async fn all_visible_under(
+        &self,
+        policy: &ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy,
+    ) -> Vec<Arc<dyn Tool>> {
+        let version = self.engine_version;
+        self.tools
+            .read()
+            .await
+            .values()
+            .filter(|tool| Self::is_engine_visible(tool.as_ref(), version))
+            .filter(|tool| {
+                crate::tools::runtime_filter::is_visible_under(policy, tool.runtime_affordance())
+            })
             .cloned()
             .collect()
     }
