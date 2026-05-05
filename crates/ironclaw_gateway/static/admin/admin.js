@@ -790,11 +790,25 @@
       alert('Display name is required');
       return;
     }
+
+    // Issue #3083: prevent rapid double/triple click from firing N
+    // parallel POSTs (which would create N duplicate user records).
+    // Disable + busy-flag the submit button on entry; restore in
+    // .finally so a validation/server error reopens the form cleanly.
+    var formEl = document.getElementById('create-user-form');
+    var submitBtn = formEl ? formEl.querySelector('[data-action="create-user"]') : null;
+    if (submitBtn) {
+      if (submitBtn.disabled) return;
+      submitBtn.disabled = true;
+      submitBtn.setAttribute('aria-busy', 'true');
+    }
+    var originalSubmitText = submitBtn ? submitBtn.textContent : null;
+    if (submitBtn) submitBtn.textContent = 'Creating…';
+
     var body = { display_name: nameEl.value.trim(), role: roleEl ? roleEl.value : 'member' };
     if (emailEl && emailEl.value.trim()) body.email = emailEl.value.trim();
 
     apiFetch('/api/admin/users', { method: 'POST', body: body }).then(function (res) {
-      var formEl = document.getElementById('create-user-form');
       if (formEl) formEl.style.display = 'none';
       if (nameEl) nameEl.value = '';
       if (emailEl) emailEl.value = '';
@@ -810,6 +824,12 @@
       });
     }).catch(function (err) {
       alert('Failed to create user: ' + err.message);
+    }).finally(function () {
+      if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.removeAttribute('aria-busy');
+        if (originalSubmitText !== null) submitBtn.textContent = originalSubmitText;
+      }
     });
   }
 
