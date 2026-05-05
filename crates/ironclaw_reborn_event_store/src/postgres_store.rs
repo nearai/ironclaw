@@ -1,13 +1,14 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use ironclaw_events::{
     DurableAuditLog, DurableEventLog, EventCursor, EventError, EventLogEntry, EventReplay,
     EventStreamKey, ReadScope, RuntimeEvent,
 };
 use ironclaw_host_api::AuditEnvelope;
 use secrecy::{ExposeSecret, SecretString};
-use tokio_postgres::{Client, NoTls, types::ToSql};
+use tokio_postgres::{Config, NoTls, types::ToSql};
 use tokio_postgres_rustls::MakeRustlsConnect;
 
 use crate::{
@@ -100,30 +101,24 @@ pub(crate) async fn build_postgres_event_stores(
     url: SecretString,
 ) -> Result<RebornEventStores, RebornEventStoreError> {
     let raw_url = url.expose_secret();
-    let client = if is_local_postgres_url(raw_url) {
-        let (client, connection) = tokio_postgres::connect(raw_url, NoTls)
-            .await
-            .map_err(|source| RebornEventStoreError::backend("postgres", "connect", source))?;
-        tokio::spawn(async move {
-            if connection.await.is_err() {
-                tracing::debug!("postgres event-store connection task exited with an error");
-            }
-        });
-        client
+    let pg_config: Config = raw_url.parse().map_err(|source| {
+        RebornEventStoreError::backend("postgres", "parse connection string", source)
+    })?;
+    let manager_config = ManagerConfig {
+        recycling_method: RecyclingMethod::Fast,
+    };
+    let manager = if is_local_postgres_url(raw_url) {
+        Manager::from_config(pg_config, NoTls, manager_config)
     } else {
         let tls = make_rustls_connector()?;
-        let (client, connection) = tokio_postgres::connect(raw_url, tls)
-            .await
-            .map_err(|source| RebornEventStoreError::backend("postgres", "connect-tls", source))?;
-        tokio::spawn(async move {
-            if connection.await.is_err() {
-                tracing::debug!("postgres event-store TLS connection task exited with an error");
-            }
-        });
-        client
+        Manager::from_config(pg_config, tls, manager_config)
     };
+    let pool = Pool::builder(manager)
+        .runtime(Runtime::Tokio1)
+        .build()
+        .map_err(|source| RebornEventStoreError::backend("postgres", "build pool", source))?;
 
-    let store = PostgresStore::new(client);
+    let store = PostgresStore::new(pool);
     store
         .run_migrations()
         .await
@@ -136,18 +131,28 @@ pub(crate) async fn build_postgres_event_stores(
 
 #[derive(Clone)]
 struct PostgresStore {
-    client: Arc<Client>,
+    pool: Pool,
 }
 
 impl PostgresStore {
-    fn new(client: Client) -> Self {
-        Self {
-            client: Arc::new(client),
-        }
+    fn new(pool: Pool) -> Self {
+        Self { pool }
+    }
+
+    /// Acquire a connection from the pool. The pool transparently replaces
+    /// connections whose underlying tokio-postgres task has exited (e.g.
+    /// after an idle timeout, server restart, or transient network drop), so
+    /// every call sees a live `Client` without per-call-site reconnect logic.
+    async fn client(&self) -> Result<deadpool_postgres::Object, EventError> {
+        self.pool
+            .get()
+            .await
+            .map_err(|_| durable_error("postgres event store failed to acquire connection"))
     }
 
     async fn run_migrations(&self) -> Result<(), EventError> {
-        self.client
+        let client = self.client().await?;
+        client
             .batch_execute(POSTGRES_EVENT_STORE_SCHEMA)
             .await
             .map_err(|_| durable_error("postgres event store failed to run migrations"))
@@ -206,8 +211,8 @@ impl PostgresStore {
             .occurred_at
             .parse::<ironclaw_host_api::Timestamp>()
             .map_err(|_| durable_error("postgres event timestamp is invalid"))?;
-        let row = self
-            .client
+        let client = self.client().await?;
+        let row = client
             .query_one(
                 r#"
                 WITH next_stream AS (
@@ -298,8 +303,8 @@ impl PostgresStore {
         let after = after.unwrap_or_default();
         let kind = kind.as_db_str();
         let agent_id = agent_db_key(stream.agent_id.as_ref());
-        let stream_row = self
-            .client
+        let client = self.client().await?;
+        let stream_row = client
             .query_opt(
                 r#"
                 SELECT next_cursor, earliest_retained
@@ -365,8 +370,7 @@ impl PostgresStore {
         }
         query.push_str(&format!(" ORDER BY cursor ASC LIMIT ${}", params.len() + 1));
         params.push(&limit_i64);
-        let rows = self
-            .client
+        let rows = client
             .query(&query, &params)
             .await
             .map_err(|_| durable_error("postgres event store failed to read entries"))?;
