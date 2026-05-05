@@ -72,7 +72,7 @@ impl BlockedReason {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SanitizedFailure {
     category: String,
 }
@@ -90,6 +90,21 @@ impl SanitizedFailure {
 
     pub fn into_category(self) -> String {
         self.category
+    }
+}
+
+impl<'de> Deserialize<'de> for SanitizedFailure {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireFailure {
+            category: String,
+        }
+
+        let wire = WireFailure::deserialize(deserializer)?;
+        Self::new(wire.category).map_err(serde::de::Error::custom)
     }
 }
 

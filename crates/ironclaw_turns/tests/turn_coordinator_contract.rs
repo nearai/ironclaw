@@ -421,6 +421,25 @@ async fn sanitized_failure_rejects_empty_controlled_or_oversized_categories() {
     assert!(SanitizedFailure::new("x".repeat(257)).is_err());
 }
 
+#[test]
+fn bounded_refs_validate_during_deserialization() {
+    assert!(serde_json::from_str::<AcceptedMessageRef>("\"message-ok\"").is_ok());
+    assert!(serde_json::from_str::<AcceptedMessageRef>("\"\"").is_err());
+    assert!(serde_json::from_str::<SourceBindingRef>("\"source\\nsecret\"").is_err());
+    let oversized = format!("\"{}\"", "x".repeat(257));
+    assert!(serde_json::from_str::<GateRef>(&oversized).is_err());
+}
+
+#[test]
+fn sanitized_failure_validates_during_deserialization() {
+    let failure = serde_json::from_str::<SanitizedFailure>("{\"category\":\"policy\"}").unwrap();
+    assert_eq!(failure.category(), "policy");
+    assert!(serde_json::from_str::<SanitizedFailure>("{\"category\":\"\"}").is_err());
+    assert!(
+        serde_json::from_str::<SanitizedFailure>("{\"category\":\"backend\\nsecret\"}").is_err()
+    );
+}
+
 #[tokio::test]
 async fn in_memory_event_sink_retains_a_bounded_tail() {
     let sink = InMemoryTurnEventSink::default();
