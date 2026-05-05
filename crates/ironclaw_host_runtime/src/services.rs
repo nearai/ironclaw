@@ -29,8 +29,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutor, McpInvocation};
 use ironclaw_processes::{
-    ProcessExecutionError, ProcessExecutionRequest, ProcessExecutionResult, ProcessExecutor,
-    ProcessManager, ProcessResultStore, ProcessServices, ProcessStore,
+    BackgroundFailureStage, ProcessExecutionError, ProcessExecutionRequest, ProcessExecutionResult,
+    ProcessExecutor, ProcessManager, ProcessResultStore, ProcessServices, ProcessStore,
 };
 use ironclaw_resources::ResourceGovernor;
 use ironclaw_run_state::{ApprovalRequestStore, RunStateStore};
@@ -38,13 +38,14 @@ use ironclaw_scripts::{ScriptError, ScriptExecutionRequest, ScriptExecutor, Scri
 use ironclaw_secrets::SecretStore;
 use ironclaw_trust::{HostTrustPolicy, TrustPolicy};
 use ironclaw_wasm::{
-    DenyWasmHostHttp, PreparedWitTool, WasmError, WasmRuntimeHttpAdapter, WitToolHost,
-    WitToolRequest, WitToolRuntime, WitToolRuntimeConfig,
+    DenyWasmHostHttp, PreparedWitTool, WasmError, WasmRuntimeCredentialProvider,
+    WasmRuntimeHttpAdapter, WitToolHost, WitToolRequest, WitToolRuntime, WitToolRuntimeConfig,
 };
 
 use crate::{
     BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntimeError,
-    NetworkObligationPolicyStore, RuntimeBackendHealth, RuntimeSecretInjectionStore,
+    NetworkObligationPolicyStore, ProcessObligationLifecycleStore, RuntimeBackendHealth,
+    RuntimeSecretInjectionStore,
 };
 
 type SharedRuntimeHttpEgress = Arc<Mutex<Option<Arc<dyn RuntimeHttpEgress>>>>;
@@ -78,7 +79,9 @@ where
     secret_store: Option<Arc<dyn SecretStore>>,
     network_policy_store: Arc<NetworkObligationPolicyStore>,
     secret_injection_store: Arc<RuntimeSecretInjectionStore>,
+    process_lifecycle_store: Arc<ProcessObligationLifecycleStore>,
     runtime_http_egress: SharedRuntimeHttpEgress,
+    wasm_credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
     runtime_health: Option<Arc<dyn RuntimeBackendHealth>>,
     script_runtime: Option<Arc<dyn ScriptExecutor>>,
     mcp_runtime: Option<Arc<dyn McpExecutor>>,
@@ -100,6 +103,14 @@ where
         process_services: ProcessServices<S, R>,
         surface_version: CapabilitySurfaceVersion,
     ) -> Self {
+        let network_policy_store = Arc::new(NetworkObligationPolicyStore::new());
+        let secret_injection_store = Arc::new(RuntimeSecretInjectionStore::new());
+        let process_lifecycle_store = Arc::new(ProcessObligationLifecycleStore::new(
+            process_services.process_store(),
+            Arc::clone(&network_policy_store),
+            Arc::clone(&secret_injection_store),
+            governor.clone(),
+        ));
         Self {
             registry,
             trust_policy: Arc::new(HostTrustPolicy::empty()),
@@ -114,9 +125,11 @@ where
             event_sink: None,
             audit_sink: None,
             secret_store: None,
-            network_policy_store: Arc::new(NetworkObligationPolicyStore::new()),
-            secret_injection_store: Arc::new(RuntimeSecretInjectionStore::new()),
+            network_policy_store,
+            secret_injection_store,
+            process_lifecycle_store,
             runtime_http_egress: Arc::new(Mutex::new(None)),
+            wasm_credential_provider: None,
             runtime_health: None,
             script_runtime: None,
             mcp_runtime: None,
@@ -221,6 +234,19 @@ where
         self
     }
 
+    pub fn with_wasm_runtime_credential_provider<T>(mut self, provider: Arc<T>) -> Self
+    where
+        T: WasmRuntimeCredentialProvider + 'static,
+    {
+        let provider: Arc<dyn WasmRuntimeCredentialProvider> = provider;
+        self.wasm_credential_provider = Some(provider);
+        self
+    }
+
+    pub fn secret_injection_store(&self) -> Arc<RuntimeSecretInjectionStore> {
+        Arc::clone(&self.secret_injection_store)
+    }
+
     pub fn with_script_runtime<T>(mut self, runtime: Arc<T>) -> Self
     where
         T: ScriptExecutor + 'static,
@@ -252,6 +278,7 @@ where
             host,
             Arc::clone(&self.network_policy_store),
             Arc::clone(&self.runtime_http_egress),
+            self.wasm_credential_provider.clone(),
         )?);
         Ok(self.with_wasm_runtime(adapter))
     }
@@ -293,9 +320,40 @@ where
         let dispatcher: Arc<dyn CapabilityDispatcher> = Arc::new(self.runtime_dispatcher());
         let process_executor =
             Arc::new(RuntimeDispatchProcessExecutor::new(Arc::clone(&dispatcher)));
-        let process_manager: Arc<dyn ProcessManager> =
-            Arc::new(self.process_services.background_manager(process_executor));
-        let process_store: Arc<dyn ProcessStore> = self.process_services.process_store();
+        let lifecycle_process_store = Arc::clone(&self.process_lifecycle_store);
+        let process_store: Arc<dyn ProcessStore> = lifecycle_process_store.clone();
+        let result_failure_cleanup_store = Arc::clone(&lifecycle_process_store);
+        let process_manager: Arc<dyn ProcessManager> = Arc::new(
+            ironclaw_processes::BackgroundProcessManager::new(
+                lifecycle_process_store,
+                process_executor,
+            )
+            .with_cancellation_registry(self.process_services.cancellation_registry())
+            .with_result_store(self.process_services.result_store())
+            .with_error_handler(move |failure| {
+                let reconcile = match failure.stage {
+                    BackgroundFailureStage::StoreComplete => true,
+                    BackgroundFailureStage::StoreFail => false,
+                    BackgroundFailureStage::ResultStoreComplete => true,
+                    BackgroundFailureStage::ResultStoreFail => false,
+                    _ => return,
+                };
+                let cleanup_store = Arc::clone(&result_failure_cleanup_store);
+                tokio::spawn(async move {
+                    if let Err(error) = cleanup_store
+                        .cleanup_process_obligations(&failure.scope, failure.process_id, reconcile)
+                        .await
+                    {
+                        tracing::warn!(
+                            process_id = %failure.process_id,
+                            stage = ?failure.stage,
+                            error = %error,
+                            "background process obligation cleanup failed"
+                        );
+                    }
+                });
+            }),
+        );
         let process_result_store: Arc<dyn ProcessResultStore> =
             self.process_services.result_store();
         let runtime_health = self.runtime_health.clone().unwrap_or_else(|| {
@@ -457,6 +515,7 @@ where
                     capability_id: request.capability_id,
                     scope: request.scope,
                     estimate: request.estimate,
+                    mounts: request.mounts,
                     resource_reservation: request.resource_reservation,
                     invocation: ScriptInvocation {
                         input: request.input,
@@ -531,6 +590,7 @@ struct WasmRuntimeAdapter {
     host: WitToolHost,
     network_policy_store: Arc<NetworkObligationPolicyStore>,
     runtime_http_egress: SharedRuntimeHttpEgress,
+    credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
     prepared: Mutex<HashMap<String, Arc<PreparedWitTool>>>,
 }
 
@@ -540,12 +600,14 @@ impl WasmRuntimeAdapter {
         host: WitToolHost,
         network_policy_store: Arc<NetworkObligationPolicyStore>,
         runtime_http_egress: SharedRuntimeHttpEgress,
+        credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
     ) -> Self {
         Self {
             runtime,
             host,
             network_policy_store,
             runtime_http_egress,
+            credential_provider,
             prepared: Mutex::new(HashMap::new()),
         }
     }
@@ -555,12 +617,14 @@ impl WasmRuntimeAdapter {
         host: WitToolHost,
         network_policy_store: Arc<NetworkObligationPolicyStore>,
         runtime_http_egress: SharedRuntimeHttpEgress,
+        credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
     ) -> Result<Self, WasmError> {
         Ok(Self::new(
             WitToolRuntime::new(config)?,
             host,
             network_policy_store,
             runtime_http_egress,
+            credential_provider,
         ))
     }
 
@@ -584,14 +648,12 @@ impl WasmRuntimeAdapter {
         let Some(egress) = egress else {
             return self.host.clone().with_http(Arc::new(DenyWasmHostHttp));
         };
-        self.host
-            .clone()
-            .with_http(Arc::new(WasmRuntimeHttpAdapter::new(
-                egress,
-                scope.clone(),
-                capability_id.clone(),
-                policy,
-            )))
+        let mut adapter =
+            WasmRuntimeHttpAdapter::new(egress, scope.clone(), capability_id.clone(), policy);
+        if let Some(provider) = &self.credential_provider {
+            adapter = adapter.with_credential_provider(Arc::clone(provider));
+        }
+        self.host.clone().with_http(Arc::new(adapter))
     }
 }
 

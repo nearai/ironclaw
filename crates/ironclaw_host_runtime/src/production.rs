@@ -400,6 +400,9 @@ impl HostRuntime for DefaultHostRuntime {
             if let Some(registry) = &self.process_cancellation_registry {
                 process_host = process_host.with_cancellation_registry(Arc::clone(registry));
             }
+            if let Some(result_store) = &self.process_result_store {
+                process_host = process_host.with_result_store_dyn(Arc::clone(result_store));
+            }
 
             for record in records {
                 if record.status != ProcessStatus::Running {
@@ -408,13 +411,7 @@ impl HostRuntime for DefaultHostRuntime {
                 process_invocations.push(record.invocation_id);
                 let work_id = RuntimeWorkId::Process(record.process_id);
                 match process_host.kill(&request.scope, record.process_id).await {
-                    Ok(record) => {
-                        if let Some(result_store) = &self.process_result_store {
-                            result_store
-                                .kill(&record.scope, record.process_id)
-                                .await
-                                .map_err(unavailable_from_process_error)?;
-                        }
+                    Ok(_) => {
                         outcome.cancelled.push(work_id);
                     }
                     Err(ProcessError::InvalidTransition { .. }) => {

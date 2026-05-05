@@ -4,7 +4,7 @@
 //! generic filesystem crate owns only virtual path authority, scoped mounts,
 //! backend cataloging, and backend routing.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
@@ -12,6 +12,7 @@ use ironclaw_filesystem::{
     DirEntry, FileStat, FileType, FilesystemError, FilesystemOperation, RootFilesystem,
 };
 use ironclaw_host_api::{HostApiError, VirtualPath};
+use ironclaw_safety::{Sanitizer, Severity};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -238,6 +239,505 @@ pub struct MemoryWriteOptions {
     pub changed_by: Option<String>,
 }
 
+/// Version identifier for the protected prompt-path policy registry.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PromptSafetyPolicyVersion(String);
+
+impl PromptSafetyPolicyVersion {
+    pub fn new(value: impl Into<String>) -> Result<Self, HostApiError> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return Err(HostApiError::InvalidId {
+                kind: "prompt safety policy version",
+                value,
+                reason: "policy version must not be empty".to_string(),
+            });
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for PromptSafetyPolicyVersion {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Stable protected-path class emitted by prompt-write safety decisions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptProtectedPathClass {
+    relative_path: String,
+}
+
+impl PromptProtectedPathClass {
+    pub fn relative_path(&self) -> &str {
+        &self.relative_path
+    }
+
+    pub fn as_str(&self) -> &str {
+        "system_prompt_file"
+    }
+}
+
+/// Versioned registry of memory-relative files that may be injected into future prompts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptProtectedPathRegistry {
+    policy_version: PromptSafetyPolicyVersion,
+    protected_paths: BTreeSet<String>,
+}
+
+impl PromptProtectedPathRegistry {
+    pub fn new(
+        policy_version: PromptSafetyPolicyVersion,
+        protected_paths: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Result<Self, HostApiError> {
+        let mut registry = Self {
+            policy_version,
+            protected_paths: BTreeSet::new(),
+        };
+        for path in protected_paths {
+            registry = registry.with_additional_path(path)?;
+        }
+        Ok(registry)
+    }
+
+    pub fn policy_version(&self) -> &PromptSafetyPolicyVersion {
+        &self.policy_version
+    }
+
+    pub fn classify_path(&self, path: &MemoryDocumentPath) -> Option<PromptProtectedPathClass> {
+        self.classify_relative_path(path.relative_path())
+    }
+
+    pub fn classify_relative_path(&self, relative_path: &str) -> Option<PromptProtectedPathClass> {
+        let normalized = normalize_prompt_protected_path(relative_path).ok()?;
+        self.protected_paths
+            .contains(&normalized)
+            .then_some(PromptProtectedPathClass {
+                relative_path: normalized,
+            })
+    }
+
+    pub fn with_additional_path(mut self, path: impl Into<String>) -> Result<Self, HostApiError> {
+        let normalized = normalize_prompt_protected_path(&path.into())?;
+        self.protected_paths.insert(normalized);
+        Ok(self)
+    }
+}
+
+impl Default for PromptProtectedPathRegistry {
+    fn default() -> Self {
+        Self {
+            policy_version: PromptSafetyPolicyVersion("prompt-protected-paths:v1".to_string()),
+            protected_paths: DEFAULT_PROMPT_PROTECTED_PATHS
+                .iter()
+                .map(|path| path.to_ascii_lowercase())
+                .collect(),
+        }
+    }
+}
+
+const DEFAULT_PROMPT_PROTECTED_PATHS: &[&str] = &[
+    "SOUL.md",
+    "AGENTS.md",
+    "USER.md",
+    "IDENTITY.md",
+    "SYSTEM.md",
+    "MEMORY.md",
+    "TOOLS.md",
+    "HEARTBEAT.md",
+    "BOOTSTRAP.md",
+    "context/assistant-directives.md",
+    "context/profile.json",
+];
+
+fn normalize_prompt_protected_path(path: &str) -> Result<String, HostApiError> {
+    validated_memory_relative_path(path.to_string()).map(|path| path.to_ascii_lowercase())
+}
+
+/// Operation type passed to prompt-write safety policy hooks.
+///
+/// This crate directly wires the hook through memory repository and filesystem write/append
+/// paths. Other host services that implement patch, import, seed, profile, or admin prompt
+/// mutations must pass their final resolved content through the same policy boundary before
+/// persistence; the variants are shared vocabulary for those callers, not self-wiring magic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptWriteOperation {
+    Write,
+    Append,
+    Patch,
+    Import,
+    Seed,
+    ProfileUpdate,
+    AdminSystemPromptUpdate,
+}
+
+impl std::fmt::Display for PromptWriteOperation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Write => "write",
+            Self::Append => "append",
+            Self::Patch => "patch",
+            Self::Import => "import",
+            Self::Seed => "seed",
+            Self::ProfileUpdate => "profile_update",
+            Self::AdminSystemPromptUpdate => "admin_system_prompt_update",
+        })
+    }
+}
+
+/// Caller surface that requested a protected prompt-file mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptWriteSource {
+    MemoryBackend,
+    MemoryFilesystemAdapter,
+    MemoryDocumentFilesystem,
+    Import,
+    Seed,
+    Profile,
+    AdminSystemPrompt,
+    Capability,
+}
+
+impl std::fmt::Display for PromptWriteSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::MemoryBackend => "memory_backend",
+            Self::MemoryFilesystemAdapter => "memory_filesystem_adapter",
+            Self::MemoryDocumentFilesystem => "memory_document_filesystem",
+            Self::Import => "import",
+            Self::Seed => "seed",
+            Self::Profile => "profile",
+            Self::AdminSystemPrompt => "admin_system_prompt",
+            Self::Capability => "capability",
+        })
+    }
+}
+
+/// Named allowance required for policy-approved protected prompt-file bypasses.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PromptSafetyAllowanceId(String);
+
+impl PromptSafetyAllowanceId {
+    pub fn new(value: impl Into<String>) -> Result<Self, HostApiError> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return Err(HostApiError::InvalidId {
+                kind: "prompt safety allowance",
+                value,
+                reason: "allowance id must not be empty".to_string(),
+            });
+        }
+        Ok(Self(value))
+    }
+
+    pub fn empty_prompt_file_clear() -> Self {
+        Self("empty_prompt_file_clear".to_string())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for PromptSafetyAllowanceId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Stable severity bucket for sanitized prompt-write safety outcomes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PromptSafetySeverity {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+impl PromptSafetySeverity {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Critical => "critical",
+        }
+    }
+}
+
+impl From<Severity> for PromptSafetySeverity {
+    fn from(severity: Severity) -> Self {
+        match severity {
+            Severity::Low => Self::Low,
+            Severity::Medium => Self::Medium,
+            Severity::High => Self::High,
+            Severity::Critical => Self::Critical,
+        }
+    }
+}
+
+/// Sanitized finding summary. It never includes raw content, matched text, or detector descriptions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptSafetySummary {
+    pub severity: PromptSafetySeverity,
+    pub finding_count: usize,
+}
+
+/// Stable sanitized reason code for protected prompt-write outcomes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptSafetyReasonCode {
+    HighRiskPromptInjection,
+    CriticalPromptInjection,
+    PromptWritePolicyUnavailable,
+    PromptWritePolicyMisconfigured,
+    ProtectedPathRegistryUnavailable,
+    PromptWriteBypassNotAllowed,
+    PromptWriteSafetyEventUnavailable,
+}
+
+impl PromptSafetyReasonCode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::HighRiskPromptInjection => "high_risk_prompt_injection",
+            Self::CriticalPromptInjection => "critical_prompt_injection",
+            Self::PromptWritePolicyUnavailable => "prompt_write_policy_unavailable",
+            Self::PromptWritePolicyMisconfigured => "prompt_write_policy_misconfigured",
+            Self::ProtectedPathRegistryUnavailable => "protected_path_registry_unavailable",
+            Self::PromptWriteBypassNotAllowed => "prompt_write_bypass_not_allowed",
+            Self::PromptWriteSafetyEventUnavailable => "prompt_write_safety_event_unavailable",
+        }
+    }
+}
+
+impl std::fmt::Display for PromptSafetyReasonCode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Sanitized prompt-write rejection reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptSafetyReason {
+    pub code: PromptSafetyReasonCode,
+    pub severity: Option<PromptSafetySeverity>,
+    pub finding_count: usize,
+    pub protected_path_class: Option<PromptProtectedPathClass>,
+}
+
+impl PromptSafetyReason {
+    fn new(code: PromptSafetyReasonCode) -> Self {
+        Self {
+            code,
+            severity: None,
+            finding_count: 0,
+            protected_path_class: None,
+        }
+    }
+
+    fn with_findings(
+        code: PromptSafetyReasonCode,
+        severity: PromptSafetySeverity,
+        finding_count: usize,
+        protected_path_class: Option<PromptProtectedPathClass>,
+    ) -> Self {
+        Self {
+            code,
+            severity: Some(severity),
+            finding_count,
+            protected_path_class,
+        }
+    }
+}
+
+/// Request passed to host-composed prompt-write safety policy hooks.
+pub struct PromptWriteSafetyRequest<'a> {
+    pub scope: &'a MemoryDocumentScope,
+    pub path: &'a VirtualPath,
+    pub relative_memory_path: Option<&'a str>,
+    pub operation: PromptWriteOperation,
+    pub source: PromptWriteSource,
+    pub content: &'a str,
+    pub previous_content_hash: Option<&'a str>,
+    pub policy_version: PromptSafetyPolicyVersion,
+    pub protected_path_class: Option<&'a PromptProtectedPathClass>,
+    pub allowance: Option<&'a PromptSafetyAllowanceId>,
+}
+
+/// Decision returned by prompt-write safety policy hooks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromptWriteSafetyDecision {
+    Allow,
+    Warn { findings: PromptSafetySummary },
+    Reject { reason: PromptSafetyReason },
+    BypassAllowed { allowance: PromptSafetyAllowanceId },
+}
+
+/// Durable redacted event class emitted for protected prompt-write checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptWriteSafetyEventKind {
+    Checked,
+    Warned,
+    Rejected,
+    BypassAllowed,
+}
+
+/// Redacted prompt-write safety event payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptWriteSafetyEvent {
+    pub kind: PromptWriteSafetyEventKind,
+    pub scope: MemoryDocumentScope,
+    pub operation: PromptWriteOperation,
+    pub source: PromptWriteSource,
+    pub policy_version: PromptSafetyPolicyVersion,
+    pub protected_path_class: Option<PromptProtectedPathClass>,
+    pub reason_code: Option<PromptSafetyReasonCode>,
+    pub severity: Option<PromptSafetySeverity>,
+    pub finding_count: usize,
+    pub allowance: Option<PromptSafetyAllowanceId>,
+}
+
+/// Host-composed sink for durable redacted prompt-write safety events.
+#[async_trait]
+pub trait PromptWriteSafetyEventSink: Send + Sync {
+    async fn record_prompt_write_safety_event(
+        &self,
+        event: PromptWriteSafetyEvent,
+    ) -> Result<(), FilesystemError>;
+}
+
+/// Sanitized policy evaluation failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptWriteSafetyError {
+    pub reason: PromptSafetyReason,
+}
+
+impl PromptWriteSafetyError {
+    pub fn new(code: PromptSafetyReasonCode) -> Self {
+        Self {
+            reason: PromptSafetyReason::new(code),
+        }
+    }
+}
+
+/// Host-composed policy hook for protected prompt-file writes.
+#[async_trait]
+pub trait PromptWriteSafetyPolicy: Send + Sync {
+    fn protected_path_registry(&self) -> Option<&PromptProtectedPathRegistry> {
+        None
+    }
+
+    fn requires_previous_content_hash(&self) -> bool {
+        false
+    }
+
+    async fn check_write(
+        &self,
+        request: PromptWriteSafetyRequest<'_>,
+    ) -> Result<PromptWriteSafetyDecision, PromptWriteSafetyError>;
+}
+
+/// Default prompt-write safety policy preserving current workspace scanner behavior.
+pub struct DefaultPromptWriteSafetyPolicy {
+    registry: PromptProtectedPathRegistry,
+    sanitizer: Sanitizer,
+}
+
+impl DefaultPromptWriteSafetyPolicy {
+    pub fn new() -> Self {
+        Self::with_registry(PromptProtectedPathRegistry::default())
+    }
+
+    pub fn with_registry(registry: PromptProtectedPathRegistry) -> Self {
+        Self {
+            registry,
+            sanitizer: Sanitizer::new(),
+        }
+    }
+}
+
+impl Default for DefaultPromptWriteSafetyPolicy {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl PromptWriteSafetyPolicy for DefaultPromptWriteSafetyPolicy {
+    fn protected_path_registry(&self) -> Option<&PromptProtectedPathRegistry> {
+        Some(&self.registry)
+    }
+
+    async fn check_write(
+        &self,
+        request: PromptWriteSafetyRequest<'_>,
+    ) -> Result<PromptWriteSafetyDecision, PromptWriteSafetyError> {
+        let protected_path_class = request.protected_path_class.cloned().or_else(|| {
+            request
+                .relative_memory_path
+                .and_then(|path| self.registry.classify_relative_path(path))
+        });
+        let Some(protected_path_class) = protected_path_class else {
+            return Ok(PromptWriteSafetyDecision::Allow);
+        };
+
+        if request.content.trim().is_empty() {
+            if let Some(allowance) = request.allowance
+                && *allowance == PromptSafetyAllowanceId::empty_prompt_file_clear()
+            {
+                return Ok(PromptWriteSafetyDecision::BypassAllowed {
+                    allowance: allowance.clone(),
+                });
+            }
+            return Ok(PromptWriteSafetyDecision::Reject {
+                reason: PromptSafetyReason {
+                    protected_path_class: Some(protected_path_class),
+                    ..PromptSafetyReason::new(PromptSafetyReasonCode::PromptWriteBypassNotAllowed)
+                },
+            });
+        }
+
+        let warnings = self.sanitizer.detect(request.content);
+        let Some(max_severity) = warnings.iter().map(|warning| warning.severity).max() else {
+            return Ok(PromptWriteSafetyDecision::Allow);
+        };
+        let severity = PromptSafetySeverity::from(max_severity);
+        let finding_count = warnings.len();
+
+        if max_severity >= Severity::Critical {
+            return Ok(PromptWriteSafetyDecision::Reject {
+                reason: PromptSafetyReason::with_findings(
+                    PromptSafetyReasonCode::CriticalPromptInjection,
+                    severity,
+                    finding_count,
+                    Some(protected_path_class),
+                ),
+            });
+        }
+        if max_severity >= Severity::High {
+            return Ok(PromptWriteSafetyDecision::Reject {
+                reason: PromptSafetyReason::with_findings(
+                    PromptSafetyReasonCode::HighRiskPromptInjection,
+                    severity,
+                    finding_count,
+                    Some(protected_path_class),
+                ),
+            });
+        }
+
+        Ok(PromptWriteSafetyDecision::Warn {
+            findings: PromptSafetySummary {
+                severity,
+                finding_count,
+            },
+        })
+    }
+}
+
 /// Error returned by memory embedding providers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EmbeddingError {
@@ -388,6 +888,13 @@ impl ParsedMemoryPath {
     }
 }
 
+/// Result of an optimistic atomic append attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryAppendOutcome {
+    Appended,
+    Conflict,
+}
+
 /// Repository for file-shaped memory documents.
 ///
 /// Implementations own the actual source of truth, such as the existing
@@ -414,6 +921,21 @@ pub trait MemoryDocumentRepository: Send + Sync {
     ) -> Result<(), FilesystemError> {
         let _ = options;
         self.write_document(path, bytes).await
+    }
+
+    async fn compare_and_append_document_with_options(
+        &self,
+        path: &MemoryDocumentPath,
+        expected_previous_hash: Option<&str>,
+        bytes: &[u8],
+        options: &MemoryWriteOptions,
+    ) -> Result<MemoryAppendOutcome, FilesystemError> {
+        let _ = (expected_previous_hash, bytes, options);
+        Err(memory_error(
+            path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+            FilesystemOperation::AppendFile,
+            "memory document repository does not support atomic append",
+        ))
     }
 
     async fn read_document_metadata(
@@ -543,12 +1065,304 @@ fn validate_content_against_schema(
     }
 }
 
+fn prompt_write_protected_classification(
+    policy: Option<&Arc<dyn PromptWriteSafetyPolicy>>,
+    registry: &PromptProtectedPathRegistry,
+    path: &MemoryDocumentPath,
+) -> Option<(PromptProtectedPathClass, PromptSafetyPolicyVersion)> {
+    if let Some(path_class) = registry.classify_path(path) {
+        return Some((path_class, registry.policy_version().clone()));
+    }
+    policy
+        .and_then(|policy| policy.protected_path_registry())
+        .and_then(|registry| {
+            registry
+                .classify_path(path)
+                .map(|path_class| (path_class, registry.policy_version().clone()))
+        })
+}
+
+fn prompt_write_policy_requires_previous_content_hash(
+    policy: Option<&Arc<dyn PromptWriteSafetyPolicy>>,
+) -> bool {
+    policy
+        .map(|policy| policy.requires_previous_content_hash())
+        .unwrap_or(false)
+}
+
+struct PromptWriteSafetyCheck<'a> {
+    scope: &'a MemoryDocumentScope,
+    path: &'a MemoryDocumentPath,
+    operation: PromptWriteOperation,
+    source: PromptWriteSource,
+    content: &'a str,
+    previous_content_hash: Option<&'a str>,
+    allowance: Option<&'a PromptSafetyAllowanceId>,
+    filesystem_operation: FilesystemOperation,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PromptWriteSafetyEnforcement {
+    allowance: Option<PromptSafetyAllowanceId>,
+}
+
+async fn enforce_prompt_write_safety(
+    policy: Option<&Arc<dyn PromptWriteSafetyPolicy>>,
+    event_sink: Option<&Arc<dyn PromptWriteSafetyEventSink>>,
+    registry: &PromptProtectedPathRegistry,
+    check: PromptWriteSafetyCheck<'_>,
+) -> Result<PromptWriteSafetyEnforcement, FilesystemError> {
+    let Some((protected_path_class, policy_version)) =
+        prompt_write_protected_classification(policy, registry, check.path)
+    else {
+        return Ok(PromptWriteSafetyEnforcement::default());
+    };
+    let virtual_path = check
+        .path
+        .virtual_path()
+        .unwrap_or_else(|_| valid_memory_path());
+    let Some(policy) = policy else {
+        let reason = PromptSafetyReason::new(PromptSafetyReasonCode::PromptWritePolicyUnavailable);
+        emit_prompt_write_safety_event(
+            event_sink,
+            &check,
+            PromptWriteSafetyEventParts {
+                kind: PromptWriteSafetyEventKind::Rejected,
+                policy_version: &policy_version,
+                protected_path_class: &protected_path_class,
+                reason: Some(&reason),
+                findings: None,
+                allowance: None,
+                require_sink: false,
+            },
+        )
+        .await?;
+        return Err(prompt_write_safety_error(
+            virtual_path,
+            check.filesystem_operation,
+            reason,
+        ));
+    };
+
+    let request = PromptWriteSafetyRequest {
+        scope: check.scope,
+        path: &virtual_path,
+        relative_memory_path: Some(check.path.relative_path()),
+        operation: check.operation,
+        source: check.source,
+        content: check.content,
+        previous_content_hash: check.previous_content_hash,
+        policy_version: policy_version.clone(),
+        protected_path_class: Some(&protected_path_class),
+        allowance: check.allowance,
+    };
+
+    match policy.check_write(request).await {
+        Ok(PromptWriteSafetyDecision::Allow) => {
+            emit_prompt_write_safety_event(
+                event_sink,
+                &check,
+                PromptWriteSafetyEventParts {
+                    kind: PromptWriteSafetyEventKind::Checked,
+                    policy_version: &policy_version,
+                    protected_path_class: &protected_path_class,
+                    reason: None,
+                    findings: None,
+                    allowance: None,
+                    require_sink: false,
+                },
+            )
+            .await?;
+            Ok(PromptWriteSafetyEnforcement::default())
+        }
+        Ok(PromptWriteSafetyDecision::BypassAllowed { allowance }) => {
+            emit_prompt_write_safety_event(
+                event_sink,
+                &check,
+                PromptWriteSafetyEventParts {
+                    kind: PromptWriteSafetyEventKind::BypassAllowed,
+                    policy_version: &policy_version,
+                    protected_path_class: &protected_path_class,
+                    reason: None,
+                    findings: None,
+                    allowance: Some(&allowance),
+                    require_sink: true,
+                },
+            )
+            .await?;
+            tracing::debug!(
+                target: "ironclaw::memory::prompt_write_safety",
+                operation = %check.operation,
+                source = %check.source,
+                protected_path_class = %protected_path_class.as_str(),
+                policy_version = %policy_version,
+                allowance = %allowance,
+                "protected prompt write bypass allowed"
+            );
+            Ok(PromptWriteSafetyEnforcement {
+                allowance: Some(allowance),
+            })
+        }
+        Ok(PromptWriteSafetyDecision::Warn { findings }) => {
+            emit_prompt_write_safety_event(
+                event_sink,
+                &check,
+                PromptWriteSafetyEventParts {
+                    kind: PromptWriteSafetyEventKind::Warned,
+                    policy_version: &policy_version,
+                    protected_path_class: &protected_path_class,
+                    reason: None,
+                    findings: Some(&findings),
+                    allowance: None,
+                    require_sink: true,
+                },
+            )
+            .await?;
+            tracing::debug!(
+                target: "ironclaw::memory::prompt_write_safety",
+                operation = %check.operation,
+                source = %check.source,
+                protected_path_class = %protected_path_class.as_str(),
+                policy_version = %policy_version,
+                severity = %findings.severity.as_str(),
+                finding_count = findings.finding_count,
+                "protected prompt write allowed with sanitized safety warning"
+            );
+            Ok(PromptWriteSafetyEnforcement::default())
+        }
+        Ok(PromptWriteSafetyDecision::Reject { reason }) => {
+            emit_prompt_write_safety_event(
+                event_sink,
+                &check,
+                PromptWriteSafetyEventParts {
+                    kind: PromptWriteSafetyEventKind::Rejected,
+                    policy_version: &policy_version,
+                    protected_path_class: &protected_path_class,
+                    reason: Some(&reason),
+                    findings: None,
+                    allowance: None,
+                    require_sink: false,
+                },
+            )
+            .await?;
+            Err(prompt_write_safety_error(
+                virtual_path,
+                check.filesystem_operation,
+                reason,
+            ))
+        }
+        Err(error) => {
+            let reason = error.reason;
+            emit_prompt_write_safety_event(
+                event_sink,
+                &check,
+                PromptWriteSafetyEventParts {
+                    kind: PromptWriteSafetyEventKind::Rejected,
+                    policy_version: &policy_version,
+                    protected_path_class: &protected_path_class,
+                    reason: Some(&reason),
+                    findings: None,
+                    allowance: None,
+                    require_sink: false,
+                },
+            )
+            .await?;
+            Err(prompt_write_safety_error(
+                virtual_path,
+                check.filesystem_operation,
+                reason,
+            ))
+        }
+    }
+}
+
+struct PromptWriteSafetyEventParts<'a> {
+    kind: PromptWriteSafetyEventKind,
+    policy_version: &'a PromptSafetyPolicyVersion,
+    protected_path_class: &'a PromptProtectedPathClass,
+    reason: Option<&'a PromptSafetyReason>,
+    findings: Option<&'a PromptSafetySummary>,
+    allowance: Option<&'a PromptSafetyAllowanceId>,
+    // Outcomes that would still persist with a non-clean safety result (warn/bypass)
+    // require a durable redacted audit seam before persistence.
+    require_sink: bool,
+}
+
+async fn emit_prompt_write_safety_event(
+    event_sink: Option<&Arc<dyn PromptWriteSafetyEventSink>>,
+    check: &PromptWriteSafetyCheck<'_>,
+    parts: PromptWriteSafetyEventParts<'_>,
+) -> Result<(), FilesystemError> {
+    let Some(event_sink) = event_sink else {
+        return if parts.require_sink {
+            Err(prompt_write_safety_error(
+                check
+                    .path
+                    .virtual_path()
+                    .unwrap_or_else(|_| valid_memory_path()),
+                check.filesystem_operation,
+                PromptSafetyReason::new(PromptSafetyReasonCode::PromptWriteSafetyEventUnavailable),
+            ))
+        } else {
+            Ok(())
+        };
+    };
+    let event = PromptWriteSafetyEvent {
+        kind: parts.kind,
+        scope: check.scope.clone(),
+        operation: check.operation,
+        source: check.source,
+        policy_version: parts.policy_version.clone(),
+        protected_path_class: Some(parts.protected_path_class.clone()),
+        reason_code: parts.reason.map(|reason| reason.code),
+        severity: parts
+            .reason
+            .and_then(|reason| reason.severity)
+            .or_else(|| parts.findings.map(|findings| findings.severity)),
+        finding_count: parts
+            .reason
+            .map(|reason| reason.finding_count)
+            .or_else(|| parts.findings.map(|findings| findings.finding_count))
+            .unwrap_or(0),
+        allowance: parts.allowance.cloned(),
+    };
+    if let Err(error) = event_sink.record_prompt_write_safety_event(event).await {
+        tracing::debug!(
+            target: "ironclaw::memory::prompt_write_safety",
+            error = %error,
+            operation = %check.operation,
+            source = %check.source,
+            "failed to record prompt write safety event"
+        );
+        return Err(prompt_write_safety_error(
+            check
+                .path
+                .virtual_path()
+                .unwrap_or_else(|_| valid_memory_path()),
+            check.filesystem_operation,
+            PromptSafetyReason::new(PromptSafetyReasonCode::PromptWriteSafetyEventUnavailable),
+        ));
+    }
+    Ok(())
+}
+
+fn prompt_write_safety_error(
+    path: VirtualPath,
+    operation: FilesystemOperation,
+    reason: PromptSafetyReason,
+) -> FilesystemError {
+    memory_error(path, operation, reason.code.as_str())
+}
+
 /// Declared behavior supported by a memory backend.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MemoryBackendCapabilities {
     pub file_documents: bool,
     pub metadata: bool,
     pub versioning: bool,
+    /// Backend enforces prompt-write safety for protected write and append operations.
+    /// Filesystem adapters can defer duplicate policy checks to backends that advertise this.
+    pub prompt_write_safety: bool,
     pub full_text_search: bool,
     pub vector_search: bool,
     pub embeddings: bool,
@@ -566,6 +1380,7 @@ pub struct MemoryBackendCapabilities {
 pub struct MemoryContext {
     scope: MemoryDocumentScope,
     invocation_id: Option<String>,
+    prompt_write_safety_allowance: Option<PromptSafetyAllowanceId>,
 }
 
 impl MemoryContext {
@@ -573,11 +1388,20 @@ impl MemoryContext {
         Self {
             scope,
             invocation_id: None,
+            prompt_write_safety_allowance: None,
         }
     }
 
     pub fn with_invocation_id(mut self, invocation_id: impl Into<String>) -> Self {
         self.invocation_id = Some(invocation_id.into());
+        self
+    }
+
+    pub fn with_prompt_write_safety_allowance(
+        mut self,
+        allowance: PromptSafetyAllowanceId,
+    ) -> Self {
+        self.prompt_write_safety_allowance = Some(allowance);
         self
     }
 
@@ -587,6 +1411,10 @@ impl MemoryContext {
 
     pub fn invocation_id(&self) -> Option<&str> {
         self.invocation_id.as_deref()
+    }
+
+    pub fn prompt_write_safety_allowance(&self) -> Option<&PromptSafetyAllowanceId> {
+        self.prompt_write_safety_allowance.as_ref()
     }
 }
 
@@ -826,11 +1654,31 @@ pub trait MemoryBackend: Send + Sync {
             "memory backend does not support search",
         ))
     }
+
+    async fn compare_and_append_document(
+        &self,
+        context: &MemoryContext,
+        path: &MemoryDocumentPath,
+        expected_previous_hash: Option<&str>,
+        bytes: &[u8],
+    ) -> Result<MemoryAppendOutcome, FilesystemError> {
+        let _ = (path, expected_previous_hash, bytes);
+        Err(memory_backend_unsupported(
+            context.scope(),
+            FilesystemOperation::AppendFile,
+            "memory backend does not support atomic append",
+        ))
+    }
 }
 
 /// [`RootFilesystem`] adapter exposing any [`MemoryBackend`] as `/memory` files.
 pub struct MemoryBackendFilesystemAdapter {
     backend: Arc<dyn MemoryBackend>,
+    prompt_safety_policy: Option<Arc<dyn PromptWriteSafetyPolicy>>,
+    prompt_safety_event_sink: Option<Arc<dyn PromptWriteSafetyEventSink>>,
+    prompt_protected_path_registry: PromptProtectedPathRegistry,
+    prompt_safety_config_overridden: bool,
+    one_shot_prompt_safety_allowance: Mutex<Option<PromptSafetyAllowanceId>>,
 }
 
 impl MemoryBackendFilesystemAdapter {
@@ -839,11 +1687,70 @@ impl MemoryBackendFilesystemAdapter {
         B: MemoryBackend + 'static,
     {
         let backend: Arc<dyn MemoryBackend> = backend;
-        Self { backend }
+        Self::from_dyn(backend)
     }
 
     pub fn from_dyn(backend: Arc<dyn MemoryBackend>) -> Self {
-        Self { backend }
+        let registry = PromptProtectedPathRegistry::default();
+        Self {
+            backend,
+            prompt_safety_policy: Some(Arc::new(DefaultPromptWriteSafetyPolicy::with_registry(
+                registry.clone(),
+            ))),
+            prompt_safety_event_sink: None,
+            prompt_protected_path_registry: registry,
+            prompt_safety_config_overridden: false,
+            one_shot_prompt_safety_allowance: Mutex::new(None),
+        }
+    }
+
+    pub fn with_prompt_write_safety_policy<P>(mut self, policy: Arc<P>) -> Self
+    where
+        P: PromptWriteSafetyPolicy + 'static,
+    {
+        let policy: Arc<dyn PromptWriteSafetyPolicy> = policy;
+        self.prompt_safety_policy = Some(policy);
+        self.prompt_safety_config_overridden = true;
+        self
+    }
+
+    pub fn without_prompt_write_safety_policy(mut self) -> Self {
+        self.prompt_safety_policy = None;
+        self.prompt_safety_config_overridden = true;
+        self
+    }
+
+    pub fn with_prompt_write_safety_event_sink<S>(mut self, event_sink: Arc<S>) -> Self
+    where
+        S: PromptWriteSafetyEventSink + 'static,
+    {
+        let event_sink: Arc<dyn PromptWriteSafetyEventSink> = event_sink;
+        self.prompt_safety_event_sink = Some(event_sink);
+        self.prompt_safety_config_overridden = true;
+        self
+    }
+
+    /// Installs an explicit prompt-write safety allowance for the next protected write only.
+    ///
+    /// The allowance is consumed before policy evaluation so shared filesystem adapters cannot
+    /// accidentally retain a bypass for later unrelated callers.
+    pub fn with_one_shot_prompt_write_safety_allowance(
+        self,
+        allowance: PromptSafetyAllowanceId,
+    ) -> Self {
+        if let Ok(mut slot) = self.one_shot_prompt_safety_allowance.lock() {
+            *slot = Some(allowance);
+        }
+        self
+    }
+
+    pub fn with_prompt_protected_path_registry(
+        mut self,
+        registry: PromptProtectedPathRegistry,
+    ) -> Self {
+        self.prompt_protected_path_registry = registry;
+        self.prompt_safety_config_overridden = true;
+        self
     }
 
     fn ensure_file_documents(
@@ -897,10 +1804,155 @@ impl RootFilesystem for MemoryBackendFilesystemAdapter {
     async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
         self.ensure_file_documents(path, FilesystemOperation::WriteFile)?;
         let document_path = self.parse_file_path(path, FilesystemOperation::WriteFile)?;
-        let context = MemoryContext::new(document_path.scope().clone());
+        let mut context = MemoryContext::new(document_path.scope().clone());
+        let is_protected = prompt_write_protected_classification(
+            self.prompt_safety_policy.as_ref(),
+            &self.prompt_protected_path_registry,
+            &document_path,
+        )
+        .is_some();
+        let backend_capabilities = self.backend.capabilities();
+        let adapter_should_enforce_prompt_safety = is_protected
+            && (!backend_capabilities.prompt_write_safety || self.prompt_safety_config_overridden);
+        let prompt_safety_allowance = if is_protected || backend_capabilities.prompt_write_safety {
+            take_prompt_safety_allowance(
+                &self.one_shot_prompt_safety_allowance,
+                path,
+                FilesystemOperation::WriteFile,
+            )?
+        } else {
+            None
+        };
+        if let Some(allowance) = &prompt_safety_allowance {
+            context = context.with_prompt_write_safety_allowance(allowance.clone());
+        }
+        let mut backend_context = context.clone();
+        if adapter_should_enforce_prompt_safety {
+            let content = std::str::from_utf8(bytes).map_err(|_| {
+                memory_error(
+                    path.clone(),
+                    FilesystemOperation::WriteFile,
+                    "memory document content must be UTF-8",
+                )
+            })?;
+            let previous_hash = if prompt_write_policy_requires_previous_content_hash(
+                self.prompt_safety_policy.as_ref(),
+            ) {
+                self.backend
+                    .read_document(&context, &document_path)
+                    .await?
+                    .and_then(|bytes| std::str::from_utf8(&bytes).ok().map(content_sha256))
+            } else {
+                None
+            };
+            let enforcement = enforce_prompt_write_safety(
+                self.prompt_safety_policy.as_ref(),
+                self.prompt_safety_event_sink.as_ref(),
+                &self.prompt_protected_path_registry,
+                PromptWriteSafetyCheck {
+                    scope: context.scope(),
+                    path: &document_path,
+                    operation: PromptWriteOperation::Write,
+                    source: PromptWriteSource::MemoryFilesystemAdapter,
+                    content,
+                    previous_content_hash: previous_hash.as_deref(),
+                    allowance: context.prompt_write_safety_allowance(),
+                    filesystem_operation: FilesystemOperation::WriteFile,
+                },
+            )
+            .await?;
+            backend_context = memory_context_with_prompt_safety_enforcement(&context, enforcement);
+        }
         self.backend
-            .write_document(&context, &document_path, bytes)
+            .write_document(&backend_context, &document_path, bytes)
             .await
+    }
+
+    async fn append_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
+        self.ensure_file_documents(path, FilesystemOperation::AppendFile)?;
+        let document_path = self.parse_file_path(path, FilesystemOperation::AppendFile)?;
+        let mut context = MemoryContext::new(document_path.scope().clone());
+        let is_protected = prompt_write_protected_classification(
+            self.prompt_safety_policy.as_ref(),
+            &self.prompt_protected_path_registry,
+            &document_path,
+        )
+        .is_some();
+        let backend_capabilities = self.backend.capabilities();
+        let adapter_should_enforce_prompt_safety = is_protected
+            && (!backend_capabilities.prompt_write_safety || self.prompt_safety_config_overridden);
+        let prompt_safety_allowance = if is_protected || backend_capabilities.prompt_write_safety {
+            take_prompt_safety_allowance(
+                &self.one_shot_prompt_safety_allowance,
+                path,
+                FilesystemOperation::AppendFile,
+            )?
+        } else {
+            None
+        };
+        if let Some(allowance) = &prompt_safety_allowance {
+            context = context.with_prompt_write_safety_allowance(allowance.clone());
+        }
+
+        for _ in 0..MAX_MEMORY_APPEND_RETRIES {
+            let previous = self.backend.read_document(&context, &document_path).await?;
+            let expected_previous_hash = previous.as_deref().map(content_bytes_sha256);
+            let previous_bytes = previous.unwrap_or_default();
+            let previous_prompt_hash = if adapter_should_enforce_prompt_safety
+                && prompt_write_policy_requires_previous_content_hash(
+                    self.prompt_safety_policy.as_ref(),
+                ) {
+                std::str::from_utf8(&previous_bytes)
+                    .ok()
+                    .map(content_sha256)
+            } else {
+                None
+            };
+            let mut combined = previous_bytes;
+            combined.extend_from_slice(bytes);
+            let mut backend_context = context.clone();
+            if adapter_should_enforce_prompt_safety {
+                let content = std::str::from_utf8(&combined).map_err(|_| {
+                    memory_error(
+                        path.clone(),
+                        FilesystemOperation::AppendFile,
+                        "memory document content must be UTF-8",
+                    )
+                })?;
+                let enforcement = enforce_prompt_write_safety(
+                    self.prompt_safety_policy.as_ref(),
+                    self.prompt_safety_event_sink.as_ref(),
+                    &self.prompt_protected_path_registry,
+                    PromptWriteSafetyCheck {
+                        scope: context.scope(),
+                        path: &document_path,
+                        operation: PromptWriteOperation::Append,
+                        source: PromptWriteSource::MemoryFilesystemAdapter,
+                        content,
+                        previous_content_hash: previous_prompt_hash.as_deref(),
+                        allowance: context.prompt_write_safety_allowance(),
+                        filesystem_operation: FilesystemOperation::AppendFile,
+                    },
+                )
+                .await?;
+                backend_context =
+                    memory_context_with_prompt_safety_enforcement(&context, enforcement);
+            }
+            match self
+                .backend
+                .compare_and_append_document(
+                    &backend_context,
+                    &document_path,
+                    expected_previous_hash.as_deref(),
+                    bytes,
+                )
+                .await?
+            {
+                MemoryAppendOutcome::Appended => return Ok(()),
+                MemoryAppendOutcome::Conflict => continue,
+            }
+        }
+        Err(memory_append_conflict_error(path.clone()))
     }
 
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
@@ -975,6 +2027,9 @@ pub struct RepositoryMemoryBackend<R> {
     indexer: Option<Arc<dyn MemoryDocumentIndexer>>,
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     capabilities: MemoryBackendCapabilities,
+    prompt_safety_policy: Option<Arc<dyn PromptWriteSafetyPolicy>>,
+    prompt_safety_event_sink: Option<Arc<dyn PromptWriteSafetyEventSink>>,
+    prompt_protected_path_registry: PromptProtectedPathRegistry,
 }
 
 impl<R> RepositoryMemoryBackend<R>
@@ -982,6 +2037,7 @@ where
     R: MemoryDocumentRepository + 'static,
 {
     pub fn new(repository: Arc<R>) -> Self {
+        let registry = PromptProtectedPathRegistry::default();
         Self {
             repository,
             indexer: None,
@@ -990,8 +2046,14 @@ where
                 file_documents: true,
                 metadata: true,
                 versioning: true,
+                prompt_write_safety: true,
                 ..MemoryBackendCapabilities::default()
             },
+            prompt_safety_policy: Some(Arc::new(DefaultPromptWriteSafetyPolicy::with_registry(
+                registry.clone(),
+            ))),
+            prompt_safety_event_sink: None,
+            prompt_protected_path_registry: registry,
         }
     }
 
@@ -1015,6 +2077,37 @@ where
         self.capabilities = capabilities;
         self
     }
+
+    pub fn with_prompt_write_safety_policy<P>(mut self, policy: Arc<P>) -> Self
+    where
+        P: PromptWriteSafetyPolicy + 'static,
+    {
+        let policy: Arc<dyn PromptWriteSafetyPolicy> = policy;
+        self.prompt_safety_policy = Some(policy);
+        self
+    }
+
+    pub fn without_prompt_write_safety_policy(mut self) -> Self {
+        self.prompt_safety_policy = None;
+        self
+    }
+
+    pub fn with_prompt_write_safety_event_sink<S>(mut self, event_sink: Arc<S>) -> Self
+    where
+        S: PromptWriteSafetyEventSink + 'static,
+    {
+        let event_sink: Arc<dyn PromptWriteSafetyEventSink> = event_sink;
+        self.prompt_safety_event_sink = Some(event_sink);
+        self
+    }
+
+    pub fn with_prompt_protected_path_registry(
+        mut self,
+        registry: PromptProtectedPathRegistry,
+    ) -> Self {
+        self.prompt_protected_path_registry = registry;
+        self
+    }
 }
 
 #[async_trait]
@@ -1036,7 +2129,7 @@ where
 
     async fn write_document(
         &self,
-        _context: &MemoryContext,
+        context: &MemoryContext,
         path: &MemoryDocumentPath,
         bytes: &[u8],
     ) -> Result<(), FilesystemError> {
@@ -1047,6 +2140,38 @@ where
                 "memory document content must be UTF-8",
             )
         })?;
+        let previous_hash = if prompt_write_protected_classification(
+            self.prompt_safety_policy.as_ref(),
+            &self.prompt_protected_path_registry,
+            path,
+        )
+        .is_some()
+            && prompt_write_policy_requires_previous_content_hash(
+                self.prompt_safety_policy.as_ref(),
+            ) {
+            self.repository
+                .read_document(path)
+                .await?
+                .and_then(|bytes| std::str::from_utf8(&bytes).ok().map(content_sha256))
+        } else {
+            None
+        };
+        enforce_prompt_write_safety(
+            self.prompt_safety_policy.as_ref(),
+            self.prompt_safety_event_sink.as_ref(),
+            &self.prompt_protected_path_registry,
+            PromptWriteSafetyCheck {
+                scope: context.scope(),
+                path,
+                operation: PromptWriteOperation::Write,
+                source: PromptWriteSource::MemoryBackend,
+                content,
+                previous_content_hash: previous_hash.as_deref(),
+                allowance: context.prompt_write_safety_allowance(),
+                filesystem_operation: FilesystemOperation::WriteFile,
+            },
+        )
+        .await?;
         let metadata = resolve_document_metadata(self.repository.as_ref(), path).await?;
         if let Some(schema) = &metadata.schema {
             validate_content_against_schema(path, content, schema)?;
@@ -1062,6 +2187,78 @@ where
             let _ = indexer.reindex_document(path).await;
         }
         Ok(())
+    }
+
+    async fn compare_and_append_document(
+        &self,
+        context: &MemoryContext,
+        path: &MemoryDocumentPath,
+        expected_previous_hash: Option<&str>,
+        bytes: &[u8],
+    ) -> Result<MemoryAppendOutcome, FilesystemError> {
+        let current = self.repository.read_document(path).await?;
+        if current.as_deref().map(content_bytes_sha256).as_deref() != expected_previous_hash {
+            return Ok(MemoryAppendOutcome::Conflict);
+        }
+        let previous_bytes = current.unwrap_or_default();
+        let mut combined = previous_bytes.clone();
+        combined.extend_from_slice(bytes);
+        let content = std::str::from_utf8(&combined).map_err(|_| {
+            memory_error(
+                path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+                FilesystemOperation::AppendFile,
+                "memory document content must be UTF-8",
+            )
+        })?;
+        let previous_hash = if prompt_write_protected_classification(
+            self.prompt_safety_policy.as_ref(),
+            &self.prompt_protected_path_registry,
+            path,
+        )
+        .is_some()
+            && prompt_write_policy_requires_previous_content_hash(
+                self.prompt_safety_policy.as_ref(),
+            ) {
+            std::str::from_utf8(&previous_bytes)
+                .ok()
+                .map(content_sha256)
+        } else {
+            None
+        };
+        enforce_prompt_write_safety(
+            self.prompt_safety_policy.as_ref(),
+            self.prompt_safety_event_sink.as_ref(),
+            &self.prompt_protected_path_registry,
+            PromptWriteSafetyCheck {
+                scope: context.scope(),
+                path,
+                operation: PromptWriteOperation::Append,
+                source: PromptWriteSource::MemoryBackend,
+                content,
+                previous_content_hash: previous_hash.as_deref(),
+                allowance: context.prompt_write_safety_allowance(),
+                filesystem_operation: FilesystemOperation::AppendFile,
+            },
+        )
+        .await?;
+        let metadata = resolve_document_metadata(self.repository.as_ref(), path).await?;
+        if let Some(schema) = &metadata.schema {
+            validate_content_against_schema(path, content, schema)?;
+        }
+        let options = MemoryWriteOptions {
+            metadata,
+            changed_by: Some(scoped_memory_owner_key(path.scope())),
+        };
+        let outcome = self
+            .repository
+            .compare_and_append_document_with_options(path, expected_previous_hash, bytes, &options)
+            .await?;
+        if outcome == MemoryAppendOutcome::Appended
+            && let Some(indexer) = &self.indexer
+        {
+            let _ = indexer.reindex_document(path).await;
+        }
+        Ok(outcome)
     }
 
     async fn list_documents(
@@ -1266,9 +2463,49 @@ pub fn chunk_document(content: &str, config: ChunkConfig) -> Vec<String> {
 
 /// Compute a SHA-256 content hash using the current workspace format.
 pub fn content_sha256(content: &str) -> String {
+    content_bytes_sha256(content.as_bytes())
+}
+
+fn content_bytes_sha256(content: &[u8]) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(content.as_bytes());
+    hasher.update(content);
     format!("sha256:{:x}", hasher.finalize())
+}
+
+fn memory_context_with_prompt_safety_enforcement(
+    context: &MemoryContext,
+    enforcement: PromptWriteSafetyEnforcement,
+) -> MemoryContext {
+    let mut context = context.clone();
+    if let Some(allowance) = enforcement.allowance {
+        context = context.with_prompt_write_safety_allowance(allowance);
+    }
+    context
+}
+
+fn take_prompt_safety_allowance(
+    allowance: &Mutex<Option<PromptSafetyAllowanceId>>,
+    path: &VirtualPath,
+    operation: FilesystemOperation,
+) -> Result<Option<PromptSafetyAllowanceId>, FilesystemError> {
+    let mut allowance = allowance.lock().map_err(|_| {
+        memory_error(
+            path.clone(),
+            operation,
+            "prompt write safety allowance lock poisoned",
+        )
+    })?;
+    Ok(allowance.take())
+}
+
+const MAX_MEMORY_APPEND_RETRIES: usize = 8;
+
+fn memory_append_conflict_error(path: VirtualPath) -> FilesystemError {
+    memory_error(
+        path,
+        FilesystemOperation::AppendFile,
+        "memory document changed during append; retry limit exceeded",
+    )
 }
 
 async fn build_chunk_writes(
@@ -1649,6 +2886,38 @@ impl MemoryDocumentRepository for InMemoryMemoryDocumentRepository {
         Ok(())
     }
 
+    async fn compare_and_append_document_with_options(
+        &self,
+        path: &MemoryDocumentPath,
+        expected_previous_hash: Option<&str>,
+        bytes: &[u8],
+        options: &MemoryWriteOptions,
+    ) -> Result<MemoryAppendOutcome, FilesystemError> {
+        let _ = options;
+        let mut documents = self.documents.lock().map_err(|_| {
+            memory_error(
+                path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+                FilesystemOperation::AppendFile,
+                "memory document repository lock poisoned",
+            )
+        })?;
+        let current_hash = documents.get(path).map(|bytes| content_bytes_sha256(bytes));
+        if current_hash.as_deref() != expected_previous_hash {
+            return Ok(MemoryAppendOutcome::Conflict);
+        }
+        let existing = documents
+            .keys()
+            .filter(|document| document.scope() == path.scope())
+            .cloned()
+            .collect::<Vec<_>>();
+        ensure_document_path_does_not_conflict(path, &existing, FilesystemOperation::AppendFile)?;
+        documents
+            .entry(path.clone())
+            .or_insert_with(Vec::new)
+            .extend_from_slice(bytes);
+        Ok(MemoryAppendOutcome::Appended)
+    }
+
     async fn list_documents(
         &self,
         scope: &MemoryDocumentScope,
@@ -1674,6 +2943,10 @@ impl MemoryDocumentRepository for InMemoryMemoryDocumentRepository {
 pub struct MemoryDocumentFilesystem {
     repository: Arc<dyn MemoryDocumentRepository>,
     indexer: Option<Arc<dyn MemoryDocumentIndexer>>,
+    prompt_safety_policy: Option<Arc<dyn PromptWriteSafetyPolicy>>,
+    prompt_safety_event_sink: Option<Arc<dyn PromptWriteSafetyEventSink>>,
+    prompt_protected_path_registry: PromptProtectedPathRegistry,
+    one_shot_prompt_safety_allowance: Mutex<Option<PromptSafetyAllowanceId>>,
 }
 
 impl MemoryDocumentFilesystem {
@@ -1681,9 +2954,21 @@ impl MemoryDocumentFilesystem {
     where
         R: MemoryDocumentRepository + 'static,
     {
+        let repository: Arc<dyn MemoryDocumentRepository> = repository;
+        Self::from_dyn(repository)
+    }
+
+    pub fn from_dyn(repository: Arc<dyn MemoryDocumentRepository>) -> Self {
+        let registry = PromptProtectedPathRegistry::default();
         Self {
             repository,
             indexer: None,
+            prompt_safety_policy: Some(Arc::new(DefaultPromptWriteSafetyPolicy::with_registry(
+                registry.clone(),
+            ))),
+            prompt_safety_event_sink: None,
+            prompt_protected_path_registry: registry,
+            one_shot_prompt_safety_allowance: Mutex::new(None),
         }
     }
 
@@ -1692,6 +2977,51 @@ impl MemoryDocumentFilesystem {
         I: MemoryDocumentIndexer + 'static,
     {
         self.indexer = Some(indexer);
+        self
+    }
+
+    pub fn with_prompt_write_safety_policy<P>(mut self, policy: Arc<P>) -> Self
+    where
+        P: PromptWriteSafetyPolicy + 'static,
+    {
+        let policy: Arc<dyn PromptWriteSafetyPolicy> = policy;
+        self.prompt_safety_policy = Some(policy);
+        self
+    }
+
+    pub fn without_prompt_write_safety_policy(mut self) -> Self {
+        self.prompt_safety_policy = None;
+        self
+    }
+
+    pub fn with_prompt_write_safety_event_sink<S>(mut self, event_sink: Arc<S>) -> Self
+    where
+        S: PromptWriteSafetyEventSink + 'static,
+    {
+        let event_sink: Arc<dyn PromptWriteSafetyEventSink> = event_sink;
+        self.prompt_safety_event_sink = Some(event_sink);
+        self
+    }
+
+    /// Installs an explicit prompt-write safety allowance for the next protected write only.
+    ///
+    /// The allowance is consumed before policy evaluation so shared filesystem adapters cannot
+    /// accidentally retain a bypass for later unrelated callers.
+    pub fn with_one_shot_prompt_write_safety_allowance(
+        self,
+        allowance: PromptSafetyAllowanceId,
+    ) -> Self {
+        if let Ok(mut slot) = self.one_shot_prompt_safety_allowance.lock() {
+            *slot = Some(allowance);
+        }
+        self
+    }
+
+    pub fn with_prompt_protected_path_registry(
+        mut self,
+        registry: PromptProtectedPathRegistry,
+    ) -> Self {
+        self.prompt_protected_path_registry = registry;
         self
     }
 
@@ -1734,13 +3064,183 @@ impl RootFilesystem for MemoryDocumentFilesystem {
 
     async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
         let document_path = self.parse_file_path(path, FilesystemOperation::WriteFile)?;
+        let is_protected = prompt_write_protected_classification(
+            self.prompt_safety_policy.as_ref(),
+            &self.prompt_protected_path_registry,
+            &document_path,
+        )
+        .is_some();
+        let prompt_safety_allowance = if is_protected {
+            take_prompt_safety_allowance(
+                &self.one_shot_prompt_safety_allowance,
+                path,
+                FilesystemOperation::WriteFile,
+            )?
+        } else {
+            None
+        };
+        let metadata = resolve_document_metadata(self.repository.as_ref(), &document_path).await?;
+        let mut content_for_schema = None;
+        if is_protected {
+            let content = std::str::from_utf8(bytes).map_err(|_| {
+                memory_error(
+                    path.clone(),
+                    FilesystemOperation::WriteFile,
+                    "memory document content must be UTF-8",
+                )
+            })?;
+            content_for_schema = Some(content);
+            let previous_hash = if prompt_write_policy_requires_previous_content_hash(
+                self.prompt_safety_policy.as_ref(),
+            ) {
+                self.repository
+                    .read_document(&document_path)
+                    .await?
+                    .and_then(|bytes| std::str::from_utf8(&bytes).ok().map(content_sha256))
+            } else {
+                None
+            };
+            enforce_prompt_write_safety(
+                self.prompt_safety_policy.as_ref(),
+                self.prompt_safety_event_sink.as_ref(),
+                &self.prompt_protected_path_registry,
+                PromptWriteSafetyCheck {
+                    scope: document_path.scope(),
+                    path: &document_path,
+                    operation: PromptWriteOperation::Write,
+                    source: PromptWriteSource::MemoryDocumentFilesystem,
+                    content,
+                    previous_content_hash: previous_hash.as_deref(),
+                    allowance: prompt_safety_allowance.as_ref(),
+                    filesystem_operation: FilesystemOperation::WriteFile,
+                },
+            )
+            .await?;
+        }
+        if let Some(schema) = &metadata.schema {
+            let content = match content_for_schema {
+                Some(content) => content,
+                None => std::str::from_utf8(bytes).map_err(|_| {
+                    memory_error(
+                        path.clone(),
+                        FilesystemOperation::WriteFile,
+                        "memory document content must be UTF-8",
+                    )
+                })?,
+            };
+            validate_content_against_schema(&document_path, content, schema)?;
+        }
+        let options = MemoryWriteOptions {
+            metadata,
+            changed_by: Some(scoped_memory_owner_key(document_path.scope())),
+        };
         self.repository
-            .write_document(&document_path, bytes)
+            .write_document_with_options(&document_path, bytes, &options)
             .await?;
         if let Some(indexer) = &self.indexer {
             let _ = indexer.reindex_document(&document_path).await;
         }
         Ok(())
+    }
+
+    async fn append_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
+        let document_path = self.parse_file_path(path, FilesystemOperation::AppendFile)?;
+        let is_protected = prompt_write_protected_classification(
+            self.prompt_safety_policy.as_ref(),
+            &self.prompt_protected_path_registry,
+            &document_path,
+        )
+        .is_some();
+        let prompt_safety_allowance = if is_protected {
+            take_prompt_safety_allowance(
+                &self.one_shot_prompt_safety_allowance,
+                path,
+                FilesystemOperation::AppendFile,
+            )?
+        } else {
+            None
+        };
+        let metadata = resolve_document_metadata(self.repository.as_ref(), &document_path).await?;
+        let options = MemoryWriteOptions {
+            metadata,
+            changed_by: Some(scoped_memory_owner_key(document_path.scope())),
+        };
+        for _ in 0..MAX_MEMORY_APPEND_RETRIES {
+            let previous = self.repository.read_document(&document_path).await?;
+            let expected_previous_hash = previous.as_deref().map(content_bytes_sha256);
+            let previous_bytes = previous.unwrap_or_default();
+            let previous_prompt_hash = if is_protected
+                && prompt_write_policy_requires_previous_content_hash(
+                    self.prompt_safety_policy.as_ref(),
+                ) {
+                std::str::from_utf8(&previous_bytes)
+                    .ok()
+                    .map(content_sha256)
+            } else {
+                None
+            };
+            let mut combined = previous_bytes;
+            combined.extend_from_slice(bytes);
+            let mut content_for_schema = None;
+            if is_protected {
+                let content = std::str::from_utf8(&combined).map_err(|_| {
+                    memory_error(
+                        path.clone(),
+                        FilesystemOperation::AppendFile,
+                        "memory document content must be UTF-8",
+                    )
+                })?;
+                content_for_schema = Some(content);
+                enforce_prompt_write_safety(
+                    self.prompt_safety_policy.as_ref(),
+                    self.prompt_safety_event_sink.as_ref(),
+                    &self.prompt_protected_path_registry,
+                    PromptWriteSafetyCheck {
+                        scope: document_path.scope(),
+                        path: &document_path,
+                        operation: PromptWriteOperation::Append,
+                        source: PromptWriteSource::MemoryDocumentFilesystem,
+                        content,
+                        previous_content_hash: previous_prompt_hash.as_deref(),
+                        allowance: prompt_safety_allowance.as_ref(),
+                        filesystem_operation: FilesystemOperation::AppendFile,
+                    },
+                )
+                .await?;
+            }
+            if let Some(schema) = &options.metadata.schema {
+                let content = match content_for_schema {
+                    Some(content) => content,
+                    None => std::str::from_utf8(&combined).map_err(|_| {
+                        memory_error(
+                            path.clone(),
+                            FilesystemOperation::AppendFile,
+                            "memory document content must be UTF-8",
+                        )
+                    })?,
+                };
+                validate_content_against_schema(&document_path, content, schema)?;
+            }
+            match self
+                .repository
+                .compare_and_append_document_with_options(
+                    &document_path,
+                    expected_previous_hash.as_deref(),
+                    bytes,
+                    &options,
+                )
+                .await?
+            {
+                MemoryAppendOutcome::Appended => {
+                    if let Some(indexer) = &self.indexer {
+                        let _ = indexer.reindex_document(&document_path).await;
+                    }
+                    return Ok(());
+                }
+                MemoryAppendOutcome::Conflict => continue,
+            }
+        }
+        Err(memory_append_conflict_error(path.clone()))
     }
 
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
@@ -2165,6 +3665,141 @@ impl MemoryDocumentRepository for LibSqlMemoryDocumentRepository {
                     memory_error(
                         virtual_path.clone(),
                         FilesystemOperation::WriteFile,
+                        error.to_string(),
+                    )
+                })?;
+        } else {
+            let _ = conn.execute("ROLLBACK", libsql::params![]).await;
+        }
+        result
+    }
+
+    async fn compare_and_append_document_with_options(
+        &self,
+        path: &MemoryDocumentPath,
+        expected_previous_hash: Option<&str>,
+        bytes: &[u8],
+        options: &MemoryWriteOptions,
+    ) -> Result<MemoryAppendOutcome, FilesystemError> {
+        let append_content = std::str::from_utf8(bytes).map_err(|_| {
+            memory_error(
+                path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+                FilesystemOperation::AppendFile,
+                "memory document content must be UTF-8",
+            )
+        })?;
+        let virtual_path = path.virtual_path().unwrap_or_else(|_| valid_memory_path());
+        let conn = self
+            .connect(virtual_path.clone(), FilesystemOperation::AppendFile)
+            .await?;
+        let owner_key = scoped_memory_owner_key(path.scope());
+        let agent_id = scoped_memory_agent_id(path.scope());
+        let db_path = db_path_for_memory_document(path);
+
+        conn.execute("BEGIN IMMEDIATE", libsql::params![])
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::AppendFile,
+                    error.to_string(),
+                )
+            })?;
+
+        let result: Result<MemoryAppendOutcome, FilesystemError> = async {
+            let existing = {
+                let mut rows = conn
+                    .query(
+                        "SELECT id, content FROM memory_documents WHERE user_id = ?1 AND ((?2 IS NULL AND agent_id IS NULL) OR agent_id = ?2) AND path = ?3",
+                        libsql::params![owner_key.as_str(), agent_id, db_path.as_str()],
+                    )
+                    .await
+                    .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::AppendFile, error.to_string()))?;
+                rows.next()
+                    .await
+                    .map_err(|error| {
+                        memory_error(virtual_path.clone(), FilesystemOperation::AppendFile, error.to_string())
+                    })?
+                    .map(|row| {
+                        let id: String = row.get(0)?;
+                        let previous_content: String = row.get(1)?;
+                        Ok::<_, libsql::Error>((id, previous_content))
+                    })
+                    .transpose()
+                    .map_err(|error| {
+                        memory_error(virtual_path.clone(), FilesystemOperation::AppendFile, error.to_string())
+                    })?
+            };
+            let current_hash = existing
+                .as_ref()
+                .map(|(_, content)| content_bytes_sha256(content.as_bytes()));
+            if current_hash.as_deref() != expected_previous_hash {
+                return Ok(MemoryAppendOutcome::Conflict);
+            }
+
+            if let Some((document_id, previous_content)) = existing {
+                let content = format!("{previous_content}{append_content}");
+                if options.metadata.skip_versioning != Some(true)
+                    && previous_content != content
+                    && !previous_content.is_empty()
+                {
+                    libsql_save_document_version(
+                        &conn,
+                        &virtual_path,
+                        &document_id,
+                        &previous_content,
+                        options.changed_by.as_deref(),
+                    )
+                    .await?;
+                }
+                conn.execute(
+                    "UPDATE memory_documents SET content = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1",
+                    libsql::params![document_id, content],
+                )
+                .await
+                .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::AppendFile, error.to_string()))?;
+            } else {
+                let documents = libsql_list_documents_for_scope(
+                    &conn,
+                    path.scope(),
+                    &virtual_path,
+                    FilesystemOperation::AppendFile,
+                )
+                .await?;
+                ensure_document_path_does_not_conflict(
+                    path,
+                    &documents,
+                    FilesystemOperation::AppendFile,
+                )?;
+                conn.execute(
+                    r#"
+                INSERT INTO memory_documents (id, user_id, agent_id, path, content, metadata)
+                VALUES (?1, ?2, ?3, ?4, ?5, '{}')
+                "#,
+                    libsql::params![
+                        uuid::Uuid::new_v4().to_string(),
+                        owner_key.as_str(),
+                        agent_id,
+                        db_path.as_str(),
+                        append_content,
+                    ],
+                )
+                .await
+                .map_err(|error| {
+                    memory_error(virtual_path.clone(), FilesystemOperation::AppendFile, error.to_string())
+                })?;
+            }
+            Ok(MemoryAppendOutcome::Appended)
+        }
+        .await;
+
+        if result.is_ok() {
+            conn.execute("COMMIT", libsql::params![])
+                .await
+                .map_err(|error| {
+                    memory_error(
+                        virtual_path.clone(),
+                        FilesystemOperation::AppendFile,
                         error.to_string(),
                     )
                 })?;
@@ -3128,6 +4763,133 @@ impl MemoryDocumentRepository for PostgresMemoryDocumentRepository {
             )
         })?;
         Ok(())
+    }
+
+    async fn compare_and_append_document_with_options(
+        &self,
+        path: &MemoryDocumentPath,
+        expected_previous_hash: Option<&str>,
+        bytes: &[u8],
+        options: &MemoryWriteOptions,
+    ) -> Result<MemoryAppendOutcome, FilesystemError> {
+        let append_content = std::str::from_utf8(bytes).map_err(|_| {
+            memory_error(
+                path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+                FilesystemOperation::AppendFile,
+                "memory document content must be UTF-8",
+            )
+        })?;
+        let virtual_path = path.virtual_path().unwrap_or_else(|_| valid_memory_path());
+        let mut client = self
+            .client(virtual_path.clone(), FilesystemOperation::AppendFile)
+            .await?;
+        let owner_key = scoped_memory_owner_key(path.scope());
+        let agent_id = scoped_memory_agent_id(path.scope());
+        let db_path = db_path_for_memory_document(path);
+        let txn = client.transaction().await.map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::AppendFile,
+                error.to_string(),
+            )
+        })?;
+        txn.batch_execute("LOCK TABLE memory_documents IN SHARE ROW EXCLUSIVE MODE")
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::AppendFile,
+                    error.to_string(),
+                )
+            })?;
+        let existing = txn
+            .query_opt(
+                "SELECT id, content FROM memory_documents WHERE user_id = $1 AND agent_id IS NOT DISTINCT FROM $2 AND path = $3 FOR UPDATE",
+                &[&owner_key, &agent_id, &db_path],
+            )
+            .await
+            .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::AppendFile, error.to_string()))?;
+        let current_hash = existing.as_ref().map(|row| {
+            let previous_content: String = row.get("content");
+            content_bytes_sha256(previous_content.as_bytes())
+        });
+        if current_hash.as_deref() != expected_previous_hash {
+            txn.commit().await.map_err(|error| {
+                memory_error(
+                    virtual_path,
+                    FilesystemOperation::AppendFile,
+                    error.to_string(),
+                )
+            })?;
+            return Ok(MemoryAppendOutcome::Conflict);
+        }
+
+        if let Some(row) = existing {
+            let document_id: uuid::Uuid = row.get("id");
+            let previous_content: String = row.get("content");
+            let content = format!("{previous_content}{append_content}");
+            if options.metadata.skip_versioning != Some(true)
+                && previous_content != content
+                && !previous_content.is_empty()
+            {
+                postgres_save_document_version(
+                    &txn,
+                    &virtual_path,
+                    document_id,
+                    &previous_content,
+                    options.changed_by.as_deref(),
+                )
+                .await?;
+            }
+            txn.execute(
+                "UPDATE memory_documents SET content = $2, updated_at = NOW() WHERE id = $1",
+                &[&document_id, &content],
+            )
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::AppendFile,
+                    error.to_string(),
+                )
+            })?;
+        } else {
+            let documents = postgres_list_documents_for_scope(
+                &txn,
+                path.scope(),
+                &virtual_path,
+                FilesystemOperation::AppendFile,
+            )
+            .await?;
+            ensure_document_path_does_not_conflict(
+                path,
+                &documents,
+                FilesystemOperation::AppendFile,
+            )?;
+            txn.execute(
+                r#"
+                    INSERT INTO memory_documents (user_id, agent_id, path, content, metadata)
+                    VALUES ($1, $2, $3, $4, '{}'::jsonb)
+                    "#,
+                &[&owner_key, &agent_id, &db_path, &append_content],
+            )
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::AppendFile,
+                    error.to_string(),
+                )
+            })?;
+        }
+        txn.commit().await.map_err(|error| {
+            memory_error(
+                virtual_path,
+                FilesystemOperation::AppendFile,
+                error.to_string(),
+            )
+        })?;
+        Ok(MemoryAppendOutcome::Appended)
     }
 
     async fn read_document_metadata(
