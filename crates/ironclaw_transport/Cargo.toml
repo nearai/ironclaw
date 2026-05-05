@@ -2,6 +2,11 @@
 name = "ironclaw_transport"
 version = "0.1.0"
 edition = "2024"
+description = "Reborn transport adapter contract for IronClaw"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
 publish = false
 
 [dependencies]
