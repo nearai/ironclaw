@@ -724,7 +724,9 @@ pub(crate) async fn slack_relay_oauth_callback_handler(
         // Create channel identity pairing: Slack authed_user_id → IronClaw user.
         // The oauth_user secret was stored during auth_channel_relay() and identifies
         // which IronClaw user initiated this OAuth flow.
-        if !authed_user_id.is_empty() && let Some(pairing_store) = ext_mgr.pairing_store() {
+        if !authed_user_id.is_empty()
+            && let Some(pairing_store) = ext_mgr.pairing_store()
+        {
             let user_key = format!("relay:{}:oauth_user", relay_extension_name);
             let oauth_user = ext_mgr
                 .secrets()
@@ -735,10 +737,9 @@ pub(crate) async fn slack_relay_oauth_callback_handler(
                 .unwrap_or_else(|| state.owner_id.clone());
             let _ = ext_mgr.secrets().delete(&state.owner_id, &user_key).await;
 
-            let Ok(user_id) = crate::ownership::UserId::new(
-                &oauth_user,
-                crate::ownership::UserRole::Regular,
-            ) else {
+            let Ok(user_id) =
+                crate::ownership::UserId::new(&oauth_user, crate::ownership::UserRole::Regular)
+            else {
                 tracing::warn!(
                     oauth_user = %oauth_user,
                     "relay OAuth callback: invalid user_id for channel identity"

@@ -6479,14 +6479,9 @@ impl ExtensionManager {
         let user_key = format!("relay:{}:oauth_user", name);
         let _ = self.secrets.delete(&self.user_id, &user_key).await;
         self.secrets
-            .create(
-                &self.user_id,
-                CreateSecretParams::new(&user_key, user_id),
-            )
+            .create(&self.user_id, CreateSecretParams::new(&user_key, user_id))
             .await
-            .map_err(|e| {
-                ExtensionError::AuthFailed(format!("Failed to store OAuth user: {e}"))
-            })?;
+            .map_err(|e| ExtensionError::AuthFailed(format!("Failed to store OAuth user: {e}")))?;
 
         // Channel-relay derives all URLs from trusted instance_url in chat-api.
         // We only pass the nonce for CSRF validation on the callback.

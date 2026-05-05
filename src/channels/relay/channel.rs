@@ -137,13 +137,7 @@ impl RelayChannel {
         slack_user_id: Option<&str>,
     ) -> Result<serde_json::Value, crate::channels::relay::client::RelayError> {
         self.client
-            .proxy_provider_with_user(
-                self.provider.as_str(),
-                team_id,
-                method,
-                body,
-                slack_user_id,
-            )
+            .proxy_provider_with_user(self.provider.as_str(), team_id, method, body, slack_user_id)
             .await
     }
 
