@@ -104,8 +104,14 @@ impl RuntimeConfig {
     pub fn safe_default() -> Self {
         let deployment = DeploymentMode::LocalSingleUser;
         let requested_profile = RuntimeProfile::SecureDefault;
+        // `(LocalSingleUser, SecureDefault, default OrgPolicy, no yolo disclosure)`
+        // is structurally guaranteed to resolve — `SecureDefault` is
+        // deployment-agnostic in `is_compatible`, isn't yolo, and the empty
+        // `OrgPolicy` never narrows. Locked in by
+        // `every_valid_deployment_profile_pair_resolves` in
+        // `ironclaw_runtime_policy::resolver::tests`.
         let effective_policy = resolve(ResolveRequest::new(deployment, requested_profile))
-            .expect("LocalSingleUser + SecureDefault always resolves");
+            .expect("LocalSingleUser + SecureDefault always resolves"); // safety: deployment-agnostic profile + empty policy is total
         Self {
             deployment,
             requested_profile,
