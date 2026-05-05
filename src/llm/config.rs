@@ -79,6 +79,11 @@ pub struct RegistryProviderConfig {
     /// API key (optional for some providers like Ollama).
     /// For Anthropic OAuth, this is set to `OAUTH_PLACEHOLDER`.
     pub api_key: Option<SecretString>,
+    /// Whether this provider requires an API key. Mirrors the registry's
+    /// `api_key_required` flag so `LlmConfig::unusable_reason` can decide
+    /// whether a missing `api_key` is fatal without re-loading the registry
+    /// (which would also miss the custom-vs-builtin id collision case).
+    pub api_key_required: bool,
     /// Base URL for the API endpoint.
     pub base_url: String,
     /// Model identifier.
