@@ -9,11 +9,15 @@ use std::sync::Arc;
 use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, DefaultTurnCoordinator, IdempotencyKey,
-    ReplyTargetBindingRef, RunProfileRequest, SanitizedCancelReason, SourceBindingRef,
-    SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor, TurnCoordinator, TurnError,
-    TurnRunId, TurnScope, TurnStatus,
-    runner::{ClaimRunRequest, RecoverExpiredLeasesRequest, TurnRunTransitionPort},
+    AcceptedMessageRef, CancelRunRequest, DefaultTurnCoordinator, IdempotencyKey, LoopCompleted,
+    LoopCompletionKind, LoopExit, LoopExitInvalidHandling, LoopExitValidationPolicy,
+    LoopMessageRef, ReplyTargetBindingRef, RunProfileRequest, SanitizedCancelReason,
+    SanitizedFailure, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
+    TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
+    runner::{
+        ApplyLoopExitRequest, ClaimRunRequest, RecoverExpiredLeasesRequest, TurnRunTransitionPort,
+        apply_loop_exit,
+    },
 };
 
 #[cfg(feature = "libsql")]
@@ -87,6 +91,91 @@ async fn libsql_turn_state_store_serializes_concurrent_submits_for_same_thread()
     assert_eq!(snapshot.turns.len(), 1);
     assert_eq!(snapshot.runs.len(), 1);
     assert_eq!(snapshot.active_locks.len(), 1);
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_turn_state_store_persists_apply_loop_exit_recovery_across_instances() {
+    let (db, _dir) = libsql_db().await;
+    let store = Arc::new(LibSqlTurnStateStore::new(db.clone()));
+    store.run_migrations().await.unwrap();
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-a", "idem-submit-a"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = ironclaw_turns::TurnRunnerId::new();
+    let lease_token = ironclaw_turns::TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    let recovered = apply_loop_exit(
+        store.as_ref(),
+        ApplyLoopExitRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            exit: completed_exit("exit:unverified-completed"),
+            validation_policy: LoopExitValidationPolicy {
+                require_final_checkpoint: false,
+                host_cancellation_observed: false,
+                invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
+                completion_refs_verified: false,
+                blocked_evidence_verified: false,
+                failure_evidence_verified: false,
+            },
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(recovered.status, TurnStatus::RecoveryRequired);
+    assert_eq!(
+        recovered.failure.as_ref().map(SanitizedFailure::category),
+        Some("driver_protocol_violation")
+    );
+
+    let reopened = Arc::new(LibSqlTurnStateStore::new(db));
+    let snapshot = reopened.persistence_snapshot().await.unwrap();
+    let run = snapshot
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .unwrap();
+    assert_eq!(run.status, TurnStatus::RecoveryRequired);
+    assert_eq!(
+        run.failure.as_ref().map(SanitizedFailure::category),
+        Some("driver_protocol_violation")
+    );
+    let lock = snapshot
+        .active_locks
+        .iter()
+        .find(|lock| lock.run_id == run_id)
+        .unwrap();
+    assert_eq!(lock.status, TurnStatus::RecoveryRequired);
+
+    let reopened_coordinator = DefaultTurnCoordinator::new(reopened.clone());
+    assert!(matches!(
+        reopened_coordinator
+            .submit_turn(submit_request("thread-a", "idem-submit-after-recovery"))
+            .await
+            .unwrap_err(),
+        TurnError::ThreadBusy(_)
+    ));
+
+    let cancelled = reopened_coordinator
+        .cancel_run(cancel_request("thread-a", run_id, "idem-cancel-recovered"))
+        .await
+        .unwrap();
+    assert_eq!(cancelled.status, TurnStatus::Cancelled);
 }
 
 #[cfg(feature = "libsql")]
@@ -189,6 +278,75 @@ async fn postgres_turn_state_store_persists_submit_and_busy_across_instances_whe
 }
 
 #[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_turn_state_store_persists_apply_loop_exit_recovery_when_configured() {
+    let Some(pool) = postgres_pool().await else {
+        return;
+    };
+    let suffix = unique_suffix();
+    let thread = format!("pg-recovery-thread-{suffix}");
+    let store = Arc::new(PostgresTurnStateStore::new(pool.clone()));
+    store.run_migrations().await.unwrap();
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(&thread, &format!("idem-submit-{suffix}")))
+            .await
+            .unwrap(),
+    );
+    let runner_id = ironclaw_turns::TurnRunnerId::new();
+    let lease_token = ironclaw_turns::TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    apply_loop_exit(
+        store.as_ref(),
+        ApplyLoopExitRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            exit: completed_exit(&format!("exit:unverified-{suffix}")),
+            validation_policy: LoopExitValidationPolicy {
+                require_final_checkpoint: false,
+                host_cancellation_observed: false,
+                invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
+                completion_refs_verified: false,
+                blocked_evidence_verified: false,
+                failure_evidence_verified: false,
+            },
+        },
+    )
+    .await
+    .unwrap();
+
+    let reopened = Arc::new(PostgresTurnStateStore::new(pool));
+    let snapshot = reopened.persistence_snapshot().await.unwrap();
+    let run = snapshot
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .unwrap();
+    assert_eq!(run.status, TurnStatus::RecoveryRequired);
+    assert_eq!(
+        run.failure.as_ref().map(SanitizedFailure::category),
+        Some("driver_protocol_violation")
+    );
+    let lock = snapshot
+        .active_locks
+        .iter()
+        .find(|lock| lock.run_id == run_id)
+        .unwrap();
+    assert_eq!(lock.status, TurnStatus::RecoveryRequired);
+}
+
+#[cfg(feature = "postgres")]
 #[test]
 fn postgres_turn_state_store_implements_turn_contract_traits() {
     fn assert_state_store<T: ironclaw_turns::TurnStateStore>() {}
@@ -266,6 +424,17 @@ fn cancel_request(thread: &str, run_id: TurnRunId, idempotency_key: &str) -> Can
 fn accepted_run_id(response: &SubmitTurnResponse) -> TurnRunId {
     let SubmitTurnResponse::Accepted { run_id, .. } = response;
     *run_id
+}
+
+fn completed_exit(exit_id: &str) -> LoopExit {
+    LoopExit::Completed(LoopCompleted {
+        completion_kind: LoopCompletionKind::FinalReply,
+        reply_message_refs: vec![LoopMessageRef::new("msg:assistant-final").unwrap()],
+        result_refs: vec![],
+        final_checkpoint_id: None,
+        usage_summary_ref: None,
+        exit_id: ironclaw_turns::LoopExitId::new(exit_id).unwrap(),
+    })
 }
 
 fn received_at() -> DateTime<Utc> {

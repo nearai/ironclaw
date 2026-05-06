@@ -79,11 +79,12 @@ Later slices may add validation against transcript draft state, checkpoint fresh
 
 ## 6. Implemented slice
 
-`ironclaw_turns` currently provides pure contract types and a deterministic validator:
+`ironclaw_turns` currently provides contract types, a deterministic validator, and a trusted runner-side applicator:
 
 - `LoopExit`, `LoopCompleted`, `LoopBlocked`, `LoopCancelled`, `LoopFailed`;
 - bounded durable reference types for loop exit/message/result/usage/diagnostic refs;
 - `LoopExitValidationPolicy` and `LoopExitValidationDecision`;
-- one-way mapping to `TurnRunnerOutcome` or `LoopExitMapping::RecoveryRequired`.
+- one-way mapping to `TurnRunnerOutcome` or `LoopExitMapping::RecoveryRequired`;
+- `apply_loop_exit`, which validates a driver exit and invokes the trusted `TurnRunTransitionPort` to complete, block, cancel, fail, or record recovery-required state.
 
 This slice deliberately does not wire a production `AgentLoopDriver`, durable exit-id idempotency storage, transcript draft validation, or product service-graph integration.

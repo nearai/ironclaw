@@ -50,8 +50,9 @@ Agent-loop drivers return `LoopExit` claims. `TurnRunner` validates those claims
 - valid blocked exits require host-verified checkpoint + gate refs and map to `TurnRunnerOutcome::Blocked`;
 - valid cancelled exits require observed host cancellation/interrupt and map to `TurnRunnerOutcome::Cancelled`;
 - valid failed exits require host-verified evidence that the failure is safe to terminalize, then map stable sanitized failure kinds to `TurnRunnerOutcome::Failed`;
-- invalid exits map either to sanitized terminal failure or runner/system-derived `RecoveryRequired` depending on side-effect safety evidence.
+- invalid exits map either to sanitized terminal failure or runner/system-derived `RecoveryRequired` depending on side-effect safety evidence;
+- runner-side loop-exit application must call trusted transition-port methods, not mutate durable run state directly.
 
 ## 6. Deferred work
 
-The current `ironclaw_turns` slices define the core lease/recovery state machine, initial PostgreSQL/libSQL persistence adapters, and pure `LoopExit` validation/mapping types. AgentLoopHost/AgentLoopDriver integration, durable exit-id replay storage, transcript draft validation, side-effect boundary checkpoint cadence inside the loop, production service-graph wiring, and safe explicit retry/fork UX remain follow-up slices.
+The current `ironclaw_turns` slices define the core lease/recovery state machine, initial PostgreSQL/libSQL persistence adapters, pure `LoopExit` validation/mapping types, and runner-side `apply_loop_exit` transition application. AgentLoopHost/AgentLoopDriver integration, durable exit-id replay storage, transcript draft validation, side-effect boundary checkpoint cadence inside the loop, production service-graph wiring, and safe explicit retry/fork UX remain follow-up slices.

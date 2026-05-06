@@ -19,8 +19,8 @@ use crate::{
     events::EventCursor,
     runner::{
         BlockRunRequest, CancelRunCompletionRequest, ClaimRunRequest, ClaimedTurnRun,
-        CompleteRunRequest, FailRunRequest, HeartbeatRequest, RecoverExpiredLeasesRequest,
-        RecoverExpiredLeasesResponse, TurnRunTransitionPort,
+        CompleteRunRequest, FailRunRequest, HeartbeatRequest, RecordRecoveryRequiredRequest,
+        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, TurnRunTransitionPort,
     },
 };
 
@@ -480,6 +480,19 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
             TurnStatus::Failed,
             Some(request.failure),
             TurnEventKind::Failed,
+        )
+    }
+
+    async fn record_recovery_required(
+        &self,
+        request: RecordRecoveryRequiredRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        let mut inner = self.lock_inner()?;
+        inner.recovery_required_transition(
+            request.run_id,
+            request.runner_id,
+            request.lease_token,
+            request.failure,
         )
     }
 }
@@ -1030,6 +1043,44 @@ impl Inner {
         })();
         self.records.insert(record.run_id, record);
         self.prune_terminal_records();
+        result
+    }
+
+    fn recovery_required_transition(
+        &mut self,
+        run_id: TurnRunId,
+        runner_id: crate::TurnRunnerId,
+        lease_token: crate::TurnLeaseToken,
+        failure: SanitizedFailure,
+    ) -> Result<TurnRunState, TurnError> {
+        let mut record = self.take_record(run_id)?;
+        let result = (|| {
+            ensure_active_lease(&record, runner_id, lease_token, Utc::now())?;
+            if !matches!(
+                record.status,
+                TurnStatus::Running | TurnStatus::CancelRequested
+            ) {
+                return Err(TurnError::InvalidTransition {
+                    from: record.status,
+                    to: TurnStatus::RecoveryRequired,
+                });
+            }
+            record.status = TurnStatus::RecoveryRequired;
+            record.failure = Some(failure.clone());
+            record.runner_id = None;
+            record.lease_token = None;
+            record.lease_expires_at = None;
+            record.event_cursor = self.next_cursor();
+            self.update_active_lock(&record, Utc::now());
+            let state = record.state();
+            self.push_event(
+                &record,
+                TurnEventKind::RecoveryRequired,
+                Some(failure.into_category()),
+            );
+            Ok(state)
+        })();
+        self.records.insert(record.run_id, record);
         result
     }
 
