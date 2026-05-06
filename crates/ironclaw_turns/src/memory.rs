@@ -5,7 +5,7 @@ use std::{
     sync::{Condvar, Mutex, MutexGuard},
 };
 
-use chrono::Utc;
+use chrono::{Duration as ChronoDuration, Utc};
 
 use crate::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey,
@@ -19,19 +19,22 @@ use crate::{
     events::EventCursor,
     runner::{
         BlockRunRequest, CancelRunCompletionRequest, ClaimRunRequest, ClaimedTurnRun,
-        CompleteRunRequest, FailRunRequest, HeartbeatRequest, TurnRunTransitionPort,
+        CompleteRunRequest, FailRunRequest, HeartbeatRequest, RecoverExpiredLeasesRequest,
+        RecoverExpiredLeasesResponse, TurnRunTransitionPort,
     },
 };
 
 const MAX_EVENTS: usize = 10_000;
 const MAX_TERMINAL_RECORDS: usize = 10_000;
 const MAX_IDEMPOTENCY_RECORDS: usize = 10_000;
+const DEFAULT_RUNNER_LEASE_TTL_SECONDS: i64 = 90;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InMemoryTurnStateStoreLimits {
     pub max_events: usize,
     pub max_terminal_records: usize,
     pub max_idempotency_records: usize,
+    pub runner_lease_ttl: ChronoDuration,
 }
 
 impl Default for InMemoryTurnStateStoreLimits {
@@ -40,6 +43,7 @@ impl Default for InMemoryTurnStateStoreLimits {
             max_events: MAX_EVENTS,
             max_terminal_records: MAX_TERMINAL_RECORDS,
             max_idempotency_records: MAX_IDEMPOTENCY_RECORDS,
+            runner_lease_ttl: ChronoDuration::seconds(DEFAULT_RUNNER_LEASE_TTL_SECONDS),
         }
     }
 }
@@ -137,6 +141,16 @@ impl InMemoryTurnStateStore {
             Ok(inner) => inner.events.clone(),
             Err(poisoned) => poisoned.into_inner().events.clone(),
         }
+    }
+
+    pub fn from_persistence_snapshot(
+        snapshot: TurnPersistenceSnapshot,
+        limits: InMemoryTurnStateStoreLimits,
+    ) -> Result<Self, TurnError> {
+        Ok(Self {
+            inner: Mutex::new(Inner::from_persistence_snapshot(snapshot, limits)?),
+            submit_idempotency_ready: Condvar::new(),
+        })
     }
 
     pub fn persistence_snapshot(&self) -> TurnPersistenceSnapshot {
@@ -363,6 +377,7 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
         record.status = TurnStatus::Running;
         record.runner_id = Some(request.runner_id);
         record.lease_token = Some(request.lease_token);
+        record.lease_expires_at = Some(inner.next_lease_expiry(now));
         record.last_heartbeat_at = Some(now);
         record.claim_count = record.claim_count.saturating_add(1);
         record.event_cursor = inner.next_cursor();
@@ -381,9 +396,10 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
         let mut inner = self.lock_inner()?;
         let mut record = inner.take_record(request.run_id)?;
         let result = (|| {
-            ensure_lease(&record, request.runner_id, request.lease_token)?;
             let now = Utc::now();
+            ensure_active_lease(&record, request.runner_id, request.lease_token, now)?;
             record.last_heartbeat_at = Some(now);
+            record.lease_expires_at = Some(inner.next_lease_expiry(now));
             record.event_cursor = inner.next_cursor();
             inner.touch_active_lock(&record, now);
             inner.push_event(&record, TurnEventKind::RunnerHeartbeat, None);
@@ -393,18 +409,26 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
         result
     }
 
+    async fn recover_expired_leases(
+        &self,
+        request: RecoverExpiredLeasesRequest,
+    ) -> Result<RecoverExpiredLeasesResponse, TurnError> {
+        let mut inner = self.lock_inner()?;
+        Ok(inner.recover_expired_leases(request))
+    }
+
     async fn block_run(&self, request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
         let mut inner = self.lock_inner()?;
         let mut record = inner.take_record(request.run_id)?;
         let result = (|| {
-            ensure_lease(&record, request.runner_id, request.lease_token)?;
+            let now = Utc::now();
+            ensure_active_lease(&record, request.runner_id, request.lease_token, now)?;
             if !matches!(record.status, TurnStatus::Running) {
                 return Err(TurnError::InvalidTransition {
                     from: record.status,
                     to: request.reason.status(),
                 });
             }
-            let now = Utc::now();
             record.status = request.reason.status();
             record.checkpoint_id = Some(request.checkpoint_id);
             record.gate_ref = Some(request.reason.gate_ref().clone());
@@ -461,9 +485,144 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
 }
 
 impl Inner {
+    fn from_persistence_snapshot(
+        snapshot: TurnPersistenceSnapshot,
+        limits: InMemoryTurnStateStoreLimits,
+    ) -> Result<Self, TurnError> {
+        let mut cursor = 0;
+        let turns = snapshot
+            .turns
+            .into_iter()
+            .map(|record| (record.turn_id, record))
+            .collect::<HashMap<_, _>>();
+        let mut records = HashMap::new();
+        let mut queued_runs = VecDeque::new();
+        let mut terminal_runs = VecDeque::new();
+        for run in snapshot.runs {
+            cursor = cursor.max(run.event_cursor.0);
+            let actor = turns
+                .get(&run.turn_id)
+                .map(|turn| turn.actor.clone())
+                .ok_or_else(|| TurnError::Unavailable {
+                    reason: "turn run references missing turn record".to_string(),
+                })?;
+            if run.status == TurnStatus::Queued {
+                queued_runs.push_back(run.run_id);
+            }
+            if run.status.is_terminal() {
+                terminal_runs.push_back(run.run_id);
+            }
+            records.insert(
+                run.run_id,
+                RunRecord {
+                    scope: run.scope,
+                    actor,
+                    turn_id: run.turn_id,
+                    run_id: run.run_id,
+                    status: run.status,
+                    profile: run.profile,
+                    accepted_message_ref: run.accepted_message_ref,
+                    source_binding_ref: run.source_binding_ref,
+                    reply_target_binding_ref: run.reply_target_binding_ref,
+                    checkpoint_id: run.checkpoint_id,
+                    gate_ref: run.gate_ref,
+                    failure: run.failure,
+                    event_cursor: run.event_cursor,
+                    runner_id: run.runner_id,
+                    lease_token: run.lease_token,
+                    lease_expires_at: run.lease_expires_at,
+                    last_heartbeat_at: run.last_heartbeat_at,
+                    claim_count: run.claim_count,
+                    received_at: run.received_at,
+                },
+            );
+        }
+
+        let mut active_locks = HashMap::new();
+        for lock in snapshot.active_locks {
+            active_locks.insert(lock.key.clone(), lock);
+        }
+
+        let mut submit_idempotency = HashMap::new();
+        let mut resume_idempotency = HashMap::new();
+        let mut cancel_idempotency = HashMap::new();
+        let mut idempotency_records = HashMap::new();
+        let mut submit_idempotency_order = VecDeque::new();
+        let mut resume_idempotency_order = VecDeque::new();
+        let mut cancel_idempotency_order = VecDeque::new();
+        let mut idempotency_record_order = VecDeque::new();
+        let mut ordered_idempotency_records = snapshot.idempotency_records;
+        ordered_idempotency_records.sort_by_key(|record| record.created_at);
+        for record in ordered_idempotency_records {
+            let persisted_key = persisted_key_for_record(&record);
+            idempotency_record_order.push_back(persisted_key.clone());
+            idempotency_records.insert(persisted_key, record.clone());
+            match record.operation {
+                TurnIdempotencyOperationKind::Submit => {
+                    if let Some(replay) = record.replay_submit() {
+                        let key = SubmitIdempotencyKey {
+                            scope: record.scope.clone(),
+                            key: record.key.clone(),
+                        };
+                        submit_idempotency_order.push_back(key.clone());
+                        submit_idempotency.insert(key, replay);
+                    }
+                }
+                TurnIdempotencyOperationKind::Resume => {
+                    if let (Some(run_id), Some(replay)) = (record.run_id, record.replay_resume()) {
+                        let key = RunIdempotencyKey {
+                            scope: record.scope.clone(),
+                            run_id,
+                            key: record.key.clone(),
+                        };
+                        resume_idempotency_order.push_back(key.clone());
+                        resume_idempotency.insert(key, replay);
+                    }
+                }
+                TurnIdempotencyOperationKind::Cancel => {
+                    if let (Some(run_id), Some(replay)) = (record.run_id, record.replay_cancel()) {
+                        let key = RunIdempotencyKey {
+                            scope: record.scope.clone(),
+                            run_id,
+                            key: record.key.clone(),
+                        };
+                        cancel_idempotency_order.push_back(key.clone());
+                        cancel_idempotency.insert(key, replay);
+                    }
+                }
+            }
+        }
+
+        Ok(Self {
+            cursor,
+            turns,
+            records,
+            queued_runs,
+            terminal_runs,
+            active_locks,
+            checkpoints: snapshot.checkpoints,
+            submit_idempotency,
+            submit_idempotency_in_flight: HashSet::new(),
+            resume_idempotency,
+            cancel_idempotency,
+            idempotency_records,
+            submit_idempotency_order,
+            resume_idempotency_order,
+            cancel_idempotency_order,
+            idempotency_record_order,
+            events: Vec::new(),
+            limits,
+        })
+    }
+
     fn next_cursor(&mut self) -> EventCursor {
         self.cursor = self.cursor.saturating_add(1);
         EventCursor(self.cursor)
+    }
+
+    fn next_lease_expiry(&self, now: crate::TurnTimestamp) -> crate::TurnTimestamp {
+        now.checked_add_signed(self.limits.runner_lease_ttl)
+            .unwrap_or(now)
     }
 
     fn push_event(
@@ -516,6 +675,60 @@ impl Inner {
             checkpoints,
             idempotency_records,
         }
+    }
+
+    fn recover_expired_leases(
+        &mut self,
+        request: RecoverExpiredLeasesRequest,
+    ) -> RecoverExpiredLeasesResponse {
+        let expired_run_ids = self
+            .records
+            .iter()
+            .filter_map(|(run_id, record)| {
+                if !matches!(
+                    record.status,
+                    TurnStatus::Running | TurnStatus::CancelRequested
+                ) {
+                    return None;
+                }
+                if request
+                    .scope_filter
+                    .as_ref()
+                    .is_some_and(|scope| scope != &record.scope)
+                {
+                    return None;
+                }
+                if record
+                    .lease_expires_at
+                    .is_some_and(|expires_at| expires_at <= request.now)
+                {
+                    Some(*run_id)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut recovered = Vec::with_capacity(expired_run_ids.len());
+        for run_id in expired_run_ids {
+            let Some(mut record) = self.records.remove(&run_id) else {
+                continue;
+            };
+            record.status = TurnStatus::RecoveryRequired;
+            record.runner_id = None;
+            record.lease_token = None;
+            record.lease_expires_at = None;
+            record.event_cursor = self.next_cursor();
+            self.update_active_lock(&record, request.now);
+            let state = record.state();
+            self.push_event(
+                &record,
+                TurnEventKind::RecoveryRequired,
+                Some("lease_expired".to_string()),
+            );
+            recovered.push(state);
+            self.records.insert(run_id, record);
+        }
+        RecoverExpiredLeasesResponse { recovered }
     }
 
     fn remember_submit_idempotency(
@@ -707,10 +920,9 @@ impl Inner {
                 TurnStatus::Queued
                 | TurnStatus::BlockedApproval
                 | TurnStatus::BlockedAuth
-                | TurnStatus::BlockedResource => (TurnStatus::Cancelled, TurnEventKind::Cancelled),
-                TurnStatus::Running
-                | TurnStatus::CancelRequested
-                | TurnStatus::RecoveryRequired => {
+                | TurnStatus::BlockedResource
+                | TurnStatus::RecoveryRequired => (TurnStatus::Cancelled, TurnEventKind::Cancelled),
+                TurnStatus::Running | TurnStatus::CancelRequested => {
                     (TurnStatus::CancelRequested, TurnEventKind::CancelRequested)
                 }
                 status => {
@@ -760,7 +972,7 @@ impl Inner {
     ) -> Result<TurnRunState, TurnError> {
         let mut record = self.take_record(run_id)?;
         let result = (|| {
-            ensure_lease(&record, runner_id, lease_token)?;
+            ensure_active_lease(&record, runner_id, lease_token, Utc::now())?;
             if record.status != TurnStatus::CancelRequested {
                 return Err(TurnError::InvalidTransition {
                     from: record.status,
@@ -796,7 +1008,7 @@ impl Inner {
     ) -> Result<TurnRunState, TurnError> {
         let mut record = self.take_record(run_id)?;
         let result = (|| {
-            ensure_lease(&record, runner_id, lease_token)?;
+            ensure_active_lease(&record, runner_id, lease_token, Utc::now())?;
             if record.status == TurnStatus::CancelRequested || record.status.is_terminal() {
                 return Err(TurnError::InvalidTransition {
                     from: record.status,
@@ -1079,13 +1291,22 @@ fn cancel_idempotency_record(
     }
 }
 
-fn ensure_lease(
+fn ensure_active_lease(
     record: &RunRecord,
     runner_id: crate::TurnRunnerId,
     lease_token: crate::TurnLeaseToken,
+    now: crate::TurnTimestamp,
 ) -> Result<(), TurnError> {
     if record.runner_id != Some(runner_id) || record.lease_token != Some(lease_token) {
         return Err(TurnError::LeaseMismatch);
+    }
+    if record
+        .lease_expires_at
+        .is_some_and(|expires_at| expires_at <= now)
+    {
+        return Err(TurnError::Conflict {
+            reason: "turn run lease expired".to_string(),
+        });
     }
     Ok(())
 }

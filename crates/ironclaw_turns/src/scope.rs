@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TurnScope {
     pub tenant_id: TenantId,
-    pub agent_id: AgentId,
+    pub agent_id: Option<AgentId>,
     pub project_id: Option<ProjectId>,
     pub thread_id: ThreadId,
 }
@@ -12,7 +12,7 @@ pub struct TurnScope {
 impl TurnScope {
     pub fn new(
         tenant_id: TenantId,
-        agent_id: AgentId,
+        agent_id: Option<AgentId>,
         project_id: Option<ProjectId>,
         thread_id: ThreadId,
     ) -> Self {

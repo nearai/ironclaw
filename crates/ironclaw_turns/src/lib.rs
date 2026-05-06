@@ -6,6 +6,8 @@
 //! transition APIs are intentionally not re-exported from this crate prelude.
 
 pub mod coordinator;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub mod db;
 pub mod events;
 pub mod ids;
 pub mod memory;
@@ -19,6 +21,10 @@ pub mod store;
 pub use coordinator::{
     AllowAllTurnAdmissionPolicy, DefaultTurnCoordinator, TurnAdmissionPolicy, TurnCoordinator,
 };
+#[cfg(feature = "libsql")]
+pub use db::LibSqlTurnStateStore;
+#[cfg(feature = "postgres")]
+pub use db::PostgresTurnStateStore;
 pub use events::{InMemoryTurnEventSink, TurnEventKind, TurnEventSink, TurnLifecycleEvent};
 pub use ids::{
     AcceptedMessageRef, GateRef, IdempotencyKey, ReplyTargetBindingRef, RunProfileId,

@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, BlockedReason,
@@ -22,9 +22,21 @@ use ironclaw_turns::{
     events::EventCursor,
     runner::{
         BlockRunRequest, CancelRunCompletionRequest, ClaimRunRequest, CompleteRunRequest,
-        FailRunRequest, HeartbeatRequest, TurnRunTransitionPort,
+        FailRunRequest, HeartbeatRequest, RecoverExpiredLeasesRequest, TurnRunTransitionPort,
     },
 };
+
+#[test]
+fn turn_scope_agent_id_is_optional() {
+    let scope = TurnScope::new(
+        TenantId::new("tenant1").unwrap(),
+        None,
+        Some(ProjectId::new("project1").unwrap()),
+        ThreadId::new("thread-a").unwrap(),
+    );
+
+    assert_eq!(scope.agent_id, None);
+}
 
 #[tokio::test]
 async fn submit_turn_accepts_only_canonical_refs_and_returns_redacted_metadata() {
@@ -1017,6 +1029,448 @@ async fn runner_claims_queued_run_with_lease_and_heartbeat_requires_matching_lea
 }
 
 #[tokio::test]
+async fn expired_runner_lease_rejects_heartbeat_and_terminal_completion_before_recovery_sweep() {
+    let limits = InMemoryTurnStateStoreLimits {
+        runner_lease_ttl: ChronoDuration::milliseconds(-1),
+        ..InMemoryTurnStateStoreLimits::default()
+    };
+    let store = Arc::new(InMemoryTurnStateStore::with_limits(limits));
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-a", "idem-submit-a"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    let heartbeat = store
+        .heartbeat(HeartbeatRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        heartbeat,
+        TurnError::Conflict {
+            reason: "turn run lease expired".to_string(),
+        }
+    );
+
+    let completed = store
+        .complete_run(CompleteRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        completed,
+        TurnError::Conflict {
+            reason: "turn run lease expired".to_string(),
+        }
+    );
+
+    let state = coordinator
+        .get_run_state(GetRunStateRequest {
+            scope: scope("thread-a"),
+            run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(state.status, TurnStatus::Running);
+}
+
+#[tokio::test]
+async fn expired_runner_lease_rejects_fail_and_runner_side_cancel_before_recovery_sweep() {
+    let limits = InMemoryTurnStateStoreLimits {
+        runner_lease_ttl: ChronoDuration::milliseconds(-1),
+        ..InMemoryTurnStateStoreLimits::default()
+    };
+    let store = Arc::new(InMemoryTurnStateStore::with_limits(limits));
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+
+    let failed_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-a", "idem-submit-a"))
+            .await
+            .unwrap(),
+    );
+    let fail_runner_id = TurnRunnerId::new();
+    let fail_lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: fail_runner_id,
+            lease_token: fail_lease_token,
+            scope_filter: Some(scope("thread-a")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    let failed = store
+        .fail_run(FailRunRequest {
+            run_id: failed_run_id,
+            runner_id: fail_runner_id,
+            lease_token: fail_lease_token,
+            failure: SanitizedFailure::new("late_failure").unwrap(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        failed,
+        TurnError::Conflict {
+            reason: "turn run lease expired".to_string(),
+        }
+    );
+
+    let cancelled_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-b", "idem-submit-b"))
+            .await
+            .unwrap(),
+    );
+    let cancel_runner_id = TurnRunnerId::new();
+    let cancel_lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: cancel_runner_id,
+            lease_token: cancel_lease_token,
+            scope_filter: Some(scope("thread-b")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    coordinator
+        .cancel_run(cancel_request(
+            "thread-b",
+            cancelled_run_id,
+            "idem-cancel-b",
+        ))
+        .await
+        .unwrap();
+
+    let cancelled = store
+        .cancel_run(CancelRunCompletionRequest {
+            run_id: cancelled_run_id,
+            runner_id: cancel_runner_id,
+            lease_token: cancel_lease_token,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        cancelled,
+        TurnError::Conflict {
+            reason: "turn run lease expired".to_string(),
+        }
+    );
+}
+
+#[tokio::test]
+async fn runner_claim_and_heartbeat_persist_lease_expiry() {
+    let (coordinator, store) = coordinator();
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-a", "idem-submit-a"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    let claimed = store.persistence_snapshot();
+    let run = claimed
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .unwrap();
+    let first_heartbeat_at = run
+        .last_heartbeat_at
+        .expect("claim should record heartbeat timestamp");
+    let first_expiry = run
+        .lease_expires_at
+        .expect("claim should record lease expiry");
+    assert!(first_expiry > first_heartbeat_at);
+
+    std::thread::sleep(Duration::from_millis(2));
+    store
+        .heartbeat(HeartbeatRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        })
+        .await
+        .unwrap();
+
+    let heartbeat = store.persistence_snapshot();
+    let run = heartbeat
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .unwrap();
+    assert!(run.last_heartbeat_at.unwrap() > first_heartbeat_at);
+    assert!(run.lease_expires_at.unwrap() > first_expiry);
+}
+
+#[tokio::test]
+async fn expired_running_lease_enters_recovery_required_and_keeps_thread_locked() {
+    let (coordinator, store) = coordinator();
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-a", "idem-submit-a"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let lease_expires_at = store
+        .persistence_snapshot()
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .unwrap()
+        .lease_expires_at
+        .unwrap();
+
+    let not_yet_expired = store
+        .recover_expired_leases(RecoverExpiredLeasesRequest {
+            now: lease_expires_at - ChronoDuration::milliseconds(1),
+            scope_filter: None,
+        })
+        .await
+        .unwrap();
+    assert!(not_yet_expired.recovered.is_empty());
+
+    let recovered = store
+        .recover_expired_leases(RecoverExpiredLeasesRequest {
+            now: lease_expires_at + ChronoDuration::milliseconds(1),
+            scope_filter: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(recovered.recovered.len(), 1);
+    assert_eq!(recovered.recovered[0].run_id, run_id);
+    assert_eq!(recovered.recovered[0].status, TurnStatus::RecoveryRequired);
+
+    let snapshot = store.persistence_snapshot();
+    let run = snapshot
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .unwrap();
+    assert_eq!(run.status, TurnStatus::RecoveryRequired);
+    assert_eq!(run.runner_id, None);
+    assert_eq!(run.lease_token, None);
+    assert_eq!(run.lease_expires_at, None);
+    let lock = snapshot
+        .active_locks
+        .iter()
+        .find(|lock| lock.run_id == run_id)
+        .unwrap();
+    assert_eq!(lock.status, TurnStatus::RecoveryRequired);
+
+    let busy = coordinator
+        .submit_turn(submit_request("thread-a", "idem-submit-after-recovery"))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        busy,
+        TurnError::ThreadBusy(ThreadBusy {
+            status: TurnStatus::RecoveryRequired,
+            ..
+        })
+    ));
+    assert!(
+        store
+            .claim_next_run(ClaimRunRequest {
+                runner_id: TurnRunnerId::new(),
+                lease_token: TurnLeaseToken::new(),
+                scope_filter: None,
+            })
+            .await
+            .unwrap()
+            .is_none(),
+        "recovery-required work must not be auto-retried by the normal claim path"
+    );
+    assert!(store.events().iter().any(|event| {
+        event.run_id == run_id
+            && event.kind == TurnEventKind::RecoveryRequired
+            && event.sanitized_reason.as_deref() == Some("lease_expired")
+    }));
+}
+
+#[tokio::test]
+async fn expired_cancel_requested_lease_enters_recovery_required_and_can_be_cancelled() {
+    let (coordinator, store) = coordinator();
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-a", "idem-submit-a"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let lease_expires_at = store
+        .persistence_snapshot()
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .unwrap()
+        .lease_expires_at
+        .unwrap();
+
+    let cancel = coordinator
+        .cancel_run(cancel_request("thread-a", run_id, "idem-cancel-a"))
+        .await
+        .unwrap();
+    assert_eq!(cancel.status, TurnStatus::CancelRequested);
+
+    let recovered = store
+        .recover_expired_leases(RecoverExpiredLeasesRequest {
+            now: lease_expires_at + ChronoDuration::milliseconds(1),
+            scope_filter: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(recovered.recovered.len(), 1);
+    assert_eq!(recovered.recovered[0].run_id, run_id);
+    assert_eq!(recovered.recovered[0].status, TurnStatus::RecoveryRequired);
+
+    let snapshot = store.persistence_snapshot();
+    let run = snapshot
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .unwrap();
+    assert_eq!(run.status, TurnStatus::RecoveryRequired);
+    assert_eq!(run.runner_id, None);
+    assert_eq!(run.lease_token, None);
+    assert_eq!(run.lease_expires_at, None);
+    let busy = coordinator
+        .submit_turn(submit_request(
+            "thread-a",
+            "idem-submit-after-cancel-recovery",
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(busy, TurnError::ThreadBusy(_)));
+
+    let cancelled = coordinator
+        .cancel_run(cancel_request("thread-a", run_id, "idem-cancel-recovered"))
+        .await
+        .unwrap();
+    assert_eq!(cancelled.status, TurnStatus::Cancelled);
+    assert!(store.persistence_snapshot().active_locks.is_empty());
+
+    let replacement = coordinator
+        .submit_turn(submit_request(
+            "thread-a",
+            "idem-submit-after-recovered-cancel",
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(replacement, SubmitTurnResponse::Accepted { .. }));
+}
+
+#[tokio::test]
+async fn cancel_recovery_required_run_releases_lock_and_allows_new_submit() {
+    let (coordinator, store) = coordinator();
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-a", "idem-submit-a"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let lease_expires_at = store
+        .persistence_snapshot()
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .unwrap()
+        .lease_expires_at
+        .unwrap();
+    store
+        .recover_expired_leases(RecoverExpiredLeasesRequest {
+            now: lease_expires_at + ChronoDuration::milliseconds(1),
+            scope_filter: None,
+        })
+        .await
+        .unwrap();
+
+    let cancelled = coordinator
+        .cancel_run(CancelRunRequest {
+            scope: scope("thread-a"),
+            actor: actor(),
+            run_id,
+            reason: SanitizedCancelReason::OperatorRequested,
+            idempotency_key: IdempotencyKey::new("idem-cancel-recovered").unwrap(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(cancelled.status, TurnStatus::Cancelled);
+    assert!(!cancelled.already_terminal);
+    assert!(store.persistence_snapshot().active_locks.is_empty());
+
+    let replacement = coordinator
+        .submit_turn(submit_request("thread-a", "idem-submit-replacement"))
+        .await
+        .unwrap();
+    assert!(matches!(replacement, SubmitTurnResponse::Accepted { .. }));
+}
+
+#[tokio::test]
 async fn blocked_run_persists_checkpoint_and_keeps_same_thread_lock_until_resume() {
     let (coordinator, store) = coordinator();
     let run_id = accepted_run_id(
@@ -1474,7 +1928,7 @@ fn accepted_run_id(response: &SubmitTurnResponse) -> TurnRunId {
 fn scope(thread: &str) -> TurnScope {
     TurnScope::new(
         TenantId::new("tenant1").unwrap(),
-        AgentId::new("agent1").unwrap(),
+        Some(AgentId::new("agent1").unwrap()),
         Some(ProjectId::new("project1").unwrap()),
         ThreadId::new(thread).unwrap(),
     )

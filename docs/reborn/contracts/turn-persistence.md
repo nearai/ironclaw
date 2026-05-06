@@ -33,7 +33,7 @@ The `ironclaw_turns` contract models persistence with these record families:
 | `turn_checkpoints` | Dedicated checkpoint/gate records written when a running run blocks. |
 | `turn_idempotency_keys` | Prior sanitized outcomes for scoped submit/resume/cancel idempotency keys. |
 
-Concrete PostgreSQL/libSQL tables are intentionally deferred until the DB adapter slice. Backends must preserve the same semantics when those adapters are added.
+The initial PostgreSQL/libSQL adapter slice stores each logical record family in its own table with indexed metadata columns plus a serialized contract payload. Mutations hold a backend transaction/write lock across snapshot load, in-memory contract mutation, and snapshot replacement so active-lock and idempotency semantics remain atomic. Backends must preserve the same semantics as the in-memory contract tests while later slices add incremental row-level updates, targeted read paths, and service-graph wiring.
 
 ---
 
@@ -64,10 +64,11 @@ A duplicate idempotency key must replay the prior sanitized success/error outcom
 
 ## 5. Runner lease and checkpoint rules
 
-- Claiming a queued run atomically moves it to `Running`, stores runner ID/lease token, increments `claim_count`, and updates heartbeat metadata.
-- Heartbeats only renew metadata for matching runner ID/lease token.
-- Blocking a running run writes a checkpoint record, stores the latest checkpoint/gate refs on the run, clears current lease ownership, and keeps the active lock.
-- Terminal runner outcomes require the matching runner ID/lease token and release the active lock only if the run still owns it.
+- Claiming a queued run atomically moves it to `Running`, stores runner ID/lease token, increments `claim_count`, records `last_heartbeat_at`, records `lease_expires_at`, and updates active-lock metadata.
+- Heartbeats only renew metadata for matching, unexpired runner ID/lease token; successful heartbeats refresh `last_heartbeat_at` and extend `lease_expires_at`.
+- Expired `Running` and `CancelRequested` leases transition to `RecoveryRequired`, clear current runner ownership, emit a redacted recovery event, and keep the active lock so uncertain side-effecting work is not auto-retried.
+- Blocking a running run requires a matching, unexpired lease, writes a checkpoint record, stores the latest checkpoint/gate refs on the run, clears current lease ownership, and keeps the active lock.
+- Terminal runner outcomes require the matching, unexpired runner ID/lease token and release the active lock only if the run still owns it.
 
 ---
 
