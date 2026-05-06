@@ -32,6 +32,14 @@ pub struct ChannelsConfig {
     /// Per-channel owner user IDs. When set, the channel only responds to this user.
     /// Key: channel name (e.g., "telegram"), Value: owner user ID.
     pub wasm_channel_owner_ids: HashMap<String, i64>,
+    /// Reborn Telegram WASM v2 ProductAdapter (#3285) tracer-bullet flag.
+    ///
+    /// **Default off.** When false, legacy v1 Telegram (`channels-src/telegram`)
+    /// runs unchanged through the v1 channel manager. When true, the v2
+    /// ProductAdapter path takes mutually-exclusive ownership of the
+    /// telegram webhook installation; the v1 path must NOT be active for
+    /// the same installation in that mode.
+    pub reborn_telegram_v2_enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -448,7 +456,65 @@ impl ChannelsConfig {
                 }
                 ids
             },
+            reborn_telegram_v2_enabled: parse_bool_env("REBORN_TELEGRAM_V2_ENABLED", false)?,
         })
+    }
+}
+
+/// Mutual-exclusion guard for Telegram v1/v2 paths.
+///
+/// Returns an error when both v1 and v2 would handle the same telegram
+/// installation. The host startup glue calls this BEFORE registering any
+/// telegram webhook route — failing fast prevents two paths from receiving
+/// the same update and double-submitting the same canonical message.
+///
+/// `v1_active`: true when the legacy v1 Telegram WASM channel is configured
+/// for startup (i.e. `configured_wasm_channels` contains `telegram` AND
+/// `wasm_channels_enabled` is true).
+///
+/// `v2_active`: value of `reborn_telegram_v2_enabled`.
+pub fn validate_telegram_v1_v2_exclusivity(
+    v1_active: bool,
+    v2_active: bool,
+) -> Result<(), ConfigError> {
+    if v1_active && v2_active {
+        return Err(ConfigError::InvalidValue {
+            key: "REBORN_TELEGRAM_V2_ENABLED".to_string(),
+            message:
+                "Telegram v2 ProductAdapter is enabled while the legacy v1 Telegram channel is also \
+                 configured. v1 and v2 must not handle the same telegram installation \
+                 simultaneously; disable one or the other (see issue #3285)."
+                    .to_string(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod telegram_v2_tests {
+    use super::*;
+
+    #[test]
+    fn v2_disabled_with_v1_active_is_ok() {
+        validate_telegram_v1_v2_exclusivity(true, false).expect("v1 alone is fine");
+    }
+
+    #[test]
+    fn v2_enabled_with_v1_inactive_is_ok() {
+        validate_telegram_v1_v2_exclusivity(false, true).expect("v2 alone is fine");
+    }
+
+    #[test]
+    fn neither_active_is_ok() {
+        validate_telegram_v1_v2_exclusivity(false, false).expect("neither is fine");
+    }
+
+    #[test]
+    fn both_active_fails_closed() {
+        let err = validate_telegram_v1_v2_exclusivity(true, true).expect_err("must reject");
+        assert!(
+            matches!(err, ConfigError::InvalidValue { ref key, .. } if key == "REBORN_TELEGRAM_V2_ENABLED")
+        );
     }
 }
 
@@ -629,6 +695,7 @@ mod tests {
             wasm_channels_enabled: true,
             configured_wasm_channels: Vec::new(),
             wasm_channel_owner_ids: HashMap::new(),
+            reborn_telegram_v2_enabled: false,
         };
         assert!(cfg.cli.enabled);
         assert!(cfg.http.is_none());
@@ -637,6 +704,7 @@ mod tests {
         assert_eq!(cfg.wasm_channels_dir, PathBuf::from("/tmp/channels"));
         assert!(cfg.wasm_channels_enabled);
         assert!(cfg.wasm_channel_owner_ids.is_empty());
+        assert!(!cfg.reborn_telegram_v2_enabled);
     }
 
     #[test]
@@ -655,6 +723,7 @@ mod tests {
             wasm_channels_enabled: false,
             configured_wasm_channels: vec!["telegram".to_string()],
             wasm_channel_owner_ids: ids,
+            reborn_telegram_v2_enabled: false,
         };
         assert_eq!(cfg.wasm_channel_owner_ids.get("telegram"), Some(&12345));
         assert_eq!(cfg.wasm_channel_owner_ids.get("slack"), Some(&67890));

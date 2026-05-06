@@ -1,0 +1,141 @@
+// IronClaw Reborn ProductAdapter v2 WIT contract (issue #3285).
+//
+// This WIT file documents the constrained capability boundary the v2 host
+// runtime will expose to ProductAdapter WASM components. The first-slice
+// landing ships the Rust contract types in `ironclaw_product_adapters` and a
+// Rust-native implementation of the Telegram v2 adapter. wasmtime
+// component-model bindgen is intentionally NOT wired up yet — the WIT below
+// is the agreed shape for the eventual component build.
+//
+// Host-imposed invariants (enforced regardless of the component-model glue):
+//
+// - The host MUST verify webhook/protocol authentication before invoking
+//   `parse-inbound`. Components cannot mint a `verified` auth-evidence value
+//   and the host's seal mechanism is unreachable from WASM.
+// - `http-egress` is the only network capability. Components declare a fixed
+//   list of egress hosts via `declared-egress-hosts`; the host rejects
+//   requests to any other host. Credential handles are opaque ids; the host
+//   resolves and applies the underlying secret material at request time.
+// - Response bodies returned to WASM via `http-egress` are scanned for
+//   leak-pattern matches by the host before the WASM instance can observe
+//   them.
+// - `log` and `now-millis` are the only general-purpose host imports. WASM
+//   gets no filesystem, no env, no random, no raw clock outside `now-millis`.
+
+package near:product-adapter@0.1.0;
+
+interface product-adapter-host {
+    enum log-level { trace, debug, info, warn, error }
+
+    log: func(level: log-level, message: string);
+    now-millis: func() -> u64;
+
+    record egress-headers {
+        entries: list<tuple<string, string>>,
+    }
+
+    record egress-request {
+        // Index into `declared-egress-hosts()` exported by the component.
+        host-index: u32,
+        method: string,
+        path: string,
+        headers: egress-headers,
+        body: list<u8>,
+        // Index into the credential handles enumerated in the manifest;
+        // none = unauthenticated request.
+        credential-handle-index: option<u32>,
+    }
+
+    record egress-response {
+        status: u16,
+        headers: egress-headers,
+        body: list<u8>,
+    }
+
+    enum egress-error-kind {
+        undeclared-host,
+        unknown-credential-handle,
+        unauthorized-credential-handle,
+        policy-denied,
+        timeout,
+        leak-detected,
+        network,
+    }
+
+    record egress-error {
+        kind: egress-error-kind,
+        message: string,
+    }
+
+    http-egress: func(request: egress-request) -> result<egress-response, egress-error>;
+}
+
+interface product-adapter {
+    use product-adapter-host.{egress-headers};
+
+    record parsed-envelope {
+        envelope-json: string,
+    }
+
+    record auth-evidence {
+        evidence-json: string,
+    }
+
+    record outbound-envelope {
+        envelope-json: string,
+    }
+
+    record outbound-render {
+        // Component-side render result. The host applies it via
+        // `http-egress` after re-validating against declared hosts.
+        egress-request-json: string,
+    }
+
+    enum auth-requirement-kind {
+        request-signature,
+        shared-secret-header,
+        session-cookie,
+        bearer-token,
+    }
+
+    record auth-requirement {
+        kind: auth-requirement-kind,
+        header-name: option<string>,
+        timestamp-header-name: option<string>,
+        cookie-name: option<string>,
+    }
+
+    record adapter-manifest {
+        adapter-id: string,
+        installation-id: string,
+        capabilities-json: string,
+        declared-egress-hosts: list<string>,
+        declared-credential-handles: list<string>,
+        declared-auth-requirements: list<auth-requirement>,
+    }
+
+    /// Return the component's manifest. Read at instantiation time and
+    /// snapshotted by the host.
+    manifest: func() -> adapter-manifest;
+
+    /// Parse a verified protocol payload into a `ProductInboundEnvelope`.
+    /// Returns `none` for ambient group messages and other no-op events.
+    /// Returns `error` only when the payload is malformed beyond what the
+    /// adapter chooses to silently drop.
+    parse-inbound: func(
+        raw-payload: list<u8>,
+        evidence: auth-evidence,
+    ) -> result<option<parsed-envelope>, string>;
+
+    /// Render an outbound envelope into an HTTP egress request that the host
+    /// will execute via `http-egress`. The host re-validates the egress
+    /// request against the manifest before sending.
+    render-outbound: func(
+        envelope: outbound-envelope,
+    ) -> result<outbound-render, string>;
+}
+
+world product-adapter-component {
+    import product-adapter-host;
+    export product-adapter;
+}

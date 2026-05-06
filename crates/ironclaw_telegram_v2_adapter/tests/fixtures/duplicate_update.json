@@ -1,0 +1,10 @@
+{
+    "update_id": 100,
+    "message": {
+        "message_id": 11,
+        "date": 1700000005,
+        "from": {"id": 777, "is_bot": false, "first_name": "Alice", "username": "alice"},
+        "chat": {"id": 777, "type": "private"},
+        "text": "duplicate webhook delivery"
+    }
+}

@@ -4268,6 +4268,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_product_adapters"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ironclaw_host_api",
+ "ironclaw_turns",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "ironclaw_reborn_event_store"
 version = "0.1.0"
 dependencies = [
@@ -4393,6 +4409,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_telegram_v2_adapter"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "http 1.4.0",
+ "ironclaw_host_api",
+ "ironclaw_product_adapters",
+ "ironclaw_turns",
+ "ironclaw_wasm_product_adapters",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "ironclaw_trust"
 version = "0.1.0"
 dependencies = [
@@ -4463,6 +4498,27 @@ dependencies = [
  "wat",
  "wit-component 0.245.1",
  "wit-parser 0.245.1",
+]
+
+[[package]]
+name = "ironclaw_wasm_product_adapters"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "hmac",
+ "http 1.4.0",
+ "ironclaw_host_api",
+ "ironclaw_product_adapters",
+ "ironclaw_turns",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

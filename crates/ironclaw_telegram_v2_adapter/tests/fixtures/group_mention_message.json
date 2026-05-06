@@ -1,0 +1,11 @@
+{
+    "update_id": 201,
+    "message": {
+        "message_id": 13,
+        "date": 1700000000,
+        "from": {"id": 777, "is_bot": false, "first_name": "Alice"},
+        "chat": {"id": -42, "type": "supergroup"},
+        "text": "@ironclaw_bot please summarize",
+        "entities": [{"type": "mention", "offset": 0, "length": 13}]
+    }
+}
