@@ -57,6 +57,33 @@ cargo test --features integration                            # + PostgreSQL test
 
 These commands are for day-to-day iteration while you are developing locally. The pre-submission checks below are intentionally stricter and use CI-style flags so you can catch formatting drift and clippy warnings before requesting review.
 
+### Hermetic Local Gate
+
+For a Hermes-style local confidence check, use the hermetic wrapper:
+
+```bash
+scripts/ci/hermetic_gate.sh
+```
+
+The wrapper scrubs provider credentials and real database URLs from the environment, uses an isolated temporary `IRONCLAW_BASE_DIR`, forces a temp libSQL database, pins deterministic locale/time settings, and runs the fast local gate:
+
+```bash
+cargo fmt --all -- --check
+bash scripts/pre-commit-safety.sh
+cargo clippy --locked --all-targets -- -D clippy::correctness
+cargo test --locked --lib
+cargo test --locked --no-default-features --features libsql
+```
+
+Optional deterministic tiers are available when you want broader local coverage:
+
+```bash
+IRONCLAW_HERMETIC_REPLAY=1 scripts/ci/hermetic_gate.sh  # replay snapshot tests
+IRONCLAW_HERMETIC_E2E=1 scripts/ci/hermetic_gate.sh     # browser smoke E2E slice
+```
+
+The pre-push hook runs this wrapper by default. You can bypass the whole hook with `git push --no-verify`, or skip only the test portions with `IRONCLAW_PREPUSH_TEST=0 git push` while still keeping fmt, safety checks, and clippy correctness.
+
 ## Before You Open a PR
 
 Run the local validation checks required before requesting a review. These are stricter than the commands for iterative development:

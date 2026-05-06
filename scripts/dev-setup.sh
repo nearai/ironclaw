@@ -2,15 +2,17 @@
 # Developer setup script for IronClaw.
 #
 # Gets a fresh checkout ready for development without requiring
-# Docker, PostgreSQL, or any external services.
+# Docker, PostgreSQL, or any external services. Installs repo-local git
+# hooks via core.hooksPath so pre-push uses the hermetic local gate.
 #
 # Usage:
 #   ./scripts/dev-setup.sh
 #
 # After running, you can:
-#   cargo check           # default features (postgres + libsql)
-#   cargo test            # default test suite (uses libsql temp DB)
-#   cargo test --all-features         # full test suite
+#   cargo check                         # default features (postgres + libsql)
+#   cargo test                          # default test suite (uses libsql temp DB)
+#   scripts/ci/hermetic_gate.sh         # hermetic local gate used by pre-push
+#   cargo test --all-features           # full test suite
 
 set -euo pipefail
 
@@ -48,17 +50,12 @@ cargo test
 
 # 6. Install git hooks
 echo "[6/6] Installing git hooks..."
-HOOKS_DIR=$(git rev-parse --git-path hooks 2>/dev/null) || true
-if [ -n "$HOOKS_DIR" ]; then
-    mkdir -p "$HOOKS_DIR"
-    SCRIPTS_ABS="$(cd "$(dirname "$0")" && pwd)"
-    ln -sf "$SCRIPTS_ABS/commit-msg-regression.sh" "$HOOKS_DIR/commit-msg"
-    echo "  commit-msg hook installed (regression test enforcement)"
-    ln -sf "$SCRIPTS_ABS/pre-commit-safety.sh" "$HOOKS_DIR/pre-commit"
-    echo "  pre-commit hook installed (UTF-8, case-sensitivity, /tmp, redaction checks)"
-    REPO_ROOT="$(git rev-parse --show-toplevel)"
-    ln -sf "$REPO_ROOT/.githooks/pre-push" "$HOOKS_DIR/pre-push"
-    echo "  pre-push hook installed (quality gate + optional delta lint)"
+if git rev-parse --git-dir >/dev/null 2>&1; then
+    git config core.hooksPath .githooks
+    echo "  core.hooksPath .githooks configured"
+    echo "  pre-commit hook enabled (version bumps + safety checks)"
+    echo "  commit-msg hook enabled (regression test enforcement)"
+    echo "  pre-push hook enabled (hermetic gate + optional strict lint)"
 else
     echo "  Skipped: not a git repository"
 fi
@@ -69,5 +66,6 @@ echo ""
 echo "Quick start:"
 echo "  cargo run                            # Run with default features"
 echo "  cargo test                           # Test suite (libsql temp DB)"
+echo "  scripts/ci/hermetic_gate.sh          # Hermetic local gate used by pre-push"
 echo "  cargo test --all-features            # Full test suite"
 echo "  cargo clippy --all-features          # Lint all code"

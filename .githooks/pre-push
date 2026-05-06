@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Pre-push hook: runs quality gate before pushing
+# Pre-push hook: runs the hermetic local quality gate before pushing.
 # Skip with: git push --no-verify
+# Skip only the test portions with: IRONCLAW_PREPUSH_TEST=0 git push
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 SCRIPT_DIR="$REPO_ROOT/scripts/ci"
+REMOTE_NAME="${1:-}"
 
-# Default: baseline quality gate
-"$SCRIPT_DIR/quality_gate.sh"
+# Default: Hermes-style hermetic local gate.
+"$SCRIPT_DIR/hermetic_gate.sh"
 
 # Optional strict delta lint (env-gated)
 if [ "${IRONCLAW_STRICT_DELTA_LINT:-0}" = "1" ]; then
-    "$SCRIPT_DIR/delta_lint.sh" "$1"
+    "$SCRIPT_DIR/delta_lint.sh" "$REMOTE_NAME"
 elif [ "${IRONCLAW_STRICT_LINT:-0}" = "1" ]; then
     echo "==> clippy (strict: all warnings)"
     cargo clippy --locked --all-targets -- -D warnings
