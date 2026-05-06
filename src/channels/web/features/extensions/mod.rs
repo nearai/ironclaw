@@ -296,10 +296,25 @@ pub(crate) async fn extensions_install_handler(
         _ => None,
     });
 
-    match ext_mgr
-        .install(name_str, req.url.as_deref(), kind_hint, &user.user_id)
-        .await
-    {
+    let install_result = match (kind_hint, req.url.as_deref(), req.headers.is_empty()) {
+        (Some(crate::extensions::ExtensionKind::McpServer), Some(url), false) => {
+            ext_mgr
+                .install_mcp_from_url_with_headers(
+                    name_str,
+                    url,
+                    req.headers.clone(),
+                    &user.user_id,
+                )
+                .await
+        }
+        _ => {
+            ext_mgr
+                .install(name_str, req.url.as_deref(), kind_hint, &user.user_id)
+                .await
+        }
+    };
+
+    match install_result {
         Ok(result) => {
             let mut resp = ActionResponse::ok(result.message);
             match ext_mgr
@@ -1014,6 +1029,70 @@ mod tests {
                 resp.status()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_extensions_install_handler_persists_custom_mcp_authorization_header() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir, _db_dir) = test_ext_mgr_with_db().await;
+        let state = test_gateway_state(Some(ext_mgr));
+        let app = Router::new()
+            .route("/api/extensions", get(extensions_list_handler))
+            .route("/api/extensions/install", post(extensions_install_handler))
+            .with_state(state);
+
+        let req_body = serde_json::json!({
+            "name": "mcp_auth_test",
+            "url": "http://localhost:9/mcp",
+            "kind": "mcp_server",
+            "headers": {
+                "Authorization": "Bearer ui-token"
+            }
+        });
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/extensions/install")
+            .header("content-type", "application/json")
+            .body(Body::from(req_body.to_string()))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let mut req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/extensions")
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json response");
+        let mcp = parsed["extensions"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["name"] == "mcp_auth_test"))
+            .expect("custom MCP extension entry");
+        assert_eq!(mcp["authenticated"], true);
+        assert_eq!(mcp["has_auth"], true);
     }
 
     #[tokio::test]

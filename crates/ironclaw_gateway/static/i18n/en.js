@@ -254,6 +254,7 @@ I18n.register('en', {
   'mcp.addCustom': 'Add Custom MCP Server',
   'mcp.add': 'Add',
   'mcp.addedSuccess': 'Added MCP server {name}',
+  'mcp.authorizationHeaderPlaceholder': 'Authorization header value (optional, e.g. Bearer token)',
 
 
   // Skills Tab

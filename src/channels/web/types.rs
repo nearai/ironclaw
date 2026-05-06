@@ -533,6 +533,8 @@ pub struct InstallExtensionRequest {
     pub name: String,
     pub url: Option<String>,
     pub kind: Option<String>,
+    #[serde(default)]
+    pub headers: std::collections::HashMap<String, String>,
 }
 
 // --- Extension Setup ---

@@ -254,6 +254,7 @@ I18n.register('zh-CN', {
   'mcp.addCustom': '添加自定义 MCP 服务器',
   'mcp.add': '添加',
   'mcp.addedSuccess': '已添加 MCP 服务器 {name}',
+  'mcp.authorizationHeaderPlaceholder': 'Authorization header 值（可选，例如 Bearer token）',
 
 
   // 技能标签页

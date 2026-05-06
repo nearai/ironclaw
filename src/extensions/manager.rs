@@ -1661,6 +1661,18 @@ impl ExtensionManager {
         Err(err)
     }
 
+    pub(crate) async fn install_mcp_from_url_with_headers(
+        &self,
+        name: &str,
+        url: &str,
+        headers: std::collections::HashMap<String, String>,
+        user_id: &str,
+    ) -> Result<InstallResult, ExtensionError> {
+        let name = canonicalize_extension_name(name)?;
+        self.install_mcp_from_url_inner(&name, url, headers, user_id)
+            .await
+    }
+
     /// Check auth status for an installed extension.
     ///
     /// Read-only for WASM extensions; may initiate OAuth for MCP servers.
@@ -3235,12 +3247,23 @@ impl ExtensionManager {
         url: &str,
         user_id: &str,
     ) -> Result<InstallResult, ExtensionError> {
+        self.install_mcp_from_url_inner(name, url, std::collections::HashMap::new(), user_id)
+            .await
+    }
+
+    async fn install_mcp_from_url_inner(
+        &self,
+        name: &str,
+        url: &str,
+        headers: std::collections::HashMap<String, String>,
+        user_id: &str,
+    ) -> Result<InstallResult, ExtensionError> {
         // Check if already installed
         if self.get_mcp_server(name, user_id).await.is_ok() {
             return Err(ExtensionError::AlreadyInstalled(name.to_string()));
         }
 
-        let config = McpServerConfig::new(name, url);
+        let config = McpServerConfig::new(name, url).with_headers(headers);
         config
             .validate()
             .map_err(|e| ExtensionError::InvalidUrl(e.to_string()))?;

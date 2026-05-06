@@ -254,6 +254,7 @@ I18n.register('ko', {
   'mcp.addCustom': '사용자 지정 MCP 서버 추가',
   'mcp.add': '추가',
   'mcp.addedSuccess': 'MCP 서버 {name}이(가) 추가되었습니다',
+  'mcp.authorizationHeaderPlaceholder': 'Authorization 헤더 값 (선택, 예: Bearer token)',
 
 
   // 기술 탭

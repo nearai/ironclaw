@@ -38,15 +38,19 @@ function addMcpServer() {
     showToast(I18n.t('mcp.urlRequired'), 'error');
     return;
   }
+  var authHeaderInput = document.getElementById('mcp-install-auth-header');
+  var authHeader = authHeaderInput ? authHeaderInput.value.trim() : '';
+  var headers = authHeader ? { Authorization: authHeader } : {};
 
   apiFetch('/api/extensions/install', {
     method: 'POST',
-    body: { name: name, url: url, kind: 'mcp_server' },
+    body: { name: name, url: url, kind: 'mcp_server', headers: headers },
   }).then(function(res) {
     if (res.success) {
       showToast(I18n.t('mcp.added', { name: name }), 'success');
       document.getElementById('mcp-install-name').value = '';
       document.getElementById('mcp-install-url').value = '';
+      if (authHeaderInput) authHeaderInput.value = '';
       loadMcpServers();
     } else {
       showToast(I18n.t('mcp.addFailed', { message: res.message || 'unknown error' }), 'error');
