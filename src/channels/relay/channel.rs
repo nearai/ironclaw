@@ -313,9 +313,9 @@ impl Channel for RelayChannel {
                             tracing::warn!(
                                 sender_id = %event.sender_id,
                                 error = %e,
-                                "Relay: pairing resolution failed, using raw sender_id"
+                                "Relay: pairing resolution failed, dropping message"
                             );
-                            event.sender_id.clone()
+                            continue;
                         }
                     }
                 } else {
@@ -323,6 +323,7 @@ impl Channel for RelayChannel {
                 };
 
                 let mut msg = IncomingMessage::new(&relay_name, &resolved_user_id, event.text())
+                    .with_sender_id(event.sender_id.clone())
                     .with_user_name(event.display_name())
                     .with_metadata(serde_json::json!({
                         "team_id": event.team_id(),

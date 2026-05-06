@@ -737,42 +737,40 @@ pub(crate) async fn slack_relay_oauth_callback_handler(
                 .unwrap_or_else(|| state.owner_id.clone());
             let _ = ext_mgr.secrets().delete(&state.owner_id, &user_key).await;
 
-            let role = if let Some(ref db) = state.store {
-                db.get_user(&oauth_user)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|u| match u.role.as_str() {
-                        "owner" => crate::ownership::UserRole::Owner,
-                        "admin" => crate::ownership::UserRole::Admin,
-                        _ => crate::ownership::UserRole::Regular,
-                    })
-                    .unwrap_or(crate::ownership::UserRole::Regular)
+            let user_record = if let Some(ref db) = state.store {
+                db.get_user(&oauth_user).await.ok().flatten()
             } else {
-                crate::ownership::UserRole::Regular
+                None
+            };
+            let Some(ref record) = user_record else {
+                return Err(format!(
+                    "OAuth user '{oauth_user}' not found — cannot create relay identity"
+                ));
+            };
+            if record.status != "active" {
+                return Err(format!(
+                    "OAuth user '{oauth_user}' is not active (status: {})",
+                    record.status
+                ));
+            }
+            let role = match record.role.as_str() {
+                "owner" => crate::ownership::UserRole::Owner,
+                "admin" => crate::ownership::UserRole::Admin,
+                _ => crate::ownership::UserRole::Regular,
             };
             let Ok(user_id) = crate::ownership::UserId::new(&oauth_user, role) else {
-                tracing::warn!(
-                    oauth_user = %oauth_user,
-                    "relay OAuth callback: invalid user_id for channel identity"
-                );
-                return Ok(());
+                return Err(format!(
+                    "OAuth user '{oauth_user}' has invalid user_id format"
+                ));
             };
-            if let Err(e) = pairing_store
+            pairing_store
                 .create_identity(
                     crate::channels::relay::channel::DEFAULT_RELAY_NAME,
                     &authed_user_id,
                     &user_id,
                 )
                 .await
-            {
-                tracing::warn!(
-                    authed_user_id = %authed_user_id,
-                    oauth_user = %oauth_user,
-                    error = %e,
-                    "relay OAuth callback: failed to create channel identity"
-                );
-            }
+                .map_err(|e| format!("Failed to create relay identity: {e}"))?;
         }
 
         // Activate the relay channel
