@@ -953,3 +953,58 @@ async fn replay_projection_snapshot_runs_reflect_current_stream_head_under_trunc
         "snapshot must fold runs through stream head; truncated timeline must not leak stale Running status"
     );
 }
+
+#[tokio::test]
+async fn replay_projection_snapshot_runs_reflect_process_failed_under_truncation() {
+    // Same shape as the previous test but with a `ProcessFailed` terminal
+    // event, since the reviewer specifically called out
+    // `DispatchSucceeded` / `ProcessFailed` as terminals that get masked
+    // when run state is built only from a truncated timeline page.
+    let log = Arc::new(InMemoryDurableEventLog::new());
+    let service = ReplayEventProjectionService::new(Arc::clone(&log));
+    let scope = scope_for_thread(ThreadId::new("thread-a").unwrap());
+    let capability = capability_id();
+    let provider = provider_id();
+    let process_id = ProcessId::new();
+
+    log.append(RuntimeEvent::process_started(
+        scope.clone(),
+        capability.clone(),
+        provider.clone(),
+        RuntimeKind::Script,
+        process_id,
+    ))
+    .await
+    .unwrap();
+    log.append(RuntimeEvent::process_failed(
+        scope.clone(),
+        capability,
+        provider,
+        RuntimeKind::Script,
+        process_id,
+        "boom",
+    ))
+    .await
+    .unwrap();
+
+    let snapshot = service
+        .snapshot(ProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&scope),
+            after: None,
+            limit: 1,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.timeline.entries.len(), 1);
+    assert!(snapshot.truncated);
+    assert_eq!(snapshot.runs.len(), 1);
+    assert_eq!(
+        snapshot.runs[0].status,
+        RunProjectionStatus::Failed,
+        "snapshot must fold ProcessFailed terminal events through stream head"
+    );
+    // Sanitization at the projection boundary still applies — the
+    // raw `error_kind` is normalized via `sanitize_error_kind`.
+    assert!(snapshot.runs[0].error_kind.is_some());
+}
