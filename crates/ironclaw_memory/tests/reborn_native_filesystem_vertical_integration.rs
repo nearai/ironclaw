@@ -20,17 +20,23 @@
 
 use std::sync::Arc;
 
+#[cfg(feature = "libsql")]
 use async_trait::async_trait;
+#[cfg(feature = "libsql")]
+use ironclaw_filesystem::FilesystemError;
 use ironclaw_filesystem::{
-    BackendCapabilities, BackendId, BackendKind, CompositeRootFilesystem, ContentKind,
-    FilesystemError, IndexPolicy, MountDescriptor, RootFilesystem, StorageClass,
+    BackendCapabilities, BackendId, BackendKind, CompositeRootFilesystem, ContentKind, IndexPolicy,
+    MountDescriptor, RootFilesystem, StorageClass,
 };
 use ironclaw_host_api::VirtualPath;
 use ironclaw_memory::{
-    EmbeddingError, EmbeddingProvider, MemoryBackend, MemoryBackendCapabilities,
-    MemoryBackendFilesystemAdapter, MemoryContext, MemoryDocumentPath, MemoryDocumentRepository,
-    MemoryDocumentScope, MemorySearchRequest, RepositoryMemoryBackend,
+    MemoryBackend, MemoryBackendCapabilities, MemoryBackendFilesystemAdapter, MemoryContext,
+    MemoryDocumentPath, MemoryDocumentRepository, MemoryDocumentScope, MemorySearchRequest,
+    RepositoryMemoryBackend,
 };
+
+#[cfg(feature = "libsql")]
+use ironclaw_memory::{EmbeddingError, EmbeddingProvider};
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_memory::{ChunkConfig, ChunkingMemoryDocumentIndexer};
@@ -66,9 +72,11 @@ fn vpath(suffix: &str) -> VirtualPath {
     VirtualPath::new(format!("/memory{suffix}")).unwrap()
 }
 
+#[cfg(feature = "libsql")]
 #[derive(Default)]
 struct DeterministicProvider;
 
+#[cfg(feature = "libsql")]
 #[async_trait]
 impl EmbeddingProvider for DeterministicProvider {
     fn dimension(&self) -> usize {
@@ -589,17 +597,20 @@ async fn postgres_search_through_composite_mount_returns_only_same_scope_results
 
 // --- shared spy -----------------------------------------------------------
 
+#[cfg(feature = "libsql")]
 #[derive(Default)]
 struct SearchSpyRepository {
     search_calls: std::sync::Mutex<usize>,
 }
 
+#[cfg(feature = "libsql")]
 impl SearchSpyRepository {
     fn search_calls(&self) -> usize {
         *self.search_calls.lock().unwrap()
     }
 }
 
+#[cfg(feature = "libsql")]
 #[async_trait]
 impl MemoryDocumentRepository for SearchSpyRepository {
     async fn read_document(

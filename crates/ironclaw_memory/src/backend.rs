@@ -50,6 +50,7 @@ pub struct MemoryContext {
     scope: MemoryDocumentScope,
     invocation_id: Option<String>,
     prompt_write_safety_allowance: Option<PromptSafetyAllowanceId>,
+    prompt_write_safety_enforced: bool,
 }
 
 impl MemoryContext {
@@ -58,6 +59,7 @@ impl MemoryContext {
             scope,
             invocation_id: None,
             prompt_write_safety_allowance: None,
+            prompt_write_safety_enforced: false,
         }
     }
 
@@ -74,6 +76,11 @@ impl MemoryContext {
         self
     }
 
+    pub fn with_prompt_write_safety_enforced(mut self) -> Self {
+        self.prompt_write_safety_enforced = true;
+        self
+    }
+
     pub fn scope(&self) -> &MemoryDocumentScope {
         &self.scope
     }
@@ -85,6 +92,10 @@ impl MemoryContext {
     pub fn prompt_write_safety_allowance(&self) -> Option<&PromptSafetyAllowanceId> {
         self.prompt_write_safety_allowance.as_ref()
     }
+
+    pub fn prompt_write_safety_enforced(&self) -> bool {
+        self.prompt_write_safety_enforced
+    }
 }
 
 /// Pluggable memory backend contract.
@@ -94,6 +105,11 @@ impl MemoryContext {
 #[async_trait]
 pub trait MemoryBackend: Send + Sync {
     fn capabilities(&self) -> MemoryBackendCapabilities;
+
+    fn prompt_write_safety_protects_path(&self, path: &MemoryDocumentPath) -> bool {
+        let _ = path;
+        false
+    }
 
     async fn read_document(
         &self,
@@ -275,6 +291,21 @@ fn ensure_path_matches_context(
     ))
 }
 
+fn ensure_file_documents_supported(
+    context: &MemoryContext,
+    operation: FilesystemOperation,
+    supported: bool,
+) -> Result<(), FilesystemError> {
+    if supported {
+        return Ok(());
+    }
+    Err(memory_backend_unsupported(
+        context.scope(),
+        operation,
+        "memory backend does not support file documents",
+    ))
+}
+
 fn ensure_scope_matches_context(
     context: &MemoryContext,
     scope: &MemoryDocumentScope,
@@ -299,11 +330,25 @@ where
         self.capabilities.clone()
     }
 
+    fn prompt_write_safety_protects_path(&self, path: &MemoryDocumentPath) -> bool {
+        prompt_write_protected_classification(
+            self.prompt_safety_policy.as_ref(),
+            &self.prompt_protected_path_registry,
+            path,
+        )
+        .is_some()
+    }
+
     async fn read_document(
         &self,
         context: &MemoryContext,
         path: &MemoryDocumentPath,
     ) -> Result<Option<Vec<u8>>, FilesystemError> {
+        ensure_file_documents_supported(
+            context,
+            FilesystemOperation::ReadFile,
+            self.capabilities.file_documents,
+        )?;
         ensure_path_matches_context(context, path, FilesystemOperation::ReadFile)?;
         self.repository.read_document(path).await
     }
@@ -314,6 +359,11 @@ where
         path: &MemoryDocumentPath,
         bytes: &[u8],
     ) -> Result<(), FilesystemError> {
+        ensure_file_documents_supported(
+            context,
+            FilesystemOperation::WriteFile,
+            self.capabilities.file_documents,
+        )?;
         ensure_path_matches_context(context, path, FilesystemOperation::WriteFile)?;
         let content = std::str::from_utf8(bytes).map_err(|_| {
             memory_error(
@@ -338,22 +388,24 @@ where
         } else {
             None
         };
-        enforce_prompt_write_safety(
-            self.prompt_safety_policy.as_ref(),
-            self.prompt_safety_event_sink.as_ref(),
-            &self.prompt_protected_path_registry,
-            PromptWriteSafetyCheck {
-                scope: context.scope(),
-                path,
-                operation: PromptWriteOperation::Write,
-                source: PromptWriteSource::MemoryBackend,
-                content,
-                previous_content_hash: previous_hash.as_deref(),
-                allowance: context.prompt_write_safety_allowance(),
-                filesystem_operation: FilesystemOperation::WriteFile,
-            },
-        )
-        .await?;
+        if !context.prompt_write_safety_enforced() {
+            enforce_prompt_write_safety(
+                self.prompt_safety_policy.as_ref(),
+                self.prompt_safety_event_sink.as_ref(),
+                &self.prompt_protected_path_registry,
+                PromptWriteSafetyCheck {
+                    scope: context.scope(),
+                    path,
+                    operation: PromptWriteOperation::Write,
+                    source: PromptWriteSource::MemoryBackend,
+                    content,
+                    previous_content_hash: previous_hash.as_deref(),
+                    allowance: context.prompt_write_safety_allowance(),
+                    filesystem_operation: FilesystemOperation::WriteFile,
+                },
+            )
+            .await?;
+        }
         let metadata = resolve_document_metadata(self.repository.as_ref(), path).await?;
         if let Some(schema) = &metadata.schema {
             validate_content_against_schema(path, content, schema)?;
@@ -378,6 +430,11 @@ where
         expected_previous_hash: Option<&str>,
         bytes: &[u8],
     ) -> Result<MemoryAppendOutcome, FilesystemError> {
+        ensure_file_documents_supported(
+            context,
+            FilesystemOperation::AppendFile,
+            self.capabilities.file_documents,
+        )?;
         ensure_path_matches_context(context, path, FilesystemOperation::AppendFile)?;
         let current = self.repository.read_document(path).await?;
         if current.as_deref().map(content_bytes_sha256).as_deref() != expected_previous_hash {
@@ -408,22 +465,24 @@ where
         } else {
             None
         };
-        enforce_prompt_write_safety(
-            self.prompt_safety_policy.as_ref(),
-            self.prompt_safety_event_sink.as_ref(),
-            &self.prompt_protected_path_registry,
-            PromptWriteSafetyCheck {
-                scope: context.scope(),
-                path,
-                operation: PromptWriteOperation::Append,
-                source: PromptWriteSource::MemoryBackend,
-                content,
-                previous_content_hash: previous_hash.as_deref(),
-                allowance: context.prompt_write_safety_allowance(),
-                filesystem_operation: FilesystemOperation::AppendFile,
-            },
-        )
-        .await?;
+        if !context.prompt_write_safety_enforced() {
+            enforce_prompt_write_safety(
+                self.prompt_safety_policy.as_ref(),
+                self.prompt_safety_event_sink.as_ref(),
+                &self.prompt_protected_path_registry,
+                PromptWriteSafetyCheck {
+                    scope: context.scope(),
+                    path,
+                    operation: PromptWriteOperation::Append,
+                    source: PromptWriteSource::MemoryBackend,
+                    content,
+                    previous_content_hash: previous_hash.as_deref(),
+                    allowance: context.prompt_write_safety_allowance(),
+                    filesystem_operation: FilesystemOperation::AppendFile,
+                },
+            )
+            .await?;
+        }
         let metadata = resolve_document_metadata(self.repository.as_ref(), path).await?;
         if let Some(schema) = &metadata.schema {
             validate_content_against_schema(path, content, schema)?;
@@ -449,6 +508,11 @@ where
         context: &MemoryContext,
         scope: &MemoryDocumentScope,
     ) -> Result<Vec<MemoryDocumentPath>, FilesystemError> {
+        ensure_file_documents_supported(
+            context,
+            FilesystemOperation::ListDir,
+            self.capabilities.file_documents,
+        )?;
         ensure_scope_matches_context(context, scope, FilesystemOperation::ListDir)?;
         self.repository.list_documents(scope).await
     }
@@ -475,10 +539,7 @@ where
                 "memory backend does not support full-text search",
             ));
         }
-        if request.vector()
-            && !self.capabilities.vector_search
-            && (request.query_embedding().is_some() || !request.full_text())
-        {
+        if request.vector() && !self.capabilities.vector_search {
             return Err(memory_backend_unsupported(
                 context.scope(),
                 FilesystemOperation::ReadFile,
@@ -500,8 +561,21 @@ where
         if request.vector()
             && self.capabilities.vector_search
             && request.query_embedding().is_none()
-            && let Some(provider) = &self.embedding_provider
         {
+            if !self.capabilities.embeddings {
+                return Err(memory_backend_unsupported(
+                    context.scope(),
+                    FilesystemOperation::ReadFile,
+                    "memory backend does not support embedding generation",
+                ));
+            }
+            let Some(provider) = &self.embedding_provider else {
+                return Err(memory_backend_unsupported(
+                    context.scope(),
+                    FilesystemOperation::ReadFile,
+                    "memory backend cannot generate query embeddings",
+                ));
+            };
             let embedding = embed_text(provider.as_ref(), context.scope(), request.query()).await?;
             request = request.with_query_embedding(embedding);
         }
@@ -510,8 +584,9 @@ where
         // configured provider, instead of silently producing no/wrong results downstream
         // (libsql cosine_similarity skips mismatched chunks; postgres pgvector errors
         // opaquely).
-        if let (Some(provider), Some(embedding)) =
-            (&self.embedding_provider, request.query_embedding())
+        if request.vector()
+            && let (Some(provider), Some(embedding)) =
+                (&self.embedding_provider, request.query_embedding())
         {
             let expected = provider.dimension();
             let actual = embedding.len();
@@ -535,7 +610,25 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::embedding::EmbeddingError;
     use crate::repo::InMemoryMemoryDocumentRepository;
+
+    struct UnitEmbeddingProvider;
+
+    #[async_trait]
+    impl EmbeddingProvider for UnitEmbeddingProvider {
+        fn dimension(&self) -> usize {
+            3
+        }
+
+        fn model_name(&self) -> &str {
+            "unit"
+        }
+
+        async fn embed(&self, _text: &str) -> Result<Vec<f32>, EmbeddingError> {
+            Ok(vec![1.0, 0.0, 0.0])
+        }
+    }
 
     fn alpha_path() -> MemoryDocumentPath {
         MemoryDocumentPath::new("tenant", "alpha", Some("project"), "note.md").unwrap()
@@ -552,6 +645,16 @@ mod tests {
     fn make_backend() -> RepositoryMemoryBackend<InMemoryMemoryDocumentRepository> {
         let repo = Arc::new(InMemoryMemoryDocumentRepository::new());
         RepositoryMemoryBackend::new(repo).without_prompt_write_safety_policy()
+    }
+
+    fn make_search_backend(
+        capabilities: MemoryBackendCapabilities,
+    ) -> RepositoryMemoryBackend<InMemoryMemoryDocumentRepository> {
+        let repo = Arc::new(InMemoryMemoryDocumentRepository::new());
+        RepositoryMemoryBackend::new(repo)
+            .without_prompt_write_safety_policy()
+            .with_embedding_provider(Arc::new(UnitEmbeddingProvider))
+            .with_capabilities(capabilities)
     }
 
     // Regression for PR #3180 review: a `MemoryBackend` is reachable from
@@ -612,5 +715,82 @@ mod tests {
             .read_document(&alpha_context(), &alpha_path())
             .await
             .expect("matching scope should not be rejected");
+    }
+
+    #[tokio::test]
+    async fn file_document_capability_rejects_direct_backend_file_operations() {
+        let backend = make_backend().with_capabilities(MemoryBackendCapabilities {
+            file_documents: false,
+            ..MemoryBackendCapabilities::default()
+        });
+        assert!(
+            backend
+                .read_document(&alpha_context(), &alpha_path())
+                .await
+                .is_err()
+        );
+        assert!(
+            backend
+                .write_document(&alpha_context(), &alpha_path(), b"x")
+                .await
+                .is_err()
+        );
+        assert!(
+            backend
+                .compare_and_append_document(&alpha_context(), &alpha_path(), None, b"x")
+                .await
+                .is_err()
+        );
+        assert!(
+            backend
+                .list_documents(&alpha_context(), alpha_path().scope())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn vector_request_fails_closed_when_vector_search_is_unsupported() {
+        let backend = make_search_backend(MemoryBackendCapabilities {
+            full_text_search: true,
+            vector_search: false,
+            embeddings: true,
+            ..MemoryBackendCapabilities::default()
+        });
+        let request = MemorySearchRequest::new("query").unwrap();
+        let err = backend.search(&alpha_context(), request).await.unwrap_err();
+        assert!(err.to_string().contains("vector search"));
+    }
+
+    #[tokio::test]
+    async fn vector_request_fails_closed_when_embedding_generation_is_disabled() {
+        let backend = make_search_backend(MemoryBackendCapabilities {
+            full_text_search: true,
+            vector_search: true,
+            embeddings: false,
+            ..MemoryBackendCapabilities::default()
+        });
+        let request = MemorySearchRequest::new("query").unwrap();
+        let err = backend.search(&alpha_context(), request).await.unwrap_err();
+        assert!(err.to_string().contains("embedding generation"));
+    }
+
+    #[tokio::test]
+    async fn full_text_only_search_ignores_stale_query_embedding_dimension() {
+        let backend = make_search_backend(MemoryBackendCapabilities {
+            full_text_search: true,
+            vector_search: true,
+            embeddings: true,
+            ..MemoryBackendCapabilities::default()
+        });
+        let request = MemorySearchRequest::new("query")
+            .unwrap()
+            .with_vector(false)
+            .with_query_embedding(vec![1.0]);
+        let err = backend.search(&alpha_context(), request).await.unwrap_err();
+        assert!(
+            !err.to_string().contains("dimension"),
+            "full-text-only retry must not validate stale vector dimensions: {err}"
+        );
     }
 }

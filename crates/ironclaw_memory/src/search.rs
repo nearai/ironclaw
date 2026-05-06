@@ -205,7 +205,6 @@ impl MemorySearchResult {
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 #[derive(Debug, Clone)]
 pub(crate) struct RankedMemorySearchResult {
-    pub(crate) chunk_key: String,
     pub(crate) path: MemoryDocumentPath,
     pub(crate) snippet: String,
     pub(crate) rank: u32,
@@ -234,11 +233,16 @@ pub(crate) fn fuse_memory_search_results(
             FusionStrategy::Rrf => 1.0 / (request.rrf_k() as f32 + result.rank as f32),
             FusionStrategy::WeightedScore => request.full_text_weight() / result.rank as f32,
         };
+        let document_key = result.path.relative_path().to_string();
         results
-            .entry(result.chunk_key)
+            .entry(document_key)
             .and_modify(|existing| {
                 existing.score += score;
-                existing.full_text_rank = Some(result.rank);
+                existing.full_text_rank = Some(
+                    existing
+                        .full_text_rank
+                        .map_or(result.rank, |rank| rank.min(result.rank)),
+                );
             })
             .or_insert(ResultAccumulator {
                 path: result.path,
@@ -253,11 +257,16 @@ pub(crate) fn fuse_memory_search_results(
             FusionStrategy::Rrf => 1.0 / (request.rrf_k() as f32 + result.rank as f32),
             FusionStrategy::WeightedScore => request.vector_weight() / result.rank as f32,
         };
+        let document_key = result.path.relative_path().to_string();
         results
-            .entry(result.chunk_key)
+            .entry(document_key)
             .and_modify(|existing| {
                 existing.score += score;
-                existing.vector_rank = Some(result.rank);
+                existing.vector_rank = Some(
+                    existing
+                        .vector_rank
+                        .map_or(result.rank, |rank| rank.min(result.rank)),
+                );
             })
             .or_insert(ResultAccumulator {
                 path: result.path,
@@ -322,9 +331,8 @@ mod tests {
     use super::*;
     use crate::path::MemoryDocumentPath;
 
-    fn ranked(chunk_key: &str, relative_path: &str, rank: u32) -> RankedMemorySearchResult {
+    fn ranked(_chunk_key: &str, relative_path: &str, rank: u32) -> RankedMemorySearchResult {
         RankedMemorySearchResult {
-            chunk_key: chunk_key.to_string(),
             path: MemoryDocumentPath::new("tenant-a", "alice", None, relative_path).expect("path"),
             snippet: format!("snippet for {relative_path}"),
             rank,
@@ -450,5 +458,35 @@ mod tests {
         ];
         let fused = fuse_memory_search_results(full_text, Vec::new(), &rrf_request(0.0));
         assert_eq!(fused.len(), 3);
+    }
+
+    #[test]
+    fn fusion_collapses_multiple_chunks_for_same_document_path() {
+        let request = MemorySearchRequest::new("q").unwrap().with_limit(10);
+        let full_text = vec![
+            ranked("doc-a-chunk-1", "same.md", 1),
+            ranked("doc-a-chunk-2", "same.md", 2),
+            ranked("doc-b-chunk-1", "other.md", 3),
+        ];
+        let vector = vec![ranked("doc-a-vector-chunk", "same.md", 1)];
+        let fused = fuse_memory_search_results(full_text, vector, &request);
+        let same_results = fused
+            .iter()
+            .filter(|result| result.path.relative_path() == "same.md")
+            .count();
+        assert_eq!(
+            same_results, 1,
+            "same document must consume one result slot"
+        );
+        let same = fused
+            .iter()
+            .find(|result| result.path.relative_path() == "same.md")
+            .expect("same.md result");
+        assert!(
+            same.is_hybrid(),
+            "full-text and vector chunks should fuse by document path"
+        );
+        assert_eq!(same.full_text_rank, Some(1));
+        assert_eq!(same.vector_rank, Some(1));
     }
 }

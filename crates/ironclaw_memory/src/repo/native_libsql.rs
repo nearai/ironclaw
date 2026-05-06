@@ -18,7 +18,7 @@ use ironclaw_host_api::VirtualPath;
 use crate::chunking::{MemoryChunkWrite, content_sha256};
 use crate::embedding::{cosine_similarity, decode_embedding_blob, encode_embedding_blob};
 use crate::indexer::MemoryDocumentIndexRepository;
-use crate::metadata::MemoryWriteOptions;
+use crate::metadata::{DocumentMetadata, MemoryWriteOptions, is_config_path};
 use crate::path::{MemoryDocumentPath, MemoryDocumentScope, memory_error, valid_memory_path};
 use crate::search::{
     MemorySearchRequest, MemorySearchResult, RankedMemorySearchResult, escape_fts5_query,
@@ -57,6 +57,18 @@ impl RebornLibSqlMemoryDocumentRepository {
                     error.to_string(),
                 )
             })?;
+        conn.execute(
+            "INSERT INTO reborn_memory_chunks_fts(reborn_memory_chunks_fts) VALUES ('rebuild')",
+            (),
+        )
+        .await
+        .map_err(|error| {
+            memory_error(
+                valid_memory_path(),
+                FilesystemOperation::CreateDirAll,
+                error.to_string(),
+            )
+        })?;
         Ok(())
     }
 
@@ -486,6 +498,7 @@ impl MemoryDocumentRepository for RebornLibSqlMemoryDocumentRepository {
             .connect(virtual_path.clone(), FilesystemOperation::WriteFile)
             .await?;
         let scope = path.scope();
+        let parsed_metadata = DocumentMetadata::from_value(metadata);
         let metadata = serde_json::to_string(metadata).map_err(|error| {
             memory_error(
                 virtual_path.clone(),
@@ -510,11 +523,14 @@ impl MemoryDocumentRepository for RebornLibSqlMemoryDocumentRepository {
         .await
         .map_err(|error| {
             memory_error(
-                virtual_path,
+                virtual_path.clone(),
                 FilesystemOperation::WriteFile,
                 error.to_string(),
             )
         })?;
+        if parsed_metadata.skip_indexing == Some(true) {
+            reborn_libsql_clear_chunks_for_metadata_path(&conn, path, &virtual_path).await?;
+        }
         Ok(())
     }
 
@@ -771,6 +787,69 @@ async fn reborn_libsql_document_id_and_hash(
         .map_err(|error| memory_error(virtual_path.clone(), operation, error.to_string()))
 }
 
+async fn reborn_libsql_clear_chunks_for_metadata_path(
+    conn: &libsql::Connection,
+    path: &MemoryDocumentPath,
+    virtual_path: &VirtualPath,
+) -> Result<(), FilesystemError> {
+    let scope = path.scope();
+    if is_config_path(path.relative_path()) {
+        let parent = path
+            .relative_path()
+            .rsplit_once('/')
+            .map(|(parent, _)| parent);
+        let like_pattern = parent.map_or("%".to_string(), |parent| format!("{parent}/%"));
+        conn.execute(
+            "DELETE FROM reborn_memory_chunks \
+             WHERE document_id IN (\
+                 SELECT id FROM reborn_memory_documents \
+                 WHERE tenant_id = ?1 AND user_id = ?2 AND agent_id = ?3 \
+                   AND project_id = ?4 AND path LIKE ?5\
+             )",
+            libsql::params![
+                scope.tenant_id(),
+                scope.user_id(),
+                reborn_agent_id_db_value(scope),
+                reborn_project_id_db_value(scope),
+                like_pattern,
+            ],
+        )
+        .await
+        .map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::WriteFile,
+                error.to_string(),
+            )
+        })?;
+    } else {
+        conn.execute(
+            "DELETE FROM reborn_memory_chunks \
+             WHERE document_id IN (\
+                 SELECT id FROM reborn_memory_documents \
+                 WHERE tenant_id = ?1 AND user_id = ?2 AND agent_id = ?3 \
+                   AND project_id = ?4 AND path = ?5\
+             )",
+            libsql::params![
+                scope.tenant_id(),
+                scope.user_id(),
+                reborn_agent_id_db_value(scope),
+                reborn_project_id_db_value(scope),
+                path.relative_path(),
+            ],
+        )
+        .await
+        .map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::WriteFile,
+                error.to_string(),
+            )
+        })?;
+    }
+    Ok(())
+}
+
 // Caller must hold an active transaction on `conn` (e.g. via `BEGIN IMMEDIATE`).
 async fn reborn_libsql_save_document_version(
     conn: &libsql::Connection,
@@ -860,7 +939,7 @@ async fn reborn_libsql_full_text_search_ranked(
              JOIN reborn_memory_documents d ON d.id = c.document_id \
              WHERE d.tenant_id = ?1 AND d.user_id = ?2 AND d.agent_id = ?3 \
                AND d.project_id = ?4 AND reborn_memory_chunks_fts MATCH ?5 \
-             ORDER BY rank \
+             ORDER BY rank, d.path, c.chunk_index, c.id \
              LIMIT ?6",
             libsql::params![
                 scope.tenant_id(),
@@ -888,13 +967,6 @@ async fn reborn_libsql_full_text_search_ranked(
             error.to_string(),
         )
     })? {
-        let chunk_key: String = row.get(0).map_err(|error| {
-            memory_error(
-                virtual_path.clone(),
-                FilesystemOperation::ReadFile,
-                error.to_string(),
-            )
-        })?;
         let tenant_id: String = row.get(1).map_err(|error| {
             memory_error(
                 virtual_path.clone(),
@@ -948,7 +1020,6 @@ async fn reborn_libsql_full_text_search_ranked(
         };
         let rank = results.len() as u32 + 1;
         results.push(RankedMemorySearchResult {
-            chunk_key,
             path,
             snippet,
             rank,
@@ -967,7 +1038,7 @@ async fn reborn_libsql_vector_search_ranked(
     let mut rows = conn
         .query(
             "SELECT c.id, d.tenant_id, d.user_id, d.agent_id, d.project_id, d.path, \
-                    c.content, c.embedding \
+                    c.content, c.embedding, c.chunk_index \
              FROM reborn_memory_chunks c \
              JOIN reborn_memory_documents d ON d.id = c.document_id \
              WHERE d.tenant_id = ?1 AND d.user_id = ?2 AND d.agent_id = ?3 \
@@ -988,7 +1059,7 @@ async fn reborn_libsql_vector_search_ranked(
             )
         })?;
 
-    let mut scored = Vec::<(f32, RankedMemorySearchResult)>::new();
+    let mut scored = Vec::<(f32, i64, String, RankedMemorySearchResult)>::new();
     while let Some(row) = rows.next().await.map_err(|error| {
         memory_error(
             virtual_path.clone(),
@@ -1052,6 +1123,13 @@ async fn reborn_libsql_vector_search_ranked(
                 error.to_string(),
             )
         })?;
+        let chunk_index: i64 = row.get(8).map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::ReadFile,
+                error.to_string(),
+            )
+        })?;
         let Some(embedding) = decode_embedding_blob(&embedding_blob) else {
             continue;
         };
@@ -1069,8 +1147,9 @@ async fn reborn_libsql_vector_search_ranked(
         };
         scored.push((
             score,
+            chunk_index,
+            chunk_key.clone(),
             RankedMemorySearchResult {
-                chunk_key,
                 path,
                 snippet,
                 rank: 0,
@@ -1083,17 +1162,19 @@ async fn reborn_libsql_vector_search_ranked(
             .partial_cmp(&left.0)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| {
-                left.1
+                left.3
                     .path
                     .relative_path()
-                    .cmp(right.1.path.relative_path())
+                    .cmp(right.3.path.relative_path())
             })
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.cmp(&right.2))
     });
     scored.truncate(request.pre_fusion_limit());
     Ok(scored
         .into_iter()
         .enumerate()
-        .map(|(index, (_score, mut result))| {
+        .map(|(index, (_score, _chunk_index, _chunk_key, mut result))| {
             result.rank = index as u32 + 1;
             result
         })

@@ -717,6 +717,7 @@ async fn libsql_repository_backend_searches_indexed_chunks() {
             &context,
             MemorySearchRequest::new("searchable-token")
                 .unwrap()
+                .with_vector(false)
                 .with_limit(3),
         )
         .await

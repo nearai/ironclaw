@@ -20,13 +20,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_filesystem::FilesystemError;
 use ironclaw_memory::{
-    EmbeddingError, EmbeddingProvider, MemoryBackend, MemoryBackendCapabilities, MemoryContext,
-    MemoryDocumentIndexer, MemoryDocumentPath, MemoryDocumentScope, MemorySearchRequest,
-    RepositoryMemoryBackend,
+    ChunkConfig, ChunkingMemoryDocumentIndexer, EmbeddingError, EmbeddingProvider, FusionStrategy,
+    MemoryBackend, MemoryBackendCapabilities, MemoryContext, MemoryDocumentIndexer,
+    MemoryDocumentPath, MemoryDocumentScope, MemorySearchRequest, RepositoryMemoryBackend,
 };
-
-#[cfg(feature = "libsql")]
-use ironclaw_memory::{ChunkConfig, ChunkingMemoryDocumentIndexer, FusionStrategy};
 
 #[cfg(feature = "libsql")]
 use ironclaw_memory::RebornLibSqlMemoryDocumentRepository;
@@ -654,6 +651,7 @@ async fn libsql_backend_search_honors_pre_fusion_limit_per_branch() {
             &context,
             MemorySearchRequest::new("shared-keyword")
                 .unwrap()
+                .with_vector(false)
                 .with_limit(10)
                 .with_pre_fusion_limit(10)
                 .with_vector(false),
@@ -866,6 +864,7 @@ async fn libsql_backend_search_honors_limit() {
             &context,
             MemorySearchRequest::new("shared-keyword")
                 .unwrap()
+                .with_vector(false)
                 .with_limit(10),
         )
         .await
@@ -881,6 +880,7 @@ async fn libsql_backend_search_honors_limit() {
             &context,
             MemorySearchRequest::new("shared-keyword")
                 .unwrap()
+                .with_vector(false)
                 .with_limit(2),
         )
         .await
@@ -1360,6 +1360,7 @@ async fn postgres_backend_search_honors_pre_fusion_limit_per_branch() {
             &context,
             MemorySearchRequest::new("shared-keyword")
                 .unwrap()
+                .with_vector(false)
                 .with_limit(10)
                 .with_pre_fusion_limit(10)
                 .with_vector(false),
@@ -1426,6 +1427,7 @@ async fn postgres_backend_search_honors_limit() {
             &context,
             MemorySearchRequest::new("shared-keyword")
                 .unwrap()
+                .with_vector(false)
                 .with_limit(10),
         )
         .await
@@ -1441,6 +1443,7 @@ async fn postgres_backend_search_honors_limit() {
             &context,
             MemorySearchRequest::new("shared-keyword")
                 .unwrap()
+                .with_vector(false)
                 .with_limit(2),
         )
         .await

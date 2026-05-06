@@ -15,7 +15,7 @@ use ironclaw_host_api::VirtualPath;
 
 use crate::chunking::{MemoryChunkWrite, content_sha256};
 use crate::indexer::MemoryDocumentIndexRepository;
-use crate::metadata::MemoryWriteOptions;
+use crate::metadata::{DocumentMetadata, MemoryWriteOptions, is_config_path};
 use crate::path::{MemoryDocumentPath, MemoryDocumentScope, memory_error, valid_memory_path};
 use crate::search::{
     MemorySearchRequest, MemorySearchResult, RankedMemorySearchResult, fuse_memory_search_results,
@@ -79,20 +79,23 @@ impl RebornPostgresMemoryDocumentRepository {
                     pg_error_chain(&error),
                 )
             })?;
-        // Short-circuit if the schema is already present. Re-running the full
-        // DDL on every `run_migrations` call would take an AccessExclusiveLock
-        // on `reborn_memory_documents` for the FK validation in the dependent
-        // `CREATE TABLE IF NOT EXISTS reborn_memory_chunks`, which would
-        // deadlock against concurrent writers holding RowExclusiveLock once
-        // the global write-side LOCK TABLE was removed (zmanian H1+H2).
-        // The advisory lock above still serializes the *first* migration
-        // across all processes; subsequent calls find the schema and skip.
-        let already_migrated = client
-            .query_opt(
-                "SELECT 1 FROM information_schema.tables \
-                 WHERE table_schema = current_schema() \
-                   AND table_name = 'reborn_memory_documents'",
-                &[],
+        let migration_result = client
+            .batch_execute(REBORN_POSTGRES_MEMORY_DOCUMENTS_SCHEMA)
+            .await
+            .map_err(|error| {
+                memory_error(
+                    valid_memory_path(),
+                    FilesystemOperation::CreateDirAll,
+                    pg_error_chain(&error),
+                )
+            });
+        // Best-effort unlock; if the lock release fails we still surface the
+        // migration result. The lock is session-scoped so the connection
+        // returning to the pool will release it on drop anyway.
+        let unlock_result = client
+            .execute(
+                "SELECT pg_advisory_unlock($1)",
+                &[&REBORN_MIGRATION_LOCK_ID],
             )
             .await
             .map_err(|error| {
@@ -101,32 +104,9 @@ impl RebornPostgresMemoryDocumentRepository {
                     FilesystemOperation::CreateDirAll,
                     pg_error_chain(&error),
                 )
-            })?
-            .is_some();
-        let migration_result = if already_migrated {
-            Ok(())
-        } else {
-            client
-                .batch_execute(REBORN_POSTGRES_MEMORY_DOCUMENTS_SCHEMA)
-                .await
-                .map_err(|error| {
-                    memory_error(
-                        valid_memory_path(),
-                        FilesystemOperation::CreateDirAll,
-                        pg_error_chain(&error),
-                    )
-                })
-        };
-        // Best-effort unlock; if the lock release fails we still surface the
-        // migration result. The lock is session-scoped so the connection
-        // returning to the pool will release it on drop anyway.
-        let _ = client
-            .execute(
-                "SELECT pg_advisory_unlock($1)",
-                &[&REBORN_MIGRATION_LOCK_ID],
-            )
-            .await;
+            });
         migration_result?;
+        unlock_result?;
         Ok(())
     }
 
@@ -525,6 +505,7 @@ impl MemoryDocumentRepository for RebornPostgresMemoryDocumentRepository {
             .client(virtual_path.clone(), FilesystemOperation::WriteFile)
             .await?;
         let scope = path.scope();
+        let parsed_metadata = DocumentMetadata::from_value(metadata);
         client
             .execute(
                 "UPDATE reborn_memory_documents \
@@ -543,11 +524,14 @@ impl MemoryDocumentRepository for RebornPostgresMemoryDocumentRepository {
             .await
             .map_err(|error| {
                 memory_error(
-                    virtual_path,
+                    virtual_path.clone(),
                     FilesystemOperation::WriteFile,
                     pg_error_chain(&error),
                 )
             })?;
+        if parsed_metadata.skip_indexing == Some(true) {
+            reborn_postgres_clear_chunks_for_metadata_path(&client, path, &virtual_path).await?;
+        }
         Ok(())
     }
 
@@ -806,6 +790,71 @@ where
         .collect())
 }
 
+async fn reborn_postgres_clear_chunks_for_metadata_path(
+    client: &deadpool_postgres::Object,
+    path: &MemoryDocumentPath,
+    virtual_path: &VirtualPath,
+) -> Result<(), FilesystemError> {
+    let scope = path.scope();
+    if is_config_path(path.relative_path()) {
+        let parent = path
+            .relative_path()
+            .rsplit_once('/')
+            .map(|(parent, _)| parent);
+        let like_pattern = parent.map_or("%".to_string(), |parent| format!("{parent}/%"));
+        client
+            .execute(
+                "DELETE FROM reborn_memory_chunks \
+                 WHERE document_id IN (\
+                     SELECT id FROM reborn_memory_documents \
+                     WHERE tenant_id = $1 AND user_id = $2 AND agent_id = $3 \
+                       AND project_id = $4 AND path LIKE $5\
+                 )",
+                &[
+                    &scope.tenant_id(),
+                    &scope.user_id(),
+                    &reborn_agent_id_db_value(scope),
+                    &reborn_project_id_db_value(scope),
+                    &like_pattern,
+                ],
+            )
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::WriteFile,
+                    pg_error_chain(&error),
+                )
+            })?;
+    } else {
+        client
+            .execute(
+                "DELETE FROM reborn_memory_chunks \
+                 WHERE document_id IN (\
+                     SELECT id FROM reborn_memory_documents \
+                     WHERE tenant_id = $1 AND user_id = $2 AND agent_id = $3 \
+                       AND project_id = $4 AND path = $5\
+                 )",
+                &[
+                    &scope.tenant_id(),
+                    &scope.user_id(),
+                    &reborn_agent_id_db_value(scope),
+                    &reborn_project_id_db_value(scope),
+                    &path.relative_path(),
+                ],
+            )
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::WriteFile,
+                    pg_error_chain(&error),
+                )
+            })?;
+    }
+    Ok(())
+}
+
 async fn reborn_postgres_save_document_version<C>(
     client: &C,
     virtual_path: &VirtualPath,
@@ -871,7 +920,7 @@ async fn reborn_postgres_full_text_search_ranked(
              WHERE d.tenant_id = $1 AND d.user_id = $2 AND d.agent_id = $3 \
                AND d.project_id = $4 \
                AND c.content_tsv @@ plainto_tsquery('english', $5) \
-             ORDER BY rank DESC \
+             ORDER BY rank DESC, d.path, c.chunk_index, c.id \
              LIMIT $6",
             &[
                 &scope.tenant_id(),
@@ -895,7 +944,6 @@ async fn reborn_postgres_full_text_search_ranked(
         .into_iter()
         .enumerate()
         .filter_map(|(index, row)| {
-            let chunk_id: uuid::Uuid = row.get("id");
             let tenant_id: String = row.get("tenant_id");
             let user_id: String = row.get("user_id");
             let agent_id_db: String = row.get("agent_id");
@@ -910,7 +958,6 @@ async fn reborn_postgres_full_text_search_ranked(
                 &db_path,
             )?;
             Some(RankedMemorySearchResult {
-                chunk_key: chunk_id.to_string(),
                 path,
                 snippet,
                 rank: index as u32 + 1,
@@ -936,7 +983,8 @@ async fn reborn_postgres_vector_search_ranked(
              WHERE d.tenant_id = $1 AND d.user_id = $2 AND d.agent_id = $3 \
                AND d.project_id = $4 \
                AND c.embedding IS NOT NULL \
-             ORDER BY c.embedding <=> $5 \
+               AND vector_dims(c.embedding) = vector_dims($5) \
+             ORDER BY c.embedding <=> $5, d.path, c.chunk_index, c.id \
              LIMIT $6",
             &[
                 &scope.tenant_id(),
@@ -960,7 +1008,6 @@ async fn reborn_postgres_vector_search_ranked(
         .into_iter()
         .enumerate()
         .filter_map(|(index, row)| {
-            let chunk_id: uuid::Uuid = row.get("id");
             let tenant_id: String = row.get("tenant_id");
             let user_id: String = row.get("user_id");
             let agent_id_db: String = row.get("agent_id");
@@ -975,7 +1022,6 @@ async fn reborn_postgres_vector_search_ranked(
                 &db_path,
             )?;
             Some(RankedMemorySearchResult {
-                chunk_key: chunk_id.to_string(),
                 path,
                 snippet,
                 rank: index as u32 + 1,

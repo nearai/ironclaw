@@ -57,6 +57,23 @@ impl PostgresMemoryDocumentRepository {
     }
 }
 
+fn scoped_memory_agent_uuid(
+    scope: &MemoryDocumentScope,
+    virtual_path: &VirtualPath,
+    operation: FilesystemOperation,
+) -> Result<Option<uuid::Uuid>, FilesystemError> {
+    scoped_memory_agent_id(scope)
+        .map(uuid::Uuid::parse_str)
+        .transpose()
+        .map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                operation,
+                format!("memory agent_id must be a UUID for PostgreSQL: {error}"),
+            )
+        })
+}
+
 async fn postgres_list_documents_for_scope<C>(
     client: &C,
     scope: &MemoryDocumentScope,
@@ -67,7 +84,7 @@ where
     C: deadpool_postgres::GenericClient + Sync,
 {
     let owner_key = scoped_memory_owner_key(scope);
-    let agent_id = scoped_memory_agent_id(scope);
+    let agent_id = scoped_memory_agent_uuid(scope, virtual_path, FilesystemOperation::ReadFile)?;
     let rows = client
         .query(
             "SELECT path FROM memory_documents WHERE user_id = $1 AND agent_id IS NOT DISTINCT FROM $2 ORDER BY path",
@@ -96,7 +113,8 @@ impl MemoryDocumentRepository for PostgresMemoryDocumentRepository {
             .client(virtual_path.clone(), FilesystemOperation::ReadFile)
             .await?;
         let owner_key = scoped_memory_owner_key(path.scope());
-        let agent_id = scoped_memory_agent_id(path.scope());
+        let agent_id =
+            scoped_memory_agent_uuid(path.scope(), &virtual_path, FilesystemOperation::ReadFile)?;
         let db_path = db_path_for_memory_document(path);
         let row = client
             .query_opt(
@@ -128,7 +146,8 @@ impl MemoryDocumentRepository for PostgresMemoryDocumentRepository {
             .client(virtual_path.clone(), FilesystemOperation::WriteFile)
             .await?;
         let owner_key = scoped_memory_owner_key(path.scope());
-        let agent_id = scoped_memory_agent_id(path.scope());
+        let agent_id =
+            scoped_memory_agent_uuid(path.scope(), &virtual_path, FilesystemOperation::WriteFile)?;
         let db_path = db_path_for_memory_document(path);
         let txn = client.transaction().await.map_err(|error| {
             memory_error(
@@ -232,7 +251,8 @@ impl MemoryDocumentRepository for PostgresMemoryDocumentRepository {
             .client(virtual_path.clone(), FilesystemOperation::WriteFile)
             .await?;
         let owner_key = scoped_memory_owner_key(path.scope());
-        let agent_id = scoped_memory_agent_id(path.scope());
+        let agent_id =
+            scoped_memory_agent_uuid(path.scope(), &virtual_path, FilesystemOperation::WriteFile)?;
         let db_path = db_path_for_memory_document(path);
         let txn = client.transaction().await.map_err(|error| {
             memory_error(
@@ -340,7 +360,8 @@ impl MemoryDocumentRepository for PostgresMemoryDocumentRepository {
             .client(virtual_path.clone(), FilesystemOperation::AppendFile)
             .await?;
         let owner_key = scoped_memory_owner_key(path.scope());
-        let agent_id = scoped_memory_agent_id(path.scope());
+        let agent_id =
+            scoped_memory_agent_uuid(path.scope(), &virtual_path, FilesystemOperation::AppendFile)?;
         let db_path = db_path_for_memory_document(path);
         let txn = client.transaction().await.map_err(|error| {
             memory_error(
@@ -457,7 +478,8 @@ impl MemoryDocumentRepository for PostgresMemoryDocumentRepository {
             .client(virtual_path.clone(), FilesystemOperation::ReadFile)
             .await?;
         let owner_key = scoped_memory_owner_key(path.scope());
-        let agent_id = scoped_memory_agent_id(path.scope());
+        let agent_id =
+            scoped_memory_agent_uuid(path.scope(), &virtual_path, FilesystemOperation::ReadFile)?;
         let db_path = db_path_for_memory_document(path);
         let row = client
             .query_opt(
@@ -479,7 +501,8 @@ impl MemoryDocumentRepository for PostgresMemoryDocumentRepository {
             .client(virtual_path.clone(), FilesystemOperation::WriteFile)
             .await?;
         let owner_key = scoped_memory_owner_key(path.scope());
-        let agent_id = scoped_memory_agent_id(path.scope());
+        let agent_id =
+            scoped_memory_agent_uuid(path.scope(), &virtual_path, FilesystemOperation::WriteFile)?;
         let db_path = db_path_for_memory_document(path);
         client
             .execute(
@@ -551,7 +574,7 @@ async fn postgres_full_text_search_ranked(
     virtual_path: &VirtualPath,
 ) -> Result<Vec<RankedMemorySearchResult>, FilesystemError> {
     let owner_key = scoped_memory_owner_key(scope);
-    let agent_id = scoped_memory_agent_id(scope);
+    let agent_id = scoped_memory_agent_uuid(scope, virtual_path, FilesystemOperation::ReadFile)?;
     let limit = request.pre_fusion_limit() as i64;
     let rows = client
         .query(
@@ -573,12 +596,10 @@ async fn postgres_full_text_search_ranked(
         .into_iter()
         .enumerate()
         .filter_map(|(index, row)| {
-            let chunk_id: uuid::Uuid = row.get("id");
             let db_path: String = row.get("path");
             let path = memory_document_from_db_path(scope, &db_path)?;
             let snippet: String = row.get("content");
             Some(RankedMemorySearchResult {
-                chunk_key: chunk_id.to_string(),
                 path,
                 snippet,
                 rank: index as u32 + 1,
@@ -595,7 +616,7 @@ async fn postgres_vector_search_ranked(
     virtual_path: &VirtualPath,
 ) -> Result<Vec<RankedMemorySearchResult>, FilesystemError> {
     let owner_key = scoped_memory_owner_key(scope);
-    let agent_id = scoped_memory_agent_id(scope);
+    let agent_id = scoped_memory_agent_uuid(scope, virtual_path, FilesystemOperation::ReadFile)?;
     let limit = request.pre_fusion_limit() as i64;
     let query_vector = pgvector::Vector::from(query_embedding.to_vec());
     let rows = client
@@ -624,12 +645,10 @@ async fn postgres_vector_search_ranked(
         .into_iter()
         .enumerate()
         .filter_map(|(index, row)| {
-            let chunk_id: uuid::Uuid = row.get("id");
             let db_path: String = row.get("path");
             let path = memory_document_from_db_path(scope, &db_path)?;
             let snippet: String = row.get("content");
             Some(RankedMemorySearchResult {
-                chunk_key: chunk_id.to_string(),
                 path,
                 snippet,
                 rank: index as u32 + 1,
@@ -651,7 +670,8 @@ impl MemoryDocumentIndexRepository for PostgresMemoryDocumentRepository {
             .client(virtual_path.clone(), FilesystemOperation::WriteFile)
             .await?;
         let owner_key = scoped_memory_owner_key(path.scope());
-        let agent_id = scoped_memory_agent_id(path.scope());
+        let agent_id =
+            scoped_memory_agent_uuid(path.scope(), &virtual_path, FilesystemOperation::WriteFile)?;
         let db_path = db_path_for_memory_document(path);
         let tx = client.transaction().await.map_err(|error| {
             memory_error(
@@ -775,7 +795,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 CREATE TABLE IF NOT EXISTS memory_documents (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id TEXT NOT NULL,
-    agent_id TEXT,
+    agent_id UUID,
     path TEXT NOT NULL,
     content TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),

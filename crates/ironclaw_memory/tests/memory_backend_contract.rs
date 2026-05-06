@@ -506,6 +506,31 @@ async fn memory_backend_filesystem_one_shot_allowance_reaches_backend_custom_pol
 }
 
 #[tokio::test]
+async fn memory_backend_filesystem_unprotected_write_does_not_consume_one_shot_allowance() {
+    let repository = Arc::new(InMemoryMemoryDocumentRepository::new());
+    let events = Arc::new(RecordingPromptSafetyEventSink::default());
+    let backend = Arc::new(
+        RepositoryMemoryBackend::new(repository.clone())
+            .with_prompt_write_safety_event_sink(events.clone()),
+    );
+    let filesystem = MemoryBackendFilesystemAdapter::new(backend)
+        .with_one_shot_prompt_write_safety_allowance(
+            PromptSafetyAllowanceId::empty_prompt_file_clear(),
+        );
+    let unprotected = VirtualPath::new(
+        "/memory/tenants/tenant-a/users/alice/agents/_none/projects/_none/notes/plain.md",
+    )
+    .unwrap();
+    filesystem.write_file(&unprotected, b"").await.unwrap();
+
+    let protected = VirtualPath::new(
+        "/memory/tenants/tenant-a/users/alice/agents/_none/projects/_none/BOOTSTRAP.md",
+    )
+    .unwrap();
+    filesystem.write_file(&protected, b"").await.unwrap();
+}
+
+#[tokio::test]
 async fn memory_backend_filesystem_prompt_bypass_reaches_wrapped_repository_backend() {
     let repository = Arc::new(InMemoryMemoryDocumentRepository::new());
     let events = Arc::new(RecordingPromptSafetyEventSink::default());

@@ -103,8 +103,22 @@ where
                 .await;
         }
         let chunk_texts = chunk_document(content, self.chunk_config.clone());
+        if chunk_texts.is_empty() {
+            return self
+                .repository
+                .replace_document_chunks_if_current(path, &content_hash_at_read, &[])
+                .await;
+        }
         let chunks =
-            build_chunk_writes(path, chunk_texts, self.embedding_provider.as_deref()).await?;
+            match build_chunk_writes(path, chunk_texts, self.embedding_provider.as_deref()).await {
+                Ok(chunks) => chunks,
+                Err(error) => {
+                    self.repository
+                        .replace_document_chunks_if_current(path, &content_hash_at_read, &[])
+                        .await?;
+                    return Err(error);
+                }
+            };
         self.repository
             .replace_document_chunks_if_current(path, &content_hash_at_read, &chunks)
             .await
@@ -168,12 +182,32 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+    use crate::embedding::EmbeddingError;
     use crate::path::MemoryDocumentScope;
     use crate::search::{MemorySearchRequest, MemorySearchResult};
 
     #[derive(Debug, PartialEq, Eq)]
     enum IndexerCall {
         Replace { chunks: usize, hash: String },
+    }
+
+    struct RejectingEmbeddingProvider;
+
+    #[async_trait]
+    impl EmbeddingProvider for RejectingEmbeddingProvider {
+        fn dimension(&self) -> usize {
+            3
+        }
+
+        fn model_name(&self) -> &str {
+            "rejecting"
+        }
+
+        async fn embed(&self, _text: &str) -> Result<Vec<f32>, EmbeddingError> {
+            Err(EmbeddingError::ProviderUnavailable {
+                reason: "synthetic failure".to_string(),
+            })
+        }
     }
 
     struct RecordingRepo {
@@ -306,6 +340,39 @@ mod tests {
             &calls[0],
             IndexerCall::Replace { chunks, hash }
                 if *chunks > 0 && hash == &content_sha256(content)
+        ));
+    }
+
+    #[tokio::test]
+    async fn empty_chunks_do_not_call_embedding_provider_before_clearing() {
+        let content = "   \n\t  ";
+        let repo = Arc::new(RecordingRepo::new(content));
+        let indexer = ChunkingMemoryDocumentIndexer::new(repo.clone())
+            .with_embedding_provider(Arc::new(RejectingEmbeddingProvider));
+        indexer.reindex_document(&doc_path()).await.unwrap();
+        let calls = repo.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(matches!(
+            &calls[0],
+            IndexerCall::Replace { chunks, hash }
+                if *chunks == 0 && hash == &content_sha256(content)
+        ));
+    }
+
+    #[tokio::test]
+    async fn embedding_failure_clears_existing_chunks_with_hash_guard() {
+        let content = "alpha beta gamma delta epsilon";
+        let repo = Arc::new(RecordingRepo::new(content));
+        let indexer = ChunkingMemoryDocumentIndexer::new(repo.clone())
+            .with_embedding_provider(Arc::new(RejectingEmbeddingProvider));
+        let err = indexer.reindex_document(&doc_path()).await.unwrap_err();
+        assert!(err.to_string().contains("synthetic failure"));
+        let calls = repo.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(matches!(
+            &calls[0],
+            IndexerCall::Replace { chunks, hash }
+                if *chunks == 0 && hash == &content_sha256(content)
         ));
     }
 }

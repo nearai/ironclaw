@@ -688,13 +688,6 @@ async fn libsql_full_text_search_ranked(
             error.to_string(),
         )
     })? {
-        let chunk_key: String = row.get(0).map_err(|error| {
-            memory_error(
-                virtual_path.clone(),
-                FilesystemOperation::ReadFile,
-                error.to_string(),
-            )
-        })?;
         let db_path: String = row.get(1).map_err(|error| {
             memory_error(
                 virtual_path.clone(),
@@ -714,7 +707,6 @@ async fn libsql_full_text_search_ranked(
         })?;
         let rank = results.len() as u32 + 1;
         results.push(RankedMemorySearchResult {
-            chunk_key,
             path,
             snippet,
             rank,
@@ -760,13 +752,6 @@ async fn libsql_vector_search_ranked(
             error.to_string(),
         )
     })? {
-        let chunk_key: String = row.get(0).map_err(|error| {
-            memory_error(
-                virtual_path.clone(),
-                FilesystemOperation::ReadFile,
-                error.to_string(),
-            )
-        })?;
         let db_path: String = row.get(1).map_err(|error| {
             memory_error(
                 virtual_path.clone(),
@@ -800,7 +785,6 @@ async fn libsql_vector_search_ranked(
         scored.push((
             score,
             RankedMemorySearchResult {
-                chunk_key,
                 path,
                 snippet,
                 rank: 0,

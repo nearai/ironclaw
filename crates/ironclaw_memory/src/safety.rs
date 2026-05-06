@@ -814,14 +814,17 @@ async fn emit_prompt_write_safety_event(
             source = %check.source,
             "failed to record prompt write safety event"
         );
-        return Err(prompt_write_safety_error(
-            check
-                .path
-                .virtual_path()
-                .unwrap_or_else(|_| valid_memory_path()),
-            check.filesystem_operation,
-            PromptSafetyReason::new(PromptSafetyReasonCode::PromptWriteSafetyEventUnavailable),
-        ));
+        if parts.require_sink {
+            return Err(prompt_write_safety_error(
+                check
+                    .path
+                    .virtual_path()
+                    .unwrap_or_else(|_| valid_memory_path()),
+                check.filesystem_operation,
+                PromptSafetyReason::new(PromptSafetyReasonCode::PromptWriteSafetyEventUnavailable),
+            ));
+        }
+        return Ok(());
     }
     Ok(())
 }

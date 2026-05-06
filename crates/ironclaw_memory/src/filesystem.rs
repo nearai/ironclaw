@@ -45,7 +45,7 @@ fn memory_context_with_prompt_safety_enforcement(
     if let Some(allowance) = enforcement.allowance {
         context = context.with_prompt_write_safety_allowance(allowance);
     }
-    context
+    context.with_prompt_write_safety_enforced()
 }
 
 /// [`RootFilesystem`] adapter exposing any [`MemoryBackend`] as `/memory` files.
@@ -189,9 +189,13 @@ impl RootFilesystem for MemoryBackendFilesystemAdapter {
         )
         .is_some();
         let backend_capabilities = self.backend.capabilities();
+        let backend_will_enforce_protected_path = backend_capabilities.prompt_write_safety
+            && self
+                .backend
+                .prompt_write_safety_protects_path(&document_path);
         let adapter_should_enforce_prompt_safety = is_protected
             && (!backend_capabilities.prompt_write_safety || self.prompt_safety_config_overridden);
-        let prompt_safety_allowance = if is_protected || backend_capabilities.prompt_write_safety {
+        let prompt_safety_allowance = if is_protected || backend_will_enforce_protected_path {
             take_prompt_safety_allowance(
                 &self.one_shot_prompt_safety_allowance,
                 path,
@@ -256,9 +260,13 @@ impl RootFilesystem for MemoryBackendFilesystemAdapter {
         )
         .is_some();
         let backend_capabilities = self.backend.capabilities();
+        let backend_will_enforce_protected_path = backend_capabilities.prompt_write_safety
+            && self
+                .backend
+                .prompt_write_safety_protects_path(&document_path);
         let adapter_should_enforce_prompt_safety = is_protected
             && (!backend_capabilities.prompt_write_safety || self.prompt_safety_config_overridden);
-        let prompt_safety_allowance = if is_protected || backend_capabilities.prompt_write_safety {
+        let prompt_safety_allowance = if is_protected || backend_will_enforce_protected_path {
             take_prompt_safety_allowance(
                 &self.one_shot_prompt_safety_allowance,
                 path,
@@ -619,13 +627,14 @@ impl RootFilesystem for MemoryDocumentFilesystem {
         } else {
             None
         };
-        let metadata = resolve_document_metadata(self.repository.as_ref(), &document_path).await?;
-        let options = MemoryWriteOptions {
-            metadata,
-            changed_by: Some(scoped_memory_owner_key(document_path.scope())),
-        };
         for _ in 0..MAX_MEMORY_APPEND_RETRIES {
             let previous = self.repository.read_document(&document_path).await?;
+            let metadata =
+                resolve_document_metadata(self.repository.as_ref(), &document_path).await?;
+            let options = MemoryWriteOptions {
+                metadata,
+                changed_by: Some(scoped_memory_owner_key(document_path.scope())),
+            };
             let expected_previous_hash = previous.as_deref().map(content_bytes_sha256);
             let previous_bytes = previous.unwrap_or_default();
             let previous_prompt_hash = if is_protected
