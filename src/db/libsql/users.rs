@@ -1239,6 +1239,22 @@ mod tests {
         .unwrap();
     }
 
+    #[test]
+    fn test_parse_libsql_decimal_text_accepts_scientific_and_reports_invalid() {
+        let scientific = parse_libsql_decimal_text("7.5e-05", "cost").unwrap();
+        assert_eq!(
+            scientific,
+            rust_decimal::Decimal::from_str_exact("0.000075").unwrap()
+        );
+
+        let err = parse_libsql_decimal_text("not-a-decimal", "cost").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid cost value 'not-a-decimal'"),
+            "unexpected error: {err}"
+        );
+    }
+
     #[tokio::test]
     async fn test_user_summary_stats_empty() {
         let (db, _dir) = setup().await;
