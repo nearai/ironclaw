@@ -45,6 +45,17 @@ fn row_to_api_token(row: &libsql::Row) -> Result<ApiTokenRecord, DatabaseError> 
     })
 }
 
+fn parse_libsql_decimal_text(
+    value: &str,
+    field_name: &str,
+) -> Result<rust_decimal::Decimal, DatabaseError> {
+    rust_decimal::Decimal::from_str_exact(value)
+        .or_else(|_| rust_decimal::Decimal::from_scientific(value))
+        .map_err(|e| {
+            DatabaseError::Query(format!("invalid {} value '{}': {}", field_name, value, e))
+        })
+}
+
 pub(crate) async fn seed_initial_assistant_thread(
     conn: &libsql::Connection,
     user_id: &str,
@@ -658,9 +669,7 @@ impl UserStore for LibSqlBackend {
             .map_err(|e| DatabaseError::Query(e.to_string()))?
         {
             let cost_str = get_text(&row, 5);
-            let total_cost = rust_decimal::Decimal::from_str_exact(&cost_str).map_err(|e| {
-                DatabaseError::Query(format!("invalid cost value '{}': {}", cost_str, e))
-            })?;
+            let total_cost = parse_libsql_decimal_text(&cost_str, "cost")?;
             stats.push(crate::db::UserUsageStats {
                 user_id: get_text(&row, 0),
                 model: get_text(&row, 1),
@@ -836,9 +845,7 @@ impl UserStore for LibSqlBackend {
             .map_err(|e| DatabaseError::Query(e.to_string()))?
         {
             let cost_str = get_text(&row, 2);
-            let total_cost = rust_decimal::Decimal::from_str_exact(&cost_str).map_err(|e| {
-                DatabaseError::Query(format!("invalid cost value '{}': {}", cost_str, e))
-            })?;
+            let total_cost = parse_libsql_decimal_text(&cost_str, "cost")?;
             stats.push(crate::db::UserSummaryStats {
                 user_id: get_text(&row, 0),
                 job_count: row
@@ -896,12 +903,7 @@ impl UserStore for LibSqlBackend {
             })?;
 
         let usage_cost_str = get_text(&row, 8);
-        let usage_cost = rust_decimal::Decimal::from_str_exact(&usage_cost_str).map_err(|e| {
-            DatabaseError::Query(format!(
-                "invalid usage_cost value '{}': {}",
-                usage_cost_str, e
-            ))
-        })?;
+        let usage_cost = parse_libsql_decimal_text(&usage_cost_str, "usage_cost")?;
 
         Ok(AdminUsageSummary {
             total_users: row
