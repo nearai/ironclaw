@@ -282,6 +282,7 @@ impl GatewayWorkflowHarness {
                 cost_guard: components.cost_guard,
                 sse_tx: None,
                 http_interceptor: None,
+                signing: None,
                 transcription: None,
                 document_extraction: None,
                 sandbox_readiness:

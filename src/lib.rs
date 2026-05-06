@@ -75,6 +75,7 @@ pub mod secrets;
 pub mod service;
 pub mod settings;
 pub mod setup;
+pub mod signing;
 pub mod skills;
 pub mod tenant;
 pub mod timezone;

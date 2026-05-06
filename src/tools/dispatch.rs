@@ -22,6 +22,7 @@ use uuid::Uuid;
 
 use crate::context::{ActionRecord, JobContext};
 use crate::db::Database;
+use crate::signing::SigningService;
 use crate::tools::registry::ToolRegistry;
 use crate::tools::tool::{ToolError, ToolOutput};
 use crate::tools::{prepare_tool_params, redact_params};
@@ -66,6 +67,7 @@ pub struct ToolDispatcher {
     registry: Arc<ToolRegistry>,
     safety: Arc<SafetyLayer>,
     store: Arc<dyn Database>,
+    signing: Option<Arc<SigningService>>,
 }
 
 impl ToolDispatcher {
@@ -74,11 +76,13 @@ impl ToolDispatcher {
         registry: Arc<ToolRegistry>,
         safety: Arc<SafetyLayer>,
         store: Arc<dyn Database>,
+        signing: Option<Arc<SigningService>>,
     ) -> Self {
         Self {
             registry,
             safety,
             store,
+            signing,
         }
     }
 
@@ -215,6 +219,25 @@ impl ToolDispatcher {
             }
             Err(e) => action.fail(e.to_string(), elapsed),
         };
+
+        // 6b. Cryptographic signing (best-effort). Sign the action and append
+        //     to the hash-chained audit log. Never blocks tool result delivery.
+        if let Some(ref signing) = self.signing {
+            let output_summary = match &final_result {
+                Ok(output) => {
+                    let s = output.result.to_string();
+                    crate::signing::truncate_safe(&s, 1024).to_string()
+                }
+                Err(e) => e.to_string(),
+            };
+            signing.sign_action(
+                &resolved_name,
+                &action.input,
+                &output_summary,
+                final_result.is_ok(),
+                user_id,
+            );
+        }
 
         // 7. Persist the audit record. Awaited (not spawned) so short-lived
         //    callers (CLI commands) cannot terminate before the row is written.
@@ -407,6 +430,7 @@ mod integration_tests {
             Arc::clone(&registry),
             safety,
             Arc::clone(&db),
+            None, // signing disabled in tests
         ));
         (dispatcher, concrete, db, registry, dir)
     }

@@ -61,6 +61,10 @@ pub struct WorkerDeps {
     pub http_interceptor: Option<Arc<dyn crate::llm::recording::HttpInterceptor>>,
     /// Whether the deployment is multi-tenant (used for admin tool policy filtering).
     pub multi_tenant: bool,
+    /// Optional cryptographic signing service. When set, every successful or failed
+    /// tool action is signed and appended to the hash-chained audit log. None when
+    /// `SIGNING_ENABLED=false` or signet initialization fails.
+    pub signing: Option<Arc<crate::signing::SigningService>>,
 }
 
 /// Worker that executes a single job.
@@ -773,6 +777,25 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 }
             }
         };
+
+        // Cryptographic signing (best-effort): sign the action and append to the
+        // hash-chained audit log before DB persistence. Failures inside signing
+        // log warnings but never propagate — they must not block tool execution.
+        if let (Some(ref action), Some(ref signing)) = (action.as_ref(), deps.signing.as_ref()) {
+            let output_summary = action
+                .output_raw
+                .as_deref()
+                .or(action.error.as_deref())
+                .unwrap_or("");
+            let truncated = crate::signing::truncate_safe(output_summary, 1024).to_string();
+            signing.sign_action(
+                tool_name,
+                &action.input,
+                &truncated,
+                action.error.is_none(),
+                &job_ctx.user_id,
+            );
+        }
 
         // Persist action to database (fire-and-forget)
         if let (Some(action), Some(store)) = (action, deps.store.clone()) {
@@ -1937,6 +1960,7 @@ mod tests {
             approval_context: None,
             http_interceptor: None,
             multi_tenant: false,
+            signing: None,
         };
 
         Worker::new(job_id, deps)
@@ -2157,6 +2181,7 @@ mod tests {
             approval_context,
             http_interceptor: None,
             multi_tenant: false,
+            signing: None,
         };
 
         Worker::new(job_id, deps)
