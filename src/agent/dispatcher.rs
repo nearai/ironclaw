@@ -47,6 +47,19 @@ fn resolve_settings_temperature(
         .map(|t| (t as f32).clamp(0.0, 2.0))
 }
 
+fn chat_job_context(
+    message: &IncomingMessage,
+    thread_id: Uuid,
+    user_tz: chrono_tz::Tz,
+) -> JobContext {
+    let mut job_ctx = JobContext::with_user(&message.user_id, "chat", "Interactive chat session")
+        .with_requester_id(&message.sender_id);
+    job_ctx.conversation_id = Some(thread_id);
+    job_ctx.user_timezone = user_tz.name().to_string();
+    job_ctx.metadata = crate::agent::agent_loop::chat_tool_execution_metadata(message);
+    job_ctx
+}
+
 /// Result of the agentic loop execution.
 pub(super) enum AgenticLoopResult {
     /// Completed with a response.
@@ -247,12 +260,8 @@ impl Agent {
         }
 
         // Create a JobContext for tool execution (chat doesn't have a real job)
-        let mut job_ctx =
-            JobContext::with_user(&message.user_id, "chat", "Interactive chat session")
-                .with_requester_id(&message.sender_id);
+        let mut job_ctx = chat_job_context(message, thread_id, user_tz);
         job_ctx.http_interceptor = self.deps.http_interceptor.clone();
-        job_ctx.user_timezone = user_tz.name().to_string();
-        job_ctx.metadata = crate::agent::agent_loop::chat_tool_execution_metadata(message);
 
         // Build system prompts once for this turn. Two variants: with tools
         // (normal iterations) and without (force_text final iteration).
@@ -490,12 +499,12 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         //
         // Load tool_permissions from the per-user DB settings store (same
         // source as selected_model). Falls back to empty map when no store is
-        // available (test rigs without a tenant) — tier defaults from
-        // TOOL_RISK_DEFAULTS then apply at runtime via effective_permission().
+        // available (test rigs without a tenant) — missing entries resolve via
+        // the seeded baseline in effective_permission().
         // Disabled tools are excluded from the LLM's tool list entirely.
         // AlwaysAllow tools are pre-approved in session so the approval
-        // flow is skipped — unless the tool declares ApprovalRequirement::Always,
-        // which is an unbypassable hard floor.
+        // flow is skipped unless the tool declares ApprovalRequirement::Always,
+        // which remains an unbypassable hard floor.
         //
         // The SettingsStore is wrapped in CachedSettingsStore so repeated
         // calls within the same session are cheap (in-memory lookup).
@@ -518,10 +527,10 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         };
 
         // Filter tool definitions and collect AlwaysAllow names for session
-        // pre-approval. We don't need to check ApprovalRequirement::Always here
-        // because the existing approval gate already treats it as an unbypassable
-        // hard floor — even if a tool name is in session.auto_approved_tools, an
-        // ApprovalRequirement::Always tool still requires user confirmation.
+        // pre-approval. Effective permissions are authoritative here, but tools
+        // resolved to AlwaysAllow still respect ApprovalRequirement::Always at
+        // execution time. AskEachTime/Disabled rows clear pre-approval on the
+        // next turn.
         let mut to_auto_approve: Vec<String> = Vec::new();
         let tool_defs: Vec<_> = tool_defs
             .into_iter()
@@ -1818,7 +1827,7 @@ mod tests {
     use crate::agent::agent_loop::{Agent, AgentDeps};
     use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
     use crate::agent::session::Session;
-    use crate::channels::ChannelManager;
+    use crate::channels::{ChannelManager, IncomingMessage};
     use crate::config::{AgentConfig, SafetyConfig, SkillsConfig};
     use crate::context::{ContextManager, JobContext};
     use crate::error::Error;
@@ -1829,6 +1838,7 @@ mod tests {
     };
     use crate::tools::{ApprovalRequirement, Tool, ToolError, ToolOutput, ToolRegistry};
     use ironclaw_safety::SafetyLayer;
+    use uuid::Uuid;
 
     use super::{
         capture_auth_prompt, check_auth_required, extract_auth_prompt, parse_auth_result,
@@ -2171,8 +2181,8 @@ mod tests {
 
     #[test]
     fn test_always_approval_requirement_bypasses_session_auto_approve() {
-        // Regression test: even if tool is auto-approved in session,
-        // ApprovalRequirement::Always must still trigger approval.
+        // v1 treats ApprovalRequirement::Always as a per-call floor even when
+        // the session auto-approved set contains the tool.
         use crate::tools::ApprovalRequirement;
 
         let mut session = Session::new("user-1");
@@ -2185,8 +2195,6 @@ mod tests {
             "tool should be auto-approved"
         );
 
-        // However, ApprovalRequirement::Always should always require approval
-        // This is verified by the dispatcher logic: Always => true (ignores session state)
         let always_req = ApprovalRequirement::Always;
         let requires_approval = match always_req {
             ApprovalRequirement::Never => false,
@@ -2196,7 +2204,7 @@ mod tests {
 
         assert!(
             requires_approval,
-            "ApprovalRequirement::Always must require approval even when tool is auto-approved"
+            "ApprovalRequirement::Always must require approval even when the tool is auto-approved"
         );
     }
 
@@ -2223,7 +2231,7 @@ mod tests {
             "UnlessAutoApproved should not need approval when auto-approved"
         );
 
-        // Always → always requires approval
+        // Always → always requires approval on v1.
         let always_req = ApprovalRequirement::Always;
         let always_needs = match always_req {
             ApprovalRequirement::Never => false,
@@ -2250,7 +2258,7 @@ mod tests {
             "UnlessAutoApproved should need approval when not auto-approved"
         );
 
-        // Always → always requires approval
+        // Always → always requires approval on v1.
         let always_needs = match always_req {
             ApprovalRequirement::Never => false,
             ApprovalRequirement::UnlessAutoApproved => !session.is_tool_auto_approved(new_tool),
@@ -2259,9 +2267,8 @@ mod tests {
         assert!(always_needs, "Always must always require approval");
     }
 
-    /// Regression test: `allow_always` must be `false` for `Always` and
-    /// `true` for `UnlessAutoApproved`, so the UI hides the "always" button
-    /// for tools that truly cannot be auto-approved.
+    /// Regression test: `allow_always` stays `false` for intrinsic `Always`
+    /// approval in v1.
     #[test]
     fn test_allow_always_matches_approval_requirement() {
         use crate::tools::ApprovalRequirement;
@@ -2744,6 +2751,17 @@ mod tests {
         .to_string());
 
         assert!(check_auth_required("tool_activate", &result).is_none());
+    }
+
+    #[test]
+    fn test_chat_job_context_includes_thread_id_for_sse_scoped_tools() {
+        let thread_id = Uuid::new_v4();
+        let message = IncomingMessage::new("web", "test-user", "/plan Ship it");
+
+        let job_ctx = super::chat_job_context(&message, thread_id, chrono_tz::UTC);
+
+        assert_eq!(job_ctx.conversation_id, Some(thread_id));
+        assert_eq!(job_ctx.user_timezone, "UTC");
     }
 
     #[tokio::test]
@@ -4168,7 +4186,6 @@ mod tests {
     #[test]
     fn test_permission_always_allow_never_approval_auto_approved() {
         use crate::agent::session::Session;
-        use crate::tools::ApprovalRequirement;
         use crate::tools::permissions::PermissionState;
 
         let mut session = Session::new("user-perm-1");
@@ -4176,10 +4193,8 @@ mod tests {
 
         // Simulate: PermissionState::AlwaysAllow and requires_approval → Never.
         let perm = PermissionState::AlwaysAllow;
-        let requirement = ApprovalRequirement::Never;
 
-        let hard_floor = matches!(requirement, ApprovalRequirement::Always);
-        if perm == PermissionState::AlwaysAllow && !hard_floor {
+        if perm == PermissionState::AlwaysAllow {
             session.auto_approve_tool(tool_name);
         }
 
@@ -4189,10 +4204,11 @@ mod tests {
         );
     }
 
-    /// AlwaysAllow tool with Always approval requirement must NOT be auto-approved.
+    /// AlwaysAllow tool with Always approval requirement is not auto-approved
+    /// by v1 permission hydration.
     ///
-    /// This verifies the hard-floor: ApprovalRequirement::Always is never bypassed,
-    /// even when PermissionState is AlwaysAllow.
+    /// This verifies the v1 hard floor: ApprovalRequirement::Always is never
+    /// bypassed by session auto-approval.
     #[test]
     fn test_permission_always_allow_always_approval_not_auto_approved() {
         use crate::agent::session::Session;
@@ -4213,7 +4229,7 @@ mod tests {
 
         assert!(
             !session.is_tool_auto_approved(tool_name),
-            "AlwaysAllow with Always approval requirement must NOT be auto-approved (hard floor)"
+            "v1 should preserve its hard-floor behavior for ApprovalRequirement::Always"
         );
     }
 }

@@ -85,12 +85,29 @@ pub(crate) async fn oauth_callback_handler(
 ) -> impl IntoResponse {
     use crate::auth::oauth;
 
-    // Check for error from OAuth provider (e.g., user denied consent)
+    // Check for error from OAuth provider (e.g., user denied consent).
+    //
+    // The pending flow was inserted into `ext_mgr.pending_oauth_flows()` when
+    // the user started the OAuth dance. On provider error we must remove it
+    // here — otherwise it lingers until `OAUTH_FLOW_EXPIRY` (5 min) and any
+    // subsequent auth attempt for the same (extension, user) pair has to
+    // dedupe against a ghost entry.
     if let Some(error) = params.get("error") {
         let description = params
             .get("error_description")
             .cloned()
             .unwrap_or_else(|| error.clone());
+        if let Some(state_param) = params.get("state")
+            && !state_param.is_empty()
+            && let Ok(decoded) = oauth::decode_hosted_oauth_state(state_param)
+            && let Some(ext_mgr) = state.extension_manager.as_ref()
+        {
+            ext_mgr
+                .pending_oauth_flows()
+                .write()
+                .await
+                .remove(&decoded.flow_id);
+        }
         return oauth_error_page(&description);
     }
 

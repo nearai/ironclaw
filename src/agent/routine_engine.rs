@@ -124,6 +124,13 @@ pub struct RoutineEngine {
     safety: Arc<SafetyLayer>,
     /// Sandbox readiness state — only `DockerUnavailable` blocks full-job dispatch.
     sandbox_readiness: SandboxReadiness,
+    /// Optional global HTTP interceptor (e.g., the
+    /// `IRONCLAW_TEST_HTTP_REMAP` debug-only host remapper installed
+    /// in `src/app.rs`). Threaded through to every spawned
+    /// `EngineContext` and on into the `JobContext` that drives
+    /// Lightweight tool dispatches, so routine-fired tools see the
+    /// same interceptor the chat path does.
+    http_interceptor: Option<Arc<dyn crate::llm::recording::HttpInterceptor>>,
     /// Timestamp when this engine instance was created. Used by
     /// `sync_dispatched_runs` to distinguish orphaned runs (from a previous
     /// process) from actively-watched runs (from this process).
@@ -143,6 +150,7 @@ impl RoutineEngine {
         tools: Arc<ToolRegistry>,
         safety: Arc<SafetyLayer>,
         sandbox_readiness: SandboxReadiness,
+        http_interceptor: Option<Arc<dyn crate::llm::recording::HttpInterceptor>>,
     ) -> Self {
         Self {
             config,
@@ -157,6 +165,7 @@ impl RoutineEngine {
             tools,
             safety,
             sandbox_readiness,
+            http_interceptor,
             boot_time: Utc::now(),
         }
     }
@@ -830,6 +839,7 @@ impl RoutineEngine {
             safety: self.safety.clone(),
             sandbox_readiness: self.sandbox_readiness,
             event_cache: Arc::clone(&self.event_cache),
+            http_interceptor: self.http_interceptor.clone(),
         };
 
         tokio::spawn(async move {
@@ -916,6 +926,7 @@ impl RoutineEngine {
             safety: self.safety.clone(),
             sandbox_readiness: self.sandbox_readiness,
             event_cache: Arc::clone(&self.event_cache),
+            http_interceptor: self.http_interceptor.clone(),
         };
 
         tokio::spawn(async move {
@@ -968,6 +979,7 @@ impl RoutineEngine {
             safety: self.safety.clone(),
             sandbox_readiness: self.sandbox_readiness,
             event_cache: Arc::clone(&self.event_cache),
+            http_interceptor: self.http_interceptor.clone(),
         };
 
         // Record the run in DB, then spawn execution
@@ -1107,6 +1119,14 @@ struct EngineContext {
     safety: Arc<SafetyLayer>,
     sandbox_readiness: SandboxReadiness,
     event_cache: Arc<RwLock<Vec<EventMatcher>>>,
+    /// Global HTTP interceptor (e.g., the `IRONCLAW_TEST_HTTP_REMAP`
+    /// debug-only host remapper installed in `src/app.rs`). Plumbed
+    /// here so routine-driven tool dispatches inherit the interceptor
+    /// the same way chat-driven dispatches do — without this field,
+    /// tools called from a Lightweight routine action reach the real
+    /// network even when the rest of the system is configured to
+    /// route through mocks.
+    http_interceptor: Option<Arc<dyn crate::llm::recording::HttpInterceptor>>,
 }
 
 /// Execute a routine run. Handles both lightweight and full_job modes.
@@ -1832,6 +1852,14 @@ async fn execute_lightweight_with_tools(
         title: "Lightweight Routine".to_string(),
         description: routine.name.clone(),
         metadata: lw_metadata,
+        // Inherit the global HTTP interceptor so routine-fired tool
+        // dispatches honor the same `IRONCLAW_TEST_HTTP_REMAP` /
+        // recording / replay layer as chat-fired tools. Without
+        // this, http tool calls from a Lightweight action reach the
+        // real network even when the rest of the system is wired
+        // through mocks. See `EngineContext::http_interceptor` for
+        // the upstream plumbing.
+        http_interceptor: ctx.http_interceptor.clone(),
         ..Default::default()
     };
     let allowed_tools =

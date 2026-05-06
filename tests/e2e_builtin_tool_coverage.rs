@@ -1222,7 +1222,7 @@ mod tests {
             .expect("tool_search description should be a string");
         assert!(
             tool_search_description.contains("`tool_install`")
-                && tool_search_description.contains("`tool_activate`"),
+                && tool_search_description.contains("`tool_activate(name=\"...\")`"),
             "tool_search description should describe setup/activation via tool_install and \
              tool_activate: {tool_search_description}"
         );

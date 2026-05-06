@@ -862,6 +862,24 @@ fn io_reason(error: std::io::Error) -> String {
     error.kind().to_string()
 }
 
+#[cfg(any(feature = "postgres", feature = "libsql"))]
+fn directory_write_error(path: VirtualPath) -> FilesystemError {
+    FilesystemError::Backend {
+        path,
+        operation: FilesystemOperation::WriteFile,
+        reason: "cannot overwrite a directory".to_string(),
+    }
+}
+
+#[cfg(any(feature = "postgres", feature = "libsql"))]
+fn directory_append_error(path: VirtualPath) -> FilesystemError {
+    FilesystemError::Backend {
+        path,
+        operation: FilesystemOperation::AppendFile,
+        reason: "cannot append to a directory".to_string(),
+    }
+}
+
 #[cfg(feature = "postgres")]
 /// PostgreSQL-backed [`RootFilesystem`] storing file contents by virtual path.
 pub struct PostgresRootFilesystem {
@@ -928,7 +946,14 @@ impl RootFilesystem for PostgresRootFilesystem {
 
     async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
         let client = self.client().await?;
-        client
+        if matches!(
+            self.exact_entry_with_client(&client, path).await?,
+            Some((_, FileType::Directory))
+        ) || self.has_child_entry_with_client(&client, path).await?
+        {
+            return Err(directory_write_error(path.clone()));
+        }
+        let rows = client
             .execute(
                 r#"
                 INSERT INTO root_filesystem_entries (path, contents, is_dir)
@@ -937,11 +962,15 @@ impl RootFilesystem for PostgresRootFilesystem {
                     contents = EXCLUDED.contents,
                     is_dir = FALSE,
                     updated_at = NOW()
+                WHERE root_filesystem_entries.is_dir = FALSE
                 "#,
                 &[&path.as_str(), &bytes],
             )
             .await
             .map_err(|error| db_error(path.clone(), FilesystemOperation::WriteFile, error))?;
+        if rows == 0 {
+            return Err(directory_write_error(path.clone()));
+        }
         Ok(())
     }
 
@@ -950,12 +979,9 @@ impl RootFilesystem for PostgresRootFilesystem {
         if matches!(
             self.exact_entry_with_client(&client, path).await?,
             Some((_, FileType::Directory))
-        ) {
-            return Err(FilesystemError::Backend {
-                path: path.clone(),
-                operation: FilesystemOperation::AppendFile,
-                reason: "cannot append to a directory".to_string(),
-            });
+        ) || self.has_child_entry_with_client(&client, path).await?
+        {
+            return Err(directory_append_error(path.clone()));
         }
         // TODO(reborn): append rewrites the whole DB row. Do not use this path
         // for high-volume JSONL/event streams; route those through typed event
@@ -1240,20 +1266,34 @@ impl RootFilesystem for LibSqlRootFilesystem {
     }
 
     async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
+        if matches!(
+            self.exact_entry(path).await?,
+            Some((_, FileType::Directory))
+        ) || self.has_child_entry(path).await?
+        {
+            return Err(directory_write_error(path.clone()));
+        }
         let conn = self.connect().await?;
-        conn.execute(
-            r#"
-            INSERT INTO root_filesystem_entries (path, contents, is_dir, updated_at)
-            VALUES (?1, ?2, 0, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-            ON CONFLICT (path) DO UPDATE SET
-                contents = excluded.contents,
-                is_dir = 0,
-                updated_at = excluded.updated_at
-            "#,
-            libsql::params![path.as_str(), libsql::Value::Blob(bytes.to_vec())],
-        )
-        .await
-        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::WriteFile, error))?;
+        let rows = conn
+            .execute(
+                r#"
+                INSERT INTO root_filesystem_entries (path, contents, is_dir, updated_at)
+                VALUES (?1, ?2, 0, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                ON CONFLICT (path) DO UPDATE SET
+                    contents = excluded.contents,
+                    is_dir = 0,
+                    updated_at = excluded.updated_at
+                WHERE root_filesystem_entries.is_dir = 0
+                "#,
+                libsql::params![path.as_str(), libsql::Value::Blob(bytes.to_vec())],
+            )
+            .await
+            .map_err(|error| {
+                libsql_db_error(path.clone(), FilesystemOperation::WriteFile, error)
+            })?;
+        if rows == 0 {
+            return Err(directory_write_error(path.clone()));
+        }
         Ok(())
     }
 
@@ -1261,12 +1301,9 @@ impl RootFilesystem for LibSqlRootFilesystem {
         if matches!(
             self.exact_entry(path).await?,
             Some((_, FileType::Directory))
-        ) {
-            return Err(FilesystemError::Backend {
-                path: path.clone(),
-                operation: FilesystemOperation::AppendFile,
-                reason: "cannot append to a directory".to_string(),
-            });
+        ) || self.has_child_entry(path).await?
+        {
+            return Err(directory_append_error(path.clone()));
         }
         let conn = self.connect().await?;
         // TODO(reborn): append rewrites the whole DB row. Do not use this path

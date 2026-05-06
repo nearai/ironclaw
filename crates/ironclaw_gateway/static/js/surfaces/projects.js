@@ -6,8 +6,15 @@ function applyEngineModeToTabs() {
   document.querySelectorAll('.tab-bar [data-v2-only]').forEach(function(el) {
     el.style.display = engineV2Enabled ? '' : 'none';
   });
+  // The Routines tab is the only v1-only tab today and stays visible
+  // when the user still has legacy routines (#2982). Other v1-only
+  // markers, if added later, follow the engine flag. shouldHideRoutinesTab
+  // is the single source of truth for the routines-visibility rule —
+  // duplicating its logic here was how #2574 / #2665 originally drifted.
   document.querySelectorAll('.tab-bar [data-v1-only]').forEach(function(el) {
-    el.style.display = engineV2Enabled ? 'none' : '';
+    var isRoutinesTab = el.getAttribute('data-tab-role') === 'routines';
+    var hide = isRoutinesTab ? shouldHideRoutinesTab() : engineV2Enabled;
+    el.style.display = hide ? 'none' : '';
   });
   var activeBtn = document.querySelector('.tab-bar button[data-tab].active');
   if (activeBtn && activeBtn.style.display === 'none') switchTab('chat');

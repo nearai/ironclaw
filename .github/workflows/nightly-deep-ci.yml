@@ -1,0 +1,59 @@
+name: Nightly Deep CI
+
+# This workflow intentionally reuses the canonical Run Tests workflow instead
+# of duplicating job definitions here. With event_name == workflow_call,
+# .github/workflows/test.yml runs the deterministic deep suite:
+# - full Rust test matrix: all-features, default, libsql-only
+# - heavy runtime integration tests
+# - Telegram integration partitions
+# - replay snapshot gate
+# - Telegram and Slack channel tests
+# - WASM/WIT compatibility checks
+# - Windows compile matrix
+# - benchmark compilation
+#
+# Docker is intentionally excluded here because QA/release Docker images are
+# owned by the separate Docker pipeline and need release-team alignment.
+# Full browser E2E is scheduled separately by .github/workflows/e2e.yml.
+
+on:
+  schedule:
+    - cron: "0 4 * * *" # Daily deterministic deep CI at 04:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-deep-ci-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deterministic-deep-tests:
+    name: Deterministic Deep Tests
+    uses: ./.github/workflows/test.yml
+    with:
+      ref: ${{ github.sha }}
+      include_docker: false
+
+  nightly-alert:
+    name: Nightly Deep CI Alert
+    runs-on: ubuntu-latest
+    if: always() && github.event_name == 'schedule'
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    needs: [deterministic-deep-tests]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Report nightly deep CI result
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ALERT_WORKFLOW_NAME: Nightly Deep CI
+          ALERT_ISSUE_TITLE: Nightly Deep CI failed
+          ALERT_RESULT: ${{ needs.deterministic-deep-tests.result }}
+        run: .github/scripts/nightly-alert-issue.sh

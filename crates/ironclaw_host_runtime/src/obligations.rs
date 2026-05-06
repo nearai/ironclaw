@@ -260,8 +260,9 @@ impl RuntimeSecretInjectionScopeKey {
 /// In-memory policy handoff from obligation handling to runtime adapters.
 ///
 /// Policies are keyed by tenant/user/project/mission/thread/invocation scope and
-/// capability id, and are consumed by runtime adapters immediately before the
-/// actual runtime dispatch.
+/// capability id. Runtime adapters and host egress borrow the staged policy for
+/// every network operation in the invocation; obligation completion/abort or
+/// process lifecycle cleanup owns the final discard.
 #[derive(Debug, Clone, Default)]
 pub struct NetworkObligationPolicyStore {
     policies: Arc<Mutex<HashMap<NetworkPolicyKey, NetworkPolicy>>>,
@@ -282,6 +283,18 @@ impl NetworkObligationPolicyStore {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(NetworkPolicyKey::new(scope, capability_id), policy);
+    }
+
+    pub fn get(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+    ) -> Option<NetworkPolicy> {
+        self.policies
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&NetworkPolicyKey::new(scope, capability_id))
+            .cloned()
     }
 
     pub fn take(

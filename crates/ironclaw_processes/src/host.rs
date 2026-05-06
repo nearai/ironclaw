@@ -86,7 +86,15 @@ impl<'a> ProcessHost<'a> {
                 self.record_kill_side_effects(&record).await?;
                 Ok(record)
             }
-            Err(error @ ProcessError::InvalidTransition { .. }) => Err(error),
+            Err(error @ ProcessError::InvalidTransition { .. }) => {
+                if let Ok(Some(record)) = self.store.get(scope, process_id).await
+                    && record.status == ProcessStatus::Killed
+                {
+                    self.record_kill_side_effects(&record).await?;
+                    return Ok(record);
+                }
+                Err(error)
+            }
             Err(error) => {
                 if let Ok(Some(record)) = self.store.get(scope, process_id).await
                     && record.status == ProcessStatus::Killed

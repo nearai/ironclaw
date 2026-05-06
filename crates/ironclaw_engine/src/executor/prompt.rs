@@ -640,6 +640,7 @@ mod tests {
             "Before calling one, always check its schema with `tool_info(name=\"<tool>\", detail=\"schema\")`."
         ));
         assert!(prompt.contains("- `mission_create`"));
+        assert!(!prompt.contains("mission_create(name, goal, cadence"));
         assert!(!prompt.contains("- `http`"));
         assert!(prompt.contains("## Activatable Integrations"));
         assert_eq!(prompt.matches("`gmail` [provider]").count(), 1);

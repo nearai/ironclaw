@@ -20,7 +20,8 @@ pub use host::{
     EmptyWasmRuntimeCredentials, RecordingWasmHostHttp, SystemWasmHostClock, WasmHostClock,
     WasmHostHttp, WasmHostSecrets, WasmHostTools, WasmHostWorkspace, WasmHttpRequest,
     WasmHttpResponse, WasmRuntimeCredentialProvider, WasmRuntimeCredentialRequest,
-    WasmRuntimeHttpAdapter, WasmStagedRuntimeCredential, WasmStagedRuntimeCredentials, WitToolHost,
+    WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder, WasmStagedRuntimeCredential,
+    WasmStagedRuntimeCredentials, WitToolHost,
 };
 pub use runtime::WitToolRuntime;
 pub use types::{PreparedWitTool, WasmLogLevel, WasmLogRecord, WitToolExecution, WitToolRequest};

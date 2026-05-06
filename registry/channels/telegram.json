@@ -18,8 +18,8 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw-v0.25.0/channel-telegram-0.2.8-wasm32-wasip2.tar.gz",
-      "sha256": "0fe74589b0367d085efdab395d95ec34ac274d46f498cecc1d62f313caf9cc96"
+      "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw-v0.26.0/channel-telegram-0.2.10-wasm32-wasip2.tar.gz",
+      "sha256": "4f0df0f125cc2aa6216d48a5c5bfa6a3adc5f2b32025e81ef37c9b68406eea7e"
     }
   },
   "auth_summary": {

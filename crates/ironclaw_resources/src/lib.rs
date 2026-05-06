@@ -507,6 +507,11 @@ impl ResourceGovernor for InMemoryResourceGovernor {
             });
         }
 
+        if let Err(error) = validate_usage(&actual) {
+            state.reservations.insert(reservation_id, record);
+            return Err(error);
+        }
+
         for account in &record.accounts {
             state
                 .reserved_by_account
@@ -577,6 +582,17 @@ fn validate_estimate(estimate: &ResourceEstimate) -> Result<(), ResourceError> {
     if let Some(usd) = estimate.usd
         && usd < Decimal::ZERO
     {
+        return Err(ResourceError::InvalidEstimate {
+            dimension: ResourceDimension::Usd,
+            reason: "must be non-negative",
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_usage(usage: &ResourceUsage) -> Result<(), ResourceError> {
+    if usage.usd < Decimal::ZERO {
         return Err(ResourceError::InvalidEstimate {
             dimension: ResourceDimension::Usd,
             reason: "must be non-negative",

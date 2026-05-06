@@ -610,17 +610,22 @@ fn bounded_lossy(bytes: &[u8], limit: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsString, fs, io::Cursor, sync::Mutex};
+    use std::io::Cursor;
 
+    #[cfg(unix)]
+    use std::{ffi::OsString, fs, sync::Mutex};
+
+    #[cfg(unix)]
+    use super::{DockerScriptBackend, ScriptBackend};
     use super::{
-        DockerScriptBackend, ScriptBackend, ScriptBackendRequest, docker_run_args, read_bounded,
-        validate_docker_image_reference,
+        ScriptBackendRequest, docker_run_args, read_bounded, validate_docker_image_reference,
     };
     use ironclaw_host_api::{CapabilityId, InvocationId, ResourceScope, TenantId, UserId};
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
+    #[cfg(unix)]
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
@@ -773,8 +778,10 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     struct EnvRestore(Vec<(&'static str, Option<OsString>)>);
 
+    #[cfg(unix)]
     impl Drop for EnvRestore {
         fn drop(&mut self) {
             for (key, value) in &self.0 {

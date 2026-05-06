@@ -373,14 +373,44 @@ async def send_chat_and_wait_for_terminal_message(
     message: str,
     *,
     timeout: int = 30000,
+    expected_text_contains: str | None = None,
 ) -> dict[str, str]:
     """Send a chat message and wait for the next terminal visible outcome.
 
     Returns a dict with:
     - ``role``: ``assistant`` or ``system``
     - ``text``: rendered text of the newest terminal message
+
+    The default predicate waits for the assistant message to fully settle —
+    ``data-streaming`` attribute cleared, input re-enabled, and this send's
+    optimistic pending marker removed. On slow CI runners under heavy
+    parallelism the streaming condition can race with SSE reconnects (chunks
+    arrive during the reconnect window, the attribute-clearing delta is lost,
+    predicate never flips). Callers that already assert on specific response
+    text can pass ``expected_text_contains=`` to short-circuit as soon as that
+    substring appears in the assistant bubble, but the helper still waits for
+    this send's pending marker to clear so late history renders from previous
+    turns cannot be mistaken for the new response.
     """
     chat_input = await ensure_writable_chat_input(page)
+
+    # The page fixture waits for auth/SSE readiness, but the first
+    # loadHistory() call may still be replacing the skeleton with older
+    # persisted messages. Count terminal bubbles only after that settles;
+    # otherwise a late history-rendered assistant from a previous turn can
+    # satisfy the "new assistant" predicate for the message we are about to
+    # send.
+    await page.wait_for_function(
+        """() => !document.querySelector('#chat-messages .skeleton-container')""",
+        timeout=timeout,
+    )
+
+    pending_marker = await page.evaluate(
+        """() => ({
+            threadId: typeof currentThreadId !== 'undefined' ? currentThreadId : null,
+            pendingId: typeof _nextPendingId !== 'undefined' ? _nextPendingId : null,
+        })"""
+    )
 
     assistant_sel = SEL["message_assistant"]
     system_sel = SEL["message_system"]
@@ -397,7 +427,17 @@ async def send_chat_and_wait_for_terminal_message(
             chatInputSelector,
             assistantCount,
             systemCount,
+            expectedContains,
+            pendingThreadId,
+            pendingId,
         }) => {
+            const pendingForThisSendCleared = () => {
+                if (!pendingThreadId || pendingId === null || pendingId === undefined) return true;
+                if (typeof _pendingUserMessages === 'undefined') return true;
+                const pending = _pendingUserMessages.get(pendingThreadId);
+                return !pending || !pending.some((p) => p.id === pendingId);
+            };
+
             const input = document.querySelector(chatInputSelector);
             const systems = document.querySelectorAll(systemSelector);
             if (systems.length > systemCount) {
@@ -410,15 +450,19 @@ async def send_chat_and_wait_for_terminal_message(
             }
 
             const assistants = document.querySelectorAll(assistantSelector);
-            if (assistants.length > assistantCount && input && !input.disabled) {
+            if (assistants.length > assistantCount) {
                 const last = assistants[assistants.length - 1];
                 const content = last.querySelector('.message-content');
                 const text = ((content && content.innerText) || last.innerText || '').trim();
-                if (text.length > 0 && !last.hasAttribute('data-streaming')) {
-                    return {
-                        role: 'assistant',
-                        text,
-                    };
+                if (text.length > 0 && pendingForThisSendCleared()) {
+                    if (expectedContains && text.includes(expectedContains)) {
+                        return { role: 'assistant', text };
+                    }
+                    if (!expectedContains
+                        && input && !input.disabled
+                        && !last.hasAttribute('data-streaming')) {
+                        return { role: 'assistant', text };
+                    }
                 }
             }
 
@@ -430,6 +474,9 @@ async def send_chat_and_wait_for_terminal_message(
             "chatInputSelector": SEL["chat_input"],
             "assistantCount": before_assistant,
             "systemCount": before_system,
+            "expectedContains": expected_text_contains,
+            "pendingThreadId": pending_marker["threadId"],
+            "pendingId": pending_marker["pendingId"],
         },
         timeout=timeout,
     )

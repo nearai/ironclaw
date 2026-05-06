@@ -165,21 +165,14 @@ Google browser auth requires:
 - `GOOGLE_OAUTH_CLIENT_ID`
 - `GOOGLE_OAUTH_CLIENT_SECRET`
 
-GitHub browser auth requires:
-
-- `GITHUB_OAUTH_CLIENT_ID`
-- `GITHUB_OAUTH_CLIENT_SECRET`
-
 Notion currently relies on the provider-side OAuth metadata from the configured
 MCP server and does not require separate client env vars here.
 
-### GitHub Fixture Coordinates
-
-GitHub browser verification also requires:
-
-- `AUTH_BROWSER_GITHUB_OWNER`
-- `AUTH_BROWSER_GITHUB_REPO`
-- `AUTH_BROWSER_GITHUB_ISSUE_NUMBER`
+GitHub browser auth is **not supported** — the `github` WASM tool registers as
+`auth_summary.method = "manual"` (PAT paste, not OAuth), so the browser-consent
+probe has nothing to drive. GitHub coverage lives in `auth-live-seeded` instead,
+which seeds the PAT directly via `AUTH_LIVE_GITHUB_TOKEN`. Re-add a browser
+section here only after the github tool ships an OAuth flow.
 
 ## Capturing Playwright Storage State
 
@@ -193,8 +186,8 @@ import asyncio
 from pathlib import Path
 from playwright.async_api import async_playwright
 
-TARGET_URL = "https://github.com/login"
-OUTPUT = Path("github-storage-state.json").resolve()
+TARGET_URL = "https://accounts.google.com/"
+OUTPUT = Path("google-storage-state.json").resolve()
 
 async def main():
     async with async_playwright() as p:
@@ -214,7 +207,6 @@ PY
 Provider URLs:
 
 - Google: `https://accounts.google.com/`
-- GitHub: `https://github.com/login`
 - Notion: `https://www.notion.so/login`
 
 ## GitHub Actions Storage-State Secrets
@@ -222,19 +214,18 @@ Provider URLs:
 For CI, encode each storage-state file as base64 and store it as a secret:
 
 - `AUTH_BROWSER_GOOGLE_STORAGE_STATE_B64`
-- `AUTH_BROWSER_GITHUB_STORAGE_STATE_B64`
 - `AUTH_BROWSER_NOTION_STORAGE_STATE_B64`
 
 Create the value locally:
 
 ```bash
-base64 -w0 tests/e2e/github-storage-state.json
+base64 -w0 tests/e2e/google-storage-state.json
 ```
 
 On macOS:
 
 ```bash
-base64 < tests/e2e/github-storage-state.json | tr -d '\n'
+base64 < tests/e2e/google-storage-state.json | tr -d '\n'
 ```
 
 The workflow decodes each secret into a temporary file and exports the matching

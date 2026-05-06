@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use ironclaw_filesystem::FilesystemError;
 use ironclaw_host_api::{
     AgentId, CapabilityId, CapabilitySet, ExtensionId, HostApiError, InvocationId, MissionId,
-    MountView, ProcessId, ProjectId, ResourceEstimate, ResourceReservationId, ResourceScope,
-    RuntimeKind, TenantId, ThreadId, UserId, VirtualPath,
+    MountView, ProcessId, ProjectId, ResourceEstimate, ResourceReservation, ResourceReservationId,
+    ResourceScope, RuntimeKind, TenantId, ThreadId, UserId, VirtualPath,
 };
 use ironclaw_resources::ResourceError;
 use serde::{Deserialize, Serialize};
@@ -191,6 +191,8 @@ pub struct ProcessExecutionRequest {
     pub capability_id: CapabilityId,
     pub runtime: RuntimeKind,
     pub estimate: ResourceEstimate,
+    pub mounts: MountView,
+    pub resource_reservation: Option<ResourceReservation>,
     pub input: Value,
     pub cancellation: ProcessCancellationToken,
 }

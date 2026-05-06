@@ -1,4 +1,10 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use ironclaw_host_api::*;
@@ -76,6 +82,55 @@ async fn process_host_await_process_returns_terminal_exit_after_background_compl
     assert_eq!(exit.process_id, process_id);
     assert_eq!(exit.status, ProcessStatus::Completed);
     assert_eq!(exit.error_kind, None);
+}
+
+#[tokio::test]
+async fn process_host_kill_retries_result_side_effect_for_already_killed_process() {
+    let store = InMemoryProcessStore::new();
+    let result_store = Arc::new(FailOnceKillResultStore::new());
+    let host = ProcessHost::new(&store).with_result_store(result_store.clone());
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+
+    store
+        .start(process_start(process_id, invocation_id, scope.clone()))
+        .await
+        .unwrap();
+
+    let first_err = host.kill(&scope, process_id).await.unwrap_err();
+    assert!(matches!(
+        first_err,
+        ProcessError::ProcessResultUnavailable { process_id: id } if id == process_id
+    ));
+    assert_eq!(
+        host.status(&scope, process_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        ProcessStatus::Killed
+    );
+    assert!(
+        result_store
+            .get(&scope, process_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let repaired = host.kill(&scope, process_id).await.unwrap();
+
+    assert_eq!(repaired.status, ProcessStatus::Killed);
+    assert_eq!(
+        result_store
+            .get(&scope, process_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        ProcessStatus::Killed
+    );
 }
 
 #[tokio::test]
@@ -215,6 +270,60 @@ async fn process_host_subscribe_fails_closed_for_unknown_or_other_scope_process(
 
     let hidden = host.subscribe(&other_scope, process_id).await.unwrap_err();
     assert!(matches!(hidden, ProcessError::UnknownProcess { process_id: id } if id == process_id));
+}
+
+struct FailOnceKillResultStore {
+    inner: InMemoryProcessResultStore,
+    fail_next_kill: AtomicBool,
+}
+
+impl FailOnceKillResultStore {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryProcessResultStore::new(),
+            fail_next_kill: AtomicBool::new(true),
+        }
+    }
+}
+
+#[async_trait]
+impl ProcessResultStore for FailOnceKillResultStore {
+    async fn complete(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+        output: serde_json::Value,
+    ) -> Result<ProcessResultRecord, ProcessError> {
+        self.inner.complete(scope, process_id, output).await
+    }
+
+    async fn fail(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+        error_kind: String,
+    ) -> Result<ProcessResultRecord, ProcessError> {
+        self.inner.fail(scope, process_id, error_kind).await
+    }
+
+    async fn kill(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<ProcessResultRecord, ProcessError> {
+        if self.fail_next_kill.swap(false, Ordering::SeqCst) {
+            return Err(ProcessError::ProcessResultUnavailable { process_id });
+        }
+        self.inner.kill(scope, process_id).await
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<Option<ProcessResultRecord>, ProcessError> {
+        self.inner.get(scope, process_id).await
+    }
 }
 
 struct DelayedSuccessExecutor;

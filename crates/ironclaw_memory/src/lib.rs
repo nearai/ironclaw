@@ -1428,6 +1428,9 @@ pub enum FusionStrategy {
     WeightedScore,
 }
 
+const MAX_MEMORY_SEARCH_LIMIT: usize = 1_000;
+const MAX_MEMORY_SEARCH_PRE_FUSION_LIMIT: usize = 5_000;
+
 /// Search request passed to memory backends that expose search APIs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MemorySearchRequest {
@@ -1470,12 +1473,14 @@ impl MemorySearchRequest {
     }
 
     pub fn with_limit(mut self, limit: usize) -> Self {
-        self.limit = limit.max(1);
+        self.limit = clamp_memory_search_limit(limit);
+        self.pre_fusion_limit =
+            clamp_memory_search_pre_fusion_limit(self.pre_fusion_limit, self.limit);
         self
     }
 
     pub fn with_pre_fusion_limit(mut self, limit: usize) -> Self {
-        self.pre_fusion_limit = limit.max(self.limit).max(1);
+        self.pre_fusion_limit = clamp_memory_search_pre_fusion_limit(limit, self.limit);
         self
     }
 
@@ -1567,6 +1572,24 @@ impl MemorySearchRequest {
 
     pub fn vector_weight(&self) -> f32 {
         self.vector_weight
+    }
+}
+
+fn clamp_memory_search_limit(limit: usize) -> usize {
+    limit.clamp(1, MAX_MEMORY_SEARCH_LIMIT)
+}
+
+fn clamp_memory_search_pre_fusion_limit(limit: usize, result_limit: usize) -> usize {
+    limit
+        .max(result_limit)
+        .clamp(1, MAX_MEMORY_SEARCH_PRE_FUSION_LIMIT)
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn db_pre_fusion_limit(request: &MemorySearchRequest) -> i64 {
+    match i64::try_from(request.pre_fusion_limit()) {
+        Ok(limit) => limit,
+        Err(_) => MAX_MEMORY_SEARCH_PRE_FUSION_LIMIT as i64,
     }
 }
 
@@ -3952,12 +3975,7 @@ async fn libsql_full_text_search_ranked(
             ORDER BY rank
             LIMIT ?4
             "#,
-            libsql::params![
-                owner_key,
-                agent_id,
-                fts_query,
-                request.pre_fusion_limit() as i64
-            ],
+            libsql::params![owner_key, agent_id, fts_query, db_pre_fusion_limit(request)],
         )
         .await
         .map_err(|error| {
@@ -4997,7 +5015,7 @@ async fn postgres_full_text_search_ranked(
 ) -> Result<Vec<RankedMemorySearchResult>, FilesystemError> {
     let owner_key = scoped_memory_owner_key(scope);
     let agent_id = scoped_memory_agent_id(scope);
-    let limit = request.pre_fusion_limit() as i64;
+    let limit = db_pre_fusion_limit(request);
     let rows = client
         .query(
             r#"
@@ -5042,7 +5060,7 @@ async fn postgres_vector_search_ranked(
 ) -> Result<Vec<RankedMemorySearchResult>, FilesystemError> {
     let owner_key = scoped_memory_owner_key(scope);
     let agent_id = scoped_memory_agent_id(scope);
-    let limit = request.pre_fusion_limit() as i64;
+    let limit = db_pre_fusion_limit(request);
     let query_vector = pgvector::Vector::from(query_embedding.to_vec());
     let rows = client
         .query(

@@ -88,6 +88,43 @@ fn reserve_with_id_rejects_negative_usd_estimates() {
 }
 
 #[test]
+fn reconcile_rejects_negative_usd_actuals_without_closing_reservation() {
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope("tenant1", "user1", Some("project1"));
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    let reservation = governor
+        .reserve(
+            scope,
+            ResourceEstimate {
+                usd: Some(dec!(0.25)),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+
+    let err = governor
+        .reconcile(
+            reservation.id,
+            ResourceUsage {
+                usd: dec!(-100.00),
+                ..ResourceUsage::default()
+            },
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ResourceError::InvalidEstimate {
+            dimension: ResourceDimension::Usd,
+            reason: "must be non-negative"
+        }
+    ));
+    assert_eq!(governor.reserved_for(&account).usd, dec!(0.25));
+    assert_eq!(governor.usage_for(&account).usd, dec!(0));
+    assert!(governor.release(reservation.id).is_ok());
+}
+
+#[test]
 fn usd_tally_saturates_instead_of_panicking_on_decimal_overflow() {
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope("tenant1", "user1", Some("project1"));

@@ -1760,6 +1760,9 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         let sse_ref = agent.deps.sse_tx.clone();
         let db_ref = agent.deps.store.clone();
         let conv_mgr_ref = Arc::clone(&conversation_manager);
+        let auth_mgr_ref = agent.deps.auth_manager.clone();
+        let tools_ref = Arc::clone(&agent.deps.tools);
+        let ext_mgr_ref = agent.deps.extension_manager.clone();
         tokio::spawn(async move {
             loop {
                 match notification_rx.recv().await {
@@ -1770,6 +1773,9 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
                             sse_ref.as_ref(),
                             db_ref.as_ref(),
                             Some(conv_mgr_ref.as_ref()),
+                            auth_mgr_ref.as_deref(),
+                            Some(&tools_ref),
+                            ext_mgr_ref.as_deref(),
                         )
                         .await;
                     }
@@ -4128,18 +4134,104 @@ fn interpret_message_event(role: &str, content_preview: &str) -> Option<&'static
 ///    consistent with what the user actually saw.
 // pub(crate) for #[cfg(test)] re-export in mod.rs; the module itself
 // is private so this has no production visibility beyond router.rs.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_mission_notification(
     notif: &ironclaw_engine::MissionNotification,
     channels: &std::sync::Arc<crate::channels::ChannelManager>,
     sse: Option<&Arc<SseManager>>,
     db: Option<&Arc<dyn Database>>,
     conv_mgr: Option<&ironclaw_engine::ConversationManager>,
+    auth_manager: Option<&AuthManager>,
+    tools: Option<&Arc<crate::tools::ToolRegistry>>,
+    extension_manager: Option<&crate::extensions::ExtensionManager>,
 ) {
     let Some(ref text) = notif.response else {
         return;
     };
 
     let full_text = format!("**[{}]** {text}", notif.mission_name);
+
+    // If the mission paused on a gate (auth, approval, external), surface
+    // the gate on every notify_channel via a structured StatusUpdate. This
+    // is what lights up the gateway UI's auth tray (or the equivalent in
+    // chat-only channels). The friendly text response below is still
+    // delivered alongside so the user sees the prompt in chat history.
+    //
+    // Pinned by issue #3133: previously a mission's child thread that
+    // paused on Gmail OAuth would emit no channel signal at all — the
+    // user got nothing actionable, the cron would re-fire on the same
+    // gate, and the LLM eventually narrated "Status: None Error: None"
+    // when its `http` fallback failed. The mission is now Paused
+    // (engine-side) AND the user gets an auth-tray entry to resolve.
+    if let Some(gate) = &notif.gate
+        && let Some(tools) = tools
+    {
+        for channel_name in &notif.notify_channels {
+            let metadata = serde_json::json!({"user_id": notif.user_id});
+            let status = match &gate.resume_kind {
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name,
+                    instructions,
+                    auth_url,
+                } => {
+                    let extension_name = resolve_extension_for_action(
+                        auth_manager,
+                        extension_manager,
+                        tools,
+                        &gate.action_name,
+                        &gate.parameters,
+                        credential_name.as_str(),
+                        &notif.user_id,
+                    )
+                    .await;
+                    // Forward `gate_request_id` (a freshly-generated
+                    // UUID), NOT the engine `call_id`. The gateway's
+                    // gate-resolve handler at
+                    // `channels/web/features/chat/mod.rs:183` (and the
+                    // WS handler at `platform/ws.rs:236`) call
+                    // `Uuid::parse_str` on the inbound `request_id` and
+                    // 400 on non-UUIDs — `call_id` ("call_xyz...") would
+                    // make the auth-tray entry unresolvable. Engine
+                    // `call_id` is preserved on `MissionGateInfo` for
+                    // half-2 auto-resume (#3166).
+                    StatusUpdate::AuthRequired {
+                        extension_name,
+                        instructions: Some(instructions.clone()),
+                        auth_url: auth_url.clone(),
+                        setup_url: None,
+                        request_id: Some(gate.gate_request_id.to_string()),
+                    }
+                }
+                ironclaw_engine::ResumeKind::Approval { allow_always } => {
+                    StatusUpdate::ApprovalNeeded {
+                        // See the AuthRequired arm above for why we
+                        // forward `gate_request_id` rather than the
+                        // engine `call_id`.
+                        request_id: gate.gate_request_id.to_string(),
+                        tool_name: gate.action_name.clone(),
+                        description: format!(
+                            "Mission '{}' is waiting for approval to run '{}'.",
+                            notif.mission_name, gate.action_name
+                        ),
+                        parameters: gate.parameters.clone(),
+                        allow_always: *allow_always,
+                    }
+                }
+                // External callbacks (webhooks etc.) don't have a
+                // user-facing tray entry — there's nothing the user can do
+                // beyond wait for the external system to reply. The text
+                // response still tells them what's pending.
+                ironclaw_engine::ResumeKind::External { .. } => continue,
+            };
+            if let Err(e) = channels.send_status(channel_name, status, &metadata).await {
+                debug!(
+                    channel = %channel_name,
+                    mission = %notif.mission_name,
+                    "failed to surface mission gate status: {e}"
+                );
+            }
+        }
+    }
 
     // `notify_user` takes precedence over the mission owner's user_id when
     // set — it lets a routine/mission deliver to a specific recipient
