@@ -782,7 +782,15 @@ mod tests {
             _: &[CapabilityLease],
             _: &crate::traits::effect::ThreadExecutionContext,
         ) -> Result<Vec<ActionDef>, EngineError> {
-            Ok(vec![])
+            Ok(vec![ActionDef {
+                name: "test_tool".into(),
+                description: "Test".into(),
+                parameters_schema: serde_json::json!({}),
+                effects: vec![EffectType::ReadLocal],
+                requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
+            }])
         }
 
         async fn available_capabilities(
@@ -1428,9 +1436,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Give it a moment to start, then stop
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        let _ = mgr.stop_thread(tid, "test-user").await;
+        mgr.stop_thread(tid, "user").await.unwrap();
 
         let outcome = mgr.join_thread(tid).await.unwrap();
         assert!(matches!(

@@ -413,9 +413,10 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             && let Some(host) = parsed.host_str()
         {
             for mapping in http_cap.credentials.values() {
-                let matches_host = mapping.host_patterns.iter().any(|p| {
-                    crate::secrets::host_matches_pattern(host, p)
-                });
+                let matches_host = mapping
+                    .host_patterns
+                    .iter()
+                    .any(|p| crate::secrets::host_matches_pattern(host, p));
                 if !matches_host {
                     continue;
                 }
@@ -8019,7 +8020,7 @@ mod tests {
         );
 
         // The correct function requires a dot separator before the suffix
-        use crate::tools::wasm::credential_injector::host_matches_pattern;
+        use crate::secrets::host_matches_pattern;
 
         // Legitimate subdomains MUST match
         assert!(host_matches_pattern("api.slack.com", "*.slack.com"));
