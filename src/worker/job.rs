@@ -61,6 +61,16 @@ pub struct WorkerDeps {
     pub http_interceptor: Option<Arc<dyn ironclaw_llm::recording::HttpInterceptor>>,
     /// Whether the deployment is multi-tenant (used for admin tool policy filtering).
     pub multi_tenant: bool,
+    /// Resolved runtime policy used to filter the model-facing tool list
+    /// (#3045 PR 4 + PR 5). When `Some`, the worker routes all
+    /// `tool_definitions` builds for the LLM through
+    /// `ToolRegistry::tool_definitions_visible_under(policy)` so
+    /// hosted-multi-tenant deployments cannot expose provider-host
+    /// affordances to background-job workers — closing zmanian's
+    /// iteration-2 gap on the dispatcher path. When `None` (tests, the
+    /// bootstrap path before `Config::with_runtime_overrides` runs),
+    /// the legacy unfiltered tool list is used.
+    pub runtime_policy: Option<ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy>,
 }
 
 /// Worker that executes a single job.
@@ -339,8 +349,14 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             .unwrap_or(50) as usize;
         let max_iterations = max_iterations.min(ironclaw_common::MAX_WORKER_ITERATIONS as usize);
 
-        // Initial tool definitions for planning (will be refreshed in loop)
-        reason_ctx.available_tools = self.tools().tool_definitions().await;
+        // Initial tool definitions for planning (will be refreshed in loop).
+        // Use the policy-filtered variant when a runtime policy is configured
+        // so background-job workers see the same model-facing tool surface
+        // the dispatcher does — closing the iteration-2 gap (#3243 HIGH).
+        reason_ctx.available_tools = match &self.deps.runtime_policy {
+            Some(policy) => self.tools().tool_definitions_visible_under(policy).await,
+            None => self.tools().tool_definitions().await,
+        };
 
         // Generate plan if planning is enabled
         let plan = if self.use_planning() {
@@ -1436,8 +1452,18 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             );
             reason_ctx.available_tools.clear();
         } else {
-            // Refresh tool definitions so newly built tools become visible
-            let tool_defs = self.worker.tools().tool_definitions().await;
+            // Refresh tool definitions so newly built tools become visible.
+            // Use the policy-filtered variant when configured — same
+            // iteration-2 gap fix as dispatcher.rs:465 (#3243 HIGH).
+            let tool_defs = match &self.worker.deps.runtime_policy {
+                Some(policy) => {
+                    self.worker
+                        .tools()
+                        .tool_definitions_visible_under(policy)
+                        .await
+                }
+                None => self.worker.tools().tool_definitions().await,
+            };
 
             // Apply admin tool policy filtering (multi-tenant only).
             let (user_id, is_admin) = self.resolve_user_info().await;
@@ -1941,6 +1967,7 @@ mod tests {
             approval_context: None,
             http_interceptor: None,
             multi_tenant: false,
+            runtime_policy: None,
         };
 
         Worker::new(job_id, deps)
@@ -2161,6 +2188,7 @@ mod tests {
             approval_context,
             http_interceptor: None,
             multi_tenant: false,
+            runtime_policy: None,
         };
 
         Worker::new(job_id, deps)

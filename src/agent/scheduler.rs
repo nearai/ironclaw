@@ -70,6 +70,10 @@ pub struct Scheduler {
     sse_tx: Option<Arc<crate::channels::web::sse::SseManager>>,
     /// HTTP interceptor for trace recording/replay (propagated to workers).
     http_interceptor: Option<Arc<dyn ironclaw_llm::recording::HttpInterceptor>>,
+    /// Resolved runtime policy propagated to per-job workers so the
+    /// model-facing tool list filter applies to background jobs too.
+    /// `None` in tests / before `Config::with_runtime_overrides` runs.
+    runtime_policy: Option<ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy>,
     /// Running jobs (main LLM-driven jobs).
     jobs: Arc<RwLock<HashMap<Uuid, ScheduledJob>>>,
     /// Running sub-tasks (tool executions, background tasks).
@@ -96,6 +100,7 @@ impl Scheduler {
             hooks: deps.hooks,
             sse_tx: None,
             http_interceptor: None,
+            runtime_policy: None,
             jobs: Arc::new(RwLock::new(HashMap::new())),
             subtasks: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -112,6 +117,16 @@ impl Scheduler {
         interceptor: Arc<dyn ironclaw_llm::recording::HttpInterceptor>,
     ) {
         self.http_interceptor = Some(interceptor);
+    }
+
+    /// Propagate the resolved runtime policy to spawned workers so background
+    /// jobs see the same model-facing tool surface as the dispatcher
+    /// (#3243 HIGH iteration-2 gap).
+    pub fn set_runtime_policy(
+        &mut self,
+        policy: ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy,
+    ) {
+        self.runtime_policy = Some(policy);
     }
 
     /// Create, persist, and schedule a job in one shot.
@@ -314,6 +329,7 @@ impl Scheduler {
                 approval_context,
                 http_interceptor: self.http_interceptor.clone(),
                 multi_tenant: self.config.multi_tenant,
+                runtime_policy: self.runtime_policy.clone(),
             };
             let worker = Worker::new(job_id, deps);
 

@@ -131,6 +131,10 @@ pub struct RoutineEngine {
     /// Lightweight tool dispatches, so routine-fired tools see the
     /// same interceptor the chat path does.
     http_interceptor: Option<Arc<dyn ironclaw_llm::recording::HttpInterceptor>>,
+    /// Resolved runtime policy threaded through to spawned
+    /// `EngineContext`s so routine-driven LLM iterations apply the
+    /// model-facing tool list filter (#3243 HIGH iteration-2 gap).
+    runtime_policy: Option<ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy>,
     /// Timestamp when this engine instance was created. Used by
     /// `sync_dispatched_runs` to distinguish orphaned runs (from a previous
     /// process) from actively-watched runs (from this process).
@@ -166,8 +170,19 @@ impl RoutineEngine {
             safety,
             sandbox_readiness,
             http_interceptor,
+            runtime_policy: None,
             boot_time: Utc::now(),
         }
+    }
+
+    /// Propagate the resolved runtime policy to spawned `EngineContext`s
+    /// so routine-driven LLM iterations inherit the dispatcher's
+    /// model-facing tool list filter (#3243 HIGH iteration-2 gap).
+    pub fn set_runtime_policy(
+        &mut self,
+        policy: ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy,
+    ) {
+        self.runtime_policy = Some(policy);
     }
 
     /// Expose the running count for integration tests.
@@ -840,6 +855,7 @@ impl RoutineEngine {
             sandbox_readiness: self.sandbox_readiness,
             event_cache: Arc::clone(&self.event_cache),
             http_interceptor: self.http_interceptor.clone(),
+            runtime_policy: self.runtime_policy.clone(),
         };
 
         tokio::spawn(async move {
@@ -927,6 +943,7 @@ impl RoutineEngine {
             sandbox_readiness: self.sandbox_readiness,
             event_cache: Arc::clone(&self.event_cache),
             http_interceptor: self.http_interceptor.clone(),
+            runtime_policy: self.runtime_policy.clone(),
         };
 
         tokio::spawn(async move {
@@ -980,6 +997,7 @@ impl RoutineEngine {
             sandbox_readiness: self.sandbox_readiness,
             event_cache: Arc::clone(&self.event_cache),
             http_interceptor: self.http_interceptor.clone(),
+            runtime_policy: self.runtime_policy.clone(),
         };
 
         // Record the run in DB, then spawn execution
@@ -1127,6 +1145,11 @@ struct EngineContext {
     /// network even when the rest of the system is configured to
     /// route through mocks.
     http_interceptor: Option<Arc<dyn ironclaw_llm::recording::HttpInterceptor>>,
+    /// Resolved runtime policy used to filter the model-facing tool list
+    /// for routine-driven LLM iterations (#3243 HIGH iteration-2 gap).
+    /// Routines run on the agent's own loop and need the same visibility
+    /// guarantees as chat turns. `None` is the legacy unfiltered path.
+    runtime_policy: Option<ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy>,
 }
 
 /// Execute a routine run. Handles both lightweight and full_job modes.
@@ -1900,14 +1923,17 @@ async fn execute_lightweight_with_tools(
                 total_output_tokens,
             );
         } else {
-            // Tool-enabled iteration
-            let tool_defs = ctx
-                .tools
-                .tool_definitions()
-                .await
-                .into_iter()
-                .filter(|tool| allowed_tools.contains(&tool.name))
-                .collect();
+            // Tool-enabled iteration. Use the policy-filtered variant
+            // when configured so routine-driven LLM iterations see the
+            // same model-facing tool surface as the dispatcher
+            // (#3243 HIGH iteration-2 gap).
+            let tool_defs = match &ctx.runtime_policy {
+                Some(policy) => ctx.tools.tool_definitions_visible_under(policy).await,
+                None => ctx.tools.tool_definitions().await,
+            }
+            .into_iter()
+            .filter(|tool| allowed_tools.contains(&tool.name))
+            .collect();
 
             let request_messages = snapshot_messages_for_tool_iteration(&messages);
             let request = ToolCompletionRequest::new(request_messages, tool_defs)
