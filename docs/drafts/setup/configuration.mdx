@@ -247,7 +247,7 @@ The HTTP webhook binds to `0.0.0.0:8080` by default. If you don't need external 
 | `SANDBOX_TIMEOUT_SECS` | int | `120` | Command timeout |
 | `SANDBOX_MEMORY_LIMIT_MB` | int | `2048` | Memory limit per container |
 | `SANDBOX_CPU_SHARES` | int | `1024` | CPU shares (relative weight) |
-| `SANDBOX_IMAGE` | string | `ironclaw-worker:latest` | Docker image |
+| `SANDBOX_IMAGE` | string | `ironclaw-worker:latest` | Docker image. Published IronClaw Docker images set this to `self`, which reuses the running IronClaw image for worker containers. |
 | `SANDBOX_AUTO_PULL` | bool | `true` | Auto-pull missing images |
 | `SANDBOX_EXTRA_DOMAINS` | list | — | Additional allowed domains |
 

@@ -33,8 +33,8 @@ use std::time::Duration;
 
 use bollard::Docker;
 use bollard::container::{
-    Config, CreateContainerOptions, LogOutput, LogsOptions, RemoveContainerOptions,
-    StartContainerOptions, WaitContainerOptions,
+    Config, CreateContainerOptions, InspectContainerOptions, LogOutput, LogsOptions,
+    RemoveContainerOptions, StartContainerOptions, WaitContainerOptions,
 };
 use bollard::exec::{CreateExecOptions, StartExecResults};
 use bollard::models::HostConfig;
@@ -86,6 +86,117 @@ fn append_with_limit(buffer: &mut String, text: &str, limit: usize) -> bool {
     let end = crate::util::floor_char_boundary(text, remaining);
     buffer.push_str(&text[..end]);
     true
+}
+
+/// Returns true when `image` asks IronClaw to reuse the image that is running
+/// the current container. Intended for Docker-packaged deployments where the
+/// main IronClaw image contains the worker runtime.
+pub fn is_self_image_alias(image: &str) -> bool {
+    let normalized = image.trim().to_ascii_lowercase();
+    normalized == "self" || normalized == "ironclaw:self"
+}
+
+/// Resolve a Docker image reference before creating sandbox containers.
+///
+/// The special `self` / `ironclaw:self` alias resolves to the image ID of the
+/// current IronClaw container via the Docker API. This lets published Docker
+/// images spawn worker containers from the already-present image instead of
+/// pulling a separate `ironclaw-worker` image on startup or first use.
+pub async fn resolve_image_reference(docker: &Docker, image: &str) -> Result<String> {
+    if !is_self_image_alias(image) {
+        return Ok(image.to_string());
+    }
+
+    let candidates = current_container_id_candidates();
+    if candidates.is_empty() {
+        return Err(SandboxError::ContainerCreationFailed {
+            reason: self_image_resolution_error("no current container id candidates found"),
+        });
+    }
+
+    let mut last_error = None;
+    for candidate in candidates {
+        match docker
+            .inspect_container(&candidate, None::<InspectContainerOptions>)
+            .await
+        {
+            Ok(details) => {
+                if let Some(image_id) = details.image.filter(|value| !value.trim().is_empty()) {
+                    tracing::info!(
+                        container = %candidate,
+                        image = %image_id,
+                        "Resolved sandbox image alias to current container image"
+                    );
+                    return Ok(image_id);
+                }
+                last_error = Some(format!("container {candidate} has no image id"));
+            }
+            Err(e) => {
+                tracing::debug!(
+                    container = %candidate,
+                    error = %e,
+                    "Failed to inspect current container candidate"
+                );
+                last_error = Some(e.to_string());
+            }
+        }
+    }
+
+    Err(SandboxError::ContainerCreationFailed {
+        reason: self_image_resolution_error(
+            last_error
+                .as_deref()
+                .unwrap_or("Docker did not return an image id for any candidate"),
+        ),
+    })
+}
+
+fn self_image_resolution_error(detail: &str) -> String {
+    format!(
+        "SANDBOX_IMAGE=self requires running inside a Docker container with access to the Docker API; {detail}. Set SANDBOX_IMAGE to an explicit image reference to override."
+    )
+}
+
+fn current_container_id_candidates() -> Vec<String> {
+    let mut candidates = Vec::new();
+    if let Ok(hostname) = std::env::var("HOSTNAME")
+        && is_safe_container_lookup(&hostname)
+    {
+        push_unique(&mut candidates, hostname.trim().to_string());
+    }
+
+    if let Ok(cgroup) = std::fs::read_to_string("/proc/self/cgroup") {
+        for candidate in container_id_candidates_from_cgroup(&cgroup) {
+            push_unique(&mut candidates, candidate);
+        }
+    }
+
+    candidates
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
+}
+
+fn is_safe_container_lookup(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+}
+
+fn container_id_candidates_from_cgroup(cgroup: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+    for token in cgroup.split(|c: char| !c.is_ascii_hexdigit()) {
+        if (12..=64).contains(&token.len()) && token.bytes().all(|b| b.is_ascii_hexdigit()) {
+            push_unique(&mut candidates, token.to_string());
+        }
+    }
+    candidates
 }
 
 impl ContainerRunner {
@@ -399,6 +510,9 @@ impl ContainerRunner {
             .into_iter()
             .map(|(k, v)| format!("{}={}", k, v))
             .collect();
+        if !env_vec.iter().any(|value| value.starts_with("HOME=")) {
+            env_vec.push("HOME=/home/sandbox".to_string());
+        }
 
         // Add proxy environment (uses host.docker.internal for Mac/Windows, 172.17.0.1 for Linux)
         let proxy_host = if cfg!(target_os = "linux") {
@@ -747,6 +861,30 @@ mod tests {
         let truncated = append_with_limit(&mut out, "hello", 10);
         assert!(!truncated);
         assert_eq!(out, "hello");
+    }
+
+    #[test]
+    fn self_image_alias_accepts_documented_values() {
+        assert!(is_self_image_alias("self"));
+        assert!(is_self_image_alias(" ironclaw:self "));
+        assert!(!is_self_image_alias("ironclaw-worker:latest"));
+    }
+
+    #[test]
+    fn cgroup_candidate_parser_finds_docker_and_systemd_ids() {
+        let id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let candidates = container_id_candidates_from_cgroup(&format!(
+            "0::/docker/{id}\n1:name=systemd:/docker-{id}.scope\n"
+        ));
+
+        assert_eq!(candidates, vec![id.to_string()]);
+    }
+
+    #[test]
+    fn hostname_candidate_validation_rejects_unsafe_values() {
+        assert!(is_safe_container_lookup("ironclaw-worker-123"));
+        assert!(!is_safe_container_lookup("../docker.sock"));
+        assert!(!is_safe_container_lookup(""));
     }
 
     #[cfg(unix)]

@@ -121,18 +121,56 @@ RUN set -eux; \
 # Stage 5a: Shared runtime base
 FROM debian:bookworm-slim AS runtime-base
 
+# Install the worker toolchain in the main runtime image too. Docker-packaged
+# deployments set SANDBOX_IMAGE=self below, so worker jobs can spawn from the
+# already-present IronClaw image instead of pulling ironclaw-worker on startup.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        git \
+        build-essential \
+        pkg-config \
+        libssl-dev \
+        nodejs \
+        npm \
+        python3 \
+        python3-pip \
+        python3-venv \
+        gh \
     && rm -rf /var/lib/apt/lists/*
+
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh \
+    && sh /tmp/rustup-init.sh -y --default-toolchain 1.92.0 \
+    && rm /tmp/rustup-init.sh \
+    && chmod -R a+rX /usr/local/rustup /usr/local/cargo
+
+RUN npm install -g @anthropic-ai/claude-code@latest
 
 COPY --from=builder /app/target/dist/ironclaw /usr/local/bin/ironclaw
 COPY --from=builder /app/migrations /app/migrations
 
 # Non-root user
-ENV HOME=/home/ironclaw
+ENV HOME=/home/ironclaw \
+    SANDBOX_IMAGE=self
 RUN useradd -m -d /home/ironclaw -u 1000 ironclaw \
     && mkdir -p /home/ironclaw/.ironclaw \
-    && chown -R ironclaw:ironclaw /home/ironclaw
+    && mkdir -p \
+        /home/ironclaw/.claude \
+        /home/sandbox/.ironclaw \
+        /home/sandbox/.claude \
+        /workspace \
+    && chown -R ironclaw:ironclaw /home/ironclaw /home/sandbox /workspace
 WORKDIR /home/ironclaw
 
 EXPOSE 3000

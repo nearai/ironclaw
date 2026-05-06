@@ -133,6 +133,10 @@ IronClaw can launch sandbox containers. In Docker, this requires:
 1. **Docker socket mount** (shown above): Allows IronClaw to launch sibling containers
 2. **Privileged mode** (optional): Only if sandbox jobs need elevated permissions
 
+The published Docker image includes the worker runtime and defaults `SANDBOX_IMAGE=self`.
+With the Docker socket mounted, IronClaw resolves `self` to the currently running image ID,
+so sandbox jobs do not need to pull `nearaidev/ironclaw-worker` before starting.
+
 ```bash
 # With privileged mode (not recommended unless needed)
 docker run -d \

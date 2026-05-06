@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::bootstrap::ironclaw_base_dir;
 use crate::error::OrchestratorError;
 use crate::orchestrator::auth::{CredentialGrant, TokenStore};
-use crate::sandbox::connect_docker;
+use crate::sandbox::{connect_docker, resolve_image_reference};
 
 use ironclaw_common::MAX_WORKER_ITERATIONS;
 
@@ -419,6 +419,12 @@ impl ContainerJobManager {
     ) -> Result<(), OrchestratorError> {
         // Connect to Docker (reuses cached connection)
         let docker = self.docker().await?;
+        let image = resolve_image_reference(&docker, &self.config.image)
+            .await
+            .map_err(|e| OrchestratorError::ContainerCreationFailed {
+                job_id,
+                reason: e.to_string(),
+            })?;
 
         // Build container configuration
         // Use host.docker.internal on all platforms — the extra_hosts mapping
@@ -431,6 +437,7 @@ impl ContainerJobManager {
         );
 
         let mut env_vec = vec![
+            "HOME=/home/sandbox".to_string(),
             format!("IRONCLAW_WORKER_TOKEN={}", token),
             format!("IRONCLAW_JOB_ID={}", job_id),
             format!("IRONCLAW_ORCHESTRATOR_URL={}", orchestrator_url),
@@ -578,7 +585,7 @@ impl ContainerJobManager {
         );
 
         let container_config = Config {
-            image: Some(self.config.image.clone()),
+            image: Some(image),
             cmd: Some(cmd),
             env: Some(env_vec),
             host_config: Some(host_config),

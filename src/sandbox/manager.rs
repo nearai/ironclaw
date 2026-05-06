@@ -38,7 +38,9 @@ use tokio::sync::RwLock;
 use bollard::Docker;
 
 use crate::sandbox::config::{ResourceLimits, SandboxConfig, SandboxPolicy};
-use crate::sandbox::container::{ContainerOutput, ContainerRunner, connect_docker};
+use crate::sandbox::container::{
+    ContainerOutput, ContainerRunner, connect_docker, resolve_image_reference,
+};
 use crate::sandbox::error::{Result, SandboxError};
 use crate::sandbox::proxy::{HttpProxy, NetworkProxyBuilder};
 
@@ -85,6 +87,7 @@ pub struct SandboxManager {
     config: SandboxConfig,
     proxy: Arc<RwLock<Option<HttpProxy>>>,
     docker: Arc<RwLock<Option<Docker>>>,
+    resolved_image: Arc<RwLock<Option<String>>>,
     initialized: std::sync::atomic::AtomicBool,
 }
 
@@ -95,6 +98,7 @@ impl SandboxManager {
             config,
             proxy: Arc::new(RwLock::new(None)),
             docker: Arc::new(RwLock::new(None)),
+            resolved_image: Arc::new(RwLock::new(None)),
             initialized: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -139,10 +143,11 @@ impl SandboxManager {
                 reason: e.to_string(),
             })?;
 
-        // Check for / pull image using a temporary runner
+        // Check for / pull image using a temporary runner.
+        let resolved_image = resolve_image_reference(&docker, &self.config.image).await?;
         let checker = ContainerRunner::new(
             docker.clone(),
-            self.config.image.clone(),
+            resolved_image.clone(),
             self.config.proxy_port,
         );
         if !checker.image_exists().await {
@@ -152,13 +157,14 @@ impl SandboxManager {
                 return Err(SandboxError::ContainerCreationFailed {
                     reason: format!(
                         "image {} not found and auto_pull is disabled",
-                        self.config.image
+                        resolved_image
                     ),
                 });
             }
         }
 
         *self.docker.write().await = Some(docker);
+        *self.resolved_image.write().await = Some(resolved_image);
 
         // Start the network proxy if we're using a sandboxed policy
         if self.config.policy.is_sandboxed() {
@@ -181,6 +187,8 @@ impl SandboxManager {
         if let Some(proxy) = self.proxy.write().await.take() {
             proxy.stop().await;
         }
+
+        *self.resolved_image.write().await = None;
 
         self.initialized
             .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -297,7 +305,13 @@ impl SandboxManager {
                 .ok_or_else(|| SandboxError::DockerNotAvailable {
                     reason: "Docker connection not initialized".to_string(),
                 })?;
-        let runner = ContainerRunner::new(docker, self.config.image.clone(), proxy_port);
+        let image = self
+            .resolved_image
+            .read()
+            .await
+            .clone()
+            .unwrap_or_else(|| self.config.image.clone());
+        let runner = ContainerRunner::new(docker, image, proxy_port);
 
         let limits = ResourceLimits {
             memory_bytes: self.config.memory_limit_mb * 1024 * 1024,
