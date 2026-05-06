@@ -1115,6 +1115,23 @@ impl LlmProvider for RecordingLlm {
         Ok(response)
     }
 
+    async fn complete_stream(
+        &self,
+        request: CompletionRequest,
+        on_chunk: &mut (dyn FnMut(String) + Send),
+    ) -> Result<CompletionResponse, LlmError> {
+        // Streaming bypasses recording (chunks can't be replayed as a sequence).
+        self.inner.complete_stream(request, on_chunk).await
+    }
+
+    async fn complete_with_tools_stream(
+        &self,
+        request: ToolCompletionRequest,
+        on_chunk: &mut (dyn FnMut(String) + Send),
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.inner.complete_with_tools_stream(request, on_chunk).await
+    }
+
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
         self.inner.list_models().await
     }

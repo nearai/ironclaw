@@ -109,6 +109,28 @@ impl LlmProvider for TokenRefreshingProvider {
         }
     }
 
+    async fn complete_stream(
+        &self,
+        request: CompletionRequest,
+        on_chunk: &mut (dyn FnMut(String) + Send),
+    ) -> Result<CompletionResponse, LlmError> {
+        self.ensure_fresh_token().await;
+        // Streaming requests are not retried on auth failure (the partial
+        // chunks already sent can't be un-sent); delegate straight through.
+        self.inner.complete_stream(request, on_chunk).await
+    }
+
+    async fn complete_with_tools_stream(
+        &self,
+        request: ToolCompletionRequest,
+        on_chunk: &mut (dyn FnMut(String) + Send),
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.ensure_fresh_token().await;
+        self.inner
+            .complete_with_tools_stream(request, on_chunk)
+            .await
+    }
+
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
         self.ensure_fresh_token().await;
         self.inner.list_models().await

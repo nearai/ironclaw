@@ -421,6 +421,34 @@ pub trait LlmProvider: Send + Sync {
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError>;
 
+    /// Stream a chat completion, calling `on_chunk` for each text delta.
+    /// Default implementation falls back to a single-chunk (non-streaming) call.
+    async fn complete_stream(
+        &self,
+        request: CompletionRequest,
+        on_chunk: &mut (dyn FnMut(String) + Send),
+    ) -> Result<CompletionResponse, LlmError> {
+        let resp = self.complete(request).await?;
+        on_chunk(resp.content.clone());
+        Ok(resp)
+    }
+
+    /// Stream a tool-enabled completion, calling `on_chunk` for each text delta.
+    /// Default implementation falls back to a single-chunk (non-streaming) call.
+    async fn complete_with_tools_stream(
+        &self,
+        request: ToolCompletionRequest,
+        on_chunk: &mut (dyn FnMut(String) + Send),
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        let resp = self.complete_with_tools(request).await?;
+        if let Some(ref content) = resp.content {
+            if !content.is_empty() {
+                on_chunk(content.clone());
+            }
+        }
+        Ok(resp)
+    }
+
     /// List available models from the provider.
     /// Default implementation returns empty list.
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {

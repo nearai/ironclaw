@@ -200,6 +200,22 @@ impl LlmProvider for SwappableLlmProvider {
         self.current().complete_with_tools(request).await
     }
 
+    async fn complete_stream(
+        &self,
+        request: CompletionRequest,
+        on_chunk: &mut (dyn FnMut(String) + Send),
+    ) -> Result<CompletionResponse, LlmError> {
+        self.current().complete_stream(request, on_chunk).await
+    }
+
+    async fn complete_with_tools_stream(
+        &self,
+        request: ToolCompletionRequest,
+        on_chunk: &mut (dyn FnMut(String) + Send),
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.current().complete_with_tools_stream(request, on_chunk).await
+    }
+
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
         self.current().list_models().await
     }
