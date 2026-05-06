@@ -7,6 +7,8 @@
 
 use std::path::PathBuf;
 
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use secrecy::SecretString;
 
 use crate::bootstrap::ironclaw_base_dir;
@@ -20,13 +22,17 @@ use crate::llm::session::SessionConfig;
 /// placeholder is never sent over the wire.
 pub const OAUTH_PLACEHOLDER: &str = "oauth-placeholder";
 
-/// Prompt cache retention policy for Anthropic.
+/// Prompt cache retention policy.
 ///
-/// Controls Anthropic's automatic prompt caching via a top-level
-/// `cache_control` field injected through rig-core's `additional_params`.
-/// - `None` — caching disabled, no `cache_control` injected.
-/// - `Short` — 5-minute TTL (default), `{"type": "ephemeral"}`, 1.25× write surcharge.
-/// - `Long` — 1-hour TTL, `{"type": "ephemeral", "ttl": "1h"}`, 2× write surcharge.
+/// Controls server-side prompt caching across providers:
+/// - **Anthropic (RigAdapter):** injects `cache_control` via `additional_params`.
+/// - **Bedrock (Converse API):** injects `CachePointBlock` into system, tool,
+///   and message content blocks.
+///
+/// Variants:
+/// - `None` — caching disabled.
+/// - `Short` — 5-minute TTL (default), 1.25× write surcharge.
+/// - `Long` — 1-hour TTL, 2× write surcharge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CacheRetention {
     /// No prompt caching.
@@ -60,6 +66,27 @@ impl std::fmt::Display for CacheRetention {
             Self::None => write!(f, "none"),
             Self::Short => write!(f, "short"),
             Self::Long => write!(f, "long"),
+        }
+    }
+}
+
+impl CacheRetention {
+    /// Cost multiplier for cache-write tokens relative to standard input rate.
+    pub fn write_multiplier(self) -> Decimal {
+        match self {
+            Self::None => Decimal::ONE,
+            Self::Short => dec!(1.25),
+            Self::Long => Decimal::TWO,
+        }
+    }
+
+    /// Discount divisor for cache-read tokens.
+    /// Cached-read cost = `input_rate / read_discount()`.
+    pub fn read_discount(self) -> Decimal {
+        if self != Self::None {
+            dec!(10)
+        } else {
+            Decimal::ONE
         }
     }
 }
@@ -144,6 +171,9 @@ pub struct BedrockConfig {
     pub cross_region: Option<String>,
     /// AWS named profile (for SSO / assume-role workflows).
     pub profile: Option<String>,
+    /// Prompt cache retention policy. Controls `CachePointBlock` injection
+    /// in Converse API requests (5-minute or 1-hour TTL).
+    pub cache_retention: CacheRetention,
 }
 
 /// LLM provider configuration.
