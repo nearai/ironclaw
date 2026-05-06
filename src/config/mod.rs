@@ -33,6 +33,7 @@ pub mod oauth;
 pub mod profile;
 pub mod relay;
 mod routines;
+pub mod runtime;
 mod safety;
 mod sandbox;
 mod search;
@@ -65,6 +66,7 @@ pub use self::missions::MissionsConfig;
 pub use self::oauth::OAuthConfig;
 pub use self::relay::RelayConfig;
 pub use self::routines::RoutineConfig;
+pub use self::runtime::{RuntimeConfig, RuntimeConfigOverrides};
 pub use self::safety::SafetyConfig;
 use self::safety::resolve_safety_config;
 pub use self::sandbox::{AcpModeConfig, ClaudeCodeConfig, SandboxModeConfig};
@@ -115,6 +117,11 @@ pub struct Config {
     pub heartbeat: HeartbeatConfig,
     pub hygiene: HygieneConfig,
     pub routines: RoutineConfig,
+    /// Resolved runtime profile / deployment-mode policy. Source of truth for
+    /// PR 5+ planner integration (which backends to expose, what approval
+    /// posture to apply). Today this is wired through but not yet consumed
+    /// by the existing backend selection sites.
+    pub runtime: RuntimeConfig,
     pub sandbox: SandboxModeConfig,
     pub claude_code: ClaudeCodeConfig,
     pub acp: AcpModeConfig,
@@ -239,6 +246,7 @@ impl Config {
                 enabled: false,
                 ..RoutineConfig::default()
             },
+            runtime: RuntimeConfig::safe_default(),
             sandbox: SandboxModeConfig {
                 enabled: false,
                 ..SandboxModeConfig::default()
@@ -310,6 +318,31 @@ impl Config {
     /// (lower priority) via dotenvy, which never overwrites existing vars.
     pub async fn from_env() -> Result<Self, ConfigError> {
         Self::from_env_with_toml(None).await
+    }
+
+    /// Re-resolve [`RuntimeConfig`] with CLI overrides layered on top of the
+    /// env-based resolution `Self::build` already performed. CLI flags take
+    /// precedence over env vars per PR 3 of #3045.
+    ///
+    /// Returns the resolver's typed error if the new `(deployment, profile)`
+    /// pair is rejected — e.g. `--deployment-mode hosted_multi_tenant
+    /// --runtime-profile local_dev` fails closed.
+    pub fn with_runtime_overrides(
+        mut self,
+        overrides: &RuntimeConfigOverrides,
+    ) -> Result<Self, ConfigError> {
+        if overrides.deployment.is_none()
+            && overrides.profile.is_none()
+            && overrides.yolo_disclosure_acknowledged.is_none()
+        {
+            return Ok(self);
+        }
+        // The resolver re-reads env vars for any field the CLI didn't set,
+        // so `RuntimeConfig::resolve_from` correctly returns
+        //   CLI > env > default
+        // even when only one of the three was overridden.
+        self.runtime = RuntimeConfig::resolve_from(overrides)?;
+        Ok(self)
     }
 
     /// Load from env with an optional TOML config file overlay.
@@ -598,6 +631,12 @@ impl Config {
             heartbeat: HeartbeatConfig::resolve(settings)?,
             hygiene: HygieneConfig::resolve(settings)?,
             routines: RoutineConfig::resolve(settings)?,
+            // PR 3 of #3045: read runtime profile / deployment mode from
+            // env vars only for now. CLI overrides arrive via
+            // `Config::with_runtime_overrides` after `from_env*` returns,
+            // so the binary entry point applies them in one place rather
+            // than threading them through every internal `build` caller.
+            runtime: RuntimeConfig::resolve_from(&RuntimeConfigOverrides::default())?,
             sandbox: SandboxModeConfig::resolve(settings)?,
             claude_code: ClaudeCodeConfig::resolve(settings)?,
             acp: AcpModeConfig::resolve(settings)?,

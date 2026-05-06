@@ -60,6 +60,12 @@ impl Tool for GrepTool {
         "grep"
     }
 
+    fn runtime_affordance(&self) -> crate::tools::ToolRuntimeAffordance {
+        // ripgrep walks the local filesystem — host-filesystem read
+        // (#3243 MED tool-affordance coverage).
+        crate::tools::ToolRuntimeAffordance::HostFilesystem
+    }
+
     fn description(&self) -> &str {
         "Search file contents using regex patterns. Powered by ripgrep. \
          Three output modes: content (matching lines with context), \

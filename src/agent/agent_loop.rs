@@ -242,6 +242,15 @@ pub struct AgentDeps {
     pub llm_backend: String,
     /// Per-tenant rate limiting registry (lazily creates rate state per user).
     pub tenant_rates: Arc<crate::tenant::TenantRateRegistry>,
+    /// Resolved runtime policy used to filter the model-facing tool list
+    /// (#3045 PR 4 + PR 5). When `None`, the legacy unfiltered tool list
+    /// is used — appropriate for tests and the bootstrap path before
+    /// `Config::with_runtime_overrides` has run. When `Some`, every
+    /// `tool_definitions` build for the LLM goes through
+    /// `ToolRegistry::tool_definitions_visible_under(policy)` so
+    /// hosted-multi-tenant deployments cannot expose provider-host shell
+    /// affordances to the model.
+    pub runtime_policy: Option<ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy>,
 }
 
 /// The main agent that coordinates all components.
@@ -319,6 +328,12 @@ impl Agent {
         }
         if let Some(ref interceptor) = deps.http_interceptor {
             scheduler.set_http_interceptor(Arc::clone(interceptor));
+        }
+        if let Some(ref policy) = deps.runtime_policy {
+            // Propagate the resolved runtime policy so background-job
+            // workers see the same model-facing tool surface as the
+            // dispatcher (#3243 HIGH iteration-2 gap).
+            scheduler.set_runtime_policy(policy.clone());
         }
         let scheduler = Arc::new(scheduler);
 
@@ -1011,7 +1026,7 @@ impl Agent {
                     let (notify_tx, mut notify_rx) =
                         tokio::sync::mpsc::channel::<OutgoingResponse>(32);
 
-                    let engine = Arc::new(RoutineEngine::new(
+                    let mut engine = RoutineEngine::new(
                         rt_config.clone(),
                         crate::tenant::SystemScope::new(Arc::clone(store)),
                         self.llm().clone(),
@@ -1023,7 +1038,13 @@ impl Agent {
                         self.safety().clone(),
                         self.deps.sandbox_readiness,
                         self.deps.http_interceptor.clone(),
-                    ));
+                    );
+                    if let Some(ref policy) = self.deps.runtime_policy {
+                        // Apply the model-facing tool list filter to
+                        // routine-driven LLM iterations too (#3243 HIGH).
+                        engine.set_runtime_policy(policy.clone());
+                    }
+                    let engine = Arc::new(engine);
 
                     // Register routine tools
                     self.deps
@@ -2255,6 +2276,7 @@ mod tests {
             builder: None,
             llm_backend: "nearai".to_string(),
             tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+            runtime_policy: None,
         };
 
         Agent::new(

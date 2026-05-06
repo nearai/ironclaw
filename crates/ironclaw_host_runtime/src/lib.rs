@@ -46,6 +46,7 @@ use std::{fmt, sync::Arc};
 use thiserror::Error;
 
 mod obligations;
+mod planner;
 mod production;
 mod services;
 
@@ -53,6 +54,7 @@ pub use obligations::{
     BuiltinObligationHandler, BuiltinObligationServices, NetworkObligationPolicyStore,
     ProcessObligationLifecycleStore, RuntimeSecretInjectionStore, RuntimeSecretInjectionStoreError,
 };
+pub use planner::{ExecutionPlan, PlannerError, plan_capability};
 pub use production::DefaultHostRuntime;
 pub use services::{HostRuntimeServices, RegisteredRuntimeHealth};
 

@@ -17,6 +17,7 @@ pub mod mcp;
 pub mod permissions;
 pub mod rate_limiter;
 pub mod redaction;
+pub mod runtime_filter;
 pub(crate) mod schema_metrics;
 pub mod schema_validator;
 pub mod wasm;
@@ -36,8 +37,10 @@ pub use builder::{
 pub(crate) use coercion::prepare_tool_params;
 pub use rate_limiter::RateLimiter;
 pub use registry::{ToolRegistry, is_protected_tool_name};
+pub use runtime_filter::is_visible_under;
 pub use tool::{
     ApprovalContext, ApprovalRequirement, EngineCompatibility, EngineVersion, RiskLevel, Tool,
     ToolDiscoverySummary, ToolDomain, ToolError, ToolOutput, ToolRateLimitConfig,
-    check_approval_in_context, redact_params, require_param, require_str, validate_tool_schema,
+    ToolRuntimeAffordance, check_approval_in_context, redact_params, require_param, require_str,
+    validate_tool_schema,
 };

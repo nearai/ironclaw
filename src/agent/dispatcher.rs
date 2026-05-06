@@ -256,7 +256,17 @@ impl Agent {
 
         // Build system prompts once for this turn. Two variants: with tools
         // (normal iterations) and without (force_text final iteration).
-        let initial_tool_defs = self.tools().tool_definitions().await;
+        //
+        // Tool list is filtered by the resolved `EffectiveRuntimePolicy` when
+        // present so the model never sees a tool whose runtime affordance the
+        // policy would refuse to grant (#3045 PR 4). Hosted multi-tenant
+        // deployments cannot surface provider-host shell affordances to the
+        // model. Action-time authorization in `ironclaw_authorization` still
+        // gates every invocation that reaches dispatch.
+        let initial_tool_defs = match &self.deps.runtime_policy {
+            Some(policy) => self.tools().tool_definitions_visible_under(policy).await,
+            None => self.tools().tool_definitions().await,
+        };
         let initial_tool_defs = if !active_skills.is_empty() {
             crate::skills::attenuate_tools(&initial_tool_defs, &active_skills).tools
         } else {
@@ -451,8 +461,22 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
 
         let force_text = iteration >= self.force_text_at;
 
-        // Refresh tool definitions each iteration so newly built tools become visible
-        let tool_defs = self.agent.tools().tool_definitions().await;
+        // Refresh tool definitions each iteration so newly built tools become
+        // visible. **Use the policy-filtered variant when a runtime policy is
+        // configured** so the visibility filter applies to *every* iteration,
+        // not just iteration 1 (zmanian #3243 HIGH iteration-2 gap). Without
+        // this, hosted-multi-tenant deployments would surface
+        // provider-host-class tools (e.g. `shell` once any tool builder
+        // registers it) to the model after the first turn.
+        let tool_defs = match &self.agent.deps.runtime_policy {
+            Some(policy) => {
+                self.agent
+                    .tools()
+                    .tool_definitions_visible_under(policy)
+                    .await
+            }
+            None => self.agent.tools().tool_definitions().await,
+        };
 
         // Apply trust-based tool attenuation if skills are active.
         let tool_defs = if !self.active_skills.is_empty() {
@@ -2091,6 +2115,7 @@ mod tests {
             builder: None,
             llm_backend: "nearai".to_string(),
             tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+            runtime_policy: None,
         };
 
         Agent::new(
@@ -2398,6 +2423,7 @@ mod tests {
             builder: None,
             llm_backend: "nearai".to_string(),
             tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+            runtime_policy: None,
         };
 
         let agent = Agent::new(
@@ -3385,6 +3411,7 @@ mod tests {
             builder: None,
             llm_backend: "nearai".to_string(),
             tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+            runtime_policy: None,
         };
 
         Agent::new(
@@ -3534,6 +3561,7 @@ mod tests {
             builder: None,
             llm_backend: "nearai".to_string(),
             tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+            runtime_policy: None,
         };
 
         let agent = Agent::new(
@@ -3669,6 +3697,7 @@ mod tests {
                 builder: None,
                 llm_backend: "nearai".to_string(),
                 tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+                runtime_policy: None,
             };
 
             Agent::new(
