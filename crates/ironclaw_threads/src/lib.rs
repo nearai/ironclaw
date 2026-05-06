@@ -778,6 +778,7 @@ fn context_messages_with_summary_replacements(thread: &StoredThread) -> Vec<Cont
         })
         .collect::<Vec<_>>();
     let mut skip_through = 0;
+    let mut emitted_summaries = Vec::new();
     let mut context = Vec::new();
     for message in thread
         .messages
@@ -787,10 +788,11 @@ fn context_messages_with_summary_replacements(thread: &StoredThread) -> Vec<Cont
         if message.sequence <= skip_through {
             continue;
         }
-        if let Some(summary) = replacement_summaries
-            .iter()
-            .find(|summary| summary.start_sequence == message.sequence)
-        {
+        if let Some(summary) = replacement_summaries.iter().find(|summary| {
+            summary.start_sequence <= message.sequence
+                && message.sequence <= summary.end_sequence
+                && !emitted_summaries.contains(&summary.summary_id)
+        }) {
             context.push(ContextMessage {
                 message_id: None,
                 summary_id: Some(summary.summary_id),
@@ -798,6 +800,7 @@ fn context_messages_with_summary_replacements(thread: &StoredThread) -> Vec<Cont
                 kind: MessageKind::Summary,
                 content: summary.content.clone(),
             });
+            emitted_summaries.push(summary.summary_id);
             skip_through = summary.end_sequence;
             continue;
         }

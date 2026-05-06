@@ -467,6 +467,79 @@ async fn summaries_are_range_artifacts_and_policy_filtered_context_replacements(
 }
 
 #[tokio::test]
+async fn summary_replacement_still_applies_when_range_starts_with_redacted_message() {
+    let service = InMemorySessionThreadService::default();
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("a"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let sensitive = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: user_message("secret token"),
+        })
+        .await
+        .unwrap();
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: user_message("context that should be summarized"),
+        })
+        .await
+        .unwrap();
+    service
+        .redact_message(RedactMessageRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            message_id: sensitive.message_id,
+            redaction_ref: "redaction/audit/2".into(),
+        })
+        .await
+        .unwrap();
+    service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 1,
+            end_sequence: 2,
+            summary_kind: "model_context".into(),
+            content: MessageContent::text("redacted range summary"),
+            model_context_policy: Some("replace_range_when_selected".into()),
+        })
+        .await
+        .unwrap();
+
+    let context = service
+        .load_context_window(LoadContextWindowRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id,
+            max_messages: 16,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(context.messages.len(), 1);
+    assert_eq!(context.messages[0].kind, MessageKind::Summary);
+    assert_eq!(context.messages[0].content, "redacted range summary");
+}
+
+#[tokio::test]
 async fn wrong_scope_lookup_returns_not_found_instead_of_cross_tenant_history() {
     let service = InMemorySessionThreadService::default();
     let thread = service
