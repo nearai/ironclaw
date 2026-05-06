@@ -48,7 +48,7 @@ Agent-loop drivers return `LoopExit` claims. `TurnRunner` validates those claims
 
 - valid completed exits require host-verified durable reply/result refs and map to `TurnRunnerOutcome::Completed`;
 - valid blocked exits require host-verified checkpoint + gate refs and map to `TurnRunnerOutcome::Blocked`;
-- valid cancelled exits require observed host cancellation/interrupt and map to `TurnRunnerOutcome::Cancelled`;
+- valid cancelled exits require observed host cancellation/interrupt plus a durably recorded `CancelRequested` run state, then map to `TurnRunnerOutcome::Cancelled`; observed interrupts that race ahead of recorded cancellation map to recovery instead of terminal cancellation;
 - valid failed exits require host-verified evidence that the failure is safe to terminalize, then map stable sanitized failure kinds to `TurnRunnerOutcome::Failed`;
 - invalid exits map either to sanitized terminal failure or runner/system-derived `RecoveryRequired` depending on side-effect safety evidence;
 - runner-side loop-exit application must call trusted transition-port methods, not mutate durable run state directly.

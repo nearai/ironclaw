@@ -52,9 +52,16 @@ impl LoopExit {
                 LoopExitViolationKind::UnverifiedBlockedEvidence,
                 policy.invalid_handling,
             ),
-            Self::Cancelled(_exit) if policy.host_cancellation_observed => {
+            Self::Cancelled(_exit)
+                if policy.host_cancellation_observed && policy.cancel_request_recorded =>
+            {
                 LoopExitValidationDecision::trusted(exit_id, TurnRunnerOutcome::Cancelled)
             }
+            Self::Cancelled(_exit) if policy.host_cancellation_observed => invalid_exit_decision(
+                exit_id,
+                LoopExitViolationKind::CancellationNotRecorded,
+                policy.invalid_handling,
+            ),
             Self::Cancelled(_exit) => invalid_exit_decision(
                 exit_id,
                 LoopExitViolationKind::CancellationNotObserved,
@@ -221,6 +228,7 @@ pub enum LoopExitInvalidHandling {
 pub struct LoopExitValidationPolicy {
     pub require_final_checkpoint: bool,
     pub host_cancellation_observed: bool,
+    pub cancel_request_recorded: bool,
     pub invalid_handling: LoopExitInvalidHandling,
     pub completion_refs_verified: bool,
     pub blocked_evidence_verified: bool,
@@ -232,6 +240,7 @@ impl Default for LoopExitValidationPolicy {
         Self {
             require_final_checkpoint: false,
             host_cancellation_observed: false,
+            cancel_request_recorded: false,
             invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
             completion_refs_verified: false,
             blocked_evidence_verified: false,
@@ -296,6 +305,7 @@ pub enum LoopExitViolationKind {
     UnverifiedBlockedEvidence,
     UnverifiedFailureEvidence,
     CancellationNotObserved,
+    CancellationNotRecorded,
 }
 
 impl LoopExitViolationKind {
@@ -307,12 +317,15 @@ impl LoopExitViolationKind {
             Self::UnverifiedBlockedEvidence => "unverified_blocked_evidence",
             Self::UnverifiedFailureEvidence => "unverified_failure_evidence",
             Self::CancellationNotObserved => "cancellation_not_observed",
+            Self::CancellationNotRecorded => "cancellation_not_recorded",
         }
     }
 
     fn failure_category(self) -> &'static str {
         match self {
-            Self::CancellationNotObserved => "interrupted_unexpectedly",
+            Self::CancellationNotObserved | Self::CancellationNotRecorded => {
+                "interrupted_unexpectedly"
+            }
             Self::MissingCompletionReference
             | Self::UnverifiedCompletionReference
             | Self::MissingFinalCheckpoint

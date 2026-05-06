@@ -20,6 +20,7 @@ fn completed_ask_user_exit_maps_to_trusted_completed_outcome_without_final_check
     .validate(LoopExitValidationPolicy {
         require_final_checkpoint: false,
         host_cancellation_observed: false,
+        cancel_request_recorded: false,
         invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: true,
         blocked_evidence_verified: false,
@@ -45,6 +46,7 @@ fn completed_exit_without_durable_refs_maps_to_protocol_failure_or_recovery() {
     let safe_decision = exit.clone().validate(LoopExitValidationPolicy {
         require_final_checkpoint: false,
         host_cancellation_observed: false,
+        cancel_request_recorded: false,
         invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: true,
         blocked_evidence_verified: false,
@@ -65,6 +67,7 @@ fn completed_exit_without_durable_refs_maps_to_protocol_failure_or_recovery() {
     let uncertain_decision = exit.validate(LoopExitValidationPolicy {
         require_final_checkpoint: false,
         host_cancellation_observed: false,
+        cancel_request_recorded: false,
         invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
         completion_refs_verified: true,
         blocked_evidence_verified: false,
@@ -93,6 +96,7 @@ fn completed_exit_requires_host_verified_completion_refs_before_trusted_mapping(
     let decision = exit.validate(LoopExitValidationPolicy {
         require_final_checkpoint: false,
         host_cancellation_observed: false,
+        cancel_request_recorded: false,
         invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
         completion_refs_verified: false,
         blocked_evidence_verified: false,
@@ -122,6 +126,7 @@ fn final_checkpoint_policy_rejects_terminal_exit_without_checkpoint() {
     .validate(LoopExitValidationPolicy {
         require_final_checkpoint: true,
         host_cancellation_observed: false,
+        cancel_request_recorded: false,
         invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: true,
         blocked_evidence_verified: false,
@@ -155,6 +160,7 @@ fn blocked_exit_maps_to_block_run_outcome_with_verified_checkpoint_and_gate_ref(
     .validate(LoopExitValidationPolicy {
         require_final_checkpoint: false,
         host_cancellation_observed: false,
+        cancel_request_recorded: false,
         invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
         completion_refs_verified: false,
         blocked_evidence_verified: true,
@@ -183,6 +189,7 @@ fn blocked_exit_requires_host_verified_gate_and_checkpoint_before_trusted_mappin
     .validate(LoopExitValidationPolicy {
         require_final_checkpoint: false,
         host_cancellation_observed: false,
+        cancel_request_recorded: false,
         invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
         completion_refs_verified: false,
         blocked_evidence_verified: false,
@@ -206,6 +213,7 @@ fn cancelled_exit_requires_observed_host_cancellation() {
     let rejected = exit.clone().validate(LoopExitValidationPolicy {
         require_final_checkpoint: false,
         host_cancellation_observed: false,
+        cancel_request_recorded: false,
         invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: false,
         blocked_evidence_verified: false,
@@ -223,9 +231,28 @@ fn cancelled_exit_requires_observed_host_cancellation() {
         "cancellation_not_observed"
     );
 
+    let unrecorded = exit.clone().validate(LoopExitValidationPolicy {
+        require_final_checkpoint: false,
+        host_cancellation_observed: true,
+        cancel_request_recorded: false,
+        invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
+        completion_refs_verified: false,
+        blocked_evidence_verified: false,
+        failure_evidence_verified: false,
+    });
+    assert_eq!(
+        unrecorded.violation.unwrap().category(),
+        "cancellation_not_recorded"
+    );
+    assert!(matches!(
+        unrecorded.mapping,
+        ironclaw_turns::LoopExitMapping::RecoveryRequired { .. }
+    ));
+
     let accepted = exit.validate(LoopExitValidationPolicy {
         require_final_checkpoint: false,
         host_cancellation_observed: true,
+        cancel_request_recorded: true,
         invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: false,
         blocked_evidence_verified: false,

@@ -108,15 +108,16 @@ async fn libsql_turn_state_store_persists_apply_loop_exit_recovery_across_instan
     );
     let runner_id = ironclaw_turns::TurnRunnerId::new();
     let lease_token = ironclaw_turns::TurnLeaseToken::new();
-    store
+    let claimed = store
         .claim_next_run(ClaimRunRequest {
             runner_id,
             lease_token,
-            scope_filter: None,
+            scope_filter: Some(scope("thread-a")),
         })
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(claimed.state.run_id, run_id);
 
     let recovered = apply_loop_exit(
         store.as_ref(),
@@ -128,6 +129,7 @@ async fn libsql_turn_state_store_persists_apply_loop_exit_recovery_across_instan
             validation_policy: LoopExitValidationPolicy {
                 require_final_checkpoint: false,
                 host_cancellation_observed: false,
+                cancel_request_recorded: false,
                 invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
                 completion_refs_verified: false,
                 blocked_evidence_verified: false,
@@ -296,15 +298,16 @@ async fn postgres_turn_state_store_persists_apply_loop_exit_recovery_when_config
     );
     let runner_id = ironclaw_turns::TurnRunnerId::new();
     let lease_token = ironclaw_turns::TurnLeaseToken::new();
-    store
+    let claimed = store
         .claim_next_run(ClaimRunRequest {
             runner_id,
             lease_token,
-            scope_filter: None,
+            scope_filter: Some(scope(&thread)),
         })
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(claimed.state.run_id, run_id);
 
     apply_loop_exit(
         store.as_ref(),
@@ -316,6 +319,7 @@ async fn postgres_turn_state_store_persists_apply_loop_exit_recovery_when_config
             validation_policy: LoopExitValidationPolicy {
                 require_final_checkpoint: false,
                 host_cancellation_observed: false,
+                cancel_request_recorded: false,
                 invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
                 completion_refs_verified: false,
                 blocked_evidence_verified: false,

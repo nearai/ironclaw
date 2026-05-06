@@ -50,7 +50,7 @@ The driver-facing variants are fixed for the MVP:
 - `Completed` requires at least one durable reply-message ref or result ref, and the host/runner must verify those refs exist before mapping to a trusted completed outcome. Raw reply text is rejected by the wire shape and by strict loop-ref grammar.
 - `Completed` requires `final_checkpoint_id` only when the resolved run profile/checkpoint policy requires a terminal checkpoint.
 - `Blocked` requires all of: blocked kind, durable `gate_ref`, and `checkpoint_id`, and the host/runner must verify the gate/checkpoint evidence before mapping to a trusted blocked outcome. The blocked kind is limited to approval, auth, and resource for MVP.
-- `Cancelled` is accepted only when the host cancellation/interrupt input was observed by the runner/host policy.
+- `Cancelled` is accepted only when the host cancellation/interrupt input was observed by the runner/host policy and the cancellation has already been durably recorded on the run as `CancelRequested`. If an interrupt is observed before that durable state exists, the exit maps to recovery instead of terminal cancellation.
 - `Failed` uses stable sanitized failure kinds such as `iteration_limit`, `model_error`, `context_build_failed`, or `driver_bug`, and the host/runner must verify the failure evidence is safe to terminalize before mapping to a trusted failed outcome.
 - Ref lists are bounded and duplicate-free so a driver cannot force unbounded evidence verification work.
 - Usage/cost truth remains in host accounting/projection stores; `LoopExit` may carry only usage-summary refs.
@@ -71,7 +71,7 @@ Initial validation covers:
 - terminal exits missing a required final checkpoint;
 - blocked exits whose checkpoint/gate evidence has not been verified by host evidence;
 - failed exits whose failure evidence has not been verified safe to terminalize by host evidence;
-- cancelled exits without observed host cancellation/interrupt.
+- cancelled exits without observed host cancellation/interrupt, or with an observed interrupt that has not yet been durably recorded as a cancel request.
 
 Later slices may add validation against transcript draft state, checkpoint freshness, event evidence, usage-summary refs, and idempotent exit replay storage.
 
