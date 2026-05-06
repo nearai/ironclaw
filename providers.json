@@ -44,7 +44,7 @@
     "id": "ollama",
     "aliases": [],
     "protocol": "ollama",
-    "default_base_url": "http://localhost:11434",
+    "default_base_url": "http://127.0.0.1:11434",
     "base_url_env": "OLLAMA_BASE_URL",
     "model_env": "OLLAMA_MODEL",
     "default_model": "llama3",

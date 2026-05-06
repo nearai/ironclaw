@@ -529,7 +529,7 @@ impl EmbeddingProvider for BedrockEmbeddings {
 /// Ollama embedding provider using a local Ollama instance.
 ///
 /// Ollama serves embedding models (e.g. `nomic-embed-text`, `mxbai-embed-large`)
-/// via a REST API, typically at `http://localhost:11434`.
+/// via a REST API, typically at `http://127.0.0.1:11434`.
 pub struct OllamaEmbeddings {
     client: reqwest::Client,
     base_url: String,
