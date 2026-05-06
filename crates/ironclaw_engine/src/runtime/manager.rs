@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error};
 
 use crate::capability::lease::LeaseManager;
@@ -26,6 +27,7 @@ use crate::types::thread::{Thread, ThreadConfig, ThreadId, ThreadState, ThreadTy
 struct RunningThread {
     signal_tx: SignalSender,
     handle: tokio::task::JoinHandle<Result<ThreadOutcome, EngineError>>,
+    cancel_token: CancellationToken,
 }
 
 /// Top-level orchestrator for thread lifecycle.
@@ -326,6 +328,9 @@ impl ThreadManager {
         // Create signal channel
         let (tx, rx) = messaging::signal_channel(32);
 
+        // Create cancellation token for cooperative interrupt
+        let cancel_token = CancellationToken::new();
+
         // Build execution loop
         let llm = Arc::clone(&self.llm);
         let effects = Arc::clone(&self.effects);
@@ -339,7 +344,8 @@ impl ThreadManager {
             .with_capabilities(Arc::clone(&self.capabilities))
             .with_event_tx(self.event_tx.clone())
             .with_retrieval(retrieval)
-            .with_store(Arc::clone(&self.store));
+            .with_store(Arc::clone(&self.store))
+            .with_cancel_token(cancel_token.clone());
 
         // Spawn background task
         let store_for_task = Arc::clone(&self.store);
@@ -405,6 +411,7 @@ impl ThreadManager {
             RunningThread {
                 signal_tx: tx,
                 handle,
+                cancel_token: cancel_token.clone(),
             },
         );
 
@@ -428,6 +435,7 @@ impl ThreadManager {
         }
         let running = self.running.read().await;
         if let Some(rt) = running.get(&thread_id) {
+            rt.cancel_token.cancel();
             let _ = rt.signal_tx.send(ThreadSignal::Stop).await;
             Ok(())
         } else {

@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use crate::capability::lease::LeaseManager;
@@ -121,6 +122,8 @@ pub struct ExecutionLoop {
     store: Option<Arc<dyn crate::traits::store::Store>>,
     /// Runtime platform metadata for self-awareness in system prompts.
     platform_info: Option<crate::executor::prompt::PlatformInfo>,
+    /// Cancellation token for cooperative interrupt during LLM/tool calls.
+    cancel_token: CancellationToken,
 }
 
 impl ExecutionLoop {
@@ -146,6 +149,7 @@ impl ExecutionLoop {
             retrieval: None,
             store: None,
             platform_info: None,
+            cancel_token: CancellationToken::new(),
         }
     }
 
@@ -182,6 +186,12 @@ impl ExecutionLoop {
     /// Set platform metadata for self-awareness in system prompts.
     pub fn with_platform_info(mut self, info: crate::executor::prompt::PlatformInfo) -> Self {
         self.platform_info = Some(info);
+        self
+    }
+
+    /// Set the cancellation token for cooperative interrupt.
+    pub fn with_cancel_token(mut self, token: CancellationToken) -> Self {
+        self.cancel_token = token;
         self
     }
 
@@ -430,6 +440,7 @@ impl ExecutionLoop {
             self.store.as_ref(),
             self.platform_info.as_ref(),
             &checkpoint.persisted_state,
+            &self.cancel_token,
         )
         .await;
 

@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::agent::Agent;
@@ -121,6 +122,7 @@ impl Agent {
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
         initial_messages: Vec<ChatMessage>,
+        cancel_token: CancellationToken,
     ) -> Result<AgenticLoopResult, Error> {
         // Detect group chat from channel metadata (needed before loading system prompt)
         let is_group_chat = message
@@ -293,6 +295,7 @@ impl Agent {
             user_tz,
             turn_usage: std::sync::Mutex::new(TurnUsageSummary::default()),
             cached_admin_tool_policy: tokio::sync::OnceCell::new(),
+            cancel_token,
         };
 
         // If /skill-name mentions were expanded, rewrite the last user message
@@ -407,6 +410,7 @@ struct ChatDelegate<'a> {
     user_tz: chrono_tz::Tz,
     turn_usage: std::sync::Mutex<TurnUsageSummary>,
     cached_admin_tool_policy: crate::tools::permissions::AdminToolPolicyCache,
+    cancel_token: CancellationToken,
 }
 
 impl ChatDelegate<'_> {
@@ -440,6 +444,10 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             return LoopSignal::Stop;
         }
         LoopSignal::Continue
+    }
+
+    fn cancellation_token(&self) -> CancellationToken {
+        self.cancel_token.clone()
     }
 
     async fn before_llm_call(
@@ -1823,6 +1831,7 @@ mod tests {
 
     use async_trait::async_trait;
     use rust_decimal::Decimal;
+    use tokio_util::sync::CancellationToken;
 
     use crate::agent::agent_loop::{Agent, AgentDeps};
     use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
@@ -2454,7 +2463,14 @@ mod tests {
         let tenant = agent.tenant_ctx("test-user").await;
 
         let result = agent
-            .run_agentic_loop(&message, tenant, session, thread_id, initial_messages)
+            .run_agentic_loop(
+                &message,
+                tenant,
+                session,
+                thread_id,
+                initial_messages,
+                CancellationToken::new(),
+            )
             .await
             .expect("dispatcher run should succeed");
 
@@ -3472,7 +3488,14 @@ mod tests {
         // timeout will fire and the test will fail.
         let result = tokio::time::timeout(
             Duration::from_secs(5),
-            agent.run_agentic_loop(&message, tenant, session, thread_id, initial_messages),
+            agent.run_agentic_loop(
+                &message,
+                tenant,
+                session,
+                thread_id,
+                initial_messages,
+                CancellationToken::new(),
+            ),
         )
         .await;
 
@@ -3606,6 +3629,7 @@ mod tests {
                 Arc::clone(&session),
                 thread_id,
                 initial_messages,
+                CancellationToken::new(),
             )
             .await;
         assert!(result.is_ok(), "dispatcher run failed");
@@ -3741,7 +3765,14 @@ mod tests {
         // max_tool_iterations.
         let result = tokio::time::timeout(
             Duration::from_secs(5),
-            agent.run_agentic_loop(&message, tenant, session, thread_id, initial_messages),
+            agent.run_agentic_loop(
+                &message,
+                tenant,
+                session,
+                thread_id,
+                initial_messages,
+                CancellationToken::new(),
+            ),
         )
         .await;
 
@@ -3800,6 +3831,7 @@ mod tests {
                     session.clone(),
                     thread_id,
                     initial_messages,
+                    CancellationToken::new(),
                 )
                 .await
                 .expect("dispatcher run should succeed");
