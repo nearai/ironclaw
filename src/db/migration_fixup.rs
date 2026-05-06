@@ -301,6 +301,10 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
+    #[cfg(feature = "integration")]
+    static POSTGRES_MIGRATION_FIXUP_TEST_LOCK: tokio::sync::Mutex<()> =
+        tokio::sync::Mutex::const_new(());
+
     fn migrations_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("migrations")
     }
@@ -647,6 +651,7 @@ mod tests {
                 return;
             }
         };
+        let _guard = POSTGRES_MIGRATION_FIXUP_TEST_LOCK.lock().await;
 
         // Make sure refinery_schema_history exists. We can't rely on
         // the test DB having had migrations run, so create it on
@@ -795,6 +800,7 @@ mod tests {
                 return;
             }
         };
+        let _guard = POSTGRES_MIGRATION_FIXUP_TEST_LOCK.lock().await;
 
         // Make sure refinery_schema_history exists so we exercise the
         // post-history-check branch (the early-return on missing table
