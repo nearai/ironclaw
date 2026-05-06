@@ -226,7 +226,12 @@ impl RoutineEngine {
         let triggered = self.matching_event_triggers(message, content).await;
         let fired = triggered.len();
         for triggered in triggered {
-            std::mem::drop(self.spawn_fire(triggered.routine, "event", Some(triggered.detail)));
+            std::mem::drop(self.spawn_fire(
+                triggered.routine,
+                "event",
+                Some(triggered.detail),
+                None,
+            ));
         }
         fired
     }
@@ -244,7 +249,9 @@ impl RoutineEngine {
         let fired = triggered.len();
         let handles: Vec<JoinHandle<()>> = triggered
             .into_iter()
-            .map(|triggered| self.spawn_fire(triggered.routine, "event", Some(triggered.detail)))
+            .map(|triggered| {
+                self.spawn_fire(triggered.routine, "event", Some(triggered.detail), None)
+            })
             .collect();
 
         for handle in handles {
@@ -426,7 +433,6 @@ impl RoutineEngine {
                     .get(key)
                     .and_then(crate::agent::routine::json_value_as_filter_string)
                 else {
-                    tracing::debug!(routine = %routine.name, filter_key = %key, "Filter key not found in payload");
                     matched = false;
                     break;
                 };
@@ -457,7 +463,12 @@ impl RoutineEngine {
             }
 
             let detail = truncate(&format!("{source}:{event_type}"), 200);
-            self.spawn_fire(routine.clone(), "system_event", Some(detail));
+            let event_payload = if payload.is_null() {
+                None
+            } else {
+                Some(payload.clone())
+            };
+            self.spawn_fire(routine.clone(), "system_event", Some(detail), event_payload);
             fired += 1;
         }
 
@@ -511,7 +522,7 @@ impl RoutineEngine {
                 None
             };
 
-            self.spawn_fire(routine, "cron", detail);
+            self.spawn_fire(routine, "cron", detail, None);
         }
     }
 
@@ -843,7 +854,7 @@ impl RoutineEngine {
         };
 
         tokio::spawn(async move {
-            execute_routine(engine, routine, run).await;
+            execute_routine(engine, routine, run, None).await;
         });
 
         Ok(run_id)
@@ -930,7 +941,7 @@ impl RoutineEngine {
         };
 
         tokio::spawn(async move {
-            execute_routine(engine, routine, run).await;
+            execute_routine(engine, routine, run, None).await;
         });
 
         Ok(run_id)
@@ -942,6 +953,7 @@ impl RoutineEngine {
         routine: Routine,
         trigger_type: &str,
         trigger_detail: Option<String>,
+        event_payload: Option<serde_json::Value>,
     ) -> JoinHandle<()> {
         let run = RoutineRun {
             id: Uuid::new_v4(),
@@ -989,7 +1001,7 @@ impl RoutineEngine {
                 tracing::error!(routine = %routine.name, "Failed to record run: {}", e);
                 return;
             }
-            execute_routine(engine, routine, run).await;
+            execute_routine(engine, routine, run, event_payload).await;
         })
     }
 
@@ -1130,7 +1142,12 @@ struct EngineContext {
 }
 
 /// Execute a routine run. Handles both lightweight and full_job modes.
-async fn execute_routine(ctx: EngineContext, mut routine: Routine, run: RoutineRun) {
+async fn execute_routine(
+    ctx: EngineContext,
+    mut routine: Routine,
+    run: RoutineRun,
+    event_payload: Option<serde_json::Value>,
+) {
     // Increment running count (atomic: survives panics in the execution below)
     ctx.running_count.fetch_add(1, Ordering::Relaxed);
 
@@ -1206,6 +1223,7 @@ async fn execute_routine(ctx: EngineContext, mut routine: Routine, run: RoutineR
                         *max_tokens,
                         *use_tools,
                         *max_tool_rounds,
+                        event_payload.as_ref(),
                     )
                     .await
                 }
@@ -1219,7 +1237,7 @@ async fn execute_routine(ctx: EngineContext, mut routine: Routine, run: RoutineR
                         description,
                         max_iterations: *max_iterations,
                     };
-                    execute_full_job(&ctx, &routine, &run, &execution).await
+                    execute_full_job(&ctx, &routine, &run, &execution, event_payload.as_ref()).await
                 }
             };
 
@@ -1436,6 +1454,7 @@ async fn execute_full_job(
     routine: &Routine,
     run: &RoutineRun,
     execution: &FullJobExecutionConfig<'_>,
+    event_payload: Option<&serde_json::Value>,
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
     // Full-job routines dispatch through the scheduler (same as /job
     // commands) — no Docker sandbox required when sandbox is disabled.
@@ -1469,12 +1488,17 @@ async fn execute_full_job(
 
     // Prepend execution context so the LLM knows it's already inside a
     // routine and should execute the task directly — not set up infrastructure.
+    let event_context = event_payload
+        .and_then(|p| serde_json::to_string_pretty(p).ok())
+        .map(|json| format!("\n\n## Trigger Event\n\n```json\n{json}\n```"))
+        .unwrap_or_default();
+
     let contextualized_description = format!(
         "IMPORTANT: You are executing inside routine \"{routine_name}\". \
          The routine and its schedule are already configured. \
          Tools and credentials are already set up. \
          Do NOT create routines, jobs, or try to discover/install/authenticate tools. \
-         Execute the task directly.\n\n{desc}",
+         Execute the task directly.\n\n{desc}{event_context}",
         routine_name = routine.name,
         desc = execution.description,
     );
@@ -1521,6 +1545,7 @@ async fn execute_full_job(
 ///
 /// If tools are enabled, this runs a simplified agentic loop (max 3-5 iterations).
 /// If tools are disabled, this does a single LLM call (original behavior).
+#[allow(clippy::too_many_arguments)]
 async fn execute_lightweight(
     ctx: &EngineContext,
     routine: &Routine,
@@ -1529,9 +1554,19 @@ async fn execute_lightweight(
     max_tokens: u32,
     use_tools: bool,
     max_tool_rounds: u32,
+    event_payload: Option<&serde_json::Value>,
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
     // Load context from workspace
     let mut context_parts = Vec::new();
+
+    // Inject the triggering event payload first so the routine has immediate
+    // access to the structured event data without an extra API call.
+    if let Some(payload) = event_payload
+        && let Ok(json) = serde_json::to_string_pretty(payload)
+    {
+        context_parts.push(format!("## Trigger Event\n\n```json\n{json}\n```"));
+    }
+
     for path in context_paths {
         match ctx.workspace.read(path).await {
             Ok(doc) => {
