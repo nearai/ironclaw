@@ -16,6 +16,7 @@ pub enum TurnEventKind {
     Resumed,
     RunnerClaimed,
     RunnerHeartbeat,
+    RecoveryRequired,
     Blocked,
     CancelRequested,
     Cancelled,

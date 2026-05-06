@@ -4,7 +4,6 @@
 //! (`tests/e2e_live_mission_gmail.rs`, etc.) can reuse the same approval
 //! responder and notification heuristics without copy-paste drift.
 
-#![cfg(feature = "libsql")]
 #![allow(dead_code)] // shared API; not every test uses every helper
 
 use std::collections::HashSet;
