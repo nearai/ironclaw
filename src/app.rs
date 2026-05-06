@@ -121,6 +121,11 @@ pub struct AppBuilder {
 
     // Backend-specific handles needed by secrets store
     handles: Option<crate::db::DatabaseHandles>,
+
+    // Optional plugin hook for downstream binaries that register their own
+    // Rust `Tool` implementations alongside the built-ins. See
+    // `src/tools/external_registrar.rs` for the contract.
+    external_tool_registrar: Option<Arc<dyn crate::tools::ExternalToolRegistrar>>,
 }
 
 impl AppBuilder {
@@ -146,6 +151,7 @@ impl AppBuilder {
             secrets_store: None,
             llm_override: None,
             handles: None,
+            external_tool_registrar: None,
         }
     }
 
@@ -180,6 +186,21 @@ impl AppBuilder {
     /// Inject a pre-created LLM provider, skipping `init_llm()`.
     pub fn with_llm(&mut self, llm: Arc<dyn LlmProvider>) {
         self.llm_override = Some(llm);
+    }
+
+    /// Attach a plugin that registers additional Rust-level `Tool`
+    /// implementations alongside the built-ins. Called once during
+    /// `init_tools()` after `register_builtin_tools()` and after all
+    /// credential/DB/interceptor accessors on the registry are populated.
+    ///
+    /// Intended for downstream forks (e.g. `nearai/ironclaw-abound`) that
+    /// ship integration-specific tools that cannot live upstream. See
+    /// `src/tools/external_registrar.rs` for the full contract.
+    pub fn with_external_tool_registrar(
+        &mut self,
+        registrar: Arc<dyn crate::tools::ExternalToolRegistrar>,
+    ) {
+        self.external_tool_registrar = Some(registrar);
     }
 
     /// Phase 1: Initialize database backend.
@@ -538,6 +559,17 @@ impl AppBuilder {
         tools.register_builtin_tools();
         tools.register_tool_info();
         tools.register_system_tools();
+
+        // Downstream plugin seam: a fork that bundles its own Rust tools
+        // (e.g. `nearai/ironclaw-abound`) supplies an
+        // `ExternalToolRegistrar` here and registers its tools into the
+        // same `Arc<ToolRegistry>`. Upstream has no way to discover Rust
+        // tools at runtime, so this seam is the only non-patch extension
+        // point for in-process Rust tools. WASM + MCP extensions are
+        // unaffected.
+        if let Some(ref registrar) = self.external_tool_registrar {
+            registrar.register(&tools);
+        }
 
         if let Some(ref ss) = self.secrets_store {
             tools.register_secrets_tools(Arc::clone(ss));
@@ -1597,6 +1629,78 @@ mod tests {
             .await
             .expect("reading the credential back from the ephemeral store must succeed");
         assert_eq!(decrypted.expose(), "tok-abc");
+    }
+
+    // ── External tool registrar plugin seam ──────────────────────
+    //
+    // Drive the registrar contract directly against a `ToolRegistry`.
+    // `init_tools()`'s wiring is a three-liner (`if let Some(reg) =
+    // self.external_tool_registrar { reg.register(&tools); }`) — the
+    // risk this test covers is someone renaming or accidentally
+    // gating that call, which would make the private-fork's tools
+    // silently vanish on startup. The grep for `external_tool_registrar`
+    // in `init_tools` backs up the compile-time coverage below.
+
+    struct CaptureRegistrar {
+        tool_name: &'static str,
+    }
+
+    struct DummyTool {
+        name: &'static str,
+    }
+
+    #[async_trait]
+    impl crate::tools::Tool for DummyTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            "test-only external tool"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object", "properties": {} })
+        }
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &crate::context::JobContext,
+        ) -> Result<crate::tools::ToolOutput, crate::tools::ToolError> {
+            Ok(crate::tools::ToolOutput::success(
+                serde_json::json!({}),
+                std::time::Duration::from_millis(1),
+            ))
+        }
+    }
+
+    impl crate::tools::ExternalToolRegistrar for CaptureRegistrar {
+        fn register(&self, registry: &Arc<crate::tools::ToolRegistry>) {
+            registry.register_sync(Arc::new(DummyTool {
+                name: self.tool_name,
+            }));
+        }
+    }
+
+    #[tokio::test]
+    async fn external_tool_registrar_registers_tool_into_registry() {
+        use crate::tools::ExternalToolRegistrar;
+        use crate::tools::ToolRegistry;
+
+        let registry = Arc::new(ToolRegistry::new());
+        registry.register_builtin_tools();
+        assert!(
+            !registry.has("external_marker_tool_for_test").await,
+            "sanity: the marker tool should not be a built-in"
+        );
+
+        let registrar = CaptureRegistrar {
+            tool_name: "external_marker_tool_for_test",
+        };
+        registrar.register(&registry);
+
+        assert!(
+            registry.has("external_marker_tool_for_test").await,
+            "ExternalToolRegistrar::register should add its tool to the registry"
+        );
     }
 
     struct SessionStartHook {
