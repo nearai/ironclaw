@@ -1,8 +1,10 @@
 use async_trait::async_trait;
 use std::{
+    fmt,
     panic::{AssertUnwindSafe, catch_unwind},
     sync::Arc,
 };
+use tracing::debug;
 
 use crate::{
     AdmissionRejection, CancelRunRequest, CancelRunResponse, GetRunStateRequest, ResumeTurnRequest,
@@ -23,9 +25,20 @@ pub struct TurnRunWake {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TurnRunWakeNotifyError {
     DeliveryUnavailable,
 }
+
+impl fmt::Display for TurnRunWakeNotifyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DeliveryUnavailable => formatter.write_str("delivery_unavailable"),
+        }
+    }
+}
+
+impl std::error::Error for TurnRunWakeNotifyError {}
 
 pub trait TurnRunWakeNotifier: Send + Sync {
     fn notify_queued_run(&self, wake: TurnRunWake) -> Result<(), TurnRunWakeNotifyError>;
@@ -120,7 +133,11 @@ fn resume_wake(scope: TurnScope, response: &ResumeTurnResponse) -> TurnRunWake {
 }
 
 fn notify_queued_run_best_effort(notifier: &dyn TurnRunWakeNotifier, wake: TurnRunWake) {
-    let _ = catch_unwind(AssertUnwindSafe(|| notifier.notify_queued_run(wake)));
+    match catch_unwind(AssertUnwindSafe(|| notifier.notify_queued_run(wake))) {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => debug!(error = %error, "turn run wake notification failed"),
+        Err(_) => debug!("turn run wake notifier panicked"),
+    }
 }
 
 #[async_trait]
