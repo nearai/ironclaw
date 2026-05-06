@@ -42,6 +42,7 @@ exceptions, not a loophole for new state:
 
 - `Heartbeat` — SSE keepalive, no payload, no state
 - `StreamChunk` — LLM token streaming, pre-step-completion by design; formalizing into `EventKind` would pollute the durable log with token-level noise
+- `SkillActivated` / `McpPromptsExpanded` — dispatcher-level mention-expansion notifications (activation-card UI hint). Both carry the same shape: a list of names plus per-mention feedback notes. They fire before the LLM sees the rewritten message, so there's no `EventKind` to project from yet. The rewritten user-message content is preserved in the turn log; the activation card is a UI convenience derived from what the expander did. Migrating to `EventKind` belongs in the same pass that formalises pre-LLM input transforms.
 
 New `AppEvent` variants that claim "transport-only" status require
 review sign-off and an entry in this table.

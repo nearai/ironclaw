@@ -2844,6 +2844,147 @@ impl ExtensionManager {
         }
     }
 
+    // ── MCP prompts aggregation ─────────────────────────────────────────
+    //
+    // Single source of truth for both the `/prompts` slash command and the
+    // `GET /api/prompts` HTTP endpoint. Multi-tenancy scoping (caller's
+    // active servers only) lives here once so the slash command handler,
+    // the web API handler, and the dispatcher-level mention expander all
+    // share it.
+
+    /// List MCP prompts across the caller's active servers.
+    ///
+    /// Returns one `ServerPromptsEntry` per *active* server (installed but
+    /// not activated servers are skipped — see `.claude/rules/lifecycle.md`).
+    /// A per-server failure becomes `ServerPromptsResult::Error` so one dead
+    /// server doesn't suppress the others.
+    pub async fn list_prompts_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<crate::extensions::ServerPromptsEntry>, ExtensionError> {
+        let servers = self
+            .load_mcp_servers(user_id)
+            .await
+            .map_err(|e| ExtensionError::Config(e.to_string()))?;
+
+        // Collect active (installed ≠ active — see .claude/rules/lifecycle.md)
+        // clients first, then fetch all `prompts/list` responses in
+        // parallel so `/prompts` latency is N+1 RTT instead of N×RTT.
+        let mut active: Vec<(String, std::sync::Arc<crate::tools::mcp::McpClient>)> = Vec::new();
+        for server in &servers.servers {
+            if let Some(client) = self.mcp_clients.get(user_id, &server.name).await {
+                active.push((server.name.clone(), client));
+            }
+        }
+
+        let fetches = active.iter().map(|(_, client)| client.list_prompts());
+        let results = futures::future::join_all(fetches).await;
+
+        let entries = active
+            .into_iter()
+            .zip(results)
+            .map(
+                |((name, client), result)| crate::extensions::ServerPromptsEntry {
+                    server: name.clone(),
+                    instructions: client.instructions().map(truncate_instructions),
+                    result: match result {
+                        Ok(prompts) => crate::extensions::ServerPromptsResult::Ok { prompts },
+                        Err(e) => {
+                            // Log the raw error before the user-safe
+                            // mapping swallows transport / config /
+                            // parse internals.
+                            tracing::warn!(
+                                user_id = %user_id,
+                                server = %name,
+                                error = %e,
+                                "list_prompts failed for active MCP server",
+                            );
+                            crate::extensions::ServerPromptsResult::Error {
+                                message: map_mcp_error_to_user(&e),
+                            }
+                        }
+                    },
+                },
+            )
+            .collect();
+        Ok(entries)
+    }
+
+    /// Fetch a specific prompt from an MCP server the caller has activated.
+    ///
+    /// Three-layer error shape:
+    ///
+    /// - `NotActive` when the caller hasn't activated the server (distinct
+    ///   from `NotInstalled` so the HTTP boundary can preserve the
+    ///   discovery-vs-activation distinction).
+    /// - `MissingRequiredArgs` when the caller's argument map omits a
+    ///   server-declared required argument. Typed (not a string-matched
+    ///   `ActivationFailed`) so the HTTP boundary can map to 400 by
+    ///   matching the variant, not by substring-searching a message.
+    /// - `ActivationFailed` for every other failure (transport, server
+    ///   error, malformed response), with the raw message user-safe-mapped.
+    pub async fn get_prompt_for_user(
+        &self,
+        user_id: &str,
+        server: &str,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<crate::tools::mcp::GetPromptResult, ExtensionError> {
+        // `McpServerName`'s allowlist permits uppercase letters, and
+        // persisted configs may be mixed case. Fall back to a
+        // case-insensitive match so user-authored `/Notion:foo` mentions
+        // resolve against a `notion` (or `Notion`) entry without
+        // requiring the parser to know the canonical casing.
+        let client = self
+            .mcp_clients
+            .get_ci(user_id, server)
+            .await
+            .ok_or_else(|| {
+                ExtensionError::NotActive(format!(
+                    "MCP server '{server}' is not active for this user"
+                ))
+            })?;
+
+        // Typed pre-flight so the HTTP boundary sees `PromptNotFound`
+        // (→ 404) and `MissingRequiredArgs` (→ 400) instead of a
+        // generic `ActivationFailed`. `get_prompt` re-validates args
+        // as defence-in-depth.
+        let prompts = client
+            .list_prompts()
+            .await
+            .map_err(|e| ExtensionError::ActivationFailed(map_mcp_error_to_user(&e)))?;
+        let prompt_def = prompts.iter().find(|p| p.name == name).ok_or_else(|| {
+            ExtensionError::PromptNotFound {
+                server: server.to_string(),
+                prompt: name.to_string(),
+            }
+        })?;
+        let missing: Vec<String> = prompt_def
+            .arguments
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .filter(|a| a.required)
+            .filter(|a| {
+                arguments
+                    .as_object()
+                    .is_none_or(|o| !o.contains_key(&a.name))
+            })
+            .map(|a| a.name.clone())
+            .collect();
+        if !missing.is_empty() {
+            return Err(ExtensionError::MissingRequiredArgs {
+                prompt: name.to_string(),
+                missing,
+            });
+        }
+
+        client
+            .get_prompt(name, arguments)
+            .await
+            .map_err(|e| ExtensionError::ActivationFailed(map_mcp_error_to_user(&e)))
+    }
+
     // ── MCP config helpers (DB with disk fallback) ─────────────────────
 
     async fn load_mcp_servers(
@@ -7927,6 +8068,48 @@ fn combine_install_errors(
     }
 }
 
+/// Map an MCP `ToolError` into a user-safe string for `/prompts` output
+/// and the HTTP API. Must not expose stack-trace-ish internals (per
+/// `.claude/rules/error-handling.md` "Error Boundaries at the Channel Edge").
+///
+/// The original error MUST be logged at `warn` by the caller so operator
+/// visibility into transport / config / parse failures isn't lost.
+fn map_mcp_error_to_user(err: &crate::tools::ToolError) -> String {
+    let raw = err.to_string();
+    if crate::tools::mcp::is_auth_error_message(&raw) {
+        return "server auth expired — re-activate the extension".to_string();
+    }
+    match err {
+        crate::tools::ToolError::RateLimited(_) => {
+            "server is rate limiting — retry shortly".to_string()
+        }
+        _ => "failed to reach MCP server".to_string(),
+    }
+}
+
+/// Truncate server-supplied `InitializeResult.instructions` to a
+/// char-count budget for informational display in `/prompts` output.
+/// Appends `…` when truncated. Single-pass — uses the `chars()` iterator
+/// once so a multi-megabyte adversarial `instructions` payload doesn't
+/// double-scan.
+fn truncate_instructions(raw: &str) -> String {
+    const MAX: usize = 200;
+    // Fast path: byte length is always ≥ char count, so a short byte
+    // string is definitely within budget.
+    if raw.len() <= MAX {
+        return raw.to_string();
+    }
+    let mut iter = raw.chars();
+    let prefix: String = iter.by_ref().take(MAX).collect();
+    if iter.next().is_some() {
+        let mut out = prefix;
+        out.push('…');
+        out
+    } else {
+        prefix
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fmt::Debug;
@@ -7975,6 +8158,66 @@ mod tests {
                 expected, actual
             ))
         }
+    }
+
+    #[test]
+    fn map_mcp_error_to_user_does_not_leak_transport() {
+        // Per-server `ToolError` flows through `map_mcp_error_to_user`
+        // into `ServerPromptsResult::Error.message`, which is
+        // serialised over `/api/prompts` and rendered by `/prompts`.
+        // Transport / config / parse internals must not survive — see
+        // `.claude/rules/error-handling.md`.
+        let cases: &[(crate::tools::ToolError, &[&str])] = &[
+            (
+                crate::tools::ToolError::ExternalService(
+                    "transport: dial tcp 10.0.0.1:5432 i/o timeout (attempt 3/3)".into(),
+                ),
+                &["10.0.0.1", "tcp", "dial"],
+            ),
+            (
+                crate::tools::ToolError::ExternalService(
+                    "Invalid prompts list: missing field `prompts` at line 12 column 3".into(),
+                ),
+                &["line 12", "missing field"],
+            ),
+            (
+                crate::tools::ToolError::ExecutionFailed(
+                    "Failed to read /home/user/.ironclaw/mcp-servers.json: os error 13".into(),
+                ),
+                &["/.ironclaw/", "os error"],
+            ),
+        ];
+        for (err, forbidden) in cases {
+            let out = super::map_mcp_error_to_user(err);
+            for needle in *forbidden {
+                assert!(
+                    !out.contains(needle),
+                    "generic path must NOT include {needle:?}, got: {out}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn map_mcp_error_to_user_auth_errors_surface_reactivate_hint() {
+        let auth = crate::tools::ToolError::ExternalService(
+            "MCP error: 401 Unauthorized (code -32001)".into(),
+        );
+        let out = super::map_mcp_error_to_user(&auth);
+        assert!(
+            out.contains("re-activate"),
+            "auth errors must surface the re-activation hint, got: {out}"
+        );
+    }
+
+    #[test]
+    fn map_mcp_error_to_user_rate_limit_is_retryable() {
+        let rate = crate::tools::ToolError::RateLimited(None);
+        let out = super::map_mcp_error_to_user(&rate);
+        assert!(
+            out.contains("rate limiting") || out.contains("retry"),
+            "rate-limit must surface a retry hint, got: {out}"
+        );
     }
 
     #[test]

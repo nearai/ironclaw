@@ -57,6 +57,7 @@ HEADED=1 pytest scenarios/
 | `test_oauth_refresh.py` | Hosted Gmail OAuth regression: complete setup via `/oauth/callback`, expire the stored access token in libSQL, trigger a real `gmail` tool call through `/api/chat/send`, and verify refresh goes through the mock `/oauth/refresh` proxy without forwarding `client_secret` |
 | `test_v2_tool_activate_surface.py` | Engine-v2 prompt contract: `tool_activate` is the visible enablement tool, `tool_auth`/`tool_install` stay off the normal surfaced prompt, and blocked integrations appear under `Activatable Integrations` |
 | `test_dom_resource_limits.py` | DOM pruning at MAX_DOM_MESSAGES cap, no setInterval timer leaks across SSE reconnect cycles, streaming message preservation during pruning |
+| `test_mcp_prompts.py` | Install+activate no-auth mock MCP server via `/api/extensions/install`, run `/prompts` through `/api/chat/send` and assert the SSE `response` event lists the advertised prompts, and assert `/server:prompt-name key=value` mentions fire a `mcp_prompts_expanded` SSE event AND rewrite the user message to a `<mcp_prompt>` block before the LLM call. Uses the `/mcp-prompts` mock endpoint (localhost → skips `requires_auth`). |
 
 ## `helpers.py`
 

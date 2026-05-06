@@ -101,6 +101,23 @@ impl Drop for MockMcpServer {
     }
 }
 
+/// Mock prompt declaration served from `prompts/list`.
+#[derive(Clone, Debug, Serialize)]
+pub struct MockPromptDef {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<Vec<MockPromptArgDef>>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct MockPromptArgDef {
+    pub name: String,
+    #[serde(default)]
+    pub required: bool,
+}
+
 /// Shared state for the mock server handlers.
 struct MockState {
     /// Base URL (filled after bind).
@@ -118,6 +135,17 @@ struct MockState {
     /// `Mcp-Session-Id` per handshake so multi-user isolation tests can
     /// observe that each activation binds its own session.
     session_counter: std::sync::Mutex<u64>,
+    /// Prompt declarations served from `prompts/list`. Non-empty → server
+    /// advertises the `prompts` capability on initialize.
+    prompts: Vec<MockPromptDef>,
+    /// Rendered `GetPromptResult.messages[0].content.text` keyed by prompt
+    /// name; served from `prompts/get`.
+    prompt_text_by_name: HashMap<String, String>,
+    /// Captured `prompts/get` params for assertions about argument
+    /// forwarding (the nearai/ironclaw#1948 shape).
+    prompt_get_calls: std::sync::Mutex<Vec<serde_json::Value>>,
+    /// Server-supplied instructions returned from `initialize`.
+    instructions: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -134,18 +162,28 @@ struct McpToolDef {
     annotations: Option<serde_json::Value>,
 }
 
-/// Start a mock MCP server on a random port.
-///
-/// `tool_responses` configures what `tools/call` returns for each tool name.
-/// Multiple responses for the same tool are returned in order.
-pub async fn start_mock_mcp_server(tool_responses: Vec<MockToolResponse>) -> MockMcpServer {
-    // Build tool definitions and response map.
+/// Per-server customization the three public constructors plug in.
+/// Everything else (routing, bind, shutdown plumbing) lives in
+/// [`spawn_mock_server`].
+#[derive(Default)]
+struct MockServerFixture {
+    tools: Vec<McpToolDef>,
+    tool_responses: HashMap<String, Vec<serde_json::Value>>,
+    prompts: Vec<MockPromptDef>,
+    prompt_text_by_name: HashMap<String, String>,
+    instructions: Option<String>,
+}
+
+/// Build a `(tools, tool_responses)` pair from `MockToolResponse` inputs.
+/// Multiple responses for the same tool name queue up in order.
+fn tools_from_responses(
+    tool_responses: &[MockToolResponse],
+) -> (Vec<McpToolDef>, HashMap<String, Vec<serde_json::Value>>) {
     let mut tools = Vec::new();
     let mut response_map: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
-    let mut seen_tools = std::collections::HashSet::new();
-
-    for tr in &tool_responses {
-        if seen_tools.insert(tr.name.clone()) {
+    let mut seen = std::collections::HashSet::new();
+    for tr in tool_responses {
+        if seen.insert(tr.name.clone()) {
             tools.push(McpToolDef {
                 name: tr.name.clone(),
                 description: format!("Mock tool: {}", tr.name),
@@ -158,8 +196,13 @@ pub async fn start_mock_mcp_server(tool_responses: Vec<MockToolResponse>) -> Moc
             .or_default()
             .push(tr.content.clone());
     }
+    (tools, response_map)
+}
 
-    // Bind to a random port.
+/// Shared spin-up: bind a random port, wire up routes, spawn the serve
+/// task, and return the handle. All three public `start_mock_mcp_server*`
+/// constructors converge here.
+async fn spawn_mock_server(fixture: MockServerFixture) -> MockMcpServer {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("failed to bind mock MCP server");
@@ -168,11 +211,15 @@ pub async fn start_mock_mcp_server(tool_responses: Vec<MockToolResponse>) -> Moc
 
     let state = Arc::new(MockState {
         base_url: base_url.clone(),
-        tools,
-        tool_responses: response_map,
+        tools: fixture.tools,
+        tool_responses: fixture.tool_responses,
         tool_response_idx: std::sync::Mutex::new(HashMap::new()),
         recorded_requests: std::sync::Mutex::new(Vec::new()),
         session_counter: std::sync::Mutex::new(0),
+        prompts: fixture.prompts,
+        prompt_text_by_name: fixture.prompt_text_by_name,
+        prompt_get_calls: std::sync::Mutex::new(Vec::new()),
+        instructions: fixture.instructions,
     });
 
     let app = Router::new()
@@ -211,6 +258,20 @@ pub async fn start_mock_mcp_server(tool_responses: Vec<MockToolResponse>) -> Moc
     }
 }
 
+/// Start a mock MCP server on a random port.
+///
+/// `tool_responses` configures what `tools/call` returns for each tool name.
+/// Multiple responses for the same tool are returned in order.
+pub async fn start_mock_mcp_server(tool_responses: Vec<MockToolResponse>) -> MockMcpServer {
+    let (tools, tool_responses) = tools_from_responses(&tool_responses);
+    spawn_mock_server(MockServerFixture {
+        tools,
+        tool_responses,
+        ..MockServerFixture::default()
+    })
+    .await
+}
+
 /// Same as `start_mock_mcp_server` but every dimension of the
 /// `tools/list` response is caller-controlled — description,
 /// input schema, and annotations. Use this when a test needs to
@@ -220,11 +281,10 @@ pub async fn start_mock_mcp_server(tool_responses: Vec<MockToolResponse>) -> Moc
 /// users of the same server name).
 pub async fn start_mock_mcp_server_with_specs(specs: Vec<MockToolSpec>) -> MockMcpServer {
     let mut tools = Vec::new();
-    let mut response_map: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
-    let mut seen_tools = std::collections::HashSet::new();
-
+    let mut tool_responses: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+    let mut seen = std::collections::HashSet::new();
     for spec in &specs {
-        if seen_tools.insert(spec.name.clone()) {
+        if seen.insert(spec.name.clone()) {
             tools.push(McpToolDef {
                 name: spec.name.clone(),
                 description: spec.description.clone(),
@@ -232,59 +292,57 @@ pub async fn start_mock_mcp_server_with_specs(specs: Vec<MockToolSpec>) -> MockM
                 annotations: spec.annotations.clone(),
             });
         }
-        response_map
+        tool_responses
             .entry(spec.name.clone())
             .or_default()
             .push(spec.content.clone());
     }
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("failed to bind mock MCP server");
-    let addr: SocketAddr = listener.local_addr().expect("no local addr");
-    let base_url = format!("http://127.0.0.1:{}", addr.port());
-
-    let state = Arc::new(MockState {
-        base_url: base_url.clone(),
+    spawn_mock_server(MockServerFixture {
         tools,
-        tool_responses: response_map,
-        tool_response_idx: std::sync::Mutex::new(HashMap::new()),
-        recorded_requests: std::sync::Mutex::new(Vec::new()),
-        session_counter: std::sync::Mutex::new(0),
-    });
+        tool_responses,
+        ..MockServerFixture::default()
+    })
+    .await
+}
 
-    let app = Router::new()
-        .route(
-            "/.well-known/oauth-protected-resource/mcp",
-            get(handle_protected_resource),
-        )
-        .route(
-            "/.well-known/oauth-authorization-server",
-            get(handle_auth_server_metadata),
-        )
-        .route("/register", post(handle_register))
-        .route("/authorize", get(handle_authorize))
-        .route("/token", post(handle_token))
-        .route("/mcp", post(handle_mcp))
-        .with_state(Arc::clone(&state));
+/// Configuration for a mock server that advertises MCP prompts. Callers
+/// supply the prompt declarations (tested by `prompts/list`) plus the
+/// rendered text each prompt returns (from `prompts/get`).
+#[derive(Clone, Debug, Default)]
+pub struct PromptsConfig {
+    pub prompts: Vec<MockPromptDef>,
+    /// Maps prompt name → rendered user-message text. A name missing from
+    /// this map falls back to `"rendered: <name>"`.
+    pub rendered: HashMap<String, String>,
+    /// Optional `InitializeResult.instructions`.
+    pub instructions: Option<String>,
+}
 
-    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-    let handle = tokio::spawn(async move {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async {
-                let _ = shutdown_rx.await;
-            })
-            .await
-            .expect("mock MCP server failed");
-    });
+/// Same as `start_mock_mcp_server` but also serves `prompts/list` and
+/// `prompts/get`, and advertises the `prompts` capability on initialize.
+/// Use this for tests that exercise the MCP prompts surface.
+pub async fn start_mock_mcp_server_with_prompts(
+    tool_responses: Vec<MockToolResponse>,
+    prompts_cfg: PromptsConfig,
+) -> MockMcpServer {
+    let (tools, tool_responses) = tools_from_responses(&tool_responses);
+    spawn_mock_server(MockServerFixture {
+        tools,
+        tool_responses,
+        prompts: prompts_cfg.prompts,
+        prompt_text_by_name: prompts_cfg.rendered,
+        instructions: prompts_cfg.instructions,
+    })
+    .await
+}
 
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-    MockMcpServer {
-        base_url,
-        state,
-        shutdown_tx: Some(shutdown_tx),
-        handle: Some(handle),
+impl MockMcpServer {
+    /// Outbound `prompts/get` params captured since the server started.
+    /// Lets tests assert that arguments round-trip from the caller
+    /// (slash command, HTTP handler, or mention expansion) through to
+    /// the wire without being silently dropped.
+    pub fn recorded_prompt_get_calls(&self) -> Vec<serde_json::Value> {
+        self.state.prompt_get_calls.lock().unwrap().clone()
     }
 }
 
@@ -427,19 +485,25 @@ async fn handle_mcp(
                 format!("mock-session-{}", *counter)
             };
             response_session_id = Some(session_id);
+            let mut capabilities = serde_json::json!({ "tools": {} });
+            if !state.prompts.is_empty() {
+                capabilities["prompts"] = serde_json::json!({ "listChanged": false });
+            }
+            let mut result = serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "serverInfo": {
+                    "name": "mock-mcp-server",
+                    "version": "1.0.0"
+                },
+                "capabilities": capabilities
+            });
+            if let Some(instr) = &state.instructions {
+                result["instructions"] = serde_json::json!(instr);
+            }
             serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": req.id,
-                "result": {
-                    "protocolVersion": "2024-11-05",
-                    "serverInfo": {
-                        "name": "mock-mcp-server",
-                        "version": "1.0.0"
-                    },
-                    "capabilities": {
-                        "tools": {}
-                    }
-                }
+                "result": result
             })
         }
         "tools/list" => {
@@ -484,6 +548,48 @@ async fn handle_mcp(
                         {
                             "type": "text",
                             "text": serde_json::to_string(&content).unwrap_or_default()
+                        }
+                    ]
+                }
+            })
+        }
+        "prompts/list" => {
+            let prompts: Vec<serde_json::Value> = state
+                .prompts
+                .iter()
+                .map(|p| serde_json::to_value(p).unwrap())
+                .collect();
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": req.id,
+                "result": { "prompts": prompts }
+            })
+        }
+        "prompts/get" => {
+            // Capture the full params so tests can assert argument
+            // forwarding — the nearai/ironclaw#1948 shape.
+            if let Some(params) = req.params.as_ref() {
+                state.prompt_get_calls.lock().unwrap().push(params.clone());
+            }
+            let name = req
+                .params
+                .as_ref()
+                .and_then(|p| p.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let text = state
+                .prompt_text_by_name
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| format!("rendered: {}", name));
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": req.id,
+                "result": {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": { "type": "text", "text": text }
                         }
                     ]
                 }

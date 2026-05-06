@@ -407,6 +407,19 @@ pub enum AppEvent {
         feedback: Vec<String>,
     },
 
+    /// `/server:prompt-name` mentions were expanded inline in the user's
+    /// message. `prompt_names` lists the `server:prompt` labels that were
+    /// injected; `feedback` lists per-mention notes so the UI can explain
+    /// unexpanded mentions. Named parallel to `SkillActivated.skill_names`.
+    #[serde(rename = "mcp_prompts_expanded")]
+    McpPromptsExpanded {
+        prompt_names: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        feedback: Vec<String>,
+    },
+
     /// Extension activation status change (WASM channels).
     #[serde(rename = "extension_status")]
     ExtensionStatus {
@@ -719,6 +732,7 @@ impl AppEvent {
             Self::Suggestions { .. } => "suggestions",
             Self::TurnCost { .. } => "turn_cost",
             Self::SkillActivated { .. } => "skill_activated",
+            Self::McpPromptsExpanded { .. } => "mcp_prompts_expanded",
             Self::ExtensionStatus { .. } => "extension_status",
             Self::ReasoningUpdate { .. } => "reasoning_update",
             Self::JobReasoning { .. } => "job_reasoning",

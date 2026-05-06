@@ -623,6 +623,37 @@ pub struct InstalledExtension {
     pub version: Option<String>,
 }
 
+/// Outcome of `list_prompts` for a single MCP server in a user's active set.
+///
+/// Tagged union: per-server `Ok` and `Error` live side-by-side so a single
+/// dead server (expired auth, transport failure) doesn't suppress the
+/// others in the aggregated response. Errors are mapped to user-safe
+/// strings at this boundary (`.claude/rules/error-handling.md`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ServerPromptsResult {
+    Ok {
+        prompts: Vec<crate::tools::mcp::McpPrompt>,
+    },
+    Error {
+        message: String,
+    },
+}
+
+/// Per-server entry in the prompts listing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerPromptsEntry {
+    pub server: String,
+    /// Server-supplied instructions from the initialize handshake, if any.
+    /// Displayed informationally in `/prompts` output; NOT injected into the
+    /// system prompt (no trust model yet — see
+    /// `.claude/rules/safety-and-sandbox.md`). Truncated at the aggregator.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    #[serde(flatten)]
+    pub result: ServerPromptsResult,
+}
+
 /// Error type for extension operations.
 #[derive(Debug, thiserror::Error)]
 pub enum ExtensionError {
@@ -635,6 +666,9 @@ pub enum ExtensionError {
     #[error("Extension not installed: {0}")]
     NotInstalled(String),
 
+    #[error("Extension not active: {0}")]
+    NotActive(String),
+
     #[error("Authentication failed: {0}")]
     AuthFailed(String),
 
@@ -643,6 +677,25 @@ pub enum ExtensionError {
 
     #[error("Activation failed: {0}")]
     ActivationFailed(String),
+
+    /// Caller supplied an MCP prompt argument map that's missing one or
+    /// more server-declared required arguments. Typed so the HTTP
+    /// boundary can map it to 400 without string-matching
+    /// `ActivationFailed` messages — see
+    /// `src/channels/web/features/prompts/mod.rs::get_prompt_error_to_status`.
+    #[error("MCP prompt '{prompt}' missing required arguments: {}", .missing.join(", "))]
+    MissingRequiredArgs {
+        prompt: String,
+        missing: Vec<String>,
+    },
+
+    /// Caller referenced an MCP prompt name that the server does not
+    /// advertise. Distinct from `NotActive` (server-level) so the HTTP
+    /// boundary can preserve the resource-specific 404 and avoid
+    /// folding unknown-prompt errors into the generic 500 bucket that
+    /// protects transport/config internals.
+    #[error("MCP prompt '{prompt}' not found on server '{server}'")]
+    PromptNotFound { server: String, prompt: String },
 
     #[error("Authentication required")]
     AuthRequired,

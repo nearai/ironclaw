@@ -228,6 +228,23 @@ impl McpClientStore {
             .map(|entry| entry.client.clone())
     }
 
+    /// Case-insensitive variant of [`Self::get`]. Exact match is the
+    /// fast path; a linear scan with `eq_ignore_ascii_case` is the
+    /// fallback for mixed-case config entries (`McpServerName` permits
+    /// uppercase and casing is not canonicalised at config load).
+    pub async fn get_ci(&self, user_id: &str, server_name: &str) -> Option<Arc<McpClient>> {
+        let clients = self.clients.read().await;
+        if let Some(entry) = clients.get(&McpClientKey::new(user_id, server_name)) {
+            return Some(entry.client.clone());
+        }
+        clients
+            .iter()
+            .find(|(key, _)| {
+                key.user_id == user_id && key.server_name.eq_ignore_ascii_case(server_name)
+            })
+            .map(|(_, entry)| entry.client.clone())
+    }
+
     /// Whether `(user_id, server_name)` has an active client.
     pub async fn contains(&self, user_id: &str, server_name: &str) -> bool {
         self.clients
@@ -415,6 +432,48 @@ mod tests {
             &store.get("user-b", "notion").await.expect("b"),
             &client_b
         ));
+    }
+
+    #[tokio::test]
+    async fn get_ci_resolves_case_insensitively_and_stays_user_scoped() {
+        // Regression for the mention-parser casing mismatch: a mention
+        // like `/Notion:foo` must resolve against a client inserted as
+        // `notion`, and a `/notion:foo` mention must resolve against a
+        // `Notion` entry. Case-folding must NOT cross the user
+        // boundary — user-b's lowercase client must never leak to
+        // user-a's uppercase mention.
+        let store = McpClientStore::new();
+        let client_a = Arc::new(McpClient::new_with_name("notion", "http://a.invalid"));
+        let client_b = Arc::new(McpClient::new_with_name("notion", "http://b.invalid"));
+
+        store
+            .insert("user-a", "Notion", client_a.clone(), "sig-a".into())
+            .await;
+        store
+            .insert("user-b", "notion", client_b.clone(), "sig-b".into())
+            .await;
+
+        // Exact-case match still takes the fast path.
+        assert!(Arc::ptr_eq(
+            &store.get_ci("user-a", "Notion").await.expect("a exact"),
+            &client_a
+        ));
+        // Lowercase mention against mixed-case config: resolves.
+        assert!(Arc::ptr_eq(
+            &store.get_ci("user-a", "notion").await.expect("a lower"),
+            &client_a
+        ));
+        // Uppercase mention against lowercase config: resolves.
+        assert!(Arc::ptr_eq(
+            &store.get_ci("user-b", "NOTION").await.expect("b upper"),
+            &client_b
+        ));
+
+        // Case-insensitivity must NOT cross the user axis.
+        assert!(
+            store.get_ci("user-c", "notion").await.is_none(),
+            "ci lookup must stay user-scoped — user-c never activated"
+        );
     }
 
     #[tokio::test]

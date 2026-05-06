@@ -159,6 +159,8 @@ All commands parsed by `SubmissionParser::parse()`:
 | `/version` | `SystemCommand { "version" }` | |
 | `/tools` | `SystemCommand { "tools" }` | |
 | `/skills [search <q>]` | `SystemCommand { "skills" }` | |
+| `/prompts` | `SystemCommand { "prompts" }` | Lists MCP prompts from active servers. |
+| `/server:prompt-name [k=v ...]` inside a message | `UserInput` (expanded in dispatcher) | Mention-style injection; dispatcher splices the `<mcp_prompt>` block before the LLM sees the message. |
 | `/ping` | `SystemCommand { "ping" }` | |
 | `/debug` | `SystemCommand { "debug" }` | |
 | `/model [name]` | `SystemCommand { "model" }` | |

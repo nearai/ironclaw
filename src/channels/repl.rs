@@ -68,6 +68,7 @@ const SLASH_COMMANDS: &[&str] = &[
     "/interrupt",
     "/version",
     "/tools",
+    "/prompts",
     "/ping",
     "/job",
     "/status",
@@ -815,6 +816,14 @@ impl Channel for ReplChannel {
                     eprintln!(
                         "  \x1b[36m\u{25C8} skills: {}\x1b[0m",
                         skill_names.join(", ")
+                    );
+                }
+            }
+            StatusUpdate::McpPromptsExpanded { prompt_names, .. } => {
+                if !prompt_names.is_empty() {
+                    eprintln!(
+                        "  \x1b[36m\u{25C8} prompts: {}\x1b[0m",
+                        prompt_names.join(", ")
                     );
                 }
             }

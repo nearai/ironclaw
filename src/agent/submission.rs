@@ -92,6 +92,12 @@ impl SubmissionParser {
                 args: vec![],
             };
         }
+        if lower == "/prompts" {
+            return Submission::SystemCommand {
+                command: "prompts".to_string(),
+                args: vec![],
+            };
+        }
         if lower == "/debug" {
             return Submission::SystemCommand {
                 command: "debug".to_string(),

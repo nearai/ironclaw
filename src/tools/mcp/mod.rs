@@ -35,6 +35,7 @@ pub mod config;
 pub mod factory;
 pub(crate) mod http_transport;
 pub(crate) mod process;
+pub mod prompt_mentions;
 mod protocol;
 pub mod session;
 pub(crate) mod stdio_transport;
@@ -49,7 +50,11 @@ pub(crate) use client_store::{McpClientStore, surface_signature};
 pub use config::{McpServerConfig, McpServersFile, OAuthConfig};
 pub use factory::{McpFactoryError, create_client_from_config};
 pub use process::McpProcessManager;
-pub use protocol::{InitializeResult, McpRequest, McpResponse, McpTool};
+pub use prompt_mentions::{PromptMention, extract_prompt_mentions};
+pub use protocol::{
+    ContentBlock, GetPromptResult, InitializeResult, ListPromptsResult, McpPrompt, McpRequest,
+    McpResponse, McpTool, PromptArgument, PromptMessage, PromptRole,
+};
 pub use session::McpSessionManager;
 pub use transport::McpTransport;
 

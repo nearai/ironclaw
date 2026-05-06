@@ -165,6 +165,23 @@ impl McpRequest {
             })),
         )
     }
+
+    /// Create a prompts/list request.
+    pub fn list_prompts(id: u64) -> Self {
+        Self::new(id, "prompts/list", None)
+    }
+
+    /// Create a prompts/get request.
+    pub fn get_prompt(id: u64, name: &str, arguments: serde_json::Value) -> Self {
+        Self::new(
+            id,
+            "prompts/get",
+            Some(serde_json::json!({
+                "name": name,
+                "arguments": arguments
+            })),
+        )
+    }
 }
 
 /// Response from an MCP server.
@@ -260,6 +277,70 @@ pub struct PromptsCapability {
     /// Whether the prompt list can change.
     #[serde(rename = "listChanged", default)]
     pub list_changed: bool,
+}
+
+/// Role of a message inside an MCP prompt template.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PromptRole {
+    User,
+    Assistant,
+}
+
+impl PromptRole {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PromptRole::User => "user",
+            PromptRole::Assistant => "assistant",
+        }
+    }
+}
+
+/// A declared argument of an MCP prompt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptArgument {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub required: bool,
+}
+
+/// A prompt advertised by an MCP server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpPrompt {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<Vec<PromptArgument>>,
+}
+
+/// Result of `prompts/list`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListPromptsResult {
+    pub prompts: Vec<McpPrompt>,
+    #[serde(
+        rename = "nextCursor",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub next_cursor: Option<String>,
+}
+
+/// A single message inside an MCP prompt template.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptMessage {
+    pub role: PromptRole,
+    pub content: ContentBlock,
+}
+
+/// Result of `prompts/get`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetPromptResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub messages: Vec<PromptMessage>,
 }
 
 /// Server information.
@@ -749,5 +830,109 @@ mod tests {
 
         let required = tool.input_schema.get("required").expect("has required");
         assert!(required.as_array().expect("is array").len() == 2);
+    }
+
+    // ── MCP prompts ──────────────────────────────────────────────────────
+
+    #[test]
+    fn prompt_role_serializes_lowercase() {
+        assert_eq!(
+            serde_json::to_value(PromptRole::User).expect("serialize"),
+            serde_json::json!("user"),
+        );
+        assert_eq!(
+            serde_json::to_value(PromptRole::Assistant).expect("serialize"),
+            serde_json::json!("assistant"),
+        );
+        let role: PromptRole =
+            serde_json::from_value(serde_json::json!("user")).expect("deserialize user");
+        assert_eq!(role, PromptRole::User);
+        let role: PromptRole =
+            serde_json::from_value(serde_json::json!("assistant")).expect("deserialize assistant");
+        assert_eq!(role, PromptRole::Assistant);
+    }
+
+    #[test]
+    fn prompt_argument_required_defaults_to_false_when_absent() {
+        // MCP spec: a missing `required` means the argument is optional.
+        let arg: PromptArgument =
+            serde_json::from_value(serde_json::json!({ "name": "query" })).expect("deserialize");
+        assert_eq!(arg.name, "query");
+        assert!(!arg.required);
+        assert!(arg.description.is_none());
+    }
+
+    #[test]
+    fn list_prompts_result_roundtrips() {
+        let json = serde_json::json!({
+            "prompts": [
+                {
+                    "name": "create-page",
+                    "description": "Create a Notion page",
+                    "arguments": [
+                        { "name": "parent_id", "description": "Parent page", "required": true },
+                        { "name": "title", "required": true },
+                        { "name": "body" }
+                    ]
+                }
+            ]
+        });
+        let result: ListPromptsResult = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(result.prompts.len(), 1);
+        let prompt = &result.prompts[0];
+        assert_eq!(prompt.name, "create-page");
+        let args = prompt.arguments.as_ref().expect("has arguments");
+        assert_eq!(args.len(), 3);
+        assert!(args[0].required);
+        assert!(args[1].required);
+        assert!(!args[2].required);
+        assert!(result.next_cursor.is_none());
+    }
+
+    #[test]
+    fn get_prompt_result_roundtrips_text_and_image_content() {
+        let json = serde_json::json!({
+            "description": "a review prompt",
+            "messages": [
+                { "role": "user", "content": { "type": "text", "text": "Review this PR" } },
+                {
+                    "role": "assistant",
+                    "content": {
+                        "type": "image",
+                        "data": "AAAA",
+                        "mime_type": "image/png"
+                    }
+                }
+            ]
+        });
+        let result: GetPromptResult = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(result.description.as_deref(), Some("a review prompt"));
+        assert_eq!(result.messages.len(), 2);
+        assert_eq!(result.messages[0].role, PromptRole::User);
+        assert_eq!(result.messages[0].content.as_text(), Some("Review this PR"));
+        assert_eq!(result.messages[1].role, PromptRole::Assistant);
+        matches!(result.messages[1].content, ContentBlock::Image { .. });
+    }
+
+    #[test]
+    fn list_prompts_request_uses_spec_method() {
+        let req = McpRequest::list_prompts(42);
+        assert_eq!(req.method, "prompts/list");
+        assert_eq!(req.id, Some(42));
+        assert!(req.params.is_none());
+    }
+
+    #[test]
+    fn get_prompt_request_carries_name_and_arguments() {
+        let req = McpRequest::get_prompt(
+            7,
+            "create-page",
+            serde_json::json!({ "title": "Q2 Review" }),
+        );
+        assert_eq!(req.method, "prompts/get");
+        assert_eq!(req.id, Some(7));
+        let params = req.params.as_ref().expect("has params");
+        assert_eq!(params["name"], serde_json::json!("create-page"));
+        assert_eq!(params["arguments"]["title"], serde_json::json!("Q2 Review"));
     }
 }

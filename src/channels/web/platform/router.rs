@@ -88,6 +88,7 @@ use crate::channels::web::features::oauth::{
     oauth_callback_handler, relay_events_handler, slack_relay_oauth_callback_handler,
 };
 use crate::channels::web::features::pairing::{pairing_approve_handler, pairing_list_handler};
+use crate::channels::web::features::prompts::{prompts_get_handler, prompts_list_handler};
 use crate::channels::web::features::routines::{
     routines_delete_handler, routines_detail_handler, routines_list_handler, routines_runs_handler,
     routines_summary_handler, routines_toggle_handler, routines_trigger_handler,
@@ -225,6 +226,9 @@ pub async fn start_server(
             "/api/extensions/{name}/setup",
             get(extensions_setup_handler).post(extensions_setup_submit_handler),
         )
+        // MCP prompts
+        .route("/api/prompts", get(prompts_list_handler))
+        .route("/api/prompts/get", post(prompts_get_handler))
         // Pairing
         .route("/api/pairing/{channel}", get(pairing_list_handler))
         .route(
