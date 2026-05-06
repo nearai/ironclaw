@@ -23,8 +23,8 @@ use crate::search::{
 
 use super::{
     MemoryAppendOutcome, MemoryDocumentRepository, ensure_document_path_does_not_conflict,
-    reborn_agent_id_db_value, reborn_memory_document_from_row, reborn_project_id_db_value,
-    scoped_memory_owner_key,
+    escape_like_pattern, reborn_agent_id_db_value, reborn_memory_document_from_row,
+    reborn_project_id_db_value, scoped_memory_owner_key,
 };
 
 /// Render a tokio_postgres error with its full source chain.
@@ -506,7 +506,7 @@ impl MemoryDocumentRepository for RebornPostgresMemoryDocumentRepository {
             .await?;
         let scope = path.scope();
         let parsed_metadata = DocumentMetadata::from_value(metadata);
-        client
+        let rows_affected = client
             .execute(
                 "UPDATE reborn_memory_documents \
                  SET metadata = $6, updated_at = NOW() \
@@ -529,7 +529,10 @@ impl MemoryDocumentRepository for RebornPostgresMemoryDocumentRepository {
                     pg_error_chain(&error),
                 )
             })?;
-        if parsed_metadata.skip_indexing == Some(true) {
+        // Gate the chunk clear on the UPDATE having matched a row. See
+        // libSQL counterpart for full rationale (zmanian #3180 MED
+        // `native_libsql.rs:531`).
+        if rows_affected > 0 && parsed_metadata.skip_indexing == Some(true) {
             reborn_postgres_clear_chunks_for_metadata_path(&client, path, &virtual_path).await?;
         }
         Ok(())
@@ -801,14 +804,31 @@ async fn reborn_postgres_clear_chunks_for_metadata_path(
             .relative_path()
             .rsplit_once('/')
             .map(|(parent, _)| parent);
-        let like_pattern = parent.map_or("%".to_string(), |parent| format!("{parent}/%"));
+        // See `native_libsql.rs::reborn_libsql_clear_chunks_for_metadata_path`
+        // for the rationale — escape `\`, `%`, `_` and use `LIKE ...
+        // ESCAPE '\'` so a literal segment like `team_%/.config` does
+        // not glob-match `team-a/note.md` (zmanian #3180 MED
+        // `native_libsql.rs:801`).
+        let like_pattern = parent.map_or("%".to_string(), |parent| {
+            format!("{}/%", escape_like_pattern(parent))
+        });
+        // See libSQL counterpart for rationale: clear descendants whose
+        // own metadata is unset (NULL) or true; leave alone descendants
+        // whose document-level metadata pins skip_indexing=false
+        // (zmanian #3180 MED `native_libsql.rs:531` descendant
+        // override). Postgres jsonb uses the `?`/`->>` operators —
+        // `metadata ? 'skip_indexing'` is true if the key exists;
+        // `(metadata ->> 'skip_indexing')::text` returns the JSON
+        // boolean rendered as the literal string `"true"`/`"false"`.
         client
             .execute(
                 "DELETE FROM reborn_memory_chunks \
                  WHERE document_id IN (\
                      SELECT id FROM reborn_memory_documents \
                      WHERE tenant_id = $1 AND user_id = $2 AND agent_id = $3 \
-                       AND project_id = $4 AND path LIKE $5\
+                       AND project_id = $4 AND path LIKE $5 ESCAPE '\\' \
+                       AND (NOT (metadata ? 'skip_indexing') \
+                            OR (metadata ->> 'skip_indexing') != 'false')\
                  )",
                 &[
                     &scope.tenant_id(),

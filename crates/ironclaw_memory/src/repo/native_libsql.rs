@@ -27,8 +27,8 @@ use crate::search::{
 
 use super::{
     MemoryAppendOutcome, MemoryDocumentRepository, ensure_document_path_does_not_conflict,
-    reborn_agent_id_db_value, reborn_memory_document_from_row, reborn_project_id_db_value,
-    scoped_memory_owner_key,
+    escape_like_pattern, reborn_agent_id_db_value, reborn_memory_document_from_row,
+    reborn_project_id_db_value, scoped_memory_owner_key,
 };
 
 /// Reborn-native libSQL repository for `reborn_memory_*` tables.
@@ -506,29 +506,37 @@ impl MemoryDocumentRepository for RebornLibSqlMemoryDocumentRepository {
                 error.to_string(),
             )
         })?;
-        conn.execute(
-            "UPDATE reborn_memory_documents \
-             SET metadata = ?6, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
-             WHERE tenant_id = ?1 AND user_id = ?2 AND agent_id = ?3 \
-               AND project_id = ?4 AND path = ?5",
-            libsql::params![
-                scope.tenant_id(),
-                scope.user_id(),
-                reborn_agent_id_db_value(scope),
-                reborn_project_id_db_value(scope),
-                path.relative_path(),
-                metadata,
-            ],
-        )
-        .await
-        .map_err(|error| {
-            memory_error(
-                virtual_path.clone(),
-                FilesystemOperation::WriteFile,
-                error.to_string(),
+        let rows_affected = conn
+            .execute(
+                "UPDATE reborn_memory_documents \
+                 SET metadata = ?6, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+                 WHERE tenant_id = ?1 AND user_id = ?2 AND agent_id = ?3 \
+                   AND project_id = ?4 AND path = ?5",
+                libsql::params![
+                    scope.tenant_id(),
+                    scope.user_id(),
+                    reborn_agent_id_db_value(scope),
+                    reborn_project_id_db_value(scope),
+                    path.relative_path(),
+                    metadata,
+                ],
             )
-        })?;
-        if parsed_metadata.skip_indexing == Some(true) {
+            .await
+            .map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::WriteFile,
+                    error.to_string(),
+                )
+            })?;
+        // **Gate the chunk clear on the UPDATE having actually matched a
+        // row.** Otherwise a `write_document_metadata` for a non-existent
+        // root `.config` would pass through the metadata-update statement
+        // (rows_affected = 0, no error) and then run the descendant clear
+        // with `LIKE '%'` on a blank prefix — wiping every chunk in the
+        // scope. zmanian #3180 MED `native_libsql.rs:531` (row-update
+        // gate) and `:801` (LIKE injection, separate fix).
+        if rows_affected > 0 && parsed_metadata.skip_indexing == Some(true) {
             reborn_libsql_clear_chunks_for_metadata_path(&conn, path, &virtual_path).await?;
         }
         Ok(())
@@ -798,13 +806,31 @@ async fn reborn_libsql_clear_chunks_for_metadata_path(
             .relative_path()
             .rsplit_once('/')
             .map(|(parent, _)| parent);
-        let like_pattern = parent.map_or("%".to_string(), |parent| format!("{parent}/%"));
+        // Escape `\`, `%`, `_` in the parent prefix so a literal segment
+        // like `team_%/.config` matches only its own descendants and not
+        // unrelated paths such as `team-a/note.md` (zmanian #3180 MED
+        // `native_libsql.rs:801`). The empty-parent root-config case
+        // still uses bare `%` to mean "every path under this scope".
+        let like_pattern = parent.map_or("%".to_string(), |parent| {
+            format!("{}/%", escape_like_pattern(parent))
+        });
+        // **Honor descendant `skip_indexing=false` overrides.** A parent
+        // `.config` writing `skip_indexing=true` should clear chunks for
+        // descendants that *inherit* the skip — but not for a descendant
+        // whose own document-level metadata explicitly sets
+        // `skip_indexing=false`. `json_extract` returns 1 (true), 0
+        // (false), or NULL (unset). We clear when the descendant is
+        // unset (NULL) or already true; we leave descendants whose
+        // metadata pins skip_indexing to false alone (zmanian #3180 MED
+        // `native_libsql.rs:531` descendant override).
         conn.execute(
             "DELETE FROM reborn_memory_chunks \
              WHERE document_id IN (\
                  SELECT id FROM reborn_memory_documents \
                  WHERE tenant_id = ?1 AND user_id = ?2 AND agent_id = ?3 \
-                   AND project_id = ?4 AND path LIKE ?5\
+                   AND project_id = ?4 AND path LIKE ?5 ESCAPE '\\' \
+                   AND (json_extract(metadata, '$.skip_indexing') IS NULL \
+                        OR json_extract(metadata, '$.skip_indexing') != 0)\
              )",
             libsql::params![
                 scope.tenant_id(),

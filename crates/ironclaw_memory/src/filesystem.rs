@@ -103,7 +103,16 @@ impl MemoryBackendFilesystemAdapter {
     {
         let event_sink: Arc<dyn PromptWriteSafetyEventSink> = event_sink;
         self.prompt_safety_event_sink = Some(event_sink);
-        self.prompt_safety_config_overridden = true;
+        // **Sink config is observability, not policy override.** Adding an
+        // audit sink does *not* mean the host is replacing the backend's
+        // policy — it means the host wants every safety event to land in a
+        // specific durable seam. Flipping `prompt_safety_config_overridden`
+        // here would cause the adapter to take over enforcement, skipping a
+        // stricter backend policy that the operator never intended to
+        // bypass (zmanian #3180 HIGH `filesystem.rs:47`). Policy overrides
+        // are now scoped to the explicit `with_prompt_write_safety_policy`
+        // / `without_prompt_write_safety_policy` /
+        // `with_prompt_protected_path_registry` builders.
         self
     }
 
@@ -193,8 +202,17 @@ impl RootFilesystem for MemoryBackendFilesystemAdapter {
             && self
                 .backend
                 .prompt_write_safety_protects_path(&document_path);
+        // The adapter must enforce whenever the path is protected and the
+        // wrapped backend will *not* enforce for THIS path — relying on
+        // the bare `prompt_write_safety` capability flag is insufficient
+        // because a backend can advertise the capability while reporting
+        // `prompt_write_safety_protects_path() == false` for adapter-
+        // classified protected files (SOUL.md, AGENTS.md, …). Without
+        // this path-level check the adapter skips its policy and the
+        // backend does nothing → unprotected write through the
+        // filesystem surface (zmanian #3180 HIGH `filesystem.rs:196`).
         let adapter_should_enforce_prompt_safety = is_protected
-            && (!backend_capabilities.prompt_write_safety || self.prompt_safety_config_overridden);
+            && (!backend_will_enforce_protected_path || self.prompt_safety_config_overridden);
         let prompt_safety_allowance = if is_protected || backend_will_enforce_protected_path {
             take_prompt_safety_allowance(
                 &self.one_shot_prompt_safety_allowance,
@@ -264,8 +282,10 @@ impl RootFilesystem for MemoryBackendFilesystemAdapter {
             && self
                 .backend
                 .prompt_write_safety_protects_path(&document_path);
+        // See `write_file` for the rationale — same path-level rule for
+        // append (zmanian #3180 HIGH `filesystem.rs:196`).
         let adapter_should_enforce_prompt_safety = is_protected
-            && (!backend_capabilities.prompt_write_safety || self.prompt_safety_config_overridden);
+            && (!backend_will_enforce_protected_path || self.prompt_safety_config_overridden);
         let prompt_safety_allowance = if is_protected || backend_will_enforce_protected_path {
             take_prompt_safety_allowance(
                 &self.one_shot_prompt_safety_allowance,

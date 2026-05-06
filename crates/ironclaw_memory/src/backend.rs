@@ -76,7 +76,21 @@ impl MemoryContext {
         self
     }
 
-    pub fn with_prompt_write_safety_enforced(mut self) -> Self {
+    /// Internal marker used by the filesystem adapter to tell the wrapped
+    /// backend "I have already enforced prompt-write safety; do not run a
+    /// second policy evaluation that could erroneously reject a value the
+    /// adapter already approved."
+    ///
+    /// Crate-private on purpose. If this were `pub`, any direct backend
+    /// caller could construct a `MemoryContext` with the marker set and
+    /// persist high-risk content to protected files (`SOUL.md`,
+    /// `BOOTSTRAP.md`, etc.) through the public backend seam without
+    /// passing through *any* policy check. Only
+    /// `MemoryBackendFilesystemAdapter` (the same crate) is allowed to
+    /// produce an enforced context, and only after running its own
+    /// `enforce_prompt_write_safety` pass. zmanian #3180 HIGH
+    /// (`backend.rs:79`).
+    pub(crate) fn with_prompt_write_safety_enforced(mut self) -> Self {
         self.prompt_write_safety_enforced = true;
         self
     }
@@ -628,6 +642,27 @@ mod tests {
         async fn embed(&self, _text: &str) -> Result<Vec<f32>, EmbeddingError> {
             Ok(vec![1.0, 0.0, 0.0])
         }
+    }
+
+    #[test]
+    fn default_context_does_not_claim_prompt_safety_enforced() {
+        // The bypass marker is `pub(crate)` so external callers cannot
+        // construct an enforced context. The crate-internal default must
+        // start unenforced — otherwise a forgotten reset path could leak
+        // the bypass into routes that did not run policy. Locks the
+        // invariant in alongside the privacy reduction (zmanian #3180
+        // HIGH `backend.rs:79`).
+        let ctx = MemoryContext::new(
+            MemoryDocumentScope::new("tenant", "alpha", Some("project")).unwrap(),
+        );
+        assert!(!ctx.prompt_write_safety_enforced());
+        let with_allowance = ctx
+            .clone()
+            .with_prompt_write_safety_allowance(PromptSafetyAllowanceId::empty_prompt_file_clear());
+        assert!(
+            !with_allowance.prompt_write_safety_enforced(),
+            "setting an allowance must not flip the enforced marker"
+        );
     }
 
     fn alpha_path() -> MemoryDocumentPath {

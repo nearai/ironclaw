@@ -185,6 +185,183 @@ async fn libsql_backend_skip_indexing_from_config_writes_zero_chunks_to_db() {
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
+async fn libsql_metadata_write_to_missing_root_config_does_not_wipe_chunks() {
+    // zmanian #3180 MED `native_libsql.rs:531` (row-update gate): a
+    // `write_document_metadata` for a non-existent root `.config` (no
+    // matching row) used to fall through to the descendant chunk-clear
+    // path, which for `.config` paths runs `LIKE '%'` — wiping every
+    // chunk in the scope. After the fix the clear is gated on the
+    // UPDATE having actually matched a row.
+    use ironclaw_memory::MemoryDocumentRepository;
+    let fixture = libsql_repo().await;
+    let repo = fixture.repo.clone();
+    let indexer = Arc::new(ChunkingMemoryDocumentIndexer::new(repo.clone()));
+    let backend = RepositoryMemoryBackend::new(repo.clone()).with_indexer(indexer);
+    let context = MemoryContext::new(MemoryDocumentScope::new("tenant-a", "alice", None).unwrap());
+
+    let doc = MemoryDocumentPath::new("tenant-a", "alice", None, "notes/keep.md").unwrap();
+    backend
+        .write_document(&context, &doc, b"alpha beta gamma")
+        .await
+        .unwrap();
+    let before = count_rows_libsql(&fixture.db, "reborn_memory_chunks").await;
+    assert!(before > 0, "expected chunks for the seeded document");
+
+    // Write metadata to a `.config` row that *does not exist* — root
+    // `.config` is the most dangerous case because the descendant-clear
+    // pattern collapses to bare `%`. The UPDATE must touch zero rows,
+    // and no chunks may be cleared.
+    let missing_root_config =
+        MemoryDocumentPath::new("tenant-a", "alice", None, ".config").unwrap();
+    repo.write_document_metadata(
+        &missing_root_config,
+        &serde_json::json!({"skip_indexing": true}),
+    )
+    .await
+    .unwrap();
+
+    let after = count_rows_libsql(&fixture.db, "reborn_memory_chunks").await;
+    assert_eq!(
+        after, before,
+        "metadata write to missing .config must not delete any chunks; before={before}, after={after}"
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_parent_skip_indexing_does_not_clear_descendants_with_explicit_override() {
+    // zmanian #3180 MED `native_libsql.rs:531` (descendant override): a
+    // parent `.config` with `skip_indexing=true` must clear chunks for
+    // descendants that *inherit* the skip, but must NOT clear chunks
+    // for descendants whose own document-level metadata explicitly sets
+    // `skip_indexing: false`. The metadata-merge contract is: document
+    // metadata overlays inherited config.
+    use ironclaw_memory::MemoryDocumentRepository;
+    let fixture = libsql_repo().await;
+    let repo = fixture.repo.clone();
+    let indexer = Arc::new(ChunkingMemoryDocumentIndexer::new(repo.clone()));
+    let backend = RepositoryMemoryBackend::new(repo.clone()).with_indexer(indexer);
+    let context = MemoryContext::new(MemoryDocumentScope::new("tenant-a", "alice", None).unwrap());
+
+    // Two siblings under `notes/`: `inherits.md` has no document-level
+    // metadata, `opts_in.md` explicitly opts back into indexing.
+    let inheriting =
+        MemoryDocumentPath::new("tenant-a", "alice", None, "notes/inherits.md").unwrap();
+    let opts_in = MemoryDocumentPath::new("tenant-a", "alice", None, "notes/opts_in.md").unwrap();
+    backend
+        .write_document(&context, &inheriting, b"alpha beta gamma")
+        .await
+        .unwrap();
+    backend
+        .write_document(&context, &opts_in, b"delta epsilon zeta")
+        .await
+        .unwrap();
+    repo.write_document_metadata(&opts_in, &serde_json::json!({"skip_indexing": false}))
+        .await
+        .unwrap();
+    let before = count_rows_libsql(&fixture.db, "reborn_memory_chunks").await;
+    assert!(
+        before >= 2,
+        "expected chunks for both pre-existing documents"
+    );
+
+    // Parent `.config` with skip_indexing=true.
+    let parent_config =
+        MemoryDocumentPath::new("tenant-a", "alice", None, "notes/.config").unwrap();
+    repo.write_document(&parent_config, b"").await.unwrap();
+    repo.write_document_metadata(&parent_config, &serde_json::json!({"skip_indexing": true}))
+        .await
+        .unwrap();
+
+    // The override-bearing descendant must keep its chunks; the
+    // inheriting one may have been cleared.
+    let conn = fixture.db.connect().expect("connect");
+    let opts_in_chunks: i64 = conn
+        .query(
+            "SELECT COUNT(*) FROM reborn_memory_chunks c \
+             JOIN reborn_memory_documents d ON d.id = c.document_id \
+             WHERE d.path = ?1",
+            libsql::params![opts_in.relative_path()],
+        )
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap();
+    assert!(
+        opts_in_chunks > 0,
+        "descendant with explicit `skip_indexing: false` must keep its chunks; got {opts_in_chunks}"
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_skip_indexing_metadata_clear_does_not_glob_match_unrelated_paths() {
+    // zmanian #3180 MED `native_libsql.rs:801`: the `path LIKE
+    // 'parent/%'` predicate used by the skip_indexing chunk-clear
+    // glob-matched any path whose literal characters happened to be
+    // present, because `%` and `_` in valid `MemoryDocumentPath`
+    // segments are SQL wildcards. A `team_%/.config` write would also
+    // delete chunks for `team-a/note.md`. After the fix, the literal
+    // `_` and `%` in the parent prefix are escaped and the LIKE clause
+    // uses `ESCAPE '\'`.
+    use ironclaw_memory::MemoryDocumentRepository;
+    let fixture = libsql_repo().await;
+    let repo = fixture.repo.clone();
+
+    // Write+index two documents that should NOT be cleared by a metadata
+    // write to `team_%/.config`. The literal-prefix subtree below
+    // (`team_%/...`) is the only one that should be cleared.
+    let indexer = Arc::new(ChunkingMemoryDocumentIndexer::new(repo.clone()));
+    let backend = RepositoryMemoryBackend::new(repo.clone()).with_indexer(indexer);
+    let context = MemoryContext::new(MemoryDocumentScope::new("tenant-a", "alice", None).unwrap());
+
+    let unrelated = MemoryDocumentPath::new("tenant-a", "alice", None, "team-a/note.md").unwrap();
+    let literal_subtree =
+        MemoryDocumentPath::new("tenant-a", "alice", None, "team_%/note.md").unwrap();
+    backend
+        .write_document(&context, &unrelated, b"unrelated body content")
+        .await
+        .unwrap();
+    backend
+        .write_document(&context, &literal_subtree, b"literal subtree body")
+        .await
+        .unwrap();
+    let before = count_rows_libsql(&fixture.db, "reborn_memory_chunks").await;
+    assert!(
+        before >= 2,
+        "expected chunks for both pre-existing documents, got {before}"
+    );
+
+    // Now write a `.config` with `skip_indexing=true` under the literal
+    // `team_%/` parent. Without escaping, the LIKE would also match
+    // `team-a/note.md` and wipe its chunks too.
+    let config_path = MemoryDocumentPath::new("tenant-a", "alice", None, "team_%/.config").unwrap();
+    repo.write_document(&config_path, b"").await.unwrap();
+    repo.write_document_metadata(&config_path, &serde_json::json!({"skip_indexing": true}))
+        .await
+        .unwrap();
+
+    // The unrelated `team-a/note.md` chunks must still be present;
+    // only the literal `team_%/` subtree gets cleared.
+    let after = count_rows_libsql(&fixture.db, "reborn_memory_chunks").await;
+    assert!(
+        after >= 1,
+        "team-a/note.md chunks must survive the metadata clear; got {after} rows"
+    );
+    // Concretely: the unrelated row's chunk content must still be findable.
+    let unrelated_after = repo.read_document(&unrelated).await.unwrap();
+    assert!(
+        unrelated_after.is_some(),
+        "unrelated document body must not be touched by the metadata clear"
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
 async fn libsql_backend_document_metadata_overrides_inherited_config() {
     use ironclaw_memory::MemoryDocumentRepository;
     let fixture = libsql_repo().await;
@@ -958,6 +1135,50 @@ async fn pg_repo(tenant_id: &str) -> Option<Arc<RebornPostgresMemoryDocumentRepo
     repo.run_migrations().await.expect("run_migrations");
     pg_cleanup_tenant(&pool, tenant_id).await;
     Some(repo)
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_skip_indexing_metadata_clear_does_not_glob_match_unrelated_paths() {
+    // zmanian #3180 MED `native_libsql.rs:801` (Postgres mirror): the
+    // `path LIKE 'parent/%'` predicate on the metadata clear path
+    // glob-matched any literal `_` or `%` in valid path segments. After
+    // the fix, the prefix is escaped and the LIKE clause uses
+    // `ESCAPE '\'`. Drives the same regression on Postgres so the
+    // shared helper is exercised against the second SQL dialect.
+    use ironclaw_memory::MemoryDocumentRepository;
+    let tenant = "reborn-pg-like-injection";
+    let Some(repo) = pg_repo(tenant).await else {
+        return;
+    };
+
+    let indexer = Arc::new(ChunkingMemoryDocumentIndexer::new(repo.clone()));
+    let backend = RepositoryMemoryBackend::new(repo.clone()).with_indexer(indexer);
+    let context = MemoryContext::new(MemoryDocumentScope::new(tenant, "alice", None).unwrap());
+
+    let unrelated = MemoryDocumentPath::new(tenant, "alice", None, "team-a/note.md").unwrap();
+    let literal_subtree = MemoryDocumentPath::new(tenant, "alice", None, "team_%/note.md").unwrap();
+    backend
+        .write_document(&context, &unrelated, b"unrelated body content")
+        .await
+        .unwrap();
+    backend
+        .write_document(&context, &literal_subtree, b"literal subtree body")
+        .await
+        .unwrap();
+
+    let config_path = MemoryDocumentPath::new(tenant, "alice", None, "team_%/.config").unwrap();
+    repo.write_document(&config_path, b"").await.unwrap();
+    repo.write_document_metadata(&config_path, &serde_json::json!({"skip_indexing": true}))
+        .await
+        .unwrap();
+
+    let unrelated_after = repo.read_document(&unrelated).await.unwrap();
+    assert!(
+        unrelated_after.is_some(),
+        "team-a/note.md must not be touched by the team_%/.config metadata clear"
+    );
+    pg_cleanup_tenant(&pg_pool(), tenant).await;
 }
 
 #[cfg(feature = "postgres")]
