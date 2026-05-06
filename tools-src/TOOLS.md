@@ -20,6 +20,12 @@ For all messengers: receive notifications of new messages, read contacts, groups
 - [ ] WhatsApp - Cloud API for messaging via Meta Business platform
 - [ ] Signal - messaging (note: no official public API exists)
 
+# Decentralized / Nostr
+
+Nostr tools use a private key (nsec1... or hex) stored in the workspace secret `NOSTR_PRIVATE_KEY`. Actions: publish notes (kind 1), send DMs (kind 4, NIP-04 simplified), react (kind 7), repost (kind 6), get/set profile (kind 0), fetch notes by author, manage relay list. Transport is HTTP POST to WebSocket relays (no persistent connections). NIP-19 encoding for npub/nsec keys.
+
+- [x] Nostr - publish notes, DMs, reactions, reposts, profile management, relay queries
+
 # Transportation
 
 - [ ] Uber - call a car to specific destination from current place, check the status of the car/ride including stream the current position, support ordering food as well

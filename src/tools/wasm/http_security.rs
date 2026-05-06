@@ -9,6 +9,16 @@ pub(crate) struct ValidatedHttpTarget {
     pin_host_resolution: bool,
 }
 
+impl ValidatedHttpTarget {
+    /// Returns the DNS-pinned socket addresses for this target.
+    ///
+    /// Used by callers that need to connect directly to the validated address
+    /// (e.g. WebSocket connections that bypass reqwest's DNS pinning).
+    pub(crate) fn resolved_addrs(&self) -> &[SocketAddr] {
+        &self.resolved_addrs
+    }
+}
+
 /// Build a reqwest client builder with the WASM SSRF redirect policy applied.
 ///
 /// Redirects are disabled so callers must explicitly validate each hop instead
@@ -31,12 +41,19 @@ pub(crate) fn ssrf_safe_client_builder_for_target(
 }
 
 /// Resolve the URL's hostname, reject private/internal IP addresses, and
+/// Check whether private IPs are allowed for the current process.
+/// Only returns true when the test-only escape hatch env var is set.
+fn allow_private_for_test() -> bool {
+    std::env::var("IRONCLAW_TEST_ALLOW_PRIVATE_IP").as_deref() == Ok("1")
+}
+
+/// Resolve the URL's hostname, reject private/internal IP addresses, and
 /// return the resolved addresses for caller-side DNS pinning.
 pub(crate) async fn validate_and_resolve_http_target(
     url: &str,
 ) -> Result<ValidatedHttpTarget, String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("Failed to parse URL: {e}"))?;
-    if !matches!(parsed.scheme(), "http" | "https") {
+    if !matches!(parsed.scheme(), "http" | "https" | "ws" | "wss") {
         return Err(format!("Unsupported URL scheme: {}", parsed.scheme()));
     }
     if !parsed.username().is_empty() || parsed.password().is_some() {
@@ -52,15 +69,14 @@ pub(crate) async fn validate_and_resolve_http_target(
         })
         .ok_or_else(|| "Failed to parse host from URL".to_string())?
         .to_string();
-    let port = parsed
-        .port_or_known_default()
-        .unwrap_or(match parsed.scheme() {
-            "http" => 80,
-            _ => 443,
-        });
+
+    let port = parsed.port().unwrap_or(match parsed.scheme() {
+        "http" | "ws" => 80,
+        _ => 443,
+    });
 
     if let Ok(ip) = host.parse::<IpAddr>() {
-        return if is_private_ip(ip) {
+        return if is_private_ip(ip) && !allow_private_for_test() {
             Err(format!(
                 "HTTP request to private/internal IP {} is not allowed",
                 ip
@@ -84,7 +100,7 @@ pub(crate) async fn validate_and_resolve_http_target(
     }
 
     for addr in &addrs {
-        if is_private_ip(addr.ip()) {
+        if is_private_ip(addr.ip()) && !allow_private_for_test() {
             return Err(format!(
                 "DNS rebinding detected: {} resolved to private IP {}",
                 host,
@@ -106,7 +122,7 @@ pub(crate) async fn validate_and_resolve_http_target(
 /// passes the allowlist check, then resolves to an internal address.
 pub(crate) fn reject_private_ip(url: &str) -> Result<(), String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("Failed to parse URL: {e}"))?;
-    if !matches!(parsed.scheme(), "http" | "https") {
+    if !matches!(parsed.scheme(), "http" | "https" | "ws" | "wss") {
         return Err(format!("Unsupported URL scheme: {}", parsed.scheme()));
     }
     if !parsed.username().is_empty() || parsed.password().is_some() {
