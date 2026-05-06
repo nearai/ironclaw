@@ -492,6 +492,12 @@ pub trait ConversationStore: Send + Sync {
         &self,
         conversation_id: Uuid,
     ) -> Result<Option<String>, DatabaseError>;
+    /// Return all (conversation_uuid, channel, user_id, external_thread_id) rows
+    /// where `thread_id IS NOT NULL`. Used at startup to seed the in-memory
+    /// thread map so channel-native room/chat IDs survive process restarts.
+    async fn list_external_thread_mappings(
+        &self,
+    ) -> Result<Vec<(Uuid, String, String, String)>, DatabaseError>;
 }
 
 #[async_trait]

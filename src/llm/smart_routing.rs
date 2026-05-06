@@ -1396,7 +1396,7 @@ mod tests {
 
     #[test]
     fn score_very_long_prompt_is_at_least_standard() {
-        let long = "Tell me about ".to_string() + &"things ".repeat(200);
+        let long = format!("Tell me about {}", "things ".repeat(200));
         let result = score_complexity(&long);
         assert!(
             result.total >= 16,

@@ -31,6 +31,7 @@ mod attachments;
 mod channel;
 mod http;
 mod manager;
+mod matrix;
 pub mod relay;
 mod repl;
 mod signal;
@@ -53,6 +54,7 @@ pub use channel::{
 };
 pub use http::{HttpChannel, HttpChannelState};
 pub use manager::ChannelManager;
+pub use matrix::MatrixChannel;
 pub use repl::ReplChannel;
 pub use signal::SignalChannel;
 pub use web::GatewayChannel;

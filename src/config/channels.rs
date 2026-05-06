@@ -19,6 +19,7 @@ pub struct ChannelsConfig {
     pub gateway: Option<GatewayConfig>,
     pub signal: Option<SignalConfig>,
     pub tui: Option<TuiChannelConfig>,
+    pub matrix: Option<MatrixConfig>,
     /// Directory containing WASM channel modules (default: ~/.ironclaw/channels/).
     pub wasm_channels_dir: std::path::PathBuf,
     /// Whether WASM channels are enabled.
@@ -100,6 +101,54 @@ pub struct GatewayOidcConfig {
     pub issuer: Option<String>,
     /// Expected `aud` claim. Validated if set.
     pub audience: Option<String>,
+}
+
+/// Matrix channel configuration (native Matrix Client-Server API).
+#[derive(Debug, Clone)]
+pub struct MatrixConfig {
+    /// Matrix homeserver URL (e.g. `https://matrix.org`).
+    pub homeserver: String,
+    /// Matrix access token for the bot account.
+    /// Sourced from MATRIX_ACCESS_TOKEN env var or the encrypted secrets DB
+    /// (secret name: `matrix_access_token`). Set via `ironclaw onboard` or
+    /// `ironclaw secret set matrix_access_token <token>`.
+    pub access_token: SecretString,
+    /// Matrix device ID for session restore.
+    ///
+    /// Persisted after the first login via the secrets DB (secret name:
+    /// `matrix_device_id`, env var: `MATRIX_DEVICE_ID`). When present the
+    /// SDK restores the existing device rather than registering a new one,
+    /// which preserves Megolm session keys across restarts.
+    ///
+    /// `None` on first boot — the SDK assigns a device ID and the channel
+    /// saves it to the secrets DB via `SecretsStore`.
+    pub device_id: Option<String>,
+    /// Users allowed to interact with the bot (Matrix user IDs, e.g. `@user:matrix.org`).
+    ///
+    /// - Empty list — all DM senders blocked unless paired or `dm_policy = "open"`
+    /// - `*` — allow everyone
+    pub allow_from: Vec<String>,
+    /// DM policy: "open", "allowlist", or "pairing". Default: "pairing".
+    ///
+    /// - "open" — accept all messages
+    /// - "allowlist" — only senders in allow_from
+    /// - "pairing" — allowlist + send pairing reply to unknown senders
+    pub dm_policy: String,
+    /// Optional owner restriction: only this Matrix user ID is accepted.
+    /// Overrides all other policy checks.
+    pub owner_id: Option<String>,
+    /// How often to poll Matrix `/sync` in seconds. Default: 5.
+    /// Only used by the raw reqwest fallback path (no-`matrix-sdk-channel`).
+    pub poll_interval_secs: u32,
+    /// Whether to auto-join invited rooms. Default: true.
+    pub auto_join: bool,
+    /// Display name to set for the bot. Default: "IronClaw".
+    pub display_name: Option<String>,
+    /// Path to the matrix-sdk SQLite store directory.
+    ///
+    /// Defaults to `~/.ironclaw/matrix-sdk/`. The directory is created on
+    /// first use. Configurable via `MATRIX_SDK_STORE_PATH` env var.
+    pub sdk_store_path: std::path::PathBuf,
 }
 
 /// Signal channel configuration (signal-cli daemon HTTP/JSON-RPC).
@@ -397,6 +446,70 @@ impl ChannelsConfig {
             None
         };
 
+        // Matrix channel — enabled when MATRIX_HOMESERVER is set AND
+        // MATRIX_ACCESS_TOKEN is available (may be injected from secrets DB
+        // in Phase 2; silently deferred if token is missing at Phase 1).
+        let matrix_homeserver =
+            optional_env("MATRIX_HOMESERVER")?.or_else(|| cs.matrix_homeserver.clone());
+        let matrix = if let Some(homeserver) = matrix_homeserver {
+            let access_token =
+                optional_env("MATRIX_ACCESS_TOKEN")?.or_else(|| cs.matrix_access_token.clone());
+            match access_token {
+                None => {
+                    // Token not yet available (secrets injected in Phase 2).
+                    // Silently defer — channel will activate on next re-resolution.
+                    tracing::debug!(
+                        "MATRIX_ACCESS_TOKEN not yet available — Matrix channel deferred"
+                    );
+                    None
+                }
+                Some(token) => {
+                    let allow_from = optional_env("MATRIX_ALLOW_FROM")?
+                        .or_else(|| cs.matrix_allow_from.clone())
+                        .map(|s| {
+                            s.split(',')
+                                .map(|e| e.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let dm_policy = optional_env("MATRIX_DM_POLICY")?
+                        .or_else(|| cs.matrix_dm_policy.clone())
+                        .unwrap_or_else(|| "pairing".to_string());
+                    let owner_id =
+                        optional_env("MATRIX_OWNER_ID")?.or_else(|| cs.matrix_owner_id.clone());
+                    let poll_interval_secs: u32 = parse_optional_env(
+                        "MATRIX_POLL_INTERVAL_SECS",
+                        cs.matrix_poll_interval_secs.unwrap_or(5),
+                    )?;
+                    let auto_join =
+                        parse_bool_env("MATRIX_AUTO_JOIN", cs.matrix_auto_join.unwrap_or(true))?;
+                    let display_name = optional_env("MATRIX_DISPLAY_NAME")?
+                        .or_else(|| cs.matrix_display_name.clone());
+                    // Device ID — injected from secrets DB into MATRIX_DEVICE_ID
+                    // by inject_llm_keys_from_secrets(). None on first boot.
+                    let device_id = optional_env("MATRIX_DEVICE_ID")?;
+                    let sdk_store_path = optional_env("MATRIX_SDK_STORE_PATH")?
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_else(|| ironclaw_base_dir().join("matrix-sdk"));
+                    Some(MatrixConfig {
+                        homeserver,
+                        access_token: SecretString::from(token),
+                        device_id,
+                        allow_from,
+                        dm_policy,
+                        owner_id,
+                        poll_interval_secs,
+                        auto_join,
+                        display_name,
+                        sdk_store_path,
+                    })
+                }
+            }
+        } else {
+            None
+        };
+
         let cli_enabled = db_first_bool(cs.cli_enabled, defaults.cli_enabled, "CLI_ENABLED")?;
         let cli_mode = db_first_optional_string(&cs.cli_mode, "CLI_MODE")?
             .unwrap_or_else(|| "tui".to_string());
@@ -417,6 +530,7 @@ impl ChannelsConfig {
             gateway,
             signal,
             tui,
+            matrix,
             wasm_channels_dir: {
                 // DB-first: use settings if explicitly set, else env, else default.
                 // defaults.wasm_channels_dir is None, so any Some(..) is an explicit DB override.
@@ -625,6 +739,7 @@ mod tests {
             gateway: None,
             signal: None,
             tui: None,
+            matrix: None,
             wasm_channels_dir: PathBuf::from("/tmp/channels"),
             wasm_channels_enabled: true,
             configured_wasm_channels: Vec::new(),
@@ -651,6 +766,7 @@ mod tests {
             gateway: None,
             signal: None,
             tui: None,
+            matrix: None,
             wasm_channels_dir: PathBuf::from("/opt/channels"),
             wasm_channels_enabled: false,
             configured_wasm_channels: vec!["telegram".to_string()],
