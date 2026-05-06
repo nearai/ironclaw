@@ -158,6 +158,11 @@ bounded_ref!(GateRef, "gate_ref");
 bounded_ref!(IdempotencyKey, "idempotency_key");
 bounded_ref!(RunProfileRequest, "run_profile_request");
 bounded_ref!(RunProfileId, "run_profile_id");
+bounded_ref!(LoopExitId, "loop_exit_id");
+bounded_ref!(LoopMessageRef, "loop_message_ref");
+bounded_ref!(LoopResultRef, "loop_result_ref");
+bounded_ref!(LoopUsageSummaryRef, "loop_usage_summary_ref");
+bounded_ref!(LoopDiagnosticRef, "loop_diagnostic_ref");
 
 impl RunProfileId {
     pub fn default_profile() -> Self {

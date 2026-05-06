@@ -2,7 +2,7 @@
 
 **Status:** Contract-freeze draft  
 **Date:** 2026-05-06  
-**Depends on:** [`turn-persistence.md`](turn-persistence.md), [`turns-agent-loop.md`](turns-agent-loop.md), [`runtime-profiles.md`](runtime-profiles.md)
+**Depends on:** [`turn-persistence.md`](turn-persistence.md), [`turns-agent-loop.md`](turns-agent-loop.md), [`loop-exit.md`](loop-exit.md), [`runtime-profiles.md`](runtime-profiles.md)
 
 ---
 
@@ -10,7 +10,7 @@
 
 `TurnRunner` is the trusted worker-side control plane for executable turn runs. It claims queued runs, maintains leases while model/tool work is active, records safe checkpoint/block/terminal transitions, and moves abandoned work to explicit recovery instead of blindly retrying side effects.
 
-Product adapters must continue to use `TurnCoordinator`. Runner transition APIs are trusted-worker APIs and remain under `ironclaw_turns::runner`.
+Product adapters must continue to use `TurnCoordinator`. Runner transition APIs are trusted-worker APIs and remain under `ironclaw_turns::runner`. Driver-facing loop exits remain distinct from trusted runner outcomes; see [`loop-exit.md`](loop-exit.md).
 
 ---
 
@@ -42,6 +42,16 @@ Product adapters must continue to use `TurnCoordinator`. Runner transition APIs 
 
 ---
 
-## 5. Deferred work
+## 5. Loop exit validation
 
-The current `ironclaw_turns` slices define the core lease/recovery state machine and initial PostgreSQL/libSQL persistence adapters. AgentLoopHost/AgentLoopDriver integration, side-effect boundary checkpoint cadence inside the loop, production service-graph wiring, and safe explicit retry/fork UX remain follow-up slices.
+Agent-loop drivers return `LoopExit` claims. `TurnRunner` validates those claims before applying a trusted outcome:
+
+- valid completed exits map to `TurnRunnerOutcome::Completed`;
+- valid blocked exits require checkpoint + gate refs and map to `TurnRunnerOutcome::Blocked`;
+- valid cancelled exits require observed host cancellation/interrupt and map to `TurnRunnerOutcome::Cancelled`;
+- valid failed exits map stable sanitized failure kinds to `TurnRunnerOutcome::Failed`;
+- invalid exits map either to sanitized terminal failure or runner/system-derived `RecoveryRequired` depending on side-effect safety evidence.
+
+## 6. Deferred work
+
+The current `ironclaw_turns` slices define the core lease/recovery state machine, initial PostgreSQL/libSQL persistence adapters, and pure `LoopExit` validation/mapping types. AgentLoopHost/AgentLoopDriver integration, durable exit-id replay storage, transcript draft validation, side-effect boundary checkpoint cadence inside the loop, production service-graph wiring, and safe explicit retry/fork UX remain follow-up slices.

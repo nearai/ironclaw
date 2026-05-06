@@ -2,7 +2,7 @@
 
 **Status:** Contract-freeze draft
 **Date:** 2026-04-25
-**Depends on:** [`host-api.md`](host-api.md), [`capabilities.md`](capabilities.md), [`memory.md`](memory.md), [`events-projections.md`](events-projections.md), [`processes.md`](processes.md), [`turn-persistence.md`](turn-persistence.md)
+**Depends on:** [`host-api.md`](host-api.md), [`capabilities.md`](capabilities.md), [`memory.md`](memory.md), [`events-projections.md`](events-projections.md), [`processes.md`](processes.md), [`turn-persistence.md`](turn-persistence.md), [`loop-exit.md`](loop-exit.md)
 
 ---
 
@@ -127,6 +127,7 @@ running -> completed|failed|cancelled
 
 Rules:
 
+- agent-loop drivers report how an attempt stopped with `LoopExit`; validation and trusted outcome mapping follow [`loop-exit.md`](loop-exit.md);
 - runner claim, lease, heartbeat, and expired-lease recovery rules follow [`turn-runner.md`](turn-runner.md);
 - persistence records, active-lock ownership, runner lease fields, checkpoints, and idempotency outcomes follow [`turn-persistence.md`](turn-persistence.md);
 - state transitions are persisted before externally visible side effects where needed for recovery;
