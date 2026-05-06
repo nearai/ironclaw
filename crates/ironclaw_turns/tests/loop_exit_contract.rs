@@ -23,6 +23,7 @@ fn completed_ask_user_exit_maps_to_trusted_completed_outcome_without_final_check
         invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: true,
         blocked_evidence_verified: false,
+        failure_evidence_verified: false,
     });
 
     assert_eq!(decision.exit_id, exit_id);
@@ -47,6 +48,7 @@ fn completed_exit_without_durable_refs_maps_to_protocol_failure_or_recovery() {
         invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: true,
         blocked_evidence_verified: false,
+        failure_evidence_verified: false,
     });
     assert_eq!(
         safe_decision.mapping,
@@ -66,6 +68,7 @@ fn completed_exit_without_durable_refs_maps_to_protocol_failure_or_recovery() {
         invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
         completion_refs_verified: true,
         blocked_evidence_verified: false,
+        failure_evidence_verified: false,
     });
     assert!(matches!(
         uncertain_decision,
@@ -93,6 +96,7 @@ fn completed_exit_requires_host_verified_completion_refs_before_trusted_mapping(
         invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
         completion_refs_verified: false,
         blocked_evidence_verified: false,
+        failure_evidence_verified: false,
     });
 
     assert_eq!(
@@ -121,6 +125,7 @@ fn final_checkpoint_policy_rejects_terminal_exit_without_checkpoint() {
         invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: true,
         blocked_evidence_verified: false,
+        failure_evidence_verified: false,
     });
 
     assert_eq!(
@@ -153,6 +158,7 @@ fn blocked_exit_maps_to_block_run_outcome_with_verified_checkpoint_and_gate_ref(
         invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
         completion_refs_verified: false,
         blocked_evidence_verified: true,
+        failure_evidence_verified: false,
     });
 
     assert_eq!(decision.violation, None);
@@ -180,6 +186,7 @@ fn blocked_exit_requires_host_verified_gate_and_checkpoint_before_trusted_mappin
         invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
         completion_refs_verified: false,
         blocked_evidence_verified: false,
+        failure_evidence_verified: false,
     });
 
     assert_eq!(
@@ -202,6 +209,7 @@ fn cancelled_exit_requires_observed_host_cancellation() {
         invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: false,
         blocked_evidence_verified: false,
+        failure_evidence_verified: false,
     });
     assert_eq!(
         rejected.mapping,
@@ -221,18 +229,22 @@ fn cancelled_exit_requires_observed_host_cancellation() {
         invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: false,
         blocked_evidence_verified: false,
+        failure_evidence_verified: false,
     });
     assert_eq!(accepted.mapping, TurnRunnerOutcome::Cancelled.into());
     assert_eq!(accepted.violation, None);
 }
 
 #[test]
-fn iteration_limit_failure_maps_to_stable_sanitized_runner_failure() {
+fn iteration_limit_failure_maps_to_stable_sanitized_runner_failure_after_host_verification() {
     let decision = LoopExit::failed(
         LoopFailureKind::IterationLimit,
         exit_id("exit:max-iterations"),
     )
-    .validate(LoopExitValidationPolicy::default());
+    .validate(LoopExitValidationPolicy {
+        failure_evidence_verified: true,
+        ..LoopExitValidationPolicy::default()
+    });
 
     assert_eq!(
         decision.mapping,
@@ -241,6 +253,21 @@ fn iteration_limit_failure_maps_to_stable_sanitized_runner_failure() {
         }
         .into()
     );
+}
+
+#[test]
+fn failed_exit_requires_host_verified_failure_evidence_before_trusted_mapping() {
+    let decision = LoopExit::failed(LoopFailureKind::DriverBug, exit_id("exit:driver-bug"))
+        .validate(LoopExitValidationPolicy::default());
+
+    assert_eq!(
+        decision.violation.unwrap().category(),
+        "unverified_failure_evidence"
+    );
+    assert!(matches!(
+        decision.mapping,
+        ironclaw_turns::LoopExitMapping::RecoveryRequired { .. }
+    ));
 }
 
 #[test]
@@ -270,6 +297,36 @@ fn loop_exit_wire_shape_rejects_raw_payload_fields_and_recovery_required_variant
     assert!(serde_json::from_value::<LoopExit>(raw_blocked).is_err());
 
     assert!(serde_json::from_value::<LoopExit>(json!({"recovery_required": {}})).is_err());
+}
+
+#[test]
+fn loop_exit_rejects_oversized_or_duplicate_ref_vectors() {
+    let oversized_messages = (0..65)
+        .map(|index| format!("msg:item-{index}"))
+        .collect::<Vec<_>>();
+    let raw_completed = json!({
+        "completed": {
+            "completion_kind": "final_reply",
+            "reply_message_refs": oversized_messages,
+            "result_refs": [],
+            "final_checkpoint_id": null,
+            "usage_summary_ref": null,
+            "exit_id": "exit:oversized"
+        }
+    });
+    assert!(serde_json::from_value::<LoopExit>(raw_completed).is_err());
+
+    let duplicate_refs = json!({
+        "completed": {
+            "completion_kind": "final_reply",
+            "reply_message_refs": ["msg:dup", "msg:dup"],
+            "result_refs": [],
+            "final_checkpoint_id": null,
+            "usage_summary_ref": null,
+            "exit_id": "exit:duplicates"
+        }
+    });
+    assert!(serde_json::from_value::<LoopExit>(duplicate_refs).is_err());
 }
 
 #[test]

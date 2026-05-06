@@ -1,4 +1,6 @@
-use serde::{Deserialize, Serialize};
+use std::{collections::HashSet, hash::Hash};
+
+use serde::{Deserialize, Serialize, de};
 
 use crate::{
     BlockedReason, GateRef, LoopDiagnosticRef, LoopExitId, LoopGateRef, LoopMessageRef,
@@ -58,11 +60,18 @@ impl LoopExit {
                 LoopExitViolationKind::CancellationNotObserved,
                 policy.invalid_handling,
             ),
-            Self::Failed(exit) => LoopExitValidationDecision::trusted(
+            Self::Failed(exit) if policy.failure_evidence_verified => {
+                LoopExitValidationDecision::trusted(
+                    exit_id,
+                    TurnRunnerOutcome::Failed {
+                        failure: exit.reason_kind.to_sanitized_failure(),
+                    },
+                )
+            }
+            Self::Failed(_exit) => invalid_exit_decision(
                 exit_id,
-                TurnRunnerOutcome::Failed {
-                    failure: exit.reason_kind.to_sanitized_failure(),
-                },
+                LoopExitViolationKind::UnverifiedFailureEvidence,
+                policy.invalid_handling,
             ),
         }
     }
@@ -91,7 +100,9 @@ impl LoopExit {
 #[serde(deny_unknown_fields)]
 pub struct LoopCompleted {
     pub completion_kind: LoopCompletionKind,
+    #[serde(deserialize_with = "deserialize_bounded_unique_refs")]
     pub reply_message_refs: Vec<LoopMessageRef>,
+    #[serde(deserialize_with = "deserialize_bounded_unique_refs")]
     pub result_refs: Vec<LoopResultRef>,
     pub final_checkpoint_id: Option<TurnCheckpointId>,
     pub usage_summary_ref: Option<LoopUsageSummaryRef>,
@@ -146,6 +157,7 @@ impl LoopBlockedKind {
 pub struct LoopCancelled {
     pub reason_kind: LoopCancelledReasonKind,
     pub checkpoint_id: Option<TurnCheckpointId>,
+    #[serde(deserialize_with = "deserialize_bounded_unique_refs")]
     pub interrupted_message_refs: Vec<LoopMessageRef>,
     pub exit_id: LoopExitId,
 }
@@ -212,6 +224,7 @@ pub struct LoopExitValidationPolicy {
     pub invalid_handling: LoopExitInvalidHandling,
     pub completion_refs_verified: bool,
     pub blocked_evidence_verified: bool,
+    pub failure_evidence_verified: bool,
 }
 
 impl Default for LoopExitValidationPolicy {
@@ -222,6 +235,7 @@ impl Default for LoopExitValidationPolicy {
             invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
             completion_refs_verified: false,
             blocked_evidence_verified: false,
+            failure_evidence_verified: false,
         }
     }
 }
@@ -280,6 +294,7 @@ pub enum LoopExitViolationKind {
     UnverifiedCompletionReference,
     MissingFinalCheckpoint,
     UnverifiedBlockedEvidence,
+    UnverifiedFailureEvidence,
     CancellationNotObserved,
 }
 
@@ -290,6 +305,7 @@ impl LoopExitViolationKind {
             Self::UnverifiedCompletionReference => "unverified_completion_reference",
             Self::MissingFinalCheckpoint => "missing_final_checkpoint",
             Self::UnverifiedBlockedEvidence => "unverified_blocked_evidence",
+            Self::UnverifiedFailureEvidence => "unverified_failure_evidence",
             Self::CancellationNotObserved => "cancellation_not_observed",
         }
     }
@@ -300,9 +316,35 @@ impl LoopExitViolationKind {
             Self::MissingCompletionReference
             | Self::UnverifiedCompletionReference
             | Self::MissingFinalCheckpoint
-            | Self::UnverifiedBlockedEvidence => "driver_protocol_violation",
+            | Self::UnverifiedBlockedEvidence
+            | Self::UnverifiedFailureEvidence => "driver_protocol_violation",
         }
     }
+}
+
+const MAX_LOOP_EXIT_REF_COUNT: usize = 64;
+
+fn deserialize_bounded_unique_refs<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Eq + Hash,
+{
+    let values = Vec::<T>::deserialize(deserializer)?;
+    if values.len() > MAX_LOOP_EXIT_REF_COUNT {
+        return Err(de::Error::custom(format!(
+            "loop exit ref list must contain at most {MAX_LOOP_EXIT_REF_COUNT} entries"
+        )));
+    }
+
+    let mut seen = HashSet::with_capacity(values.len());
+    for value in &values {
+        if !seen.insert(value) {
+            return Err(de::Error::custom(
+                "loop exit ref list must not contain duplicates",
+            ));
+        }
+    }
+    Ok(values)
 }
 
 fn validate_completed_exit(
