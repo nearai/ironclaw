@@ -753,7 +753,7 @@ impl ExtensionManager {
     }
 
     /// Get the relay config stored at startup.
-    fn relay_config(&self) -> Result<&crate::config::RelayConfig, ExtensionError> {
+    pub(crate) fn relay_config(&self) -> Result<&crate::config::RelayConfig, ExtensionError> {
         self.relay_config.as_ref().ok_or_else(|| {
             ExtensionError::Config(
                 "CHANNEL_RELAY_URL and CHANNEL_RELAY_API_KEY must be set".to_string(),
@@ -774,7 +774,7 @@ impl ExtensionManager {
     /// and the URL must not contain userinfo (embedded credentials).  This
     /// prevents a malicious override from exfiltrating the instance-wide relay
     /// API key to an attacker-controlled host.
-    async fn effective_relay_url(&self, name: &str) -> Option<String> {
+    pub(crate) async fn effective_relay_url(&self, name: &str) -> Option<String> {
         if let Some(ref store) = self.store {
             let key = format!("extensions.{name}.relay_url");
             if let Ok(Some(v)) = store.get_setting(&self.user_id, &key).await {

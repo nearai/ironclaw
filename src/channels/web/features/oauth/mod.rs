@@ -692,8 +692,6 @@ pub(crate) async fn slack_relay_oauth_callback_handler(
         .into_response();
     }
 
-    let authed_user_id = params.get("authed_user_id").cloned().unwrap_or_default();
-
     let result: Result<(), String> = async {
         let store = state.store.as_ref().ok_or_else(|| {
             "Relay activation requires persistent settings storage; no-db mode is unsupported."
@@ -721,12 +719,48 @@ pub(crate) async fn slack_relay_oauth_callback_handler(
                 format!("Failed to persist relay team_id: {e}")
             })?;
 
+        // Activate the relay channel first — this creates the relay client and
+        // verifies the connection is usable.
+        tracing::info!(
+            relay = %relay_extension_name,
+            owner_id = %state.owner_id,
+            "relay OAuth callback: activating relay channel"
+        );
+        ext_mgr
+            .activate_stored_relay(&relay_extension_name, &state.owner_id)
+            .await
+            .map_err(|e| format!("Failed to activate relay channel: {}", e))?;
+
         // Create channel identity pairing: Slack authed_user_id → IronClaw user.
-        // The oauth_user secret was stored during auth_channel_relay() and identifies
-        // which IronClaw user initiated this OAuth flow.
-        if !authed_user_id.is_empty()
-            && let Some(pairing_store) = ext_mgr.pairing_store()
-        {
+        // Fetch authed_user_id from the relay's connections API (server-side,
+        // not from the redirect URL which could be tampered).
+        if let Some(pairing_store) = ext_mgr.pairing_store() {
+            let relay_config = ext_mgr
+                .relay_config()
+                .map_err(|e| format!("Relay config not available: {e}"))?;
+            let effective_url = ext_mgr
+                .effective_relay_url(&relay_extension_name)
+                .await
+                .unwrap_or_else(|| relay_config.url.clone());
+            let client = crate::channels::relay::RelayClient::new(
+                effective_url,
+                relay_config.api_key.clone(),
+                relay_config.request_timeout_secs,
+            )
+            .map_err(|e| format!("Failed to create relay client: {e}"))?;
+
+            let connections = client
+                .list_connections("")
+                .await
+                .map_err(|e| format!("Failed to fetch relay connections: {e}"))?;
+            let authed_user_id = connections
+                .iter()
+                .find(|c| c.team_id == team_id)
+                .and_then(|c| c.authed_user_id.clone())
+                .ok_or_else(|| {
+                    "No connection with authed_user_id found for this team".to_string()
+                })?;
+
             let user_key = format!("relay:{}:oauth_user", relay_extension_name);
             let oauth_user = ext_mgr
                 .secrets()
@@ -763,26 +797,17 @@ pub(crate) async fn slack_relay_oauth_callback_handler(
                     "OAuth user '{oauth_user}' has invalid user_id format"
                 ));
             };
+            // Scope external_id to workspace: "team_id:slack_user_id"
+            let scoped_external_id = format!("{}:{}", team_id, authed_user_id);
             pairing_store
                 .create_identity(
                     crate::channels::relay::channel::DEFAULT_RELAY_NAME,
-                    &authed_user_id,
+                    &scoped_external_id,
                     &user_id,
                 )
                 .await
                 .map_err(|e| format!("Failed to create relay identity: {e}"))?;
         }
-
-        // Activate the relay channel
-        tracing::info!(
-            relay = %relay_extension_name,
-            owner_id = %state.owner_id,
-            "relay OAuth callback: activating relay channel"
-        );
-        ext_mgr
-            .activate_stored_relay(&relay_extension_name, &state.owner_id)
-            .await
-            .map_err(|e| format!("Failed to activate relay channel: {}", e))?;
 
         Ok(())
     }

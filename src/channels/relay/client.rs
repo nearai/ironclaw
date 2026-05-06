@@ -81,9 +81,13 @@ impl ChannelEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Connection {
     pub provider: String,
+    #[serde(alias = "provider_scope")]
     pub team_id: String,
+    #[serde(alias = "provider_scope_name")]
     pub team_name: Option<String>,
+    #[serde(default)]
     pub connected: bool,
+    pub authed_user_id: Option<String>,
 }
 
 /// HTTP client for the channel-relay service.

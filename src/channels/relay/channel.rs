@@ -255,9 +255,13 @@ impl Channel for RelayChannel {
                 );
 
                 // Resolve sender_id → internal UserId via PairingStore.
-                // Falls back to raw sender_id for backward compat (single-tenant).
+                // External ID is scoped to workspace: "team_id:sender_id".
+                let scoped_external_id = format!("{}:{}", event.provider_scope, event.sender_id);
                 let resolved_user_id: String = if let Some(ref store) = pairing_store {
-                    match store.resolve_identity(&relay_name, &event.sender_id).await {
+                    match store
+                        .resolve_identity(&relay_name, &scoped_external_id)
+                        .await
+                    {
                         Ok(Some(uid)) => {
                             let user_str = uid.as_str().to_string();
                             tracing::debug!(
@@ -277,7 +281,7 @@ impl Channel for RelayChannel {
                                 "channel_id": event.channel_id,
                             });
                             match store
-                                .upsert_request(&relay_name, &event.sender_id, Some(meta))
+                                .upsert_request(&relay_name, &scoped_external_id, Some(meta))
                                 .await
                             {
                                 Ok(record) => {
