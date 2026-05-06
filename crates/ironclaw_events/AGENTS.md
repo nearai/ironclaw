@@ -16,7 +16,7 @@
 
 ## Do Not Move In Here
 
-- SSE/WebSocket product transport, raw secrets, host paths, or backend error details.
+- SSE/WebSocket product transport.
 - Secrets, raw host paths, backend error details, and unredacted user content in errors, events, snapshots, logs, or docs.
 
 ## Validation
