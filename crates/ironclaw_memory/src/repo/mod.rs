@@ -93,6 +93,23 @@ pub trait MemoryDocumentRepository: Send + Sync {
         Ok(None)
     }
 
+    /// Persist new metadata for `path`.
+    ///
+    /// Implementations are expected to invalidate stale chunk rows when
+    /// the metadata change makes the document's existing index invalid.
+    /// In particular, both native repositories CLEAR chunk rows when
+    /// the new metadata sets `skip_indexing=true` (for `.config` paths,
+    /// the clear cascades to descendants whose own metadata does not
+    /// override the inherited skip).
+    ///
+    /// **Contract limitation**: this method only invalidates the
+    /// already-stored *index*; it cannot re-create chunks. If a caller
+    /// flips `skip_indexing` from `true` back to `false`, the document
+    /// stays unindexed until the caller drives a reindex itself
+    /// (e.g. by re-writing the document body, or by calling the
+    /// indexer directly). The repo has no access to chunkers or
+    /// embedding providers and therefore cannot do this on its own
+    /// (zmanian #3180 MED `native_libsql.rs:491`).
     async fn write_document_metadata(
         &self,
         path: &MemoryDocumentPath,

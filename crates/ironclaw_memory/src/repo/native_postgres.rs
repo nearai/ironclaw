@@ -997,14 +997,22 @@ async fn reborn_postgres_vector_search_ranked(
     let query_vector = pgvector::Vector::from(query_embedding.to_vec());
     let rows = client
         .query(
+            // `vector_dims($5)` needs an explicit `::vector` cast: pgvector
+            // overloads `vector_dims` for both `vector` and `halfvec`, so
+            // an untyped placeholder fails to bind ("function
+            // vector_dims(unknown) is not unique"). The cast pins the
+            // overload (zmanian #3180 MED `native_postgres.rs:985`).
+            // Mismatched-dim chunks are filtered out so a scope holding
+            // multiple provider dimensions (Ollama 768, OpenAI 1536, …)
+            // still searches cleanly under whichever dim the query uses.
             "SELECT c.id, d.tenant_id, d.user_id, d.agent_id, d.project_id, d.path, c.content \
              FROM reborn_memory_chunks c \
              JOIN reborn_memory_documents d ON d.id = c.document_id \
              WHERE d.tenant_id = $1 AND d.user_id = $2 AND d.agent_id = $3 \
                AND d.project_id = $4 \
                AND c.embedding IS NOT NULL \
-               AND vector_dims(c.embedding) = vector_dims($5) \
-             ORDER BY c.embedding <=> $5, d.path, c.chunk_index, c.id \
+               AND vector_dims(c.embedding) = vector_dims($5::vector) \
+             ORDER BY c.embedding <=> $5::vector, d.path, c.chunk_index, c.id \
              LIMIT $6",
             &[
                 &scope.tenant_id(),

@@ -73,6 +73,77 @@ async fn reborn_libsql_run_migrations_creates_native_substrate_idempotently() {
     );
 }
 
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn reborn_libsql_run_migrations_backfills_fts_for_existing_chunks() {
+    // zmanian #3180 MED `native_libsql.rs:1232`: if `reborn_memory_chunks`
+    // already has rows when migrations create or recreate the
+    // `reborn_memory_chunks_fts` virtual table, FTS search would
+    // silently miss those chunks because the FTS5 sync triggers only
+    // fire on subsequent inserts — not on already-present rows. The
+    // migration must explicitly backfill the FTS index from the source
+    // table so existing chunks remain searchable after a partial-schema
+    // repair.
+    use ironclaw_memory::{
+        ChunkConfig, ChunkingMemoryDocumentIndexer, MemoryDocumentIndexer, MemoryDocumentPath,
+        MemoryDocumentRepository,
+    };
+    use std::sync::Arc;
+
+    let (db, _dir) = libsql_db().await;
+    let repository = Arc::new(RebornLibSqlMemoryDocumentRepository::new(db.clone()));
+    repository.run_migrations().await.expect("first migration");
+
+    // Index a document so a chunk row exists with content `searchable
+    // term`. Use a tiny chunk config so the body produces at least one
+    // chunk regardless of token boundaries.
+    let path = MemoryDocumentPath::new("tenant-a", "alice", None, "before-repair.md").unwrap();
+    repository
+        .write_document(&path, b"searchable term inside body")
+        .await
+        .unwrap();
+    let indexer =
+        ChunkingMemoryDocumentIndexer::new(repository.clone()).with_chunk_config(ChunkConfig {
+            chunk_size: 4,
+            overlap_percent: 0.0,
+            min_chunk_size: 1,
+        });
+    indexer.reindex_document(&path).await.unwrap();
+
+    // Simulate a partial schema repair: drop the FTS table + triggers,
+    // leave the chunk row untouched. Re-running migrations must
+    // recreate the FTS substrate AND backfill it from the existing
+    // chunks so the term remains searchable. Without the explicit
+    // `'rebuild'` after migration, search would return nothing.
+    let conn = db.connect().expect("connect");
+    for stmt in [
+        "DROP TRIGGER IF EXISTS reborn_memory_chunks_fts_insert",
+        "DROP TRIGGER IF EXISTS reborn_memory_chunks_fts_delete",
+        "DROP TRIGGER IF EXISTS reborn_memory_chunks_fts_update",
+        "DROP TABLE IF EXISTS reborn_memory_chunks_fts",
+    ] {
+        conn.execute(stmt, ()).await.expect(stmt);
+    }
+    repository.run_migrations().await.expect("repair migration");
+
+    // Now FTS-search for the term that lived in the pre-repair chunk
+    // row. The migration must have rebuilt the FTS index, otherwise
+    // this returns zero results.
+    use ironclaw_memory::MemorySearchRequest;
+    let request = MemorySearchRequest::new("searchable")
+        .unwrap()
+        .with_vector(false)
+        .with_limit(10);
+    let hits = repository
+        .search_documents(path.scope(), &request)
+        .await
+        .unwrap();
+    assert!(
+        !hits.is_empty(),
+        "FTS rebuild must surface chunks that existed before the partial-schema repair"
+    );
+}
+
 #[cfg(feature = "postgres")]
 use ironclaw_memory::RebornPostgresMemoryDocumentRepository;
 

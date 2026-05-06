@@ -200,6 +200,124 @@ async fn configured_prompt_safety_event_sink_failure_blocks_bypass_persistence()
 }
 
 #[tokio::test]
+async fn configured_sink_failure_does_not_block_clean_allow_writes() {
+    // zmanian #3180 MED `safety.rs:809`: once a sink is configured,
+    // sink errors must only fail-close outcomes that require a durable
+    // audit event before persistence (warn/bypass). For an `Allow`
+    // outcome on a protected path with benign content, a sink error
+    // must NOT convert into `prompt_write_safety_event_unavailable`
+    // and block the write — the `Allow` decision was already taken on
+    // its own merits.
+    //
+    // We compose:
+    //   - backend with a *failing* sink and the default policy,
+    //   - benign content on a protected path: default policy returns
+    //     `Allow` (no sanitizer findings).
+    //
+    // The current code already gates the sink-error → fail-closed
+    // conversion on `require_sink`, which the `Allow` path leaves
+    // false. This regression locks that contract in.
+    let repository = Arc::new(InMemoryMemoryDocumentRepository::new());
+    let events = Arc::new(FailingPromptSafetyEventSink);
+    let backend = RepositoryMemoryBackend::new(repository.clone())
+        .with_prompt_write_safety_event_sink(events);
+    let context = MemoryContext::new(MemoryDocumentScope::new("tenant-a", "alice", None).unwrap());
+    let path = MemoryDocumentPath::new("tenant-a", "alice", None, "MEMORY.md").unwrap();
+
+    // Benign content — the default policy returns `Allow` (no
+    // sanitizer findings, no bypass). The sink fails on every event;
+    // because `Allow` doesn't require_sink, that failure must be
+    // logged and swallowed. The write must persist.
+    backend
+        .write_document(&context, &path, b"benign reminder body")
+        .await
+        .expect("Allow outcome must not be blocked by a sink failure");
+    assert_eq!(
+        repository.read_document(&path).await.unwrap().unwrap(),
+        b"benign reminder body"
+    );
+}
+
+#[tokio::test]
+async fn backend_does_not_re_reject_adapter_approved_warn_or_bypass() {
+    // zmanian #3180 MED `filesystem.rs:245`: when the adapter has its
+    // own policy/sink overridden and runs prompt-safety enforcement,
+    // it must hand the wrapped backend a context marked as
+    // already-enforced so the backend does NOT run a second
+    // `enforce_prompt_write_safety` pass with its own (different) sink.
+    // Otherwise an adapter-approved warn/bypass can be re-rejected by
+    // the backend with `prompt_write_safety_event_unavailable` (or any
+    // other reason from a stricter backend policy).
+    //
+    // This regression composes:
+    //   - adapter with a working sink + the default policy (which
+    //     allows benign content),
+    //   - backend with NO sink and an `AlwaysRejectIfRecheckedPolicy`
+    //     that fails closed unconditionally.
+    //
+    // After the fix the adapter's approval propagates as
+    // `prompt_write_safety_enforced=true` on the backend context, and
+    // the backend's policy is short-circuited. Before the fix the
+    // backend would re-evaluate and reject benign content the adapter
+    // had already approved.
+
+    /// Backend policy that always rejects — proves the backend is NOT
+    /// re-running its policy on adapter-approved writes.
+    #[derive(Debug)]
+    struct AlwaysRejectIfRecheckedPolicy;
+
+    #[async_trait]
+    impl PromptWriteSafetyPolicy for AlwaysRejectIfRecheckedPolicy {
+        async fn check_write(
+            &self,
+            _request: PromptWriteSafetyRequest<'_>,
+        ) -> Result<PromptWriteSafetyDecision, PromptWriteSafetyError> {
+            Ok(PromptWriteSafetyDecision::Reject {
+                reason: PromptWriteSafetyError::new(
+                    PromptSafetyReasonCode::HighRiskPromptInjection,
+                )
+                .reason,
+            })
+        }
+    }
+
+    let repository = Arc::new(InMemoryMemoryDocumentRepository::new());
+    let backend = Arc::new(
+        RepositoryMemoryBackend::new(repository.clone())
+            .with_prompt_write_safety_policy(Arc::new(AlwaysRejectIfRecheckedPolicy)),
+    );
+    // Adapter has its own policy override (default) and a sink — drives
+    // the path where adapter takes over enforcement.
+    let events = Arc::new(RecordingPromptSafetyEventSink::default());
+    let filesystem = MemoryBackendFilesystemAdapter::new(backend)
+        .with_prompt_write_safety_policy(Arc::new(DefaultPromptWriteSafetyPolicy::default()))
+        .with_prompt_write_safety_event_sink(events);
+    let path = VirtualPath::new(
+        "/memory/tenants/tenant-a/users/alice/agents/_none/projects/_none/SOUL.md",
+    )
+    .unwrap();
+
+    // Benign content: adapter's default policy allows it. If the
+    // backend's `AlwaysRejectIfRecheckedPolicy` is re-run, the write
+    // fails. The fix is: adapter sets `prompt_write_safety_enforced`
+    // on the backend context, backend skips its policy.
+    filesystem
+        .write_file(&path, b"benign body content")
+        .await
+        .expect("adapter-approved write must NOT be re-rejected by backend");
+    let document_path = MemoryDocumentPath::new("tenant-a", "alice", None, "SOUL.md").unwrap();
+    assert_eq!(
+        repository
+            .read_document(&document_path)
+            .await
+            .unwrap()
+            .unwrap(),
+        b"benign body content",
+        "adapter-approved benign write must persist"
+    );
+}
+
+#[tokio::test]
 async fn adapter_enforces_when_backend_advertises_capability_but_does_not_protect_path() {
     // zmanian #3180 HIGH (`filesystem.rs:196`): a plugin backend can
     // advertise `prompt_write_safety: true` while reporting

@@ -803,6 +803,80 @@ async fn embedding_column_accepts_non_1536_dimension_vectors() {
 }
 
 #[tokio::test]
+async fn vector_search_with_mixed_dimension_chunks_does_not_error() {
+    // zmanian #3180 MED `native_postgres.rs:985`: the schema is
+    // unbounded `vector`, so a scope can legitimately contain chunks
+    // produced by different embedding providers with different
+    // dimensions (Ollama 768, OpenAI 1536, Claude 1024, …). Without a
+    // dimension filter, `ORDER BY c.embedding <=> $query` would error
+    // on ANY mismatched chunk and tear down the whole search. The
+    // current implementation filters with
+    // `vector_dims(c.embedding) = vector_dims($5)`; this regression
+    // proves the filter actually fires by issuing a search against a
+    // scope that holds both 5-dim chunks (matching) and 7-dim chunks
+    // (mismatching) and asserting the search succeeds and returns only
+    // the matching chunks.
+    let tenant = "reborn-pg-vector-mixeddim-search";
+    let Some(repo) = fresh_repository(tenant).await else {
+        return;
+    };
+    let path_match = MemoryDocumentPath::new(tenant, "alice", None, "match.md").unwrap();
+    let path_mismatch = MemoryDocumentPath::new(tenant, "alice", None, "mismatch.md").unwrap();
+    repo.write_document(&path_match, b"match body")
+        .await
+        .unwrap();
+    repo.write_document(&path_mismatch, b"mismatch body")
+        .await
+        .unwrap();
+    let hash_match = content_sha256("match body");
+    let hash_mismatch = content_sha256("mismatch body");
+
+    repo.replace_document_chunks_if_current(
+        &path_match,
+        &hash_match,
+        &[MemoryChunkWrite {
+            content: "matching dim".to_string(),
+            embedding: Some(vec![1.0, 0.0, 0.0, 0.0, 0.0]),
+        }],
+    )
+    .await
+    .unwrap();
+    repo.replace_document_chunks_if_current(
+        &path_mismatch,
+        &hash_mismatch,
+        &[MemoryChunkWrite {
+            content: "wrong dim".to_string(),
+            // 7 dims — must NOT match the 5-dim query and must NOT
+            // crash the entire search.
+            embedding: Some(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        }],
+    )
+    .await
+    .unwrap();
+
+    let request = MemorySearchRequest::new("dim")
+        .unwrap()
+        .with_full_text(false)
+        .with_query_embedding(vec![1.0, 0.0, 0.0, 0.0, 0.0])
+        .with_limit(10);
+    let hits = repo
+        .search_documents(path_match.scope(), &request)
+        .await
+        .expect("vector search must not error against mixed-dimension scope");
+
+    let paths: Vec<&str> = hits.iter().map(|h| h.path.relative_path()).collect();
+    assert!(
+        paths.contains(&"match.md"),
+        "matching-dim chunk must be returned; got {paths:?}"
+    );
+    assert!(
+        !paths.contains(&"mismatch.md"),
+        "mismatched-dim chunk must be filtered out, not error the query; got {paths:?}"
+    );
+    cleanup_tenant(&pool(), tenant).await;
+}
+
+#[tokio::test]
 async fn writes_with_non_english_cjk_content_persist_under_english_tsvector_config() {
     // zmanian test gap 5: `reborn_memory_chunks.content_tsv` is a generated
     // TSVECTOR computed with `to_tsvector('english', content)`. Non-English

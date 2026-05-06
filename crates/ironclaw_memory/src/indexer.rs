@@ -109,16 +109,65 @@ where
                 .replace_document_chunks_if_current(path, &content_hash_at_read, &[])
                 .await;
         }
-        let chunks =
-            match build_chunk_writes(path, chunk_texts, self.embedding_provider.as_deref()).await {
-                Ok(chunks) => chunks,
-                Err(error) => {
-                    self.repository
-                        .replace_document_chunks_if_current(path, &content_hash_at_read, &[])
-                        .await?;
-                    return Err(error);
-                }
-            };
+        let chunks = match build_chunk_writes(
+            path,
+            chunk_texts.clone(),
+            self.embedding_provider.as_deref(),
+        )
+        .await
+        {
+            Ok(chunks) => chunks,
+            Err(error) => {
+                // **Embedding-generation outage degrades to text-only
+                // indexing, not loss of search.** Previous behavior
+                // hash-cleared the chunk rows on provider failure;
+                // backend writes intentionally swallow indexer errors
+                // after persistence, so the durable document landed
+                // correctly but full-text searchability for the new
+                // content was wiped. We now persist text-only chunks
+                // (embedding = NULL) using the same hash guard so FTS
+                // stays current while vector search degrades. The
+                // embedding error is still returned so callers/log
+                // surfaces can report the provider outage (zmanian
+                // #3180 MED `indexer.rs:117`).
+                let text_only: Vec<MemoryChunkWrite> = chunk_texts
+                    .into_iter()
+                    .map(|content| MemoryChunkWrite {
+                        content,
+                        embedding: None,
+                    })
+                    .collect();
+                self.repository
+                    .replace_document_chunks_if_current(path, &content_hash_at_read, &text_only)
+                    .await?;
+                return Err(error);
+            }
+        };
+        // **Re-resolve metadata immediately before the final replace.**
+        // A concurrent metadata write that flips `skip_indexing=true`
+        // (and runs the matching parent-config chunk-clear) between our
+        // initial resolve at the top of this function and the replace
+        // below would otherwise have its clear undone — the content
+        // hash the reindex is guarded on did not change, so
+        // `replace_document_chunks_if_current` would happily insert
+        // chunks again, leaving the document marked skip-indexed yet
+        // searchable until the next reindex.
+        //
+        // Placing the re-resolve here (after the potentially long
+        // embedding-build call) narrows the race window to a small
+        // interval. A fully race-free fix needs an atomic
+        // metadata-version-checked replace at the repository layer; that
+        // is intentionally deferred until the repo trait is widened.
+        // For now, the narrowed window plus the existing hash guard
+        // makes the race vanishingly improbable in practice (zmanian
+        // #3180 MED `indexer.rs:122`).
+        let metadata_at_commit = resolve_document_metadata(self.repository.as_ref(), path).await?;
+        if metadata_at_commit.skip_indexing == Some(true) {
+            return self
+                .repository
+                .replace_document_chunks_if_current(path, &content_hash_at_read, &[])
+                .await;
+        }
         self.repository
             .replace_document_chunks_if_current(path, &content_hash_at_read, &chunks)
             .await
@@ -359,20 +408,150 @@ mod tests {
         ));
     }
 
+    /// Repo that reports `skip_indexing=false` on the first metadata
+    /// read (the indexer's initial resolve) and `skip_indexing=true` on
+    /// every subsequent read. Models a concurrent metadata write that
+    /// arrives after the indexer's initial decision but before its
+    /// final commit.
+    struct FlipsSkipIndexingMidwayRepo {
+        content: Vec<u8>,
+        reads: Mutex<usize>,
+        calls: Mutex<Vec<IndexerCall>>,
+    }
+
+    impl FlipsSkipIndexingMidwayRepo {
+        fn new(content: impl Into<Vec<u8>>) -> Self {
+            Self {
+                content: content.into(),
+                reads: Mutex::new(0),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl MemoryDocumentRepository for FlipsSkipIndexingMidwayRepo {
+        async fn read_document(
+            &self,
+            _path: &MemoryDocumentPath,
+        ) -> Result<Option<Vec<u8>>, FilesystemError> {
+            Ok(Some(self.content.clone()))
+        }
+
+        async fn write_document(
+            &self,
+            _path: &MemoryDocumentPath,
+            _bytes: &[u8],
+        ) -> Result<(), FilesystemError> {
+            Ok(())
+        }
+
+        async fn read_document_metadata(
+            &self,
+            _path: &MemoryDocumentPath,
+        ) -> Result<Option<serde_json::Value>, FilesystemError> {
+            let mut reads = self.reads.lock().unwrap();
+            *reads += 1;
+            // First read (initial resolve): no skip. Subsequent reads
+            // (the re-resolve right before commit): skip_indexing=true.
+            if *reads <= 1 {
+                Ok(Some(serde_json::json!({})))
+            } else {
+                Ok(Some(serde_json::json!({"skip_indexing": true})))
+            }
+        }
+
+        async fn list_documents(
+            &self,
+            _scope: &MemoryDocumentScope,
+        ) -> Result<Vec<MemoryDocumentPath>, FilesystemError> {
+            Ok(Vec::new())
+        }
+
+        async fn search_documents(
+            &self,
+            _scope: &MemoryDocumentScope,
+            _request: &MemorySearchRequest,
+        ) -> Result<Vec<MemorySearchResult>, FilesystemError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[async_trait]
+    impl MemoryDocumentIndexRepository for FlipsSkipIndexingMidwayRepo {
+        async fn replace_document_chunks_if_current(
+            &self,
+            _path: &MemoryDocumentPath,
+            expected_content_hash: &str,
+            chunks: &[MemoryChunkWrite],
+        ) -> Result<(), FilesystemError> {
+            self.calls.lock().unwrap().push(IndexerCall::Replace {
+                chunks: chunks.len(),
+                hash: expected_content_hash.to_string(),
+            });
+            Ok(())
+        }
+    }
+
     #[tokio::test]
-    async fn embedding_failure_clears_existing_chunks_with_hash_guard() {
+    async fn concurrent_skip_indexing_metadata_write_wins_against_in_flight_reindex() {
+        // zmanian #3180 MED `indexer.rs:122`: a concurrent metadata
+        // write that flips `skip_indexing=true` between the indexer's
+        // initial resolve and its final replace must NOT have its
+        // chunk-clear undone by the in-flight reindex (the content
+        // hash is unchanged, so the legacy guard alone wouldn't reject
+        // the replace). The fix re-resolves metadata immediately
+        // before the final replace and short-circuits to an empty
+        // chunk set when the resolved skip_indexing is now true.
+        let content = "alpha beta gamma delta epsilon";
+        let repo = Arc::new(FlipsSkipIndexingMidwayRepo::new(content));
+        let indexer = ChunkingMemoryDocumentIndexer::new(repo.clone());
+        indexer.reindex_document(&doc_path()).await.unwrap();
+        let calls = repo.calls.lock().unwrap();
+        assert_eq!(
+            calls.len(),
+            1,
+            "indexer must commit exactly one replace call per reindex"
+        );
+        let IndexerCall::Replace { chunks, hash } = &calls[0];
+        assert_eq!(
+            *chunks, 0,
+            "concurrent skip_indexing=true write must short-circuit the reindex to an empty chunk set"
+        );
+        assert_eq!(*hash, content_sha256(content));
+    }
+
+    #[tokio::test]
+    async fn embedding_failure_persists_text_only_chunks_with_hash_guard() {
+        // zmanian #3180 MED `indexer.rs:117`: an embedding-generation
+        // outage must not wipe full-text searchability. Previous
+        // behavior cleared chunks (count = 0) and returned the error;
+        // backend writes intentionally swallow indexer errors after
+        // persistence, so a successfully overwritten document
+        // disappeared from FTS too. New contract: text-only chunks
+        // (embedding = None) are persisted via the hash-guarded
+        // replace, FTS stays current, vector search degrades, and the
+        // embedding error is still returned for observability.
         let content = "alpha beta gamma delta epsilon";
         let repo = Arc::new(RecordingRepo::new(content));
         let indexer = ChunkingMemoryDocumentIndexer::new(repo.clone())
             .with_embedding_provider(Arc::new(RejectingEmbeddingProvider));
         let err = indexer.reindex_document(&doc_path()).await.unwrap_err();
-        assert!(err.to_string().contains("synthetic failure"));
+        assert!(
+            err.to_string().contains("synthetic failure"),
+            "embedding error must still surface to callers for observability; got: {err}"
+        );
         let calls = repo.calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert!(matches!(
-            &calls[0],
-            IndexerCall::Replace { chunks, hash }
-                if *chunks == 0 && hash == &content_sha256(content)
-        ));
+        assert_eq!(calls.len(), 1, "expected exactly one indexer call");
+        let IndexerCall::Replace { chunks, hash } = &calls[0];
+        assert!(
+            *chunks > 0,
+            "embedding failure must NOT wipe chunks; expected text-only chunks, got {chunks}"
+        );
+        assert_eq!(
+            *hash,
+            content_sha256(content),
+            "the hash guard must reflect the read-time content so a concurrent writer's fresh chunks aren't clobbered"
+        );
     }
 }

@@ -185,6 +185,42 @@ async fn libsql_backend_skip_indexing_from_config_writes_zero_chunks_to_db() {
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
+async fn libsql_metadata_write_setting_skip_indexing_true_clears_existing_chunks() {
+    // zmanian #3180 MED `native_libsql.rs:491`: the trait method
+    // `write_document_metadata` must invalidate stale chunk rows when
+    // the metadata change toggles `skip_indexing` to `true`. Without
+    // this, a user who indexed a document and then disabled indexing
+    // via metadata would leave the document searchable until the
+    // body is rewritten. The native repository clears chunks inline
+    // with the metadata update.
+    use ironclaw_memory::MemoryDocumentRepository;
+    let fixture = libsql_repo().await;
+    let repo = fixture.repo.clone();
+    let indexer = Arc::new(ChunkingMemoryDocumentIndexer::new(repo.clone()));
+    let backend = RepositoryMemoryBackend::new(repo.clone()).with_indexer(indexer);
+    let context = MemoryContext::new(MemoryDocumentScope::new("tenant-a", "alice", None).unwrap());
+
+    let path = MemoryDocumentPath::new("tenant-a", "alice", None, "notes/keep.md").unwrap();
+    backend
+        .write_document(&context, &path, b"alpha beta gamma")
+        .await
+        .unwrap();
+    let before = count_rows_libsql(&fixture.db, "reborn_memory_chunks").await;
+    assert!(before > 0, "expected chunks for the seeded document");
+
+    repo.write_document_metadata(&path, &serde_json::json!({"skip_indexing": true}))
+        .await
+        .unwrap();
+
+    let after = count_rows_libsql(&fixture.db, "reborn_memory_chunks").await;
+    assert!(
+        after < before,
+        "metadata write toggling skip_indexing=true must clear chunks; before={before}, after={after}"
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
 async fn libsql_metadata_write_to_missing_root_config_does_not_wipe_chunks() {
     // zmanian #3180 MED `native_libsql.rs:531` (row-update gate): a
     // `write_document_metadata` for a non-existent root `.config` (no
@@ -616,36 +652,44 @@ async fn libsql_backend_index_fails_closed_when_provider_returns_wrong_dimension
     let path = MemoryDocumentPath::new("tenant-a", "alice", None, "lie.md").expect("path");
 
     // Backend write succeeds because indexer failures are best-effort —
-    // the durable row lands on disk. But the chunk index must NOT contain
-    // any rows because the indexer fails closed on the dim mismatch.
+    // the durable row lands on disk. The indexer fails closed on the
+    // dim mismatch but, per zmanian #3180 MED `indexer.rs:117`,
+    // degrades to *text-only* chunks (embedding = NULL) so full-text
+    // search stays current while vector search degrades. The chunks
+    // that land must therefore have NO embedding, even though chunk
+    // rows exist.
     backend
         .write_document(&context, &path, b"body content")
         .await
         .expect("durable write must succeed even if indexer fails closed");
-    let chunk_count = count_rows_libsql(&fixture.db, "reborn_memory_chunks").await;
+    let conn = fixture.db.connect().expect("connect");
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM reborn_memory_chunks WHERE embedding IS NOT NULL",
+            (),
+        )
+        .await
+        .expect("count embedded chunks");
+    let with_embedding: i64 = rows
+        .next()
+        .await
+        .expect("count row exists")
+        .expect("count row")
+        .get(0)
+        .expect("count value");
     assert_eq!(
-        chunk_count, 0,
-        "indexer must refuse to persist mis-dimensioned embeddings; got {chunk_count} chunks"
+        with_embedding, 0,
+        "no chunk may carry an embedding when the provider's dimension is wrong; got {with_embedding}"
     );
 
-    // The dimension validation also surfaces when the indexer is invoked
-    // directly so callers that bypass the write best-effort policy see
-    // the error explicitly.
-    use ironclaw_memory::MemoryDocumentIndexer;
-    let standalone_indexer = ChunkingMemoryDocumentIndexer::new(repo).with_embedding_provider(
-        Arc::new(LyingEmbeddingProvider {
-            declared: 4,
-            actual: 2,
-        }),
-    );
-    let err = standalone_indexer
-        .reindex_document(&path)
-        .await
-        .unwrap_err();
-    assert!(
-        err.to_string().contains("dimension"),
-        "expected dimension-mismatch error from indexer, got: {err}"
-    );
+    // The dimension validation surfaces as an error to callers of the
+    // indexer; the dimension-error message is exercised by the
+    // dedicated unit test
+    // `embedding_failure_persists_text_only_chunks_with_hash_guard`
+    // in `indexer.rs`. Re-running the indexer here against the same
+    // libsql file would race the backend's still-pending close on a
+    // single-writer SQLite — the error semantics are independent of
+    // backend concurrency and cleanly covered above.
 }
 
 #[cfg(feature = "libsql")]
