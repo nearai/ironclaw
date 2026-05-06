@@ -46,8 +46,8 @@ Product adapters must continue to use `TurnCoordinator`. Runner transition APIs 
 
 Agent-loop drivers return `LoopExit` claims. `TurnRunner` validates those claims before applying a trusted outcome:
 
-- valid completed exits map to `TurnRunnerOutcome::Completed`;
-- valid blocked exits require checkpoint + gate refs and map to `TurnRunnerOutcome::Blocked`;
+- valid completed exits require host-verified durable reply/result refs and map to `TurnRunnerOutcome::Completed`;
+- valid blocked exits require host-verified checkpoint + gate refs and map to `TurnRunnerOutcome::Blocked`;
 - valid cancelled exits require observed host cancellation/interrupt and map to `TurnRunnerOutcome::Cancelled`;
 - valid failed exits map stable sanitized failure kinds to `TurnRunnerOutcome::Failed`;
 - invalid exits map either to sanitized terminal failure or runner/system-derived `RecoveryRequired` depending on side-effect safety evidence.

@@ -28,10 +28,10 @@ pub use db::LibSqlTurnStateStore;
 pub use db::PostgresTurnStateStore;
 pub use events::{InMemoryTurnEventSink, TurnEventKind, TurnEventSink, TurnLifecycleEvent};
 pub use ids::{
-    AcceptedMessageRef, GateRef, IdempotencyKey, LoopDiagnosticRef, LoopExitId, LoopMessageRef,
-    LoopResultRef, LoopUsageSummaryRef, ReplyTargetBindingRef, RunProfileId, RunProfileRequest,
-    RunProfileVersion, SourceBindingRef, TurnCheckpointId, TurnId, TurnLeaseToken, TurnRunId,
-    TurnRunnerId,
+    AcceptedMessageRef, GateRef, IdempotencyKey, LoopDiagnosticRef, LoopExitId, LoopGateRef,
+    LoopMessageRef, LoopResultRef, LoopUsageSummaryRef, ReplyTargetBindingRef, RunProfileId,
+    RunProfileRequest, RunProfileVersion, SourceBindingRef, TurnCheckpointId, TurnId,
+    TurnLeaseToken, TurnRunId, TurnRunnerId,
 };
 pub use loop_exit::{
     LoopBlocked, LoopBlockedKind, LoopCancelled, LoopCancelledReasonKind, LoopCompleted,

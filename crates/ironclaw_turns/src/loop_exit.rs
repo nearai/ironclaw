@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BlockedReason, GateRef, LoopDiagnosticRef, LoopExitId, LoopMessageRef, LoopResultRef,
-    LoopUsageSummaryRef, SanitizedFailure, TurnCheckpointId, runner::TurnRunnerOutcome,
+    BlockedReason, GateRef, LoopDiagnosticRef, LoopExitId, LoopGateRef, LoopMessageRef,
+    LoopResultRef, LoopUsageSummaryRef, SanitizedFailure, TurnCheckpointId,
+    runner::TurnRunnerOutcome,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,12 +29,26 @@ impl LoopExit {
         let exit_id = self.exit_id().clone();
         match self {
             Self::Completed(exit) => validate_completed_exit(exit_id, exit, policy),
-            Self::Blocked(exit) => LoopExitValidationDecision::trusted(
+            Self::Blocked(exit) if policy.blocked_evidence_verified => {
+                match exit.kind.to_blocked_reason(exit.gate_ref) {
+                    Ok(reason) => LoopExitValidationDecision::trusted(
+                        exit_id,
+                        TurnRunnerOutcome::Blocked {
+                            checkpoint_id: exit.checkpoint_id,
+                            reason,
+                        },
+                    ),
+                    Err(()) => invalid_exit_decision(
+                        exit_id,
+                        LoopExitViolationKind::UnverifiedBlockedEvidence,
+                        policy.invalid_handling,
+                    ),
+                }
+            }
+            Self::Blocked(_exit) => invalid_exit_decision(
                 exit_id,
-                TurnRunnerOutcome::Blocked {
-                    checkpoint_id: exit.checkpoint_id,
-                    reason: exit.kind.to_blocked_reason(exit.gate_ref),
-                },
+                LoopExitViolationKind::UnverifiedBlockedEvidence,
+                policy.invalid_handling,
             ),
             Self::Cancelled(_exit) if policy.host_cancellation_observed => {
                 LoopExitValidationDecision::trusted(exit_id, TurnRunnerOutcome::Cancelled)
@@ -102,7 +117,7 @@ pub enum LoopCompletionKind {
 #[serde(deny_unknown_fields)]
 pub struct LoopBlocked {
     pub kind: LoopBlockedKind,
-    pub gate_ref: GateRef,
+    pub gate_ref: LoopGateRef,
     pub checkpoint_id: TurnCheckpointId,
     pub exit_id: LoopExitId,
 }
@@ -116,12 +131,13 @@ pub enum LoopBlockedKind {
 }
 
 impl LoopBlockedKind {
-    fn to_blocked_reason(self, gate_ref: GateRef) -> BlockedReason {
-        match self {
+    fn to_blocked_reason(self, gate_ref: LoopGateRef) -> Result<BlockedReason, ()> {
+        let gate_ref = GateRef::new(gate_ref.as_str()).map_err(|_| ())?;
+        Ok(match self {
             Self::Approval => BlockedReason::Approval { gate_ref },
             Self::Auth => BlockedReason::Auth { gate_ref },
             Self::Resource => BlockedReason::Resource { gate_ref },
-        }
+        })
     }
 }
 
@@ -194,6 +210,8 @@ pub struct LoopExitValidationPolicy {
     pub require_final_checkpoint: bool,
     pub host_cancellation_observed: bool,
     pub invalid_handling: LoopExitInvalidHandling,
+    pub completion_refs_verified: bool,
+    pub blocked_evidence_verified: bool,
 }
 
 impl Default for LoopExitValidationPolicy {
@@ -202,6 +220,8 @@ impl Default for LoopExitValidationPolicy {
             require_final_checkpoint: false,
             host_cancellation_observed: false,
             invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
+            completion_refs_verified: false,
+            blocked_evidence_verified: false,
         }
     }
 }
@@ -257,7 +277,9 @@ impl LoopExitViolation {
 #[serde(rename_all = "snake_case")]
 pub enum LoopExitViolationKind {
     MissingCompletionReference,
+    UnverifiedCompletionReference,
     MissingFinalCheckpoint,
+    UnverifiedBlockedEvidence,
     CancellationNotObserved,
 }
 
@@ -265,7 +287,9 @@ impl LoopExitViolationKind {
     fn category(self) -> &'static str {
         match self {
             Self::MissingCompletionReference => "missing_completion_reference",
+            Self::UnverifiedCompletionReference => "unverified_completion_reference",
             Self::MissingFinalCheckpoint => "missing_final_checkpoint",
+            Self::UnverifiedBlockedEvidence => "unverified_blocked_evidence",
             Self::CancellationNotObserved => "cancellation_not_observed",
         }
     }
@@ -273,9 +297,10 @@ impl LoopExitViolationKind {
     fn failure_category(self) -> &'static str {
         match self {
             Self::CancellationNotObserved => "interrupted_unexpectedly",
-            Self::MissingCompletionReference | Self::MissingFinalCheckpoint => {
-                "driver_protocol_violation"
-            }
+            Self::MissingCompletionReference
+            | Self::UnverifiedCompletionReference
+            | Self::MissingFinalCheckpoint
+            | Self::UnverifiedBlockedEvidence => "driver_protocol_violation",
         }
     }
 }
@@ -289,6 +314,14 @@ fn validate_completed_exit(
         return invalid_exit_decision(
             exit_id,
             LoopExitViolationKind::MissingCompletionReference,
+            policy.invalid_handling,
+        );
+    }
+
+    if !policy.completion_refs_verified {
+        return invalid_exit_decision(
+            exit_id,
+            LoopExitViolationKind::UnverifiedCompletionReference,
             policy.invalid_handling,
         );
     }

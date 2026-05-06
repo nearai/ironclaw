@@ -10,7 +10,7 @@
 
 `LoopExit` is the driver-facing claim returned by an agent-loop attempt after a runner has already claimed a turn run. It is not durable run state and it is not trusted by itself.
 
-`TurnRunner` validates `LoopExit` evidence before translating it to a trusted `TurnRunnerOutcome` or to `RecoveryRequired` when safety cannot be proven.
+`TurnRunner` validates `LoopExit` evidence before translating it to a trusted `TurnRunnerOutcome` or to `RecoveryRequired` when safety cannot be proven. Syntactically valid refs are not evidence by themselves; the host/runner must verify referenced transcript, result, checkpoint, and gate records before trusting an exit.
 
 This prevents unsafe state changes such as releasing the active-thread lock after a driver says `Completed` without durable transcript/result refs, or blocking a run without a durable checkpoint and gate reference.
 
@@ -26,7 +26,7 @@ AgentLoopDriver
   -> TurnStateStore transition
 ```
 
-`LoopExit` contains references only. It must not carry raw prompts, assistant text, tool inputs, approval payloads, secrets, host paths, provider errors, stack traces, or raw runtime output.
+`LoopExit` contains references only. It must not carry raw prompts, assistant text, tool inputs, approval payloads, secrets, host paths, provider errors, stack traces, or raw runtime output. Loop-owned refs use tight host-minted opaque prefixes (`exit:`, `msg:`, `result:`, `gate:`, `usage:`, `diag:`) to avoid accepting free-form payload text as evidence.
 
 ---
 
@@ -47,9 +47,9 @@ The driver-facing variants are fixed for the MVP:
 
 ## 4. Evidence requirements
 
-- `Completed` requires at least one durable reply-message ref or result ref. Raw reply text is rejected by the wire shape.
+- `Completed` requires at least one durable reply-message ref or result ref, and the host/runner must verify those refs exist before mapping to a trusted completed outcome. Raw reply text is rejected by the wire shape and by strict loop-ref grammar.
 - `Completed` requires `final_checkpoint_id` only when the resolved run profile/checkpoint policy requires a terminal checkpoint.
-- `Blocked` requires all of: blocked kind, durable `gate_ref`, and `checkpoint_id`. The blocked kind is limited to approval, auth, and resource for MVP.
+- `Blocked` requires all of: blocked kind, durable `gate_ref`, and `checkpoint_id`, and the host/runner must verify the gate/checkpoint evidence before mapping to a trusted blocked outcome. The blocked kind is limited to approval, auth, and resource for MVP.
 - `Cancelled` is accepted only when the host cancellation/interrupt input was observed by the runner/host policy.
 - `Failed` uses stable sanitized failure kinds such as `iteration_limit`, `model_error`, `context_build_failed`, or `driver_bug`.
 - Usage/cost truth remains in host accounting/projection stores; `LoopExit` may carry only usage-summary refs.
@@ -66,7 +66,9 @@ Validation always produces a redacted decision:
 Initial validation covers:
 
 - completed exits missing durable completion refs;
+- completed exits whose refs have not been verified by host evidence;
 - terminal exits missing a required final checkpoint;
+- blocked exits whose checkpoint/gate evidence has not been verified by host evidence;
 - cancelled exits without observed host cancellation/interrupt.
 
 Later slices may add validation against transcript draft state, checkpoint freshness, event evidence, usage-summary refs, and idempotent exit replay storage.
