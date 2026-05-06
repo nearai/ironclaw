@@ -852,8 +852,14 @@ mod tests {
     }
 
     #[test]
-    fn every_valid_deployment_profile_pair_resolves() {
+    fn every_non_yolo_deployment_profile_pair_resolves() {
         // Locks in the compatibility matrix as a single readable assertion.
+        // Yolo profiles are intentionally excluded — they require explicit
+        // disclosure acknowledgement (and `EnterpriseYoloDedicated` also
+        // needs `org_policy.admin_approves_dedicated_yolo`), and are
+        // covered by `yolo_profiles_require_disclosure_acknowledgement` and
+        // `enterprise_yolo_dedicated_requires_disclosure_and_org_admin_approval`
+        // (zmanian #3243 LOW: name now reflects the non-yolo scope).
         let valid_pairs = [
             // Deployment-agnostic profiles work everywhere.
             (

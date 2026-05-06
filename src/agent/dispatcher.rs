@@ -461,8 +461,22 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
 
         let force_text = iteration >= self.force_text_at;
 
-        // Refresh tool definitions each iteration so newly built tools become visible
-        let tool_defs = self.agent.tools().tool_definitions().await;
+        // Refresh tool definitions each iteration so newly built tools become
+        // visible. **Use the policy-filtered variant when a runtime policy is
+        // configured** so the visibility filter applies to *every* iteration,
+        // not just iteration 1 (zmanian #3243 HIGH iteration-2 gap). Without
+        // this, hosted-multi-tenant deployments would surface
+        // provider-host-class tools (e.g. `shell` once any tool builder
+        // registers it) to the model after the first turn.
+        let tool_defs = match &self.agent.deps.runtime_policy {
+            Some(policy) => {
+                self.agent
+                    .tools()
+                    .tool_definitions_visible_under(policy)
+                    .await
+            }
+            None => self.agent.tools().tool_definitions().await,
+        };
 
         // Apply trust-based tool attenuation if skills are active.
         let tool_defs = if !self.active_skills.is_empty() {

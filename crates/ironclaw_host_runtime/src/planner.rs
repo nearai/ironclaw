@@ -33,6 +33,21 @@
 //! model call; the planner is the second line of defence at execution
 //! time. Both must agree: if the visibility filter would have hidden a
 //! capability, the planner must also refuse to plan it.
+//!
+//! **What the planner does NOT check.** A capability that declares
+//! `WriteFilesystem` or `DeleteFilesystem` against a policy whose
+//! `filesystem_backend` is `ScopedVirtual` (read-only by intent) is
+//! *not* rejected here. Filesystem-write authorization is gated
+//! per-mount by `ironclaw_capabilities::CapabilityHost` and the
+//! `MountView` constraints attached to each grant — the planner only
+//! decides which backend kind to plan against. A profile that resolves
+//! to a read-only filesystem backend will still produce a plan with
+//! that backend; the actual write attempt fails at the capability/mount
+//! boundary. Threading filesystem-write authority into the resolver
+//! (so a "read-only profile" could fail-close at plan time) is a
+//! deliberate non-goal — the per-mount granularity is already richer
+//! than a single profile-level boolean (zmanian #3243 LOW
+//! planner-write-scope).
 
 use ironclaw_host_api::runtime_policy::{
     EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, ProcessBackendKind, SecretMode,

@@ -26,7 +26,9 @@ use std::sync::Arc;
 
 use ironclaw::config::{RuntimeConfig, RuntimeConfigOverrides};
 use ironclaw::tools::ToolRegistry;
-use ironclaw::tools::builtin::ShellTool;
+use ironclaw::tools::builtin::{
+    ApplyPatchTool, HttpTool, ListDirTool, ReadFileTool, ShellTool, WriteFileTool,
+};
 use ironclaw_host_api::runtime_policy::{DeploymentMode, RuntimeProfile};
 use ironclaw_runtime_policy::{OrgPolicyConstraints, ResolveRequest, resolve};
 
@@ -34,6 +36,96 @@ async fn registry_with_shell() -> ToolRegistry {
     let registry = ToolRegistry::new();
     registry.register(Arc::new(ShellTool::new())).await;
     registry
+}
+
+async fn registry_with_host_fs_tools() -> ToolRegistry {
+    let registry = ToolRegistry::new();
+    registry.register(Arc::new(ReadFileTool::new())).await;
+    registry.register(Arc::new(WriteFileTool::new())).await;
+    registry.register(Arc::new(ListDirTool::new())).await;
+    registry.register(Arc::new(ApplyPatchTool::new())).await;
+    registry
+}
+
+async fn registry_with_http() -> ToolRegistry {
+    let registry = ToolRegistry::new();
+    registry.register(Arc::new(HttpTool::new())).await;
+    registry
+}
+
+#[tokio::test]
+async fn host_filesystem_tools_are_hidden_under_hosted_dev_policy() {
+    // zmanian #3243 MED tool-affordance coverage: file_read / file_write /
+    // list_dir / apply_patch all touch the local host filesystem.
+    // HostedDev resolves to FilesystemBackendKind::TenantWorkspace, so
+    // the visibility filter must hide them from the model. Without
+    // this, the iteration-1+ filter only hid `shell` (the only tool
+    // declaring a non-default affordance) and the rest of the
+    // host-filesystem tool surface stayed visible — defeating the
+    // hosted-multi-tenant security property.
+    let policy = resolve(ResolveRequest::new(
+        DeploymentMode::HostedMultiTenant,
+        RuntimeProfile::HostedDev,
+    ))
+    .expect("HostedMultiTenant + HostedDev resolves");
+
+    let registry = registry_with_host_fs_tools().await;
+    let visible = registry.tool_definitions_visible_under(&policy).await;
+    let names: Vec<&str> = visible.iter().map(|t| t.name.as_str()).collect();
+
+    for hidden in ["read_file", "write_file", "list_dir", "apply_patch"] {
+        assert!(
+            !names.contains(&hidden),
+            "{hidden} must be hidden under HostedDev (TenantWorkspace); got {names:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn host_filesystem_tools_are_visible_under_local_dev_policy() {
+    // The complement of the hosted-dev test: under LocalDev (which
+    // resolves to FilesystemBackendKind::HostWorkspace), the file
+    // tools must be visible.
+    let policy = resolve(ResolveRequest::new(
+        DeploymentMode::LocalSingleUser,
+        RuntimeProfile::LocalDev,
+    ))
+    .expect("LocalSingleUser + LocalDev resolves");
+
+    let registry = registry_with_host_fs_tools().await;
+    let visible = registry.tool_definitions_visible_under(&policy).await;
+    let names: Vec<&str> = visible.iter().map(|t| t.name.as_str()).collect();
+
+    for visible_name in ["read_file", "write_file", "list_dir", "apply_patch"] {
+        assert!(
+            names.contains(&visible_name),
+            "{visible_name} must be visible under LocalDev (HostWorkspace); got {names:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn http_tool_is_hidden_under_brokered_network_modes() {
+    // zmanian #3243 MED tool-affordance coverage: HttpTool declares
+    // DirectNetwork. HostedDev resolves to NetworkMode::Allowlist,
+    // HostedSafe to Brokered — both must hide HttpTool. The supported
+    // network surface for those deployments is brokered/allowlisted,
+    // not arbitrary direct egress.
+    for profile in [RuntimeProfile::HostedDev, RuntimeProfile::HostedSafe] {
+        let policy = resolve(ResolveRequest::new(
+            DeploymentMode::HostedMultiTenant,
+            profile,
+        ))
+        .expect("HostedMultiTenant resolves");
+        let registry = registry_with_http().await;
+        let visible = registry.tool_definitions_visible_under(&policy).await;
+        assert!(
+            !visible.iter().any(|t| t.name == "http"),
+            "http must be hidden under {profile:?} (NetworkMode {:?}); got {:?}",
+            policy.network_mode,
+            visible.iter().map(|t| &t.name).collect::<Vec<_>>()
+        );
+    }
 }
 
 #[tokio::test]

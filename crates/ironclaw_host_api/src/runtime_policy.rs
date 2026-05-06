@@ -162,6 +162,16 @@ pub enum RuntimeProfile {
     EnterpriseDev,
     /// Reduced approvals on org-dedicated infrastructure. Requires
     /// `EnterpriseDedicated` deployment + org admin policy.
+    ///
+    /// **Network is `DirectLogged`, not `Allowlist`.** This is wider than
+    /// `EnterpriseDev`'s `Allowlist` — it's a deliberate trade-off: the
+    /// org-dedicated runner is the trust boundary, the org admin has
+    /// explicitly opted in, and direct egress is logged for audit. Other
+    /// dimensions (filesystem stays `OrgDedicatedWorkspace`, secrets stay
+    /// `OrgBroker`, processes stay `OrgDedicatedRunner`) are unchanged
+    /// from `EnterpriseDev`. Approvals are also wider — uses
+    /// `ApprovalPolicy::OrgPolicy`, NOT `Minimal` (see resolver test
+    /// `enterprise_yolo_dedicated_uses_org_policy_approvals_not_minimal`).
     EnterpriseYoloDedicated,
 
     /// General safe helper-process mode: scoped/read-only mount + scratch,
