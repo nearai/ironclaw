@@ -25,7 +25,8 @@ pub async fn get_handler(
         ));
     }
 
-    let db = state.store.as_ref().ok_or((
+    let db = state.store.as_ref(); // dispatch-exempt: admin DB workspace
+    let db = db.ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;
@@ -75,7 +76,8 @@ pub async fn put_handler(
         ));
     }
 
-    let db = state.store.as_ref().ok_or((
+    let db = state.store.as_ref(); // dispatch-exempt: admin DB workspace
+    let db = db.ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;
@@ -92,7 +94,8 @@ pub async fn put_handler(
     })?;
 
     // Invalidate the cached admin prompt so all workspaces see the update.
-    if let Some(ref pool) = state.workspace_pool {
+    let pool = state.workspace_pool.as_ref(); // dispatch-exempt: cache invalidate
+    if let Some(pool) = pool {
         pool.invalidate_admin_prompt().await;
     }
 
