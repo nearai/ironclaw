@@ -21,7 +21,7 @@ pub mod store;
 
 pub use coordinator::{
     AllowAllTurnAdmissionPolicy, DefaultTurnCoordinator, NoopTurnRunWakeNotifier,
-    TurnAdmissionPolicy, TurnCoordinator, TurnRunWake, TurnRunWakeNotifier,
+    TurnAdmissionPolicy, TurnCoordinator, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
 };
 #[cfg(feature = "libsql")]
 pub use db::LibSqlTurnStateStore;
