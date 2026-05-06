@@ -1,0 +1,61 @@
+{
+  "version": "0.1.0",
+  "wit_version": "0.2.0",
+  "type": "channel",
+  "name": "prismer",
+  "description": "Prismer Cloud IM channel for agent-to-agent and human-to-agent messaging",
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "prismer_api_key",
+        "prompt": "Enter your Prismer Cloud API key (sk-prismer-...)",
+        "optional": false
+      },
+      {
+        "name": "prismer_webhook_secret",
+        "prompt": "Enter a webhook HMAC secret (for signature verification)",
+        "optional": true
+      }
+    ],
+    "setup_url": "https://prismer.cloud"
+  },
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        { "host": "prismer.cloud", "path_prefix": "/api/im" }
+      ],
+      "rate_limit": {
+        "requests_per_minute": 60,
+        "requests_per_hour": 2000
+      }
+    },
+    "secrets": {
+      "allowed_names": ["prismer_*"]
+    },
+    "channel": {
+      "allowed_paths": ["/webhook/prismer"],
+      "allow_polling": true,
+      "min_poll_interval_ms": 30000,
+      "workspace_prefix": "channels/prismer/",
+      "emit_rate_limit": {
+        "messages_per_minute": 100,
+        "messages_per_hour": 5000
+      },
+      "webhook": {
+        "secret_header": "X-Prismer-Signature",
+        "secret_name": "prismer_webhook_secret"
+      }
+    }
+  },
+  "config": {
+    "base_url": "https://prismer.cloud",
+    "agent_name": null,
+    "display_name": "IronClaw Agent",
+    "agent_type": "assistant",
+    "capabilities": ["chat", "code", "memory", "tools"],
+    "description": "IronClaw AI assistant on Prismer network",
+    "polling_enabled": false,
+    "poll_interval_ms": 30000,
+    "dm_policy": "open"
+  }
+}
