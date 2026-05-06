@@ -882,20 +882,25 @@ fn operation_key(record: &TurnIdempotencyRecord) -> Result<String, TurnError> {
 }
 
 fn idempotency_record_key(record: &TurnIdempotencyRecord) -> Result<String, TurnError> {
-    Ok(format!(
-        "{}|{}|{}|{}",
-        scope_key(&record.scope)?,
-        operation_key(record)?,
-        record
-            .run_id
-            .map(|run_id| run_id.to_string())
-            .unwrap_or_default(),
-        record.key.as_str()
-    ))
+    #[derive(serde::Serialize)]
+    struct IdempotencyRecordKey<'a> {
+        scope: &'a crate::TurnScope,
+        operation: crate::TurnIdempotencyOperationKind,
+        run_id: Option<String>,
+        key: &'a str,
+    }
+
+    to_json(&IdempotencyRecordKey {
+        scope: &record.scope,
+        operation: record.operation,
+        run_id: record.run_id.map(|run_id| run_id.to_string()),
+        key: record.key.as_str(),
+    })
 }
 
-fn db_error(_error: impl std::fmt::Display) -> TurnError {
+fn db_error(error: impl std::fmt::Display) -> TurnError {
+    tracing::debug!(%error, "turn state persistence operation failed");
     TurnError::Unavailable {
-        reason: "turn state persistence unavailable".to_string(),
+        reason: "turn state persistence temporarily unavailable".to_string(),
     }
 }

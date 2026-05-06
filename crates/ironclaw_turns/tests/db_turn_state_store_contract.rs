@@ -275,7 +275,7 @@ fn received_at() -> DateTime<Utc> {
 fn scope(thread: &str) -> TurnScope {
     TurnScope::new(
         TenantId::new("tenant1").unwrap(),
-        AgentId::new("agent1").unwrap(),
+        Some(AgentId::new("agent1").unwrap()),
         Some(ProjectId::new("project1").unwrap()),
         ThreadId::new(thread).unwrap(),
     )
