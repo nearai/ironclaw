@@ -44,4 +44,4 @@ Product adapters must continue to use `TurnCoordinator`. Runner transition APIs 
 
 ## 5. Deferred work
 
-This slice defines the core lease/recovery state machine in `ironclaw_turns`. Concrete PostgreSQL/libSQL adapters, AgentLoopHost/AgentLoopDriver integration, side-effect boundary checkpoint cadence inside the loop, and safe explicit retry/fork UX remain follow-up slices.
+The current `ironclaw_turns` slices define the core lease/recovery state machine and initial PostgreSQL/libSQL persistence adapters. AgentLoopHost/AgentLoopDriver integration, side-effect boundary checkpoint cadence inside the loop, production service-graph wiring, and safe explicit retry/fork UX remain follow-up slices.

@@ -143,6 +143,16 @@ impl InMemoryTurnStateStore {
         }
     }
 
+    pub fn from_persistence_snapshot(
+        snapshot: TurnPersistenceSnapshot,
+        limits: InMemoryTurnStateStoreLimits,
+    ) -> Result<Self, TurnError> {
+        Ok(Self {
+            inner: Mutex::new(Inner::from_persistence_snapshot(snapshot, limits)?),
+            submit_idempotency_ready: Condvar::new(),
+        })
+    }
+
     pub fn persistence_snapshot(&self) -> TurnPersistenceSnapshot {
         match self.inner.lock() {
             Ok(inner) => inner.persistence_snapshot(),
@@ -475,6 +485,136 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
 }
 
 impl Inner {
+    fn from_persistence_snapshot(
+        snapshot: TurnPersistenceSnapshot,
+        limits: InMemoryTurnStateStoreLimits,
+    ) -> Result<Self, TurnError> {
+        let mut cursor = 0;
+        let turns = snapshot
+            .turns
+            .into_iter()
+            .map(|record| (record.turn_id, record))
+            .collect::<HashMap<_, _>>();
+        let mut records = HashMap::new();
+        let mut queued_runs = VecDeque::new();
+        let mut terminal_runs = VecDeque::new();
+        for run in snapshot.runs {
+            cursor = cursor.max(run.event_cursor.0);
+            let actor = turns
+                .get(&run.turn_id)
+                .map(|turn| turn.actor.clone())
+                .ok_or_else(|| TurnError::Unavailable {
+                    reason: "turn run references missing turn record".to_string(),
+                })?;
+            if run.status == TurnStatus::Queued {
+                queued_runs.push_back(run.run_id);
+            }
+            if run.status.is_terminal() {
+                terminal_runs.push_back(run.run_id);
+            }
+            records.insert(
+                run.run_id,
+                RunRecord {
+                    scope: run.scope,
+                    actor,
+                    turn_id: run.turn_id,
+                    run_id: run.run_id,
+                    status: run.status,
+                    profile: run.profile,
+                    accepted_message_ref: run.accepted_message_ref,
+                    source_binding_ref: run.source_binding_ref,
+                    reply_target_binding_ref: run.reply_target_binding_ref,
+                    checkpoint_id: run.checkpoint_id,
+                    gate_ref: run.gate_ref,
+                    failure: run.failure,
+                    event_cursor: run.event_cursor,
+                    runner_id: run.runner_id,
+                    lease_token: run.lease_token,
+                    lease_expires_at: run.lease_expires_at,
+                    last_heartbeat_at: run.last_heartbeat_at,
+                    claim_count: run.claim_count,
+                    received_at: run.received_at,
+                },
+            );
+        }
+
+        let mut active_locks = HashMap::new();
+        for lock in snapshot.active_locks {
+            active_locks.insert(lock.key.clone(), lock);
+        }
+
+        let mut submit_idempotency = HashMap::new();
+        let mut resume_idempotency = HashMap::new();
+        let mut cancel_idempotency = HashMap::new();
+        let mut idempotency_records = HashMap::new();
+        let mut submit_idempotency_order = VecDeque::new();
+        let mut resume_idempotency_order = VecDeque::new();
+        let mut cancel_idempotency_order = VecDeque::new();
+        let mut idempotency_record_order = VecDeque::new();
+        let mut ordered_idempotency_records = snapshot.idempotency_records;
+        ordered_idempotency_records.sort_by_key(|record| record.created_at);
+        for record in ordered_idempotency_records {
+            let persisted_key = persisted_key_for_record(&record);
+            idempotency_record_order.push_back(persisted_key.clone());
+            idempotency_records.insert(persisted_key, record.clone());
+            match record.operation {
+                TurnIdempotencyOperationKind::Submit => {
+                    if let Some(replay) = record.replay_submit() {
+                        let key = SubmitIdempotencyKey {
+                            scope: record.scope.clone(),
+                            key: record.key.clone(),
+                        };
+                        submit_idempotency_order.push_back(key.clone());
+                        submit_idempotency.insert(key, replay);
+                    }
+                }
+                TurnIdempotencyOperationKind::Resume => {
+                    if let (Some(run_id), Some(replay)) = (record.run_id, record.replay_resume()) {
+                        let key = RunIdempotencyKey {
+                            scope: record.scope.clone(),
+                            run_id,
+                            key: record.key.clone(),
+                        };
+                        resume_idempotency_order.push_back(key.clone());
+                        resume_idempotency.insert(key, replay);
+                    }
+                }
+                TurnIdempotencyOperationKind::Cancel => {
+                    if let (Some(run_id), Some(replay)) = (record.run_id, record.replay_cancel()) {
+                        let key = RunIdempotencyKey {
+                            scope: record.scope.clone(),
+                            run_id,
+                            key: record.key.clone(),
+                        };
+                        cancel_idempotency_order.push_back(key.clone());
+                        cancel_idempotency.insert(key, replay);
+                    }
+                }
+            }
+        }
+
+        Ok(Self {
+            cursor,
+            turns,
+            records,
+            queued_runs,
+            terminal_runs,
+            active_locks,
+            checkpoints: snapshot.checkpoints,
+            submit_idempotency,
+            submit_idempotency_in_flight: HashSet::new(),
+            resume_idempotency,
+            cancel_idempotency,
+            idempotency_records,
+            submit_idempotency_order,
+            resume_idempotency_order,
+            cancel_idempotency_order,
+            idempotency_record_order,
+            events: Vec::new(),
+            limits,
+        })
+    }
+
     fn next_cursor(&mut self) -> EventCursor {
         self.cursor = self.cursor.saturating_add(1);
         EventCursor(self.cursor)

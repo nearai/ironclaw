@@ -33,7 +33,7 @@ The `ironclaw_turns` contract models persistence with these record families:
 | `turn_checkpoints` | Dedicated checkpoint/gate records written when a running run blocks. |
 | `turn_idempotency_keys` | Prior sanitized outcomes for scoped submit/resume/cancel idempotency keys. |
 
-Concrete PostgreSQL/libSQL tables are intentionally deferred until the DB adapter slice. Backends must preserve the same semantics when those adapters are added.
+The initial PostgreSQL/libSQL adapter slice stores each logical record family in its own table with indexed metadata columns plus a serialized contract payload. Backends must preserve the same semantics as the in-memory contract tests while later slices harden service-graph wiring.
 
 ---
 
