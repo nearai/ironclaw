@@ -47,6 +47,19 @@ fn resolve_settings_temperature(
         .map(|t| (t as f32).clamp(0.0, 2.0))
 }
 
+fn chat_job_context(
+    message: &IncomingMessage,
+    thread_id: Uuid,
+    user_tz: chrono_tz::Tz,
+) -> JobContext {
+    let mut job_ctx = JobContext::with_user(&message.user_id, "chat", "Interactive chat session")
+        .with_requester_id(&message.sender_id);
+    job_ctx.conversation_id = Some(thread_id);
+    job_ctx.user_timezone = user_tz.name().to_string();
+    job_ctx.metadata = crate::agent::agent_loop::chat_tool_execution_metadata(message);
+    job_ctx
+}
+
 /// Result of the agentic loop execution.
 pub(super) enum AgenticLoopResult {
     /// Completed with a response.
@@ -247,12 +260,8 @@ impl Agent {
         }
 
         // Create a JobContext for tool execution (chat doesn't have a real job)
-        let mut job_ctx =
-            JobContext::with_user(&message.user_id, "chat", "Interactive chat session")
-                .with_requester_id(&message.sender_id);
+        let mut job_ctx = chat_job_context(message, thread_id, user_tz);
         job_ctx.http_interceptor = self.deps.http_interceptor.clone();
-        job_ctx.user_timezone = user_tz.name().to_string();
-        job_ctx.metadata = crate::agent::agent_loop::chat_tool_execution_metadata(message);
 
         // Build system prompts once for this turn. Two variants: with tools
         // (normal iterations) and without (force_text final iteration).
@@ -1818,7 +1827,7 @@ mod tests {
     use crate::agent::agent_loop::{Agent, AgentDeps};
     use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
     use crate::agent::session::Session;
-    use crate::channels::ChannelManager;
+    use crate::channels::{ChannelManager, IncomingMessage};
     use crate::config::{AgentConfig, SafetyConfig, SkillsConfig};
     use crate::context::{ContextManager, JobContext};
     use crate::error::Error;
@@ -1829,6 +1838,7 @@ mod tests {
     };
     use crate::tools::{ApprovalRequirement, Tool, ToolError, ToolOutput, ToolRegistry};
     use ironclaw_safety::SafetyLayer;
+    use uuid::Uuid;
 
     use super::{
         capture_auth_prompt, check_auth_required, extract_auth_prompt, parse_auth_result,
@@ -2741,6 +2751,17 @@ mod tests {
         .to_string());
 
         assert!(check_auth_required("tool_activate", &result).is_none());
+    }
+
+    #[test]
+    fn test_chat_job_context_includes_thread_id_for_sse_scoped_tools() {
+        let thread_id = Uuid::new_v4();
+        let message = IncomingMessage::new("web", "test-user", "/plan Ship it");
+
+        let job_ctx = super::chat_job_context(&message, thread_id, chrono_tz::UTC);
+
+        assert_eq!(job_ctx.conversation_id, Some(thread_id));
+        assert_eq!(job_ctx.user_timezone, "UTC");
     }
 
     #[tokio::test]

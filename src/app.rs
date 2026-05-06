@@ -695,6 +695,7 @@ impl AppBuilder {
         tools: &Arc<ToolRegistry>,
         hooks: &Arc<HookRegistry>,
         settings_store_override: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>>,
+        ownership_cache: Arc<crate::ownership::OwnershipCache>,
     ) -> Result<
         (
             Arc<McpSessionManager>,
@@ -989,6 +990,13 @@ impl AppBuilder {
             if let Some(ref ss) = settings_store_override {
                 em = em.with_settings_store(Arc::clone(ss));
             }
+            if let Some(ref db) = self.db {
+                let ps = Arc::new(crate::pairing::PairingStore::new(
+                    Arc::clone(db),
+                    Arc::clone(&ownership_cache),
+                ));
+                em = em.with_pairing_store(ps);
+            }
             let manager = Arc::new(em);
             tools.register_extension_tools(Arc::clone(&manager));
 
@@ -1181,6 +1189,7 @@ impl AppBuilder {
             _ => (None, None),
         };
 
+        let ownership_cache = Arc::new(crate::ownership::OwnershipCache::new());
         let (
             mcp_session_manager,
             mcp_process_manager,
@@ -1189,7 +1198,12 @@ impl AppBuilder {
             catalog_entries,
             dev_loaded_tool_names,
         ) = self
-            .init_extensions(&tools, &hooks, settings_store.clone())
+            .init_extensions(
+                &tools,
+                &hooks,
+                settings_store.clone(),
+                Arc::clone(&ownership_cache),
+            )
             .await?;
 
         // Load bootstrap-completed flag from settings so that existing users
@@ -1333,7 +1347,7 @@ impl AppBuilder {
             catalog_entries,
             dev_loaded_tool_names,
             builder,
-            ownership_cache: Arc::new(crate::ownership::OwnershipCache::new()),
+            ownership_cache,
         })
     }
 }

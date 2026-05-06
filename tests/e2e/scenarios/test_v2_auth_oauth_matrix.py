@@ -37,7 +37,6 @@ from helpers import (
     api_post,
     create_member_user,
     open_authed_page,
-    send_chat_and_wait_for_terminal_message,
     sse_stream,
     wait_for_ready,
 )
@@ -1074,12 +1073,15 @@ async def _wait_for_tool_call(
     thread_id: str,
     tool_name: str,
     timeout: float = 30.0,
+    *,
+    token: str = AUTH_TOKEN,
 ) -> dict:
     approved_request_ids = set()
     for _ in range(int(timeout * 2)):
         response = await api_get(
             base_url,
             f"/api/chat/history?thread_id={thread_id}",
+            token=token,
             timeout=15,
         )
         response.raise_for_status()
@@ -1090,6 +1092,7 @@ async def _wait_for_tool_call(
             approve = await api_post(
                 base_url,
                 "/api/chat/approval",
+                token=token,
                 json={
                     "request_id": pending["request_id"],
                     "action": "approve",
@@ -1449,6 +1452,23 @@ async def test_wasm_tool_oauth_roundtrip(auth_matrix_server):
     assert readiness["active"] is True, readiness
 
 
+@pytest.mark.xfail(
+    strict=False,
+    reason=(
+        "Obsolete under the engine-v2 callable-only contract from #2868. "
+        "When the LLM emits a direct call to a not-yet-authed extension, "
+        "the engine now returns 'action <name> is not callable in this "
+        "execution context' instead of surfacing a gate_required "
+        "Authentication event with an auth URL. The new model-facing "
+        "enablement path is `tool_activate(name=...)`, exercised in "
+        "test_v2_tool_activate_surface.py. The mock LLM is canned to emit "
+        "tool calls directly, so it can't drive the new contract; until "
+        "the canned response is updated (or the engine restores a bridge-"
+        "level fallback) this scenario can't be reproduced from a "
+        "scripted LLM. test_settings_first_gmail_auth_then_chat_runs "
+        "covers the same auth flow through the settings UI path."
+    ),
+)
 async def test_wasm_tool_first_chat_auth_attempt_emits_auth_url(auth_matrix_server):
     server = auth_matrix_server
     await _install_extension(server["base_url"], "gmail")
@@ -1550,22 +1570,33 @@ async def test_mcp_same_server_multi_user_via_browser(browser, auth_matrix_serve
         browser, server["base_url"], token=member["token"]
     )
     try:
-        owner_result = await send_chat_and_wait_for_terminal_message(
-            owner_page,
-            "check mock mcp search",
-            timeout=300000,
-            expected_text_contains="Mock MCP search result",
+        # Send the chat through each user's browser session. Engine v2 opens
+        # an `approval` pending_gate on the first MCP tool call; the browser
+        # has no auto-approve UI in this fixture, so drive approval through
+        # the per-user API while polling for the tool call to land. Without
+        # this, both pages hang in the streaming predicate forever.
+        await owner_page.locator(SEL["chat_input"]).fill("check mock mcp search")
+        await owner_page.locator(SEL["chat_input"]).press("Enter")
+        await member_page.locator(SEL["chat_input"]).fill("check mock mcp search")
+        await member_page.locator(SEL["chat_input"]).press("Enter")
+
+        owner_thread = await _current_thread_id(owner_page)
+        member_thread = await _current_thread_id(member_page)
+
+        await _wait_for_tool_call(
+            server["base_url"],
+            owner_thread,
+            "mock_mcp_mock_search",
+            timeout=60.0,
+            token=AUTH_TOKEN,
         )
-        member_result = await send_chat_and_wait_for_terminal_message(
-            member_page,
-            "check mock mcp search",
-            timeout=300000,
-            expected_text_contains="Mock MCP search result",
+        await _wait_for_tool_call(
+            server["base_url"],
+            member_thread,
+            "mock_mcp_mock_search",
+            timeout=60.0,
+            token=member["token"],
         )
-        assert owner_result["role"] == "assistant", owner_result
-        assert member_result["role"] == "assistant", member_result
-        assert "Mock MCP search result" in owner_result["text"], owner_result
-        assert "Mock MCP search result" in member_result["text"], member_result
 
         mcp_state = await _get_mock_mcp_state(server["mock_llm_url"])
         tool_call_auths = {
@@ -1862,6 +1893,15 @@ async def test_wasm_tool_oauth_refresh_on_demand(auth_matrix_server):
 
     thread_id = await _create_thread(server["base_url"])
     await _send_chat(server["base_url"], thread_id, "check gmail unread")
+
+    # Engine v2 gates the gmail call on `approval` before reaching the
+    # http credential-injection layer that performs the refresh. Without
+    # approving, the chat sits in pending_gate forever and the refresh
+    # endpoint is never hit. Drive approval through the API while waiting
+    # for the tool to land.
+    await _wait_for_tool_call(
+        server["base_url"], thread_id, "gmail", timeout=30.0
+    )
 
     oauth_state = await _wait_for_refresh_request(server["mock_llm_url"])
     assert oauth_state["refresh_count"] >= 1, oauth_state

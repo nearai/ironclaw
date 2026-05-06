@@ -235,7 +235,7 @@ dependencies = [
  "objc2-foundation",
  "parking_lot",
  "percent-encoding",
- "windows-sys 0.60.2",
+ "windows-sys 0.59.0",
  "x11rb",
 ]
 
@@ -3976,6 +3976,68 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_approvals"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ironclaw_authorization",
+ "ironclaw_events",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_run_state",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "ironclaw_architecture"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "ironclaw_authorization"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_trust",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "ironclaw_capabilities"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ironclaw_approvals",
+ "ironclaw_authorization",
+ "ironclaw_dispatcher",
+ "ironclaw_events",
+ "ironclaw_extensions",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_processes",
+ "ironclaw_resources",
+ "ironclaw_run_state",
+ "ironclaw_trust",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ironclaw_common"
 version = "0.4.0"
 dependencies = [
@@ -3984,6 +4046,23 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tracing",
+]
+
+[[package]]
+name = "ironclaw_dispatcher"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ironclaw_events",
+ "ironclaw_extensions",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_resources",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-test",
 ]
 
 [[package]]
@@ -4009,6 +4088,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_events"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ironclaw_host_api",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "ironclaw_extensions"
+version = "0.1.0"
+dependencies = [
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_trust",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml 0.8.23",
+ "url",
+]
+
+[[package]]
+name = "ironclaw_filesystem"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "deadpool-postgres",
+ "ironclaw_host_api",
+ "libsql",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
+]
+
+[[package]]
 name = "ironclaw_gateway"
 version = "0.1.0"
 dependencies = [
@@ -4016,6 +4140,151 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tracing",
+]
+
+[[package]]
+name = "ironclaw_host_api"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+ "serde_json",
+ "sha2",
+ "static_assertions",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "ironclaw_host_runtime"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ironclaw_approvals",
+ "ironclaw_authorization",
+ "ironclaw_capabilities",
+ "ironclaw_dispatcher",
+ "ironclaw_events",
+ "ironclaw_extensions",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_mcp",
+ "ironclaw_network",
+ "ironclaw_processes",
+ "ironclaw_resources",
+ "ironclaw_run_state",
+ "ironclaw_safety",
+ "ironclaw_scripts",
+ "ironclaw_secrets",
+ "ironclaw_trust",
+ "ironclaw_wasm",
+ "rust_decimal",
+ "secrecy",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
+ "wat",
+ "wit-component 0.245.1",
+ "wit-parser 0.245.1",
+]
+
+[[package]]
+name = "ironclaw_mcp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ironclaw_dispatcher",
+ "ironclaw_events",
+ "ironclaw_extensions",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_resources",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "ironclaw_memory"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "deadpool-postgres",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_safety",
+ "jsonschema",
+ "libsql",
+ "pgvector",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "ironclaw_network"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ironclaw_host_api",
+ "reqwest",
+ "thiserror 2.0.18",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "ironclaw_processes"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "ironclaw_events",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_resources",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "ironclaw_resources"
+version = "0.1.0"
+dependencies = [
+ "ironclaw_host_api",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ironclaw_run_state"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -4029,6 +4298,36 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "ironclaw_scripts"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ironclaw_dispatcher",
+ "ironclaw_events",
+ "ironclaw_extensions",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_resources",
+ "rust_decimal_macros",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "ironclaw_secrets"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ironclaw_host_api",
+ "secrecy",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -4051,6 +4350,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_trust"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ironclaw_host_api",
+ "serde",
+ "serde_json",
+ "static_assertions",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ironclaw_tui"
 version = "0.1.0"
 dependencies = [
@@ -4067,6 +4378,29 @@ dependencies = [
  "tracing",
  "tui-textarea",
  "unicode-width 0.2.0",
+]
+
+[[package]]
+name = "ironclaw_wasm"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ironclaw_dispatcher",
+ "ironclaw_events",
+ "ironclaw_extensions",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_resources",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "wasmtime",
+ "wasmtime-wasi",
+ "wat",
+ "wit-component 0.245.1",
+ "wit-parser 0.245.1",
 ]
 
 [[package]]
@@ -5944,7 +6278,7 @@ dependencies = [
  "once_cell",
  "socket2 0.5.10",
  "tracing",
- "windows-sys 0.60.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6335,6 +6669,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "h2 0.4.13",
@@ -8874,6 +9209,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasm-metadata"
+version = "0.245.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da55e60097e8b37b475a0fa35c3420dd71d9eb7bd66109978ab55faf56a57efb"
+dependencies = [
+ "anyhow",
+ "indexmap 2.13.0",
+ "wasm-encoder 0.245.1",
+ "wasmparser 0.245.1",
+]
+
+[[package]]
 name = "wasm-streams"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9784,9 +10131,9 @@ dependencies = [
  "indexmap 2.13.0",
  "prettyplease",
  "syn 2.0.117",
- "wasm-metadata",
+ "wasm-metadata 0.244.0",
  "wit-bindgen-core",
- "wit-component",
+ "wit-component 0.244.0",
 ]
 
 [[package]]
@@ -9818,9 +10165,28 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "wasm-encoder 0.244.0",
- "wasm-metadata",
+ "wasm-metadata 0.244.0",
  "wasmparser 0.244.0",
  "wit-parser 0.244.0",
+]
+
+[[package]]
+name = "wit-component"
+version = "0.245.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4894f10d2d5cbc17c77e91f86a1e48e191a788da4425293b55c98b44ba3fcac9"
+dependencies = [
+ "anyhow",
+ "bitflags 2.11.0",
+ "indexmap 2.13.0",
+ "log",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "wasm-encoder 0.245.1",
+ "wasm-metadata 0.245.1",
+ "wasmparser 0.245.1",
+ "wit-parser 0.245.1",
 ]
 
 [[package]]

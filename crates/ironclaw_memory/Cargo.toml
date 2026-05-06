@@ -1,0 +1,36 @@
+[package]
+name = "ironclaw_memory"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Memory document service adapters for IronClaw Reborn"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[features]
+default = []
+postgres = ["dep:deadpool-postgres", "dep:tokio-postgres", "dep:pgvector"]
+libsql = ["dep:libsql"]
+
+[dependencies]
+async-trait = "0.1"
+deadpool-postgres = { version = "0.14", optional = true }
+ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.1" }
+libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
+jsonschema = { version = "0.45", default-features = false }
+pgvector = { version = "0.4", features = ["postgres"], optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tracing = "0.1"
+tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-serde_json-1"], optional = true }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt"] }
