@@ -4051,6 +4051,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_conversations"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ironclaw_host_api",
+ "ironclaw_turns",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "ironclaw_dispatcher"
 version = "0.1.0"
 dependencies = [
