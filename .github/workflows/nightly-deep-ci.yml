@@ -35,3 +35,25 @@ jobs:
     with:
       ref: main
       include_docker: false
+
+  nightly-alert:
+    name: Nightly Deep CI Alert
+    runs-on: ubuntu-latest
+    if: always() && github.event_name == 'schedule'
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    needs: [deterministic-deep-tests]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Report nightly deep CI result
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ALERT_WORKFLOW_NAME: Nightly Deep CI
+          ALERT_ISSUE_TITLE: Nightly Deep CI failed
+          ALERT_RESULT: ${{ needs.deterministic-deep-tests.result }}
+        run: .github/scripts/nightly-alert-issue.sh

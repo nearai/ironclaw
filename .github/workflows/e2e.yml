@@ -126,3 +126,25 @@ jobs:
             echo "One or more E2E jobs failed"
             exit 1
           fi
+
+  nightly-alert:
+    name: Nightly E2E Alert
+    runs-on: ubuntu-latest
+    if: always() && github.event_name == 'schedule'
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    needs: [e2e]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Report nightly E2E result
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ALERT_WORKFLOW_NAME: Nightly E2E
+          ALERT_ISSUE_TITLE: Nightly E2E failed
+          ALERT_RESULT: ${{ needs.e2e.result }}
+        run: .github/scripts/nightly-alert-issue.sh
