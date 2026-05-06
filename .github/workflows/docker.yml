@@ -94,7 +94,7 @@ jobs:
             WORKER_TAGS="${WORKER_TAGS},${WORKER_IMAGE_NAME}:latest"
             WORKER_TAGS="${WORKER_TAGS},${WORKER_IMAGE_NAME}:${SHA}"
           elif [[ "${EVENT_NAME}" == "schedule" ]]; then
-            # Daily staging: :staging + :sha-xxx
+            # Hourly staging: :staging + :sha-xxx
             TAGS="${IMAGE_NAME}:staging"
             TAGS="${TAGS},${IMAGE_NAME}:${SHA}"
             WORKER_TAGS="${WORKER_IMAGE_NAME}:staging"
