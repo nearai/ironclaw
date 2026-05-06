@@ -218,6 +218,7 @@ impl Channel for RelayChannel {
         let provider_str = self.provider.as_str().to_string();
         let relay_name = channel_name.clone();
         let pairing_store = self.pairing_store.clone();
+        let pairing_client = self.client.clone();
 
         // Spawn a task that reads events from the webhook handler and converts to IncomingMessage
         tokio::spawn(async move {
@@ -267,11 +268,46 @@ impl Channel for RelayChannel {
                             user_str
                         }
                         Ok(None) => {
-                            tracing::debug!(
+                            tracing::info!(
                                 sender_id = %event.sender_id,
-                                "Relay: sender not paired, using raw sender_id"
+                                "Relay: sender not paired, sending pairing code"
                             );
-                            event.sender_id.clone()
+                            let meta = serde_json::json!({
+                                "sender_name": event.display_name(),
+                                "channel_id": event.channel_id,
+                            });
+                            match store
+                                .upsert_request(&relay_name, &event.sender_id, Some(meta))
+                                .await
+                            {
+                                Ok(record) => {
+                                    let instructions = format!(
+                                        "Enter this code in IronClaw to pair your Slack account: `{}`",
+                                        record.code
+                                    );
+                                    let team_id = event.team_id().to_string();
+                                    let body = serde_json::json!({
+                                        "channel": event.channel_id,
+                                        "text": instructions,
+                                        "thread_ts": event.thread_id.as_deref().unwrap_or(&event.id),
+                                    });
+                                    if let Err(e) = pairing_client
+                                        .proxy_provider(
+                                            &provider_str,
+                                            &team_id,
+                                            "chat.postMessage",
+                                            body,
+                                        )
+                                        .await
+                                    {
+                                        tracing::warn!(error = %e, "Relay: failed to send pairing code reply");
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "Relay: failed to create pairing request");
+                                }
+                            }
+                            continue;
                         }
                         Err(e) => {
                             tracing::warn!(
