@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::bootstrap::ironclaw_base_dir;
 use crate::error::OrchestratorError;
 use crate::orchestrator::auth::{CredentialGrant, TokenStore};
-use crate::sandbox::{connect_docker, resolve_image_reference};
+use crate::sandbox::{SANDBOX_HOME, connect_docker, resolve_image_reference};
 
 use ironclaw_common::MAX_WORKER_ITERATIONS;
 
@@ -437,7 +437,7 @@ impl ContainerJobManager {
         );
 
         let mut env_vec = vec![
-            "HOME=/home/sandbox".to_string(),
+            format!("HOME={SANDBOX_HOME}"),
             format!("IRONCLAW_WORKER_TOKEN={}", token),
             format!("IRONCLAW_JOB_ID={}", job_id),
             format!("IRONCLAW_ORCHESTRATOR_URL={}", orchestrator_url),
@@ -476,7 +476,7 @@ impl ContainerJobManager {
             {
                 Some(config_path) => {
                     binds.push(format!(
-                        "{}:/home/sandbox/.ironclaw/mcp-servers.json:ro",
+                        "{}:{SANDBOX_HOME}/.ironclaw/mcp-servers.json:ro",
                         config_path.display()
                     ));
                     tracing::debug!(

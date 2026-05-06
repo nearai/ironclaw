@@ -43,6 +43,13 @@ use futures::StreamExt;
 use crate::sandbox::config::{ResourceLimits, SandboxPolicy};
 use crate::sandbox::error::{Result, SandboxError};
 
+/// Home directory used by sandbox/worker containers.
+///
+/// This intentionally differs from the IronClaw service user's home in the
+/// combined Docker image; spawned job containers should keep their tool state
+/// under the sandbox home.
+pub const SANDBOX_HOME: &str = "/home/sandbox";
+
 /// Output from container execution.
 #[derive(Debug, Clone)]
 pub struct ContainerOutput {
@@ -511,7 +518,7 @@ impl ContainerRunner {
             .map(|(k, v)| format!("{}={}", k, v))
             .collect();
         if !env_vec.iter().any(|value| value.starts_with("HOME=")) {
-            env_vec.push("HOME=/home/sandbox".to_string());
+            env_vec.push(format!("HOME={SANDBOX_HOME}"));
         }
 
         // Add proxy environment (uses host.docker.internal for Mac/Windows, 172.17.0.1 for Linux)
@@ -575,7 +582,7 @@ impl ContainerRunner {
                 [
                     ("/tmp".to_string(), "size=512M".to_string()),
                     (
-                        "/home/sandbox/.cargo/registry".to_string(),
+                        format!("{SANDBOX_HOME}/.cargo/registry"),
                         "size=1G".to_string(),
                     ),
                 ]

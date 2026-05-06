@@ -94,7 +94,8 @@ pub mod proxy;
 
 pub use config::{ResourceLimits, SandboxConfig, SandboxPolicy};
 pub use container::{
-    ContainerOutput, ContainerRunner, connect_docker, is_self_image_alias, resolve_image_reference,
+    ContainerOutput, ContainerRunner, SANDBOX_HOME, connect_docker, is_self_image_alias,
+    resolve_image_reference,
 };
 pub use detect::{DockerDetection, DockerStatus, Platform, check_docker};
 pub use error::{Result, SandboxError};
