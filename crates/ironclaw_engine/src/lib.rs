@@ -104,7 +104,7 @@ pub use memory::RetrievalEngine;
 
 // ── Re-exports: reliability ──────────────────────────────────
 
-pub use reliability::ReliabilityTracker;
+pub use reliability::{ActionMetrics, ReliabilityRecordingEffects, ReliabilityTracker};
 
 // ── Re-exports: workspace mounts ─────────────────────────────
 
