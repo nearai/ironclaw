@@ -39,6 +39,11 @@ fn deployment_mode_round_trips_serde_for_every_variant() {
         DeploymentMode::HostedMultiTenant,
         DeploymentMode::EnterpriseDedicated,
     ];
+    assert_eq!(
+        variants.len(),
+        3,
+        "DeploymentMode variant count drift — update this test when adding variants",
+    );
     for v in variants {
         assert_round_trip(v, v.as_str());
         // DeploymentMode also implements `FromStr` — round-trip via the
@@ -84,6 +89,11 @@ fn filesystem_backend_kind_round_trips_serde_for_every_variant() {
         FilesystemBackendKind::TenantWorkspace,
         FilesystemBackendKind::OrgDedicatedWorkspace,
     ];
+    assert_eq!(
+        variants.len(),
+        4,
+        "FilesystemBackendKind variant count drift — update this test when adding variants",
+    );
     for v in variants {
         assert_round_trip(v, v.as_str());
     }
@@ -100,6 +110,11 @@ fn process_backend_kind_round_trips_serde_for_every_variant() {
         ProcessBackendKind::TenantSandbox,
         ProcessBackendKind::OrgDedicatedRunner,
     ];
+    assert_eq!(
+        variants.len(),
+        7,
+        "ProcessBackendKind variant count drift — update this test when adding variants",
+    );
     for v in variants {
         assert_round_trip(v, v.as_str());
     }
@@ -114,6 +129,11 @@ fn network_mode_round_trips_serde_for_every_variant() {
         NetworkMode::DirectLogged,
         NetworkMode::Direct,
     ];
+    assert_eq!(
+        variants.len(),
+        5,
+        "NetworkMode variant count drift — update this test when adding variants",
+    );
     for v in variants {
         assert_round_trip(v, v.as_str());
     }
@@ -129,6 +149,11 @@ fn secret_mode_round_trips_serde_for_every_variant() {
         SecretMode::ScrubbedEnv,
         SecretMode::InheritedEnv,
     ];
+    assert_eq!(
+        variants.len(),
+        6,
+        "SecretMode variant count drift — update this test when adding variants",
+    );
     for v in variants {
         assert_round_trip(v, v.as_str());
     }
@@ -143,6 +168,11 @@ fn approval_policy_round_trips_serde_for_every_variant() {
         ApprovalPolicy::OrgPolicy,
         ApprovalPolicy::Minimal,
     ];
+    assert_eq!(
+        variants.len(),
+        5,
+        "ApprovalPolicy variant count drift — update this test when adding variants",
+    );
     for v in variants {
         assert_round_trip(v, v.as_str());
     }
@@ -155,6 +185,11 @@ fn audit_mode_round_trips_serde_for_every_variant() {
         AuditMode::Standard,
         AuditMode::OrgPolicy,
     ];
+    assert_eq!(
+        variants.len(),
+        3,
+        "AuditMode variant count drift — update this test when adding variants",
+    );
     for v in variants {
         assert_round_trip(v, v.as_str());
     }
