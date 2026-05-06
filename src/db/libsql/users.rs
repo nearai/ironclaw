@@ -45,6 +45,12 @@ fn row_to_api_token(row: &libsql::Row) -> Result<ApiTokenRecord, DatabaseError> 
     })
 }
 
+fn parse_libsql_decimal(value: &str, label: &str) -> Result<rust_decimal::Decimal, DatabaseError> {
+    rust_decimal::Decimal::from_str_exact(value)
+        .or_else(|_| rust_decimal::Decimal::from_scientific(value))
+        .map_err(|e| DatabaseError::Query(format!("invalid {label} value '{value}': {e}")))
+}
+
 pub(crate) async fn seed_initial_assistant_thread(
     conn: &libsql::Connection,
     user_id: &str,
@@ -658,9 +664,7 @@ impl UserStore for LibSqlBackend {
             .map_err(|e| DatabaseError::Query(e.to_string()))?
         {
             let cost_str = get_text(&row, 5);
-            let total_cost = rust_decimal::Decimal::from_str_exact(&cost_str).map_err(|e| {
-                DatabaseError::Query(format!("invalid cost value '{}': {}", cost_str, e))
-            })?;
+            let total_cost = parse_libsql_decimal(&cost_str, "cost")?;
             stats.push(crate::db::UserUsageStats {
                 user_id: get_text(&row, 0),
                 model: get_text(&row, 1),
@@ -836,9 +840,7 @@ impl UserStore for LibSqlBackend {
             .map_err(|e| DatabaseError::Query(e.to_string()))?
         {
             let cost_str = get_text(&row, 2);
-            let total_cost = rust_decimal::Decimal::from_str_exact(&cost_str).map_err(|e| {
-                DatabaseError::Query(format!("invalid cost value '{}': {}", cost_str, e))
-            })?;
+            let total_cost = parse_libsql_decimal(&cost_str, "cost")?;
             stats.push(crate::db::UserSummaryStats {
                 user_id: get_text(&row, 0),
                 job_count: row
@@ -896,12 +898,7 @@ impl UserStore for LibSqlBackend {
             })?;
 
         let usage_cost_str = get_text(&row, 8);
-        let usage_cost = rust_decimal::Decimal::from_str_exact(&usage_cost_str).map_err(|e| {
-            DatabaseError::Query(format!(
-                "invalid usage_cost value '{}': {}",
-                usage_cost_str, e
-            ))
-        })?;
+        let usage_cost = parse_libsql_decimal(&usage_cost_str, "usage_cost")?;
 
         Ok(AdminUsageSummary {
             total_users: row
@@ -1282,6 +1279,37 @@ mod tests {
         // Bob returns empty when filtered
         let bob_only = db.user_summary_stats(Some("bob")).await.unwrap();
         assert!(bob_only.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_usage_aggregates_accept_scientific_costs_from_libsql() {
+        let (db, _dir) = setup().await;
+        db.create_user(&test_user("alice")).await.unwrap();
+
+        insert_test_job(&db, "job-small-cost", "alice").await;
+        insert_test_llm_call(&db, "job-small-cost", "mock-model", "0.000075").await;
+
+        let expected_cost = rust_decimal::Decimal::from_str_exact("0.000075").unwrap();
+
+        let summary_stats = db.user_summary_stats(Some("alice")).await.unwrap();
+        assert_eq!(summary_stats.len(), 1);
+        assert_eq!(summary_stats[0].total_cost, expected_cost);
+
+        let usage_stats = db
+            .user_usage_stats(
+                Some("alice"),
+                chrono::Utc::now() - chrono::Duration::hours(1),
+            )
+            .await
+            .unwrap();
+        assert_eq!(usage_stats.len(), 1);
+        assert_eq!(usage_stats[0].total_cost, expected_cost);
+
+        let admin_summary = db
+            .admin_usage_summary(chrono::Utc::now() - chrono::Duration::hours(1))
+            .await
+            .unwrap();
+        assert_eq!(admin_summary.usage_cost, expected_cost);
     }
 
     #[tokio::test]
