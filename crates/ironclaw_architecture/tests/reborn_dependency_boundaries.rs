@@ -3,6 +3,41 @@ use std::{collections::HashMap, path::PathBuf, process::Command};
 use serde_json::Value;
 
 #[test]
+fn reborn_boundary_rules_active_crates_are_workspace_members() {
+    // Regression for PR #3212 review: a boundary rule whose crate has a
+    // `Cargo.toml` on disk but is missing from `cargo metadata` would
+    // previously fail open in `assert_no_normal_workspace_deps`, masking
+    // forbidden edges in the unregistered crate. Each active rule must
+    // either name a crate that has no directory yet (future-only,
+    // tolerated) or a crate that is in the workspace metadata.
+    let metadata = cargo_metadata();
+    let packages = metadata["packages"]
+        .as_array()
+        .expect("cargo metadata must include packages");
+    let registered = packages
+        .iter()
+        .filter_map(|package| package["name"].as_str().map(ToString::to_string))
+        .collect::<std::collections::HashSet<_>>();
+
+    let root = workspace_root();
+    for rule in boundary_rules() {
+        let crate_dir = root.join("crates").join(rule.crate_name);
+        let manifest = crate_dir.join("Cargo.toml");
+        if !manifest.exists() {
+            continue;
+        }
+        assert!(
+            registered.contains(rule.crate_name),
+            "{} has a Cargo.toml at {} but is not registered as a workspace member; \
+             add it to the root `Cargo.toml` `workspace.members` so its boundary rule \
+             is actually checked",
+            rule.crate_name,
+            manifest.display()
+        );
+    }
+}
+
+#[test]
 fn reborn_crate_dependency_boundaries_hold() {
     let metadata = cargo_metadata();
     let packages = metadata["packages"]
