@@ -15,7 +15,7 @@ use ironclaw_host_api::VirtualPath;
 
 use crate::chunking::{MemoryChunkWrite, content_sha256};
 use crate::indexer::MemoryDocumentIndexRepository;
-use crate::metadata::{DocumentMetadata, MemoryWriteOptions, is_config_path};
+use crate::metadata::{DocumentMetadata, MemoryWriteOptions, find_nearest_config, is_config_path};
 use crate::path::{MemoryDocumentPath, MemoryDocumentScope, memory_error, valid_memory_path};
 use crate::search::{
     MemorySearchRequest, MemorySearchResult, RankedMemorySearchResult, fuse_memory_search_results,
@@ -23,8 +23,8 @@ use crate::search::{
 
 use super::{
     MemoryAppendOutcome, MemoryDocumentRepository, ensure_document_path_does_not_conflict,
-    escape_like_pattern, reborn_agent_id_db_value, reborn_memory_document_from_row,
-    reborn_project_id_db_value, scoped_memory_owner_key,
+    reborn_agent_id_db_value, reborn_memory_document_from_row, reborn_project_id_db_value,
+    scoped_memory_changed_by_key,
 };
 
 /// Render a tokio_postgres error with its full source chain.
@@ -171,7 +171,7 @@ impl MemoryDocumentRepository for RebornPostgresMemoryDocumentRepository {
         // direct-write behavior so version history stays attributable
         // when operators bypass the higher backend seam.
         let options = MemoryWriteOptions {
-            changed_by: Some(scoped_memory_owner_key(path.scope())),
+            changed_by: Some(scoped_memory_changed_by_key(path.scope())),
             ..MemoryWriteOptions::default()
         };
         self.write_document_with_options(path, bytes, &options)
@@ -793,75 +793,77 @@ where
         .collect())
 }
 
+fn metadata_clear_applies_to(config_or_document_path: &str, candidate_path: &str) -> bool {
+    if !is_config_path(config_or_document_path) {
+        return candidate_path == config_or_document_path;
+    }
+    match config_or_document_path.rsplit_once('/') {
+        Some((parent, _)) => candidate_path.starts_with(&format!("{parent}/")),
+        None => true,
+    }
+}
+
+fn resolved_metadata_from_rows(
+    relative_path: &str,
+    document_metadata: &serde_json::Value,
+    config_metadata: &std::collections::HashMap<String, serde_json::Value>,
+) -> DocumentMetadata {
+    let base = find_nearest_config(relative_path, config_metadata)
+        .unwrap_or_else(|| serde_json::json!({}));
+    DocumentMetadata::from_value(&DocumentMetadata::merge(&base, document_metadata))
+}
+
 async fn reborn_postgres_clear_chunks_for_metadata_path(
     client: &deadpool_postgres::Object,
     path: &MemoryDocumentPath,
     virtual_path: &VirtualPath,
 ) -> Result<(), FilesystemError> {
     let scope = path.scope();
-    if is_config_path(path.relative_path()) {
-        let parent = path
-            .relative_path()
-            .rsplit_once('/')
-            .map(|(parent, _)| parent);
-        // See `native_libsql.rs::reborn_libsql_clear_chunks_for_metadata_path`
-        // for the rationale — escape `\`, `%`, `_` and use `LIKE ...
-        // ESCAPE '\'` so a literal segment like `team_%/.config` does
-        // not glob-match `team-a/note.md` (zmanian #3180 MED
-        // `native_libsql.rs:801`).
-        let like_pattern = parent.map_or("%".to_string(), |parent| {
-            format!("{}/%", escape_like_pattern(parent))
-        });
-        // See libSQL counterpart for rationale: clear descendants whose
-        // own metadata is unset (NULL) or true; leave alone descendants
-        // whose document-level metadata pins skip_indexing=false
-        // (zmanian #3180 MED `native_libsql.rs:531` descendant
-        // override). Postgres jsonb uses the `?`/`->>` operators —
-        // `metadata ? 'skip_indexing'` is true if the key exists;
-        // `(metadata ->> 'skip_indexing')::text` returns the JSON
-        // boolean rendered as the literal string `"true"`/`"false"`.
-        client
-            .execute(
-                "DELETE FROM reborn_memory_chunks \
-                 WHERE document_id IN (\
-                     SELECT id FROM reborn_memory_documents \
-                     WHERE tenant_id = $1 AND user_id = $2 AND agent_id = $3 \
-                       AND project_id = $4 AND path LIKE $5 ESCAPE '\\' \
-                       AND (NOT (metadata ? 'skip_indexing') \
-                            OR (metadata ->> 'skip_indexing') != 'false')\
-                 )",
-                &[
-                    &scope.tenant_id(),
-                    &scope.user_id(),
-                    &reborn_agent_id_db_value(scope),
-                    &reborn_project_id_db_value(scope),
-                    &like_pattern,
-                ],
+    let rows = client
+        .query(
+            "SELECT id, path, metadata FROM reborn_memory_documents \
+             WHERE tenant_id = $1 AND user_id = $2 AND agent_id = $3 AND project_id = $4",
+            &[
+                &scope.tenant_id(),
+                &scope.user_id(),
+                &reborn_agent_id_db_value(scope),
+                &reborn_project_id_db_value(scope),
+            ],
+        )
+        .await
+        .map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::WriteFile,
+                pg_error_chain(&error),
             )
-            .await
-            .map_err(|error| {
-                memory_error(
-                    virtual_path.clone(),
-                    FilesystemOperation::WriteFile,
-                    pg_error_chain(&error),
-                )
-            })?;
-    } else {
+        })?;
+
+    let mut documents = Vec::<(uuid::Uuid, String, serde_json::Value)>::new();
+    let mut config_metadata = std::collections::HashMap::<String, serde_json::Value>::new();
+    for row in rows {
+        let id: uuid::Uuid = row.get("id");
+        let relative_path: String = row.get("path");
+        let metadata: serde_json::Value = row.get("metadata");
+        if is_config_path(&relative_path) {
+            config_metadata.insert(relative_path.clone(), metadata.clone());
+        }
+        documents.push((id, relative_path, metadata));
+    }
+
+    for (document_id, relative_path, document_metadata) in documents {
+        if !metadata_clear_applies_to(path.relative_path(), &relative_path) {
+            continue;
+        }
+        let resolved =
+            resolved_metadata_from_rows(&relative_path, &document_metadata, &config_metadata);
+        if resolved.skip_indexing != Some(true) {
+            continue;
+        }
         client
             .execute(
-                "DELETE FROM reborn_memory_chunks \
-                 WHERE document_id IN (\
-                     SELECT id FROM reborn_memory_documents \
-                     WHERE tenant_id = $1 AND user_id = $2 AND agent_id = $3 \
-                       AND project_id = $4 AND path = $5\
-                 )",
-                &[
-                    &scope.tenant_id(),
-                    &scope.user_id(),
-                    &reborn_agent_id_db_value(scope),
-                    &reborn_project_id_db_value(scope),
-                    &path.relative_path(),
-                ],
+                "DELETE FROM reborn_memory_chunks WHERE document_id = $1",
+                &[&document_id],
             )
             .await
             .map_err(|error| {

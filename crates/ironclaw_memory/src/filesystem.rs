@@ -16,7 +16,8 @@ use crate::path::{
     MemoryDocumentPath, MemoryDocumentScope, ParsedMemoryPath, memory_error, memory_not_found,
 };
 use crate::repo::{
-    MemoryAppendOutcome, MemoryDocumentRepository, memory_direct_children, scoped_memory_owner_key,
+    MemoryAppendOutcome, MemoryDocumentRepository, memory_direct_children,
+    scoped_memory_changed_by_key,
 };
 use crate::safety::{
     DefaultPromptWriteSafetyPolicy, PromptProtectedPathRegistry, PromptSafetyAllowanceId,
@@ -619,7 +620,7 @@ impl RootFilesystem for MemoryDocumentFilesystem {
         }
         let options = MemoryWriteOptions {
             metadata,
-            changed_by: Some(scoped_memory_owner_key(document_path.scope())),
+            changed_by: Some(scoped_memory_changed_by_key(document_path.scope())),
         };
         self.repository
             .write_document_with_options(&document_path, bytes, &options)
@@ -653,7 +654,7 @@ impl RootFilesystem for MemoryDocumentFilesystem {
                 resolve_document_metadata(self.repository.as_ref(), &document_path).await?;
             let options = MemoryWriteOptions {
                 metadata,
-                changed_by: Some(scoped_memory_owner_key(document_path.scope())),
+                changed_by: Some(scoped_memory_changed_by_key(document_path.scope())),
             };
             let expected_previous_hash = previous.as_deref().map(content_bytes_sha256);
             let previous_bytes = previous.unwrap_or_default();

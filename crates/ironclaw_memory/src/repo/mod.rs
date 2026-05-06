@@ -147,6 +147,19 @@ pub(crate) fn scoped_memory_owner_key(scope: &MemoryDocumentScope) -> String {
     )
 }
 
+pub(crate) fn scoped_memory_changed_by_key(scope: &MemoryDocumentScope) -> String {
+    if let Some(agent_id) = scope.agent_id() {
+        return format!(
+            "tenant:{}:user:{}:agent:{}:project:{}",
+            scope.tenant_id(),
+            scope.user_id(),
+            agent_id,
+            scope.project_id().unwrap_or("_none")
+        );
+    }
+    scoped_memory_owner_key(scope)
+}
+
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn scoped_memory_agent_id(scope: &MemoryDocumentScope) -> Option<&str> {
     scope.agent_id()
@@ -184,30 +197,6 @@ pub(crate) fn reborn_agent_id_db_value(scope: &MemoryDocumentScope) -> &str {
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn reborn_project_id_db_value(scope: &MemoryDocumentScope) -> &str {
     scope.project_id().unwrap_or(REBORN_SCOPE_NONE_SENTINEL)
-}
-
-/// Escape a literal string for use as a `LIKE`/`ILIKE` pattern with an
-/// explicit `ESCAPE '\'` clause. Prefixes `\`, `%`, and `_` with `\` so
-/// these wildcards in user-supplied path segments are matched literally
-/// rather than glob-style.
-///
-/// `MemoryDocumentPath` allows `%` and `_` in valid path segments
-/// (e.g. `team_%/.config`). Without escaping, the `path LIKE
-/// 'team_%/%'` pattern would also match unrelated paths such as
-/// `team-a/note.md`, deleting their chunks (zmanian #3180 MED
-/// `native_libsql.rs:801`). Callers must use this helper plus an
-/// explicit `ESCAPE '\'` clause in the SQL whenever they assemble a
-/// pattern from user-controlled segments.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-pub(crate) fn escape_like_pattern(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for c in input.chars() {
-        if c == '\\' || c == '%' || c == '_' {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out
 }
 
 /// Reconstruct a `MemoryDocumentPath` from explicit Reborn-native scope columns

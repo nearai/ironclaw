@@ -335,6 +335,64 @@ async fn libsql_parent_skip_indexing_does_not_clear_descendants_with_explicit_ov
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
+async fn libsql_parent_skip_indexing_respects_nested_config_override() {
+    use ironclaw_memory::MemoryDocumentRepository;
+    let fixture = libsql_repo().await;
+    let repo = fixture.repo.clone();
+    let indexer = Arc::new(ChunkingMemoryDocumentIndexer::new(repo.clone()));
+    let backend = RepositoryMemoryBackend::new(repo.clone()).with_indexer(indexer);
+    let context = MemoryContext::new(MemoryDocumentScope::new("tenant-a", "alice", None).unwrap());
+
+    let inherited =
+        MemoryDocumentPath::new("tenant-a", "alice", None, "team/inherited.md").unwrap();
+    let nested_override =
+        MemoryDocumentPath::new("tenant-a", "alice", None, "team/sub/kept.md").unwrap();
+    backend
+        .write_document(&context, &inherited, b"parent inherited token")
+        .await
+        .unwrap();
+    backend
+        .write_document(&context, &nested_override, b"nested override token")
+        .await
+        .unwrap();
+
+    let child_config =
+        MemoryDocumentPath::new("tenant-a", "alice", None, "team/sub/.config").unwrap();
+    repo.write_document(&child_config, b"").await.unwrap();
+    repo.write_document_metadata(&child_config, &serde_json::json!({"skip_indexing": false}))
+        .await
+        .unwrap();
+
+    let parent_config = MemoryDocumentPath::new("tenant-a", "alice", None, "team/.config").unwrap();
+    repo.write_document(&parent_config, b"").await.unwrap();
+    repo.write_document_metadata(&parent_config, &serde_json::json!({"skip_indexing": true}))
+        .await
+        .unwrap();
+
+    let conn = fixture.db.connect().expect("connect");
+    let kept_chunks: i64 = conn
+        .query(
+            "SELECT COUNT(*) FROM reborn_memory_chunks c \
+             JOIN reborn_memory_documents d ON d.id = c.document_id \
+             WHERE d.path = ?1",
+            libsql::params![nested_override.relative_path()],
+        )
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap();
+    assert!(
+        kept_chunks > 0,
+        "nested .config skip_indexing=false must keep descendant chunks searchable"
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
 async fn libsql_skip_indexing_metadata_clear_does_not_glob_match_unrelated_paths() {
     // zmanian #3180 MED `native_libsql.rs:801`: the `path LIKE
     // 'parent/%'` predicate used by the skip_indexing chunk-clear
@@ -383,16 +441,44 @@ async fn libsql_skip_indexing_metadata_clear_does_not_glob_match_unrelated_paths
 
     // The unrelated `team-a/note.md` chunks must still be present;
     // only the literal `team_%/` subtree gets cleared.
-    let after = count_rows_libsql(&fixture.db, "reborn_memory_chunks").await;
+    let conn = fixture.db.connect().expect("connect");
+    let unrelated_chunks: i64 = conn
+        .query(
+            "SELECT COUNT(*) FROM reborn_memory_chunks c \
+             JOIN reborn_memory_documents d ON d.id = c.document_id \
+             WHERE d.path = ?1",
+            libsql::params![unrelated.relative_path()],
+        )
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap();
     assert!(
-        after >= 1,
-        "team-a/note.md chunks must survive the metadata clear; got {after} rows"
+        unrelated_chunks > 0,
+        "team-a/note.md chunks must survive the metadata clear"
     );
-    // Concretely: the unrelated row's chunk content must still be findable.
-    let unrelated_after = repo.read_document(&unrelated).await.unwrap();
-    assert!(
-        unrelated_after.is_some(),
-        "unrelated document body must not be touched by the metadata clear"
+    let literal_chunks: i64 = conn
+        .query(
+            "SELECT COUNT(*) FROM reborn_memory_chunks c \
+             JOIN reborn_memory_documents d ON d.id = c.document_id \
+             WHERE d.path = ?1",
+            libsql::params![literal_subtree.relative_path()],
+        )
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap();
+    assert_eq!(
+        literal_chunks, 0,
+        "literal team_% subtree chunks should be cleared by its own .config"
     );
 }
 
@@ -1183,6 +1269,60 @@ async fn pg_repo(tenant_id: &str) -> Option<Arc<RebornPostgresMemoryDocumentRepo
 
 #[cfg(feature = "postgres")]
 #[tokio::test]
+async fn postgres_parent_skip_indexing_respects_nested_config_override() {
+    use ironclaw_memory::MemoryDocumentRepository;
+    let tenant = "reborn-pg-nested-config-override";
+    let Some(repo) = pg_repo(tenant).await else {
+        return;
+    };
+    let indexer = Arc::new(ChunkingMemoryDocumentIndexer::new(repo.clone()));
+    let backend = RepositoryMemoryBackend::new(repo.clone()).with_indexer(indexer);
+    let context = MemoryContext::new(MemoryDocumentScope::new(tenant, "alice", None).unwrap());
+
+    let inherited = MemoryDocumentPath::new(tenant, "alice", None, "team/inherited.md").unwrap();
+    let nested_override =
+        MemoryDocumentPath::new(tenant, "alice", None, "team/sub/kept.md").unwrap();
+    backend
+        .write_document(&context, &inherited, b"parent inherited token")
+        .await
+        .unwrap();
+    backend
+        .write_document(&context, &nested_override, b"nested override token")
+        .await
+        .unwrap();
+
+    let child_config = MemoryDocumentPath::new(tenant, "alice", None, "team/sub/.config").unwrap();
+    repo.write_document(&child_config, b"").await.unwrap();
+    repo.write_document_metadata(&child_config, &serde_json::json!({"skip_indexing": false}))
+        .await
+        .unwrap();
+
+    let parent_config = MemoryDocumentPath::new(tenant, "alice", None, "team/.config").unwrap();
+    repo.write_document(&parent_config, b"").await.unwrap();
+    repo.write_document_metadata(&parent_config, &serde_json::json!({"skip_indexing": true}))
+        .await
+        .unwrap();
+
+    let client = pg_pool().get().await.expect("get client");
+    let kept_chunks: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM reborn_memory_chunks c \
+             JOIN reborn_memory_documents d ON d.id = c.document_id \
+             WHERE d.tenant_id = $1 AND d.path = $2",
+            &[&tenant, &nested_override.relative_path()],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(
+        kept_chunks > 0,
+        "nested .config skip_indexing=false must keep descendant chunks searchable"
+    );
+    pg_cleanup_tenant(&pg_pool(), tenant).await;
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
 async fn postgres_skip_indexing_metadata_clear_does_not_glob_match_unrelated_paths() {
     // zmanian #3180 MED `native_libsql.rs:801` (Postgres mirror): the
     // `path LIKE 'parent/%'` predicate on the metadata clear path
@@ -1217,10 +1357,34 @@ async fn postgres_skip_indexing_metadata_clear_does_not_glob_match_unrelated_pat
         .await
         .unwrap();
 
-    let unrelated_after = repo.read_document(&unrelated).await.unwrap();
+    let client = pg_pool().get().await.expect("get client");
+    let unrelated_chunks: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM reborn_memory_chunks c \
+             JOIN reborn_memory_documents d ON d.id = c.document_id \
+             WHERE d.tenant_id = $1 AND d.path = $2",
+            &[&tenant, &unrelated.relative_path()],
+        )
+        .await
+        .unwrap()
+        .get(0);
     assert!(
-        unrelated_after.is_some(),
-        "team-a/note.md must not be touched by the team_%/.config metadata clear"
+        unrelated_chunks > 0,
+        "team-a/note.md chunks must survive the team_%/.config metadata clear"
+    );
+    let literal_chunks: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM reborn_memory_chunks c \
+             JOIN reborn_memory_documents d ON d.id = c.document_id \
+             WHERE d.tenant_id = $1 AND d.path = $2",
+            &[&tenant, &literal_subtree.relative_path()],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        literal_chunks, 0,
+        "literal team_% subtree chunks should be cleared by its own .config"
     );
     pg_cleanup_tenant(&pg_pool(), tenant).await;
 }
@@ -1401,21 +1565,38 @@ async fn postgres_backend_index_fails_closed_when_provider_returns_wrong_dimensi
         .await
         .expect("durable write must succeed even if indexer fails closed");
 
-    // Verify zero chunks were inserted via a direct SQL count.
+    // Embedding failure now degrades to text-only chunks: the document remains
+    // full-text searchable, but no invalid embedding vectors are persisted.
     let client = pg_pool().get().await.expect("client");
-    let count: i64 = client
+    let row = client
         .query_one(
-            "SELECT COUNT(*) FROM reborn_memory_chunks c \
+            "SELECT COUNT(*), COUNT(c.embedding) FROM reborn_memory_chunks c \
              JOIN reborn_memory_documents d ON d.id = c.document_id \
              WHERE d.tenant_id = $1",
             &[&tenant],
         )
         .await
-        .expect("count chunks")
-        .get(0);
+        .expect("count chunks");
+    let chunk_count: i64 = row.get(0);
+    let embedded_count: i64 = row.get(1);
+    assert!(
+        chunk_count > 0,
+        "indexer must keep text-only chunks so full-text search survives provider failures"
+    );
     assert_eq!(
-        count, 0,
-        "indexer must refuse to persist mis-dimensioned embeddings; got {count} chunks"
+        embedded_count, 0,
+        "indexer must refuse to persist mis-dimensioned embeddings; got {embedded_count} embedded chunks"
+    );
+    let results = backend
+        .search(
+            &context,
+            MemorySearchRequest::new("body").unwrap().with_vector(false),
+        )
+        .await
+        .expect("full-text search should survive embedding failure");
+    assert!(
+        results.iter().any(|result| result.path == path),
+        "text-only chunk should keep the document full-text searchable"
     );
 
     // Direct indexer invocation surfaces the dimension error explicitly.

@@ -760,6 +760,36 @@ async fn direct_write_attributes_version_to_scoped_owner_key() {
 }
 
 #[tokio::test]
+async fn agent_scoped_direct_writes_attribute_versions_with_agent_id() {
+    let tenant = "reborn-pg-direct-agent-attr";
+    let Some(repo) = fresh_repository(tenant).await else {
+        return;
+    };
+    let path = MemoryDocumentPath::new_with_agent(
+        tenant,
+        "alice",
+        Some("planner"),
+        Some("project-a"),
+        "attr.md",
+    )
+    .expect("path");
+
+    repo.write_document(&path, b"v1").await.unwrap();
+    repo.write_document(&path, b"v2").await.unwrap();
+
+    let rows = read_version_rows_with_changed_by(&pool(), tenant, &path).await;
+    assert_eq!(rows.len(), 1);
+    let (_, _, _, changed_by) = &rows[0];
+    let expected = format!("tenant:{tenant}:user:alice:agent:planner:project:project-a");
+    assert_eq!(
+        changed_by.as_deref(),
+        Some(expected.as_str()),
+        "agent-scoped native version attribution must distinguish agent scopes"
+    );
+    cleanup_tenant(&pool(), tenant).await;
+}
+
+#[tokio::test]
 async fn embedding_column_accepts_non_1536_dimension_vectors() {
     // The native Postgres schema declares `embedding vector` (unbounded)
     // so providers with non-1536 dimensions (Ollama 768/1024, OpenAI

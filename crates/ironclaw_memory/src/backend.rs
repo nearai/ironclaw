@@ -13,7 +13,7 @@ use crate::path::{
     MemoryDocumentPath, MemoryDocumentScope, memory_backend_unsupported, memory_error,
     valid_memory_path,
 };
-use crate::repo::{MemoryAppendOutcome, MemoryDocumentRepository, scoped_memory_owner_key};
+use crate::repo::{MemoryAppendOutcome, MemoryDocumentRepository, scoped_memory_changed_by_key};
 use crate::safety::{
     DefaultPromptWriteSafetyPolicy, PromptProtectedPathRegistry, PromptSafetyAllowanceId,
     PromptWriteOperation, PromptWriteSafetyCheck, PromptWriteSafetyEventSink,
@@ -426,7 +426,7 @@ where
         }
         let options = MemoryWriteOptions {
             metadata,
-            changed_by: Some(scoped_memory_owner_key(path.scope())),
+            changed_by: Some(scoped_memory_changed_by_key(path.scope())),
         };
         self.repository
             .write_document_with_options(path, bytes, &options)
@@ -503,7 +503,7 @@ where
         }
         let options = MemoryWriteOptions {
             metadata,
-            changed_by: Some(scoped_memory_owner_key(path.scope())),
+            changed_by: Some(scoped_memory_changed_by_key(path.scope())),
         };
         let outcome = self
             .repository

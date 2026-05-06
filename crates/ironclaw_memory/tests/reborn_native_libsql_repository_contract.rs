@@ -675,6 +675,31 @@ async fn direct_write_attributes_version_to_scoped_owner_key() {
 }
 
 #[tokio::test]
+async fn agent_scoped_direct_writes_attribute_versions_with_agent_id() {
+    let f = fresh_repository().await;
+    let path = MemoryDocumentPath::new_with_agent(
+        "tenant-a",
+        "alice",
+        Some("planner"),
+        Some("project-a"),
+        "attr.md",
+    )
+    .expect("path");
+
+    f.repo.write_document(&path, b"v1").await.unwrap();
+    f.repo.write_document(&path, b"v2").await.unwrap();
+
+    let rows = read_version_rows_with_changed_by(&f.db, &path).await;
+    assert_eq!(rows.len(), 1);
+    let (_, _, _, changed_by) = &rows[0];
+    assert_eq!(
+        changed_by.as_deref(),
+        Some("tenant:tenant-a:user:alice:agent:planner:project:project-a"),
+        "agent-scoped native version attribution must distinguish agent scopes"
+    );
+}
+
+#[tokio::test]
 async fn concurrent_replace_chunks_with_same_hash_serializes_to_one_winner() {
     // zmanian test gap 1: two concurrent indexers call
     // `replace_document_chunks_if_current` with the same

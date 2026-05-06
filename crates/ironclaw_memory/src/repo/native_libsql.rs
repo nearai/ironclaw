@@ -18,7 +18,7 @@ use ironclaw_host_api::VirtualPath;
 use crate::chunking::{MemoryChunkWrite, content_sha256};
 use crate::embedding::{cosine_similarity, decode_embedding_blob, encode_embedding_blob};
 use crate::indexer::MemoryDocumentIndexRepository;
-use crate::metadata::{DocumentMetadata, MemoryWriteOptions, is_config_path};
+use crate::metadata::{DocumentMetadata, MemoryWriteOptions, find_nearest_config, is_config_path};
 use crate::path::{MemoryDocumentPath, MemoryDocumentScope, memory_error, valid_memory_path};
 use crate::search::{
     MemorySearchRequest, MemorySearchResult, RankedMemorySearchResult, escape_fts5_query,
@@ -27,8 +27,8 @@ use crate::search::{
 
 use super::{
     MemoryAppendOutcome, MemoryDocumentRepository, ensure_document_path_does_not_conflict,
-    escape_like_pattern, reborn_agent_id_db_value, reborn_memory_document_from_row,
-    reborn_project_id_db_value, scoped_memory_owner_key,
+    reborn_agent_id_db_value, reborn_memory_document_from_row, reborn_project_id_db_value,
+    scoped_memory_changed_by_key,
 };
 
 /// Reborn-native libSQL repository for `reborn_memory_*` tables.
@@ -151,7 +151,7 @@ impl MemoryDocumentRepository for RebornLibSqlMemoryDocumentRepository {
         // direct-write behavior so version history stays attributable when
         // operators bypass the higher backend seam.
         let options = MemoryWriteOptions {
-            changed_by: Some(scoped_memory_owner_key(path.scope())),
+            changed_by: Some(scoped_memory_changed_by_key(path.scope())),
             ..MemoryWriteOptions::default()
         };
         self.write_document_with_options(path, bytes, &options)
@@ -795,49 +795,41 @@ async fn reborn_libsql_document_id_and_hash(
         .map_err(|error| memory_error(virtual_path.clone(), operation, error.to_string()))
 }
 
+fn metadata_clear_applies_to(config_or_document_path: &str, candidate_path: &str) -> bool {
+    if !is_config_path(config_or_document_path) {
+        return candidate_path == config_or_document_path;
+    }
+    match config_or_document_path.rsplit_once('/') {
+        Some((parent, _)) => candidate_path.starts_with(&format!("{parent}/")),
+        None => true,
+    }
+}
+
+fn resolved_metadata_from_rows(
+    relative_path: &str,
+    document_metadata: &serde_json::Value,
+    config_metadata: &std::collections::HashMap<String, serde_json::Value>,
+) -> DocumentMetadata {
+    let base = find_nearest_config(relative_path, config_metadata)
+        .unwrap_or_else(|| serde_json::json!({}));
+    DocumentMetadata::from_value(&DocumentMetadata::merge(&base, document_metadata))
+}
+
 async fn reborn_libsql_clear_chunks_for_metadata_path(
     conn: &libsql::Connection,
     path: &MemoryDocumentPath,
     virtual_path: &VirtualPath,
 ) -> Result<(), FilesystemError> {
     let scope = path.scope();
-    if is_config_path(path.relative_path()) {
-        let parent = path
-            .relative_path()
-            .rsplit_once('/')
-            .map(|(parent, _)| parent);
-        // Escape `\`, `%`, `_` in the parent prefix so a literal segment
-        // like `team_%/.config` matches only its own descendants and not
-        // unrelated paths such as `team-a/note.md` (zmanian #3180 MED
-        // `native_libsql.rs:801`). The empty-parent root-config case
-        // still uses bare `%` to mean "every path under this scope".
-        let like_pattern = parent.map_or("%".to_string(), |parent| {
-            format!("{}/%", escape_like_pattern(parent))
-        });
-        // **Honor descendant `skip_indexing=false` overrides.** A parent
-        // `.config` writing `skip_indexing=true` should clear chunks for
-        // descendants that *inherit* the skip — but not for a descendant
-        // whose own document-level metadata explicitly sets
-        // `skip_indexing=false`. `json_extract` returns 1 (true), 0
-        // (false), or NULL (unset). We clear when the descendant is
-        // unset (NULL) or already true; we leave descendants whose
-        // metadata pins skip_indexing to false alone (zmanian #3180 MED
-        // `native_libsql.rs:531` descendant override).
-        conn.execute(
-            "DELETE FROM reborn_memory_chunks \
-             WHERE document_id IN (\
-                 SELECT id FROM reborn_memory_documents \
-                 WHERE tenant_id = ?1 AND user_id = ?2 AND agent_id = ?3 \
-                   AND project_id = ?4 AND path LIKE ?5 ESCAPE '\\' \
-                   AND (json_extract(metadata, '$.skip_indexing') IS NULL \
-                        OR json_extract(metadata, '$.skip_indexing') != 0)\
-             )",
+    let mut rows = conn
+        .query(
+            "SELECT id, path, metadata FROM reborn_memory_documents \
+             WHERE tenant_id = ?1 AND user_id = ?2 AND agent_id = ?3 AND project_id = ?4",
             libsql::params![
                 scope.tenant_id(),
                 scope.user_id(),
                 reborn_agent_id_db_value(scope),
                 reborn_project_id_db_value(scope),
-                like_pattern,
             ],
         )
         .await
@@ -848,21 +840,63 @@ async fn reborn_libsql_clear_chunks_for_metadata_path(
                 error.to_string(),
             )
         })?;
-    } else {
+
+    let mut documents = Vec::<(String, String, serde_json::Value)>::new();
+    let mut config_metadata = std::collections::HashMap::<String, serde_json::Value>::new();
+    while let Some(row) = rows.next().await.map_err(|error| {
+        memory_error(
+            virtual_path.clone(),
+            FilesystemOperation::WriteFile,
+            error.to_string(),
+        )
+    })? {
+        let id: String = row.get(0).map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::WriteFile,
+                error.to_string(),
+            )
+        })?;
+        let relative_path: String = row.get(1).map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::WriteFile,
+                error.to_string(),
+            )
+        })?;
+        let metadata_raw: String = row.get(2).map_err(|error| {
+            memory_error(
+                virtual_path.clone(),
+                FilesystemOperation::WriteFile,
+                error.to_string(),
+            )
+        })?;
+        let metadata =
+            serde_json::from_str::<serde_json::Value>(&metadata_raw).map_err(|error| {
+                memory_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::WriteFile,
+                    error.to_string(),
+                )
+            })?;
+        if is_config_path(&relative_path) {
+            config_metadata.insert(relative_path.clone(), metadata.clone());
+        }
+        documents.push((id, relative_path, metadata));
+    }
+
+    for (document_id, relative_path, document_metadata) in documents {
+        if !metadata_clear_applies_to(path.relative_path(), &relative_path) {
+            continue;
+        }
+        let resolved =
+            resolved_metadata_from_rows(&relative_path, &document_metadata, &config_metadata);
+        if resolved.skip_indexing != Some(true) {
+            continue;
+        }
         conn.execute(
-            "DELETE FROM reborn_memory_chunks \
-             WHERE document_id IN (\
-                 SELECT id FROM reborn_memory_documents \
-                 WHERE tenant_id = ?1 AND user_id = ?2 AND agent_id = ?3 \
-                   AND project_id = ?4 AND path = ?5\
-             )",
-            libsql::params![
-                scope.tenant_id(),
-                scope.user_id(),
-                reborn_agent_id_db_value(scope),
-                reborn_project_id_db_value(scope),
-                path.relative_path(),
-            ],
+            "DELETE FROM reborn_memory_chunks WHERE document_id = ?1",
+            libsql::params![document_id.as_str()],
         )
         .await
         .map_err(|error| {
