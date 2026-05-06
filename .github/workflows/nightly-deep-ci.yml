@@ -33,7 +33,7 @@ jobs:
     name: Deterministic Deep Tests
     uses: ./.github/workflows/test.yml
     with:
-      ref: main
+      ref: ${{ github.sha }}
       include_docker: false
 
   nightly-alert:

@@ -42,6 +42,36 @@ extract_failure_excerpt "${workdir}/quiet.log" "${workdir}/fallback.txt" 20
 assert_contains "${workdir}/fallback.txt" "No high-signal failure lines matched"
 assert_contains "${workdir}/fallback.txt" "ordinary line two"
 
+python3 - <<'PY' "${workdir}/long.log"
+from pathlib import Path
+import sys
+Path(sys.argv[1]).write_text('ERROR: ' + ('x' * 70000) + '\n')
+PY
+MAX_EXCERPT_LINE_CHARS=120 MAX_EXCERPT_CHARS=300 extract_failure_excerpt "${workdir}/long.log" "${workdir}/long-excerpt.txt" 20
+assert_contains "${workdir}/long-excerpt.txt" "[line truncated]"
+long_excerpt_bytes="$(wc -c < "${workdir}/long-excerpt.txt" | tr -d ' ')"
+if [[ "${long_excerpt_bytes}" -gt 360 ]]; then
+  echo "Expected long excerpt to stay bounded, got ${long_excerpt_bytes} bytes" >&2
+  cat "${workdir}/long-excerpt.txt" >&2
+  exit 1
+fi
+
+cat > "${workdir}/many.log" <<'LOG'
+ERROR: first failure line with enough content to keep
+ERROR: second failure line with enough content to keep
+ERROR: third failure line with enough content to keep
+ERROR: fourth failure line with enough content to keep
+ERROR: fifth failure line with enough content to keep
+LOG
+MAX_EXCERPT_LINE_CHARS=1000 MAX_EXCERPT_CHARS=120 extract_failure_excerpt "${workdir}/many.log" "${workdir}/many-excerpt.txt" 20
+assert_contains "${workdir}/many-excerpt.txt" "[excerpt truncated to 120 characters]"
+many_excerpt_bytes="$(wc -c < "${workdir}/many-excerpt.txt" | tr -d ' ')"
+if [[ "${many_excerpt_bytes}" -gt 180 ]]; then
+  echo "Expected many-line excerpt to stay bounded, got ${many_excerpt_bytes} bytes" >&2
+  cat "${workdir}/many-excerpt.txt" >&2
+  exit 1
+fi
+
 cat > "${workdir}/jobs.md" <<'JOBS'
 - E2E (features) (`failure`): https://github.example/jobs/1
 JOBS
@@ -57,6 +87,8 @@ write_failure_body "${workdir}/body.md" "${workdir}/jobs.md" "${workdir}/excerpt
 assert_contains "${workdir}/body.md" "Log retrieval notes"
 assert_contains "${workdir}/body.md" "HTTP 404: logs are not ready yet"
 assert_contains "${workdir}/body.md" "updated in place on repeated failures"
+truncate_file_chars "${workdir}/body.md" "${workdir}/body-bounded.md" 240 "issue body"
+assert_contains "${workdir}/body-bounded.md" "[issue body truncated to 240 characters]"
 
 mkdir -p "${workdir}/bin"
 cat > "${workdir}/bin/gh" <<'GH'
