@@ -87,6 +87,13 @@ impl SanitizedFailure {
         Ok(Self { category })
     }
 
+    pub(crate) fn from_trusted_static(category: &'static str) -> Self {
+        debug_assert!(validate_sanitized_category("failure_category", category).is_ok());
+        Self {
+            category: category.to_string(),
+        }
+    }
+
     pub fn category(&self) -> &str {
         &self.category
     }

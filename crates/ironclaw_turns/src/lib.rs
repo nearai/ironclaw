@@ -10,6 +10,7 @@ pub mod coordinator;
 pub mod db;
 pub mod events;
 pub mod ids;
+pub mod loop_exit;
 pub mod memory;
 pub mod request;
 pub mod response;
@@ -27,9 +28,16 @@ pub use db::LibSqlTurnStateStore;
 pub use db::PostgresTurnStateStore;
 pub use events::{InMemoryTurnEventSink, TurnEventKind, TurnEventSink, TurnLifecycleEvent};
 pub use ids::{
-    AcceptedMessageRef, GateRef, IdempotencyKey, ReplyTargetBindingRef, RunProfileId,
+    AcceptedMessageRef, GateRef, IdempotencyKey, LoopDiagnosticRef, LoopExitId, LoopGateRef,
+    LoopMessageRef, LoopResultRef, LoopUsageSummaryRef, ReplyTargetBindingRef, RunProfileId,
     RunProfileRequest, RunProfileVersion, SourceBindingRef, TurnCheckpointId, TurnId,
     TurnLeaseToken, TurnRunId, TurnRunnerId,
+};
+pub use loop_exit::{
+    LoopBlocked, LoopBlockedKind, LoopCancelled, LoopCancelledReasonKind, LoopCompleted,
+    LoopCompletionKind, LoopExit, LoopExitInvalidHandling, LoopExitMapping,
+    LoopExitValidationDecision, LoopExitValidationPolicy, LoopExitViolation, LoopExitViolationKind,
+    LoopFailed, LoopFailureKind,
 };
 pub use memory::{InMemoryTurnStateStore, InMemoryTurnStateStoreLimits};
 pub use request::{
