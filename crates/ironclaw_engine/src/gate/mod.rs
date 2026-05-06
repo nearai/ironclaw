@@ -209,6 +209,23 @@ pub trait GateController: Send + Sync {
     /// completing so the surrounding execution can either continue or
     /// terminate cleanly.
     async fn pause(&self, request: GatePauseRequest) -> GateResolution;
+
+    /// Wake any [`pause`] futures currently parked on `thread_id` with
+    /// [`GateResolution::Cancelled`] and discard their pending state.
+    ///
+    /// `ThreadManager::stop_thread()` calls this before sending
+    /// `ThreadSignal::Stop`. Without it, an engine task parked inside
+    /// `pause()` is not polling the thread signal channel and will
+    /// continue waiting for the user (or up to the host's gate-expiry
+    /// window) before observing the stop request — leaving the running
+    /// task and pending prompt orphaned.
+    ///
+    /// Default implementation is a no-op; overrides should be
+    /// idempotent and tolerant of concurrent calls. Implementations
+    /// that don't track per-thread waiters can ignore this call.
+    ///
+    /// [`pause`]: GateController::pause
+    async fn cancel_thread(&self, _thread_id: crate::types::thread::ThreadId) {}
 }
 
 /// Default [`GateController`] that cancels every pause request.

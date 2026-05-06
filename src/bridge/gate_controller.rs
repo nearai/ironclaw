@@ -31,7 +31,7 @@
 //! `PendingGate`. Stale entries (from a turn that completed without
 //! gating) are removed by the bridge after the call.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -154,6 +154,20 @@ pub struct BridgeGateController {
     /// `GateResolution::Cancelled`. With it, the second `pause()`
     /// queues until the first resolves.
     gate_locks: Mutex<HashMap<ExecutionKey, Arc<Mutex<()>>>>,
+    /// Per-`ThreadId` registry of in-flight pause request_ids.
+    /// `pause()` adds its `request_id` here on entry and removes it on
+    /// exit. `cancel_thread()` walks this set and delivers
+    /// `GateResolution::Cancelled` to each — wiring `stop_thread()`
+    /// through to the parked future so a stop request promptly wakes
+    /// the engine task instead of waiting on the 30-minute gate
+    /// expiry.
+    ///
+    /// A `HashSet<Uuid>` (rather than `Option<Uuid>`) is correct even
+    /// though the current `gate_locks` serializes one pause per
+    /// `(user, thread)`: a future change that loosens that
+    /// serialization (e.g. per-action gates instead of per-thread)
+    /// would otherwise drop pending request_ids on the floor.
+    active_pauses: Mutex<HashMap<ThreadId, HashSet<Uuid>>>,
 }
 
 impl BridgeGateController {
@@ -178,6 +192,26 @@ impl BridgeGateController {
             per_execution: Mutex::new(HashMap::new()),
             pre_execution: Mutex::new(HashMap::new()),
             gate_locks: Mutex::new(HashMap::new()),
+            active_pauses: Mutex::new(HashMap::new()),
+        }
+    }
+
+    async fn track_active_pause(&self, thread_id: ThreadId, request_id: Uuid) {
+        self.active_pauses
+            .lock()
+            .await
+            .entry(thread_id)
+            .or_default()
+            .insert(request_id);
+    }
+
+    async fn untrack_active_pause(&self, thread_id: ThreadId, request_id: Uuid) {
+        let mut map = self.active_pauses.lock().await;
+        if let Some(set) = map.get_mut(&thread_id) {
+            set.remove(&request_id);
+            if set.is_empty() {
+                map.remove(&thread_id);
+            }
         }
     }
 
@@ -460,6 +494,19 @@ impl GateController for BridgeGateController {
         // becomes `Cancelled` without ever prompting the user. Holding
         // this lock across insert + select-await queues subsequent
         // gates behind the current one so each gets its own prompt.
+        //
+        // TODO(#3157 follow-up — design-doc item): bound live inline
+        // gate awaits per user / globally with a typed semaphore so an
+        // authenticated user opening many threads each with an
+        // unresolved approval gate cannot accumulate parked engine
+        // tasks/pending rows past a budget. The current implicit bound
+        // is one pending gate per (user, thread) × the existing
+        // thread-creation budget × the 30-min expiry; that is enough
+        // to ship the first inline-await slice but not enough as a
+        // long-term DoS guard. Track in a separate issue once the
+        // semaphore design (cap UX, fairness, rejection error shape)
+        // is settled rather than hand-rolling it inside this
+        // controller.
         let exec_key = ExecutionKey {
             user_id: request.user_id.clone(),
             thread_id: request.thread_id,
@@ -494,6 +541,13 @@ impl GateController for BridgeGateController {
 
         let (tx, rx) = oneshot::channel();
         self.resolutions.register(request_id, tx).await;
+
+        // Track this in-flight pause so `cancel_thread()` can wake it
+        // promptly on `ThreadManager::stop_thread()`. Without this,
+        // a stop request against a thread parked here would have to
+        // wait for the user (or the 30-min expiry) before the engine
+        // task observed the stop signal.
+        self.track_active_pause(request.thread_id, request_id).await;
 
         self.emit_gate_prompt(&pending, &per_exec.channel_metadata)
             .await;
@@ -542,7 +596,56 @@ impl GateController for BridgeGateController {
                 GateResolution::Cancelled
             }
         };
+        // Always untrack on exit. Idempotent — `cancel_thread` may
+        // have already removed our entry while delivering the
+        // cancellation that woke us; re-removing is a no-op.
+        self.untrack_active_pause(request.thread_id, request_id)
+            .await;
         resolution
+    }
+
+    async fn cancel_thread(&self, thread_id: ThreadId) {
+        // Snapshot the in-flight request_ids and pending keys, then
+        // release the lock before delivering. Holding `active_pauses`
+        // while calling `try_deliver` (which takes its own lock) and
+        // `pending_gates.discard` (DB I/O) would gratuitously serialize
+        // unrelated stops.
+        let request_ids: Vec<Uuid> = {
+            let map = self.active_pauses.lock().await;
+            map.get(&thread_id)
+                .map(|set| set.iter().copied().collect())
+                .unwrap_or_default()
+        };
+        if request_ids.is_empty() {
+            return;
+        }
+        debug!(
+            thread = %thread_id,
+            count = request_ids.len(),
+            "BridgeGateController::cancel_thread: waking parked gates",
+        );
+        for request_id in request_ids {
+            // Deliver Cancelled to the parked future. Returns false if
+            // the future has already woken (resolution arrived between
+            // our snapshot and try_deliver) — that's fine, we just
+            // skip the discard for the same reason.
+            let _ = self
+                .resolutions
+                .try_deliver(request_id, GateResolution::Cancelled)
+                .await;
+        }
+        // Discard any pending DB rows for this thread so the UI doesn't
+        // keep showing stranded prompts. We don't have the
+        // `pending_key` here (only request_id), so use the thread-level
+        // discard helper if one exists — otherwise this is the cost of
+        // not threading the key through. The pause() future will run
+        // its own cleanup when it wakes; this branch is a defence in
+        // depth for the case where a row was committed but the
+        // resolution channel was closed.
+        let _removed = self.pending_gates.discard_for_thread(thread_id).await;
+        // Clear the active set for this thread now that all parked
+        // pauses have been notified.
+        self.active_pauses.lock().await.remove(&thread_id);
     }
 }
 
@@ -581,6 +684,141 @@ mod tests {
 
         let received = receiver_task.await.expect("task panicked");
         assert!(matches!(received, Some(GateResolution::Denied { .. })));
+    }
+
+    /// `cancel_thread()` wakes a `pause()` future parked on the given
+    /// thread with `GateResolution::Cancelled`. Without this hook,
+    /// `ThreadManager::stop_thread()` would have to wait up to the
+    /// 30-minute gate expiry before the engine task observed the stop.
+    #[tokio::test]
+    async fn cancel_thread_wakes_parked_pause_with_cancelled_resolution() {
+        use ironclaw_engine::GateController;
+        use ironclaw_engine::ResumeKind;
+        use ironclaw_engine::ThreadId;
+
+        let controller = Arc::new(BridgeGateController::new(
+            Arc::new(crate::gate::store::PendingGateStore::in_memory()),
+            None,
+            Arc::new(crate::tools::ToolRegistry::new()),
+            None,
+            None,
+            Arc::new(crate::channels::ChannelManager::new()),
+            Arc::new(GateResolutions::new()),
+        ));
+        let thread_id = ThreadId::new();
+        let user_id = "stop-during-wait-user".to_string();
+        let conversation_id = ironclaw_engine::ConversationId::new();
+
+        // Bridge populates the per-execution context before invoking
+        // the engine. Without it `pause()` cancels immediately
+        // (no per-execution lookup hit), which would also pass the
+        // test for the wrong reason.
+        controller
+            .set_execution_context(
+                user_id.clone(),
+                thread_id,
+                PerExecutionContext {
+                    conversation_id,
+                    source_channel: "test".into(),
+                    scope_thread_id: None,
+                    channel_metadata: serde_json::json!({}),
+                    original_message: None,
+                },
+            )
+            .await;
+
+        // Park a pause() future in a spawned task. It will block on the
+        // approval-resolution oneshot (and the 30-min sleep) until
+        // cancel_thread wakes it.
+        let controller_clone = controller.clone();
+        let user_clone = user_id.clone();
+        let pause_task = tokio::spawn(async move {
+            controller_clone
+                .pause(GatePauseRequest {
+                    thread_id,
+                    user_id: user_clone,
+                    gate_name: "approval".into(),
+                    action_name: "test_tool".into(),
+                    call_id: "call_stop_test".into(),
+                    parameters: serde_json::json!({}),
+                    resume_kind: ResumeKind::Approval { allow_always: true },
+                    conversation_id: Some(conversation_id),
+                })
+                .await
+        });
+
+        // Let pause() reach the select await before we cancel.
+        // The track_active_pause + register happen synchronously after
+        // the pending_gates.insert; one tokio yield is sufficient on
+        // current_thread runtime because pause() yields at .await
+        // points before reaching the select.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+            if !controller
+                .active_pauses
+                .lock()
+                .await
+                .get(&thread_id)
+                .map(|s| s.is_empty())
+                .unwrap_or(true)
+            {
+                break;
+            }
+        }
+        assert!(
+            !controller
+                .active_pauses
+                .lock()
+                .await
+                .get(&thread_id)
+                .map(|s| s.is_empty())
+                .unwrap_or(true),
+            "pause must register an active entry before we cancel"
+        );
+
+        // Now stop the thread. The pause future should resolve
+        // promptly (well under the 30-minute expiry).
+        controller.cancel_thread(thread_id).await;
+
+        let resolution = tokio::time::timeout(std::time::Duration::from_secs(2), pause_task)
+            .await
+            .expect("cancel_thread must wake parked pause within 2s")
+            .expect("pause task did not panic");
+        assert!(
+            matches!(resolution, GateResolution::Cancelled),
+            "stop must surface as Cancelled; got {resolution:?}"
+        );
+
+        // Active set is cleared.
+        assert!(
+            !controller
+                .active_pauses
+                .lock()
+                .await
+                .contains_key(&thread_id),
+            "active_pauses must be cleared after cancel_thread"
+        );
+    }
+
+    /// `cancel_thread()` is a no-op when no pause is parked on the
+    /// thread. `ThreadManager::stop_thread()` always calls it; the
+    /// happy path (no inline-await waiter) must not panic or block.
+    #[tokio::test]
+    async fn cancel_thread_with_no_active_pause_is_a_no_op() {
+        use ironclaw_engine::GateController;
+        use ironclaw_engine::ThreadId;
+
+        let controller = BridgeGateController::new(
+            Arc::new(crate::gate::store::PendingGateStore::in_memory()),
+            None,
+            Arc::new(crate::tools::ToolRegistry::new()),
+            None,
+            None,
+            Arc::new(crate::channels::ChannelManager::new()),
+            Arc::new(GateResolutions::new()),
+        );
+        // Should return immediately.
+        controller.cancel_thread(ThreadId::new()).await;
     }
 
     /// `try_deliver` returns `false` when the receiver was dropped

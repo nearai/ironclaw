@@ -450,6 +450,14 @@ impl ThreadManager {
     }
 
     /// Send a stop signal to a running thread.
+    ///
+    /// Wakes any [`crate::gate::GateController::pause`] futures that
+    /// are currently parked on this thread BEFORE sending
+    /// `ThreadSignal::Stop` so the engine task can observe the stop
+    /// promptly. Without the explicit cancel, a thread parked inside
+    /// `pause()` (inline approval await) is not polling the signal
+    /// channel and would continue waiting until the user resolves the
+    /// prompt or the gate expires.
     pub async fn stop_thread(&self, thread_id: ThreadId, user_id: &str) -> Result<(), EngineError> {
         // Validate ownership before allowing stop.
         if let Some(thread) = self.store.load_thread(thread_id).await?
@@ -460,6 +468,14 @@ impl ThreadManager {
                 entity: format!("thread {thread_id}"),
             });
         }
+
+        // Wake any inline gate await blocked on this thread first. The
+        // controller is shared across spawned engine tasks; a parked
+        // `pause()` future polled inside an executor doesn't see
+        // `ThreadSignal::Stop` directly.
+        let controller = self.gate_controller.read().await.clone();
+        controller.cancel_thread(thread_id).await;
+
         let running = self.running.read().await;
         if let Some(rt) = running.get(&thread_id) {
             let _ = rt.signal_tx.send(ThreadSignal::Stop).await;
