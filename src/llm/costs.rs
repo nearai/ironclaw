@@ -2,8 +2,13 @@
 //!
 //! Returns (input_cost_per_token, output_cost_per_token) as Decimal pairs.
 //! Ollama and other local models return zero cost.
+//!
+//! Also hosts the shared per-call cost computation used by both v1
+//! (`CostGuard::record_llm_call`) and v2 (`LlmBridgeAdapter::cost_usd_from`)
+//! so both engines agree on the number billed for a single completion.
 
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal_macros::dec;
 
 /// Look up known per-token costs for a model by its identifier.
@@ -86,6 +91,81 @@ pub fn default_cost() -> (Decimal, Decimal) {
     (dec!(0.0000025), dec!(0.00001))
 }
 
+/// Compute the USD cost of a single completion response as a `Decimal`,
+/// honoring prompt-caching pricing.
+///
+/// Shared by v1 (`CostGuard::record_llm_call`) and v2 (via
+/// `compute_call_cost_usd`). Both engines must call this so
+/// `Thread::total_cost_usd` and v1's daily budget tracker agree.
+///
+/// Pricing rules:
+/// - uncached input tokens priced at `input_rate`
+/// - cache-read tokens discounted by `cache_read_discount` (e.g. 10 for
+///   Anthropic, 2 for OpenAI). Zero is treated as "no discount".
+/// - cache-write tokens multiplied by `cache_write_multiplier` (e.g.
+///   1.25× for Anthropic 5-minute TTL, 2× for 1-hour TTL)
+/// - output tokens priced at `output_rate`
+///
+/// `input_tokens` is the provider-reported total; cache tokens are already
+/// counted inside that total, so uncached input = input_tokens - cache_read
+/// - cache_creation.
+#[allow(clippy::too_many_arguments)]
+pub fn compute_call_cost_decimal(
+    input_rate: Decimal,
+    output_rate: Decimal,
+    input_tokens: u32,
+    output_tokens: u32,
+    cache_read_input_tokens: u32,
+    cache_creation_input_tokens: u32,
+    cache_read_discount: Decimal,
+    cache_write_multiplier: Decimal,
+) -> Decimal {
+    let cached_total = cache_read_input_tokens.saturating_add(cache_creation_input_tokens);
+    let uncached_input = input_tokens.saturating_sub(cached_total);
+    let effective_discount = if cache_read_discount.is_zero() {
+        Decimal::ONE
+    } else {
+        cache_read_discount
+    };
+    let cache_read_cost =
+        input_rate * Decimal::from(cache_read_input_tokens) / effective_discount;
+    let cache_write_cost =
+        input_rate * Decimal::from(cache_creation_input_tokens) * cache_write_multiplier;
+    input_rate * Decimal::from(uncached_input)
+        + cache_read_cost
+        + cache_write_cost
+        + output_rate * Decimal::from(output_tokens)
+}
+
+/// Convenience wrapper returning the cost as `f64`, for engine v2's
+/// `TokenUsage::cost_usd` field. Lossy at extreme precision but adequate
+/// for display / budget comparisons. Returns 0.0 on NaN or conversion
+/// failure (e.g. extremely large Decimals).
+#[allow(clippy::too_many_arguments)]
+pub fn compute_call_cost_usd(
+    input_rate: Decimal,
+    output_rate: Decimal,
+    input_tokens: u32,
+    output_tokens: u32,
+    cache_read_input_tokens: u32,
+    cache_creation_input_tokens: u32,
+    cache_read_discount: Decimal,
+    cache_write_multiplier: Decimal,
+) -> f64 {
+    compute_call_cost_decimal(
+        input_rate,
+        output_rate,
+        input_tokens,
+        output_tokens,
+        cache_read_input_tokens,
+        cache_creation_input_tokens,
+        cache_read_discount,
+        cache_write_multiplier,
+    )
+    .to_f64()
+    .unwrap_or(0.0)
+}
+
 /// Heuristic to detect local/self-hosted models (Ollama, llama.cpp, etc.).
 fn is_local_model(model_id: &str) -> bool {
     let lower = model_id.to_lowercase();
@@ -152,6 +232,112 @@ mod tests {
     fn test_provider_prefix_stripped() {
         // "openai/gpt-4o" should resolve to same as "gpt-4o"
         assert_eq!(model_cost("openai/gpt-4o"), model_cost("gpt-4o"));
+    }
+
+    /// Regression for #2800 PR-A: `compute_call_cost_decimal` must produce
+    /// the same number v1's `CostGuard::record_llm_call` previously computed
+    /// inline. Guards against anyone "simplifying" the formula on either side.
+    #[test]
+    fn compute_call_cost_decimal_matches_legacy_inline_formula() {
+        // Representative Anthropic-with-caching call.
+        let input_rate = dec!(0.000003);
+        let output_rate = dec!(0.000015);
+        let input_tokens: u32 = 10_000;
+        let output_tokens: u32 = 500;
+        let cache_read: u32 = 3_000;
+        let cache_write: u32 = 1_000;
+        let discount = dec!(10);
+        let multiplier = dec!(1.25);
+
+        // Re-derive inline the same way v1 used to do it.
+        let cached_total = cache_read.saturating_add(cache_write);
+        let uncached_input = input_tokens.saturating_sub(cached_total);
+        let effective_discount = if discount.is_zero() {
+            Decimal::ONE
+        } else {
+            discount
+        };
+        let expected = input_rate * Decimal::from(uncached_input)
+            + input_rate * Decimal::from(cache_read) / effective_discount
+            + input_rate * Decimal::from(cache_write) * multiplier
+            + output_rate * Decimal::from(output_tokens);
+
+        let actual = compute_call_cost_decimal(
+            input_rate,
+            output_rate,
+            input_tokens,
+            output_tokens,
+            cache_read,
+            cache_write,
+            discount,
+            multiplier,
+        );
+        assert_eq!(actual, expected);
+    }
+
+    /// Zero discount must be treated as "no discount" (not divide-by-zero).
+    #[test]
+    fn compute_call_cost_zero_discount_does_not_panic() {
+        let cost = compute_call_cost_decimal(
+            dec!(0.000003),
+            dec!(0.000015),
+            1_000,
+            100,
+            500,
+            0,
+            Decimal::ZERO, // zero discount: treat as no discount
+            Decimal::ONE,
+        );
+        // With uncached=500, cache_read=500, output=100: 500*rate + 500*rate + 100*out_rate
+        assert!(cost > Decimal::ZERO);
+    }
+
+    /// Providers that report zero cost per token (subscription billing)
+    /// must return zero USD cost regardless of token counts.
+    #[test]
+    fn compute_call_cost_zero_rate_returns_zero() {
+        let cost_f64 = compute_call_cost_usd(
+            Decimal::ZERO,
+            Decimal::ZERO,
+            100_000,
+            10_000,
+            0,
+            0,
+            Decimal::ONE,
+            Decimal::ONE,
+        );
+        assert_eq!(cost_f64, 0.0);
+    }
+
+    /// The f64 wrapper is a thin convenience over the Decimal path; its
+    /// output must match `.to_f64()` of the Decimal result, so engine v2
+    /// (f64 consumer) and v1 (Decimal consumer) agree to the last bit f64
+    /// can represent.
+    #[test]
+    fn compute_call_cost_usd_tracks_decimal_path() {
+        let input_rate = dec!(0.000003);
+        let output_rate = dec!(0.000015);
+        let dec_val = compute_call_cost_decimal(
+            input_rate,
+            output_rate,
+            1_234,
+            567,
+            200,
+            100,
+            dec!(10),
+            dec!(1.25),
+        );
+        let f64_val = compute_call_cost_usd(
+            input_rate,
+            output_rate,
+            1_234,
+            567,
+            200,
+            100,
+            dec!(10),
+            dec!(1.25),
+        );
+        assert_eq!(dec_val.to_f64().unwrap(), f64_val);
     }
 
     #[test]

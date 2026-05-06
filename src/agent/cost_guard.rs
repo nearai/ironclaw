@@ -199,24 +199,20 @@ impl CostGuard {
     ) -> Decimal {
         let (input_rate, output_rate) = cost_per_token
             .unwrap_or_else(|| costs::model_cost(model).unwrap_or_else(costs::default_cost));
-        // Cached read tokens cost input_rate / cache_read_discount (provider-specific).
-        // Cached write tokens cost write_multiplier × input_rate (e.g. 1.25× for 5m, 2× for 1h).
-        // Uncached tokens = total input - cache reads - cache writes.
-        let cached_total = cache_read_input_tokens.saturating_add(cache_creation_input_tokens);
-        let uncached_input = input_tokens.saturating_sub(cached_total);
-        let effective_discount = if cache_read_discount.is_zero() {
-            Decimal::ONE
-        } else {
-            cache_read_discount
-        };
-        let cache_read_cost =
-            input_rate * Decimal::from(cache_read_input_tokens) / effective_discount;
-        let cache_write_cost =
-            input_rate * Decimal::from(cache_creation_input_tokens) * cache_write_multiplier;
-        let cost = input_rate * Decimal::from(uncached_input)
-            + cache_read_cost
-            + cache_write_cost
-            + output_rate * Decimal::from(output_tokens);
+        // Shared cost formula with engine v2's `LlmBridgeAdapter::cost_usd_from`
+        // (see src/llm/costs.rs::compute_call_cost_decimal). Both engines must
+        // compute the same number for a given call so v1 daily-budget
+        // enforcement and v2 `Thread::total_cost_usd` agree.
+        let cost = costs::compute_call_cost_decimal(
+            input_rate,
+            output_rate,
+            input_tokens,
+            output_tokens,
+            cache_read_input_tokens,
+            cache_creation_input_tokens,
+            cache_read_discount,
+            cache_write_multiplier,
+        );
 
         // Update daily cost (reset if new day)
         {

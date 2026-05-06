@@ -8,9 +8,6 @@ use ironclaw_engine::{
     ActionDef, EngineError, LlmBackend, LlmCallConfig, LlmOutput, LlmResponse, ThreadMessage,
     TokenUsage,
 };
-use rust_decimal::Decimal;
-use rust_decimal::prelude::ToPrimitive;
-
 use crate::llm::{
     ChatMessage, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolDefinition,
     clean_response, recover_tool_calls_from_content, sanitize_tool_messages,
@@ -18,18 +15,11 @@ use crate::llm::{
 
 const EMPTY_CLEANED_RESPONSE_FALLBACK: &str = "I'm not sure how to respond to that.";
 
-/// Compute the USD cost of a single completion response, honoring the
-/// provider's prompt-caching pricing. Mirrors the formula in
-/// `src/agent/cost_guard.rs::CostGuard::record_llm_call` so engine v2's
-/// `Thread::total_cost_usd` matches what `max_budget_usd` / v1's daily
-/// budget enforcer would have computed:
-///
-/// * uncached input tokens are priced at `cost_per_token().0`;
-/// * cache-read tokens are discounted by `cache_read_discount()` (10x
-///   off for Anthropic, 2x for OpenAI);
-/// * cache-write tokens are multiplied by `cache_write_multiplier()`
-///   (1.25× for Anthropic 5m TTL, 2× for 1h);
-/// * output tokens are priced at `cost_per_token().1`.
+/// Compute the USD cost of a single completion response for engine v2's
+/// `TokenUsage::cost_usd`, using the shared formula in
+/// `src/llm/costs.rs::compute_call_cost_usd`. V1's `CostGuard::record_llm_call`
+/// uses the same underlying `compute_call_cost_decimal` so both engines bill
+/// identically for a given call.
 ///
 /// Returns 0.0 for subscription-billed providers that report
 /// `cost_per_token() == (0, 0)` (e.g. OpenAI Codex via ChatGPT OAuth).
@@ -41,31 +31,16 @@ fn cost_usd_from(
     cache_creation_input_tokens: u32,
 ) -> f64 {
     let (input_rate, output_rate) = provider.cost_per_token();
-
-    // `input_tokens` is the provider-reported total. Cache tokens are
-    // already counted inside that total, so the uncached remainder is
-    // what's left after subtracting both buckets.
-    let cached_total = cache_read_input_tokens.saturating_add(cache_creation_input_tokens);
-    let uncached_input = input_tokens.saturating_sub(cached_total);
-
-    // Guard against providers reporting a zero discount — treat zero as
-    // "no discount" rather than attempting a div-by-zero.
-    let discount = provider.cache_read_discount();
-    let effective_discount = if discount.is_zero() {
-        Decimal::ONE
-    } else {
-        discount
-    };
-
-    let cache_read_cost = input_rate * Decimal::from(cache_read_input_tokens) / effective_discount;
-    let cache_write_cost =
-        input_rate * Decimal::from(cache_creation_input_tokens) * provider.cache_write_multiplier();
-    let cost = input_rate * Decimal::from(uncached_input)
-        + cache_read_cost
-        + cache_write_cost
-        + output_rate * Decimal::from(output_tokens);
-
-    cost.to_f64().unwrap_or(0.0)
+    crate::llm::costs::compute_call_cost_usd(
+        input_rate,
+        output_rate,
+        input_tokens,
+        output_tokens,
+        cache_read_input_tokens,
+        cache_creation_input_tokens,
+        provider.cache_read_discount(),
+        provider.cache_write_multiplier(),
+    )
 }
 
 /// Wraps an existing `LlmProvider` to implement the engine's `LlmBackend` trait.
