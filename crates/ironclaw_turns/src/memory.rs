@@ -5,7 +5,7 @@ use std::{
     sync::{Condvar, Mutex, MutexGuard},
 };
 
-use chrono::Utc;
+use chrono::{Duration as ChronoDuration, Utc};
 
 use crate::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey,
@@ -19,19 +19,22 @@ use crate::{
     events::EventCursor,
     runner::{
         BlockRunRequest, CancelRunCompletionRequest, ClaimRunRequest, ClaimedTurnRun,
-        CompleteRunRequest, FailRunRequest, HeartbeatRequest, TurnRunTransitionPort,
+        CompleteRunRequest, FailRunRequest, HeartbeatRequest, RecoverExpiredLeasesRequest,
+        RecoverExpiredLeasesResponse, TurnRunTransitionPort,
     },
 };
 
 const MAX_EVENTS: usize = 10_000;
 const MAX_TERMINAL_RECORDS: usize = 10_000;
 const MAX_IDEMPOTENCY_RECORDS: usize = 10_000;
+const DEFAULT_RUNNER_LEASE_TTL_SECONDS: i64 = 90;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InMemoryTurnStateStoreLimits {
     pub max_events: usize,
     pub max_terminal_records: usize,
     pub max_idempotency_records: usize,
+    pub runner_lease_ttl: ChronoDuration,
 }
 
 impl Default for InMemoryTurnStateStoreLimits {
@@ -40,6 +43,7 @@ impl Default for InMemoryTurnStateStoreLimits {
             max_events: MAX_EVENTS,
             max_terminal_records: MAX_TERMINAL_RECORDS,
             max_idempotency_records: MAX_IDEMPOTENCY_RECORDS,
+            runner_lease_ttl: ChronoDuration::seconds(DEFAULT_RUNNER_LEASE_TTL_SECONDS),
         }
     }
 }
@@ -363,6 +367,7 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
         record.status = TurnStatus::Running;
         record.runner_id = Some(request.runner_id);
         record.lease_token = Some(request.lease_token);
+        record.lease_expires_at = Some(inner.next_lease_expiry(now));
         record.last_heartbeat_at = Some(now);
         record.claim_count = record.claim_count.saturating_add(1);
         record.event_cursor = inner.next_cursor();
@@ -384,6 +389,7 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
             ensure_lease(&record, request.runner_id, request.lease_token)?;
             let now = Utc::now();
             record.last_heartbeat_at = Some(now);
+            record.lease_expires_at = Some(inner.next_lease_expiry(now));
             record.event_cursor = inner.next_cursor();
             inner.touch_active_lock(&record, now);
             inner.push_event(&record, TurnEventKind::RunnerHeartbeat, None);
@@ -391,6 +397,14 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
         })();
         inner.records.insert(record.run_id, record);
         result
+    }
+
+    async fn recover_expired_leases(
+        &self,
+        request: RecoverExpiredLeasesRequest,
+    ) -> Result<RecoverExpiredLeasesResponse, TurnError> {
+        let mut inner = self.lock_inner()?;
+        Ok(inner.recover_expired_leases(request))
     }
 
     async fn block_run(&self, request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
@@ -466,6 +480,11 @@ impl Inner {
         EventCursor(self.cursor)
     }
 
+    fn next_lease_expiry(&self, now: crate::TurnTimestamp) -> crate::TurnTimestamp {
+        now.checked_add_signed(self.limits.runner_lease_ttl)
+            .unwrap_or(now)
+    }
+
     fn push_event(
         &mut self,
         record: &RunRecord,
@@ -516,6 +535,63 @@ impl Inner {
             checkpoints,
             idempotency_records,
         }
+    }
+
+    fn recover_expired_leases(
+        &mut self,
+        request: RecoverExpiredLeasesRequest,
+    ) -> RecoverExpiredLeasesResponse {
+        let expired_run_ids = self
+            .records
+            .iter()
+            .filter_map(|(run_id, record)| {
+                if record.status != TurnStatus::Running {
+                    return None;
+                }
+                if request
+                    .scope_filter
+                    .as_ref()
+                    .is_some_and(|scope| scope != &record.scope)
+                {
+                    return None;
+                }
+                if record
+                    .lease_expires_at
+                    .is_some_and(|expires_at| expires_at <= request.now)
+                {
+                    Some(*run_id)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut recovered = Vec::with_capacity(expired_run_ids.len());
+        for run_id in expired_run_ids {
+            let Some(mut record) = self.records.remove(&run_id) else {
+                continue;
+            };
+            if record.status == TurnStatus::Running
+                && record
+                    .lease_expires_at
+                    .is_some_and(|expires_at| expires_at <= request.now)
+            {
+                record.status = TurnStatus::RecoveryRequired;
+                record.runner_id = None;
+                record.lease_token = None;
+                record.lease_expires_at = None;
+                record.event_cursor = self.next_cursor();
+                self.update_active_lock(&record, request.now);
+                let state = record.state();
+                self.push_event(
+                    &record,
+                    TurnEventKind::RecoveryRequired,
+                    Some("lease_expired".to_string()),
+                );
+                recovered.push(state);
+            }
+            self.records.insert(run_id, record);
+        }
+        RecoverExpiredLeasesResponse { recovered }
     }
 
     fn remember_submit_idempotency(
@@ -707,10 +783,9 @@ impl Inner {
                 TurnStatus::Queued
                 | TurnStatus::BlockedApproval
                 | TurnStatus::BlockedAuth
-                | TurnStatus::BlockedResource => (TurnStatus::Cancelled, TurnEventKind::Cancelled),
-                TurnStatus::Running
-                | TurnStatus::CancelRequested
-                | TurnStatus::RecoveryRequired => {
+                | TurnStatus::BlockedResource
+                | TurnStatus::RecoveryRequired => (TurnStatus::Cancelled, TurnEventKind::Cancelled),
+                TurnStatus::Running | TurnStatus::CancelRequested => {
                     (TurnStatus::CancelRequested, TurnEventKind::CancelRequested)
                 }
                 status => {

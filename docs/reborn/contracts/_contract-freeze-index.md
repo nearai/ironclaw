@@ -85,6 +85,7 @@ If a task needs to change one of those answers, it is not implementation work; i
 - [`settings-config.md`](settings-config.md)
 - [`turns-agent-loop.md`](turns-agent-loop.md)
 - [`turn-persistence.md`](turn-persistence.md)
+- [`turn-runner.md`](turn-runner.md)
 - [`migration-compatibility.md`](migration-compatibility.md)
 
 ---

@@ -119,11 +119,14 @@ accepted -> queued -> running
 running -> blocked_approval -> running
 running -> waiting_tool -> running
 running -> waiting_process -> running
+running -> recovery_required
+recovery_required -> cancelled
 running -> completed|failed|cancelled
 ```
 
 Rules:
 
+- runner claim, lease, heartbeat, and expired-lease recovery rules follow [`turn-runner.md`](turn-runner.md);
 - persistence records, active-lock ownership, runner lease fields, checkpoints, and idempotency outcomes follow [`turn-persistence.md`](turn-persistence.md);
 - state transitions are persisted before externally visible side effects where needed for recovery;
 - approval-blocked turns persist enough fingerprint metadata to resume without raw input leakage;

@@ -64,8 +64,9 @@ A duplicate idempotency key must replay the prior sanitized success/error outcom
 
 ## 5. Runner lease and checkpoint rules
 
-- Claiming a queued run atomically moves it to `Running`, stores runner ID/lease token, increments `claim_count`, and updates heartbeat metadata.
-- Heartbeats only renew metadata for matching runner ID/lease token.
+- Claiming a queued run atomically moves it to `Running`, stores runner ID/lease token, increments `claim_count`, records `last_heartbeat_at`, records `lease_expires_at`, and updates active-lock metadata.
+- Heartbeats only renew metadata for matching runner ID/lease token; successful heartbeats refresh `last_heartbeat_at` and extend `lease_expires_at`.
+- Expired `Running` leases transition to `RecoveryRequired`, clear current runner ownership, emit a redacted recovery event, and keep the active lock so uncertain side-effecting work is not auto-retried.
 - Blocking a running run writes a checkpoint record, stores the latest checkpoint/gate refs on the run, clears current lease ownership, and keeps the active lock.
 - Terminal runner outcomes require the matching runner ID/lease token and release the active lock only if the run still owns it.
 
