@@ -76,6 +76,8 @@ pub struct RegistryProviderConfig {
     pub protocol: ProviderProtocol,
     /// Provider identifier (e.g., "groq", "openai", "tinfoil").
     pub provider_id: String,
+    /// Whether this provider requires credentials to be usable.
+    pub api_key_required: bool,
     /// API key (optional for some providers like Ollama).
     /// For Anthropic OAuth, this is set to `OAUTH_PLACEHOLDER`.
     pub api_key: Option<SecretString>,

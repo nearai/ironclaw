@@ -186,6 +186,7 @@ async fn try_fetch_models(provider_id: &str, config_path: Option<&Path>) -> Opti
             llm_config.provider = Some(crate::llm::RegistryProviderConfig {
                 protocol: def.protocol,
                 provider_id: def.id.clone(),
+                api_key_required: def.api_key_required,
                 model: def.default_model.clone(),
                 api_key: api_key.map(secrecy::SecretString::from),
                 base_url,
