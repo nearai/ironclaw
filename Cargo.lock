@@ -4350,6 +4350,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_threads"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "ironclaw_host_api",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "ironclaw_trust"
 version = "0.1.0"
 dependencies = [
