@@ -124,13 +124,13 @@
     "aliases": [
       "open_router"
     ],
-    "protocol": "open_ai_completions",
-    "default_base_url": "https://openrouter.ai/api/v1",
+    "protocol": "open_router",
+    "default_base_url": "",
     "api_key_env": "OPENROUTER_API_KEY",
     "api_key_required": true,
     "model_env": "OPENROUTER_MODEL",
     "default_model": "openai/gpt-4o",
-    "description": "OpenRouter multi-provider gateway (200+ models)",
+    "description": "OpenRouter multi-provider gateway (200+ models, preserves reasoning across turns)",
     "setup": {
       "kind": "api_key",
       "secret_name": "llm_openrouter_api_key",

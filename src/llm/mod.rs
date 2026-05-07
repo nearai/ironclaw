@@ -189,6 +189,7 @@ fn create_registry_provider(
         ProviderProtocol::Ollama => create_ollama_from_registry(config),
         ProviderProtocol::DeepSeek => create_deepseek_from_registry(config),
         ProviderProtocol::Gemini => create_gemini_from_registry(config),
+        ProviderProtocol::OpenRouter => create_openrouter_from_registry(config),
         ProviderProtocol::GithubCopilot => {
             let provider =
                 github_copilot::GithubCopilotProvider::new(config, request_timeout_secs)?;
@@ -468,6 +469,77 @@ fn create_deepseek_from_registry(
         model = %config.model,
         base_url = if config.base_url.is_empty() { "default" } else { &config.base_url },
         "Using DeepSeek provider (preserves reasoning_content across turns)"
+    );
+
+    Ok(Arc::new(
+        RigAdapter::new(model, &config.model)
+            .with_unsupported_params(config.unsupported_params.clone()),
+    ))
+}
+
+/// Build an OpenRouter provider via rig-core's dedicated OpenRouter client.
+///
+/// Routing through this client (rather than the generic OpenAI-compat path)
+/// preserves OpenRouter's `reasoning`, `reasoning_details`, and per-tool-call
+/// signatures across turns. The generic OpenAI client strips all of them, so
+/// any thinking-mode model accessed via OpenRouter (Claude with thinking,
+/// OpenAI o-series, DeepSeek-R1, Gemini 2.5+, Qwen QwQ, …) loses its
+/// reasoning artifacts on the assistant message and the next request fails
+/// the same way as #3201 / #3225.
+fn create_openrouter_from_registry(
+    config: &RegistryProviderConfig,
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    use rig::providers::openrouter;
+
+    let api_key = config
+        .api_key
+        .as_ref()
+        .map(|k| k.expose_secret().to_string())
+        .ok_or_else(|| LlmError::AuthFailed {
+            provider: config.provider_id.clone(),
+        })?;
+
+    // OpenRouter attribution headers (`HTTP-Referer`, `X-Title`) and any other
+    // user-configured extras must follow the request through.
+    let mut extra_headers = reqwest::header::HeaderMap::new();
+    for (key, value) in &config.extra_headers {
+        let name = match reqwest::header::HeaderName::from_bytes(key.as_bytes()) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(header = %key, error = %e, "Skipping extra header: invalid name");
+                continue;
+            }
+        };
+        let val = match reqwest::header::HeaderValue::from_str(value) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(header = %key, error = %e, "Skipping extra header: invalid value");
+                continue;
+            }
+        };
+        extra_headers.insert(name, val);
+    }
+
+    let mut builder = openrouter::Client::builder().api_key(&api_key);
+    if !config.base_url.is_empty() {
+        builder = builder.base_url(&config.base_url);
+    }
+    if !extra_headers.is_empty() {
+        builder = builder.http_headers(extra_headers);
+    }
+
+    let client: openrouter::Client = builder.build().map_err(|e| LlmError::RequestFailed {
+        provider: config.provider_id.clone(),
+        reason: format!("Failed to create OpenRouter client: {e}"),
+    })?;
+
+    let model = client.completion_model(&config.model);
+
+    tracing::debug!(
+        provider = %config.provider_id,
+        model = %config.model,
+        base_url = if config.base_url.is_empty() { "default" } else { &config.base_url },
+        "Using OpenRouter provider (preserves reasoning + signatures across turns)"
     );
 
     Ok(Arc::new(
