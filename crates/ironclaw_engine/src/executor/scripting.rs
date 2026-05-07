@@ -2085,6 +2085,23 @@ async fn drive_inline_gate(
             .await;
 
         if let Some(outcome) = denial_outcome_for_resolution(&resolution) {
+            // Cancelled+Authentication → unwind via the legacy
+            // `RuntimeError("execution paused by gate ...")` so the
+            // outer orchestrator can produce `ThreadOutcome::GatePaused`
+            // and missions can transition to Paused. Cancelled here
+            // means the controller can't resolve the auth inline (no
+            // OAuth wiring) — the legacy unwind path is the right
+            // fallback. Denied / explicit user-cancel remain failures.
+            if matches!(
+                resolution,
+                crate::gate::GateResolution::Cancelled
+            ) && matches!(gate.resume_kind, crate::gate::ResumeKind::Authentication { .. })
+            {
+                return ExtFunctionResult::Error(MontyException::new(
+                    ExcType::RuntimeError,
+                    Some(format!("execution paused by gate '{}'", gate.gate_name)),
+                ));
+            }
             events.push(EventKind::ActionFailed {
                 step_id: context.step_id,
                 action_name: gate.action_name.clone(),

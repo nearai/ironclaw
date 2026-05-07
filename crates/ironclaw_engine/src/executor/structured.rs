@@ -648,6 +648,35 @@ async fn execute_with_inline_gate_retry(
             .await;
         call_ctx.call_approval_granted = false;
 
+        // Snapshot the original gate (for re-emission on
+        // Cancelled+Authentication, see below).
+        let original_err = match &result {
+            Err(EngineError::GatePaused {
+                resume_kind,
+                paused_lease,
+                resume_output,
+                gate_name,
+                action_name,
+                call_id,
+                parameters,
+            }) if matches!(
+                **resume_kind,
+                crate::gate::ResumeKind::Approval { .. }
+                    | crate::gate::ResumeKind::Authentication { .. }
+            ) =>
+            {
+                Some(EngineError::GatePaused {
+                    gate_name: gate_name.clone(),
+                    action_name: action_name.clone(),
+                    call_id: call_id.clone(),
+                    parameters: parameters.clone(),
+                    resume_kind: resume_kind.clone(),
+                    paused_lease: paused_lease.clone(),
+                    resume_output: resume_output.clone(),
+                })
+            }
+            _ => None,
+        };
         let (gate_name, action_name, call_id, parameters, resume_kind) = match result {
             Err(EngineError::GatePaused {
                 gate_name,
@@ -698,7 +727,7 @@ async fn execute_with_inline_gate_retry(
                 action_name: action_name.clone(),
                 call_id: call_id.clone(),
                 parameters: parameters.clone(),
-                resume_kind,
+                resume_kind: resume_kind.clone(),
                 conversation_id: exec_ctx.conversation_id,
             })
             .await;
@@ -706,6 +735,23 @@ async fn execute_with_inline_gate_retry(
         if let Some(outcome) =
             crate::executor::scripting::denial_outcome_for_resolution(&resolution)
         {
+            // Cancelled+Authentication → unwind to legacy
+            // `ThreadOutcome::GatePaused` so missions / non-inline-aware
+            // controllers can still surface a Paused state. Cancelled
+            // here means the controller can't resolve the auth inline
+            // (e.g. `CancellingGateController` in tests, or a
+            // BridgeGateController without OAuth wiring) — that's
+            // semantically "no inline path exists" and the legacy
+            // unwind is the right fallback. Denied / explicit
+            // Cancelled-by-user remain failures.
+            if matches!(
+                resolution,
+                crate::gate::GateResolution::Cancelled
+            ) && matches!(resume_kind, crate::gate::ResumeKind::Authentication { .. })
+                && let Some(err) = original_err
+            {
+                return (Err(err), emitted_events);
+            }
             return (
                 Err(EngineError::Effect {
                     reason: outcome.effect_reason(),
