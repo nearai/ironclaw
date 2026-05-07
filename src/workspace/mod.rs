@@ -751,18 +751,26 @@ impl Workspace {
     pub fn scoped_to_user(&self, user_id: impl Into<String>) -> Self {
         let user_id = user_id.into();
 
+        let private_source_scopes: Vec<String> = self
+            .memory_layers
+            .iter()
+            .filter(|layer| layer.sensitivity == crate::workspace::layer::LayerSensitivity::Private)
+            .map(|layer| layer.scope.clone())
+            .collect();
+
         let mut memory_layers = self.memory_layers.clone();
         for layer in &mut memory_layers {
-            if layer.sensitivity == crate::workspace::layer::LayerSensitivity::Private
-                && layer.scope == self.user_id
-            {
+            if layer.sensitivity == crate::workspace::layer::LayerSensitivity::Private {
                 layer.scope = user_id.clone();
             }
         }
 
         let mut read_user_ids = vec![user_id.clone()];
         for scope in &self.read_user_ids {
-            if scope != &self.user_id && !read_user_ids.contains(scope) {
+            if scope != &self.user_id
+                && !private_source_scopes.contains(scope)
+                && !read_user_ids.contains(scope)
+            {
                 read_user_ids.push(scope.clone());
             }
         }

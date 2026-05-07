@@ -138,26 +138,22 @@ impl Agent {
             &self.config.default_timezone,
         );
 
-        let system_prompt = if let Some(ws) = self.workspace() {
-            let scoped_workspace = if ws.user_id() == message.user_id {
-                Arc::clone(ws)
-            } else {
-                Arc::new(ws.scoped_to_user(&message.user_id))
-            };
-            match scoped_workspace
-                .system_prompt_for_context_tz(is_group_chat, user_tz)
-                .await
-            {
-                Ok(prompt) if !prompt.is_empty() => Some(prompt),
-                Ok(_) => None,
-                Err(e) => {
-                    tracing::debug!("Could not load workspace system prompt: {}", e);
-                    None
+        let system_prompt =
+            if let Some(scoped_workspace) = self.workspace_for_user(&message.user_id) {
+                match scoped_workspace
+                    .system_prompt_for_context_tz(is_group_chat, user_tz)
+                    .await
+                {
+                    Ok(prompt) if !prompt.is_empty() => Some(prompt),
+                    Ok(_) => None,
+                    Err(e) => {
+                        tracing::debug!("Could not load workspace system prompt: {}", e);
+                        None
+                    }
                 }
-            }
-        } else {
-            None
-        };
+            } else {
+                None
+            };
 
         // Select active skills. Explicit /skill-name mentions are force-activated
         // and replaced with the skill's description in the rewritten message.

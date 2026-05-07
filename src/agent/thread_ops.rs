@@ -618,8 +618,9 @@ impl Agent {
                     .await;
 
                 let compactor = ContextCompactor::new(self.llm().clone());
+                let workspace = self.workspace_for_user(&message.user_id);
                 if let Err(e) = compactor
-                    .compact(thread, strategy, self.workspace().map(|w| w.as_ref()))
+                    .compact(thread, strategy, workspace.as_deref())
                     .await
                 {
                     tracing::warn!("Auto-compaction failed: {}", e);
@@ -1317,6 +1318,7 @@ impl Agent {
         thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
         let mut sess = session.lock().await;
+        let user_id = sess.user_id.clone();
         let thread = sess
             .threads
             .get_mut(&thread_id)
@@ -1332,8 +1334,9 @@ impl Agent {
             );
 
         let compactor = ContextCompactor::new(self.llm().clone());
+        let workspace = self.workspace_for_user(&user_id);
         match compactor
-            .compact(thread, strategy, self.workspace().map(|w| w.as_ref()))
+            .compact(thread, strategy, workspace.as_deref())
             .await
         {
             Ok(result) => {
@@ -2871,6 +2874,70 @@ mod tests {
         );
 
         (agent, statuses)
+    }
+
+    #[cfg(feature = "libsql")]
+    async fn make_thread_ops_test_db() -> (Arc<dyn crate::db::Database>, tempfile::TempDir) {
+        use crate::db::Database;
+
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let path = dir.path().join("test.db");
+        let backend = crate::db::libsql::LibSqlBackend::new_local(&path)
+            .await
+            .expect("failed to create test LibSqlBackend");
+        backend
+            .run_migrations()
+            .await
+            .expect("failed to run migrations");
+        (Arc::new(backend) as Arc<dyn crate::db::Database>, dir)
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn process_compact_writes_summary_to_session_user_workspace() {
+        let (db, _dir) = make_thread_ops_test_db().await;
+        let owner_workspace = Arc::new(crate::workspace::Workspace::new_with_db(
+            "owner-scope",
+            Arc::clone(&db),
+        ));
+        let (mut agent, _statuses) = make_thread_ops_test_agent().await;
+        agent.deps.store = Some(Arc::clone(&db));
+        agent.deps.workspace = Some(owner_workspace);
+
+        let session = Arc::new(Mutex::new(Session::new("alice")));
+        let thread_id = {
+            let mut sess = session.lock().await;
+            let thread = sess.create_thread(Some("gateway"));
+            for i in 0..6 {
+                thread.start_turn(format!("msg-{i}"));
+                thread.conclude_turn(TurnOutcome::Completed(format!("resp-{i}")));
+            }
+            thread.id
+        };
+
+        let result = agent
+            .process_compact(Arc::clone(&session), thread_id)
+            .await
+            .expect("manual compaction should run");
+        assert!(
+            matches!(result, SubmissionResult::Ok { .. }),
+            "unexpected compact result: {result:?}"
+        );
+
+        let date = chrono::Utc::now().format("%Y-%m-%d");
+        let path = format!("daily/{date}.md");
+        let alice_ws = crate::workspace::Workspace::new_with_db("alice", Arc::clone(&db));
+        let alice_doc = alice_ws
+            .read(&path)
+            .await
+            .expect("compaction summary should be written to the session user's workspace");
+        assert!(alice_doc.content.contains("Context Summary"));
+
+        let owner_ws = crate::workspace::Workspace::new_with_db("owner-scope", Arc::clone(&db));
+        assert!(
+            owner_ws.read(&path).await.is_err(),
+            "compaction summary must not be written to the startup owner workspace"
+        );
     }
 
     #[test]
