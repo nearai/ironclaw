@@ -1110,6 +1110,211 @@ async fn duplicate_external_event_replays_message_and_does_not_submit_duplicate_
 }
 
 #[tokio::test]
+async fn direct_route_rejects_borrowed_owner_actor_key() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            web(),
+            default_installation(),
+            external_actor("alice-web"),
+            user("alice"),
+        )
+        .await;
+    services
+        .pair_external_actor(
+            tenant(),
+            web(),
+            default_installation(),
+            external_actor("bob-web"),
+            user("bob"),
+        )
+        .await;
+    let resolution = services
+        .resolve_or_create_binding(resolve_request(
+            web(),
+            external_actor("alice-web"),
+            external_conversation("alice-private-borrowed-key", None),
+            "alice-borrowed-key-event",
+        ))
+        .await
+        .unwrap();
+    services
+        .add_thread_participant(&tenant(), &resolution.turn_scope.thread_id, user("bob"))
+        .await
+        .unwrap();
+
+    let err = services
+        .validate_reply_target(validate_reply_request(
+            user("bob"),
+            web(),
+            default_installation(),
+            external_actor("alice-web"),
+            resolution.turn_scope.thread_id.clone(),
+            resolution.reply_target_binding_ref.clone(),
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, InboundTurnError::AccessDenied { .. }));
+
+    let err = services
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            tenant_id: tenant(),
+            thread_id: resolution.turn_scope.thread_id,
+            actor: TurnActor::new(user("bob")),
+            adapter_kind: web(),
+            adapter_installation_id: default_installation(),
+            external_actor_ref: external_actor("alice-web"),
+            source_binding_ref: resolution.source_binding_ref,
+            reply_target_binding_ref: resolution.reply_target_binding_ref,
+            external_conversation_ref: external_conversation("alice-private-borrowed-key", None),
+            external_event_id: ExternalEventId::new("bob-borrowed-key-event").unwrap(),
+            content_ref: InboundMessageContentRef::new("content:bob-borrowed-key-event").unwrap(),
+            received_at: Utc.with_ymd_and_hms(2026, 5, 6, 12, 1, 0).unwrap(),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, InboundTurnError::AccessDenied { .. }));
+}
+
+#[tokio::test]
+async fn failed_shared_route_probe_does_not_widen_direct_binding() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            web(),
+            default_installation(),
+            external_actor("alice-web"),
+            user("alice"),
+        )
+        .await;
+    services
+        .pair_external_actor(
+            tenant(),
+            web(),
+            default_installation(),
+            external_actor("bob-web"),
+            user("bob"),
+        )
+        .await;
+    services
+        .pair_external_actor(
+            tenant(),
+            web(),
+            default_installation(),
+            external_actor("charlie-web"),
+            user("charlie"),
+        )
+        .await;
+    let resolution = services
+        .resolve_or_create_binding(resolve_request(
+            web(),
+            external_actor("alice-web"),
+            external_conversation("alice-direct-probe", None),
+            "alice-direct-probe-event",
+        ))
+        .await
+        .unwrap();
+    services
+        .add_thread_participant(&tenant(), &resolution.turn_scope.thread_id, user("bob"))
+        .await
+        .unwrap();
+    services
+        .add_thread_participant(&tenant(), &resolution.turn_scope.thread_id, user("charlie"))
+        .await
+        .unwrap();
+
+    let mut bob_probe = resolve_request(
+        web(),
+        external_actor("bob-web"),
+        external_conversation("alice-direct-probe", None),
+        "bob-probe-event",
+    );
+    bob_probe.route_kind = ConversationRouteKind::Shared;
+    let err = services
+        .resolve_or_create_binding(bob_probe)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, InboundTurnError::AccessDenied { .. }));
+
+    let err = services
+        .resolve_or_create_binding(resolve_request(
+            web(),
+            external_actor("charlie-web"),
+            external_conversation("alice-direct-probe", None),
+            "charlie-after-failed-probe",
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, InboundTurnError::AccessDenied { .. }));
+}
+
+#[tokio::test]
+async fn shared_route_rejects_wrong_adapter_context() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("alice-telegram"),
+            user("alice"),
+        )
+        .await;
+    services
+        .pair_external_actor(
+            tenant(),
+            web(),
+            default_installation(),
+            external_actor("alice-web"),
+            user("alice"),
+        )
+        .await;
+    let mut request = resolve_request(
+        telegram(),
+        external_actor("alice-telegram"),
+        external_conversation("shared-adapter-route", None),
+        "shared-adapter-event",
+    );
+    request.route_kind = ConversationRouteKind::Shared;
+    let resolution = services.resolve_or_create_binding(request).await.unwrap();
+
+    let err = services
+        .validate_reply_target(validate_reply_request(
+            user("alice"),
+            web(),
+            default_installation(),
+            external_actor("alice-web"),
+            resolution.turn_scope.thread_id.clone(),
+            resolution.reply_target_binding_ref.clone(),
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, InboundTurnError::AccessDenied { .. }));
+
+    let err = services
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            tenant_id: tenant(),
+            thread_id: resolution.turn_scope.thread_id,
+            actor: resolution.actor,
+            adapter_kind: web(),
+            adapter_installation_id: default_installation(),
+            external_actor_ref: external_actor("alice-web"),
+            source_binding_ref: resolution.source_binding_ref,
+            reply_target_binding_ref: resolution.reply_target_binding_ref,
+            external_conversation_ref: external_conversation("shared-adapter-route", None),
+            external_event_id: ExternalEventId::new("wrong-adapter-accept-event").unwrap(),
+            content_ref: InboundMessageContentRef::new("content:wrong-adapter-accept-event")
+                .unwrap(),
+            received_at: Utc.with_ymd_and_hms(2026, 5, 6, 12, 1, 0).unwrap(),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, InboundTurnError::AccessDenied { .. }));
+}
+
+#[tokio::test]
 async fn direct_route_rejects_same_user_different_external_actor_alias() {
     let services = InMemoryConversationServices::default();
     services
@@ -1246,6 +1451,15 @@ async fn shared_route_marker_widens_existing_direct_binding_for_participants() {
         )
         .await
         .unwrap();
+    let mut alice_widen = inbound_request(
+        telegram(),
+        external_actor("alice-telegram"),
+        group.clone(),
+        "late-shared-owner-marker",
+    );
+    alice_widen.route_kind = ConversationRouteKind::Shared;
+    inbound.handle_inbound_turn(alice_widen).await.unwrap();
+
     let mut bob_request = inbound_request(
         telegram(),
         external_actor("bob-telegram"),
@@ -1257,7 +1471,7 @@ async fn shared_route_marker_widens_existing_direct_binding_for_participants() {
     let bob = inbound.handle_inbound_turn(bob_request).await.unwrap();
 
     assert_eq!(bob.resolution.actor, TurnActor::new(user("bob")));
-    assert_eq!(coordinator.submissions().len(), 2);
+    assert_eq!(coordinator.submissions().len(), 3);
 }
 
 #[tokio::test]

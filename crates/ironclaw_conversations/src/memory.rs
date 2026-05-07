@@ -54,6 +54,23 @@ impl InMemoryConversationServices {
         }
     }
 
+    pub async fn unpair_external_actor(
+        &self,
+        tenant_id: &TenantId,
+        adapter_kind: &AdapterKind,
+        adapter_installation_id: &AdapterInstallationId,
+        external_actor_ref: &ExternalActorRef,
+    ) {
+        if let Ok(mut state) = self.state.lock() {
+            state.pairings.remove(&ActorKey::new(
+                tenant_id,
+                adapter_kind,
+                adapter_installation_id,
+                external_actor_ref,
+            ));
+        }
+    }
+
     pub async fn add_thread_participant(
         &self,
         tenant_id: &TenantId,
@@ -101,9 +118,6 @@ impl ConversationBindingService for InMemoryConversationServices {
         );
 
         if state.bindings.contains_key(&binding_key) {
-            if request.route_kind == ConversationRouteKind::Shared {
-                state.widen_binding_route_access(&binding_key)?;
-            }
             let binding = state
                 .bindings
                 .get(&binding_key)
@@ -116,6 +130,14 @@ impl ConversationBindingService for InMemoryConversationServices {
                     thread_id: binding.thread_id.to_string(),
                 });
             }
+            if request.route_kind == ConversationRouteKind::Shared {
+                state.widen_binding_route_access(&binding_key)?;
+            }
+            let binding = state
+                .bindings
+                .get(&binding_key)
+                .cloned()
+                .ok_or(InboundTurnError::StatePoisoned)?;
             return Ok(binding.resolution(actor_user_id, request.tenant_id));
         }
 
@@ -168,15 +190,32 @@ impl ConversationBindingService for InMemoryConversationServices {
             external_conversation_identity: request.external_conversation_ref.identity(),
         };
         if state.bindings.contains_key(&binding_key) {
-            if request.route_kind == ConversationRouteKind::Shared {
-                state.widen_binding_route_access(&binding_key)?;
-            }
             let existing = state
                 .bindings
                 .get(&binding_key)
                 .cloned()
                 .ok_or(InboundTurnError::StatePoisoned)?;
             if existing.thread_id == request.target_thread_id {
+                let route_actor_key = ActorKey::new(
+                    &request.tenant_id,
+                    &request.adapter_kind,
+                    &request.adapter_installation_id,
+                    &request.external_actor_ref,
+                );
+                if !existing.route_access.allows(&route_actor_key) {
+                    return Err(InboundTurnError::AccessDenied {
+                        actor_id: actor_user_id.to_string(),
+                        thread_id: existing.thread_id.to_string(),
+                    });
+                }
+                if request.route_kind == ConversationRouteKind::Shared {
+                    state.widen_binding_route_access(&binding_key)?;
+                }
+                let existing = state
+                    .bindings
+                    .get(&binding_key)
+                    .cloned()
+                    .ok_or(InboundTurnError::StatePoisoned)?;
                 return Ok(LinkedConversationBinding {
                     thread_id: existing.thread_id,
                     source_binding_ref: existing.source_binding_ref,
@@ -228,25 +267,36 @@ impl ConversationBindingService for InMemoryConversationServices {
                 thread_id: request.reply_target_binding_ref.as_str().to_string(),
             });
         };
+        let route_actor_key = ActorKey::new(
+            &request.tenant_id,
+            &request.adapter_kind,
+            &request.adapter_installation_id,
+            &request.external_actor_ref,
+        );
         if binding.tenant_id != request.tenant_id
             || binding.thread_id != request.current_thread_id
-            || !binding.route_access.allows(&ActorKey::new(
-                &request.tenant_id,
-                &request.adapter_kind,
-                &request.adapter_installation_id,
-                &request.external_actor_ref,
-            ))
+            || binding.adapter_kind != request.adapter_kind
+            || binding.adapter_installation_id != request.adapter_installation_id
+            || !binding.route_access.allows(&route_actor_key)
         {
             return Err(InboundTurnError::AccessDenied {
                 actor_id: request.actor_user_id.to_string(),
                 thread_id: binding.thread_id.to_string(),
             });
         }
-        state.ensure_participant(
-            &binding.tenant_id,
-            &request.actor_user_id,
-            &binding.thread_id,
+        let paired_user_id = state.resolve_actor(
+            &request.tenant_id,
+            &request.adapter_kind,
+            &request.adapter_installation_id,
+            &request.external_actor_ref,
         )?;
+        if paired_user_id != request.actor_user_id {
+            return Err(InboundTurnError::AccessDenied {
+                actor_id: request.actor_user_id.to_string(),
+                thread_id: binding.thread_id.to_string(),
+            });
+        }
+        state.ensure_participant(&binding.tenant_id, &paired_user_id, &binding.thread_id)?;
         Ok(ReplyTargetBinding {
             tenant_id: binding.tenant_id,
             actor_user_id: request.actor_user_id,
@@ -265,11 +315,19 @@ impl SessionThreadService for InMemoryConversationServices {
         request: AcceptInboundMessageRequest,
     ) -> Result<AcceptedInboundMessage, InboundTurnError> {
         let mut state = self.lock_state()?;
-        state.ensure_participant(
+        let paired_user_id = state.resolve_actor(
             &request.tenant_id,
-            &request.actor.user_id,
-            &request.thread_id,
+            &request.adapter_kind,
+            &request.adapter_installation_id,
+            &request.external_actor_ref,
         )?;
+        if paired_user_id != request.actor.user_id {
+            return Err(InboundTurnError::AccessDenied {
+                actor_id: request.actor.user_id.to_string(),
+                thread_id: request.thread_id.to_string(),
+            });
+        }
+        state.ensure_participant(&request.tenant_id, &paired_user_id, &request.thread_id)?;
         state.ensure_binding_refs_match(
             &request.tenant_id,
             &request.thread_id,
@@ -489,6 +547,10 @@ impl InMemoryState {
             || reply_binding.tenant_id != *tenant_id
             || source_binding.thread_id != *thread_id
             || reply_binding.thread_id != *thread_id
+            || source_binding.adapter_kind != route_actor_key.adapter_kind
+            || reply_binding.adapter_kind != route_actor_key.adapter_kind
+            || source_binding.adapter_installation_id != route_actor_key.adapter_installation_id
+            || reply_binding.adapter_installation_id != route_actor_key.adapter_installation_id
             || source_binding.source_binding_ref.as_str() != source_binding_ref
             || reply_binding.reply_target_binding_ref.as_str() != reply_target_binding_ref
             || source_binding.source_binding_ref != reply_binding.source_binding_ref
