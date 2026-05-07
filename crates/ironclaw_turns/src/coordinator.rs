@@ -24,7 +24,7 @@ pub struct TurnRunWake {
     pub event_cursor: EventCursor,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum TurnRunWakeNotifyError {
     DeliveryUnavailable,
