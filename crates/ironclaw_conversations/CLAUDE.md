@@ -12,5 +12,6 @@
 - Serde deserialization for external ref types must delegate to the same validation rules as constructors.
 - Future durable binding repositories must avoid raw wide composite unique indexes for external route fields; use typed rows plus a collision-resistant digest/indirection key derived from length-prefixed components.
 - Accepted message idempotency and turn-submission idempotency are separate: adapter retries must reuse the accepted message ref and retry submission until the message is marked submitted, rotating submit idempotency keys after failed/busy attempts so turn-store replay cannot strand the message.
+- Automatic first-contact binding must not trust raw adapter-supplied agent/project scope hints; use explicit linking or a future trusted thread-creation seam for scoped thread selection.
 - Explicit links are idempotent only for the same target thread; never silently retarget an already-bound external conversation to another thread.
 - Keep durable PostgreSQL/libSQL adapters out of this crate until the transcript/thread storage boundary has a scoped implementation plan with parity tests.

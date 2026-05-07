@@ -81,8 +81,8 @@ impl ConversationBindingService for InMemoryConversationServices {
             }
         })?;
         let thread = ThreadRecord {
-            agent_id: request.requested_agent_id.clone(),
-            project_id: request.requested_project_id.clone(),
+            agent_id: None,
+            project_id: None,
             participants: HashSet::from([actor_user_id.clone()]),
         };
         state
@@ -94,8 +94,8 @@ impl ConversationBindingService for InMemoryConversationServices {
             request.adapter_installation_id,
             request.external_conversation_ref,
             thread_id,
-            request.requested_agent_id,
-            request.requested_project_id,
+            None,
+            None,
         )?;
         let resolution = binding.resolution(actor_user_id, request.tenant_id.clone());
         state.store_binding(binding_key, binding);
@@ -208,19 +208,6 @@ impl SessionThreadService for InMemoryConversationServices {
             request.reply_target_binding_ref.as_str(),
             &request.actor.user_id,
         )?;
-        let idempotency_key = MessageIdempotencyKey {
-            tenant_id: request.tenant_id.clone(),
-            source_binding_ref: request.source_binding_ref.as_str().to_string(),
-            external_event_id: request.external_event_id.clone(),
-        };
-        if let Some(existing) = state.message_idempotency.get(&idempotency_key) {
-            let mut duplicate = existing.clone();
-            duplicate.idempotency = MessageIdempotencyStatus::Duplicate;
-            return Ok(duplicate);
-        }
-
-        let message_ref = AcceptedMessageRef::new(format!("message:{}", Uuid::new_v4()))
-            .map_err(|reason| InboundTurnError::InvalidCanonicalRef { reason })?;
         let source_binding = state
             .source_bindings
             .get(request.source_binding_ref.as_str())
@@ -236,6 +223,19 @@ impl SessionThreadService for InMemoryConversationServices {
                 thread_id: request.thread_id.to_string(),
             });
         }
+        let idempotency_key = MessageIdempotencyKey {
+            tenant_id: request.tenant_id.clone(),
+            source_binding_ref: request.source_binding_ref.as_str().to_string(),
+            external_event_id: request.external_event_id.clone(),
+        };
+        if let Some(existing) = state.message_idempotency.get(&idempotency_key) {
+            let mut duplicate = existing.clone();
+            duplicate.idempotency = MessageIdempotencyStatus::Duplicate;
+            return Ok(duplicate);
+        }
+
+        let message_ref = AcceptedMessageRef::new(format!("message:{}", Uuid::new_v4()))
+            .map_err(|reason| InboundTurnError::InvalidCanonicalRef { reason })?;
         let reply_target_record = state
             .reply_targets
             .get(request.reply_target_binding_ref.as_str())

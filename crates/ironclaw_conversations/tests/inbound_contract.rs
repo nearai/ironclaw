@@ -701,6 +701,37 @@ async fn explicit_link_refuses_to_retarget_existing_conversation_binding() {
 }
 
 #[tokio::test]
+async fn first_bind_does_not_trust_unvalidated_requested_scope_hints() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            web(),
+            default_installation(),
+            external_actor("alice-web"),
+            user("alice"),
+        )
+        .await;
+
+    let resolution = services
+        .resolve_or_create_binding(ironclaw_conversations::ResolveConversationRequest {
+            tenant_id: tenant(),
+            adapter_kind: web(),
+            adapter_installation_id: default_installation(),
+            external_actor_ref: external_actor("alice-web"),
+            external_conversation_ref: external_conversation("browser-session", None),
+            external_event_id: ExternalEventId::new("web-event-scope-hint").unwrap(),
+            requested_agent_id: Some(AgentId::new("spoofed-agent").unwrap()),
+            requested_project_id: Some(ProjectId::new("spoofed-project").unwrap()),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(resolution.turn_scope.agent_id, None);
+    assert_eq!(resolution.turn_scope.project_id, None);
+}
+
+#[tokio::test]
 async fn explicit_link_uses_existing_thread_scope_not_spoofed_link_scope() {
     let services = InMemoryConversationServices::default();
     services
@@ -1034,6 +1065,63 @@ async fn accept_inbound_message_rejects_external_route_mismatch() {
             external_event_id: ExternalEventId::new("route-mismatch-event").unwrap(),
             content_ref: InboundMessageContentRef::new("content:route-mismatch-event").unwrap(),
             received_at: Utc.with_ymd_and_hms(2026, 5, 6, 12, 1, 0).unwrap(),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, InboundTurnError::AccessDenied { .. }));
+}
+
+#[tokio::test]
+async fn duplicate_accept_rejects_external_route_mismatch() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            web(),
+            default_installation(),
+            external_actor("alice-web"),
+            user("alice"),
+        )
+        .await;
+    let resolution = services
+        .resolve_or_create_binding(resolve_request(
+            web(),
+            external_actor("alice-web"),
+            external_conversation("alice-browser-a", None),
+            "alice-event-a",
+        ))
+        .await
+        .unwrap();
+
+    services
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            tenant_id: tenant(),
+            thread_id: resolution.turn_scope.thread_id.clone(),
+            actor: resolution.actor.clone(),
+            source_binding_ref: resolution.source_binding_ref.clone(),
+            reply_target_binding_ref: resolution.reply_target_binding_ref.clone(),
+            external_conversation_ref: external_conversation("alice-browser-a", None),
+            external_event_id: ExternalEventId::new("duplicate-route-mismatch-event").unwrap(),
+            content_ref: InboundMessageContentRef::new("content:duplicate-route-mismatch-event")
+                .unwrap(),
+            received_at: Utc.with_ymd_and_hms(2026, 5, 6, 12, 1, 0).unwrap(),
+        })
+        .await
+        .unwrap();
+
+    let err = services
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            tenant_id: tenant(),
+            thread_id: resolution.turn_scope.thread_id,
+            actor: resolution.actor,
+            source_binding_ref: resolution.source_binding_ref,
+            reply_target_binding_ref: resolution.reply_target_binding_ref,
+            external_conversation_ref: external_conversation("alice-browser-b", None),
+            external_event_id: ExternalEventId::new("duplicate-route-mismatch-event").unwrap(),
+            content_ref: InboundMessageContentRef::new("content:duplicate-route-mismatch-event")
+                .unwrap(),
+            received_at: Utc.with_ymd_and_hms(2026, 5, 6, 12, 2, 0).unwrap(),
         })
         .await
         .unwrap_err();
