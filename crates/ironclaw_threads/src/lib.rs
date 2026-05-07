@@ -293,6 +293,13 @@ pub enum SessionThreadError {
         start_sequence: u64,
         end_sequence: u64,
     },
+    #[error(
+        "summary range {start_sequence}..={end_sequence} overlaps an existing replacement summary"
+    )]
+    OverlappingSummaryRange {
+        start_sequence: u64,
+        end_sequence: u64,
+    },
     #[error("failed to create generated thread id: {0}")]
     GeneratedThreadId(String),
 }
@@ -674,6 +681,22 @@ impl SessionThreadService for InMemorySessionThreadService {
                 end_sequence: request.end_sequence,
             });
         }
+        if request.model_context_policy.as_deref() == Some("replace_range_when_selected")
+            && thread.summary_artifacts.iter().any(|summary| {
+                summary.model_context_policy.as_deref() == Some("replace_range_when_selected")
+                    && ranges_overlap(
+                        request.start_sequence,
+                        request.end_sequence,
+                        summary.start_sequence,
+                        summary.end_sequence,
+                    )
+            })
+        {
+            return Err(SessionThreadError::OverlappingSummaryRange {
+                start_sequence: request.start_sequence,
+                end_sequence: request.end_sequence,
+            });
+        }
         let artifact = SummaryArtifact {
             summary_id: SummaryArtifactId::new(),
             thread_id: request.thread_id,
@@ -767,6 +790,10 @@ fn ensure_user_accepted(
         from: message.status,
         attempted,
     })
+}
+
+fn ranges_overlap(left_start: u64, left_end: u64, right_start: u64, right_end: u64) -> bool {
+    left_start <= right_end && right_start <= left_end
 }
 
 fn context_messages_with_summary_replacements(thread: &StoredThread) -> Vec<ContextMessage> {

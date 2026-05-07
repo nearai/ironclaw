@@ -467,6 +467,61 @@ async fn summaries_are_range_artifacts_and_policy_filtered_context_replacements(
 }
 
 #[tokio::test]
+async fn overlapping_replacement_summaries_are_rejected() {
+    let service = InMemorySessionThreadService::default();
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("a"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    for text in ["one", "two", "three"] {
+        service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: scope("a"),
+                thread_id: thread.thread_id.clone(),
+                actor_id: "actor-a".into(),
+                source_binding_id: None,
+                reply_target_binding_id: None,
+                external_event_id: None,
+                content: user_message(text),
+            })
+            .await
+            .unwrap();
+    }
+    service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 1,
+            end_sequence: 2,
+            summary_kind: "model_context".into(),
+            content: MessageContent::text("one and two summarized"),
+            model_context_policy: Some("replace_range_when_selected".into()),
+        })
+        .await
+        .unwrap();
+
+    let overlapping = service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id,
+            start_sequence: 2,
+            end_sequence: 3,
+            summary_kind: "model_context".into(),
+            content: MessageContent::text("two and three summarized"),
+            model_context_policy: Some("replace_range_when_selected".into()),
+        })
+        .await;
+
+    assert!(overlapping.is_err());
+}
+
+#[tokio::test]
 async fn summary_replacement_still_applies_when_range_starts_with_redacted_message() {
     let service = InMemorySessionThreadService::default();
     let thread = service
