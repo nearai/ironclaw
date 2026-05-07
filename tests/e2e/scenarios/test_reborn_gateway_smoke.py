@@ -11,35 +11,29 @@ import asyncio
 import os
 import signal
 import socket
-import tempfile
+from pathlib import Path
 
 import pytest
 from playwright.async_api import expect
 
 from helpers import AUTH_TOKEN, SEL, api_get, api_post, wait_for_ready
 
-_REBORN_GATEWAY_DB_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-reborn-gateway-e2e-")
-_REBORN_GATEWAY_HOME_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-reborn-gateway-e2e-home-")
+def _find_free_port() -> int:
+    """Ask the OS for an available loopback port.
+
+    The returned port is only a startup hint; the gateway fixture retries with a
+    fresh port pair if another process wins the bind race before ironclaw starts.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
 
 
-def _reserve_loopback_sockets(count: int) -> list[socket.socket]:
-    sockets: list[socket.socket] = []
+def _read_log(path: Path, limit: int = 8192) -> str:
     try:
-        while len(sockets) < count:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.bind(("127.0.0.1", 0))
-            sockets.append(sock)
-        return sockets
-    except Exception:
-        for sock in sockets:
-            sock.close()
-        raise
-
-
-def _close_reserved_sockets(sockets: list[socket.socket]) -> None:
-    for sock in sockets:
-        if sock.fileno() != -1:
-            sock.close()
+        return path.read_text(encoding="utf-8", errors="replace")[-limit:]
+    except OSError:
+        return ""
 
 
 def _forward_coverage_env(env: dict[str, str]) -> None:
@@ -52,102 +46,104 @@ def _forward_coverage_env(env: dict[str, str]) -> None:
 
 
 async def _stop_process(proc, *, sig=signal.SIGINT, timeout: float = 10) -> None:
-    async def _drain_pipes() -> None:
-        try:
-            await asyncio.wait_for(proc.communicate(), timeout=1)
-        except (asyncio.TimeoutError, ValueError):
-            pass
-
+    """Signal a subprocess and wait for exit without re-reading stdio pipes."""
     if proc.returncode is not None:
-        await _drain_pipes()
         return
 
     try:
         proc.send_signal(sig)
     except ProcessLookupError:
-        await _drain_pipes()
         return
 
     try:
         await asyncio.wait_for(proc.wait(), timeout=timeout)
     except asyncio.TimeoutError:
         proc.kill()
-        await proc.wait()
-    await _drain_pipes()
+        await asyncio.wait_for(proc.wait(), timeout=5)
 
 
 @pytest.fixture(scope="module")
-async def reborn_gateway_server(ironclaw_binary, mock_llm_server):
+async def reborn_gateway_server(ironclaw_binary, mock_llm_server, tmp_path_factory):
     """Start an isolated gateway configured for the Reborn/V2 product shell."""
-    home_dir = _REBORN_GATEWAY_HOME_TMPDIR.name
-    base_dir = os.path.join(home_dir, ".ironclaw")
-    os.makedirs(base_dir, exist_ok=True)
-    reserved_sockets = _reserve_loopback_sockets(2)
-    gateway_port = reserved_sockets[0].getsockname()[1]
-    http_port = reserved_sockets[1].getsockname()[1]
+    home_dir = tmp_path_factory.mktemp("ironclaw-reborn-gateway-home")
+    db_dir = tmp_path_factory.mktemp("ironclaw-reborn-gateway-db")
+    base_dir = home_dir / ".ironclaw"
+    base_dir.mkdir(parents=True, exist_ok=True)
 
-    env = {
-        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-        "HOME": home_dir,
-        "IRONCLAW_BASE_DIR": base_dir,
-        "RUST_LOG": "ironclaw=info",
-        "RUST_BACKTRACE": "1",
-        "ENGINE_V2": "true",
-        "AGENT_AUTO_APPROVE_TOOLS": "true",
-        "GATEWAY_ENABLED": "true",
-        "GATEWAY_HOST": "127.0.0.1",
-        "GATEWAY_PORT": str(gateway_port),
-        "GATEWAY_AUTH_TOKEN": AUTH_TOKEN,
-        "GATEWAY_USER_ID": "reborn-gateway-e2e-user",
-        "HTTP_HOST": "127.0.0.1",
-        "HTTP_PORT": str(http_port),
-        "CLI_ENABLED": "false",
-        "LLM_BACKEND": "openai_compatible",
-        "LLM_BASE_URL": mock_llm_server,
-        "LLM_API_KEY": "mock-api-key",
-        "LLM_MODEL": "mock-model",
-        "DATABASE_BACKEND": "libsql",
-        "LIBSQL_PATH": os.path.join(_REBORN_GATEWAY_DB_TMPDIR.name, "reborn-gateway-e2e.db"),
-        "SANDBOX_ENABLED": "false",
-        "SKILLS_ENABLED": "false",
-        "ROUTINES_ENABLED": "false",
-        "HEARTBEAT_ENABLED": "false",
-        "EMBEDDING_ENABLED": "false",
-        "WASM_ENABLED": "false",
-        "ONBOARD_COMPLETED": "true",
-    }
-    _forward_coverage_env(env)
+    proc = None
+    base_url = None
+    last_stderr = ""
+    last_gateway_port = None
 
-    _close_reserved_sockets(reserved_sockets)
-    proc = await asyncio.create_subprocess_exec(
-        ironclaw_binary,
-        "--no-onboard",
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env,
-    )
-    base_url = f"http://127.0.0.1:{gateway_port}"
+    for attempt in range(1, 4):
+        gateway_port = _find_free_port()
+        http_port = _find_free_port()
+        last_gateway_port = gateway_port
+        stdout_path = home_dir / f"reborn-gateway-attempt-{attempt}.stdout.log"
+        stderr_path = home_dir / f"reborn-gateway-attempt-{attempt}.stderr.log"
+
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": str(home_dir),
+            "IRONCLAW_BASE_DIR": str(base_dir),
+            "RUST_LOG": "ironclaw=info",
+            "RUST_BACKTRACE": "1",
+            "ENGINE_V2": "true",
+            "AGENT_AUTO_APPROVE_TOOLS": "true",
+            "GATEWAY_ENABLED": "true",
+            "GATEWAY_HOST": "127.0.0.1",
+            "GATEWAY_PORT": str(gateway_port),
+            "GATEWAY_AUTH_TOKEN": AUTH_TOKEN,
+            "GATEWAY_USER_ID": "reborn-gateway-e2e-user",
+            "HTTP_HOST": "127.0.0.1",
+            "HTTP_PORT": str(http_port),
+            "CLI_ENABLED": "false",
+            "LLM_BACKEND": "openai_compatible",
+            "LLM_BASE_URL": mock_llm_server,
+            "LLM_API_KEY": "mock-api-key",
+            "LLM_MODEL": "mock-model",
+            "DATABASE_BACKEND": "libsql",
+            "LIBSQL_PATH": str(db_dir / "reborn-gateway-e2e.db"),
+            "SANDBOX_ENABLED": "false",
+            "SKILLS_ENABLED": "false",
+            "ROUTINES_ENABLED": "false",
+            "HEARTBEAT_ENABLED": "false",
+            "EMBEDDING_ENABLED": "false",
+            "WASM_ENABLED": "false",
+            "ONBOARD_COMPLETED": "true",
+        }
+        _forward_coverage_env(env)
+
+        with stdout_path.open("wb") as stdout_file, stderr_path.open("wb") as stderr_file:
+            proc = await asyncio.create_subprocess_exec(
+                ironclaw_binary,
+                "--no-onboard",
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                env=env,
+            )
+        base_url = f"http://127.0.0.1:{gateway_port}"
+
+        try:
+            await wait_for_ready(f"{base_url}/api/health", timeout=60)
+            break
+        except TimeoutError:
+            if proc.returncode is None:
+                await _stop_process(proc, timeout=2)
+            last_stderr = _read_log(stderr_path)
+            proc = None
+    else:
+        pytest.fail(
+            "Reborn gateway smoke server failed to start after 3 attempts.\n"
+            f"Last attempted port: {last_gateway_port}\n"
+            f"stderr:\n{last_stderr}"
+        )
 
     try:
-        await wait_for_ready(f"{base_url}/api/health", timeout=60)
         yield base_url
-    except TimeoutError:
-        if proc.returncode is None:
-            await _stop_process(proc, timeout=2)
-        stderr_text = ""
-        if proc.stderr:
-            try:
-                stderr_bytes = await asyncio.wait_for(proc.stderr.read(8192), timeout=2)
-                stderr_text = stderr_bytes.decode("utf-8", errors="replace")
-            except asyncio.TimeoutError:
-                pass
-        pytest.fail(
-            f"Reborn gateway smoke server failed to start on port {gateway_port}.\n"
-            f"stderr:\n{stderr_text}"
-        )
     finally:
-        if proc.returncode is None:
+        if proc is not None and proc.returncode is None:
             await _stop_process(proc, sig=signal.SIGINT, timeout=10)
             if proc.returncode is None:
                 await _stop_process(proc, sig=signal.SIGTERM, timeout=5)
