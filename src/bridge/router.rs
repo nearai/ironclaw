@@ -5760,6 +5760,35 @@ pub async fn get_engine_project(
         }))
 }
 
+/// Whether `thread` should be surfaced as a user-actionable failure.
+///
+/// A thread counts as a "real" failure for the projects "needs attention"
+/// feed when:
+/// - its state is `Failed`, AND
+/// - it failed within the last 24 hours, AND
+/// - it was NOT force-failed by `recover_project_threads` on engine
+///   restart (those carry the
+///   [`ironclaw_engine::ENGINE_RESTART_RECOVERY_METADATA_KEY`] flag and
+///   are crash-recovery artifacts, not user errors).
+///
+/// Filtering on the metadata flag fixes #3274: an upgrade transitioned
+/// every still-running thread to `Failed`, which then flooded the
+/// Projects tab with phantom "Thread failed" warnings.
+fn is_real_thread_failure(
+    thread: &ironclaw_engine::types::thread::Thread,
+    h24_ago: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    matches!(
+        thread.state,
+        ironclaw_engine::types::thread::ThreadState::Failed
+    ) && thread.updated_at >= h24_ago
+        && !thread
+            .metadata
+            .get(ironclaw_engine::ENGINE_RESTART_RECOVERY_METADATA_KEY)
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+}
+
 /// Projects overview — health, stats, attention items for all projects.
 ///
 /// Iterates all projects, computes per-project stats from missions and threads,
@@ -5855,12 +5884,14 @@ pub async fn get_engine_projects_overview(
             .map(|t| t.total_cost_usd)
             .sum();
 
+        // Filter restart-recovery noise: `recover_project_threads`
+        // force-fails non-terminal threads on engine restart and tags
+        // them with `engine_restart_recovery`. They aren't actionable
+        // failures, so we exclude them from both the count and the
+        // attention feed (#3274).
         let failures_24h = threads
             .iter()
-            .filter(|t| {
-                matches!(t.state, ironclaw_engine::types::thread::ThreadState::Failed)
-                    && t.updated_at >= h24_ago
-            })
+            .filter(|t| is_real_thread_failure(t, h24_ago))
             .count() as u64;
 
         let last_activity = threads
@@ -5889,11 +5920,7 @@ pub async fn get_engine_projects_overview(
             });
         }
         for thread in &threads {
-            if matches!(
-                thread.state,
-                ironclaw_engine::types::thread::ThreadState::Failed
-            ) && thread.updated_at >= h24_ago
-            {
+            if is_real_thread_failure(thread, h24_ago) {
                 attention.push(AttentionItem {
                     kind: "failure".to_string(),
                     project_id: pid.to_string(),
@@ -10291,6 +10318,88 @@ mod tests {
         assert!(
             global_skills.iter().any(|d| d.id == skill_doc.id),
             "migrated nil-project skill must be visible via list_skills_global"
+        );
+    }
+
+    // ── is_real_thread_failure (#3274) ──────────────────────────────────
+
+    /// Helper: build a Failed thread with a configurable updated_at.
+    fn make_failed_thread(updated_at: chrono::DateTime<chrono::Utc>) -> ironclaw_engine::Thread {
+        let mut t = ironclaw_engine::Thread::new(
+            "test goal",
+            ironclaw_engine::ThreadType::Foreground,
+            ironclaw_engine::ProjectId::new(),
+            "alice",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        t.transition_to(ironclaw_engine::ThreadState::Running, None)
+            .unwrap();
+        t.transition_to(
+            ironclaw_engine::ThreadState::Failed,
+            Some("LLM error".into()),
+        )
+        .unwrap();
+        t.updated_at = updated_at;
+        t
+    }
+
+    #[test]
+    fn real_failure_recent_within_window() {
+        let now = chrono::Utc::now();
+        let h24_ago = now - chrono::Duration::hours(24);
+        let t = make_failed_thread(now);
+        assert!(
+            super::is_real_thread_failure(&t, h24_ago),
+            "recent failed thread should surface as a real failure"
+        );
+    }
+
+    #[test]
+    fn real_failure_excluded_when_older_than_24h() {
+        let now = chrono::Utc::now();
+        let h24_ago = now - chrono::Duration::hours(24);
+        let t = make_failed_thread(now - chrono::Duration::hours(25));
+        assert!(
+            !super::is_real_thread_failure(&t, h24_ago),
+            "stale failure outside the 24h window must not be surfaced"
+        );
+    }
+
+    #[test]
+    fn real_failure_excludes_engine_restart_recovery() {
+        let now = chrono::Utc::now();
+        let h24_ago = now - chrono::Duration::hours(24);
+        let mut t = make_failed_thread(now);
+        // Simulate `recover_project_threads` having tagged the thread.
+        if let Some(obj) = t.metadata.as_object_mut() {
+            obj.insert(
+                ironclaw_engine::ENGINE_RESTART_RECOVERY_METADATA_KEY.to_string(),
+                serde_json::Value::Bool(true),
+            );
+        }
+        assert!(
+            !super::is_real_thread_failure(&t, h24_ago),
+            "restart-recovery threads must not surface as user-actionable failures"
+        );
+    }
+
+    #[test]
+    fn real_failure_ignores_non_failed_states() {
+        let now = chrono::Utc::now();
+        let h24_ago = now - chrono::Duration::hours(24);
+        let mut t = ironclaw_engine::Thread::new(
+            "still running",
+            ironclaw_engine::ThreadType::Foreground,
+            ironclaw_engine::ProjectId::new(),
+            "alice",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        t.transition_to(ironclaw_engine::ThreadState::Running, None)
+            .unwrap();
+        t.updated_at = now;
+        assert!(
+            !super::is_real_thread_failure(&t, h24_ago),
+            "Running thread must not be classified as a failure"
         );
     }
 

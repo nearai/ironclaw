@@ -648,13 +648,14 @@ impl ThreadManager {
     /// Reconcile persisted non-terminal threads after process startup.
     ///
     /// The current engine does not support mid-thread replay/resume, so any
-    /// thread left in a non-terminal state is marked failed-safe.
+    /// thread left in a non-terminal state is marked failed-safe. Threads
+    /// transitioned to `Failed` here carry the
+    /// [`ENGINE_RESTART_RECOVERY_METADATA_KEY`] flag so callers can
+    /// distinguish them from real, user-actionable failures.
     pub async fn recover_project_threads(
         &self,
         project_id: ProjectId,
     ) -> Result<Vec<ThreadId>, EngineError> {
-        const PENDING_APPROVAL_METADATA_KEY: &str = "pending_approval";
-        const RUNTIME_CHECKPOINT_METADATA_KEY: &str = "runtime_checkpoint";
         // System operation: recover all non-terminal threads regardless of user.
         let threads = self.store.list_all_threads(project_id).await?;
         let mut recovered = Vec::new();
@@ -688,6 +689,16 @@ impl ThreadManager {
                 continue;
             }
 
+            // Tag the thread before transitioning so downstream consumers
+            // (projects "needs attention" feed, health rollup) can skip
+            // restart-recovery noise and only surface real failures.
+            if let Some(obj) = thread.metadata.as_object_mut() {
+                obj.insert(
+                    ENGINE_RESTART_RECOVERY_METADATA_KEY.to_string(),
+                    serde_json::Value::Bool(true),
+                );
+            }
+
             if thread
                 .transition_to(
                     ThreadState::Failed,
@@ -704,6 +715,24 @@ impl ThreadManager {
         Ok(recovered)
     }
 }
+
+/// Metadata key set on a thread that has an in-flight pending-approval
+/// gate. Persisted threads carrying this key skip restart-recovery so the
+/// gate survives a process restart.
+pub const PENDING_APPROVAL_METADATA_KEY: &str = "pending_approval";
+
+/// Metadata key set on a thread that has a serialized runtime checkpoint
+/// (CodeAct VM state, nudge counters, compaction count). Threads carrying
+/// this key are suspended on restart instead of failed.
+pub const RUNTIME_CHECKPOINT_METADATA_KEY: &str = "runtime_checkpoint";
+
+/// Metadata key set on threads that were forced into `Failed` by
+/// [`ThreadManager::recover_project_threads`] because the process
+/// restarted before they could complete. The thread did not fail for
+/// user-visible reasons; the projects "needs attention" surface filters
+/// these out so an upgrade does not cascade into a wall of phantom
+/// failure warnings.
+pub const ENGINE_RESTART_RECOVERY_METADATA_KEY: &str = "engine_restart_recovery";
 
 fn is_resolved_call_message(message: &ThreadMessage, call_id: &str) -> bool {
     if message.role == MessageRole::ActionResult
@@ -1563,6 +1592,28 @@ mod tests {
         assert_eq!(saved.state, ThreadState::Failed);
         let events = store.load_events(running.id).await.unwrap();
         assert!(!events.is_empty());
+
+        // Restart-recovery flag must be set so the projects "needs
+        // attention" feed can filter these out (#3274).
+        assert_eq!(
+            saved
+                .metadata
+                .get(ENGINE_RESTART_RECOVERY_METADATA_KEY)
+                .and_then(|v| v.as_bool()),
+            Some(true),
+            "recovered thread should carry the engine_restart_recovery flag"
+        );
+
+        // Threads that were already terminal before recovery must NOT
+        // gain the flag — they failed for real reasons.
+        let saved_completed = store.load_thread(completed.id).await.unwrap().unwrap();
+        assert!(
+            saved_completed
+                .metadata
+                .get(ENGINE_RESTART_RECOVERY_METADATA_KEY)
+                .is_none(),
+            "pre-existing failed thread must not be flagged as restart-recovery"
+        );
     }
 
     #[tokio::test]

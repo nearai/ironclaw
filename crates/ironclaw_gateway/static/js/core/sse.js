@@ -88,6 +88,12 @@ function connectSSE(lastEventIdOverride) {
     // Refresh sidebar so stale spinners are removed immediately.
     processingThreads.clear();
     debouncedLoadThreads();
+    // Retry any first-load loader (chat history, threads, missions) that
+    // raced engine init and failed silently. SSE-accept implies the
+    // backend has stabilized — see init-auth.js for the rationale (#3274).
+    if (typeof runInitialHydrationRetry === 'function') {
+      runInitialHydrationRetry();
+    }
     sseHasConnectedBefore = true;
   };
 

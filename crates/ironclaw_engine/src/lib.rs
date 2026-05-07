@@ -83,7 +83,10 @@ pub use gate::{
 
 pub use executor::prompt::PlatformInfo;
 pub use runtime::conversation::ConversationManager;
-pub use runtime::manager::ThreadManager;
+pub use runtime::manager::{
+    ENGINE_RESTART_RECOVERY_METADATA_KEY, PENDING_APPROVAL_METADATA_KEY,
+    RUNTIME_CHECKPOINT_METADATA_KEY, ThreadManager,
+};
 pub use runtime::messaging::ThreadOutcome;
 pub use runtime::mission::{
     BudgetGate, FireRateLimit, MissionGateInfo, MissionManager, MissionNotification, MissionUpdate,
