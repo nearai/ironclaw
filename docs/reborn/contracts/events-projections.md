@@ -261,3 +261,13 @@ Durable backends must match `InMemoryDurableEventLog` cursor behavior:
 ### Projection boundary
 
 Product-facing timeline, status, approval, auth, tool-call, process, resource, and memory views should be projections over durable logs, not a second source of truth. Projection services must tolerate replay gaps with explicit snapshot/rebase behavior and must not mutate control-plane state while deriving read models.
+
+### Outbound egress and subscription state
+
+`ironclaw_outbound` owns the metadata-only state needed around projection delivery:
+
+- per-thread notification policy for explicit external fanout and progress opt-in;
+- durable projection subscription cursor checkpoints scoped to actor, thread, and `ProjectionScope`;
+- outbound delivery attempt/status rows for support-visible retry/dead-letter workflows.
+
+This state is not canonical transcript or projection content. Rows store refs, cursors, status enums, timestamps, and sanitized failure kinds only. Product adapters still revalidate reply-target binding authorization before every external push, and delivery failure must not mutate canonical transcript/projection state or mark turns/runs failed.
