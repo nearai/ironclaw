@@ -70,6 +70,9 @@ pub struct Scheduler {
     sse_tx: Option<Arc<crate::channels::web::sse::SseManager>>,
     /// HTTP interceptor for trace recording/replay (propagated to workers).
     http_interceptor: Option<Arc<dyn ironclaw_llm::recording::HttpInterceptor>>,
+    /// Cached channel routing config — shared with the SIGHUP handler for hot-reload.
+    channel_routing:
+        Arc<tokio::sync::RwLock<Option<crate::agent::channel_routing::ChannelRoutingConfig>>>,
     /// Running jobs (main LLM-driven jobs).
     jobs: Arc<RwLock<HashMap<Uuid, ScheduledJob>>>,
     /// Running sub-tasks (tool executions, background tasks).
@@ -96,6 +99,7 @@ impl Scheduler {
             hooks: deps.hooks,
             sse_tx: None,
             http_interceptor: None,
+            channel_routing: crate::agent::channel_routing::ChannelRoutingConfig::none_arc(),
             jobs: Arc::new(RwLock::new(HashMap::new())),
             subtasks: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -112,6 +116,18 @@ impl Scheduler {
         interceptor: Arc<dyn ironclaw_llm::recording::HttpInterceptor>,
     ) {
         self.http_interceptor = Some(interceptor);
+    }
+
+    /// Wire the shared channel routing Arc so workers inherit the live SIGHUP-reloaded config.
+    pub fn set_channel_routing(
+        &mut self,
+        routing: Arc<
+            tokio::sync::RwLock<
+                Option<crate::agent::channel_routing::ChannelRoutingConfig>,
+            >,
+        >,
+    ) {
+        self.channel_routing = routing;
     }
 
     /// Create, persist, and schedule a job in one shot.
@@ -314,6 +330,7 @@ impl Scheduler {
                 approval_context,
                 http_interceptor: self.http_interceptor.clone(),
                 multi_tenant: self.config.multi_tenant,
+                channel_routing: Arc::clone(&self.channel_routing),
             };
             let worker = Worker::new(job_id, deps);
 

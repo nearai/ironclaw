@@ -37,6 +37,8 @@ use ironclaw_llm::{
 };
 use ironclaw_safety::SafetyLayer;
 
+use crate::agent::channel_routing::ChannelRoutingConfig;
+
 /// Shared dependencies for worker execution.
 ///
 /// This bundles the dependencies that are shared across all workers,
@@ -61,6 +63,9 @@ pub struct WorkerDeps {
     pub http_interceptor: Option<Arc<dyn ironclaw_llm::recording::HttpInterceptor>>,
     /// Whether the deployment is multi-tenant (used for admin tool policy filtering).
     pub multi_tenant: bool,
+    /// Cached channel routing config — same Arc shared with the SIGHUP handler so
+    /// workers see live config without per-iteration DB queries.
+    pub channel_routing: Arc<tokio::sync::RwLock<Option<ChannelRoutingConfig>>>,
 }
 
 /// Worker that executes a single job.
@@ -113,9 +118,6 @@ impl Worker {
     async fn tool_definitions_for_current_context(&self) -> Vec<crate::llm::ToolDefinition> {
         let tool_defs = self.tools().tool_definitions().await;
 
-        let Some(store) = self.store() else {
-            return tool_defs;
-        };
         let Ok(job_ctx) = self.context_manager().get_context(self.job_id).await else {
             return tool_defs;
         };
@@ -133,13 +135,10 @@ impl Worker {
             .filter(|value| value.is_object())
             .unwrap_or(&null_metadata);
 
-        let Some(routing) =
-            crate::agent::channel_routing::ChannelRoutingConfig::load_from_system_scope(
-                store,
-                &job_ctx.user_id,
-            )
-            .await
-        else {
+        // Use the cached Arc — same version as the SIGHUP-aware dispatcher,
+        // no extra DB round-trip per iteration.
+        let routing = self.deps.channel_routing.read().await.clone();
+        let Some(routing) = routing else {
             return tool_defs;
         };
 
@@ -2001,6 +2000,7 @@ mod tests {
             approval_context: None,
             http_interceptor: None,
             multi_tenant: false,
+            channel_routing: ChannelRoutingConfig::none_arc(),
         };
 
         Worker::new(job_id, deps)
@@ -2221,6 +2221,7 @@ mod tests {
             approval_context,
             http_interceptor: None,
             multi_tenant: false,
+            channel_routing: ChannelRoutingConfig::none_arc(),
         };
 
         Worker::new(job_id, deps)
@@ -2907,6 +2908,7 @@ mod tests {
                 approval_context: None,
                 http_interceptor: None,
                 multi_tenant: false,
+                channel_routing: ChannelRoutingConfig::none_arc(),
             },
         );
 

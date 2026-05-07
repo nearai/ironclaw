@@ -469,6 +469,7 @@ impl Agent {
         if let Some(ref interceptor) = deps.http_interceptor {
             scheduler.set_http_interceptor(Arc::clone(interceptor));
         }
+        scheduler.set_channel_routing(Arc::clone(&deps.channel_routing));
         let scheduler = Arc::new(scheduler);
 
         Self {

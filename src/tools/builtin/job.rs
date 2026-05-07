@@ -290,9 +290,17 @@ impl CreateJobTool {
     /// Derive an implicit MCP server allowlist from the originating channel's
     /// routing group when the caller did not pass `mcp_servers` explicitly.
     ///
+    /// Determines the MCP server allowlist for a job based on its origin channel.
+    ///
+    /// Security model:
+    /// - `None` return means **no constraint** (DM bypass) — the caller inherits
+    ///   the full unfiltered MCP server set. This is intentional: DM channels are
+    ///   trusted contexts where routing restrictions do not apply.
+    /// - `Some(servers)` means the job is constrained to those server prefixes.
+    /// - An absent channel (routine/heartbeat) falls back to the default group
+    ///   (fail-closed), never `None`.
+    ///
     /// Uses the cached routing Arc when available (no extra DB round-trip).
-    /// When channel context is missing (routine/heartbeat jobs), applies the
-    /// default group rather than failing open and allowing all servers.
     async fn derive_routed_mcp_servers(
         &self,
         ctx: &JobContext,
