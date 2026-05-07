@@ -141,6 +141,7 @@ impl GatewayWorkflowHarness {
             protocol: ProviderProtocol::OpenAiCompletions,
             provider_id: "openai_compatible".to_string(),
             api_key: Some(SecretString::from("dummy".to_string())),
+            api_key_required: false,
             base_url: base_url.to_string(),
             model: model.to_string(),
             extra_headers: Vec::new(),

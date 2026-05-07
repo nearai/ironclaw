@@ -188,6 +188,7 @@ async fn try_fetch_models(provider_id: &str, config_path: Option<&Path>) -> Opti
                 provider_id: def.id.clone(),
                 model: def.default_model.clone(),
                 api_key: api_key.map(secrecy::SecretString::from),
+                api_key_required: def.api_key_required,
                 base_url,
                 extra_headers: Vec::new(),
                 oauth_token: None,
