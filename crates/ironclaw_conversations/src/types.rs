@@ -90,6 +90,7 @@ pub struct AcceptInboundMessageRequest {
 pub struct AcceptedInboundMessage {
     pub tenant_id: TenantId,
     pub thread_id: ThreadId,
+    pub actor: TurnActor,
     pub message_ref: AcceptedMessageRef,
     pub source_binding_ref: SourceBindingRef,
     pub reply_target_binding_ref: ReplyTargetBindingRef,

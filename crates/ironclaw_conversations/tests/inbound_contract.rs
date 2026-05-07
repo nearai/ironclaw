@@ -4,17 +4,18 @@ use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use ironclaw_conversations::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AdapterInstallationId, AdapterKind,
-    ConversationBindingService, ExternalActorRef, ExternalConversationRef, ExternalEventId,
-    InMemoryConversationServices, InboundMessageContentRef, InboundTurnError, InboundTurnRequest,
-    InboundTurnService, LinkConversationRequest, MessageIdempotencyStatus, SessionThreadService,
-    ThreadAccessDecision,
+    ConversationBindingResolution, ConversationBindingService, ExternalActorRef,
+    ExternalConversationRef, ExternalEventId, InMemoryConversationServices,
+    InboundMessageContentRef, InboundTurnError, InboundTurnRequest, InboundTurnService,
+    LinkConversationRequest, LinkedConversationBinding, MessageIdempotencyStatus,
+    ReplyTargetBinding, SessionThreadService, ThreadAccessDecision,
 };
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey,
-    ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion, SubmitTurnRequest,
-    SubmitTurnResponse, ThreadBusy, TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnRunState,
-    TurnStatus,
+    ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
+    TurnCoordinator, TurnError, TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
 
 #[tokio::test]
@@ -789,6 +790,118 @@ async fn explicit_link_uses_existing_thread_scope_not_spoofed_link_scope() {
 }
 
 #[tokio::test]
+async fn duplicate_external_event_after_submit_failure_reuses_original_actor() {
+    let binding = DriftBindingService::new();
+    let session =
+        FixedMessageSessionService::new(AcceptedMessageRef::new("message:drift").unwrap());
+    let coordinator = Arc::new(FailFirstTurnCoordinator::default());
+    let inbound = InboundTurnService::new(binding, session, coordinator.clone());
+    let request = inbound_request(
+        telegram(),
+        external_actor("shared-group-actor"),
+        external_conversation("group-chat", None),
+        "shared-event-retry",
+    );
+
+    let err = inbound
+        .handle_inbound_turn(request.clone())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, InboundTurnError::TurnSubmissionFailed { .. }));
+
+    inbound.handle_inbound_turn(request).await.unwrap();
+
+    assert_eq!(coordinator.submissions().len(), 2);
+    assert_eq!(
+        coordinator.submissions()[0].actor,
+        TurnActor::new(user("alice"))
+    );
+    assert_eq!(
+        coordinator.submissions()[1].actor,
+        TurnActor::new(user("alice")),
+        "duplicate retry must reuse the accepted message actor, not the current resolver actor"
+    );
+}
+
+#[tokio::test]
+async fn permanent_turn_error_does_not_rotate_submit_idempotency_key() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-1"),
+            user("alice"),
+        )
+        .await;
+    let coordinator = Arc::new(PermanentFailureTurnCoordinator::default());
+    let inbound = InboundTurnService::new(services.clone(), services.clone(), coordinator.clone());
+    let request = inbound_request(
+        telegram(),
+        external_actor("telegram-user-1"),
+        external_conversation("chat-1", None),
+        "telegram-event-permanent-error",
+    );
+
+    let first = inbound
+        .handle_inbound_turn(request.clone())
+        .await
+        .unwrap_err();
+    let second = inbound.handle_inbound_turn(request).await.unwrap_err();
+
+    assert!(matches!(
+        first,
+        InboundTurnError::TurnSubmissionFailed { .. }
+    ));
+    assert!(matches!(
+        second,
+        InboundTurnError::TurnSubmissionFailed { .. }
+    ));
+    assert_eq!(coordinator.submissions().len(), 2);
+    assert_eq!(
+        coordinator.submissions()[0].idempotency_key,
+        coordinator.submissions()[1].idempotency_key,
+        "permanent turn errors should keep the original submit idempotency key for replay"
+    );
+}
+
+#[tokio::test]
+async fn turn_submission_failure_preserves_structured_turn_error() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-1"),
+            user("alice"),
+        )
+        .await;
+    let coordinator = Arc::new(PermanentFailureTurnCoordinator::default());
+    let inbound = InboundTurnService::new(services.clone(), services.clone(), coordinator);
+
+    let err = inbound
+        .handle_inbound_turn(inbound_request(
+            telegram(),
+            external_actor("telegram-user-1"),
+            external_conversation("chat-1", None),
+            "telegram-event-structured-error",
+        ))
+        .await
+        .unwrap_err();
+
+    let InboundTurnError::TurnSubmissionFailed { error } = err else {
+        panic!("expected structured turn submission failure");
+    };
+    assert_eq!(
+        error.category(),
+        ironclaw_turns::TurnErrorCategory::InvalidRequest
+    );
+    assert_eq!(error.adapter_status_code(), 400);
+}
+
+#[tokio::test]
 async fn duplicate_external_event_after_transient_submit_failure_retries_same_message_ref() {
     let services = InMemoryConversationServices::default();
     services
@@ -1386,6 +1499,7 @@ impl SessionThreadService for FixedMessageSessionService {
         let message = AcceptedInboundMessage {
             tenant_id: request.tenant_id,
             thread_id: request.thread_id,
+            actor: request.actor,
             message_ref: self.message_ref.clone(),
             source_binding_ref: request.source_binding_ref,
             reply_target_binding_ref: request.reply_target_binding_ref,
@@ -1426,6 +1540,65 @@ impl SessionThreadService for FixedMessageSessionService {
     }
 }
 
+#[derive(Clone)]
+struct DriftBindingService {
+    calls: Arc<Mutex<usize>>,
+}
+
+impl DriftBindingService {
+    fn new() -> Self {
+        Self {
+            calls: Arc::new(Mutex::new(0)),
+        }
+    }
+}
+
+#[async_trait]
+impl ConversationBindingService for DriftBindingService {
+    async fn resolve_or_create_binding(
+        &self,
+        request: ironclaw_conversations::ResolveConversationRequest,
+    ) -> Result<ConversationBindingResolution, InboundTurnError> {
+        let mut calls = self.calls.lock().unwrap();
+        *calls += 1;
+        let user_id = if *calls == 1 {
+            user("alice")
+        } else {
+            user("bob")
+        };
+        Ok(ConversationBindingResolution {
+            tenant_id: request.tenant_id.clone(),
+            actor: TurnActor::new(user_id),
+            turn_scope: TurnScope::new(
+                request.tenant_id,
+                None,
+                None,
+                ThreadId::new("shared-thread").unwrap(),
+            ),
+            source_binding_ref: SourceBindingRef::new("source:shared").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:shared").unwrap(),
+            access: ThreadAccessDecision::Allowed,
+        })
+    }
+
+    async fn link_conversation_to_thread(
+        &self,
+        _request: LinkConversationRequest,
+    ) -> Result<LinkedConversationBinding, InboundTurnError> {
+        unimplemented!("not used by inbound facade tests")
+    }
+
+    async fn validate_reply_target(
+        &self,
+        _tenant_id: &TenantId,
+        _actor_user_id: &UserId,
+        _current_thread_id: &ThreadId,
+        _reply_target_binding_ref: &ReplyTargetBindingRef,
+    ) -> Result<ReplyTargetBinding, InboundTurnError> {
+        unimplemented!("not used by inbound facade tests")
+    }
+}
+
 #[derive(Default)]
 struct RecordingTurnCoordinator {
     submissions: Mutex<Vec<SubmitTurnRequest>>,
@@ -1447,6 +1620,11 @@ struct BusyFirstUniqueKeyCoordinator {
     submissions: Mutex<Vec<SubmitTurnRequest>>,
 }
 
+#[derive(Default)]
+struct PermanentFailureTurnCoordinator {
+    submissions: Mutex<Vec<SubmitTurnRequest>>,
+}
+
 impl BusyFirstUniqueKeyCoordinator {
     fn submissions(&self) -> Vec<SubmitTurnRequest> {
         self.submissions.lock().unwrap().clone()
@@ -1456,6 +1634,40 @@ impl BusyFirstUniqueKeyCoordinator {
 impl FailFirstTurnCoordinator {
     fn submissions(&self) -> Vec<SubmitTurnRequest> {
         self.submissions.lock().unwrap().clone()
+    }
+}
+
+impl PermanentFailureTurnCoordinator {
+    fn submissions(&self) -> Vec<SubmitTurnRequest> {
+        self.submissions.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl TurnCoordinator for PermanentFailureTurnCoordinator {
+    async fn submit_turn(
+        &self,
+        request: SubmitTurnRequest,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        self.submissions.lock().unwrap().push(request);
+        Err(TurnError::InvalidRequest {
+            reason: "permanent invalid request".to_string(),
+        })
+    }
+
+    async fn resume_turn(
+        &self,
+        _request: ResumeTurnRequest,
+    ) -> Result<ResumeTurnResponse, TurnError> {
+        unimplemented!("not used by inbound facade tests")
+    }
+
+    async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
+        unimplemented!("not used by inbound facade tests")
+    }
+
+    async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        unimplemented!("not used by inbound facade tests")
     }
 }
 

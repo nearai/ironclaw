@@ -1,3 +1,5 @@
+use ironclaw_turns::TurnError;
+
 #[derive(Debug, thiserror::Error)]
 pub enum InboundTurnError {
     #[error("{kind} is invalid: {reason}")]
@@ -19,6 +21,6 @@ pub enum InboundTurnError {
     StatePoisoned,
     #[error("failed to construct canonical reference: {reason}")]
     InvalidCanonicalRef { reason: String },
-    #[error("turn submission failed: {reason}")]
-    TurnSubmissionFailed { reason: String },
+    #[error("turn submission failed: {error}")]
+    TurnSubmissionFailed { error: TurnError },
 }

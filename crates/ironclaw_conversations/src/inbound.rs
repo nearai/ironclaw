@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ironclaw_turns::{SubmitTurnRequest, TurnCoordinator};
+use ironclaw_turns::{AdmissionRejectionReason, SubmitTurnRequest, TurnCoordinator, TurnError};
 
 use crate::{
     AcceptInboundMessageRequest, ConversationBindingService, InboundTurnError, InboundTurnRequest,
@@ -33,7 +33,7 @@ where
         &self,
         request: InboundTurnRequest,
     ) -> Result<InboundTurnResponse, InboundTurnError> {
-        let resolution = self
+        let mut resolution = self
             .binding_service
             .resolve_or_create_binding(ResolveConversationRequest {
                 tenant_id: request.tenant_id.clone(),
@@ -61,6 +61,8 @@ where
             })
             .await?;
 
+        resolution.actor = accepted_message.actor.clone();
+
         if accepted_message.idempotency == MessageIdempotencyStatus::Duplicate
             && self
                 .session_thread_service
@@ -82,7 +84,7 @@ where
             .turn_coordinator
             .submit_turn(SubmitTurnRequest {
                 scope: resolution.turn_scope.clone(),
-                actor: resolution.actor.clone(),
+                actor: accepted_message.actor.clone(),
                 accepted_message_ref: accepted_message.message_ref.clone(),
                 source_binding_ref: accepted_message.source_binding_ref.clone(),
                 reply_target_binding_ref: accepted_message.reply_target_binding_ref.clone(),
@@ -94,12 +96,12 @@ where
         let turn_submission = match turn_submission_result {
             Ok(response) => response,
             Err(error) => {
-                self.session_thread_service
-                    .rotate_inbound_message_turn_submission_key(&accepted_message.message_ref)
-                    .await?;
-                return Err(InboundTurnError::TurnSubmissionFailed {
-                    reason: error.to_string(),
-                });
+                if should_rotate_submit_key(&error) {
+                    self.session_thread_service
+                        .rotate_inbound_message_turn_submission_key(&accepted_message.message_ref)
+                        .await?;
+                }
+                return Err(InboundTurnError::TurnSubmissionFailed { error });
             }
         };
         self.session_thread_service
@@ -111,5 +113,21 @@ where
             accepted_message,
             turn_submission: Some(turn_submission),
         })
+    }
+}
+
+fn should_rotate_submit_key(error: &TurnError) -> bool {
+    match error {
+        TurnError::ThreadBusy(_) | TurnError::Unavailable { .. } => true,
+        TurnError::AdmissionRejected(rejection) => matches!(
+            rejection.reason,
+            AdmissionRejectionReason::TenantLimit | AdmissionRejectionReason::Unavailable
+        ),
+        TurnError::ScopeNotFound
+        | TurnError::Unauthorized
+        | TurnError::InvalidRequest { .. }
+        | TurnError::Conflict { .. }
+        | TurnError::InvalidTransition { .. }
+        | TurnError::LeaseMismatch => false,
     }
 }

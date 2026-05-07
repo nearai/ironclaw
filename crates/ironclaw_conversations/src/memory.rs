@@ -256,6 +256,7 @@ impl SessionThreadService for InMemoryConversationServices {
         let accepted = AcceptedInboundMessage {
             tenant_id: request.tenant_id,
             thread_id: request.thread_id,
+            actor: request.actor.clone(),
             message_ref,
             source_binding_ref: request.source_binding_ref,
             reply_target_binding_ref: message_reply_target_binding_ref,
