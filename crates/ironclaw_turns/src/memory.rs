@@ -787,23 +787,37 @@ impl Inner {
         cursor = cursor.max(events.iter().map(|event| event.cursor.0).max().unwrap_or(0));
         cursor = cursor.max(snapshot.event_retention_floor.0);
         let mut admission_reservations = HashMap::new();
-        for reservation in snapshot.admission_reservations {
+        for mut reservation in snapshot.admission_reservations {
+            let Some(record) = records.get(&reservation.run_id) else {
+                continue;
+            };
+            if record.status.is_terminal() {
+                reservation.released = true;
+            }
             admission_reservations.insert(reservation.run_id, reservation);
         }
         for record in records.values() {
-            if record.status.keeps_active_lock()
-                && !admission_reservations.contains_key(&record.run_id)
-            {
+            if record.status.keeps_active_lock() {
                 let admission_class = record.profile.admission_class.clone();
-                admission_reservations.insert(
-                    record.run_id,
-                    TurnAdmissionReservationRecord {
-                        run_id: record.run_id,
-                        admission_class: admission_class.clone(),
-                        buckets: admission_buckets(&record.scope, &record.actor, &admission_class),
-                        released: false,
-                    },
-                );
+                let buckets = admission_buckets(&record.scope, &record.actor, &admission_class);
+                let needs_canonical_reservation = admission_reservations
+                    .get(&record.run_id)
+                    .is_none_or(|reservation| {
+                        reservation.released
+                            || reservation.admission_class != admission_class
+                            || reservation.buckets != buckets
+                    });
+                if needs_canonical_reservation {
+                    admission_reservations.insert(
+                        record.run_id,
+                        TurnAdmissionReservationRecord {
+                            run_id: record.run_id,
+                            admission_class,
+                            buckets,
+                            released: false,
+                        },
+                    );
+                }
             }
         }
 
@@ -1677,6 +1691,7 @@ impl Inner {
                 .is_some_and(|record| record.status.is_terminal())
             {
                 self.records.remove(&run_id);
+                self.admission_reservations.remove(&run_id);
             }
         }
     }

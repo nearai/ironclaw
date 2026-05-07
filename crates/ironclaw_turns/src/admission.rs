@@ -5,9 +5,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::{TurnActor, TurnRunId, TurnScope};
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
 pub struct TurnAdmissionClass(String);
+
+impl<'de> Deserialize<'de> for TurnAdmissionClass {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
 
 impl TurnAdmissionClass {
     pub fn new(value: impl Into<String>) -> Result<Self, String> {

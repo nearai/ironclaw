@@ -72,7 +72,7 @@ A duplicate idempotency key must replay prior accepted submit and admission-reje
 - Capacity denial returns one deterministic safe `AdmissionRejected` payload with axis kind, total/class bucket, admission class when applicable, limit, active count, and optional retry hint. It must not expose foreign bucket IDs or raw provider internals.
 - Missing limits mean unlimited. A non-AllowAll provider that is unavailable fails closed with `AdmissionRejectionReason::Unavailable` and creates no run/reservation.
 - Queued, running, blocked, cancel-requested, and recovery-required runs keep reservations. Resume reuses the existing reservation.
-- Terminal transitions (`Completed`, `Failed`, `Cancelled`, and future terminal states) release reservations exactly once while retaining released reservation evidence.
+- Terminal transitions (`Completed`, `Failed`, `Cancelled`, and future terminal states) release reservations exactly once. Released reservation evidence is retained only while the corresponding terminal run remains within the bounded terminal-record retention window; active capacity accounting must not scan unbounded released history.
 - Limit changes do not evict existing runs; new admissions are denied until active reservations drop below the configured limit.
 - Snapshot/DB loaders must synthesize unreleased reservation evidence for legacy non-terminal runs that predate persisted reservation rows so active capacity is not bypassed after migration/restart.
 

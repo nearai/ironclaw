@@ -974,6 +974,69 @@ async fn snapshot_load_synthesizes_reservations_for_legacy_active_runs() {
 }
 
 #[tokio::test]
+async fn snapshot_load_recovers_released_or_mismatched_reservations_for_active_runs() {
+    let source_store = Arc::new(InMemoryTurnStateStore::default());
+    let source_coordinator = DefaultTurnCoordinator::new(source_store.clone());
+    source_coordinator
+        .submit_turn(submit_request("thread-a", "idem-submit-a"))
+        .await
+        .unwrap();
+    let source_snapshot = source_store.persistence_snapshot();
+    assert_eq!(source_snapshot.admission_reservations.len(), 1);
+
+    for corrupt_reservation in ["released", "empty_buckets"] {
+        let mut snapshot = source_snapshot.clone();
+        match corrupt_reservation {
+            "released" => snapshot.admission_reservations[0].released = true,
+            "empty_buckets" => snapshot.admission_reservations[0].buckets.clear(),
+            _ => unreachable!(),
+        }
+        let limits = StaticTurnAdmissionLimitProvider::default()
+            .with_total_limit(TurnAdmissionAxisKind::Tenant, 1);
+        let restored = Arc::new(
+            InMemoryTurnStateStore::from_persistence_snapshot_with_admission_limit_provider(
+                snapshot,
+                InMemoryTurnStateStoreLimits::default(),
+                Arc::new(limits),
+            )
+            .unwrap(),
+        );
+        let reservations = restored.active_admission_reservations();
+        assert_eq!(reservations.len(), 1, "case {corrupt_reservation}");
+        assert!(!reservations[0].released, "case {corrupt_reservation}");
+        assert_eq!(
+            reservations[0].buckets.len(),
+            8,
+            "case {corrupt_reservation}"
+        );
+
+        let restored_coordinator = DefaultTurnCoordinator::new(restored.clone());
+        let denied = restored_coordinator
+            .submit_turn(submit_request(
+                &format!("thread-b-{corrupt_reservation}"),
+                &format!("idem-submit-b-{corrupt_reservation}"),
+            ))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                denied,
+                TurnError::AdmissionRejected(AdmissionRejection {
+                    capacity_denial: Some(TurnAdmissionCapacityDenial {
+                        axis_kind: TurnAdmissionAxisKind::Tenant,
+                        limit: 1,
+                        active_count: 1,
+                        ..
+                    }),
+                    ..
+                })
+            ),
+            "case {corrupt_reservation}: {denied:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn terminal_run_releases_admission_reservation_for_new_thread() {
     let limits = StaticTurnAdmissionLimitProvider::default()
         .with_total_limit(TurnAdmissionAxisKind::Tenant, 1);
@@ -1014,6 +1077,126 @@ async fn terminal_run_releases_admission_reservation_for_new_thread() {
         .unwrap();
     assert_ne!(accepted_run_id(&second), first_run_id);
     assert_eq!(store.active_admission_reservations().len(), 1);
+}
+
+#[tokio::test]
+async fn snapshot_load_drops_released_reservations_without_retained_run_records() {
+    let source_store = Arc::new(InMemoryTurnStateStore::default());
+    let source_coordinator = DefaultTurnCoordinator::new(source_store.clone());
+    let run_id = accepted_run_id(
+        &source_coordinator
+            .submit_turn(submit_request("thread-a", "idem-submit-a"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    source_store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope("thread-a")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    source_store
+        .complete_run(CompleteRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        })
+        .await
+        .unwrap();
+    let mut snapshot = source_store.persistence_snapshot();
+    assert_eq!(snapshot.admission_reservations.len(), 1);
+    assert!(snapshot.admission_reservations[0].released);
+    snapshot.runs.clear();
+
+    let restored = InMemoryTurnStateStore::from_persistence_snapshot(
+        snapshot,
+        InMemoryTurnStateStoreLimits::default(),
+    )
+    .unwrap();
+
+    assert!(
+        restored
+            .persistence_snapshot()
+            .admission_reservations
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn terminal_record_pruning_bounds_released_admission_reservations() {
+    let store = Arc::new(InMemoryTurnStateStore::with_limits(
+        InMemoryTurnStateStoreLimits {
+            max_terminal_records: 1,
+            ..InMemoryTurnStateStoreLimits::default()
+        },
+    ));
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+    let first_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-a", "idem-submit-a"))
+            .await
+            .unwrap(),
+    );
+    let first_runner_id = TurnRunnerId::new();
+    let first_lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: first_runner_id,
+            lease_token: first_lease_token,
+            scope_filter: Some(scope("thread-a")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .complete_run(CompleteRunRequest {
+            run_id: first_run_id,
+            runner_id: first_runner_id,
+            lease_token: first_lease_token,
+        })
+        .await
+        .unwrap();
+
+    let second_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-b", "idem-submit-b"))
+            .await
+            .unwrap(),
+    );
+    let second_runner_id = TurnRunnerId::new();
+    let second_lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: second_runner_id,
+            lease_token: second_lease_token,
+            scope_filter: Some(scope("thread-b")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .complete_run(CompleteRunRequest {
+            run_id: second_run_id,
+            runner_id: second_runner_id,
+            lease_token: second_lease_token,
+        })
+        .await
+        .unwrap();
+
+    let snapshot = store.persistence_snapshot();
+    assert!(snapshot.runs.iter().all(|run| run.run_id != first_run_id));
+    assert!(
+        snapshot
+            .admission_reservations
+            .iter()
+            .all(|reservation| reservation.run_id != first_run_id)
+    );
+    assert_eq!(snapshot.admission_reservations.len(), 1);
 }
 
 #[tokio::test]
@@ -2922,6 +3105,11 @@ async fn sanitized_failure_rejects_empty_controlled_oversized_or_unsanitized_cat
 
 #[test]
 fn bounded_refs_validate_during_deserialization() {
+    assert!(serde_json::from_str::<TurnAdmissionClass>("\"interactive\"").is_ok());
+    assert!(serde_json::from_str::<TurnAdmissionClass>("\"\"").is_err());
+    assert!(serde_json::from_str::<TurnAdmissionClass>("\"Interactive\"").is_err());
+    assert!(serde_json::from_str::<TurnAdmissionClass>("\"admin-system\"").is_err());
+    assert!(serde_json::from_str::<TurnAdmissionClass>("\"class\\nsecret\"").is_err());
     assert!(serde_json::from_str::<AcceptedMessageRef>("\"message-ok\"").is_ok());
     assert!(serde_json::from_str::<AcceptedMessageRef>("\"\"").is_err());
     assert!(serde_json::from_str::<SourceBindingRef>("\"source\\nsecret\"").is_err());
