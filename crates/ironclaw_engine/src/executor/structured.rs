@@ -605,11 +605,14 @@ fn interrupted_call_needs_refund(result: &Result<ActionResult, EngineError>) -> 
 /// the resolution, so well-behaved chains converge in 1–2 iterations
 /// and the cap is only ever hit on bugs.
 ///
-/// Authentication/External resume kinds keep the legacy re-entry
-/// path: their resolution installs new state (credentials, callback
-/// payloads) that only takes effect on the next thread run-through,
-/// not via direct hand-back to the suspended call. Those return
-/// `Err(GatePaused)` unmodified.
+/// Authentication resume kinds also flow through this loop now —
+/// `bridge::resume_paused_missions_for_credential` (the OAuth-callback
+/// hook from #3133 half-2) delivers `GateResolution::Approved` to the
+/// parked controller as soon as the credential lands in the secrets
+/// store, so the retry sees the credential and the action succeeds.
+/// External resume kinds still keep the legacy re-entry path: their
+/// resolution installs callback-payload state that the suspended call
+/// can't see without unwinding.
 ///
 /// Returns `(final_result, events)` where `events` carries the
 /// `ApprovalRequested` audit events emitted across retry iterations
@@ -653,7 +656,12 @@ async fn execute_with_inline_gate_retry(
                 parameters,
                 resume_kind,
                 ..
-            }) if matches!(*resume_kind, crate::gate::ResumeKind::Approval { .. }) => {
+            }) if matches!(
+                *resume_kind,
+                crate::gate::ResumeKind::Approval { .. }
+                    | crate::gate::ResumeKind::Authentication { .. }
+            ) =>
+            {
                 (gate_name, action_name, call_id, *parameters, *resume_kind)
             }
             other => return (other, emitted_events),

@@ -5233,10 +5233,10 @@ impl ExtensionManager {
                     .await
                     .map_err(|e| e.to_string())?;
 
-                    // Half-2 of #3133: resume any paused background mission
-                    // whose `paused_gate` was waiting on this credential.
-                    // Best-effort; the helper logs and swallows errors so a
-                    // resume failure does NOT undo the credential write.
+                    // Half-2 of #3133, two-pronged auto-resume. See
+                    // `src/channels/web/features/oauth/mod.rs` for the
+                    // matching wire on the gateway-OAuth path.
+                    let _ = crate::bridge::resolve_inline_gates_for_credential(&secret_name).await;
                     let _ = crate::bridge::resume_paused_missions_for_credential(
                         &user_id,
                         &secret_name,

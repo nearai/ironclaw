@@ -1282,10 +1282,16 @@ struct EngineState {
     /// Filesystem root for project-local attachment persistence.
     project_root: PathBuf,
     /// Inline gate-await controller. Lets the engine pause Tier 0 and
-    /// Tier 1 executions in place on `Approval` gates, rather than
-    /// unwinding back to the orchestrator and re-entering on resume
-    /// (which would re-execute earlier non-idempotent tool calls).
+    /// Tier 1 executions in place on `Approval` and `Authentication`
+    /// gates, rather than unwinding back to the orchestrator and
+    /// re-entering on resume (which would re-execute earlier
+    /// non-idempotent tool calls).
     gate_controller: Arc<crate::bridge::gate_controller::BridgeGateController>,
+    /// Process-wide registry of in-flight gate resolution channels.
+    /// Held alongside `gate_controller` so the OAuth-callback path can
+    /// wake parked Authentication waiters by credential name without
+    /// going through the controller's internals.
+    gate_resolutions: Arc<crate::bridge::gate_controller::GateResolutions>,
 }
 
 /// Global engine state, initialized on first use.
@@ -1961,6 +1967,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         extension_manager: agent.deps.extension_manager.clone(),
         project_root: resolve_project_root(),
         gate_controller,
+        gate_resolutions: resolutions,
     });
 
     Ok(())
@@ -2150,12 +2157,48 @@ pub async fn resolve_engine_auth_callback(
     })
 }
 
+/// Wake any Tier 0/Tier 1 inline-await waiters that paused on the
+/// credential named `credential_name`.
+///
+/// Half-2 of #3133, inline-await arm. The Tier 1 (CodeAct) and Tier 0
+/// (structured) paths now keep their VM/batch parked on
+/// `GateController::pause()` for Authentication gates the same way
+/// they do for Approval. When OAuth lands a credential, this helper
+/// delivers `GateResolution::Approved` to every parked waiter so the
+/// suspended action retries inline against the now-present secret —
+/// no thread re-entry, no replay of earlier side effects in the same
+/// step.
+///
+/// Returns the number of waiters woken (zero is normal — most
+/// credential writes don't unblock any inline VM).
+pub async fn resolve_inline_gates_for_credential(credential_name: &str) -> usize {
+    let Some(lock) = ENGINE_STATE.get() else {
+        return 0;
+    };
+    let guard = lock.read().await;
+    let Some(state) = guard.as_ref() else {
+        return 0;
+    };
+    let woken = state
+        .gate_resolutions
+        .deliver_for_credential(credential_name)
+        .await;
+    if woken > 0 {
+        tracing::debug!(
+            credential = %credential_name,
+            woken,
+            "delivered Approved to parked inline-await waiter(s) on credential write"
+        );
+    }
+    woken
+}
+
 /// Auto-resume paused missions whose `paused_gate` was waiting for the
 /// credential named `credential_name`.
 ///
-/// Half-2 of #3133. Called from the OAuth completion path and from
-/// `secrets_store::create` / `update`. Walks the engine state to locate
-/// the [`MissionManager`] and delegates to
+/// Half-2 of #3133, mission arm. Called from the OAuth completion path
+/// and from `secrets_store::create` / `update`. Walks the engine state
+/// to locate the [`MissionManager`] and delegates to
 /// [`MissionManager::resume_paused_for_credential`], which transitions
 /// every matching mission `Paused → Active`, clears its `paused_gate`,
 /// and (for non-Manual cadences) kicks off an immediate fire so the
@@ -6613,6 +6656,7 @@ pub(crate) mod test_support {
                 Arc::new(crate::channels::ChannelManager::new()),
                 Arc::new(crate::bridge::gate_controller::GateResolutions::new()),
             )),
+            gate_resolutions: Arc::new(crate::bridge::gate_controller::GateResolutions::new()),
             project_root: super::resolve_project_root(),
         };
 
@@ -8807,6 +8851,7 @@ mod tests {
                 Arc::new(crate::channels::ChannelManager::new()),
                 Arc::new(crate::bridge::gate_controller::GateResolutions::new()),
             )),
+            gate_resolutions: Arc::new(crate::bridge::gate_controller::GateResolutions::new()),
             project_root: resolve_project_root(),
         }
     }
@@ -8966,6 +9011,7 @@ mod tests {
                 Arc::new(crate::channels::ChannelManager::new()),
                 Arc::new(crate::bridge::gate_controller::GateResolutions::new()),
             )),
+            gate_resolutions: Arc::new(crate::bridge::gate_controller::GateResolutions::new()),
             project_root: resolve_project_root(),
         }
     }
@@ -10723,6 +10769,7 @@ mod tests {
                 Arc::new(crate::channels::ChannelManager::new()),
                 Arc::new(crate::bridge::gate_controller::GateResolutions::new()),
             )),
+            gate_resolutions: Arc::new(crate::bridge::gate_controller::GateResolutions::new()),
             project_root: resolve_project_root(),
         }
     }

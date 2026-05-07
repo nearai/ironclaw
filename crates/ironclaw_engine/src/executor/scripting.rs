@@ -2182,9 +2182,14 @@ async fn drive_inline_gate(
                 parameters,
                 resume_kind,
                 ..
-            }) if matches!(*resume_kind, crate::gate::ResumeKind::Approval { .. }) => {
+            }) if matches!(
+                *resume_kind,
+                crate::gate::ResumeKind::Approval { .. }
+                    | crate::gate::ResumeKind::Authentication { .. }
+            ) =>
+            {
                 // Refund the use we just consumed — the next loop
-                // iteration will pause and re-consume on approval.
+                // iteration will pause and re-consume on resolution.
                 let _ = leases.refund_use(lease.id).await;
                 events.push(EventKind::ApprovalRequested {
                     action_name: action_name.clone(),
@@ -2332,14 +2337,21 @@ async fn resolve_tool_future(
                 params_summary: params_summary.clone(),
             });
 
-            // Authentication / External resume kinds keep the legacy
-            // re-entry path: their resolution installs new state
-            // (credentials, callback payloads) that only takes effect
-            // on the next thread run-through, not via direct hand-back
-            // to a suspended call. Surface as the historical
-            // `RuntimeError` so the orchestrator unwinds and the
-            // bridge's `ThreadOutcome::GatePaused` arm handles it.
-            if !matches!(*resume_kind, crate::gate::ResumeKind::Approval { .. }) {
+            // External resume kinds keep the legacy re-entry path —
+            // their resolution installs callback-payload state that
+            // can't be handed back to a suspended call. Approval and
+            // Authentication both go through `drive_inline_gate`:
+            // Approval resolves on user click, Authentication resolves
+            // when `bridge::resume_paused_missions_for_credential`
+            // (the OAuth-callback hook from #3133 half-2) delivers
+            // `GateResolution::Approved` to the parked controller. In
+            // both cases the action retries inline and the script
+            // continues without unwinding.
+            if !matches!(
+                *resume_kind,
+                crate::gate::ResumeKind::Approval { .. }
+                    | crate::gate::ResumeKind::Authentication { .. }
+            ) {
                 return ExtFunctionResult::Error(MontyException::new(
                     ExcType::RuntimeError,
                     Some(format!("execution paused by gate '{gate_name}'")),

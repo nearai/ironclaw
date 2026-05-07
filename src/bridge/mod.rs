@@ -73,6 +73,7 @@ pub use router::{
     resolve_engine_auth_callback,
     resolve_gate,
     resume_engine_mission,
+    resolve_inline_gates_for_credential,
     resume_paused_missions_for_credential,
     resume_paused_missions_for_gate_request,
     transition_engine_pending_auth_request_to_pairing,
