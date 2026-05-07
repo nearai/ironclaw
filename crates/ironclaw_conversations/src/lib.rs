@@ -74,10 +74,6 @@ impl ExternalActorRef {
     pub fn id(&self) -> &str {
         &self.id
     }
-
-    fn fingerprint(&self) -> String {
-        format!("kind={};id={}", self.kind, self.id)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -122,12 +118,11 @@ impl ExternalConversationRef {
     }
 
     pub fn conversation_fingerprint(&self) -> String {
-        format!(
-            "space={};conversation={};thread={}",
+        length_prefixed_fingerprint(&[
             self.space_id.as_deref().unwrap_or(""),
-            self.conversation_id,
-            self.thread_id.as_deref().unwrap_or("")
-        )
+            &self.conversation_id,
+            self.thread_id.as_deref().unwrap_or(""),
+        ])
     }
 }
 
@@ -396,14 +391,22 @@ pub struct InMemoryConversationServices {
 impl InMemoryConversationServices {
     pub async fn pair_external_actor(
         &self,
+        tenant_id: TenantId,
         adapter_kind: AdapterKind,
+        adapter_installation_id: AdapterInstallationId,
         external_actor_ref: ExternalActorRef,
         user_id: UserId,
     ) {
         if let Ok(mut state) = self.state.lock() {
-            state
-                .pairings
-                .insert(ActorKey::new(&adapter_kind, &external_actor_ref), user_id);
+            state.pairings.insert(
+                ActorKey::new(
+                    &tenant_id,
+                    &adapter_kind,
+                    &adapter_installation_id,
+                    &external_actor_ref,
+                ),
+                user_id,
+            );
         }
     }
 
@@ -422,12 +425,16 @@ impl ConversationBindingService for InMemoryConversationServices {
         request: ResolveConversationRequest,
     ) -> Result<ConversationBindingResolution, InboundTurnError> {
         let mut state = self.lock_state()?;
-        let actor_user_id =
-            state.resolve_actor(&request.adapter_kind, &request.external_actor_ref)?;
+        let actor_user_id = state.resolve_actor(
+            &request.tenant_id,
+            &request.adapter_kind,
+            &request.adapter_installation_id,
+            &request.external_actor_ref,
+        )?;
         let binding_key = BindingKey::from_request(&request);
 
         if let Some(binding) = state.bindings.get(&binding_key).cloned() {
-            state.ensure_participant(&actor_user_id, &binding.thread_id)?;
+            state.ensure_participant(&request.tenant_id, &actor_user_id, &binding.thread_id)?;
             return Ok(binding.resolution(actor_user_id, request.tenant_id));
         }
 
@@ -439,7 +446,6 @@ impl ConversationBindingService for InMemoryConversationServices {
         let thread = ThreadRecord {
             agent_id: request.requested_agent_id.clone(),
             project_id: request.requested_project_id.clone(),
-            thread_id: thread_id.clone(),
             participants: HashSet::from([actor_user_id.clone()]),
         };
         state
@@ -468,15 +474,22 @@ impl ConversationBindingService for InMemoryConversationServices {
         request: LinkConversationRequest,
     ) -> Result<LinkedConversationBinding, InboundTurnError> {
         let mut state = self.lock_state()?;
-        let actor_user_id =
-            state.resolve_actor(&request.adapter_kind, &request.external_actor_ref)?;
-        let target_thread =
-            state.thread_for_participant(&actor_user_id, &request.target_thread_id)?;
+        let actor_user_id = state.resolve_actor(
+            &request.tenant_id,
+            &request.adapter_kind,
+            &request.adapter_installation_id,
+            &request.external_actor_ref,
+        )?;
+        let target_thread = state.thread_for_participant(
+            &request.tenant_id,
+            &actor_user_id,
+            &request.target_thread_id,
+        )?;
         let binding_key = BindingKey {
             tenant_id: request.tenant_id.clone(),
             adapter_kind: request.adapter_kind.clone(),
             adapter_installation_id: request.adapter_installation_id.clone(),
-            conversation_fingerprint: request.external_conversation_ref.conversation_fingerprint(),
+            external_conversation_ref: request.external_conversation_ref.clone(),
         };
         let binding = BindingRecord::new(
             request.tenant_id,
@@ -522,7 +535,7 @@ impl ConversationBindingService for InMemoryConversationServices {
                 thread_id: binding.thread_id.to_string(),
             });
         }
-        state.ensure_participant(actor_user_id, &binding.thread_id)?;
+        state.ensure_participant(&binding.tenant_id, actor_user_id, &binding.thread_id)?;
         Ok(ReplyTargetBinding {
             tenant_id: binding.tenant_id,
             actor_user_id: actor_user_id.clone(),
@@ -539,7 +552,11 @@ impl SessionThreadService for InMemoryConversationServices {
         request: AcceptInboundMessageRequest,
     ) -> Result<AcceptedInboundMessage, InboundTurnError> {
         let mut state = self.lock_state()?;
-        state.ensure_participant(&request.actor.user_id, &request.thread_id)?;
+        state.ensure_participant(
+            &request.tenant_id,
+            &request.actor.user_id,
+            &request.thread_id,
+        )?;
         let idempotency_key = MessageIdempotencyKey {
             tenant_id: request.tenant_id.clone(),
             source_binding_ref: request.source_binding_ref.as_str().to_string(),
@@ -596,11 +613,18 @@ struct InMemoryState {
 impl InMemoryState {
     fn resolve_actor(
         &self,
+        tenant_id: &TenantId,
         adapter_kind: &AdapterKind,
+        adapter_installation_id: &AdapterInstallationId,
         external_actor_ref: &ExternalActorRef,
     ) -> Result<UserId, InboundTurnError> {
         self.pairings
-            .get(&ActorKey::new(adapter_kind, external_actor_ref))
+            .get(&ActorKey::new(
+                tenant_id,
+                adapter_kind,
+                adapter_installation_id,
+                external_actor_ref,
+            ))
             .cloned()
             .ok_or_else(|| InboundTurnError::BindingRequired {
                 adapter_kind: adapter_kind.as_str().to_string(),
@@ -610,23 +634,21 @@ impl InMemoryState {
 
     fn ensure_participant(
         &self,
+        tenant_id: &TenantId,
         actor_user_id: &UserId,
         thread_id: &ThreadId,
     ) -> Result<(), InboundTurnError> {
-        self.thread_for_participant(actor_user_id, thread_id)
+        self.thread_for_participant(tenant_id, actor_user_id, thread_id)
             .map(|_| ())
     }
 
     fn thread_for_participant(
         &self,
+        tenant_id: &TenantId,
         actor_user_id: &UserId,
         thread_id: &ThreadId,
     ) -> Result<ThreadRecord, InboundTurnError> {
-        let Some(thread) = self
-            .threads
-            .values()
-            .find(|thread| &thread.thread_id == thread_id)
-        else {
+        let Some(thread) = self.threads.get(&ThreadKey::new(tenant_id, thread_id)) else {
             return Err(InboundTurnError::ThreadNotFound {
                 thread_id: thread_id.to_string(),
             });
@@ -643,15 +665,24 @@ impl InMemoryState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ActorKey {
+    tenant_id: TenantId,
     adapter_kind: AdapterKind,
-    actor_fingerprint: String,
+    adapter_installation_id: AdapterInstallationId,
+    external_actor_ref: ExternalActorRef,
 }
 
 impl ActorKey {
-    fn new(adapter_kind: &AdapterKind, external_actor_ref: &ExternalActorRef) -> Self {
+    fn new(
+        tenant_id: &TenantId,
+        adapter_kind: &AdapterKind,
+        adapter_installation_id: &AdapterInstallationId,
+        external_actor_ref: &ExternalActorRef,
+    ) -> Self {
         Self {
+            tenant_id: tenant_id.clone(),
             adapter_kind: adapter_kind.clone(),
-            actor_fingerprint: external_actor_ref.fingerprint(),
+            adapter_installation_id: adapter_installation_id.clone(),
+            external_actor_ref: external_actor_ref.clone(),
         }
     }
 }
@@ -661,7 +692,7 @@ struct BindingKey {
     tenant_id: TenantId,
     adapter_kind: AdapterKind,
     adapter_installation_id: AdapterInstallationId,
-    conversation_fingerprint: String,
+    external_conversation_ref: ExternalConversationRef,
 }
 
 impl BindingKey {
@@ -670,7 +701,7 @@ impl BindingKey {
             tenant_id: request.tenant_id.clone(),
             adapter_kind: request.adapter_kind.clone(),
             adapter_installation_id: request.adapter_installation_id.clone(),
-            conversation_fingerprint: request.external_conversation_ref.conversation_fingerprint(),
+            external_conversation_ref: request.external_conversation_ref.clone(),
         }
     }
 }
@@ -694,7 +725,6 @@ impl ThreadKey {
 struct ThreadRecord {
     agent_id: Option<AgentId>,
     project_id: Option<ProjectId>,
-    thread_id: ThreadId,
     participants: HashSet<UserId>,
 }
 
@@ -761,6 +791,17 @@ struct MessageIdempotencyKey {
     tenant_id: TenantId,
     source_binding_ref: String,
     external_event_id: ExternalEventId,
+}
+
+fn length_prefixed_fingerprint(parts: &[&str]) -> String {
+    let mut out = String::new();
+    for part in parts {
+        out.push_str(&part.len().to_string());
+        out.push(':');
+        out.push_str(part);
+        out.push('|');
+    }
+    out
 }
 
 fn validate_external_id(kind: &'static str, value: &str) -> Result<(), InboundTurnError> {

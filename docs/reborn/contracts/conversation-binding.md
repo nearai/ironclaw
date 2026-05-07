@@ -52,10 +52,13 @@ This is not the final durable transcript store. PostgreSQL/libSQL storage and la
 2. Unpaired actors fail closed with `BindingRequired`; no message is accepted and no turn is submitted.
 3. Different adapter installations/conversations do not auto-merge even for the same paired user.
 4. Explicit linking can attach a new external conversation to an existing thread only after actor/thread access checks pass.
-5. External inbound idempotency is keyed by `(tenant_id, source_binding_ref, external_event_id)` and replays the original accepted message ref without submitting a duplicate turn.
-6. Bound group/channel messages are authorized against thread participants; external channel membership alone is insufficient.
-7. Source binding and reply target binding refs are distinct. Egress must validate the stored reply target for the current actor/thread before sending.
-8. Message content crosses this boundary as a content ref. Raw user text is owned by the transcript/content storage boundary, not turn state.
+5. Pairing/authenticated actor resolution is scoped by `(tenant_id, adapter_kind, adapter_installation_id, external_actor_ref)`; a pairing on one tenant or adapter installation does not authorize another.
+6. External actor/conversation refs stay structured for equality. String fingerprints, when exposed for diagnostics, must be collision-safe for delimiter-like external IDs.
+7. Explicit linking resolves the target thread inside the requested tenant; a caller cannot attach a different tenant's thread by reusing or guessing a thread id.
+8. External inbound idempotency is keyed by `(tenant_id, source_binding_ref, external_event_id)` and replays the original accepted message ref without submitting a duplicate turn.
+9. Bound group/channel messages are authorized against thread participants; external channel membership alone is insufficient.
+10. Source binding and reply target binding refs are distinct. Egress must validate the stored reply target for the current actor/thread before sending.
+11. Message content crosses this boundary as a content ref. Raw user text is owned by the transcript/content storage boundary, not turn state.
 
 ---
 

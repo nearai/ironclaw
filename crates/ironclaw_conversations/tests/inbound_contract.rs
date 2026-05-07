@@ -19,7 +19,13 @@ use ironclaw_turns::{
 async fn paired_actor_without_binding_creates_thread_binding_message_and_submits_turn() {
     let services = InMemoryConversationServices::default();
     services
-        .pair_external_actor(telegram(), external_actor("telegram-user-1"), user("alice"))
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-1"),
+            user("alice"),
+        )
         .await;
     let coordinator = Arc::new(RecordingTurnCoordinator::default());
     let inbound = InboundTurnService::new(services.clone(), services.clone(), coordinator.clone());
@@ -80,13 +86,184 @@ async fn unpaired_external_actor_returns_binding_required_before_message_or_turn
 }
 
 #[tokio::test]
+async fn pairing_is_scoped_by_tenant_and_adapter_installation() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-1"),
+            user("alice"),
+        )
+        .await;
+
+    let cross_tenant = services
+        .resolve_or_create_binding(resolve_request_with(
+            TenantId::new("tenant-b").unwrap(),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-1"),
+            external_conversation("chat-1", None),
+            "tenant-b-event-1",
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        cross_tenant,
+        InboundTurnError::BindingRequired { .. }
+    ));
+
+    let cross_installation = services
+        .resolve_or_create_binding(resolve_request_with(
+            tenant(),
+            telegram(),
+            AdapterInstallationId::new("other-installation").unwrap(),
+            external_actor("telegram-user-1"),
+            external_conversation("chat-1", None),
+            "other-install-event-1",
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        cross_installation,
+        InboundTurnError::BindingRequired { .. }
+    ));
+}
+
+#[tokio::test]
+async fn external_ref_keying_cannot_be_collided_with_delimiter_characters() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            ExternalActorRef::new("user;id=x", "y").unwrap(),
+            user("alice"),
+        )
+        .await;
+
+    let colliding_actor = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            ExternalActorRef::new("user", "x;id=y").unwrap(),
+            external_conversation("chat-1", None),
+            "actor-collision-event",
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        colliding_actor,
+        InboundTurnError::BindingRequired { .. }
+    ));
+
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-1"),
+            user("alice"),
+        )
+        .await;
+    let first = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            external_actor("telegram-user-1"),
+            ExternalConversationRef::new(None, "a;thread=b", Some("c"), None).unwrap(),
+            "conversation-collision-a",
+        ))
+        .await
+        .unwrap();
+    let second = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            external_actor("telegram-user-1"),
+            ExternalConversationRef::new(None, "a", Some("b;thread=c"), None).unwrap(),
+            "conversation-collision-b",
+        ))
+        .await
+        .unwrap();
+    assert_ne!(first.turn_scope.thread_id, second.turn_scope.thread_id);
+}
+
+#[tokio::test]
+async fn explicit_link_cannot_cross_tenant_by_reusing_a_thread_id() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            web(),
+            default_installation(),
+            external_actor("alice-web"),
+            user("alice"),
+        )
+        .await;
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("alice-telegram"),
+            user("alice"),
+        )
+        .await;
+    services
+        .pair_external_actor(
+            TenantId::new("tenant-b").unwrap(),
+            telegram(),
+            default_installation(),
+            external_actor("alice-telegram"),
+            user("alice"),
+        )
+        .await;
+    let tenant_a = services
+        .resolve_or_create_binding(resolve_request(
+            web(),
+            external_actor("alice-web"),
+            external_conversation("browser-session", None),
+            "web-event-1",
+        ))
+        .await
+        .unwrap();
+
+    let err = services
+        .link_conversation_to_thread(LinkConversationRequest {
+            tenant_id: TenantId::new("tenant-b").unwrap(),
+            adapter_kind: telegram(),
+            adapter_installation_id: default_installation(),
+            external_actor_ref: external_actor("alice-telegram"),
+            external_conversation_ref: external_conversation("chat-tenant-b", None),
+            target_thread_id: tenant_a.turn_scope.thread_id,
+            target_agent_id: tenant_a.turn_scope.agent_id,
+            target_project_id: tenant_a.turn_scope.project_id,
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, InboundTurnError::ThreadNotFound { .. }));
+}
+
+#[tokio::test]
 async fn webui_and_telegram_default_to_separate_threads_for_same_user() {
     let services = InMemoryConversationServices::default();
     services
-        .pair_external_actor(web(), external_actor("alice-web"), user("alice"))
+        .pair_external_actor(
+            tenant(),
+            web(),
+            default_installation(),
+            external_actor("alice-web"),
+            user("alice"),
+        )
         .await;
     services
-        .pair_external_actor(telegram(), external_actor("alice-telegram"), user("alice"))
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("alice-telegram"),
+            user("alice"),
+        )
         .await;
 
     let web_resolution = services
@@ -120,10 +297,22 @@ async fn webui_and_telegram_default_to_separate_threads_for_same_user() {
 async fn explicit_link_attaches_conversation_to_existing_thread_after_access_checks() {
     let services = InMemoryConversationServices::default();
     services
-        .pair_external_actor(web(), external_actor("alice-web"), user("alice"))
+        .pair_external_actor(
+            tenant(),
+            web(),
+            default_installation(),
+            external_actor("alice-web"),
+            user("alice"),
+        )
         .await;
     services
-        .pair_external_actor(telegram(), external_actor("alice-telegram"), user("alice"))
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("alice-telegram"),
+            user("alice"),
+        )
         .await;
 
     let web_resolution = services
@@ -169,10 +358,22 @@ async fn explicit_link_attaches_conversation_to_existing_thread_after_access_che
 async fn explicit_link_uses_existing_thread_scope_not_spoofed_link_scope() {
     let services = InMemoryConversationServices::default();
     services
-        .pair_external_actor(web(), external_actor("alice-web"), user("alice"))
+        .pair_external_actor(
+            tenant(),
+            web(),
+            default_installation(),
+            external_actor("alice-web"),
+            user("alice"),
+        )
         .await;
     services
-        .pair_external_actor(telegram(), external_actor("alice-telegram"), user("alice"))
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("alice-telegram"),
+            user("alice"),
+        )
         .await;
 
     let web_resolution = services
@@ -214,7 +415,13 @@ async fn explicit_link_uses_existing_thread_scope_not_spoofed_link_scope() {
 async fn duplicate_external_event_replays_message_and_does_not_submit_duplicate_turn() {
     let services = InMemoryConversationServices::default();
     services
-        .pair_external_actor(telegram(), external_actor("telegram-user-1"), user("alice"))
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-1"),
+            user("alice"),
+        )
         .await;
     let coordinator = Arc::new(RecordingTurnCoordinator::default());
     let inbound = InboundTurnService::new(services.clone(), services.clone(), coordinator.clone());
@@ -243,10 +450,22 @@ async fn duplicate_external_event_replays_message_and_does_not_submit_duplicate_
 async fn bound_group_message_from_non_participant_is_denied() {
     let services = InMemoryConversationServices::default();
     services
-        .pair_external_actor(telegram(), external_actor("alice-telegram"), user("alice"))
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("alice-telegram"),
+            user("alice"),
+        )
         .await;
     services
-        .pair_external_actor(telegram(), external_actor("bob-telegram"), user("bob"))
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("bob-telegram"),
+            user("bob"),
+        )
         .await;
     let group = external_conversation("group-1", Some("topic-a"));
     let alice_resolution = services
@@ -277,10 +496,22 @@ async fn bound_group_message_from_non_participant_is_denied() {
 async fn reply_target_validation_is_scoped_to_actor_and_binding() {
     let services = InMemoryConversationServices::default();
     services
-        .pair_external_actor(web(), external_actor("alice-web"), user("alice"))
+        .pair_external_actor(
+            tenant(),
+            web(),
+            default_installation(),
+            external_actor("alice-web"),
+            user("alice"),
+        )
         .await;
     services
-        .pair_external_actor(web(), external_actor("bob-web"), user("bob"))
+        .pair_external_actor(
+            tenant(),
+            web(),
+            default_installation(),
+            external_actor("bob-web"),
+            user("bob"),
+        )
         .await;
     let alice = services
         .resolve_or_create_binding(resolve_request(
@@ -344,10 +575,28 @@ fn resolve_request(
     external_conversation_ref: ExternalConversationRef,
     external_event_id: &str,
 ) -> ironclaw_conversations::ResolveConversationRequest {
-    ironclaw_conversations::ResolveConversationRequest {
-        tenant_id: tenant(),
+    resolve_request_with(
+        tenant(),
         adapter_kind,
-        adapter_installation_id: default_installation(),
+        default_installation(),
+        external_actor_ref,
+        external_conversation_ref,
+        external_event_id,
+    )
+}
+
+fn resolve_request_with(
+    tenant_id: TenantId,
+    adapter_kind: AdapterKind,
+    adapter_installation_id: AdapterInstallationId,
+    external_actor_ref: ExternalActorRef,
+    external_conversation_ref: ExternalConversationRef,
+    external_event_id: &str,
+) -> ironclaw_conversations::ResolveConversationRequest {
+    ironclaw_conversations::ResolveConversationRequest {
+        tenant_id,
+        adapter_kind,
+        adapter_installation_id,
         external_actor_ref,
         external_conversation_ref,
         external_event_id: ExternalEventId::new(external_event_id).unwrap(),
