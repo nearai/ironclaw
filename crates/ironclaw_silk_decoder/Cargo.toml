@@ -1,3 +1,8 @@
+# Standalone — explicitly NOT part of the IronClaw workspace so the main
+# `cargo build` does not pull in `silk-rs` (which requires `bindgen` +
+# `libclang` and a C toolchain). See `crates/ironclaw_silk_decoder/README.md`.
+[workspace]
+
 [package]
 name = "ironclaw_silk_decoder"
 version = "0.1.0"
