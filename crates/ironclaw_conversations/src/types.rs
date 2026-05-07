@@ -11,6 +11,13 @@ use crate::{
     InboundMessageContentRef,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationRouteKind {
+    Direct,
+    Shared,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolveConversationRequest {
     pub tenant_id: TenantId,
@@ -19,6 +26,7 @@ pub struct ResolveConversationRequest {
     pub external_actor_ref: ExternalActorRef,
     pub external_conversation_ref: ExternalConversationRef,
     pub external_event_id: ExternalEventId,
+    pub route_kind: ConversationRouteKind,
     pub requested_agent_id: Option<AgentId>,
     pub requested_project_id: Option<ProjectId>,
 }
@@ -40,6 +48,7 @@ pub struct LinkConversationRequest {
     pub adapter_installation_id: AdapterInstallationId,
     pub external_actor_ref: ExternalActorRef,
     pub external_conversation_ref: ExternalConversationRef,
+    pub route_kind: ConversationRouteKind,
     pub target_thread_id: ThreadId,
     pub target_agent_id: Option<AgentId>,
     pub target_project_id: Option<ProjectId>,
@@ -114,6 +123,7 @@ pub struct InboundTurnRequest {
     pub external_actor_ref: ExternalActorRef,
     pub external_conversation_ref: ExternalConversationRef,
     pub external_event_id: ExternalEventId,
+    pub route_kind: ConversationRouteKind,
     pub content_ref: InboundMessageContentRef,
     pub requested_agent_id: Option<AgentId>,
     pub requested_project_id: Option<ProjectId>,

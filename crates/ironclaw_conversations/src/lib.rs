@@ -23,7 +23,7 @@ pub use memory::InMemoryConversationServices;
 pub use traits::{ConversationBindingService, ConversationBindingServiceExt, SessionThreadService};
 pub use types::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, ConversationBindingResolution,
-    InboundTurnRequest, InboundTurnResponse, LinkConversationRequest, LinkedConversationBinding,
-    MessageIdempotencyStatus, ReplyTargetBinding, ResolveConversationRequest, ThreadAccessDecision,
-    ThreadMessageRecord,
+    ConversationRouteKind, InboundTurnRequest, InboundTurnResponse, LinkConversationRequest,
+    LinkedConversationBinding, MessageIdempotencyStatus, ReplyTargetBinding,
+    ResolveConversationRequest, ThreadAccessDecision, ThreadMessageRecord,
 };

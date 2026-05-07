@@ -42,6 +42,7 @@ where
                 external_actor_ref: request.external_actor_ref,
                 external_conversation_ref: request.external_conversation_ref.clone(),
                 external_event_id: request.external_event_id.clone(),
+                route_kind: request.route_kind,
                 requested_agent_id: request.requested_agent_id,
                 requested_project_id: request.requested_project_id,
             })

@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use ironclaw_conversations::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AdapterInstallationId, AdapterKind,
-    ConversationBindingResolution, ConversationBindingService, ExternalActorRef,
-    ExternalConversationRef, ExternalEventId, InMemoryConversationServices,
+    ConversationBindingResolution, ConversationBindingService, ConversationRouteKind,
+    ExternalActorRef, ExternalConversationRef, ExternalEventId, InMemoryConversationServices,
     InboundMessageContentRef, InboundTurnError, InboundTurnRequest, InboundTurnService,
     LinkConversationRequest, LinkedConversationBinding, MessageIdempotencyStatus,
     ReplyTargetBinding, SessionThreadService, ThreadAccessDecision,
@@ -313,6 +313,7 @@ async fn explicit_link_reuses_binding_when_only_external_message_id_changes() {
                 Some("message-1"),
             )
             .unwrap(),
+            route_kind: ConversationRouteKind::Direct,
             target_thread_id: web_resolution.turn_scope.thread_id.clone(),
             target_agent_id: web_resolution.turn_scope.agent_id.clone(),
             target_project_id: web_resolution.turn_scope.project_id.clone(),
@@ -332,6 +333,7 @@ async fn explicit_link_reuses_binding_when_only_external_message_id_changes() {
                 Some("message-2"),
             )
             .unwrap(),
+            route_kind: ConversationRouteKind::Direct,
             target_thread_id: web_resolution.turn_scope.thread_id,
             target_agent_id: web_resolution.turn_scope.agent_id,
             target_project_id: web_resolution.turn_scope.project_id,
@@ -459,6 +461,7 @@ async fn explicit_link_cannot_cross_tenant_by_reusing_a_thread_id() {
             adapter_installation_id: default_installation(),
             external_actor_ref: external_actor("alice-telegram"),
             external_conversation_ref: external_conversation("chat-tenant-b", None),
+            route_kind: ConversationRouteKind::Direct,
             target_thread_id: tenant_a.turn_scope.thread_id,
             target_agent_id: tenant_a.turn_scope.agent_id,
             target_project_id: tenant_a.turn_scope.project_id,
@@ -555,6 +558,7 @@ async fn explicit_link_attaches_conversation_to_existing_thread_after_access_che
             adapter_installation_id: default_installation(),
             external_actor_ref: external_actor("alice-telegram"),
             external_conversation_ref: external_conversation("chat-1", None),
+            route_kind: ConversationRouteKind::Direct,
             target_thread_id: web_resolution.turn_scope.thread_id.clone(),
             target_agent_id: web_resolution.turn_scope.agent_id.clone(),
             target_project_id: web_resolution.turn_scope.project_id.clone(),
@@ -614,6 +618,7 @@ async fn repeated_explicit_link_replays_existing_binding_refs() {
         adapter_installation_id: default_installation(),
         external_actor_ref: external_actor("alice-telegram"),
         external_conversation_ref: external_conversation("chat-1", None),
+        route_kind: ConversationRouteKind::Direct,
         target_thread_id: web_resolution.turn_scope.thread_id.clone(),
         target_agent_id: web_resolution.turn_scope.agent_id.clone(),
         target_project_id: web_resolution.turn_scope.project_id.clone(),
@@ -678,6 +683,7 @@ async fn explicit_link_refuses_to_retarget_existing_conversation_binding() {
             adapter_installation_id: default_installation(),
             external_actor_ref: external_actor("alice-telegram"),
             external_conversation_ref: external_conversation("chat-1", None),
+            route_kind: ConversationRouteKind::Direct,
             target_thread_id: first_thread.turn_scope.thread_id,
             target_agent_id: first_thread.turn_scope.agent_id,
             target_project_id: first_thread.turn_scope.project_id,
@@ -692,6 +698,7 @@ async fn explicit_link_refuses_to_retarget_existing_conversation_binding() {
             adapter_installation_id: default_installation(),
             external_actor_ref: external_actor("alice-telegram"),
             external_conversation_ref: external_conversation("chat-1", None),
+            route_kind: ConversationRouteKind::Direct,
             target_thread_id: second_thread.turn_scope.thread_id,
             target_agent_id: second_thread.turn_scope.agent_id,
             target_project_id: second_thread.turn_scope.project_id,
@@ -721,6 +728,7 @@ async fn first_bind_does_not_trust_unvalidated_requested_scope_hints() {
             adapter_installation_id: default_installation(),
             external_actor_ref: external_actor("alice-web"),
             external_conversation_ref: external_conversation("browser-session", None),
+            route_kind: ConversationRouteKind::Direct,
             external_event_id: ExternalEventId::new("web-event-scope-hint").unwrap(),
             requested_agent_id: Some(AgentId::new("spoofed-agent").unwrap()),
             requested_project_id: Some(ProjectId::new("spoofed-project").unwrap()),
@@ -809,6 +817,7 @@ async fn explicit_link_uses_existing_thread_scope_not_spoofed_link_scope() {
             adapter_installation_id: default_installation(),
             external_actor_ref: external_actor("alice-telegram"),
             external_conversation_ref: external_conversation("chat-1", None),
+            route_kind: ConversationRouteKind::Direct,
             target_thread_id: web_resolution.turn_scope.thread_id.clone(),
             target_agent_id: Some(AgentId::new("spoofed-agent").unwrap()),
             target_project_id: Some(ProjectId::new("spoofed-project").unwrap()),
@@ -1092,6 +1101,66 @@ async fn duplicate_external_event_replays_message_and_does_not_submit_duplicate_
         first.accepted_message.message_ref
     );
     assert_eq!(coordinator.submissions().len(), 1);
+}
+
+#[tokio::test]
+async fn shared_group_participant_can_send_on_existing_binding() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("alice-telegram"),
+            user("alice"),
+        )
+        .await;
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("bob-telegram"),
+            user("bob"),
+        )
+        .await;
+    let coordinator = Arc::new(RecordingTurnCoordinator::default());
+    let inbound = InboundTurnService::new(services.clone(), services.clone(), coordinator.clone());
+    let group = external_conversation("group-1", Some("topic-a"));
+    let mut alice_request = inbound_request(
+        telegram(),
+        external_actor("alice-telegram"),
+        group.clone(),
+        "group-event-alice",
+    );
+    alice_request.route_kind = ConversationRouteKind::Shared;
+
+    let alice = inbound.handle_inbound_turn(alice_request).await.unwrap();
+    services
+        .add_thread_participant(
+            &tenant(),
+            &alice.resolution.turn_scope.thread_id,
+            user("bob"),
+        )
+        .await
+        .unwrap();
+    let mut bob_request = inbound_request(
+        telegram(),
+        external_actor("bob-telegram"),
+        group,
+        "group-event-bob",
+    );
+    bob_request.route_kind = ConversationRouteKind::Shared;
+
+    let bob = inbound.handle_inbound_turn(bob_request).await.unwrap();
+
+    assert_eq!(bob.resolution.actor, TurnActor::new(user("bob")));
+    assert_eq!(bob.accepted_message.actor, TurnActor::new(user("bob")));
+    assert_eq!(coordinator.submissions().len(), 2);
+    assert_eq!(
+        coordinator.submissions()[1].actor,
+        TurnActor::new(user("bob"))
+    );
 }
 
 #[tokio::test]
@@ -1523,6 +1592,7 @@ fn inbound_request(
         external_actor_ref,
         external_conversation_ref,
         external_event_id: ExternalEventId::new(external_event_id).unwrap(),
+        route_kind: ConversationRouteKind::Direct,
         content_ref: InboundMessageContentRef::new(format!("content:{external_event_id}")).unwrap(),
         requested_agent_id: Some(agent()),
         requested_project_id: Some(project()),
@@ -1562,6 +1632,7 @@ fn resolve_request_with(
         external_actor_ref,
         external_conversation_ref,
         external_event_id: ExternalEventId::new(external_event_id).unwrap(),
+        route_kind: ConversationRouteKind::Direct,
         requested_agent_id: Some(agent()),
         requested_project_id: Some(project()),
     }

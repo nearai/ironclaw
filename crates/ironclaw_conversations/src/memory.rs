@@ -13,8 +13,8 @@ use uuid::Uuid;
 
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AdapterInstallationId, AdapterKind,
-    ConversationBindingResolution, ConversationBindingService, ExternalActorRef,
-    ExternalConversationIdentity, ExternalConversationRef, InboundTurnError,
+    ConversationBindingResolution, ConversationBindingService, ConversationRouteKind,
+    ExternalActorRef, ExternalConversationIdentity, ExternalConversationRef, InboundTurnError,
     LinkConversationRequest, LinkedConversationBinding, MessageIdempotencyStatus,
     ReplyTargetBinding, ResolveConversationRequest, SessionThreadService, ThreadAccessDecision,
     ThreadMessageRecord,
@@ -117,7 +117,7 @@ impl ConversationBindingService for InMemoryConversationServices {
             request.adapter_kind,
             request.adapter_installation_id,
             request.external_conversation_ref,
-            actor_user_id.clone(),
+            ReplyRouteAccess::new(actor_user_id.clone(), request.route_kind),
             BindingTarget::new(thread_id, None, None),
         )?;
         let resolution = binding.resolution(actor_user_id, request.tenant_id.clone());
@@ -164,7 +164,7 @@ impl ConversationBindingService for InMemoryConversationServices {
             request.adapter_kind,
             request.adapter_installation_id,
             request.external_conversation_ref,
-            actor_user_id,
+            ReplyRouteAccess::new(actor_user_id, request.route_kind),
             BindingTarget::new(
                 request.target_thread_id,
                 target_thread.agent_id,
@@ -634,10 +634,10 @@ struct ReplyRouteAccess {
 }
 
 impl ReplyRouteAccess {
-    fn owner(owner_user_id: UserId) -> Self {
+    fn new(owner_user_id: UserId, route_kind: ConversationRouteKind) -> Self {
         Self {
             owner_user_id,
-            shared: false,
+            shared: route_kind == ConversationRouteKind::Shared,
         }
     }
 
@@ -731,7 +731,7 @@ impl BindingRecord {
         adapter_kind: AdapterKind,
         adapter_installation_id: AdapterInstallationId,
         external_conversation_ref: ExternalConversationRef,
-        owner_user_id: UserId,
+        route_access: ReplyRouteAccess,
         target: BindingTarget,
     ) -> Result<Self, InboundTurnError> {
         let source_binding_ref = SourceBindingRef::new(format!("source:{}", Uuid::new_v4()))
@@ -749,7 +749,7 @@ impl BindingRecord {
             thread_id: target.thread_id,
             agent_id: target.agent_id,
             project_id: target.project_id,
-            route_access: ReplyRouteAccess::owner(owner_user_id),
+            route_access,
             source_binding_ref,
             reply_target_binding_ref,
         })
