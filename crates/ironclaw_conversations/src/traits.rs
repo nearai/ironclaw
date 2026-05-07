@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use ironclaw_host_api::{TenantId, ThreadId, UserId};
-use ironclaw_turns::{AcceptedMessageRef, ReplyTargetBindingRef};
+use ironclaw_turns::{AcceptedMessageRef, IdempotencyKey, ReplyTargetBindingRef};
 
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, ConversationBindingResolution,
@@ -43,6 +43,16 @@ pub trait SessionThreadService: Send + Sync {
         &self,
         message_ref: &AcceptedMessageRef,
     ) -> Result<bool, InboundTurnError>;
+
+    async fn inbound_message_turn_submission_key(
+        &self,
+        message_ref: &AcceptedMessageRef,
+    ) -> Result<IdempotencyKey, InboundTurnError>;
+
+    async fn rotate_inbound_message_turn_submission_key(
+        &self,
+        message_ref: &AcceptedMessageRef,
+    ) -> Result<(), InboundTurnError>;
 
     async fn mark_inbound_message_turn_submitted(
         &self,

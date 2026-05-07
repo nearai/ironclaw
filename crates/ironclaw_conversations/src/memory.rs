@@ -6,7 +6,8 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
-    AcceptedMessageRef, ReplyTargetBindingRef, SourceBindingRef, TurnActor, TurnScope,
+    AcceptedMessageRef, IdempotencyKey, ReplyTargetBindingRef, SourceBindingRef, TurnActor,
+    TurnScope,
 };
 use uuid::Uuid;
 
@@ -281,6 +282,33 @@ impl SessionThreadService for InMemoryConversationServices {
         Ok(state.submitted_message_refs.contains(message_ref))
     }
 
+    async fn inbound_message_turn_submission_key(
+        &self,
+        message_ref: &AcceptedMessageRef,
+    ) -> Result<IdempotencyKey, InboundTurnError> {
+        let mut state = self.lock_state()?;
+        if let Some(key) = state.submission_keys.get(message_ref).cloned() {
+            return Ok(key);
+        }
+        let key = IdempotencyKey::new(message_ref.as_str().to_string())
+            .map_err(|reason| InboundTurnError::InvalidCanonicalRef { reason })?;
+        state
+            .submission_keys
+            .insert(message_ref.clone(), key.clone());
+        Ok(key)
+    }
+
+    async fn rotate_inbound_message_turn_submission_key(
+        &self,
+        message_ref: &AcceptedMessageRef,
+    ) -> Result<(), InboundTurnError> {
+        let mut state = self.lock_state()?;
+        state
+            .submission_keys
+            .insert(message_ref.clone(), state_generated_submission_key()?);
+        Ok(())
+    }
+
     async fn mark_inbound_message_turn_submitted(
         &self,
         message_ref: &AcceptedMessageRef,
@@ -289,6 +317,11 @@ impl SessionThreadService for InMemoryConversationServices {
         state.submitted_message_refs.insert(message_ref.clone());
         Ok(())
     }
+}
+
+fn state_generated_submission_key() -> Result<IdempotencyKey, InboundTurnError> {
+    IdempotencyKey::new(format!("submit:{}", Uuid::new_v4()))
+        .map_err(|reason| InboundTurnError::InvalidCanonicalRef { reason })
 }
 
 impl InMemoryConversationServices {
@@ -307,6 +340,7 @@ struct InMemoryState {
     reply_targets: HashMap<String, ReplyTargetRecord>,
     threads: HashMap<ThreadKey, ThreadRecord>,
     message_idempotency: HashMap<MessageIdempotencyKey, AcceptedInboundMessage>,
+    submission_keys: HashMap<AcceptedMessageRef, IdempotencyKey>,
     submitted_message_refs: HashSet<AcceptedMessageRef>,
     messages: Vec<ThreadMessageRecord>,
 }
@@ -553,7 +587,7 @@ impl BindingRecord {
             tenant_id,
             adapter_kind,
             adapter_installation_id,
-            external_conversation_ref,
+            external_conversation_ref: external_conversation_ref.without_message_id(),
             external_conversation_identity,
             thread_id,
             agent_id,

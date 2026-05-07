@@ -11,9 +11,10 @@ use ironclaw_conversations::{
 };
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, ResumeTurnRequest,
-    ResumeTurnResponse, RunProfileId, RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse,
-    TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnRunState, TurnStatus,
+    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey,
+    ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion, SubmitTurnRequest,
+    SubmitTurnResponse, ThreadBusy, TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnRunState,
+    TurnStatus,
 };
 
 #[tokio::test]
@@ -405,7 +406,8 @@ async fn validated_reply_target_preserves_adapter_installation_and_external_rout
     );
     assert_eq!(
         target.external_conversation_ref.message_id(),
-        Some("message-1")
+        None,
+        "binding-level reply targets must not preserve stale per-message routing"
     );
 }
 
@@ -792,6 +794,49 @@ async fn duplicate_external_event_after_transient_submit_failure_retries_same_me
         coordinator.submissions()[0].accepted_message_ref,
         coordinator.submissions()[1].accepted_message_ref,
         "adapter retry must reuse the accepted message ref instead of getting stuck after a pre-submit failure"
+    );
+    assert!(retry.turn_submission.is_some());
+}
+
+#[tokio::test]
+async fn busy_thread_retry_uses_fresh_submit_key_for_same_accepted_message() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-1"),
+            user("alice"),
+        )
+        .await;
+    let coordinator = Arc::new(BusyFirstUniqueKeyCoordinator::default());
+    let inbound = InboundTurnService::new(services.clone(), services.clone(), coordinator.clone());
+    let request = inbound_request(
+        telegram(),
+        external_actor("telegram-user-1"),
+        external_conversation("chat-1", None),
+        "telegram-event-busy-retry",
+    );
+
+    let err = inbound
+        .handle_inbound_turn(request.clone())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, InboundTurnError::TurnSubmissionFailed { .. }));
+
+    let retry = inbound.handle_inbound_turn(request).await.unwrap();
+
+    assert_eq!(services.accepted_messages().await.len(), 1);
+    assert_eq!(coordinator.submissions().len(), 2);
+    assert_eq!(
+        coordinator.submissions()[0].accepted_message_ref,
+        coordinator.submissions()[1].accepted_message_ref
+    );
+    assert_ne!(
+        coordinator.submissions()[0].idempotency_key,
+        coordinator.submissions()[1].idempotency_key,
+        "busy/admission idempotency replays must not strand the accepted inbound message forever"
     );
     assert!(retry.turn_submission.is_some());
 }
@@ -1269,6 +1314,21 @@ impl SessionThreadService for FixedMessageSessionService {
         Ok(*self.submitted.lock().unwrap())
     }
 
+    async fn inbound_message_turn_submission_key(
+        &self,
+        message_ref: &AcceptedMessageRef,
+    ) -> Result<IdempotencyKey, InboundTurnError> {
+        IdempotencyKey::new(message_ref.as_str().to_string())
+            .map_err(|reason| InboundTurnError::InvalidCanonicalRef { reason })
+    }
+
+    async fn rotate_inbound_message_turn_submission_key(
+        &self,
+        _message_ref: &AcceptedMessageRef,
+    ) -> Result<(), InboundTurnError> {
+        Ok(())
+    }
+
     async fn mark_inbound_message_turn_submitted(
         &self,
         _message_ref: &AcceptedMessageRef,
@@ -1294,9 +1354,54 @@ struct FailFirstTurnCoordinator {
     submissions: Mutex<Vec<SubmitTurnRequest>>,
 }
 
+#[derive(Default)]
+struct BusyFirstUniqueKeyCoordinator {
+    submissions: Mutex<Vec<SubmitTurnRequest>>,
+}
+
+impl BusyFirstUniqueKeyCoordinator {
+    fn submissions(&self) -> Vec<SubmitTurnRequest> {
+        self.submissions.lock().unwrap().clone()
+    }
+}
+
 impl FailFirstTurnCoordinator {
     fn submissions(&self) -> Vec<SubmitTurnRequest> {
         self.submissions.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl TurnCoordinator for BusyFirstUniqueKeyCoordinator {
+    async fn submit_turn(
+        &self,
+        request: SubmitTurnRequest,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        let mut submissions = self.submissions.lock().unwrap();
+        submissions.push(request.clone());
+        if submissions.len() == 1 {
+            return Err(TurnError::ThreadBusy(ThreadBusy {
+                active_run_id: TurnRunId::new(),
+                status: TurnStatus::Running,
+                event_cursor: ironclaw_turns::events::EventCursor(1),
+            }));
+        }
+        Ok(accepted_response(request))
+    }
+
+    async fn resume_turn(
+        &self,
+        _request: ResumeTurnRequest,
+    ) -> Result<ResumeTurnResponse, TurnError> {
+        unimplemented!("not used by inbound facade tests")
+    }
+
+    async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
+        unimplemented!("not used by inbound facade tests")
+    }
+
+    async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        unimplemented!("not used by inbound facade tests")
     }
 }
 

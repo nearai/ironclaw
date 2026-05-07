@@ -127,6 +127,15 @@ impl ExternalConversationRef {
         self.message_id.as_deref()
     }
 
+    pub fn without_message_id(&self) -> Self {
+        Self {
+            space_id: self.space_id.clone(),
+            conversation_id: self.conversation_id.clone(),
+            thread_id: self.thread_id.clone(),
+            message_id: None,
+        }
+    }
+
     pub(crate) fn identity(&self) -> ExternalConversationIdentity {
         ExternalConversationIdentity {
             space_id: self.space_id.clone(),

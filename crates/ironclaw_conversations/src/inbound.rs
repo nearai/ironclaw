@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ironclaw_turns::{IdempotencyKey, SubmitTurnRequest, TurnCoordinator};
+use ironclaw_turns::{SubmitTurnRequest, TurnCoordinator};
 
 use crate::{
     AcceptInboundMessageRequest, ConversationBindingService, InboundTurnError, InboundTurnRequest,
@@ -74,10 +74,11 @@ where
             });
         }
 
-        let idempotency_key =
-            IdempotencyKey::new(accepted_message.message_ref.as_str().to_string())
-                .map_err(|reason| InboundTurnError::InvalidCanonicalRef { reason })?;
-        let turn_submission = self
+        let idempotency_key = self
+            .session_thread_service
+            .inbound_message_turn_submission_key(&accepted_message.message_ref)
+            .await?;
+        let turn_submission_result = self
             .turn_coordinator
             .submit_turn(SubmitTurnRequest {
                 scope: resolution.turn_scope.clone(),
@@ -89,10 +90,18 @@ where
                 idempotency_key,
                 received_at: request.received_at,
             })
-            .await
-            .map_err(|error| InboundTurnError::TurnSubmissionFailed {
-                reason: error.to_string(),
-            })?;
+            .await;
+        let turn_submission = match turn_submission_result {
+            Ok(response) => response,
+            Err(error) => {
+                self.session_thread_service
+                    .rotate_inbound_message_turn_submission_key(&accepted_message.message_ref)
+                    .await?;
+                return Err(InboundTurnError::TurnSubmissionFailed {
+                    reason: error.to_string(),
+                });
+            }
+        };
         self.session_thread_service
             .mark_inbound_message_turn_submitted(&accepted_message.message_ref)
             .await?;
