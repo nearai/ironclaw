@@ -60,6 +60,23 @@ async fn libsql_accepts_long_external_event_ids_without_index_key_bloat() {
 
 #[cfg(feature = "postgres")]
 #[tokio::test]
+async fn postgres_migrations_are_serialized_when_called_concurrently() {
+    let Some(pool) = postgres_pool().await else {
+        return;
+    };
+    let stores = (0..8)
+        .map(|_| PostgresSessionThreadService::new(pool.clone()))
+        .collect::<Vec<_>>();
+
+    let results = join_all(stores.iter().map(|store| store.run_migrations())).await;
+
+    for result in results {
+        result.unwrap();
+    }
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
 async fn postgres_persists_thread_history_and_context_across_instances_when_configured() {
     let Some(pool) = postgres_pool().await else {
         return;

@@ -306,11 +306,17 @@ impl PostgresSessionThreadService {
     }
 
     pub async fn run_migrations(&self) -> Result<(), SessionThreadError> {
-        let client = self.client().await?;
-        client
-            .batch_execute(POSTGRES_SESSION_THREAD_SCHEMA)
+        const MIGRATION_LOCK_ID: i64 = 0x1c10_0003;
+
+        let mut client = self.client().await?;
+        let txn = client.transaction().await.map_err(db_error)?;
+        txn.query_one("SELECT pg_advisory_xact_lock($1)", &[&MIGRATION_LOCK_ID])
             .await
-            .map_err(db_error)
+            .map_err(db_error)?;
+        txn.batch_execute(POSTGRES_SESSION_THREAD_SCHEMA)
+            .await
+            .map_err(db_error)?;
+        txn.commit().await.map_err(db_error)
     }
 
     async fn client(&self) -> Result<deadpool_postgres::Object, SessionThreadError> {
@@ -1369,7 +1375,7 @@ async fn postgres_replace_state(
         let payload = to_json(&thread.record)?;
         client
             .execute(
-                "INSERT INTO reborn_session_thread_records (thread_id, scope_key, next_sequence, payload) VALUES ($1, $2, $3, $4::jsonb)",
+                "INSERT INTO reborn_session_thread_records (thread_id, scope_key, next_sequence, payload) VALUES ($1, $2, $3, $4::text::jsonb)",
                 &[
                     &thread.record.thread_id.to_string(),
                     &thread_scope_key(&thread.record.scope)?,
@@ -1383,7 +1389,7 @@ async fn postgres_replace_state(
             let payload = to_json(message)?;
             client
                 .execute(
-                    "INSERT INTO reborn_thread_message_records (message_id, thread_id, scope_key, sequence, kind, status, turn_run_id, payload) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)",
+                    "INSERT INTO reborn_thread_message_records (message_id, thread_id, scope_key, sequence, kind, status, turn_run_id, payload) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::text::jsonb)",
                     &[
                         &message.message_id.to_string(),
                         &message.thread_id.to_string(),
@@ -1402,7 +1408,7 @@ async fn postgres_replace_state(
             let payload = to_json(summary)?;
             client
                 .execute(
-                    "INSERT INTO reborn_thread_summary_artifacts (summary_id, thread_id, scope_key, start_sequence, end_sequence, model_context_policy, payload) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)",
+                    "INSERT INTO reborn_thread_summary_artifacts (summary_id, thread_id, scope_key, start_sequence, end_sequence, model_context_policy, payload) VALUES ($1, $2, $3, $4, $5, $6, $7::text::jsonb)",
                     &[
                         &summary.summary_id.to_string(),
                         &summary.thread_id.to_string(),
@@ -1422,7 +1428,7 @@ async fn postgres_replace_state(
         let payload = to_json(record)?;
         client
             .execute(
-                "INSERT INTO reborn_thread_inbound_idempotency (record_key, scope_key, source_binding_id, external_event_id, thread_id, message_id, payload) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)",
+                "INSERT INTO reborn_thread_inbound_idempotency (record_key, scope_key, source_binding_id, external_event_id, thread_id, message_id, payload) VALUES ($1, $2, $3, $4, $5, $6, $7::text::jsonb)",
                 &[
                     &idempotency_record_key(&record.key())?,
                     &thread_scope_key(&record.scope)?,
