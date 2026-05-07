@@ -1537,15 +1537,6 @@ async def test_mcp_oauth_roundtrip_via_browser(browser, auth_matrix_server):
         await context.close()
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Engine-v2 inline-await regression: OAuth/MCP gate resume paths "
-        "through the v2 engine park the agent loop, and the matching "
-        "/api/chat/gate/resolve queues through the same mpsc that's "
-        "blocked. Mirrors test_v2_engine_approval_flow.py::test_approval_yes."
-    ),
-    strict=False,
-)
 async def test_mcp_same_server_multi_user_via_browser(browser, auth_matrix_server):
     server = auth_matrix_server
     member = await create_member_user(server["base_url"], display_name="MCP Matrix Member")
@@ -1673,13 +1664,6 @@ async def test_chat_first_gmail_installs_prompts_and_retries(
     assert extension["active"] is True, extension
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Engine-v2 inline-await regression — see "
-        "test_mcp_same_server_multi_user_via_browser xfail note."
-    ),
-    strict=False,
-)
 async def test_settings_first_gmail_auth_then_chat_runs(
     auth_matrix_server, auth_matrix_page
 ):
@@ -1890,13 +1874,6 @@ async def test_mcp_oauth_roundtrip(auth_matrix_server):
     assert any("mock_search" in tool for tool in extension.get("tools", [])), extension
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Engine-v2 inline-await regression — see "
-        "test_mcp_same_server_multi_user_via_browser xfail note."
-    ),
-    strict=False,
-)
 async def test_wasm_tool_oauth_refresh_on_demand(auth_matrix_server):
     server = auth_matrix_server
     auth_url = await _wasm_tool_auth_url(server)

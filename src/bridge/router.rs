@@ -2477,6 +2477,39 @@ pub enum InlineGateOutcome {
     NoLiveVm,
 }
 
+/// Verification failures from [`try_resolve_inline_approval_gate`] that
+/// must surface as 4xx HTTP responses rather than fall through to the
+/// legacy resume path. Variants map to specific status codes at the HTTP
+/// boundary (see `chat_approval_handler`):
+///
+/// - [`InlineGateError::ChannelMismatch`] → 403 Forbidden
+/// - [`InlineGateError::Stale`] → 409 Conflict (request_id already
+///   resolved or doesn't match the latest pending row)
+/// - [`InlineGateError::Expired`] → 409 Conflict (the pending gate's
+///   `expires_at` has passed)
+/// - [`InlineGateError::Other`] → 500 Internal Server Error
+///
+/// Typed at the API boundary (rather than relying on
+/// `error.to_string().contains("authorization")`) so a future change to
+/// the error format string can't silently flip a 403 into a 500.
+#[derive(Debug, thiserror::Error)]
+pub enum InlineGateError {
+    /// The resolving channel does not match the channel that originated
+    /// the gate (and is not in the trusted-channel allowlist).
+    #[error("Channel '{actual}' cannot resolve gates from channel '{expected}'")]
+    ChannelMismatch { expected: String, actual: String },
+    /// The request_id doesn't match the active pending gate (already
+    /// resolved, dropped, or replaced by a newer gate row).
+    #[error("Approval request is stale or already resolved")]
+    Stale,
+    /// The pending gate's `expires_at` has elapsed.
+    #[error("Approval request has expired")]
+    Expired,
+    /// Any other gate-store failure.
+    #[error("gate error: {0}")]
+    Other(String),
+}
+
 /// Fast-path inline resolution for an Approval gate, intended to be
 /// callable from HTTP handlers without going through the agent-loop
 /// mpsc.
@@ -2504,7 +2537,8 @@ pub enum InlineGateOutcome {
 ///
 /// Errors are returned only when the gate exists but verification
 /// fails (channel mismatch, stale request_id, expired). Those map to
-/// 4xx responses; the caller should not fall through.
+/// 4xx responses via [`InlineGateError`]; the caller should not fall
+/// through.
 pub async fn try_resolve_inline_approval_gate(
     user_id: &str,
     channel: &str,
@@ -2512,7 +2546,7 @@ pub async fn try_resolve_inline_approval_gate(
     request_id: uuid::Uuid,
     resolution: ironclaw_engine::GateResolution,
     settings_store: Option<&(dyn crate::db::SettingsStore + Send + Sync)>,
-) -> Result<InlineGateOutcome, Error> {
+) -> Result<InlineGateOutcome, InlineGateError> {
     // Only Approval-shaped resolutions are eligible for inline-await.
     // `BridgeGateController::pause` returns Cancelled immediately for
     // Authentication and External resume kinds without parking, so
@@ -2541,8 +2575,9 @@ pub async fn try_resolve_inline_approval_gate(
     };
 
     // take_verified atomically removes + verifies (request_id, channel
-    // auth, expiry). Verification failures surface as Err so the HTTP
-    // handler returns 4xx rather than silently falling through.
+    // auth, expiry). Verification failures surface as a typed
+    // `InlineGateError` so the HTTP handler can map to the right 4xx
+    // status without inspecting message strings.
     let pending = state
         .pending_gates
         .take_verified(&key, request_id, channel)
@@ -2550,15 +2585,12 @@ pub async fn try_resolve_inline_approval_gate(
         .map_err(|e| {
             use crate::gate::store::GateStoreError;
             match e {
-                GateStoreError::ChannelMismatch { expected, actual } => engine_err(
-                    "authorization",
-                    format!("Channel '{actual}' cannot resolve gates from channel '{expected}'"),
-                ),
-                GateStoreError::RequestIdMismatch => {
-                    engine_err("stale", "Approval request is stale or already resolved")
+                GateStoreError::ChannelMismatch { expected, actual } => {
+                    InlineGateError::ChannelMismatch { expected, actual }
                 }
-                GateStoreError::Expired => engine_err("expired", "Approval request has expired"),
-                other => engine_err("gate", other),
+                GateStoreError::RequestIdMismatch => InlineGateError::Stale,
+                GateStoreError::Expired => InlineGateError::Expired,
+                other => InlineGateError::Other(other.to_string()),
             }
         })?;
 
@@ -4167,6 +4199,335 @@ fn spawn_deferred_context_cleanup(
     });
 }
 
+/// Background continuation that takes over event forwarding and final
+/// response delivery for a thread that parked at an inline approval
+/// gate. Spawned by `await_thread_outcome` once it detects a pending
+/// gate row for the (user, thread) — at that point the foreground
+/// `handle_message` future is unblocked (returns `Pending`) so the
+/// per-user agent loop can dispatch other threads, while this task
+/// continues to:
+///
+/// 1. Forward `ThreadEvent`s for `thread_id` to SSE and the originating
+///    channel — covers both the events emitted before the user
+///    resolves the gate and the post-resume events once the engine
+///    continues from the parked tool call.
+/// 2. Detect thread completion via `is_running`, then call
+///    `join_thread` for the final outcome.
+/// 3. Broadcast the final response via SSE (`AppEvent::Response`),
+///    deliver it through the originating channel
+///    (`ChannelManager::respond` + `Done` status), and persist it to
+///    the v1 conversation table for the history API.
+/// 4. Clear the per-(user, thread) execution context so the gate
+///    controller's bookkeeping bounds.
+///
+/// Without this task, after early-Pending-on-park the engine resumes
+/// invisibly: SSE clients never see the assistant response, non-web
+/// channels (Telegram, CLI) never receive the response message, and
+/// the history table is missing the final assistant turn.
+///
+/// Capped at one hour to bound execution against any pathological
+/// post-resume hang; the gate `expires_at` (30 min) upper-bounds the
+/// pre-resume wait, and a sane post-resume thread completes well
+/// inside the second 30 min.
+#[allow(clippy::too_many_arguments)]
+fn spawn_post_park_continuation(
+    state: &EngineState,
+    channels: Arc<crate::channels::ChannelManager>,
+    message: IncomingMessage,
+    conv_id: ironclaw_engine::ConversationId,
+    thread_id: ironclaw_engine::ThreadId,
+) {
+    let thread_manager = Arc::clone(&state.thread_manager);
+    let conversation_manager = Arc::clone(&state.conversation_manager);
+    let effect_adapter = Arc::clone(&state.effect_adapter);
+    let store = Arc::clone(&state.store);
+    let gate_controller = Arc::clone(&state.gate_controller);
+    let pending_gates = Arc::clone(&state.pending_gates);
+    let sse = state.sse.clone();
+    let db = state.db.clone();
+    let auth_manager = state.auth_manager.clone();
+    let extension_manager = state.extension_manager.clone();
+    let user_id = message.user_id.clone();
+    let channel_name = message.channel.clone();
+    let metadata = message.metadata.clone();
+    let tid_str = thread_id.to_string();
+
+    tokio::spawn(async move {
+        let mut event_rx = thread_manager.subscribe_events();
+        // Cap at one hour: gate expiry bounds the pre-resume wait, and
+        // a sane post-resume thread completes well inside that.
+        let max_wait = std::time::Duration::from_secs(60 * 60);
+        let started = tokio::time::Instant::now();
+        loop {
+            tokio::select! {
+                event = event_rx.recv() => {
+                    match event {
+                        Ok(ref evt) if evt.thread_id == thread_id => {
+                            forward_event_to_channel(evt, &channels, &channel_name, &metadata).await;
+                            if let Some(ref sse) = sse {
+                                let skip_verbose = !sse.has_verbose_receivers();
+                                let leak_detector = effect_adapter.safety().leak_detector();
+                                for mut app_event in thread_event_to_app_events(evt, &tid_str) {
+                                    if skip_verbose && app_event.is_verbose_only() {
+                                        continue;
+                                    }
+                                    redact_code_executed_secrets(&mut app_event, leak_detector);
+                                    sse.broadcast_for_user(&user_id, app_event); // projection-exempt: bridge dispatcher, post-park event forwarding
+                                }
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        _ => {}
+                    }
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
+                    if !thread_manager.is_running(thread_id).await {
+                        break;
+                    }
+                    if started.elapsed() >= max_wait {
+                        tracing::warn!(
+                            thread_id = %thread_id,
+                            "post-park continuation hit one-hour cap; abandoning"
+                        );
+                        gate_controller.clear_execution_context(&user_id, thread_id, conv_id).await;
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Thread completed. Mirror `await_thread_outcome`'s post-loop
+        // outcome → BridgeOutcome path, but deliver the response
+        // directly via channel + SSE rather than returning it through
+        // the bridge return value (the foreground call returned Pending
+        // long ago).
+        let outcome = match thread_manager.join_thread(thread_id).await {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::debug!(
+                    thread_id = %thread_id,
+                    error = %e,
+                    "post-park continuation: join_thread failed"
+                );
+                gate_controller
+                    .clear_execution_context(&user_id, thread_id, conv_id)
+                    .await;
+                return;
+            }
+        };
+
+        if let Err(e) = conversation_manager
+            .record_thread_outcome(conv_id, thread_id, &outcome)
+            .await
+        {
+            tracing::debug!(
+                thread_id = %thread_id,
+                error = %e,
+                "post-park continuation: record_thread_outcome failed"
+            );
+        }
+
+        let response_text: Option<String> = match &outcome {
+            ThreadOutcome::Completed { response } => {
+                if let Some(ref db) = db {
+                    persist_v2_tool_calls(&store, db, thread_id, &message).await;
+                }
+                response.clone()
+            }
+            ThreadOutcome::Stopped => Some("Thread was stopped.".into()),
+            ThreadOutcome::MaxIterations => {
+                Some("Reached maximum iterations without completing.".into())
+            }
+            ThreadOutcome::Failed {
+                error,
+                debug_detail,
+            } => {
+                let sanitized =
+                    crate::bridge::user_facing_errors::user_facing_thread_failure(error);
+                let sse_will_deliver_to_user =
+                    sse.is_some() && channel_name == GATEWAY_CHANNEL_NAME;
+                if let Some(ref sse) = sse {
+                    sse.broadcast_for_user(
+                        // projection-exempt: bridge dispatcher, post-park failed thread error
+                        &user_id,
+                        AppEvent::Error {
+                            message: sanitized.clone(),
+                            thread_id: Some(tid_str.clone()),
+                        },
+                    );
+                }
+                match bridge_outcome_for_failed_thread(
+                    error,
+                    debug_detail.as_deref(),
+                    &user_id,
+                    &channel_name,
+                    sse_will_deliver_to_user,
+                ) {
+                    BridgeOutcome::Respond(text) => Some(text),
+                    _ => None,
+                }
+            }
+            ThreadOutcome::GatePaused {
+                gate_name,
+                action_name,
+                call_id,
+                parameters,
+                resume_kind,
+                resume_output,
+                paused_lease,
+            } => {
+                // The post-resume engine hit ANOTHER (legacy) GatePaused
+                // outcome — typically Authentication or External. Build
+                // the new pending gate row and surface the prompt; no
+                // response text to deliver yet.
+                let redacted_params =
+                    if let Some(tool) = effect_adapter.tools().get(action_name).await {
+                        crate::tools::redact_params(parameters, tool.sensitive_params())
+                    } else {
+                        parameters.clone()
+                    };
+                let pending = PendingGate {
+                    request_id: uuid::Uuid::new_v4(),
+                    gate_name: gate_name.clone(),
+                    user_id: user_id.clone(),
+                    thread_id,
+                    scope_thread_id: message
+                        .conversation_scope()
+                        .and_then(|s| ironclaw_common::ExternalThreadId::new(s).ok()),
+                    conversation_id: conv_id,
+                    source_channel: channel_name.clone(),
+                    action_name: action_name.clone(),
+                    call_id: call_id.clone(),
+                    parameters: parameters.clone(),
+                    display_parameters: Some(redacted_params),
+                    description: format!(
+                        "Tool '{}' requires {} (gate: {gate_name})",
+                        action_name,
+                        resume_kind.kind_name()
+                    ),
+                    resume_kind: resume_kind.clone(),
+                    created_at: chrono::Utc::now(),
+                    expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
+                    original_message: Some(message.content.clone()),
+                    resume_output: resume_output.clone(),
+                    paused_lease: paused_lease.as_deref().cloned(),
+                    approval_already_granted: false,
+                };
+                if let Err(e) = pending_gates.insert(pending.clone()).await {
+                    tracing::debug!(
+                        gate = %gate_name,
+                        error = %e,
+                        "post-park continuation: failed to store follow-up pending gate"
+                    );
+                }
+                let extension_name = resolve_auth_gate_extension_name(
+                    auth_manager.as_deref(),
+                    extension_manager.as_deref(),
+                    effect_adapter.tools(),
+                    &pending,
+                )
+                .await;
+                let _ = channels
+                    .send_status(
+                        &channel_name,
+                        match &pending.resume_kind {
+                            ironclaw_engine::ResumeKind::Approval { allow_always } => {
+                                StatusUpdate::ApprovalNeeded {
+                                    request_id: pending.request_id.to_string(),
+                                    tool_name: pending.action_name.clone(),
+                                    description: pending.description.clone(),
+                                    parameters: pending
+                                        .display_parameters
+                                        .clone()
+                                        .unwrap_or_else(|| pending.parameters.clone()),
+                                    allow_always: *allow_always,
+                                }
+                            }
+                            _ => StatusUpdate::AuthRequired {
+                                extension_name: extension_name.unwrap_or_else(|| {
+                                    ironclaw_common::ExtensionName::from_trusted(
+                                        pending.action_name.clone(),
+                                    )
+                                }),
+                                instructions: Some(pending.description.clone()),
+                                auth_url: None,
+                                setup_url: None,
+                                request_id: Some(pending.request_id.to_string()),
+                            },
+                        },
+                        &metadata,
+                    )
+                    .await;
+                None
+            }
+        };
+
+        if let Some(ref text) = response_text {
+            // SSE Response broadcast (web).
+            if let Some(ref sse) = sse {
+                sse.broadcast_for_user(
+                    // projection-exempt: bridge dispatcher, post-park final response
+                    &user_id,
+                    AppEvent::Response {
+                        content: text.clone(),
+                        thread_id: tid_str.clone(),
+                    },
+                );
+            }
+            // Channel respond + Done status (Telegram, CLI, gateway).
+            if let Err(e) = channels
+                .respond(&message, OutgoingResponse::text(text.clone()))
+                .await
+            {
+                tracing::debug!(
+                    channel = %channel_name,
+                    error = %e,
+                    "post-park continuation: channel respond failed"
+                );
+            }
+            if let Err(e) = channels
+                .send_status(
+                    &channel_name,
+                    StatusUpdate::Status("Done".into()),
+                    &metadata,
+                )
+                .await
+            {
+                tracing::debug!(
+                    channel = %channel_name,
+                    error = %e,
+                    "post-park continuation: Done status failed"
+                );
+            }
+            // Persist to v1 DB so the history API renders the final
+            // assistant message.
+            if let Some(ref db) = db {
+                let scope_uuid = message
+                    .conversation_scope()
+                    .and_then(|s| uuid::Uuid::parse_str(s).ok());
+                let v1_conv_id = if let Some(uuid) = scope_uuid {
+                    Some(uuid)
+                } else {
+                    db.get_or_create_assistant_conversation(&user_id, &channel_name)
+                        .await
+                        .ok()
+                };
+                if let Some(cid) = v1_conv_id {
+                    let _ = db.add_conversation_message(cid, "assistant", text).await;
+                }
+            }
+        }
+
+        gate_controller
+            .clear_execution_context(&user_id, thread_id, conv_id)
+            .await;
+        debug!(
+            thread_id = %thread_id,
+            "engine v2: post-park continuation ran"
+        );
+    });
+}
+
 /// Fire active OnEvent missions whose pattern matches the inbound message.
 ///
 /// Builds a payload containing the message metadata that mission threads
@@ -4261,6 +4622,16 @@ async fn await_thread_outcome(
     // a denied approval where the thread fails to resume).
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
     let mut timed_out = false;
+    // Set when we detect the thread has parked at an inline gate. The
+    // gate-park handoff (below) returns `Pending` immediately so the
+    // per-user agent loop unblocks and can dispatch other threads, while
+    // a background task takes over event forwarding and final-response
+    // delivery for this thread.
+    let mut gate_parked = false;
+    let pending_key = PendingGateKey {
+        user_id: message.user_id.clone(),
+        thread_id,
+    };
 
     loop {
         tokio::select! {
@@ -4303,6 +4674,22 @@ async fn await_thread_outcome(
                 if !state.thread_manager.is_running(thread_id).await {
                     break;
                 }
+                // Inline gate detection: if a pending gate has been
+                // registered for (user, thread) while the thread is
+                // still running, the engine is parked inside
+                // `BridgeGateController::pause` awaiting user
+                // resolution. Holding `handle_message` here would
+                // serialize the per-user agent loop behind the parked
+                // pause — a second thread's `UserInput` queued in
+                // `msg_tx` cannot dispatch until either the user
+                // resolves this gate or the 5-minute deadline below
+                // fires. Hand off to a background continuation task
+                // (preserves event forwarding + final-response delivery)
+                // and surface as `Pending` so the agent loop unblocks.
+                if state.pending_gates.peek(&pending_key).await.is_some() {
+                    gate_parked = true;
+                    break;
+                }
                 if tokio::time::Instant::now() >= deadline {
                     tracing::warn!(
                         thread_id = %thread_id,
@@ -4313,6 +4700,23 @@ async fn await_thread_outcome(
                 }
             }
         }
+    }
+
+    // If we exited because the thread parked at an inline gate, hand
+    // off the rest of the lifecycle (event forwarding + final response
+    // broadcast on completion + per-execution context cleanup) to a
+    // background task and return `Pending`. join_thread cannot run on
+    // the foreground task because it would block on the parked future
+    // for up to the gate's 30-min expiry.
+    if gate_parked && state.thread_manager.is_running(thread_id).await {
+        spawn_post_park_continuation(
+            state,
+            agent.channels.clone(),
+            message.clone(),
+            conv_id,
+            thread_id,
+        );
+        return Ok(BridgeOutcome::Pending);
     }
 
     // If we hit the deadline and the thread is still running (typically
@@ -11222,12 +11626,15 @@ mod tests {
         );
     }
 
-    /// Regression for the bug fixed in commit 652315e8: `persist_v2_tool_calls`
-    /// must only be called from the `ThreadOutcome::Completed` arm. If a
-    /// future refactor moves the call out of that arm, partial tool
-    /// executions on `GatePaused` would orphan a `role="tool_calls"` DB row
-    /// that then duplicates when the gate resumes. Pin the call-site
-    /// conditional by inspecting the source of `await_thread_outcome`.
+    /// Regression for the bug fixed in commit 652315e8:
+    /// `persist_v2_tool_calls` must only be called from a
+    /// `ThreadOutcome::Completed` arm. If a future refactor moves the
+    /// call out of that arm, partial tool executions on `GatePaused`
+    /// would orphan a `role="tool_calls"` DB row that then duplicates
+    /// when the gate resumes. Pin the call-site invariant by inspecting
+    /// the source of `await_thread_outcome` and any sibling arm-driven
+    /// dispatchers (currently `spawn_post_park_continuation`, which
+    /// re-runs the same outcome match in a background task).
     #[test]
     fn persist_v2_tool_calls_only_called_from_completed_arm() {
         let source = include_str!("router.rs");
@@ -11235,33 +11642,49 @@ mod tests {
             .split_once("async fn persist_v2_tool_calls")
             .expect("persist_v2_tool_calls must exist in router.rs");
 
-        // There should be exactly one call site in the pre-definition body
-        // (the call inside `await_thread_outcome`). The text below the
-        // definition is allowed to reference it (doc comments, unit tests).
-        let call_sites = before_fn.matches("persist_v2_tool_calls(").count();
-        assert_eq!(
-            call_sites, 1,
-            "expected exactly one call site for persist_v2_tool_calls, found {call_sites}"
-        );
-
-        // The call must live inside `ThreadOutcome::Completed` and must not
-        // appear in any of the terminal arms that represent non-completion
-        // outcomes. `GatePaused` is the one that triggered the bug.
-        let completed_idx = before_fn
-            .find("ThreadOutcome::Completed")
-            .expect("Completed arm must exist");
-        let gate_paused_idx = before_fn
-            .find("ThreadOutcome::GatePaused")
-            .expect("GatePaused arm must exist");
-        let call_idx = before_fn
-            .find("persist_v2_tool_calls(")
-            .expect("call site must exist");
-
+        // The text below the definition is allowed to reference it
+        // (doc comments, unit tests). Above the definition there must
+        // be at least one call site, and every call site must sit
+        // between a `ThreadOutcome::Completed` opening match arm and
+        // the nearest non-Completed sibling arm.
+        let call_sites: Vec<usize> = before_fn
+            .match_indices("persist_v2_tool_calls(")
+            .map(|(idx, _)| idx)
+            .collect();
         assert!(
-            completed_idx < call_idx && call_idx < gate_paused_idx,
-            "persist_v2_tool_calls call must sit between Completed and GatePaused arms, got \
-             completed={completed_idx} call={call_idx} gate_paused={gate_paused_idx}"
+            !call_sites.is_empty(),
+            "expected at least one call site for persist_v2_tool_calls"
         );
+
+        let other_outcome_arms = [
+            "ThreadOutcome::GatePaused",
+            "ThreadOutcome::Failed",
+            "ThreadOutcome::Stopped",
+            "ThreadOutcome::MaxIterations",
+        ];
+        for call_idx in &call_sites {
+            // Find the most recent match-arm marker preceding this call.
+            // Must be `ThreadOutcome::Completed` — anything else means
+            // the call sits in a non-completion arm and risks the bug.
+            let prefix = &before_fn[..*call_idx];
+            let last_completed = prefix.rfind("ThreadOutcome::Completed");
+            let last_other = other_outcome_arms
+                .iter()
+                .filter_map(|arm| prefix.rfind(arm))
+                .max();
+            assert!(
+                last_completed.is_some(),
+                "persist_v2_tool_calls call at byte {call_idx} must be inside a \
+                 ThreadOutcome::Completed arm — no preceding Completed marker"
+            );
+            assert!(
+                last_other.unwrap_or(0) < last_completed.unwrap_or(0),
+                "persist_v2_tool_calls call at byte {call_idx} must be inside the \
+                 closest enclosing ThreadOutcome::Completed arm; a non-Completed arm \
+                 marker (GatePaused/Failed/Stopped/MaxIterations) appears between \
+                 the Completed marker and the call"
+            );
+        }
     }
 
     // ── resume_lease_for_pending_gate tests ────────────────────
@@ -12007,10 +12430,9 @@ mod tests {
             )
             .await
             .expect_err("cross-channel resolve must error");
-            let msg = err.to_string();
             assert!(
-                msg.contains("authorization") || msg.contains("Channel"),
-                "channel-mismatch error must be authorization-shaped; got: {msg}"
+                matches!(err, super::InlineGateError::ChannelMismatch { .. }),
+                "channel-mismatch must surface as InlineGateError::ChannelMismatch; got: {err:?}"
             );
 
             // Parked alpha must NOT have woken — the rejection happens

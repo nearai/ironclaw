@@ -299,20 +299,20 @@ async def _approve(
 # ---------------------------------------------------------------------------
 
 class TestV2EngineApprovalFlow:
-    @pytest.mark.skip(
-        reason=(
-            "Engine-v2 regression with concurrent inline-await gates on "
-            "the same user: the second thread's send never produces a "
-            "turn (history shows turns=0, pending=None) and the first "
-            "thread's parked execution context appears to monopolize "
-            "per-user dispatch. Reproduces in isolation. Skipped "
-            "(rather than xfail) because the failed run leaves the "
-            "module-scoped v2_approval_server in a state where every "
-            "subsequent test in this file also fails. Re-enable once "
-            "the underlying engine regression is fixed."
-        ),
-    )
     async def test_same_user_approvals_are_thread_scoped(self, v2_approval_server):
+        """Two threads for the same user can each park at their own
+        approval gate concurrently; resolving one does not affect the
+        other.
+
+        Regression for the inline-gate-park dispatch interaction (#3157
+        follow-up). Without the gate-park handoff, thread A's parked
+        engine call holds the per-user agent loop's `handle_message`
+        for up to 5 minutes, and thread B's send sits in `msg_tx`
+        behind it — pending_b never surfaces in this window. The
+        bridge now spawns a post-park continuation when it detects a
+        pending gate row for the (user, thread), which lets the agent
+        loop unblock immediately and dispatch thread B.
+        """
         base_url = v2_approval_server
 
         thread_a = (await api_post(base_url, "/api/chat/thread/new", timeout=15)).json()["id"]

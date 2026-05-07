@@ -556,14 +556,6 @@ async def test_blocked_integration_surfaces_in_activatable_section(v2_activate_s
         await _ensure_removed(v2_activate_surface_server, "gmail")
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Engine-v2 inline-await regression — auth gate parks the agent "
-        "loop, and the resume path queues through the same blocked mpsc. "
-        "See test_v2_engine_approval_flow.py::test_approval_yes for repro."
-    ),
-    strict=False,
-)
 async def test_blocked_gmail_auth_blocks_upstream_requests_before_auth(
     v2_activate_surface_auth_server,
 ):

@@ -231,15 +231,18 @@ pub(crate) async fn chat_approval_handler(
                 // Fall through to the legacy mpsc dispatch below.
             }
             Err(e) => {
-                let msg = e.to_string();
-                let status = if msg.contains("authorization") {
-                    StatusCode::FORBIDDEN
-                } else if msg.contains("stale") || msg.contains("expired") {
-                    StatusCode::CONFLICT
-                } else {
-                    StatusCode::INTERNAL_SERVER_ERROR
+                // Map typed verification failures to specific 4xx /
+                // 5xx codes. Matching on the variant — not a substring
+                // of the rendered message — keeps the HTTP contract
+                // tied to the typed surface so a future change to the
+                // error message can't silently flip a 403 → 500.
+                use crate::bridge::InlineGateError;
+                let status = match &e {
+                    InlineGateError::ChannelMismatch { .. } => StatusCode::FORBIDDEN,
+                    InlineGateError::Stale | InlineGateError::Expired => StatusCode::CONFLICT,
+                    InlineGateError::Other(_) => StatusCode::INTERNAL_SERVER_ERROR,
                 };
-                return Err((status, msg));
+                return Err((status, e.to_string()));
             }
         }
     }

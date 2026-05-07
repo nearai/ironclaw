@@ -38,6 +38,7 @@ pub use router::{
     EngineStepInfo,
     EngineThreadDetail,
     EngineThreadInfo,
+    InlineGateError,
     InlineGateOutcome,
     ProjectOverviewEntry,
     ProjectsOverviewResponse,
