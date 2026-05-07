@@ -80,6 +80,7 @@ pub struct AcceptInboundMessageRequest {
     pub actor: TurnActor,
     pub source_binding_ref: SourceBindingRef,
     pub reply_target_binding_ref: ReplyTargetBindingRef,
+    pub external_conversation_ref: ExternalConversationRef,
     pub external_event_id: ExternalEventId,
     pub content_ref: InboundMessageContentRef,
     pub received_at: DateTime<Utc>,

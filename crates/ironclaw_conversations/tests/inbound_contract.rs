@@ -234,6 +234,37 @@ async fn per_message_external_ids_do_not_fork_conversation_bindings() {
         second.resolution.reply_target_binding_ref,
         first.resolution.reply_target_binding_ref
     );
+    assert_ne!(
+        second.accepted_message.reply_target_binding_ref,
+        first.accepted_message.reply_target_binding_ref,
+        "accepted inbound messages need message-scoped reply targets even when binding identity is stable"
+    );
+    let first_target = services
+        .validate_reply_target(
+            &tenant(),
+            &user("alice"),
+            &first.resolution.turn_scope.thread_id,
+            &first.accepted_message.reply_target_binding_ref,
+        )
+        .await
+        .unwrap();
+    let second_target = services
+        .validate_reply_target(
+            &tenant(),
+            &user("alice"),
+            &second.resolution.turn_scope.thread_id,
+            &second.accepted_message.reply_target_binding_ref,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        first_target.external_conversation_ref.message_id(),
+        Some("message-1")
+    );
+    assert_eq!(
+        second_target.external_conversation_ref.message_id(),
+        Some("message-2")
+    );
     assert_eq!(coordinator.submissions().len(), 2);
 }
 
@@ -963,6 +994,7 @@ async fn accept_inbound_message_rejects_mixed_source_and_reply_bindings() {
             actor: first.actor,
             source_binding_ref: first.source_binding_ref,
             reply_target_binding_ref: second.reply_target_binding_ref,
+            external_conversation_ref: external_conversation("alice-browser-a", None),
             external_event_id: ExternalEventId::new("mixed-binding-event").unwrap(),
             content_ref: InboundMessageContentRef::new("content:mixed-binding-event").unwrap(),
             received_at: Utc.with_ymd_and_hms(2026, 5, 6, 12, 1, 0).unwrap(),

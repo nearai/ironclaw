@@ -219,12 +219,29 @@ impl SessionThreadService for InMemoryConversationServices {
 
         let message_ref = AcceptedMessageRef::new(format!("message:{}", Uuid::new_v4()))
             .map_err(|reason| InboundTurnError::InvalidCanonicalRef { reason })?;
+        let reply_target_record = state
+            .reply_targets
+            .get(request.reply_target_binding_ref.as_str())
+            .cloned()
+            .ok_or_else(|| InboundTurnError::ThreadNotFound {
+                thread_id: request.reply_target_binding_ref.as_str().to_string(),
+            })?;
+        let message_reply_target_binding_ref =
+            ReplyTargetBindingRef::new(format!("reply:{}", Uuid::new_v4()))
+                .map_err(|reason| InboundTurnError::InvalidCanonicalRef { reason })?;
+        state.reply_targets.insert(
+            message_reply_target_binding_ref.as_str().to_string(),
+            reply_target_record.with_reply_target(
+                message_reply_target_binding_ref.clone(),
+                request.external_conversation_ref.clone(),
+            ),
+        );
         let accepted = AcceptedInboundMessage {
             tenant_id: request.tenant_id,
             thread_id: request.thread_id,
             message_ref,
             source_binding_ref: request.source_binding_ref,
-            reply_target_binding_ref: request.reply_target_binding_ref,
+            reply_target_binding_ref: message_reply_target_binding_ref,
             idempotency: MessageIdempotencyStatus::Inserted,
         };
         state
@@ -271,7 +288,7 @@ struct InMemoryState {
     pairings: HashMap<ActorKey, UserId>,
     bindings: HashMap<BindingKey, BindingRecord>,
     source_bindings: HashMap<String, BindingRecord>,
-    reply_targets: HashMap<String, BindingRecord>,
+    reply_targets: HashMap<String, ReplyTargetRecord>,
     threads: HashMap<ThreadKey, ThreadRecord>,
     message_idempotency: HashMap<MessageIdempotencyKey, AcceptedInboundMessage>,
     submitted_message_refs: HashSet<AcceptedMessageRef>,
@@ -286,7 +303,7 @@ impl InMemoryState {
         );
         self.reply_targets.insert(
             binding.reply_target_binding_ref.as_str().to_string(),
-            binding.clone(),
+            ReplyTargetRecord::from_binding(&binding, binding.external_conversation_ref.clone()),
         );
         self.bindings.insert(binding_key, binding);
     }
@@ -314,7 +331,8 @@ impl InMemoryState {
             || source_binding.thread_id != *thread_id
             || reply_binding.thread_id != *thread_id
             || source_binding.source_binding_ref.as_str() != source_binding_ref
-            || source_binding.reply_target_binding_ref != reply_binding.reply_target_binding_ref
+            || reply_binding.reply_target_binding_ref.as_str() != reply_target_binding_ref
+            || source_binding.source_binding_ref != reply_binding.source_binding_ref
         {
             return Err(InboundTurnError::AccessDenied {
                 actor_id: actor_user_id.to_string(),
@@ -439,6 +457,50 @@ struct ThreadRecord {
     agent_id: Option<AgentId>,
     project_id: Option<ProjectId>,
     participants: HashSet<UserId>,
+}
+
+#[derive(Debug, Clone)]
+struct ReplyTargetRecord {
+    tenant_id: TenantId,
+    adapter_kind: AdapterKind,
+    adapter_installation_id: AdapterInstallationId,
+    external_conversation_ref: ExternalConversationRef,
+    thread_id: ThreadId,
+    source_binding_ref: SourceBindingRef,
+    reply_target_binding_ref: ReplyTargetBindingRef,
+}
+
+impl ReplyTargetRecord {
+    fn from_binding(
+        binding: &BindingRecord,
+        external_conversation_ref: ExternalConversationRef,
+    ) -> Self {
+        Self {
+            tenant_id: binding.tenant_id.clone(),
+            adapter_kind: binding.adapter_kind.clone(),
+            adapter_installation_id: binding.adapter_installation_id.clone(),
+            external_conversation_ref,
+            thread_id: binding.thread_id.clone(),
+            source_binding_ref: binding.source_binding_ref.clone(),
+            reply_target_binding_ref: binding.reply_target_binding_ref.clone(),
+        }
+    }
+
+    fn with_reply_target(
+        &self,
+        reply_target_binding_ref: ReplyTargetBindingRef,
+        external_conversation_ref: ExternalConversationRef,
+    ) -> Self {
+        Self {
+            tenant_id: self.tenant_id.clone(),
+            adapter_kind: self.adapter_kind.clone(),
+            adapter_installation_id: self.adapter_installation_id.clone(),
+            external_conversation_ref,
+            thread_id: self.thread_id.clone(),
+            source_binding_ref: self.source_binding_ref.clone(),
+            reply_target_binding_ref,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
