@@ -53,8 +53,9 @@ use crate::settings::Settings;
 pub use self::agent::AgentConfig;
 pub use self::builder::BuilderModeConfig;
 pub use self::channels::{
-    ChannelsConfig, CliConfig, DEFAULT_GATEWAY_PORT, GatewayConfig, GatewayOidcConfig, HttpConfig,
-    SignalConfig, TuiChannelConfig,
+    ChannelsConfig, CliConfig, DEFAULT_GATEWAY_PORT, DEFAULT_WEBHOOK_LISTENER_HOST,
+    DEFAULT_WEBHOOK_LISTENER_PORT, GatewayConfig, GatewayOidcConfig, HttpConfig, SignalConfig,
+    TuiChannelConfig, WebhookListenerConfig,
 };
 pub use self::database::{DatabaseBackend, DatabaseConfig, SslMode, default_libsql_path};
 pub use self::embeddings::{DEFAULT_EMBEDDING_CACHE_SIZE, EmbeddingsConfig};
@@ -193,6 +194,10 @@ impl Config {
             channels: ChannelsConfig {
                 cli: CliConfig { enabled: false },
                 http: None,
+                webhook_listener: WebhookListenerConfig {
+                    host: DEFAULT_WEBHOOK_LISTENER_HOST.to_string(),
+                    port: DEFAULT_WEBHOOK_LISTENER_PORT,
+                },
                 gateway: None,
                 signal: None,
                 tui: None,

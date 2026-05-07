@@ -89,11 +89,11 @@ ironclaw
 
 <Accordion title="⚠️ 错误：Webhook 服务器启动失败">
 
-如果遇到错误 `Error: Channel webhook_server failed to start: Failed to bind to 0.0.0.0:8080: Address already in use (os error 98)`，请尝试设置一个不同的 HTTP 端口：
+如果遇到错误 `Error: Channel webhook_server failed to start: Failed to bind to 127.0.0.1:8080: Address already in use (os error 98)`，请尝试设置一个不同的 webhook 监听器端口：
 
 ```
-# 将默认 HTTP 端口改为 8081
-export HTTP_PORT=8081
+# 将默认 webhook 监听器端口改为 8081
+export WEBHOOK_PORT=8081
 
 # 然后重新启动智能体
 ironclaw

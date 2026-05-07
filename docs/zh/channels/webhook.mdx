@@ -1,56 +1,70 @@
 ---
 title: HTTP Webhook
 sidebarTitle: Webhook
-description: 用于外部集成的 REST API
-icon: globe
+description: 在统一 webhook 监听器上接收 HTTP webhook 请求
 ---
 
-HTTP Webhook 频道提供 REST API，用于将外部服务与 IronClaw 集成。
+HTTP Webhook 通道在 IronClaw 的统一 webhook 监听器上注册 `POST /webhook` 路由。
 
 <Note>
-如果您还没有设置智能体，请先查看我们的[快速开始指南](../quickstart)
+如果您还未设置代理，请参考我们的[快速入门指南](../quickstart)。
 </Note>
 
 ---
 
-## 启用 Webhook
+## 监听器模型
+
+IronClaw 现在分离了两个关注点：
+
+- **统一 webhook 监听器**的绑定地址通过 `WEBHOOK_HOST` / `WEBHOOK_PORT` 配置。
+- **具名 HTTP webhook 通道**通过 `HTTP_ENABLED=true` 启用。
+
+这意味着 `HTTP_ENABLED=false` 会保持 HTTP webhook 通道禁用状态，即使 `HTTP_HOST` / `HTTP_PORT` 仍然存在用于兼容性。
 
 ```bash
+export WEBHOOK_HOST=127.0.0.1
+export WEBHOOK_PORT=8080
+
 export HTTP_ENABLED=true
-export HTTP_HOST=0.0.0.0
-export HTTP_PORT=8080
 export HTTP_WEBHOOK_SECRET=your-secret
 ```
 
-或在引导过程中：
-```
-Step 6: Channel Configuration
-→ Select "HTTP Webhook"
-→ Port: 8080
-```
+如果 `WEBHOOK_HOST` / `WEBHOOK_PORT` 未设置，IronClaw 仍可回退到旧版 `HTTP_HOST` / `HTTP_PORT` 监听器设置以保持兼容性。新部署应显式设置 `WEBHOOK_*` 变量。
+
+`SIGHUP` 只会重新加载统一 webhook 监听器的绑定地址以及 HTTP webhook 密钥。启用或禁用具名 HTTP webhook 通道仍然需要重启，因为重新加载不会重建路由拓扑。
 
 ---
 
-## 安全
+## 安全性
 
 <Warning>
-HTTP webhook 默认绑定到 `0.0.0.0:8080`。如果不需要外部 webhook 传递，请设置 `HTTP_HOST=127.0.0.1`。
+统一 webhook 监听器默认绑定到 `127.0.0.1:8080`。如果您需要外部访问，请通过反向代理、隧道或显式的 `WEBHOOK_HOST` 设置有意地暴露它。
 </Warning>
 
-### 共享密钥验证
+### 认证
 
-配置 webhook 密钥以验证请求：
+为 HTTP webhook 通道配置共享密钥：
 
 ```bash
 export HTTP_WEBHOOK_SECRET="your-secret-here"
 ```
 
-密钥通过 `X-Webhook-Secret` 请求头发送。
+客户端应使用原始请求体进行 HMAC-SHA256 认证：
 
-### 速率限制
+```text
+X-Hub-Signature-256: sha256=<hex_digest>
+```
 
-- **请求体大小**：最大 64 KB
-- **速率**：每个 IP 每分钟 60 个请求
+摘要是 `HMAC-SHA256(HTTP_WEBHOOK_SECRET, raw_request_body)` 编码为小写十六进制。
+
+旧版 JSON 正文中的 `secret` 字段仍被接受以保持兼容性，但已弃用。
+
+### 限制
+
+- 请求正文：最大 15 MB
+- 消息内容：最大 32 KB
+- 速率限制：每分钟 60 次请求
+- 待处理同步响应：100
 
 ---
 
@@ -59,104 +73,82 @@ export HTTP_WEBHOOK_SECRET="your-secret-here"
 ### 请求格式
 
 ```bash
+BODY='{"content":"Hello, IronClaw!","wait_for_response":true}'
+SIG=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "$HTTP_WEBHOOK_SECRET" | cut -d' ' -f2)
+
 curl -X POST http://localhost:8080/webhook \
   -H "Content-Type: application/json" \
-  -H "X-Webhook-Secret: your-secret" \
-  -d '{
-    "user_id": "default",
-    "message": "Hello, IronClaw!"
-  }'
+  -H "X-Hub-Signature-256: sha256=$SIG" \
+  -d "$BODY"
 ```
+
+### 载荷字段
+
+| 字段 | 类型 | 必需 | 描述 |
+|-------|------|----------|-------------|
+| `content` | string | 是 | 消息内容 |
+| `user_id` | string | 否 | 可选的发送者标识符，用于路由同时保持配置的所有者范围 |
+| `thread_id` | string | 否 | 继续现有对话线程 |
+| `wait_for_response` | boolean | 否 | 等待最多 60 秒以获取同步响应 |
+| `attachments` | array | 否 | Base64 附件或附件 URL |
+| `secret` | string | 否 | 已弃用的正文密钥认证回退 |
 
 ### 响应格式
 
 ```json
 {
-  "job_id": "uuid",
-  "status": "queued"
+  "message_id": "uuid",
+  "status": "accepted",
+  "response": "Hello! How can I help?"
 }
 ```
 
----
+- `message_id` 总是返回
+- `status` 通常是 `accepted` 或 `error`
+- `response` 仅在 `wait_for_response=true` 时填充
 
-## 请求字段
-
-| 字段 | 类型 | 必填 | 描述 |
-|-------|------|----------|-------------|
-| `user_id` | string | 是 | 用户标识符 |
-| `message` | string | 是 | 消息内容 |
-| `conversation_id` | string | 否 | 继续现有对话 |
-| `metadata` | object | 否 | 任意元数据 |
-
-## 响应字段
-
-| 字段 | 类型 | 描述 |
-|-------|------|-------------|
-| `job_id` | string | 用于状态检查的任务 UUID |
-| `status` | string | `queued`、`running`、`completed` |
-| `response` | string | 智能体响应（完成时） |
-
----
-
-## 检查状态
+### 健康检查
 
 ```bash
-curl http://localhost:8080/jobs/{job_id} -H "X-Webhook-Secret: your-secret"
+curl http://localhost:8080/health
 ```
 
 响应：
+
 ```json
 {
-  "id": "uuid",
-  "status": "completed",
-  "response": "Hello! How can I help?",
-  "created_at": "2024-01-15T10:30:00Z",
-  "completed_at": "2024-01-15T10:30:05Z"
+  "status": "healthy",
+  "channel": "http"
 }
 ```
 
 ---
 
-## 错误响应
-
-| 状态码 | 含义 |
-|--------|---------|
-| `400` | 无效的请求体 |
-| `401` | 缺少或无效的密钥 |
-| `429` | 超出速率限制 |
-| `500` | 服务器错误 |
-
----
-
-## 集成示例
-
-### GitHub Webhook
-
-配置 GitHub 将事件发送到您的 IronClaw webhook URL：
-
-```bash
-# GitHub webhook URL
-https://your-server:8080/webhook
-
-# Secret: 您配置的 HTTP_WEBHOOK_SECRET
-```
-
-### Zapier
-
-使用 Zapier 的 Webhook 操作将事件发送到 IronClaw。
-
-### 自定义脚本
+## 示例客户端
 
 ```python
+import hashlib
+import hmac
+import json
 import requests
+
+secret = b"your-secret"
+body = json.dumps({
+    "content": "Process this data",
+    "user_id": "automation",
+}).encode()
+signature = hmac.new(secret, body, hashlib.sha256).hexdigest()
 
 response = requests.post(
     "http://localhost:8080/webhook",
-    headers={"X-Webhook-Secret": "your-secret"},
-    json={"user_id": "automation", "message": "Process this data"}
+    headers={
+        "Content-Type": "application/json",
+        "X-Hub-Signature-256": f"sha256={signature}",
+    },
+    data=body,
 )
 
-print(response.json()["job_id"])
+print(response.json())
 ```
 
 ---
@@ -165,24 +157,23 @@ print(response.json()["job_id"])
 
 <AccordionGroup>
   <Accordion title="连接被拒绝" icon="x-circle">
-    - 检查 IronClaw 是否在运行
-    - 验证 `HTTP_PORT` 正确
-    - 检查防火墙：`sudo ufw allow 8080`
+    - 检查 IronClaw 是否正在运行
+    - 验证 `WEBHOOK_HOST` / `WEBHOOK_PORT`
+    - 如果 `HTTP_ENABLED=true`，确保 HTTP 通道已启用
   </Accordion>
 
   <Accordion title="401 未授权" icon="key">
-    - 包含 `X-Webhook-Secret` 请求头
-    - 验证密钥与配置匹配
+    - 包含 `X-Hub-Signature-256` 头
+    - 验证签名使用原始请求正文
+    - 确认两侧的 `HTTP_WEBHOOK_SECRET` 匹配
+  </Accordion>
+
+  <Accordion title="415 不支持的媒体类型" icon="file-warning">
+    - 发送 `Content-Type: application/json`
   </Accordion>
 
   <Accordion title="429 请求过多" icon="clock">
-    - 速率限制：每分钟 60 个请求
-    - 实现指数退避
-  </Accordion>
-
-  <Accordion title="消息未处理" icon="message-circle">
-    - 检查日志：`RUST_LOG=ironclaw=debug ironclaw run`
-    - 验证 JSON 格式
-    - 检查 `user_id` 有效
+    - 速率限制为每分钟 60 次请求
+    - 实施带退避的重试
   </Accordion>
 </AccordionGroup>

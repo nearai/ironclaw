@@ -313,7 +313,7 @@ impl Default for EmbeddingsSettings {
 
 /// Tunnel settings for public webhook endpoints.
 ///
-/// The tunnel URL is shared across all channels that need webhooks.
+/// The tunnel URL is shared across channels that need webhooks.
 /// Two modes:
 /// - **Static URL**: `public_url` set directly (manual tunnel management).
 /// - **Managed provider**: `provider` is set and the agent starts/stops the
@@ -367,7 +367,7 @@ pub struct TunnelSettings {
 pub struct ChannelSettings {
     /// Whether HTTP webhook channel is enabled.
     #[serde(default)]
-    pub http_enabled: bool,
+    pub http_enabled: Option<bool>,
 
     /// HTTP webhook port (if enabled).
     #[serde(default)]
@@ -461,7 +461,7 @@ pub struct ChannelSettings {
 impl Default for ChannelSettings {
     fn default() -> Self {
         Self {
-            http_enabled: false,
+            http_enabled: None,
             http_port: None,
             http_host: None,
             gateway_enabled: true,
@@ -2045,7 +2045,7 @@ mod tests {
                 ..Default::default()
             },
             channels: ChannelSettings {
-                http_enabled: true,
+                http_enabled: Some(true),
                 http_port: Some(9090),
                 wasm_channel_owner_ids: {
                     let mut m = std::collections::HashMap::new();
@@ -2124,7 +2124,11 @@ mod tests {
             Some("ngrok".to_string()),
             "tunnel.provider lost"
         );
-        assert!(restored.channels.http_enabled, "http_enabled lost");
+        assert_eq!(
+            restored.channels.http_enabled,
+            Some(true),
+            "http_enabled lost"
+        );
         assert_eq!(restored.channels.http_port, Some(9090), "http_port lost");
         assert_eq!(
             restored.channels.wasm_channel_owner_ids.get("telegram"),
@@ -2297,7 +2301,7 @@ mod tests {
                 model: "text-embedding-3-small".to_string(),
             },
             channels: ChannelSettings {
-                http_enabled: true,
+                http_enabled: Some(true),
                 http_port: Some(8080),
                 signal_enabled: true,
                 signal_account: Some("+1234567890".to_string()),
@@ -2329,7 +2333,11 @@ mod tests {
         assert_eq!(current.selected_model.as_deref(), Some("claude-sonnet-4-5"));
 
         // Verify: everything else preserved
-        assert!(current.channels.http_enabled, "HTTP channel must survive");
+        assert_eq!(
+            current.channels.http_enabled,
+            Some(true),
+            "HTTP channel must survive"
+        );
         assert_eq!(current.channels.http_port, Some(8080));
         assert!(current.channels.signal_enabled, "Signal must survive");
         assert_eq!(
@@ -2370,7 +2378,7 @@ mod tests {
                 ..Default::default()
             },
             channels: ChannelSettings {
-                http_enabled: false,
+                http_enabled: Some(false),
                 wasm_channels: vec!["telegram".to_string()],
                 ..Default::default()
             },
@@ -2382,12 +2390,12 @@ mod tests {
         let mut current = Settings::from_db_map(&db_map);
 
         // Simulate step_channels: user enables HTTP and adds discord
-        current.channels.http_enabled = true;
+        current.channels.http_enabled = Some(true);
         current.channels.http_port = Some(9090);
         current.channels.wasm_channels = vec!["telegram".to_string(), "discord".to_string()];
 
         // Verify: channels changed
-        assert!(current.channels.http_enabled);
+        assert_eq!(current.channels.http_enabled, Some(true));
         assert_eq!(current.channels.http_port, Some(9090));
         assert_eq!(current.channels.wasm_channels.len(), 2);
 
@@ -2413,7 +2421,7 @@ mod tests {
             llm_backend: Some("openai".to_string()),
             selected_model: Some("gpt-4o".to_string()),
             channels: ChannelSettings {
-                http_enabled: true,
+                http_enabled: Some(true),
                 http_port: Some(8080),
                 signal_enabled: true,
                 wasm_channels: vec!["telegram".to_string()],
@@ -2459,8 +2467,9 @@ mod tests {
         assert_eq!(current.selected_model.as_deref(), Some("claude-opus-4-6"));
 
         // Verify: channels, embeddings, heartbeat survived quick mode
-        assert!(
+        assert_eq!(
             current.channels.http_enabled,
+            Some(true),
             "HTTP channel must survive quick mode re-run"
         );
         assert_eq!(current.channels.http_port, Some(8080));
@@ -2704,7 +2713,7 @@ mod tests {
                 ..Default::default()
             },
             channels: ChannelSettings {
-                http_enabled: true,
+                http_enabled: Some(true),
                 signal_enabled: true,
                 ..Default::default()
             },
@@ -2728,9 +2737,10 @@ mod tests {
             current.heartbeat.enabled,
             "heartbeat.enabled=true must not be reset to false by default overlay"
         );
-        assert!(
+        assert_eq!(
             current.channels.http_enabled,
-            "http_enabled=true must not be reset to false by default overlay"
+            Some(true),
+            "http_enabled=true must not be reset to default by overlay"
         );
         assert!(
             current.channels.signal_enabled,

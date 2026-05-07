@@ -91,11 +91,19 @@ async fn cmd_list(
 
     // Built-in: HTTP webhook
     if let Some(ref http) = config.http {
+        let mut details = vec![
+            ("host", config.webhook_listener.host.clone()),
+            ("port", config.webhook_listener.port.to_string()),
+        ];
+        if http.host != config.webhook_listener.host || http.port != config.webhook_listener.port {
+            details.push(("legacy_bind_host", http.host.clone()));
+            details.push(("legacy_bind_port", http.port.to_string()));
+        }
         channels.push(ChannelInfo {
             name: "http".to_string(),
             kind: "built-in",
             enabled: true,
-            details: vec![("host", http.host.clone()), ("port", http.port.to_string())],
+            details,
         });
     } else {
         channels.push(ChannelInfo {

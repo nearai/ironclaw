@@ -188,18 +188,31 @@ pub fn create_tunnel(config: &TunnelProviderConfig) -> Result<Option<Box<dyn Tun
 
 /// Determine which local address the tunnel should forward traffic to.
 ///
-/// Prefers the webhook server (`HTTP_PORT`) since that's where webhook routes
-/// (Telegram, etc.) are served. Falls back to the gateway port if configured,
-/// otherwise defaults to 127.0.0.1:8080 (the same fallback the webhook server
-/// uses in main.rs when no HTTP config is present).
+/// Managed tunnels must forward to the unified webhook listener because that
+/// is where generic tool webhooks, channel webhooks, and WASM webhook routes
+/// are actually served.
 fn resolve_tunnel_target(channels: &crate::config::ChannelsConfig) -> (&str, u16) {
-    if let Some(ref http) = channels.http {
-        return (http.host.as_str(), http.port);
+    let host = match channels.webhook_listener.host.as_str() {
+        "0.0.0.0" => "127.0.0.1",
+        "::" | "[::]" => "::1",
+        host => host,
+    };
+
+    (host, channels.webhook_listener.port)
+}
+
+pub(crate) fn format_tunnel_origin(local_host: &str, local_port: u16) -> String {
+    let normalized_host = local_host.trim_matches(|c| c == '[' || c == ']');
+    if normalized_host.contains(':') {
+        let encoded_host = if normalized_host.contains('%') && !normalized_host.contains("%25") {
+            normalized_host.replacen('%', "%25", 1)
+        } else {
+            normalized_host.to_string()
+        };
+        format!("http://[{encoded_host}]:{local_port}")
+    } else {
+        format!("http://{normalized_host}:{local_port}")
     }
-    if let Some(ref gw) = channels.gateway {
-        return (gw.host.as_str(), gw.port);
-    }
-    ("127.0.0.1", 8080)
 }
 
 /// Start a managed tunnel if configured and no static URL is already set.
@@ -403,12 +416,16 @@ mod tests {
         assert!(proc.lock().await.is_none());
     }
 
-    // ── Port selection regression tests ──────────────────────────────
+    // ── Tunnel target resolution regression tests ────────────────────
 
     fn base_channels() -> crate::config::ChannelsConfig {
         crate::config::ChannelsConfig {
             cli: crate::config::CliConfig { enabled: false },
             http: None,
+            webhook_listener: crate::config::WebhookListenerConfig {
+                host: crate::config::DEFAULT_WEBHOOK_LISTENER_HOST.to_string(),
+                port: crate::config::DEFAULT_WEBHOOK_LISTENER_PORT,
+            },
             gateway: None,
             signal: None,
             tui: None,
@@ -419,11 +436,15 @@ mod tests {
         }
     }
 
-    fn channels_with_http(host: &str, port: u16) -> crate::config::ChannelsConfig {
+    fn channels_with_webhook_listener(host: &str, port: u16) -> crate::config::ChannelsConfig {
         let mut c = base_channels();
-        c.http = Some(crate::config::HttpConfig {
+        c.webhook_listener = crate::config::WebhookListenerConfig {
             host: host.to_string(),
             port,
+        };
+        c.http = Some(crate::config::HttpConfig {
+            host: "198.51.100.12".to_string(),
+            port: 9443,
             webhook_secret: None,
             user_id: "test".to_string(),
         });
@@ -440,68 +461,79 @@ mod tests {
         c
     }
 
-    fn channels_gateway_only(host: &str, port: u16) -> crate::config::ChannelsConfig {
-        let mut c = base_channels();
-        c.gateway = Some(crate::config::GatewayConfig {
-            host: host.to_string(),
-            port,
-            auth_token: None,
-            max_connections: 100,
-            broadcast_buffer: DEFAULT_BROADCAST_BUFFER,
-            workspace_read_scopes: Vec::new(),
-            memory_layers: Vec::new(),
-            oidc: None,
-        });
-        c
-    }
-
-    fn channels_neither() -> crate::config::ChannelsConfig {
-        base_channels()
+    #[test]
+    fn tunnel_target_webhook_listener_wildcard_ipv4_normalizes_to_loopback() {
+        let channels = channels_with_webhook_listener("0.0.0.0", 8080);
+        let (host, port) = resolve_tunnel_target(&channels);
+        assert_eq!(host, "127.0.0.1");
+        assert_eq!(port, 8080);
     }
 
     #[test]
-    fn tunnel_target_prefers_http_port() {
-        let channels = channels_with_http("127.0.0.1", 8080);
+    fn tunnel_target_webhook_listener_wildcard_ipv6_normalizes_to_loopback() {
+        let channels = channels_with_webhook_listener("[::]", 8081);
         let (host, port) = resolve_tunnel_target(&channels);
-        assert_eq!(host, "127.0.0.1"); // safety: test-only
-        assert_eq!(port, 8080); // safety: test-only
+        assert_eq!(host, "::1");
+        assert_eq!(port, 8081);
     }
 
     #[test]
-    fn tunnel_target_falls_back_to_gateway() {
-        let channels = channels_gateway_only("10.0.0.1", 4000);
+    fn tunnel_target_webhook_listener_connectable_host_is_unchanged() {
+        let channels = channels_with_webhook_listener("localhost", 8082);
         let (host, port) = resolve_tunnel_target(&channels);
-        assert_eq!(host, "10.0.0.1"); // safety: test-only
-        assert_eq!(port, 4000); // safety: test-only
+        assert_eq!(host, "localhost");
+        assert_eq!(port, 8082);
     }
 
     #[test]
-    fn tunnel_target_defaults_to_webhook_fallback() {
-        let channels = channels_neither();
+    fn tunnel_target_custom_webhook_listener_is_used_when_http_channel_is_disabled() {
+        let mut channels = base_channels();
+        channels.webhook_listener = crate::config::WebhookListenerConfig {
+            host: "127.0.0.9".to_string(),
+            port: 9091,
+        };
+
         let (host, port) = resolve_tunnel_target(&channels);
-        // Matches the webhook server's hardcoded fallback in main.rs
-        assert_eq!(host, "127.0.0.1"); // safety: test-only
-        assert_eq!(port, 8080); // safety: test-only
+
+        assert_eq!(host, "127.0.0.9");
+        assert_eq!(port, 9091);
+        assert!(
+            channels.http.is_none(),
+            "test precondition: HTTP channel disabled"
+        );
     }
 
     #[test]
-    fn tunnel_target_http_takes_priority_over_gateway() {
-        let channels = channels_with_http("192.168.1.1", 9090);
-        let (host, port) = resolve_tunnel_target(&channels);
-        // Should use HTTP config, not gateway's 127.0.0.1:3000
-        assert_eq!(host, "192.168.1.1"); // safety: test-only
-        assert_eq!(port, 9090); // safety: test-only
+    fn format_tunnel_origin_brackets_ipv6_loopback() {
+        assert_eq!(format_tunnel_origin("::1", 8080), "http://[::1]:8080");
     }
 
     #[test]
-    fn tunnel_target_no_http_no_gateway_matches_webhook_fallback() {
-        // When HTTP_PORT is not set and gateway is not configured (e.g. WASM
-        // channels exist but no explicit HTTP config), the webhook server in
-        // main.rs binds to 127.0.0.1:8080 as a hardcoded fallback. The tunnel
-        // must target the same address so webhook traffic reaches the right
-        // server.
-        let channels = channels_neither();
-        let (host, port) = resolve_tunnel_target(&channels);
-        assert_eq!((host, port), ("127.0.0.1", 8080)); // safety: test-only
+    fn format_tunnel_origin_preserves_bracketed_ipv6_loopback() {
+        assert_eq!(format_tunnel_origin("[::1]", 8081), "http://[::1]:8081");
+    }
+
+    #[test]
+    fn format_tunnel_origin_leaves_ipv4_and_hostnames_unbracketed() {
+        assert_eq!(
+            format_tunnel_origin("127.0.0.1", 8082),
+            "http://127.0.0.1:8082"
+        );
+        assert_eq!(
+            format_tunnel_origin("localhost", 8083),
+            "http://localhost:8083"
+        );
+    }
+
+    #[test]
+    fn format_tunnel_origin_encodes_ipv6_zone_ids() {
+        assert_eq!(
+            format_tunnel_origin("fe80::1%en0", 8084),
+            "http://[fe80::1%25en0]:8084"
+        );
+        assert_eq!(
+            format_tunnel_origin("[fe80::1%eth0]", 8085),
+            "http://[fe80::1%25eth0]:8085"
+        );
     }
 }
