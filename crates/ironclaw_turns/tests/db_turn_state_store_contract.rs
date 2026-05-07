@@ -4,17 +4,22 @@
     allow(dead_code, unused_imports)
 )]
 
-use std::sync::Arc;
+use std::{
+    sync::{Arc, Mutex, mpsc},
+    time::Duration,
+};
 
 use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, DefaultTurnCoordinator, IdempotencyKey, LoopCompleted,
-    LoopCompletionKind, LoopExit, LoopExitInvalidHandling, LoopExitValidationPolicy,
-    LoopMessageRef, ReplyTargetBindingRef, RunProfileRequest, SanitizedCancelReason,
-    SanitizedFailure, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
-    TurnActor, TurnCoordinator, TurnError, TurnEventKind, TurnEventProjectionRequest,
-    TurnEventProjectionService, TurnRunId, TurnScope, TurnStatus,
+    AcceptedMessageRef, CancelRunRequest, DefaultTurnCoordinator, IdempotencyKey,
+    InMemoryRunProfileResolver, LoopCompleted, LoopCompletionKind, LoopExit,
+    LoopExitInvalidHandling, LoopExitValidationPolicy, LoopMessageRef, ReplyTargetBindingRef,
+    ResolvedRunProfile, RunProfileRequest, RunProfileResolutionError, RunProfileResolutionRequest,
+    RunProfileResolver, SanitizedCancelReason, SanitizedFailure, SourceBindingRef,
+    SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor, TurnCoordinator, TurnError,
+    TurnEventKind, TurnEventProjectionRequest, TurnEventProjectionService, TurnRunId, TurnScope,
+    TurnStatus,
     runner::{
         ApplyLoopExitRequest, ClaimRunRequest, RecoverExpiredLeasesRequest, TurnRunTransitionPort,
         apply_loop_exit,
@@ -25,6 +30,34 @@ use ironclaw_turns::{
 use ironclaw_turns::LibSqlTurnStateStore;
 #[cfg(feature = "postgres")]
 use ironclaw_turns::PostgresTurnStateStore;
+
+struct BlockingRunProfileResolver {
+    started: mpsc::Sender<()>,
+    release: Mutex<mpsc::Receiver<()>>,
+}
+
+impl BlockingRunProfileResolver {
+    fn new(started: mpsc::Sender<()>, release: mpsc::Receiver<()>) -> Self {
+        Self {
+            started,
+            release: Mutex::new(release),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl RunProfileResolver for BlockingRunProfileResolver {
+    async fn resolve_run_profile(
+        &self,
+        request: RunProfileResolutionRequest,
+    ) -> Result<ResolvedRunProfile, RunProfileResolutionError> {
+        let _ = self.started.send(());
+        self.release.lock().unwrap().recv().unwrap();
+        InMemoryRunProfileResolver::default()
+            .resolve_run_profile(request)
+            .await
+    }
+}
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
@@ -140,6 +173,45 @@ async fn libsql_turn_state_store_serializes_concurrent_submits_for_same_thread()
     assert_eq!(snapshot.turns.len(), 1);
     assert_eq!(snapshot.runs.len(), 1);
     assert_eq!(snapshot.active_locks.len(), 1);
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_submit_does_not_hold_write_lock_while_resolving_run_profile() {
+    let (db, _dir) = libsql_db().await;
+    let store_a = Arc::new(LibSqlTurnStateStore::new(db.clone()));
+    store_a.run_migrations().await.unwrap();
+    let store_b = Arc::new(LibSqlTurnStateStore::new(db));
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let resolver = Arc::new(BlockingRunProfileResolver::new(started_tx, release_rx));
+    let blocking_coordinator =
+        DefaultTurnCoordinator::new(store_a).with_run_profile_resolver(resolver.clone());
+    let independent_coordinator = DefaultTurnCoordinator::new(store_b);
+
+    let pending = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(
+            blocking_coordinator
+                .submit_turn(submit_request("thread-a", "idem-submit-blocking-profile")),
+        )
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("first submit should start profile resolution");
+
+    let independent = independent_coordinator
+        .submit_turn(submit_request("thread-b", "idem-submit-independent"))
+        .await
+        .unwrap();
+
+    assert!(matches!(independent, SubmitTurnResponse::Accepted { .. }));
+    release_tx.send(()).unwrap();
+    let pending = pending.join().unwrap().unwrap();
+    assert!(matches!(pending, SubmitTurnResponse::Accepted { .. }));
 }
 
 #[cfg(feature = "libsql")]

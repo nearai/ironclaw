@@ -4,6 +4,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         mpsc,
     },
+    task::{Context, Poll},
     time::Duration,
 };
 
@@ -12,17 +13,18 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, AllowAllTurnAdmissionPolicy,
     BlockedReason, CancelRunRequest, DefaultTurnCoordinator, GateRef, GetRunStateRequest,
-    IdempotencyKey, InMemoryTurnEventSink, InMemoryTurnStateStore, InMemoryTurnStateStoreLimits,
-    LoopCompleted, LoopCompletionKind, LoopExit, LoopExitInvalidHandling, LoopExitValidationPolicy,
-    LoopGateRef, LoopMessageRef, ReplyTargetBindingRef, ResumeTurnRequest, RunProfileId,
-    RunProfileRequest, RunProfileVersion, SanitizedCancelReason, SanitizedFailure,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
-    TurnAdmissionPolicy, TurnCheckpointId, TurnCoordinator, TurnError, TurnErrorCategory,
-    TurnEventKind, TurnEventProjectionError, TurnEventProjectionRequest,
-    TurnEventProjectionService, TurnEventSink, TurnIdempotencyOperationKind,
-    TurnIdempotencyOutcomeKind, TurnLeaseToken, TurnLifecycleEvent, TurnLockVersion, TurnRunId,
-    TurnRunState, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnRunnerId,
-    TurnScope, TurnStateStore, TurnStatus,
+    IdempotencyKey, InMemoryRunProfileResolver, InMemoryTurnEventSink, InMemoryTurnStateStore,
+    InMemoryTurnStateStoreLimits, LoopCompleted, LoopCompletionKind, LoopExit,
+    LoopExitInvalidHandling, LoopExitValidationPolicy, LoopGateRef, LoopMessageRef,
+    ReplyTargetBindingRef, ResolvedRunProfile, ResumeTurnRequest, RunProfileId, RunProfileRequest,
+    RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
+    SanitizedCancelReason, SanitizedFailure, SourceBindingRef, SubmitTurnRequest,
+    SubmitTurnResponse, ThreadBusy, TurnActor, TurnAdmissionPolicy, TurnCheckpointId,
+    TurnCoordinator, TurnError, TurnErrorCategory, TurnEventKind, TurnEventProjectionError,
+    TurnEventProjectionRequest, TurnEventProjectionService, TurnEventSink,
+    TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnLeaseToken, TurnLifecycleEvent,
+    TurnLockVersion, TurnRunId, TurnRunProfile, TurnRunState, TurnRunWake, TurnRunWakeNotifier,
+    TurnRunWakeNotifyError, TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
     events::EventCursor,
     runner::{
         ApplyLoopExitRequest, ApplyValidatedLoopExitRequest, BlockRunRequest,
@@ -31,6 +33,27 @@ use ironclaw_turns::{
         RecoverExpiredLeasesResponse, TurnRunTransitionPort, apply_loop_exit,
     },
 };
+
+struct BlockingRunProfileResolver {
+    started: mpsc::Sender<()>,
+}
+
+impl BlockingRunProfileResolver {
+    fn new(started: mpsc::Sender<()>) -> Self {
+        Self { started }
+    }
+}
+
+#[async_trait::async_trait]
+impl RunProfileResolver for BlockingRunProfileResolver {
+    async fn resolve_run_profile(
+        &self,
+        _request: RunProfileResolutionRequest,
+    ) -> Result<ResolvedRunProfile, RunProfileResolutionError> {
+        let _ = self.started.send(());
+        std::future::pending::<Result<ResolvedRunProfile, RunProfileResolutionError>>().await
+    }
+}
 
 #[test]
 fn turn_scope_agent_id_is_optional() {
@@ -208,7 +231,7 @@ async fn submit_turn_accepts_only_canonical_refs_and_returns_redacted_metadata()
 
     let state = coordinator
         .get_run_state(GetRunStateRequest {
-            scope: request.scope,
+            scope: request.scope.clone(),
             run_id,
         })
         .await
@@ -224,36 +247,89 @@ async fn submit_turn_accepts_only_canonical_refs_and_returns_redacted_metadata()
     );
     assert_eq!(state.received_at, received_at());
     assert_eq!(state.failure, None);
+
+    let snapshot = _store.persistence_snapshot();
+    let run = snapshot
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .unwrap();
+    assert_eq!(run.profile.id.as_str(), "default");
+    assert_eq!(
+        run.profile.resolved.profile_id.as_str(),
+        "interactive_default"
+    );
+    assert_eq!(
+        run.profile.resolved.loop_driver.id.as_str(),
+        "lightweight_loop"
+    );
+
+    let claimed = _store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: Some(request.scope),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        claimed.resolved_run_profile.profile_id.as_str(),
+        "interactive_default"
+    );
+    assert_eq!(
+        claimed.resolved_run_profile.loop_driver.id.as_str(),
+        "lightweight_loop"
+    );
 }
 
 #[tokio::test]
-async fn requested_run_profile_is_a_hint_not_resolved_authority() {
-    let (coordinator, _store) = coordinator();
+async fn unauthorized_requested_run_profile_rejects_before_persisting_run() {
+    let (coordinator, store) = coordinator();
     let mut request = submit_request("thread-a", "idem-profile-hint");
-    request.requested_run_profile = Some(RunProfileRequest::new("experimental-fast-lane").unwrap());
+    request.requested_run_profile = Some(RunProfileRequest::new("long_running_mission").unwrap());
 
-    let response = coordinator.submit_turn(request.clone()).await.unwrap();
+    let err = coordinator.submit_turn(request.clone()).await.unwrap_err();
 
-    let SubmitTurnResponse::Accepted {
-        run_id,
-        resolved_run_profile_id,
-        resolved_run_profile_version,
-        ..
-    } = response;
-    assert_eq!(resolved_run_profile_id.as_str(), "default");
-    assert_eq!(resolved_run_profile_version, RunProfileVersion::new(1));
-
-    let state = coordinator
-        .get_run_state(GetRunStateRequest {
-            scope: request.scope,
-            run_id,
-        })
-        .await
-        .unwrap();
-    assert_eq!(state.resolved_run_profile_id.as_str(), "default");
     assert_eq!(
-        state.resolved_run_profile_version,
-        RunProfileVersion::new(1)
+        err,
+        TurnError::AdmissionRejected(AdmissionRejection::new(
+            AdmissionRejectionReason::Unauthorized
+        ))
+    );
+    assert!(store.events().is_empty());
+    assert!(store.persistence_snapshot().runs.is_empty());
+
+    let duplicate = coordinator.submit_turn(request).await.unwrap_err();
+    assert_eq!(duplicate, err);
+}
+
+#[test]
+fn legacy_turn_run_profile_payload_deserializes_with_synthetic_resolved_snapshot() {
+    let legacy = r#"{
+        "id":"default",
+        "version":1,
+        "allow_steering":false,
+        "auto_queue_followups":false
+    }"#;
+
+    let profile = serde_json::from_str::<TurnRunProfile>(legacy).unwrap();
+
+    assert_eq!(profile.id.as_str(), "default");
+    assert_eq!(profile.version, RunProfileVersion::new(1));
+    assert!(!profile.allow_steering);
+    assert_eq!(profile.resolved.profile_id.as_str(), "default");
+    assert_eq!(profile.resolved.profile_version, RunProfileVersion::new(1));
+    assert_eq!(profile.resolved.loop_driver.id.as_str(), "lightweight_loop");
+    assert!(!profile.resolved.steering_policy.allow_steering);
+    assert!(
+        profile
+            .resolved
+            .provenance
+            .sources
+            .iter()
+            .any(|source| source.summary
+                == "legacy persisted turn run profile reconstructed without raw authority handles")
     );
 }
 
@@ -416,6 +492,7 @@ async fn resume_turn_ignores_wake_notification_panic_after_requeue() {
         .submit_turn(
             submit_request("thread-a", "idem-submit-a"),
             &AllowAllTurnAdmissionPolicy,
+            &InMemoryRunProfileResolver::default(),
         )
         .await
         .map(|response| accepted_run_id(&response))
@@ -891,6 +968,47 @@ fn concurrent_duplicate_submit_waits_for_in_flight_admission_result() {
     let second = second.join().unwrap().unwrap();
     assert_eq!(second, first);
     assert_eq!(policy.calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn cancelled_submit_during_profile_resolution_clears_in_flight_idempotency() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let (started_tx, started_rx) = mpsc::channel();
+    let resolver = Arc::new(BlockingRunProfileResolver::new(started_tx));
+    let request = submit_request("thread-a", "idem-submit-cancelled-profile-resolution");
+    let mut pending = store.submit_turn(
+        request.clone(),
+        &AllowAllTurnAdmissionPolicy,
+        resolver.as_ref(),
+    );
+    let waker = std::task::Waker::noop();
+    let mut context = Context::from_waker(waker);
+    assert!(matches!(pending.as_mut().poll(&mut context), Poll::Pending));
+    started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("first submit should start profile resolution");
+    drop(pending);
+
+    let retry_store = store.clone();
+    let (retry_tx, retry_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let retry = runtime.block_on(retry_store.submit_turn(
+            request,
+            &AllowAllTurnAdmissionPolicy,
+            &InMemoryRunProfileResolver::default(),
+        ));
+        retry_tx.send(retry).unwrap();
+    });
+    let retry = retry_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("retry should not wait on a stale in-flight idempotency key")
+        .unwrap();
+
+    assert!(matches!(retry, SubmitTurnResponse::Accepted { .. }));
 }
 
 #[tokio::test]

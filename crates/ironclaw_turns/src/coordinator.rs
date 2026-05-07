@@ -7,9 +7,10 @@ use std::{
 use tracing::debug;
 
 use crate::{
-    AdmissionRejection, CancelRunRequest, CancelRunResponse, GetRunStateRequest, ResumeTurnRequest,
-    ResumeTurnResponse, SubmitTurnRequest, SubmitTurnResponse, TurnError, TurnRunId, TurnRunState,
-    TurnScope, TurnStateStore, TurnStatus, events::EventCursor,
+    AdmissionRejection, CancelRunRequest, CancelRunResponse, GetRunStateRequest,
+    InMemoryRunProfileResolver, ResumeTurnRequest, ResumeTurnResponse, RunProfileResolver,
+    SubmitTurnRequest, SubmitTurnResponse, TurnError, TurnRunId, TurnRunState, TurnScope,
+    TurnStateStore, TurnStatus, events::EventCursor,
 };
 
 pub trait TurnAdmissionPolicy: Send + Sync {
@@ -82,6 +83,7 @@ pub trait TurnCoordinator: Send + Sync {
 pub struct DefaultTurnCoordinator<S> {
     store: Arc<S>,
     admission_policy: Arc<dyn TurnAdmissionPolicy>,
+    run_profile_resolver: Arc<dyn RunProfileResolver>,
     wake_notifier: Arc<dyn TurnRunWakeNotifier>,
 }
 
@@ -93,12 +95,18 @@ where
         Self {
             store,
             admission_policy: Arc::new(AllowAllTurnAdmissionPolicy),
+            run_profile_resolver: Arc::new(InMemoryRunProfileResolver::default()),
             wake_notifier: Arc::new(NoopTurnRunWakeNotifier),
         }
     }
 
     pub fn with_admission_policy(mut self, policy: Arc<dyn TurnAdmissionPolicy>) -> Self {
         self.admission_policy = policy;
+        self
+    }
+
+    pub fn with_run_profile_resolver(mut self, resolver: Arc<dyn RunProfileResolver>) -> Self {
+        self.run_profile_resolver = resolver;
         self
     }
 
@@ -152,7 +160,11 @@ where
         let scope = request.scope.clone();
         let response = self
             .store
-            .submit_turn(request, self.admission_policy.as_ref())
+            .submit_turn(
+                request,
+                self.admission_policy.as_ref(),
+                self.run_profile_resolver.as_ref(),
+            )
             .await?;
         notify_queued_run_best_effort(self.wake_notifier.as_ref(), submit_wake(scope, &response));
         Ok(response)

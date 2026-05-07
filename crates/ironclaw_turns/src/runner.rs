@@ -2,9 +2,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BlockedReason, LoopExit, LoopExitMapping, LoopExitValidationPolicy, SanitizedFailure,
-    TurnCheckpointId, TurnError, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope,
-    TurnTimestamp, events::EventCursor,
+    BlockedReason, LoopExit, LoopExitMapping, LoopExitValidationPolicy, ResolvedRunProfile,
+    SanitizedFailure, TurnCheckpointId, TurnError, TurnLeaseToken, TurnRunId, TurnRunState,
+    TurnRunnerId, TurnScope, TurnTimestamp, events::EventCursor,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -17,6 +17,7 @@ pub struct ClaimRunRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaimedTurnRun {
     pub state: TurnRunState,
+    pub resolved_run_profile: ResolvedRunProfile,
     pub runner_id: TurnRunnerId,
     pub lease_token: TurnLeaseToken,
 }

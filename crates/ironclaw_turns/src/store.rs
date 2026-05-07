@@ -4,10 +4,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     AcceptedMessageRef, AdmissionRejection, CancelRunRequest, CancelRunResponse, GateRef,
     GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef, ResumeTurnRequest,
-    ResumeTurnResponse, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
-    TurnActor, TurnAdmissionPolicy, TurnCheckpointId, TurnError, TurnErrorCategory, TurnId,
-    TurnLeaseToken, TurnLifecycleEvent, TurnRunId, TurnRunProfile, TurnRunState, TurnRunnerId,
-    TurnScope, TurnStatus, TurnTimestamp, events::EventCursor,
+    ResumeTurnResponse, RunProfileResolver, SourceBindingRef, SubmitTurnRequest,
+    SubmitTurnResponse, ThreadBusy, TurnActor, TurnAdmissionPolicy, TurnCheckpointId, TurnError,
+    TurnErrorCategory, TurnId, TurnLeaseToken, TurnLifecycleEvent, TurnRunId, TurnRunProfile,
+    TurnRunState, TurnRunnerId, TurnScope, TurnStatus, TurnTimestamp, events::EventCursor,
 };
 
 #[async_trait]
@@ -16,6 +16,7 @@ pub trait TurnStateStore: Send + Sync {
         &self,
         request: SubmitTurnRequest,
         admission_policy: &dyn TurnAdmissionPolicy,
+        run_profile_resolver: &dyn RunProfileResolver,
     ) -> Result<SubmitTurnResponse, TurnError>;
 
     async fn resume_turn(

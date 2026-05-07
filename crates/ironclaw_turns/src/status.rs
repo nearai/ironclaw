@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    AcceptedMessageRef, GateRef, ReplyTargetBindingRef, RunProfileId, RunProfileRequest,
+    AcceptedMessageRef, GateRef, ReplyTargetBindingRef, ResolvedRunProfile, RunProfileId,
     RunProfileVersion, SourceBindingRef, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
     events::EventCursor, request::TurnTimestamp,
 };
@@ -31,22 +31,65 @@ impl TurnStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TurnRunProfile {
     pub id: RunProfileId,
     pub version: RunProfileVersion,
     pub allow_steering: bool,
     pub auto_queue_followups: bool,
+    pub resolved: ResolvedRunProfile,
 }
 
 impl TurnRunProfile {
-    pub fn resolve(_request: Option<&RunProfileRequest>) -> Self {
+    pub fn from_resolved(resolved: ResolvedRunProfile) -> Self {
+        let id = compatibility_profile_id(&resolved);
         Self {
-            id: RunProfileId::default_profile(),
-            version: RunProfileVersion::new(1),
-            allow_steering: false,
+            id,
+            version: resolved.profile_version,
+            allow_steering: resolved.steering_policy.allow_steering,
             auto_queue_followups: false,
+            resolved,
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for TurnRunProfile {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireProfile {
+            id: RunProfileId,
+            version: RunProfileVersion,
+            allow_steering: bool,
+            auto_queue_followups: bool,
+            resolved: Option<ResolvedRunProfile>,
+        }
+
+        let wire = WireProfile::deserialize(deserializer)?;
+        let resolved = wire.resolved.unwrap_or_else(|| {
+            ResolvedRunProfile::legacy_compatibility(
+                wire.id.clone(),
+                wire.version,
+                wire.allow_steering,
+            )
+        });
+        Ok(Self {
+            id: wire.id,
+            version: wire.version,
+            allow_steering: wire.allow_steering,
+            auto_queue_followups: wire.auto_queue_followups,
+            resolved,
+        })
+    }
+}
+
+fn compatibility_profile_id(resolved: &ResolvedRunProfile) -> RunProfileId {
+    if resolved.profile_id.as_str() == "interactive_default" {
+        RunProfileId::default_profile()
+    } else {
+        resolved.profile_id.clone()
     }
 }
 
