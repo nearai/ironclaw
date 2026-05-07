@@ -15,7 +15,7 @@ use crate::{
     ConversationBindingResolution, ConversationBindingService, ExternalActorRef,
     ExternalConversationRef, InboundTurnError, LinkConversationRequest, LinkedConversationBinding,
     MessageIdempotencyStatus, ReplyTargetBinding, ResolveConversationRequest, SessionThreadService,
-    ThreadAccessDecision, ThreadMessageRecord,
+    ThreadAccessDecision, ThreadMessageRecord, ids::ExternalConversationIdentity,
 };
 
 #[derive(Clone, Default)]
@@ -124,7 +124,7 @@ impl ConversationBindingService for InMemoryConversationServices {
             tenant_id: request.tenant_id.clone(),
             adapter_kind: request.adapter_kind.clone(),
             adapter_installation_id: request.adapter_installation_id.clone(),
-            external_conversation_ref: request.external_conversation_ref.clone(),
+            external_conversation_identity: request.external_conversation_ref.identity(),
         };
         if let Some(existing) = state.bindings.get(&binding_key).cloned() {
             if existing.thread_id == request.target_thread_id {
@@ -187,6 +187,8 @@ impl ConversationBindingService for InMemoryConversationServices {
             tenant_id: binding.tenant_id,
             actor_user_id: actor_user_id.clone(),
             thread_id: binding.thread_id,
+            adapter_kind: binding.adapter_kind,
+            adapter_installation_id: binding.adapter_installation_id,
             external_conversation_ref: binding.external_conversation_ref,
         })
     }
@@ -357,7 +359,7 @@ struct BindingKey {
     tenant_id: TenantId,
     adapter_kind: AdapterKind,
     adapter_installation_id: AdapterInstallationId,
-    external_conversation_ref: ExternalConversationRef,
+    external_conversation_identity: ExternalConversationIdentity,
 }
 
 impl BindingKey {
@@ -366,7 +368,7 @@ impl BindingKey {
             tenant_id: request.tenant_id.clone(),
             adapter_kind: request.adapter_kind.clone(),
             adapter_installation_id: request.adapter_installation_id.clone(),
-            external_conversation_ref: request.external_conversation_ref.clone(),
+            external_conversation_identity: request.external_conversation_ref.identity(),
         }
     }
 }
@@ -396,6 +398,8 @@ struct ThreadRecord {
 #[derive(Debug, Clone)]
 struct BindingRecord {
     tenant_id: TenantId,
+    adapter_kind: AdapterKind,
+    adapter_installation_id: AdapterInstallationId,
     external_conversation_ref: ExternalConversationRef,
     thread_id: ThreadId,
     agent_id: Option<AgentId>,
@@ -407,8 +411,8 @@ struct BindingRecord {
 impl BindingRecord {
     fn new(
         tenant_id: TenantId,
-        _adapter_kind: AdapterKind,
-        _adapter_installation_id: AdapterInstallationId,
+        adapter_kind: AdapterKind,
+        adapter_installation_id: AdapterInstallationId,
         external_conversation_ref: ExternalConversationRef,
         thread_id: ThreadId,
         agent_id: Option<AgentId>,
@@ -421,6 +425,8 @@ impl BindingRecord {
                 .map_err(|reason| InboundTurnError::InvalidCanonicalRef { reason })?;
         Ok(Self {
             tenant_id,
+            adapter_kind,
+            adapter_installation_id,
             external_conversation_ref,
             thread_id,
             agent_id,

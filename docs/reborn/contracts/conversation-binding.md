@@ -26,7 +26,7 @@ Adapters pass structured external actor/conversation refs to this boundary. The 
 
 | Component | Owns | Does not own |
 | --- | --- | --- |
-| `ConversationBindingService` | Pairing/authenticated actor resolution, external conversation binding lookup/creation, explicit conversation-to-thread links, source/reply target binding refs, reply-target validation | Raw transcript content, run lifecycle, product payload parsing |
+| `ConversationBindingService` | Pairing/authenticated actor resolution, external conversation binding lookup/creation keyed by stable conversation identity, explicit conversation-to-thread links, source/reply target binding refs, reply-target validation with adapter installation and external routing data | Raw transcript content, run lifecycle, product payload parsing |
 | `SessionThreadService` | Accepted inbound message refs, external event idempotency, message-to-thread/source/reply refs | Durable transcript schema details owned by #3204, turn/run locks |
 | `InboundTurnService` | Facade composition: resolve binding, accept message, submit canonical turn | Adapter protocol parsing, assistant egress fanout |
 | `TurnCoordinator` | Turn/run admission and lifecycle after accepted message refs exist | External actor/conversation parsing, raw message storage |
@@ -54,13 +54,14 @@ This is not the final durable transcript store. PostgreSQL/libSQL storage and la
 4. Explicit linking can attach a new external conversation to an existing thread only after actor/thread access checks pass.
 5. Pairing/authenticated actor resolution is scoped by `(tenant_id, adapter_kind, adapter_installation_id, external_actor_ref)`; a pairing on one tenant or adapter installation does not authorize another.
 6. External actor/conversation refs stay structured for equality. String fingerprints, when exposed for diagnostics, must be collision-safe for delimiter-like external IDs.
-7. Explicit linking resolves the target thread inside the requested tenant; a caller cannot attach a different tenant's thread by reusing or guessing a thread id.
-8. Explicit linking is idempotent for the same target thread and fails closed rather than silently retargeting an already-bound external conversation to a different thread.
-9. External inbound idempotency is keyed by `(tenant_id, source_binding_ref, external_event_id)` and replays the original accepted message ref without inserting a duplicate message.
-10. Adapter retries after a transient turn-submission failure must retry `TurnCoordinator.submit_turn(...)` with the same accepted message ref until the accepted message is marked submitted; retries after a successful submission do not submit a duplicate turn.
-11. Bound group/channel messages are authorized against thread participants; external channel membership alone is insufficient.
-12. Source binding and reply target binding refs are distinct. Egress must validate the stored reply target for the current actor/thread before sending.
-13. Message content crosses this boundary as a content ref. Raw user text is owned by the transcript/content storage boundary, not turn state.
+7. Conversation binding identity uses stable conversation fields `(space_id, conversation_id, thread_id)`; per-message external IDs do not fork bindings or canonical threads.
+8. Explicit linking resolves the target thread inside the requested tenant; a caller cannot attach a different tenant's thread by reusing or guessing a thread id.
+9. Explicit linking is idempotent for the same target thread and fails closed rather than silently retargeting an already-bound external conversation to a different thread, including when only per-message external IDs differ.
+10. External inbound idempotency is keyed by `(tenant_id, source_binding_ref, external_event_id)` and replays the original accepted message ref without inserting a duplicate message.
+11. Adapter retries after a transient turn-submission failure must retry `TurnCoordinator.submit_turn(...)` with the same accepted message ref until the accepted message is marked submitted; retries after a successful submission do not submit a duplicate turn.
+12. Bound group/channel messages are authorized against thread participants; external channel membership alone is insufficient.
+13. Source binding and reply target binding refs are distinct. Egress must validate the stored reply target for the current actor/thread before sending, and validation returns the adapter kind, adapter installation id, and full external conversation route needed to address the reply.
+14. Message content crosses this boundary as a content ref. Raw user text is owned by the transcript/content storage boundary, not turn state.
 
 ---
 

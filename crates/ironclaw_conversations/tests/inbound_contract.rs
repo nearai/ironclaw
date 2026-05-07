@@ -190,6 +190,194 @@ async fn external_ref_keying_cannot_be_collided_with_delimiter_characters() {
 }
 
 #[tokio::test]
+async fn per_message_external_ids_do_not_fork_conversation_bindings() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-1"),
+            user("alice"),
+        )
+        .await;
+    let coordinator = Arc::new(RecordingTurnCoordinator::default());
+    let inbound = InboundTurnService::new(services.clone(), services.clone(), coordinator.clone());
+
+    let first = inbound
+        .handle_inbound_turn(inbound_request(
+            telegram(),
+            external_actor("telegram-user-1"),
+            ExternalConversationRef::new(None, "chat-1", Some("topic-a"), Some("message-1"))
+                .unwrap(),
+            "telegram-event-message-1",
+        ))
+        .await
+        .unwrap();
+    let second = inbound
+        .handle_inbound_turn(inbound_request(
+            telegram(),
+            external_actor("telegram-user-1"),
+            ExternalConversationRef::new(None, "chat-1", Some("topic-a"), Some("message-2"))
+                .unwrap(),
+            "telegram-event-message-2",
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(second.resolution.turn_scope, first.resolution.turn_scope);
+    assert_eq!(
+        second.resolution.source_binding_ref,
+        first.resolution.source_binding_ref
+    );
+    assert_eq!(
+        second.resolution.reply_target_binding_ref,
+        first.resolution.reply_target_binding_ref
+    );
+    assert_eq!(coordinator.submissions().len(), 2);
+}
+
+#[tokio::test]
+async fn explicit_link_reuses_binding_when_only_external_message_id_changes() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            web(),
+            default_installation(),
+            external_actor("alice-web"),
+            user("alice"),
+        )
+        .await;
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("alice-telegram"),
+            user("alice"),
+        )
+        .await;
+    let web_resolution = services
+        .resolve_or_create_binding(resolve_request(
+            web(),
+            external_actor("alice-web"),
+            external_conversation("browser-session", None),
+            "web-event-1",
+        ))
+        .await
+        .unwrap();
+    let first = services
+        .link_conversation_to_thread(LinkConversationRequest {
+            tenant_id: tenant(),
+            adapter_kind: telegram(),
+            adapter_installation_id: default_installation(),
+            external_actor_ref: external_actor("alice-telegram"),
+            external_conversation_ref: ExternalConversationRef::new(
+                Some("workspace-a"),
+                "chat-1",
+                Some("topic-a"),
+                Some("message-1"),
+            )
+            .unwrap(),
+            target_thread_id: web_resolution.turn_scope.thread_id.clone(),
+            target_agent_id: web_resolution.turn_scope.agent_id.clone(),
+            target_project_id: web_resolution.turn_scope.project_id.clone(),
+        })
+        .await
+        .unwrap();
+    let replay = services
+        .link_conversation_to_thread(LinkConversationRequest {
+            tenant_id: tenant(),
+            adapter_kind: telegram(),
+            adapter_installation_id: default_installation(),
+            external_actor_ref: external_actor("alice-telegram"),
+            external_conversation_ref: ExternalConversationRef::new(
+                Some("workspace-a"),
+                "chat-1",
+                Some("topic-a"),
+                Some("message-2"),
+            )
+            .unwrap(),
+            target_thread_id: web_resolution.turn_scope.thread_id,
+            target_agent_id: web_resolution.turn_scope.agent_id,
+            target_project_id: web_resolution.turn_scope.project_id,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(replay.thread_id, first.thread_id);
+    assert_eq!(replay.source_binding_ref, first.source_binding_ref);
+    assert_eq!(
+        replay.reply_target_binding_ref,
+        first.reply_target_binding_ref
+    );
+}
+
+#[tokio::test]
+async fn validated_reply_target_preserves_adapter_installation_and_external_route() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            AdapterInstallationId::new("workspace-a-installation").unwrap(),
+            external_actor("alice-telegram"),
+            user("alice"),
+        )
+        .await;
+    let conversation_ref = ExternalConversationRef::new(
+        Some("workspace-a"),
+        "channel-1",
+        Some("thread-1"),
+        Some("message-1"),
+    )
+    .unwrap();
+    let resolution = services
+        .resolve_or_create_binding(resolve_request_with(
+            tenant(),
+            telegram(),
+            AdapterInstallationId::new("workspace-a-installation").unwrap(),
+            external_actor("alice-telegram"),
+            conversation_ref,
+            "telegram-event-1",
+        ))
+        .await
+        .unwrap();
+
+    let target = services
+        .validate_reply_target(
+            &tenant(),
+            &user("alice"),
+            &resolution.reply_target_binding_ref,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(target.adapter_kind, telegram());
+    assert_eq!(
+        target.adapter_installation_id,
+        AdapterInstallationId::new("workspace-a-installation").unwrap()
+    );
+    assert_eq!(
+        target.external_conversation_ref.space_id(),
+        Some("workspace-a")
+    );
+    assert_eq!(
+        target.external_conversation_ref.conversation_id(),
+        "channel-1"
+    );
+    assert_eq!(
+        target.external_conversation_ref.thread_id(),
+        Some("thread-1")
+    );
+    assert_eq!(
+        target.external_conversation_ref.message_id(),
+        Some("message-1")
+    );
+}
+
+#[tokio::test]
 async fn explicit_link_cannot_cross_tenant_by_reusing_a_thread_id() {
     let services = InMemoryConversationServices::default();
     services

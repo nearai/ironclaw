@@ -57,6 +57,8 @@ pub struct ReplyTargetBinding {
     pub tenant_id: TenantId,
     pub actor_user_id: UserId,
     pub thread_id: ThreadId,
+    pub adapter_kind: AdapterKind,
+    pub adapter_installation_id: AdapterInstallationId,
     pub external_conversation_ref: ExternalConversationRef,
 }
 

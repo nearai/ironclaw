@@ -65,6 +65,13 @@ pub struct ExternalConversationRef {
     message_id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ExternalConversationIdentity {
+    space_id: Option<String>,
+    conversation_id: String,
+    thread_id: Option<String>,
+}
+
 impl ExternalConversationRef {
     pub fn new(
         space_id: Option<&str>,
@@ -94,8 +101,28 @@ impl ExternalConversationRef {
         })
     }
 
+    pub fn space_id(&self) -> Option<&str> {
+        self.space_id.as_deref()
+    }
+
     pub fn conversation_id(&self) -> &str {
         &self.conversation_id
+    }
+
+    pub fn thread_id(&self) -> Option<&str> {
+        self.thread_id.as_deref()
+    }
+
+    pub fn message_id(&self) -> Option<&str> {
+        self.message_id.as_deref()
+    }
+
+    pub(crate) fn identity(&self) -> ExternalConversationIdentity {
+        ExternalConversationIdentity {
+            space_id: self.space_id.clone(),
+            conversation_id: self.conversation_id.clone(),
+            thread_id: self.thread_id.clone(),
+        }
     }
 
     pub fn conversation_fingerprint(&self) -> String {
