@@ -1774,7 +1774,7 @@ async fn host_runtime_services_routes_cached_wasm_http_through_per_invocation_po
 }
 
 #[tokio::test]
-async fn host_runtime_services_routes_wasm_http_with_staged_network_and_secret_handoffs() {
+async fn host_runtime_services_wasm_http_uses_production_staged_network_and_secret_handoffs() {
     let parsed_manifest = ExtensionManifest::parse(WASM_HTTP_SUCCESS_MANIFEST).unwrap();
     let component = tool_component(HTTP_TOOL_WAT);
     let filesystem = Arc::new(
@@ -1820,11 +1820,9 @@ async fn host_runtime_services_routes_wasm_http_with_staged_network_and_secret_h
         ),
     ])));
     let runtime_http = Arc::new(
-        HostHttpEgressService::new_with_request_policy_for_tests(
-            network.clone(),
-            InMemorySecretStore::new(),
-        )
-        .with_secret_injection_store(services.secret_injection_store()),
+        HostHttpEgressService::new(network.clone(), InMemorySecretStore::new())
+            .with_network_policy_store(services.network_policy_store())
+            .with_secret_injection_store(services.secret_injection_store()),
     );
     let services = services
         .with_runtime_http_egress(runtime_http)
@@ -1835,7 +1833,7 @@ async fn host_runtime_services_routes_wasm_http_with_staged_network_and_secret_h
     secret_store
         .put(
             scope.clone(),
-            secret_handle,
+            secret_handle.clone(),
             SecretMaterial::from("sk-vertical-secret"),
         )
         .await
@@ -1865,6 +1863,21 @@ async fn host_runtime_services_routes_wasm_http_with_staged_network_and_secret_h
             "authorization".to_string(),
             "Bearer sk-vertical-secret".to_string(),
         ))
+    );
+    assert!(
+        services
+            .network_policy_store()
+            .take(&scope, &capability_id)
+            .is_none(),
+        "completed invoke must discard staged network policy after shared egress uses it"
+    );
+    assert!(
+        services
+            .secret_injection_store()
+            .take(&scope, &capability_id, &secret_handle)
+            .unwrap()
+            .is_none(),
+        "completed invoke must consume staged secret material once"
     );
 }
 

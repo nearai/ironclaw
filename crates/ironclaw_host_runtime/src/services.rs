@@ -496,6 +496,10 @@ where
         self
     }
 
+    pub fn network_policy_store(&self) -> Arc<NetworkObligationPolicyStore> {
+        Arc::clone(&self.network_policy_store)
+    }
+
     pub fn secret_injection_store(&self) -> Arc<RuntimeSecretInjectionStore> {
         Arc::clone(&self.secret_injection_store)
     }
