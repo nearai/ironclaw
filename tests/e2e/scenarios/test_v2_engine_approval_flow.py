@@ -65,6 +65,21 @@ async def _stop_process(proc, sig=signal.SIGINT, timeout=5):
     await _drain_pipes()
 
 
+async def _set_tool_permission(base_url: str, tool_name: str, state: str):
+    """Persist an explicit tool permission override for deterministic approval tests."""
+    async with httpx.AsyncClient() as client:
+        response = await client.put(
+            f"{base_url}/api/settings/tools/{tool_name}",
+            json={"state": state},
+            headers={"Authorization": f"Bearer {AUTH_TOKEN}"},
+            timeout=15,
+        )
+    assert response.status_code == 200, (
+        f"Failed to set {tool_name} permission to {state}: "
+        f"{response.status_code} {response.text}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -109,6 +124,8 @@ async def v2_approval_server(ironclaw_binary, mock_llm_server):
         "CLI_ENABLED": "false",
         "LLM_BACKEND": "openai_compatible",
         "LLM_BASE_URL": mock_llm_server,
+        # Dummy key: mock LLM ignores it, but openai_compatible config requires auth.
+        "LLM_API_KEY": "mock-api-key",
         "LLM_MODEL": "mock-model",
         "DATABASE_BACKEND": "libsql",
         "LIBSQL_PATH": os.path.join(_V2_APPROVAL_DB_TMPDIR.name, "v2-approval-e2e.db"),
@@ -133,6 +150,11 @@ async def v2_approval_server(ironclaw_binary, mock_llm_server):
     base_url = f"http://127.0.0.1:{gateway_port}"
     try:
         await wait_for_ready(f"{base_url}/api/health", timeout=60)
+        # The production seeded default for the read-only `http` tool is
+        # `always_allow`. These approval tests intentionally exercise the
+        # explicit ask-each-time path, so pin the fixture user to that policy
+        # after startup seeding completes.
+        await _set_tool_permission(base_url, "http", "ask_each_time")
         yield base_url
     except TimeoutError:
         if proc.returncode is None:
@@ -571,6 +593,8 @@ async def restartable_v2_server(ironclaw_binary, mock_llm_server):
         "CLI_ENABLED": "false",
         "LLM_BACKEND": "openai_compatible",
         "LLM_BASE_URL": mock_llm_server,
+        # Dummy key: mock LLM ignores it, but openai_compatible config requires auth.
+        "LLM_API_KEY": "mock-api-key",
         "LLM_MODEL": "mock-model",
         "DATABASE_BACKEND": "libsql",
         "LIBSQL_PATH": os.path.join(_RESTART_DB_TMPDIR.name, "v2-restart-e2e.db"),
@@ -655,6 +679,11 @@ async def restartable_v2_server(ironclaw_binary, mock_llm_server):
 
     await start()
     try:
+        # First boot must require approval so the test can persist an
+        # `always_allow` decision, then verify a later restart honors it.
+        # Do not reset inside start(), or the restart would erase the state
+        # this test is specifically validating.
+        await _set_tool_permission(base_url, "http", "ask_each_time")
         yield {"base_url": base_url, "start": start, "stop": stop}
     finally:
         await stop()

@@ -1467,6 +1467,31 @@ impl ChannelPairingStore for PgBackend {
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(())
     }
+
+    async fn create_channel_identity(
+        &self,
+        channel: &str,
+        external_id: &str,
+        owner_id: &str,
+    ) -> Result<(), DatabaseError> {
+        let channel = crate::pairing::normalize_channel_name(channel);
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        client
+            .execute(
+                "INSERT INTO channel_identities (owner_id, channel, external_id)
+                 VALUES ($1, $2, $3)
+                 ON CONFLICT (channel, external_id)
+                 DO UPDATE SET owner_id = $1",
+                &[&owner_id, &channel, &external_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(())
+    }
 }
 
 // ==================== IdentityStore ====================

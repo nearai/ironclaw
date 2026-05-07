@@ -1,0 +1,20 @@
+[package]
+name = "ironclaw_mcp"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+ironclaw_extensions = { path = "../ironclaw_extensions" }
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_resources = { path = "../ironclaw_resources" }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+ironclaw_dispatcher = { path = "../ironclaw_dispatcher" }
+ironclaw_events = { path = "../ironclaw_events" }
+ironclaw_filesystem = { path = "../ironclaw_filesystem" }
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt"] }

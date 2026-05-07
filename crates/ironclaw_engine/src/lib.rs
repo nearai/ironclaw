@@ -75,7 +75,8 @@ pub use gate::lease::LeaseGate;
 pub use gate::pipeline::GatePipeline;
 pub use gate::tool_tier::{ToolTier, classify_tool_tier};
 pub use gate::{
-    ExecutionGate, ExecutionMode, GateContext, GateDecision, GateResolution, ResumeKind,
+    CancellingGateController, ExecutionGate, ExecutionMode, GateContext, GateController,
+    GateDecision, GatePauseRequest, GateResolution, ResumeKind,
 };
 
 // ── Re-exports: runtime ───────────────────────────────────────

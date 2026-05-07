@@ -6,7 +6,9 @@
 
 use std::sync::Arc;
 
+use crate::gate::GateController;
 use crate::types::capability::{ActionDef, ActionInventory, CapabilityLease, CapabilitySummary};
+use crate::types::conversation::ConversationId;
 use crate::types::error::EngineError;
 use crate::types::project::ProjectId;
 use crate::types::step::{ActionResult, StepId};
@@ -17,7 +19,7 @@ use ironclaw_common::ValidTimezone;
 ///
 /// Passed to the executor so it can make context-dependent decisions
 /// (e.g. different tool behavior in background vs foreground threads).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ThreadExecutionContext {
     pub thread_id: ThreadId,
     pub thread_type: ThreadType,
@@ -42,6 +44,63 @@ pub struct ThreadExecutionContext {
     pub available_actions_snapshot: Option<Arc<[ActionDef]>>,
     /// Snapshot of the full action inventory visible to the current step.
     pub available_action_inventory_snapshot: Option<Arc<ActionInventory>>,
+    /// Host-supplied callback that lets the executor pause inline on
+    /// `Approval` gates instead of unwinding back to the orchestrator.
+    ///
+    /// Required. Code paths that don't pause (post-resolution replay,
+    /// background mission writes, tests) supply
+    /// [`crate::gate::CancellingGateController::arc()`], which surfaces
+    /// any unexpected gate as a typed denial rather than the historical
+    /// "execution paused by gate" RuntimeError leak.
+    pub gate_controller: Arc<dyn GateController>,
+    /// Set to `true` when the host has already collected user approval
+    /// for *this specific call* (matched by `current_call_id`) and the
+    /// executor is retrying it inline. The host's `EffectExecutor` impl
+    /// uses this to skip the `ApprovalRequirement::Always` /
+    /// `AskEachTime` gate that would otherwise re-fire on retry —
+    /// mirrors the legacy `execute_resolved_pending_action` path that
+    /// passes `approval_already_granted=true`.
+    ///
+    /// One-shot: scoped to a single retry call. Reset to `false` on
+    /// any context not owned by an inline retry.
+    pub call_approval_granted: bool,
+    /// The conversation that originated this thread, if any. Carried
+    /// into [`crate::gate::GatePauseRequest`] so the host can match a
+    /// gate to the originating UI surface even when the same user has
+    /// multiple concurrent conversations (e.g. two browser tabs).
+    /// `None` for background mission threads with no user-facing
+    /// conversation.
+    pub conversation_id: Option<ConversationId>,
+}
+
+// Manual Debug impl: `dyn GateController` is not Debug, but the rest of
+// the struct is. The controller is opaque host-supplied state — it
+// renders as a constant marker rather than its internals.
+impl std::fmt::Debug for ThreadExecutionContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ThreadExecutionContext")
+            .field("thread_id", &self.thread_id)
+            .field("thread_type", &self.thread_type)
+            .field("project_id", &self.project_id)
+            .field("user_id", &self.user_id)
+            .field("step_id", &self.step_id)
+            .field("current_call_id", &self.current_call_id)
+            .field("source_channel", &self.source_channel)
+            .field("user_timezone", &self.user_timezone)
+            .field("thread_goal", &self.thread_goal)
+            .field(
+                "available_actions_snapshot",
+                &self.available_actions_snapshot.as_ref().map(|a| a.len()),
+            )
+            .field(
+                "available_action_inventory_snapshot",
+                &self.available_action_inventory_snapshot.is_some(),
+            )
+            .field("gate_controller", &"<dyn GateController>")
+            .field("call_approval_granted", &self.call_approval_granted)
+            .field("conversation_id", &self.conversation_id)
+            .finish()
+    }
 }
 
 /// Abstraction over capability action execution.

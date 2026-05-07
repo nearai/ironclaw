@@ -11,8 +11,6 @@ on:
         required: false
         type: string
         default: full
-  schedule:
-    - cron: "0 6 * * 1"  # Weekly Monday 6 AM UTC
   workflow_dispatch:
 
 permissions:
@@ -126,3 +124,4 @@ jobs:
             echo "One or more E2E jobs failed"
             exit 1
           fi
+

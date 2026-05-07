@@ -177,7 +177,25 @@ function connectSSE(lastEventIdOverride) {
       _doneWithoutResponseTimer = null;
     }
     finalizeActivityGroup();
-    addMessage('assistant', data.content);
+
+    const messages = document.querySelectorAll('#chat-messages .message');
+    const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
+    const lastAssistantAlreadyHasResponse = Boolean(
+      lastMessage
+        && lastMessage.classList.contains('assistant')
+        && (lastMessage.getAttribute('data-raw') || '') === data.content
+    );
+
+    // Streamed responses already accumulated `data.content` into the
+    // bubble we just finalized. Separately, a thread switch or history
+    // refresh can render the completed response from /history before the
+    // matching SSE response arrives. In both cases, adding another bubble
+    // would render the same final assistant message twice. Only create a
+    // new bubble when the final response is not already the latest chat
+    // message (the normal non-streaming path).
+    if (!streamingMsg && !lastAssistantAlreadyHasResponse) {
+      addMessage('assistant', data.content);
+    }
     pruneOldMessages();
     enableChatInput();
     // Refresh thread list so new titles appear after first message

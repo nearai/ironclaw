@@ -470,6 +470,37 @@ async def test_refresh_preserves_in_progress_turn(page, ironclaw_server):
     ).wait_for(state="visible", timeout=15000)
 
 
+async def test_response_event_does_not_duplicate_history_rendered_response(page):
+    """A late response SSE must not duplicate a response already rendered from history."""
+    thread_id = "history-rendered-thread"
+    content = "The answer is 4."
+
+    await page.wait_for_function(
+        "() => typeof eventSource !== 'undefined' && eventSource && sseHasConnectedBefore === true",
+        timeout=10000,
+    )
+    await page.evaluate(
+        """({ threadId, content }) => {
+            currentThreadId = threadId;
+            const container = document.getElementById('chat-messages');
+            container.innerHTML = '';
+            addMessage('user', 'What is 2+2?');
+            addMessage('assistant', content);
+            eventSource.dispatchEvent(new MessageEvent('response', {
+                data: JSON.stringify({
+                    type: 'response',
+                    thread_id: threadId,
+                    content,
+                }),
+            }));
+        }""",
+        {"threadId": thread_id, "content": content},
+    )
+
+    assistant_messages = page.locator(SEL["message_assistant"]).filter(has_text=content)
+    assert await assistant_messages.count() == 1
+
+
 async def test_switching_back_preserves_in_progress_turn(page, ironclaw_server):
     """Switching away and back mid-turn should rehydrate the running thread."""
     thread_a, _payload = await _start_thread_and_wait_for_in_progress(

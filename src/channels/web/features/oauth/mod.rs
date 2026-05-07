@@ -736,7 +736,8 @@ pub(crate) async fn slack_relay_oauth_callback_handler(
                 format!("Failed to persist relay team_id: {e}")
             })?;
 
-        // Activate the relay channel
+        // Activate the relay channel first — this creates the relay client and
+        // verifies the connection is usable.
         tracing::info!(
             relay = %relay_extension_name,
             owner_id = %state.owner_id,
@@ -746,6 +747,84 @@ pub(crate) async fn slack_relay_oauth_callback_handler(
             .activate_stored_relay(&relay_extension_name, &state.owner_id)
             .await
             .map_err(|e| format!("Failed to activate relay channel: {}", e))?;
+
+        // Create channel identity pairing: Slack authed_user_id → IronClaw user.
+        // Fetch authed_user_id from the relay's connections API (server-side,
+        // not from the redirect URL which could be tampered).
+        if let Some(pairing_store) = ext_mgr.pairing_store() {
+            let relay_config = ext_mgr
+                .relay_config()
+                .map_err(|e| format!("Relay config not available: {e}"))?;
+            let effective_url = ext_mgr
+                .effective_relay_url(&relay_extension_name)
+                .await
+                .unwrap_or_else(|| relay_config.url.clone());
+            let client = crate::channels::relay::RelayClient::new(
+                effective_url,
+                relay_config.api_key.clone(),
+                relay_config.request_timeout_secs,
+            )
+            .map_err(|e| format!("Failed to create relay client: {e}"))?;
+
+            let connections = client
+                .list_connections("")
+                .await
+                .map_err(|e| format!("Failed to fetch relay connections: {e}"))?;
+            let authed_user_id = connections
+                .iter()
+                .find(|c| c.team_id == team_id)
+                .and_then(|c| c.authed_user_id.clone())
+                .ok_or_else(|| {
+                    "No connection with authed_user_id found for this team".to_string()
+                })?;
+
+            let user_key = format!("relay:{}:oauth_user", relay_extension_name);
+            let oauth_user = ext_mgr
+                .secrets()
+                .get_decrypted(&state.owner_id, &user_key)
+                .await
+                .ok()
+                .map(|s| s.expose().to_string())
+                .unwrap_or_else(|| state.owner_id.clone());
+            let _ = ext_mgr.secrets().delete(&state.owner_id, &user_key).await;
+
+            let user_record = if let Some(ref db) = state.store {
+                db.get_user(&oauth_user).await.ok().flatten()
+            } else {
+                None
+            };
+            let Some(ref record) = user_record else {
+                return Err(format!(
+                    "OAuth user '{oauth_user}' not found — cannot create relay identity"
+                ));
+            };
+            if record.status != "active" {
+                return Err(format!(
+                    "OAuth user '{oauth_user}' is not active (status: {})",
+                    record.status
+                ));
+            }
+            let role = match record.role.as_str() {
+                "owner" => crate::ownership::UserRole::Owner,
+                "admin" => crate::ownership::UserRole::Admin,
+                _ => crate::ownership::UserRole::Regular,
+            };
+            let Ok(user_id) = crate::ownership::UserId::new(&oauth_user, role) else {
+                return Err(format!(
+                    "OAuth user '{oauth_user}' has invalid user_id format"
+                ));
+            };
+            // Scope external_id to workspace: "team_id:slack_user_id"
+            let scoped_external_id = format!("{}:{}", team_id, authed_user_id);
+            pairing_store
+                .create_identity(
+                    crate::channels::relay::channel::DEFAULT_RELAY_NAME,
+                    &scoped_external_id,
+                    &user_id,
+                )
+                .await
+                .map_err(|e| format!("Failed to create relay identity: {e}"))?;
+        }
 
         Ok(())
     }

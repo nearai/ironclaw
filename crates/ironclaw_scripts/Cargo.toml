@@ -1,0 +1,21 @@
+[package]
+name = "ironclaw_scripts"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+ironclaw_extensions = { path = "../ironclaw_extensions" }
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_resources = { path = "../ironclaw_resources" }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+async-trait = "0.1"
+ironclaw_dispatcher = { path = "../ironclaw_dispatcher" }
+ironclaw_events = { path = "../ironclaw_events" }
+ironclaw_filesystem = { path = "../ironclaw_filesystem" }
+rust_decimal_macros = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt"] }
