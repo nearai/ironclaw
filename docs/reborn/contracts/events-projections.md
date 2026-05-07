@@ -126,7 +126,10 @@ client reconnects with last_event_id
 services. It routes scoped runtime and audit replay requests through their
 owning projection services and preserves their domain-specific DTOs/cursors;
 it must not flatten runtime, audit, transcript, or future memory facts into a
-single generic event payload.
+single generic event payload. Resume helpers return domain-specific updates
+when a cursor is valid, or an explicit snapshot/rebase response when retention
+has made replay impossible. A cursor minted under a different scope remains an
+authority failure and must not be silently converted into a snapshot.
 
 Rules:
 

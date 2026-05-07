@@ -4,10 +4,10 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_event_projections::{
     AuditProjectionCursor, AuditProjectionError, AuditProjectionRequest, AuditProjectionService,
-    AuditProjectionStage, EventProjectionService, EventStreamManager, MAX_PROJECTION_PAGE_LIMIT,
-    ProjectionCursor, ProjectionError, ProjectionRequest, ProjectionScope,
-    ReplayAuditProjectionService, ReplayEventProjectionService, RunProjectionStatus,
-    TimelineEntryKind,
+    AuditProjectionStage, AuditStreamResume, EventProjectionService, EventStreamManager,
+    MAX_PROJECTION_PAGE_LIMIT, ProjectionCursor, ProjectionError, ProjectionRequest,
+    ProjectionScope, ReplayAuditProjectionService, ReplayEventProjectionService,
+    RunProjectionStatus, RuntimeStreamResume, TimelineEntryKind,
 };
 use ironclaw_events::{
     DurableAuditLog, DurableEventLog, EventCursor, EventError, EventLogEntry, EventReplay,
@@ -319,6 +319,363 @@ async fn event_stream_manager_surfaces_domain_rebase_for_stale_resume_cursors() 
         audit_error,
         AuditProjectionError::RebaseRequired { .. }
     ));
+}
+
+#[tokio::test]
+async fn event_stream_manager_resume_without_cursor_returns_initial_snapshots() {
+    let runtime_log = Arc::new(InMemoryDurableEventLog::new());
+    let audit_log = Arc::new(InMemoryDurableAuditLog::new());
+    let manager = event_stream_manager(Arc::clone(&runtime_log), Arc::clone(&audit_log));
+    let ctx = execution_context_for_scope(scope_for_thread(ThreadId::new("thread-a").unwrap()));
+    let projection_scope = ProjectionScope::from_resource_scope(&ctx.resource_scope);
+    let action = Action::Dispatch {
+        capability: capability_id(),
+        estimated_resources: Default::default(),
+    };
+
+    runtime_log
+        .append(RuntimeEvent::dispatch_requested(
+            ctx.resource_scope.clone(),
+            capability_id(),
+        ))
+        .await
+        .unwrap();
+    audit_log
+        .append(AuditEnvelope::denied(
+            &ctx,
+            AuditStage::Denied,
+            ActionSummary::from_action(&action),
+            DenyReason::PolicyDenied,
+        ))
+        .await
+        .unwrap();
+
+    let runtime_resume = manager
+        .runtime_resume(ProjectionRequest {
+            scope: projection_scope.clone(),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+    match runtime_resume {
+        RuntimeStreamResume::Snapshot {
+            snapshot,
+            rebased_from,
+            earliest_available,
+        } => {
+            assert_eq!(snapshot.timeline.entries.len(), 1);
+            assert_eq!(rebased_from, None);
+            assert_eq!(earliest_available, None);
+        }
+        other => panic!("expected initial runtime snapshot, got {other:?}"),
+    }
+
+    let audit_resume = manager
+        .audit_resume(AuditProjectionRequest {
+            scope: projection_scope,
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+    match audit_resume {
+        AuditStreamResume::Snapshot {
+            snapshot,
+            rebased_from,
+            earliest_available,
+        } => {
+            assert_eq!(snapshot.entries.len(), 1);
+            assert_eq!(rebased_from, None);
+            assert_eq!(earliest_available, None);
+        }
+        other => panic!("expected initial audit snapshot, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn event_stream_manager_runtime_resume_returns_updates_for_valid_cursor() {
+    let runtime_log = Arc::new(InMemoryDurableEventLog::new());
+    let audit_log = Arc::new(InMemoryDurableAuditLog::new());
+    let manager = event_stream_manager(Arc::clone(&runtime_log), audit_log);
+    let scope = scope_for_thread(ThreadId::new("thread-a").unwrap());
+    let projection_scope = ProjectionScope::from_resource_scope(&scope);
+    let capability = capability_id();
+    let provider = provider_id();
+
+    let first = runtime_log
+        .append(RuntimeEvent::dispatch_requested(
+            scope.clone(),
+            capability.clone(),
+        ))
+        .await
+        .unwrap();
+    runtime_log
+        .append(RuntimeEvent::dispatch_succeeded(
+            scope.clone(),
+            capability,
+            provider,
+            RuntimeKind::Script,
+            12,
+        ))
+        .await
+        .unwrap();
+
+    let resume = manager
+        .runtime_resume(ProjectionRequest {
+            scope: projection_scope.clone(),
+            after: Some(ProjectionCursor::for_scope(projection_scope, first.cursor)),
+            limit: 16,
+        })
+        .await
+        .unwrap();
+
+    match resume {
+        RuntimeStreamResume::Updates(replay) => {
+            assert_eq!(replay.updates.len(), 1);
+            assert_eq!(replay.updates[0].kind, TimelineEntryKind::DispatchSucceeded);
+            assert_eq!(replay.runs[0].status, RunProjectionStatus::Completed);
+        }
+        other => panic!("expected updates resume, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn event_stream_manager_runtime_resume_rebases_stale_cursor_to_snapshot() {
+    let runtime_log = Arc::new(InMemoryDurableEventLog::new());
+    let audit_log = Arc::new(InMemoryDurableAuditLog::new());
+    let manager = event_stream_manager(Arc::clone(&runtime_log), audit_log);
+    let scope = scope_for_thread(ThreadId::new("thread-a").unwrap());
+    let projection_scope = ProjectionScope::from_resource_scope(&scope);
+    let stale_cursor = ProjectionCursor::for_scope(projection_scope.clone(), EventCursor::new(99));
+
+    runtime_log
+        .append(RuntimeEvent::dispatch_requested(
+            scope.clone(),
+            capability_id(),
+        ))
+        .await
+        .unwrap();
+
+    let resume = manager
+        .runtime_resume(ProjectionRequest {
+            scope: projection_scope.clone(),
+            after: Some(stale_cursor.clone()),
+            limit: 16,
+        })
+        .await
+        .unwrap();
+
+    match resume {
+        RuntimeStreamResume::Snapshot {
+            snapshot,
+            rebased_from,
+            earliest_available,
+        } => {
+            assert_eq!(rebased_from.as_ref(), Some(&stale_cursor));
+            assert_eq!(
+                earliest_available.map(|cursor| cursor.scope),
+                Some(projection_scope)
+            );
+            assert_eq!(snapshot.timeline.entries.len(), 1);
+            assert_eq!(snapshot.next_cursor.runtime, EventCursor::new(1));
+        }
+        other => panic!("expected snapshot rebase resume, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn event_stream_manager_runtime_resume_rejects_foreign_cursor_instead_of_snapshotting() {
+    let runtime_log = Arc::new(InMemoryDurableEventLog::new());
+    let audit_log = Arc::new(InMemoryDurableAuditLog::new());
+    let manager = event_stream_manager(Arc::clone(&runtime_log), audit_log);
+    let scope_a = scope_for_thread(ThreadId::new("thread-a").unwrap());
+    let scope_b = scope_for_thread(ThreadId::new("thread-b").unwrap());
+
+    runtime_log
+        .append(RuntimeEvent::dispatch_requested(
+            scope_a.clone(),
+            capability_id(),
+        ))
+        .await
+        .unwrap();
+
+    let error = manager
+        .runtime_resume(ProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&scope_a),
+            after: Some(ProjectionCursor::for_scope(
+                ProjectionScope::from_resource_scope(&scope_b),
+                EventCursor::new(1),
+            )),
+            limit: 16,
+        })
+        .await
+        .expect_err("foreign runtime cursor is an authority error, not a rebase snapshot");
+
+    assert!(matches!(error, ProjectionError::RebaseRequired { .. }));
+}
+
+#[tokio::test]
+async fn event_stream_manager_audit_resume_returns_updates_for_valid_cursor() {
+    let runtime_log = Arc::new(InMemoryDurableEventLog::new());
+    let audit_log = Arc::new(InMemoryDurableAuditLog::new());
+    let manager = event_stream_manager(runtime_log, Arc::clone(&audit_log));
+    let ctx = execution_context_for_scope(scope_for_thread(ThreadId::new("thread-a").unwrap()));
+    let projection_scope = ProjectionScope::from_resource_scope(&ctx.resource_scope);
+    let action = Action::Dispatch {
+        capability: capability_id(),
+        estimated_resources: Default::default(),
+    };
+
+    let first = audit_log
+        .append(AuditEnvelope::denied(
+            &ctx,
+            AuditStage::Before,
+            ActionSummary::from_action(&action),
+            DenyReason::PolicyDenied,
+        ))
+        .await
+        .unwrap();
+    audit_log
+        .append(AuditEnvelope::denied(
+            &ctx,
+            AuditStage::Denied,
+            ActionSummary::from_action(&action),
+            DenyReason::PolicyDenied,
+        ))
+        .await
+        .unwrap();
+
+    let resume = manager
+        .audit_resume(AuditProjectionRequest {
+            scope: projection_scope.clone(),
+            after: Some(AuditProjectionCursor::for_scope(
+                projection_scope,
+                first.cursor,
+            )),
+            limit: 16,
+        })
+        .await
+        .unwrap();
+
+    match resume {
+        AuditStreamResume::Updates(replay) => {
+            assert_eq!(replay.entries.len(), 1);
+            assert_eq!(replay.entries[0].stage, AuditProjectionStage::Denied);
+        }
+        other => panic!("expected audit updates resume, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn event_stream_manager_audit_resume_rebases_stale_cursor_to_snapshot() {
+    let runtime_log = Arc::new(InMemoryDurableEventLog::new());
+    let audit_log = Arc::new(InMemoryDurableAuditLog::new());
+    let manager = event_stream_manager(runtime_log, Arc::clone(&audit_log));
+    let ctx = execution_context_for_scope(scope_for_thread(ThreadId::new("thread-a").unwrap()));
+    let projection_scope = ProjectionScope::from_resource_scope(&ctx.resource_scope);
+    let stale_cursor =
+        AuditProjectionCursor::for_scope(projection_scope.clone(), EventCursor::new(99));
+    let action = Action::Dispatch {
+        capability: capability_id(),
+        estimated_resources: Default::default(),
+    };
+
+    audit_log
+        .append(AuditEnvelope::denied(
+            &ctx,
+            AuditStage::Denied,
+            ActionSummary::from_action(&action),
+            DenyReason::PolicyDenied,
+        ))
+        .await
+        .unwrap();
+
+    let resume = manager
+        .audit_resume(AuditProjectionRequest {
+            scope: projection_scope.clone(),
+            after: Some(stale_cursor.clone()),
+            limit: 16,
+        })
+        .await
+        .unwrap();
+
+    match resume {
+        AuditStreamResume::Snapshot {
+            snapshot,
+            rebased_from,
+            earliest_available,
+        } => {
+            assert_eq!(rebased_from.as_ref(), Some(&stale_cursor));
+            assert_eq!(
+                earliest_available.map(|cursor| cursor.scope),
+                Some(projection_scope)
+            );
+            assert_eq!(snapshot.entries.len(), 1);
+            assert_eq!(snapshot.next_cursor.audit, EventCursor::new(1));
+        }
+        other => panic!("expected audit snapshot rebase resume, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn event_stream_manager_audit_resume_rejects_foreign_cursor_instead_of_snapshotting() {
+    let runtime_log = Arc::new(InMemoryDurableEventLog::new());
+    let audit_log = Arc::new(InMemoryDurableAuditLog::new());
+    let manager = event_stream_manager(runtime_log, audit_log);
+    let ctx_a = execution_context_for_scope(scope_for_thread(ThreadId::new("thread-a").unwrap()));
+    let ctx_b = execution_context_for_scope(scope_for_thread(ThreadId::new("thread-b").unwrap()));
+
+    let error = manager
+        .audit_resume(AuditProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&ctx_a.resource_scope),
+            after: Some(AuditProjectionCursor::for_scope(
+                ProjectionScope::from_resource_scope(&ctx_b.resource_scope),
+                EventCursor::new(1),
+            )),
+            limit: 16,
+        })
+        .await
+        .expect_err("foreign audit cursor is an authority error, not a rebase snapshot");
+
+    assert!(matches!(error, AuditProjectionError::RebaseRequired { .. }));
+}
+
+#[tokio::test]
+async fn event_stream_manager_resume_snapshot_serialization_remains_metadata_only() {
+    let runtime_log = Arc::new(InMemoryDurableEventLog::new());
+    let audit_log = Arc::new(InMemoryDurableAuditLog::new());
+    let manager = event_stream_manager(runtime_log, Arc::clone(&audit_log));
+    let ctx = execution_context_for_scope(scope_for_thread(ThreadId::new("thread-a").unwrap()));
+    let action = Action::ReadFile {
+        path: ScopedPath::new("/workspace/MANAGER_REBASE_PATH_SENTINEL_3022.md").unwrap(),
+    };
+
+    audit_log
+        .append(AuditEnvelope::denied(
+            &ctx,
+            AuditStage::Denied,
+            ActionSummary::from_action(&action),
+            DenyReason::PolicyDenied,
+        ))
+        .await
+        .unwrap();
+
+    let resume = manager
+        .audit_resume(AuditProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&ctx.resource_scope),
+            after: Some(AuditProjectionCursor::for_scope(
+                ProjectionScope::from_resource_scope(&ctx.resource_scope),
+                EventCursor::new(99),
+            )),
+            limit: 16,
+        })
+        .await
+        .unwrap();
+
+    let serialized = serde_json::to_string(&resume).unwrap();
+    assert!(!serialized.contains("MANAGER_REBASE_PATH_SENTINEL_3022"));
+    assert!(serialized.contains("rebased_from"));
 }
 
 #[tokio::test]

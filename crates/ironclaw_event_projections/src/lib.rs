@@ -483,6 +483,28 @@ pub trait EventProjectionService: Send + Sync {
     ) -> Result<ProjectionReplay, ProjectionError>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeStreamResume {
+    Snapshot {
+        snapshot: Box<ProjectionSnapshot>,
+        rebased_from: Option<ProjectionCursor>,
+        earliest_available: Option<ProjectionCursor>,
+    },
+    Updates(ProjectionReplay),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditStreamResume {
+    Snapshot {
+        snapshot: Box<AuditProjectionSnapshot>,
+        rebased_from: Option<AuditProjectionCursor>,
+        earliest_available: Option<AuditProjectionCursor>,
+    },
+    Updates(AuditProjectionReplay),
+}
+
 /// Transport-agnostic facade for scoped Reborn projection replay.
 ///
 /// Product transports should enter through this manager rather than reaching
@@ -534,6 +556,50 @@ impl EventStreamManager {
         self.runtime_projection.updates(request).await
     }
 
+    pub async fn runtime_resume(
+        &self,
+        request: ProjectionRequest,
+    ) -> Result<RuntimeStreamResume, ProjectionError> {
+        if request.after.is_none() {
+            let snapshot = self.runtime_projection.snapshot(request).await?;
+            return Ok(RuntimeStreamResume::Snapshot {
+                snapshot: Box::new(snapshot),
+                rebased_from: None,
+                earliest_available: None,
+            });
+        }
+
+        if let Some(cursor) = request.after.as_ref()
+            && cursor.scope != request.scope
+        {
+            return Err(ProjectionError::RebaseRequired {
+                requested: Box::new(cursor.clone()),
+                earliest: Box::new(ProjectionCursor::origin_for_scope(request.scope)),
+            });
+        }
+
+        let snapshot_request = ProjectionRequest {
+            scope: request.scope.clone(),
+            after: None,
+            limit: request.limit,
+        };
+        match self.runtime_projection.updates(request).await {
+            Ok(replay) => Ok(RuntimeStreamResume::Updates(replay)),
+            Err(ProjectionError::RebaseRequired {
+                requested,
+                earliest,
+            }) => {
+                let snapshot = self.runtime_projection.snapshot(snapshot_request).await?;
+                Ok(RuntimeStreamResume::Snapshot {
+                    snapshot: Box::new(snapshot),
+                    rebased_from: Some(*requested),
+                    earliest_available: Some(*earliest),
+                })
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     pub async fn audit_snapshot(
         &self,
         request: AuditProjectionRequest,
@@ -546,6 +612,50 @@ impl EventStreamManager {
         request: AuditProjectionRequest,
     ) -> Result<AuditProjectionReplay, AuditProjectionError> {
         self.audit_projection.updates(request).await
+    }
+
+    pub async fn audit_resume(
+        &self,
+        request: AuditProjectionRequest,
+    ) -> Result<AuditStreamResume, AuditProjectionError> {
+        if request.after.is_none() {
+            let snapshot = self.audit_projection.snapshot(request).await?;
+            return Ok(AuditStreamResume::Snapshot {
+                snapshot: Box::new(snapshot),
+                rebased_from: None,
+                earliest_available: None,
+            });
+        }
+
+        if let Some(cursor) = request.after.as_ref()
+            && cursor.scope != request.scope
+        {
+            return Err(AuditProjectionError::RebaseRequired {
+                requested: Box::new(cursor.clone()),
+                earliest: Box::new(AuditProjectionCursor::origin_for_scope(request.scope)),
+            });
+        }
+
+        let snapshot_request = AuditProjectionRequest {
+            scope: request.scope.clone(),
+            after: None,
+            limit: request.limit,
+        };
+        match self.audit_projection.updates(request).await {
+            Ok(replay) => Ok(AuditStreamResume::Updates(replay)),
+            Err(AuditProjectionError::RebaseRequired {
+                requested,
+                earliest,
+            }) => {
+                let snapshot = self.audit_projection.snapshot(snapshot_request).await?;
+                Ok(AuditStreamResume::Snapshot {
+                    snapshot: Box::new(snapshot),
+                    rebased_from: Some(*requested),
+                    earliest_available: Some(*earliest),
+                })
+            }
+            Err(error) => Err(error),
+        }
     }
 }
 
