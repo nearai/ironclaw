@@ -350,6 +350,7 @@ impl LlmProvider for AnthropicOAuthProvider {
             input_tokens: response.usage.input_tokens,
             output_tokens: response.usage.output_tokens,
             cache_creation_input_tokens: response.usage.cache_creation_input_tokens,
+            reasoning: None,
             cache_read_input_tokens: response.usage.cache_read_input_tokens,
         })
     }
@@ -580,6 +581,7 @@ fn extract_response_content(response: &AnthropicResponse) -> (Option<String>, Ve
                     name: name.clone(),
                     arguments: input.clone(),
                     reasoning: None,
+                    signature: None,
                 });
             }
         }
@@ -629,6 +631,7 @@ mod tests {
             name: "search".to_string(),
             arguments: serde_json::json!({"q": "test"}),
             reasoning: None,
+            signature: None,
         }];
         let messages = vec![
             ChatMessage::user("Search for test"),

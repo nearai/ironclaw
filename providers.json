@@ -129,6 +129,7 @@
     "api_key_env": "OPENROUTER_API_KEY",
     "api_key_required": true,
     "model_env": "OPENROUTER_MODEL",
+    "extra_headers_env": "OPENROUTER_EXTRA_HEADERS",
     "default_model": "openai/gpt-4o",
     "description": "OpenRouter multi-provider gateway (200+ models, preserves reasoning across turns)",
     "setup": {
@@ -337,7 +338,7 @@
       "secret_name": "llm_gemini_api_key",
       "key_url": "https://aistudio.google.com/app/apikey",
       "display_name": "Google Gemini",
-      "can_list_models": true
+      "can_list_models": false
     }
   },
   {

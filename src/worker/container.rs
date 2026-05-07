@@ -510,6 +510,7 @@ impl LoopDelegate for ContainerDelegate {
         tool_calls: Vec<crate::llm::ToolCall>,
         content: Option<String>,
         reason_ctx: &mut ReasoningContext,
+        reasoning: Option<String>,
     ) -> Result<Option<LoopOutcome>, crate::error::Error> {
         {
             let mut recovery = self.recovery_state.lock().await;
@@ -527,13 +528,12 @@ impl LoopDelegate for ContainerDelegate {
             .await;
         }
 
-        // Add assistant message with tool_calls (OpenAI protocol)
-        reason_ctx
-            .messages
-            .push(ChatMessage::assistant_with_tool_calls(
-                content,
-                tool_calls.clone(),
-            ));
+        // Add assistant message with tool_calls (OpenAI protocol).
+        // Carry reasoning for the next turn — see #3201, #3225.
+        reason_ctx.messages.push(
+            ChatMessage::assistant_with_tool_calls(content, tool_calls.clone())
+                .with_reasoning(reasoning),
+        );
 
         // Execute tools sequentially (container context — no parallel execution)
         let mut tool_failure_count: usize = 0;

@@ -739,6 +739,7 @@ impl LlmProvider for TraceLlm {
                 finish_reason: FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             }),
             TraceResponse::ToolCalls {
                 tool_calls,
@@ -752,6 +753,7 @@ impl LlmProvider for TraceLlm {
                         name: tc.name,
                         arguments: tc.arguments,
                         reasoning: None,
+                        signature: None,
                     })
                     .collect();
                 Ok(ToolCompletionResponse {
@@ -762,6 +764,7 @@ impl LlmProvider for TraceLlm {
                     finish_reason: FinishReason::ToolUse,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
+                    reasoning: None,
                 })
             }
             TraceResponse::UserInput { .. } => Err(LlmError::RequestFailed {

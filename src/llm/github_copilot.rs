@@ -347,6 +347,7 @@ impl LlmProvider for GithubCopilotProvider {
                 .map(|u| u.completion_tokens)
                 .unwrap_or(0),
             cache_creation_input_tokens: 0,
+            reasoning: None,
             cache_read_input_tokens: 0,
         })
     }
@@ -604,6 +605,7 @@ fn extract_choice_content(choice: &OpenAiChoice) -> (Option<String>, Vec<ToolCal
                     arguments: serde_json::from_str(&tc.function.arguments)
                         .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
                     reasoning: None,
+                    signature: None,
                 })
                 .collect()
         })
@@ -637,6 +639,7 @@ mod tests {
             name: "search".to_string(),
             arguments: serde_json::json!({"q": "test"}),
             reasoning: None,
+            signature: None,
         }];
         let messages = vec![
             ChatMessage::user("Search"),

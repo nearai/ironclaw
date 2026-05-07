@@ -256,6 +256,7 @@ async fn llm_complete_with_tools(
         finish_reason: format_finish_reason(resp.finish_reason),
         cache_read_input_tokens: resp.cache_read_input_tokens,
         cache_creation_input_tokens: resp.cache_creation_input_tokens,
+        reasoning: resp.reasoning,
     }))
 }
 

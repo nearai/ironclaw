@@ -263,14 +263,24 @@ fn create_openai_compat_from_registry(
         let name = match reqwest::header::HeaderName::from_bytes(key.as_bytes()) {
             Ok(n) => n,
             Err(e) => {
-                tracing::warn!(header = %key, error = %e, "Skipping extra header: invalid name");
+                tracing::warn!(
+                    provider = %config.provider_id,
+                    header = %key,
+                    error = %e,
+                    "Skipping extra header: invalid name",
+                );
                 continue;
             }
         };
         let val = match reqwest::header::HeaderValue::from_str(value) {
             Ok(v) => v,
             Err(e) => {
-                tracing::warn!(header = %key, error = %e, "Skipping extra header: invalid value");
+                tracing::warn!(
+                    provider = %config.provider_id,
+                    header = %key,
+                    error = %e,
+                    "Skipping extra header: invalid value",
+                );
                 continue;
             }
         };
@@ -500,20 +510,32 @@ fn create_openrouter_from_registry(
         })?;
 
     // OpenRouter attribution headers (`HTTP-Referer`, `X-Title`) and any other
-    // user-configured extras must follow the request through.
+    // user-configured extras must follow the request through. The `http` crate
+    // normalizes header names to lowercase internally, so configuring
+    // `HTTP-Referer` or `X-Title` (canonical OpenRouter spelling) parses fine.
     let mut extra_headers = reqwest::header::HeaderMap::new();
     for (key, value) in &config.extra_headers {
         let name = match reqwest::header::HeaderName::from_bytes(key.as_bytes()) {
             Ok(n) => n,
             Err(e) => {
-                tracing::warn!(header = %key, error = %e, "Skipping extra header: invalid name");
+                tracing::warn!(
+                    provider = %config.provider_id,
+                    header = %key,
+                    error = %e,
+                    "Skipping extra header: invalid name",
+                );
                 continue;
             }
         };
         let val = match reqwest::header::HeaderValue::from_str(value) {
             Ok(v) => v,
             Err(e) => {
-                tracing::warn!(header = %key, error = %e, "Skipping extra header: invalid value");
+                tracing::warn!(
+                    provider = %config.provider_id,
+                    header = %key,
+                    error = %e,
+                    "Skipping extra header: invalid value",
+                );
                 continue;
             }
         };
@@ -572,12 +594,20 @@ fn create_gemini_from_registry(
             provider: config.provider_id.clone(),
         })?;
 
-    let client: gemini::Client = if config.base_url.is_empty() {
+    // Pre-3201/3225 installs persisted the OpenAI-shim URL
+    // (`https://generativelanguage.googleapis.com/v1beta/openai`) under
+    // `llm_builtin_overrides[gemini].base_url`. Passing that to rig-core's
+    // native Gemini client would produce
+    // `…/v1beta/openai/v1beta/models/{model}:generateContent` and break every
+    // request. Discard any persisted shim URL and use the native default.
+    let base_url = sanitize_gemini_base_url(&config.base_url);
+
+    let client: gemini::Client = if base_url.is_empty() {
         gemini::Client::new(&api_key)
     } else {
         gemini::Client::builder()
             .api_key(&api_key)
-            .base_url(&config.base_url)
+            .base_url(&base_url)
             .build()
     }
     .map_err(|e| LlmError::RequestFailed {
@@ -590,7 +620,7 @@ fn create_gemini_from_registry(
     tracing::debug!(
         provider = %config.provider_id,
         model = %config.model,
-        base_url = if config.base_url.is_empty() { "default" } else { &config.base_url },
+        base_url = if base_url.is_empty() { "default" } else { &base_url },
         "Using Gemini provider (preserves thought_signature across turns)"
     );
 
@@ -598,6 +628,29 @@ fn create_gemini_from_registry(
         RigAdapter::new(model, &config.model)
             .with_unsupported_params(config.unsupported_params.clone()),
     ))
+}
+
+/// Discard pre-3225 OpenAI-shim Gemini URLs (`…/v1beta/openai`).
+///
+/// Returns the empty string to signal "use rig-core's native default" when the
+/// configured base URL is the legacy shim. Other URLs (custom proxies, region
+/// endpoints, etc.) pass through unchanged.
+fn sanitize_gemini_base_url(base_url: &str) -> String {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.ends_with("/v1beta/openai") || lower.ends_with("/v1/openai") {
+        tracing::warn!(
+            stale_base_url = %base_url,
+            "Ignoring legacy OpenAI-shim base URL for native Gemini provider; \
+             using rig-core default. Clear `llm_builtin_overrides[gemini].base_url` \
+             in settings to silence this warning."
+        );
+        return String::new();
+    }
+    trimmed.to_string()
 }
 
 /// Create an OpenAI Codex provider with OAuth authentication.
@@ -1288,6 +1341,68 @@ mod tests {
         assert_eq!(
             normalize_openai_base_url("https://api.example.com/custom"),
             "https://api.example.com/custom"
+        );
+    }
+
+    /// Regression for #3225: pre-PR, the configure UI/setup default for
+    /// Gemini was the OpenAI shim URL ending in `/v1beta/openai`. Once
+    /// `ProviderProtocol::Gemini` switches to rig-core's native client
+    /// (which appends `/v1beta/models/{model}:generateContent`), passing
+    /// the persisted shim URL through would produce
+    /// `…/v1beta/openai/v1beta/models/...` and break every Gemini call.
+    /// `sanitize_gemini_base_url` must strip those legacy values.
+    #[test]
+    fn sanitize_gemini_base_url_strips_legacy_openai_shim() {
+        // The exact string the old configure UI persisted.
+        assert_eq!(
+            sanitize_gemini_base_url("https://generativelanguage.googleapis.com/v1beta/openai"),
+            "",
+            "legacy OpenAI-shim base URL must be discarded so rig-core's \
+             native default takes over",
+        );
+        // With trailing slash (also seen in saved overrides).
+        assert_eq!(
+            sanitize_gemini_base_url("https://generativelanguage.googleapis.com/v1beta/openai/"),
+            "",
+        );
+        // Case-insensitive on the suffix match.
+        assert_eq!(
+            sanitize_gemini_base_url("https://Generativelanguage.googleapis.com/V1beta/OpenAI"),
+            "",
+        );
+        // The alternate `/v1/openai` shape (some adapters used this).
+        assert_eq!(
+            sanitize_gemini_base_url("https://example.com/v1/openai"),
+            "",
+        );
+    }
+
+    /// Empty/whitespace-only input must still be treated as "use the default",
+    /// not get accidentally upgraded to a real URL.
+    #[test]
+    fn sanitize_gemini_base_url_passes_through_empty() {
+        assert_eq!(sanitize_gemini_base_url(""), "");
+        assert_eq!(sanitize_gemini_base_url("   "), "");
+    }
+
+    /// Custom proxies / region endpoints / native Gemini bases must
+    /// pass through unchanged (modulo trailing-slash trimming).
+    #[test]
+    fn sanitize_gemini_base_url_preserves_custom_endpoints() {
+        // Native default base (rig-core would also use this).
+        assert_eq!(
+            sanitize_gemini_base_url("https://generativelanguage.googleapis.com"),
+            "https://generativelanguage.googleapis.com",
+        );
+        // Custom proxy.
+        assert_eq!(
+            sanitize_gemini_base_url("https://gemini-proxy.internal.example.com"),
+            "https://gemini-proxy.internal.example.com",
+        );
+        // Trailing slash gets trimmed.
+        assert_eq!(
+            sanitize_gemini_base_url("https://gemini-proxy.internal.example.com/"),
+            "https://gemini-proxy.internal.example.com",
         );
     }
 }

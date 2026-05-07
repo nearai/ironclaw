@@ -429,6 +429,12 @@ pub enum RespondResult {
     ToolCalls {
         tool_calls: Vec<ToolCall>,
         content: Option<String>,
+        /// Provider-emitted reasoning artifacts (DeepSeek `reasoning_content`,
+        /// Gemini reasoning, OpenRouter `reasoning_details`). Must be attached
+        /// to the assistant `ChatMessage` the caller pushes into context for
+        /// the next turn — otherwise the provider rejects the follow-up
+        /// request with HTTP 400. See #3201, #3225.
+        reasoning: Option<String>,
     },
 }
 
@@ -819,6 +825,7 @@ Respond in JSON format:
                     let pre_truncated = truncate_at_tool_tags(&c);
                     clean_response(&pre_truncated)
                 });
+                let provider_reasoning = response.reasoning;
                 // Populate per-tool reasoning from the shared narrative when the
                 // provider did not supply per-tool rationale.
                 let tool_calls: Vec<ToolCall> = response
@@ -845,6 +852,7 @@ Respond in JSON format:
                     result: RespondResult::ToolCalls {
                         tool_calls,
                         content: narrative,
+                        reasoning: provider_reasoning,
                     },
                     usage,
                     finish_reason: response.finish_reason,
@@ -872,6 +880,10 @@ Respond in JSON format:
                         } else {
                             Some(cleaned)
                         },
+                        // XML-tag-recovered tool calls don't come with native
+                        // reasoning artifacts — those would have been on the
+                        // structured tool_calls path instead.
+                        reasoning: response.reasoning,
                     },
                     usage,
                     finish_reason: response.finish_reason,
@@ -1640,6 +1652,7 @@ pub(crate) fn recover_tool_calls_from_content(
                     name: name.to_string(),
                     arguments,
                     reasoning: None,
+                    signature: None,
                 });
                 continue;
             }
@@ -1655,6 +1668,7 @@ pub(crate) fn recover_tool_calls_from_content(
                     name: name.to_string(),
                     arguments: serde_json::Value::Object(Default::default()),
                     reasoning: None,
+                    signature: None,
                 });
             }
         }
@@ -1693,6 +1707,7 @@ pub(crate) fn recover_tool_calls_from_content(
                         name: name.to_string(),
                         arguments,
                         reasoning: None,
+                        signature: None,
                     });
                     remaining = &args_start[bracket_end + 1..];
                     continue;
@@ -1705,6 +1720,7 @@ pub(crate) fn recover_tool_calls_from_content(
                 name: name.to_string(),
                 arguments: serde_json::Value::Object(Default::default()),
                 reasoning: None,
+                signature: None,
             });
             remaining = after_name;
         }
@@ -3398,6 +3414,7 @@ That's my plan."#;
                     finish_reason: FinishReason::Stop,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
+                    reasoning: None,
                 })
             }
         }
@@ -3549,6 +3566,7 @@ That's my plan."#;
             RespondResult::ToolCalls {
                 tool_calls,
                 content,
+                reasoning: _,
             } => {
                 assert_eq!(tool_calls.len(), 1);
                 assert_eq!(tool_calls[0].name, "tool_list");
@@ -3582,6 +3600,7 @@ That's my plan."#;
             RespondResult::ToolCalls {
                 tool_calls,
                 content,
+                reasoning: _,
             } => {
                 assert_eq!(tool_calls.len(), 1);
                 assert_eq!(tool_calls[0].name, "tool_list");
@@ -3743,12 +3762,14 @@ That's my plan."#;
                     name: "memory_write".to_string(),
                     arguments: serde_json::json!({}),
                     reasoning: None,
+                    signature: None,
                 }],
                 input_tokens: 5000,
                 output_tokens: 1024,
                 finish_reason: self.finish_reason,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
     }

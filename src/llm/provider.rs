@@ -78,6 +78,14 @@ pub struct ChatMessage {
     /// to appear on the assistant message preceding tool result messages).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
+    /// Provider-emitted reasoning artifacts (DeepSeek's `reasoning_content`,
+    /// Gemini's `thought_signature` parts, OpenRouter's `reasoning_details`)
+    /// captured from the previous response. Required to be echoed back on
+    /// the next request — DeepSeek thinking-mode and Gemini 2.5+ both reject
+    /// the next turn with HTTP 400 when the prior assistant message had
+    /// reasoning that was dropped (#3201, #3225).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
 }
 
 impl ChatMessage {
@@ -90,6 +98,7 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             tool_calls: None,
+            reasoning: None,
         }
     }
 
@@ -102,6 +111,7 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             tool_calls: None,
+            reasoning: None,
         }
     }
 
@@ -116,6 +126,7 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             tool_calls: None,
+            reasoning: None,
         }
     }
 
@@ -128,6 +139,7 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             tool_calls: None,
+            reasoning: None,
         }
     }
 
@@ -147,7 +159,22 @@ impl ChatMessage {
             } else {
                 Some(tool_calls)
             },
+            reasoning: None,
         }
+    }
+
+    /// Attach provider-emitted reasoning artifacts to an assistant message.
+    ///
+    /// Required for thinking-mode tool calling on DeepSeek (`reasoning_content`),
+    /// Gemini 2.5+ (`thought_signature`), and OpenRouter (`reasoning_details`).
+    /// The provider rejects the next turn with HTTP 400 when the prior
+    /// assistant message had reasoning that wasn't echoed back. See #3201, #3225.
+    ///
+    /// Empty / whitespace-only reasoning is dropped (treated as None) so we
+    /// don't send `reasoning_content: ""` and trip strict-mode validators.
+    pub fn with_reasoning(mut self, reasoning: Option<String>) -> Self {
+        self.reasoning = reasoning.filter(|r| !r.trim().is_empty());
+        self
     }
 
     /// Create a tool result message.
@@ -163,6 +190,7 @@ impl ChatMessage {
             tool_call_id: Some(tool_call_id.into()),
             name: Some(name.into()),
             tool_calls: None,
+            reasoning: None,
         }
     }
 }
@@ -235,12 +263,13 @@ pub struct CompletionResponse {
 }
 
 /// Why the completion finished.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FinishReason {
     Stop,
     Length,
     ToolUse,
     ContentFilter,
+    #[default]
     Unknown,
 }
 
@@ -262,6 +291,14 @@ pub struct ToolCall {
     /// or derived from the shared response content as a fallback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+    /// Provider-emitted per-tool-call cryptographic signature (Gemini's
+    /// `thought_signature`, Anthropic's reasoning signature). Required to be
+    /// echoed on the next request — Gemini 2.5+ rejects tool-loop turns with
+    /// HTTP 400 ("Function call is missing a thought_signature in
+    /// functionCall parts") when the prior tool call's signature was dropped.
+    /// See #3225.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
 }
 
 /// Generate a tool-call ID that satisfies all providers.
@@ -393,6 +430,12 @@ pub struct ToolCompletionResponse {
     pub cache_read_input_tokens: u32,
     /// Tokens written to the provider's server-side prompt cache (Anthropic).
     pub cache_creation_input_tokens: u32,
+    /// Provider-emitted reasoning content (DeepSeek `reasoning_content`,
+    /// Gemini `thought_signature` parts, OpenRouter `reasoning_details`).
+    /// Callers MUST attach this to the assistant `ChatMessage` they store
+    /// for the next turn — otherwise the provider rejects the follow-up with
+    /// HTTP 400 (#3201, #3225). `None` when the model produced no reasoning.
+    pub reasoning: Option<String>,
 }
 
 /// Metadata about a model returned by the provider's API.
@@ -805,6 +848,7 @@ mod tests {
             name: "echo".to_string(),
             arguments: serde_json::json!({}),
             reasoning: None,
+            signature: None,
         };
         let mut messages = vec![
             ChatMessage::user("hello"),
@@ -849,6 +893,7 @@ mod tests {
             name: "echo".to_string(),
             arguments: serde_json::json!({}),
             reasoning: None,
+            signature: None,
         };
         let mut messages = vec![
             ChatMessage::user("test"),
@@ -875,12 +920,14 @@ mod tests {
             name: "search".to_string(),
             arguments: serde_json::json!({"q": "test"}),
             reasoning: None,
+            signature: None,
         };
         let tc2 = ToolCall {
             id: "call_sel_2".to_string(),
             name: "http".to_string(),
             arguments: serde_json::json!({"url": "https://example.com"}),
             reasoning: None,
+            signature: None,
         };
         let mut messages = vec![
             ChatMessage::system("You are a helpful assistant."),
