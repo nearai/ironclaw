@@ -9,9 +9,6 @@
   border-radius: var(--radius-md);
   border-left: 2px solid var(--accent);
 }
-.tool-permissions-help strong {
-  color: var(--text-primary);
-}
 
 .tool-permission-row {
   display: flex;

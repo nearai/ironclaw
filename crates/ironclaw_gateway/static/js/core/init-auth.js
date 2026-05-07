@@ -459,8 +459,11 @@ function confirmRestart() {
     .catch((err) => {
       console.error('[confirmRestart] Restart request failed:', err);
       addMessage('system', I18n.t('error.restartFailed', { message: err.message }));
-      // Surface the failure inside the loader so the user can act on it
-      // without scrolling chat (#3082).
+      // Cancel the watchdog and clear the restarting flag so the 45 s
+      // timeout doesn't later replace this specific error with a generic
+      // "taking longer than expected" message (#3082).
+      clearRestartWatchdog();
+      isRestarting = false;
       showRestartLoaderError(I18n.t('error.restartFailed', { message: err.message }));
     });
 }
