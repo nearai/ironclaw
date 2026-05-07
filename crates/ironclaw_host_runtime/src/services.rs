@@ -14,7 +14,9 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_approvals::ApprovalResolver;
-use ironclaw_authorization::{CapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer};
+use ironclaw_authorization::{
+    CapabilityLeaseStore, FilesystemCapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer,
+};
 use ironclaw_dispatcher::{
     RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher,
 };
@@ -43,7 +45,9 @@ use ironclaw_reborn_event_store::{
     build_reborn_event_stores,
 };
 use ironclaw_resources::ResourceGovernor;
-use ironclaw_run_state::{ApprovalRequestStore, RunStateStore};
+use ironclaw_run_state::{
+    ApprovalRequestStore, FilesystemApprovalRequestStore, FilesystemRunStateStore, RunStateStore,
+};
 use ironclaw_scripts::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};
 use ironclaw_secrets::SecretStore;
 use ironclaw_trust::{HostTrustPolicy, TrustPolicy};
@@ -431,6 +435,30 @@ where
         filesystem: Arc<LibSqlRootFilesystem>,
     ) -> HostRuntimeServices<LibSqlRootFilesystem, G, S, R> {
         self.with_root_filesystem(filesystem)
+    }
+
+    /// Attaches filesystem-backed run-state, approval-request, and capability-lease
+    /// stores over the currently selected root filesystem.
+    pub fn with_filesystem_control_stores(mut self) -> Self {
+        let run_state = Arc::new(FilesystemRunStateStore::new_shared(Arc::clone(
+            &self.filesystem,
+        )));
+        let approval_requests = Arc::new(FilesystemApprovalRequestStore::new_shared(Arc::clone(
+            &self.filesystem,
+        )));
+        let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new_shared(Arc::clone(
+            &self.filesystem,
+        )));
+
+        self.component_types.run_state = Some(type_name::<FilesystemRunStateStore<'static, F>>());
+        self.component_types.approval_requests =
+            Some(type_name::<FilesystemApprovalRequestStore<'static, F>>());
+        self.component_types.capability_leases =
+            Some(type_name::<FilesystemCapabilityLeaseStore<'static, F>>());
+        self.run_state = Some(run_state);
+        self.approval_requests = Some(approval_requests);
+        self.capability_leases = Some(capability_leases);
+        self
     }
 
     /// Attaches the host-owned trust policy used by the produced

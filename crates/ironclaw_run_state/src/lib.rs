@@ -506,12 +506,32 @@ impl ApprovalRequestStore for InMemoryApprovalRequestStore {
     }
 }
 
+enum FilesystemStoreHandle<'a, F>
+where
+    F: RootFilesystem,
+{
+    Borrowed(&'a F),
+    Shared(Arc<F>),
+}
+
+impl<F> FilesystemStoreHandle<'_, F>
+where
+    F: RootFilesystem,
+{
+    fn filesystem(&self) -> &F {
+        match self {
+            Self::Borrowed(filesystem) => filesystem,
+            Self::Shared(filesystem) => filesystem.as_ref(),
+        }
+    }
+}
+
 /// Filesystem-backed run-state store under resource-owner-scoped `/engine` paths.
 pub struct FilesystemRunStateStore<'a, F>
 where
     F: RootFilesystem,
 {
-    filesystem: &'a F,
+    filesystem: FilesystemStoreHandle<'a, F>,
 }
 
 impl<'a, F> FilesystemRunStateStore<'a, F>
@@ -519,13 +539,25 @@ where
     F: RootFilesystem,
 {
     pub fn new(filesystem: &'a F) -> Self {
-        Self { filesystem }
+        Self {
+            filesystem: FilesystemStoreHandle::Borrowed(filesystem),
+        }
+    }
+
+    pub fn new_shared(filesystem: Arc<F>) -> FilesystemRunStateStore<'static, F> {
+        FilesystemRunStateStore {
+            filesystem: FilesystemStoreHandle::Shared(filesystem),
+        }
+    }
+
+    fn filesystem(&self) -> &F {
+        self.filesystem.filesystem()
     }
 
     async fn write_record(&self, record: &RunRecord) -> Result<(), RunStateError> {
         let path = run_record_path(&record.scope, record.invocation_id)?;
         let bytes = serialize_pretty(record)?;
-        self.filesystem.write_file(&path, &bytes).await?;
+        self.filesystem().write_file(&path, &bytes).await?;
         Ok(())
     }
 }
@@ -641,7 +673,7 @@ where
         invocation_id: InvocationId,
     ) -> Result<Option<RunRecord>, RunStateError> {
         let path = run_record_path(scope, invocation_id)?;
-        let bytes = match self.filesystem.read_file(&path).await {
+        let bytes = match self.filesystem().read_file(&path).await {
             Ok(bytes) => bytes,
             Err(error) if is_not_found(&error) => return Ok(None),
             Err(error) => return Err(error.into()),
@@ -659,7 +691,7 @@ where
         scope: &ResourceScope,
     ) -> Result<Vec<RunRecord>, RunStateError> {
         let root = run_records_root(scope)?;
-        let entries = match self.filesystem.list_dir(&root).await {
+        let entries = match self.filesystem().list_dir(&root).await {
             Ok(entries) => entries,
             Err(error) if is_not_found(&error) => return Ok(Vec::new()),
             Err(error) => return Err(error.into()),
@@ -667,7 +699,7 @@ where
         let mut records = Vec::new();
         for entry in entries {
             if entry.name.ends_with(".json") {
-                let bytes = match self.filesystem.read_file(&entry.path).await {
+                let bytes = match self.filesystem().read_file(&entry.path).await {
                     Ok(bytes) => bytes,
                     Err(error) if is_not_found(&error) => continue,
                     Err(error) => return Err(error.into()),
@@ -688,7 +720,7 @@ pub struct FilesystemApprovalRequestStore<'a, F>
 where
     F: RootFilesystem,
 {
-    filesystem: &'a F,
+    filesystem: FilesystemStoreHandle<'a, F>,
 }
 
 impl<'a, F> FilesystemApprovalRequestStore<'a, F>
@@ -696,7 +728,19 @@ where
     F: RootFilesystem,
 {
     pub fn new(filesystem: &'a F) -> Self {
-        Self { filesystem }
+        Self {
+            filesystem: FilesystemStoreHandle::Borrowed(filesystem),
+        }
+    }
+
+    pub fn new_shared(filesystem: Arc<F>) -> FilesystemApprovalRequestStore<'static, F> {
+        FilesystemApprovalRequestStore {
+            filesystem: FilesystemStoreHandle::Shared(filesystem),
+        }
+    }
+
+    fn filesystem(&self) -> &F {
+        self.filesystem.filesystem()
     }
 
     async fn update_status(
@@ -726,7 +770,7 @@ where
     async fn write_record(&self, record: &ApprovalRecord) -> Result<(), RunStateError> {
         let path = approval_record_path(&record.scope, record.request.id)?;
         let bytes = serialize_pretty(record)?;
-        self.filesystem.write_file(&path, &bytes).await?;
+        self.filesystem().write_file(&path, &bytes).await?;
         Ok(())
     }
 }
@@ -764,7 +808,7 @@ where
         request_id: ApprovalRequestId,
     ) -> Result<Option<ApprovalRecord>, RunStateError> {
         let path = approval_record_path(scope, request_id)?;
-        let bytes = match self.filesystem.read_file(&path).await {
+        let bytes = match self.filesystem().read_file(&path).await {
             Ok(bytes) => bytes,
             Err(error) if is_not_found(&error) => return Ok(None),
             Err(error) => return Err(error.into()),
@@ -814,7 +858,7 @@ where
             });
         }
         let path = approval_record_path(scope, request_id)?;
-        self.filesystem.delete(&path).await?;
+        self.filesystem().delete(&path).await?;
         Ok(record)
     }
 
@@ -823,7 +867,7 @@ where
         scope: &ResourceScope,
     ) -> Result<Vec<ApprovalRecord>, RunStateError> {
         let root = approval_records_root(scope)?;
-        let entries = match self.filesystem.list_dir(&root).await {
+        let entries = match self.filesystem().list_dir(&root).await {
             Ok(entries) => entries,
             Err(error) if is_not_found(&error) => return Ok(Vec::new()),
             Err(error) => return Err(error.into()),
@@ -831,7 +875,7 @@ where
         let mut records = Vec::new();
         for entry in entries {
             if entry.name.ends_with(".json") {
-                let bytes = match self.filesystem.read_file(&entry.path).await {
+                let bytes = match self.filesystem().read_file(&entry.path).await {
                     Ok(bytes) => bytes,
                     Err(error) if is_not_found(&error) => continue,
                     Err(error) => return Err(error.into()),

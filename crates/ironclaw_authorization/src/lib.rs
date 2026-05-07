@@ -371,12 +371,32 @@ impl CapabilityLeaseStore for InMemoryCapabilityLeaseStore {
     }
 }
 
+enum FilesystemStoreHandle<'a, F>
+where
+    F: RootFilesystem,
+{
+    Borrowed(&'a F),
+    Shared(Arc<F>),
+}
+
+impl<F> FilesystemStoreHandle<'_, F>
+where
+    F: RootFilesystem,
+{
+    fn filesystem(&self) -> &F {
+        match self {
+            Self::Borrowed(filesystem) => filesystem,
+            Self::Shared(filesystem) => filesystem.as_ref(),
+        }
+    }
+}
+
 /// Filesystem-backed capability lease store under resource-owner/invocation-scoped `/engine` paths.
 pub struct FilesystemCapabilityLeaseStore<'a, F>
 where
     F: RootFilesystem,
 {
-    filesystem: &'a F,
+    filesystem: FilesystemStoreHandle<'a, F>,
     mutation_locks: Mutex<HashMap<CapabilityLeaseOwnerKey, Arc<tokio::sync::Mutex<()>>>>,
 }
 
@@ -386,9 +406,20 @@ where
 {
     pub fn new(filesystem: &'a F) -> Self {
         Self {
-            filesystem,
+            filesystem: FilesystemStoreHandle::Borrowed(filesystem),
             mutation_locks: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub fn new_shared(filesystem: Arc<F>) -> FilesystemCapabilityLeaseStore<'static, F> {
+        FilesystemCapabilityLeaseStore {
+            filesystem: FilesystemStoreHandle::Shared(filesystem),
+            mutation_locks: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn filesystem(&self) -> &F {
+        self.filesystem.filesystem()
     }
 
     fn mutation_lock(&self, scope: &ResourceScope) -> Arc<tokio::sync::Mutex<()>> {
@@ -407,7 +438,7 @@ where
         lease_id: CapabilityGrantId,
     ) -> Result<Option<CapabilityLease>, CapabilityLeaseError> {
         let path = lease_path(scope, lease_id)?;
-        let bytes = match self.filesystem.read_file(&path).await {
+        let bytes = match self.filesystem().read_file(&path).await {
             Ok(bytes) => bytes,
             Err(error) if is_not_found(&error) => return Ok(None),
             Err(error) => return Err(lease_persistence_error(error)),
@@ -418,7 +449,7 @@ where
     async fn write_lease(&self, lease: &CapabilityLease) -> Result<(), CapabilityLeaseError> {
         let path = lease_path(&lease.scope, lease.grant.id)?;
         let bytes = serialize_pretty(lease)?;
-        self.filesystem
+        self.filesystem()
             .write_file(&path, &bytes)
             .await
             .map_err(lease_persistence_error)
@@ -429,7 +460,7 @@ where
         scope: &ResourceScope,
     ) -> Result<Option<Vec<VirtualPath>>, CapabilityLeaseError> {
         let path = lease_index_path(scope)?;
-        let bytes = match self.filesystem.read_file(&path).await {
+        let bytes = match self.filesystem().read_file(&path).await {
             Ok(bytes) => bytes,
             Err(error) if is_not_found(&error) => return Ok(None),
             Err(error) => return Err(lease_persistence_error(error)),
@@ -447,7 +478,7 @@ where
         paths.dedup_by(|left, right| left.as_str() == right.as_str());
         let path = lease_index_path(scope)?;
         let bytes = serialize_pretty(&CapabilityLeaseIndex { paths })?;
-        self.filesystem
+        self.filesystem()
             .write_file(&path, &bytes)
             .await
             .map_err(lease_persistence_error)
@@ -492,7 +523,7 @@ where
         scope: &ResourceScope,
     ) -> Result<Vec<VirtualPath>, CapabilityLeaseError> {
         let root = lease_tenant_user_root(scope)?;
-        let entries = match self.filesystem.list_dir(&root).await {
+        let entries = match self.filesystem().list_dir(&root).await {
             Ok(entries) => entries,
             Err(error) if is_not_found(&error) => return Ok(Vec::new()),
             Err(error) => return Err(lease_persistence_error(error)),
@@ -508,7 +539,7 @@ where
         &self,
         root: &VirtualPath,
     ) -> Result<Vec<VirtualPath>, CapabilityLeaseError> {
-        let entries = match self.filesystem.list_dir(root).await {
+        let entries = match self.filesystem().list_dir(root).await {
             Ok(entries) => entries,
             Err(error) if is_not_found(&error) => return Ok(Vec::new()),
             Err(error) => return Err(lease_persistence_error(error)),
@@ -525,7 +556,7 @@ where
         path: &VirtualPath,
     ) -> Result<CapabilityLease, CapabilityLeaseError> {
         let bytes = self
-            .filesystem
+            .filesystem()
             .read_file(path)
             .await
             .map_err(lease_persistence_error)?;

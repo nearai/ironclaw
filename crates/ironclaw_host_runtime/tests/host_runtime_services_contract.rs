@@ -189,7 +189,7 @@ fn production_wiring_validation_rejects_unsupported_runtime_requirements() {
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
-async fn production_root_filesystem_selection_accepts_libsql_root_filesystem() {
+async fn production_filesystem_control_store_selection_accepts_libsql_root_filesystem() {
     let db_dir = tempfile::tempdir().unwrap();
     let db_path = db_dir.path().join("root-filesystem.db");
     let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
@@ -204,7 +204,8 @@ async fn production_root_filesystem_selection_accepts_libsql_root_filesystem() {
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_libsql_root_filesystem(Arc::clone(&filesystem));
+    .with_libsql_root_filesystem(Arc::clone(&filesystem))
+    .with_filesystem_control_stores();
 
     let path = VirtualPath::new("/engine/tenants/t1/users/u1/root-selection.txt").unwrap();
     filesystem.write_file(&path, b"selected").await.unwrap();
@@ -220,6 +221,23 @@ async fn production_root_filesystem_selection_accepts_libsql_root_filesystem() {
         ),
         "LibSqlRootFilesystem must satisfy production filesystem selection: {report:?}"
     );
+    for component in [
+        ProductionWiringComponent::RunState,
+        ProductionWiringComponent::ApprovalRequests,
+        ProductionWiringComponent::CapabilityLeases,
+    ] {
+        assert!(
+            !report.contains(component, ProductionWiringIssueKind::Missing),
+            "filesystem-backed control stores must satisfy {component:?}: {report:?}"
+        );
+        assert!(
+            !report.contains(
+                component,
+                ProductionWiringIssueKind::LocalOnlyImplementation
+            ),
+            "filesystem-backed control stores must not be reported as local-only for {component:?}: {report:?}"
+        );
+    }
 }
 
 #[tokio::test]
