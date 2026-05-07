@@ -208,6 +208,11 @@ impl RunProfileId {
         Self("default".to_string())
     }
 
+    pub(crate) fn from_trusted_static(value: &'static str) -> Self {
+        debug_assert!(validate_ref("run_profile_id", value).is_ok());
+        Self(value.to_string())
+    }
+
     pub fn from_request(request: &RunProfileRequest) -> Self {
         Self(request.as_str().to_string())
     }

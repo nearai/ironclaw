@@ -4105,6 +4105,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_event_projections"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ironclaw_events",
+ "ironclaw_host_api",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "ironclaw_events"
 version = "0.1.0"
 dependencies = [
@@ -4185,6 +4199,7 @@ dependencies = [
  "ironclaw_authorization",
  "ironclaw_capabilities",
  "ironclaw_dispatcher",
+ "ironclaw_event_projections",
  "ironclaw_events",
  "ironclaw_extensions",
  "ironclaw_filesystem",
@@ -4271,9 +4286,11 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures",
+ "ironclaw_event_projections",
  "ironclaw_events",
  "ironclaw_filesystem",
  "ironclaw_host_api",
+ "ironclaw_reborn_event_store",
  "ironclaw_resources",
  "serde",
  "serde_json",
@@ -4405,6 +4422,19 @@ dependencies = [
  "tokio",
  "tracing",
  "urlencoding",
+]
+
+[[package]]
+name = "ironclaw_threads"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "ironclaw_host_api",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

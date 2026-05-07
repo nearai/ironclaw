@@ -21,7 +21,7 @@ Product adapters must continue to use `TurnCoordinator`. Runner transition APIs 
 - A successful claim stores `runner_id`, `lease_token`, `last_heartbeat_at`, `lease_expires_at`, increments `claim_count`, updates the active lock, and emits `RunnerClaimed`.
 - `heartbeat` requires the matching `runner_id` and `lease_token` and rejects leases whose `lease_expires_at` has already passed; on success it refreshes `last_heartbeat_at`, extends `lease_expires_at`, touches the active lock, and emits `RunnerHeartbeat`.
 - Pull-based claims are authoritative. Wake notifications are optimization hints only.
-- After `TurnCoordinator` durably accepts a submitted run or requeues a resumed run, it may emit a redacted queued-run wake hint containing only the canonical scope, `TurnRunId`, queued status, and event cursor. Wake delivery is not a source of truth and duplicate hints must be harmless.
+- After `TurnCoordinator` durably accepts a submitted run or requeues a resumed run, it may emit a redacted queued-run wake hint containing only the canonical scope, `TurnRunId`, queued status, and event cursor. Wake delivery is best-effort, is not a source of truth, must not fail the durable adapter call, and duplicate hints must be harmless.
 
 ---
 

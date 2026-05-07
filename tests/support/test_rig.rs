@@ -747,6 +747,17 @@ pub struct TestRigBuilder {
     /// (so the kernel pre-flight auth gate stays out of the way) but
     /// don't actually call the credentialed API.
     pre_seed_secrets: Vec<(String, String)>,
+    /// Pre-resolved `EffectiveRuntimePolicy` to install in
+    /// `AgentDeps.runtime_policy`.
+    ///
+    /// `None` (default) preserves the historical "no runtime-policy filter"
+    /// path used by every existing test. `Some(p)` is always a value
+    /// produced by `ironclaw_runtime_policy::resolve(...)` — per the
+    /// `ironclaw_runtime_policy` CLAUDE.md guardrail, the resolver is the
+    /// only sanctioned producer of `EffectiveRuntimePolicy`. Builders that
+    /// take `(deployment, profile, disclosure)` route through
+    /// `with_runtime_overrides` rather than constructing one inline.
+    runtime_policy: Option<ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy>,
 }
 
 impl TestRigBuilder {
@@ -772,6 +783,7 @@ impl TestRigBuilder {
             channel_name_override: None,
             seeded_secrets: None,
             pre_seed_secrets: Vec::new(),
+            runtime_policy: None,
         }
     }
 
@@ -789,6 +801,47 @@ impl TestRigBuilder {
     /// which is the standard rig setup).
     pub fn with_secret(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.pre_seed_secrets.push((name.into(), value.into()));
+        self
+    }
+
+    /// Install a pre-resolved runtime policy into `AgentDeps.runtime_policy`.
+    ///
+    /// Use this when the test owns resolution and needs to inspect the
+    /// resolved policy (e.g. asserting `was_reduced()` or org-policy ceiling
+    /// effects). Tests that just want to drive a `(deployment, profile,
+    /// disclosure)` triple should prefer `with_runtime_overrides`.
+    pub fn with_runtime_policy(
+        mut self,
+        policy: ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy,
+    ) -> Self {
+        self.runtime_policy = Some(policy);
+        self
+    }
+
+    /// Convenience wrapper that resolves `(deployment, profile,
+    /// yolo_disclosure)` through `ironclaw_runtime_policy::resolve` and
+    /// installs the result. `OrgPolicyConstraints::default()` is used; tests
+    /// needing org ceilings or admin-approved enterprise yolo should
+    /// construct the policy via `resolve(...)` directly and pass it through
+    /// `with_runtime_policy`.
+    ///
+    /// Panics on unresolvable combinations — appropriate for tests; the
+    /// production resolver returns a typed error.
+    pub fn with_runtime_overrides(
+        mut self,
+        deployment: ironclaw_host_api::runtime_policy::DeploymentMode,
+        profile: ironclaw_host_api::runtime_policy::RuntimeProfile,
+        yolo_disclosure: bool,
+    ) -> Self {
+        let req = ironclaw_runtime_policy::ResolveRequest {
+            deployment,
+            requested_profile: profile,
+            org_policy: ironclaw_runtime_policy::OrgPolicyConstraints::default(),
+            yolo_disclosure_acknowledged: yolo_disclosure,
+        };
+        let policy = ironclaw_runtime_policy::resolve(req)
+            .expect("with_runtime_overrides: resolver rejected combination");
+        self.runtime_policy = Some(policy);
         self
     }
 
@@ -1005,6 +1058,7 @@ impl TestRigBuilder {
             channel_name_override,
             seeded_secrets,
             pre_seed_secrets,
+            runtime_policy,
         } = self;
 
         // 1. Create temp dir + fresh libSQL database + run migrations.
@@ -1417,7 +1471,7 @@ impl TestRigBuilder {
             builder: None,
             llm_backend: "nearai".to_string(),
             tenant_rates: std::sync::Arc::new(ironclaw::tenant::TenantRateRegistry::new(4, 3)),
-            runtime_policy: None,
+            runtime_policy,
         };
 
         // 7. Create TestChannel and ChannelManager.

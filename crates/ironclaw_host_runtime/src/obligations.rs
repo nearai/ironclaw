@@ -12,7 +12,7 @@ use ironclaw_capabilities::{
     CapabilityObligationError, CapabilityObligationFailureKind, CapabilityObligationHandler,
     CapabilityObligationOutcome, CapabilityObligationPhase, CapabilityObligationRequest,
 };
-use ironclaw_events::AuditSink;
+use ironclaw_events::{AuditSink, EventSink, RuntimeEvent};
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AuditEnvelope, AuditEventId, AuditStage,
     CapabilityDispatchResult, CapabilityId, DecisionSummary, EffectKind, MountView, NetworkPolicy,
@@ -452,6 +452,7 @@ pub struct ProcessObligationLifecycleStore {
     network_policies: Arc<NetworkObligationPolicyStore>,
     secret_injections: Arc<RuntimeSecretInjectionStore>,
     resource_governor: Arc<dyn ResourceGovernor>,
+    event_sink: Mutex<Option<Arc<dyn EventSink>>>,
     active_process_handoffs: Mutex<HashMap<ProcessObligationHandoffKey, ProcessId>>,
     cleaned_process_handoffs: Mutex<HashSet<ProcessObligationProcessKey>>,
 }
@@ -486,8 +487,40 @@ impl ProcessObligationLifecycleStore {
             network_policies,
             secret_injections,
             resource_governor,
+            event_sink: Mutex::new(None),
             active_process_handoffs: Mutex::new(HashMap::new()),
             cleaned_process_handoffs: Mutex::new(HashSet::new()),
+        }
+    }
+
+    /// Attaches a best-effort event sink for process lifecycle transitions.
+    pub fn set_event_sink(&self, event_sink: Arc<dyn EventSink>) {
+        match self.event_sink.lock() {
+            Ok(mut slot) => {
+                *slot = Some(event_sink);
+            }
+            Err(error) => {
+                tracing::debug!(
+                    error = %error,
+                    "process lifecycle event sink registry unavailable"
+                );
+            }
+        }
+    }
+
+    async fn emit_process_event(&self, event: RuntimeEvent) {
+        let event_sink = match self.event_sink.lock() {
+            Ok(slot) => slot.clone(),
+            Err(error) => {
+                tracing::debug!(
+                    error = %error,
+                    "process lifecycle event sink registry unavailable"
+                );
+                None
+            }
+        };
+        if let Some(event_sink) = event_sink {
+            let _ = event_sink.emit(event).await;
         }
     }
 
@@ -731,7 +764,17 @@ impl ProcessStore for ProcessObligationLifecycleStore {
         let scope = start.scope.clone();
         let capability_id = start.capability_id.clone();
         match self.inner.start(start).await {
-            Ok(record) => Ok(record),
+            Ok(record) => {
+                self.emit_process_event(RuntimeEvent::process_started(
+                    record.scope.clone(),
+                    record.capability_id.clone(),
+                    record.extension_id.clone(),
+                    record.runtime,
+                    record.process_id,
+                ))
+                .await;
+                Ok(record)
+            }
             Err(error) => {
                 if claimed {
                     self.release_claimed_process_handoff(&scope, &capability_id, process_id)?;
@@ -747,6 +790,14 @@ impl ProcessStore for ProcessObligationLifecycleStore {
         process_id: ProcessId,
     ) -> Result<ProcessRecord, ProcessError> {
         let record = self.inner.complete(scope, process_id).await?;
+        self.emit_process_event(RuntimeEvent::process_completed(
+            record.scope.clone(),
+            record.capability_id.clone(),
+            record.extension_id.clone(),
+            record.runtime,
+            record.process_id,
+        ))
+        .await;
         self.cleanup_terminal(&record, true)?;
         Ok(record)
     }
@@ -758,6 +809,18 @@ impl ProcessStore for ProcessObligationLifecycleStore {
         error_kind: String,
     ) -> Result<ProcessRecord, ProcessError> {
         let record = self.inner.fail(scope, process_id, error_kind).await?;
+        self.emit_process_event(RuntimeEvent::process_failed(
+            record.scope.clone(),
+            record.capability_id.clone(),
+            record.extension_id.clone(),
+            record.runtime,
+            record.process_id,
+            record
+                .error_kind
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+        ))
+        .await;
         self.cleanup_terminal(&record, false)?;
         Ok(record)
     }
@@ -768,6 +831,14 @@ impl ProcessStore for ProcessObligationLifecycleStore {
         process_id: ProcessId,
     ) -> Result<ProcessRecord, ProcessError> {
         let record = self.inner.kill(scope, process_id).await?;
+        self.emit_process_event(RuntimeEvent::process_killed(
+            record.scope.clone(),
+            record.capability_id.clone(),
+            record.extension_id.clone(),
+            record.runtime,
+            record.process_id,
+        ))
+        .await;
         self.cleanup_terminal(&record, false)?;
         Ok(record)
     }

@@ -10,17 +10,18 @@ use std::{
 use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
-    AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, BlockedReason,
-    CancelRunRequest, DefaultTurnCoordinator, GateRef, GetRunStateRequest, IdempotencyKey,
-    InMemoryTurnEventSink, InMemoryTurnStateStore, InMemoryTurnStateStoreLimits, LoopCompleted,
-    LoopCompletionKind, LoopExit, LoopExitInvalidHandling, LoopExitValidationPolicy, LoopGateRef,
-    LoopMessageRef, ReplyTargetBindingRef, ResumeTurnRequest, RunProfileId, RunProfileRequest,
-    RunProfileVersion, SanitizedCancelReason, SanitizedFailure, SourceBindingRef,
-    SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor, TurnAdmissionPolicy,
-    TurnCheckpointId, TurnCoordinator, TurnError, TurnErrorCategory, TurnEventKind, TurnEventSink,
-    TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnLeaseToken, TurnLifecycleEvent,
-    TurnLockVersion, TurnRunId, TurnRunState, TurnRunWake, TurnRunWakeNotifier, TurnRunnerId,
-    TurnScope, TurnStatus,
+    AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, AllowAllTurnAdmissionPolicy,
+    BlockedReason, CancelRunRequest, DefaultTurnCoordinator, GateRef, GetRunStateRequest,
+    IdempotencyKey, InMemoryTurnEventSink, InMemoryTurnStateStore, InMemoryTurnStateStoreLimits,
+    LoopCompleted, LoopCompletionKind, LoopExit, LoopExitInvalidHandling, LoopExitValidationPolicy,
+    LoopGateRef, LoopMessageRef, ReplyTargetBindingRef, ResumeTurnRequest, RunProfileId,
+    RunProfileRequest, RunProfileVersion, SanitizedCancelReason, SanitizedFailure,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
+    TurnAdmissionPolicy, TurnCheckpointId, TurnCoordinator, TurnError, TurnErrorCategory,
+    TurnEventKind, TurnEventSink, TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind,
+    TurnLeaseToken, TurnLifecycleEvent, TurnLockVersion, TurnRunId, TurnRunState, TurnRunWake,
+    TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnRunnerId, TurnScope, TurnStateStore,
+    TurnStatus,
     events::EventCursor,
     runner::{
         ApplyLoopExitRequest, ApplyValidatedLoopExitRequest, BlockRunRequest,
@@ -243,6 +244,83 @@ async fn resume_turn_wakes_runner_for_same_run_after_requeue() {
             event_cursor: resumed.event_cursor,
         }]
     );
+}
+
+#[tokio::test]
+async fn submit_turn_ignores_wake_notification_failure_after_persisting_run() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let coordinator = DefaultTurnCoordinator::new(store.clone())
+        .with_wake_notifier(Arc::new(FailingWakeNotifier));
+
+    let response = coordinator
+        .submit_turn(submit_request("thread-a", "idem-submit-a"))
+        .await
+        .unwrap();
+    let run_id = accepted_run_id(&response);
+
+    let state = coordinator
+        .get_run_state(GetRunStateRequest {
+            scope: scope("thread-a"),
+            run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(state.status, TurnStatus::Queued);
+}
+
+#[tokio::test]
+async fn resume_turn_ignores_wake_notification_panic_after_requeue() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let coordinator = DefaultTurnCoordinator::new(store.clone())
+        .with_wake_notifier(Arc::new(PanickingWakeNotifier));
+    let run_id = store
+        .submit_turn(
+            submit_request("thread-a", "idem-submit-a"),
+            &AllowAllTurnAdmissionPolicy,
+        )
+        .await
+        .map(|response| accepted_run_id(&response))
+        .unwrap();
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let gate_ref = GateRef::new("approval-gate").unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            reason: BlockedReason::Approval {
+                gate_ref: gate_ref.clone(),
+            },
+        })
+        .await
+        .unwrap();
+
+    let resumed = coordinator
+        .resume_turn(ResumeTurnRequest {
+            scope: scope("thread-a"),
+            actor: actor(),
+            run_id,
+            gate_resolution_ref: gate_ref,
+            source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
+            idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(resumed.run_id, run_id);
+    assert_eq!(resumed.status, TurnStatus::Queued);
 }
 
 #[tokio::test]
@@ -2064,8 +2142,25 @@ impl RecordingWakeNotifier {
 }
 
 impl TurnRunWakeNotifier for RecordingWakeNotifier {
-    fn notify_queued_run(&self, wake: TurnRunWake) {
+    fn notify_queued_run(&self, wake: TurnRunWake) -> Result<(), TurnRunWakeNotifyError> {
         self.wakes.lock().unwrap().push(wake);
+        Ok(())
+    }
+}
+
+struct FailingWakeNotifier;
+
+impl TurnRunWakeNotifier for FailingWakeNotifier {
+    fn notify_queued_run(&self, _wake: TurnRunWake) -> Result<(), TurnRunWakeNotifyError> {
+        Err(TurnRunWakeNotifyError::DeliveryUnavailable)
+    }
+}
+
+struct PanickingWakeNotifier;
+
+impl TurnRunWakeNotifier for PanickingWakeNotifier {
+    fn notify_queued_run(&self, _wake: TurnRunWake) -> Result<(), TurnRunWakeNotifyError> {
+        panic!("test wake notifier panic")
     }
 }
 

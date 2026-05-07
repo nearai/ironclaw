@@ -35,6 +35,7 @@ tracing = "0.1"
 url = "2"
 
 [dev-dependencies]
+ironclaw_event_projections = { path = "../ironclaw_event_projections" }
 ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store" }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "time"] }

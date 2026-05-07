@@ -56,7 +56,10 @@ pub use obligations::{
 };
 pub use planner::{ExecutionPlan, PlannerError, plan_capability};
 pub use production::DefaultHostRuntime;
-pub use services::{HostRuntimeServices, RegisteredRuntimeHealth};
+pub use services::{
+    HostRuntimeServices, ProductionWiringComponent, ProductionWiringConfig, ProductionWiringIssue,
+    ProductionWiringIssueKind, ProductionWiringReport, RegisteredRuntimeHealth,
+};
 
 /// Stable, validated idempotency key supplied by upper turn/loop services.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -706,6 +709,24 @@ impl<N, S> HostHttpEgressService<N, S> {
         self.network_policy_store = Some(store);
         self.network_policy_source = NetworkPolicySource::StagedObligation;
         self
+    }
+
+    pub(crate) fn is_production_wired_with(
+        &self,
+        network_policy_store: &Arc<NetworkObligationPolicyStore>,
+        secret_injections: &Arc<RuntimeSecretInjectionStore>,
+    ) -> bool {
+        matches!(
+            self.network_policy_source,
+            NetworkPolicySource::StagedObligation
+        ) && self
+            .network_policy_store
+            .as_ref()
+            .is_some_and(|store| Arc::ptr_eq(store, network_policy_store))
+            && self
+                .secret_injections
+                .as_ref()
+                .is_some_and(|store| Arc::ptr_eq(store, secret_injections))
     }
 
     pub fn network(&self) -> &N {

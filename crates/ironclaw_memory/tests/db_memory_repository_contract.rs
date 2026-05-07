@@ -717,6 +717,7 @@ async fn libsql_repository_backend_searches_indexed_chunks() {
             &context,
             MemorySearchRequest::new("searchable-token")
                 .unwrap()
+                .with_vector(false)
                 .with_limit(3),
         )
         .await
@@ -835,6 +836,107 @@ async fn libsql_memory_repository_compare_and_append_detects_stale_hashes() {
 fn postgres_memory_repository_implements_memory_repository_contract() {
     fn assert_repository<T: MemoryDocumentRepository>() {}
     assert_repository::<PostgresMemoryDocumentRepository>();
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_memory_repository_round_trips_agent_scoped_writes_against_uuid_schema() {
+    // zmanian #3180 MED `postgres.rs:121`: the legacy Postgres
+    // `memory_documents.agent_id` is declared as `UUID` (in the
+    // canonical V1 migration and in this repository's
+    // `CREATE TABLE IF NOT EXISTS`). Agent-scoped reads/writes must
+    // therefore bind a `uuid::Uuid` (or `Option<uuid::Uuid>`), not
+    // `&str` — otherwise the parameter type conversion fails against
+    // a migrated DB. The current code uses `scoped_memory_agent_uuid`
+    // which parses the string into a `Uuid` before binding. This test
+    // proves the round-trip works against a real Postgres instance.
+    let database_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://localhost/ironclaw_test".to_string());
+    let config: tokio_postgres::Config = match database_url.parse() {
+        Ok(cfg) => cfg,
+        Err(_) => return,
+    };
+    let mgr = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
+    let pool = match deadpool_postgres::Pool::builder(mgr).max_size(2).build() {
+        Ok(pool) => pool,
+        Err(_) => return,
+    };
+    if pool.get().await.is_err() {
+        // Postgres unreachable; skip — same convention as
+        // sibling postgres-required tests in this file.
+        return;
+    }
+    let repo = PostgresMemoryDocumentRepository::new(pool);
+    repo.run_migrations().await.expect("run_migrations");
+
+    // Use a real UUID for agent_id so the bound parameter type is
+    // `Option<uuid::Uuid>` not `Option<&str>`. The legacy
+    // `MemoryDocumentScope` permits any non-empty string for agent_id;
+    // for *Postgres* the repository helper parses it as a UUID at
+    // bind time.
+    let agent = uuid::Uuid::new_v4();
+    let agent_str = agent.to_string();
+    let path = MemoryDocumentPath::new_with_agent(
+        "tenant-pg-agent",
+        "alice",
+        Some(agent_str.as_str()),
+        None,
+        "agent-scoped.md",
+    )
+    .expect("path");
+
+    // Clean up any prior run on the same agent_id (round-trip tests
+    // can re-run against the same DB).
+    {
+        let client = pool_for_cleanup(&database_url).await;
+        let _ = client
+            .execute(
+                "DELETE FROM memory_documents WHERE agent_id = $1",
+                &[&agent],
+            )
+            .await;
+    }
+
+    repo.write_document(&path, b"agent-scoped body")
+        .await
+        .expect("write must succeed against UUID-typed agent_id column");
+    let stored = repo.read_document(&path).await.expect("read");
+    assert_eq!(
+        stored.as_deref(),
+        Some(b"agent-scoped body".as_slice()),
+        "agent-scoped read must round-trip through Option<Uuid> bindings"
+    );
+
+    // Listing under the same scope must surface the row (the LIST
+    // query also binds `Option<Uuid>`).
+    let listed = repo.list_documents(path.scope()).await.unwrap();
+    assert!(
+        listed
+            .iter()
+            .any(|p| p.relative_path() == "agent-scoped.md"),
+        "agent-scoped list must surface the row; got {:?}",
+        listed.iter().map(|p| p.relative_path()).collect::<Vec<_>>()
+    );
+
+    // Cleanup so re-runs don't accumulate.
+    let client = pool_for_cleanup(&database_url).await;
+    let _ = client
+        .execute(
+            "DELETE FROM memory_documents WHERE agent_id = $1",
+            &[&agent],
+        )
+        .await;
+}
+
+#[cfg(feature = "postgres")]
+async fn pool_for_cleanup(database_url: &str) -> deadpool_postgres::Object {
+    let config: tokio_postgres::Config = database_url.parse().expect("DATABASE_URL parses");
+    let mgr = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
+    let pool = deadpool_postgres::Pool::builder(mgr)
+        .max_size(1)
+        .build()
+        .expect("cleanup pool");
+    pool.get().await.expect("cleanup client")
 }
 
 #[cfg(feature = "libsql")]

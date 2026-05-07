@@ -1,5 +1,10 @@
 use async_trait::async_trait;
-use std::sync::Arc;
+use std::{
+    fmt,
+    panic::{AssertUnwindSafe, catch_unwind},
+    sync::Arc,
+};
+use tracing::debug;
 
 use crate::{
     AdmissionRejection, CancelRunRequest, CancelRunResponse, GetRunStateRequest, ResumeTurnRequest,
@@ -19,15 +24,33 @@ pub struct TurnRunWake {
     pub event_cursor: EventCursor,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum TurnRunWakeNotifyError {
+    DeliveryUnavailable,
+}
+
+impl fmt::Display for TurnRunWakeNotifyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DeliveryUnavailable => formatter.write_str("delivery_unavailable"),
+        }
+    }
+}
+
+impl std::error::Error for TurnRunWakeNotifyError {}
+
 pub trait TurnRunWakeNotifier: Send + Sync {
-    fn notify_queued_run(&self, wake: TurnRunWake);
+    fn notify_queued_run(&self, wake: TurnRunWake) -> Result<(), TurnRunWakeNotifyError>;
 }
 
 #[derive(Debug, Default)]
 pub struct NoopTurnRunWakeNotifier;
 
 impl TurnRunWakeNotifier for NoopTurnRunWakeNotifier {
-    fn notify_queued_run(&self, _wake: TurnRunWake) {}
+    fn notify_queued_run(&self, _wake: TurnRunWake) -> Result<(), TurnRunWakeNotifyError> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default)]
@@ -109,6 +132,14 @@ fn resume_wake(scope: TurnScope, response: &ResumeTurnResponse) -> TurnRunWake {
     }
 }
 
+fn notify_queued_run_best_effort(notifier: &dyn TurnRunWakeNotifier, wake: TurnRunWake) {
+    match catch_unwind(AssertUnwindSafe(|| notifier.notify_queued_run(wake))) {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => debug!(error = %error, "turn run wake notification failed"),
+        Err(_) => debug!("turn run wake notifier panicked"),
+    }
+}
+
 #[async_trait]
 impl<S> TurnCoordinator for DefaultTurnCoordinator<S>
 where
@@ -123,8 +154,7 @@ where
             .store
             .submit_turn(request, self.admission_policy.as_ref())
             .await?;
-        self.wake_notifier
-            .notify_queued_run(submit_wake(scope, &response));
+        notify_queued_run_best_effort(self.wake_notifier.as_ref(), submit_wake(scope, &response));
         Ok(response)
     }
 
@@ -134,8 +164,7 @@ where
     ) -> Result<ResumeTurnResponse, TurnError> {
         let scope = request.scope.clone();
         let response = self.store.resume_turn(request).await?;
-        self.wake_notifier
-            .notify_queued_run(resume_wake(scope, &response));
+        notify_queued_run_best_effort(self.wake_notifier.as_ref(), resume_wake(scope, &response));
         Ok(response)
     }
 
