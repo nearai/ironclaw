@@ -2469,7 +2469,7 @@ mod tests {
             crate::channels::web::auth::AuthenticatedUser(
                 crate::channels::web::auth::UserIdentity {
                     user_id: "fresh-user".to_string(),
-                    role: "user".to_string(),
+                    role: "regular".to_string(),
                     workspace_read_scopes: vec![],
                 },
             ),

@@ -327,16 +327,16 @@ I18n.register('zh-CN', {
   'time.daysFromNow': '{n}天后',
   
   // 工具审批
-  'approval.title': '工具需要审批',
-  'approval.description': '一个工具请求运行权限。',
+  'approval.title': '批准工具调用',
+  'approval.description': '智能体想要运行此工具。批准以继续，或拒绝以在此停止。',
   'approval.approve': '批准',
   'approval.deny': '拒绝',
   'approval.always': '始终允许',
   'approval.approved': '已批准',
   'approval.alwaysApproved': '始终批准',
   'approval.denied': '已拒绝',
-  'approval.showParams': '显示参数',
-  'approval.hideParams': '隐藏参数',
+  'approval.showParams': '显示完整参数',
+  'approval.hideParams': '隐藏完整参数',
   
   // 认证
   'authRequired.title': '{name} 需要认证',

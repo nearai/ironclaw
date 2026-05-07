@@ -395,6 +395,24 @@ function dismissRestartLoader() {
   if (restartIcon) restartIcon.classList.remove('spinning');
 }
 
+// Reset the loader to a fresh "spinning" state and arm the watchdog.
+// Shared between user-initiated restarts (confirmRestart) and
+// agent-initiated restarts surfaced via SSE (tryShowRestartModal) so
+// every entry path gets the same #3082 recovery behavior.
+function armRestartWatchdog() {
+  const errEl = document.getElementById('restart-loader-error');
+  if (errEl) errEl.style.display = 'none';
+  const bar = document.querySelector('#restart-loader .restart-progress-bar');
+  if (bar) bar.style.display = '';
+
+  clearRestartWatchdog();
+  _restartWatchdogTimer = setTimeout(() => {
+    _restartWatchdogTimer = null;
+    if (!isRestarting) return;
+    showRestartLoaderError(I18n.t('restart.timedOut'));
+  }, RESTART_WATCHDOG_MS);
+}
+
 function triggerRestart() {
   if (!currentThreadId) {
     alert(I18n.t('error.startConversation'));
@@ -424,24 +442,10 @@ function confirmRestart() {
   restartBtn.disabled = true;
   if (restartIcon) restartIcon.classList.add('spinning');
 
-  // Show progress modal
+  // Show progress modal and arm the watchdog (#3082).
   const loaderEl = document.getElementById('restart-loader');
   loaderEl.style.display = 'flex';
-  const errEl = document.getElementById('restart-loader-error');
-  if (errEl) errEl.style.display = 'none';
-  const bar = document.querySelector('#restart-loader .restart-progress-bar');
-  if (bar) bar.style.display = '';
-
-  // Watchdog: if SSE doesn't reconnect within RESTART_WATCHDOG_MS the restart
-  // is stuck (process didn't exit, container loop didn't pick it up, or the
-  // browser can't reach the new instance). Surface a recovery prompt instead
-  // of a permanently spinning bar (#3082).
-  clearRestartWatchdog();
-  _restartWatchdogTimer = setTimeout(() => {
-    _restartWatchdogTimer = null;
-    if (!isRestarting) return;
-    showRestartLoaderError(I18n.t('restart.timedOut'));
-  }, RESTART_WATCHDOG_MS);
+  armRestartWatchdog();
 
   // Send restart command via chat
   console.log('[confirmRestart] Sending /restart command to server');
@@ -474,7 +478,8 @@ function cancelRestart() {
 }
 
 function tryShowRestartModal() {
-  // Defensive callback for when restart is detected in messages.
+  // Defensive callback for when restart is detected in messages — covers
+  // agent-initiated restarts that didn't go through confirmRestart().
   if (!isRestarting) {
     isRestarting = true;
     const restartBtn = document.getElementById('restart-btn');
@@ -482,9 +487,11 @@ function tryShowRestartModal() {
     restartBtn.disabled = true;
     if (restartIcon) restartIcon.classList.add('spinning');
 
-    // Show progress modal
+    // Show progress modal and arm the same watchdog as confirmRestart so
+    // this path also recovers if the server never comes back (#3082).
     const loaderEl = document.getElementById('restart-loader');
     loaderEl.style.display = 'flex';
+    armRestartWatchdog();
   }
 }
 
