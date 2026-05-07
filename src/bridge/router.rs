@@ -2150,6 +2150,120 @@ pub async fn resolve_engine_auth_callback(
     })
 }
 
+/// Auto-resume paused missions whose `paused_gate` was waiting for the
+/// credential named `credential_name`.
+///
+/// Half-2 of #3133. Called from the OAuth completion path and from
+/// `secrets_store::create` / `update`. Walks the engine state to locate
+/// the [`MissionManager`] and delegates to
+/// [`MissionManager::resume_paused_for_credential`], which transitions
+/// every matching mission `Paused → Active`, clears its `paused_gate`,
+/// and (for non-Manual cadences) kicks off an immediate fire so the
+/// user sees follow-through after completing OAuth.
+///
+/// Returns the count of missions that were resumed (zero is the normal
+/// case — most credential writes are not blocking any paused mission).
+/// Errors are downgraded to logs because a failure to resume a paused
+/// mission must NOT prevent the credential from being persisted —
+/// the mission can be manually resumed later.
+pub async fn resume_paused_missions_for_credential(user_id: &str, credential_name: &str) -> usize {
+    let Some(lock) = ENGINE_STATE.get() else {
+        return 0;
+    };
+    let guard = lock.read().await;
+    let Some(state) = guard.as_ref() else {
+        return 0;
+    };
+    let Some(mission_manager) = state.effect_adapter.mission_manager().await else {
+        return 0;
+    };
+    let cred = match ironclaw_common::CredentialName::new(credential_name) {
+        Ok(c) => c,
+        Err(e) => {
+            debug!(
+                error = %e,
+                credential_name = %credential_name,
+                "skipping mission auto-resume — credential name failed validation"
+            );
+            return 0;
+        }
+    };
+    match mission_manager
+        .resume_paused_for_credential(&cred, user_id)
+        .await
+    {
+        Ok(ids) => {
+            if !ids.is_empty() {
+                tracing::debug!(
+                    user_id = %user_id,
+                    credential = %credential_name,
+                    resumed = ids.len(),
+                    "auto-resumed paused mission(s) after credential write"
+                );
+            }
+            ids.len()
+        }
+        Err(e) => {
+            tracing::warn!(
+                user_id = %user_id,
+                credential = %credential_name,
+                error = %e,
+                "failed to auto-resume paused missions after credential write"
+            );
+            0
+        }
+    }
+}
+
+/// Auto-resume the paused mission whose `paused_gate.gate_request_id`
+/// matches `gate_request_id`, given a user-driven gate-resolve outcome.
+///
+/// Half-2 of #3133 for the approval/external path. Called from
+/// `/api/chat/gate/resolve` after the foreground gate has been
+/// resolved. On `Approved` the mission is transitioned `Paused →
+/// Active` and (for non-Manual cadences) immediately fired. On
+/// `Denied`/`Cancelled` the mission is marked `Failed` so the user must
+/// fix the underlying issue and resume manually.
+///
+/// Returns the resumed/failed mission id, or `None` if no paused
+/// mission was waiting on this gate (the foreground gate alone was
+/// resolved).
+pub async fn resume_paused_missions_for_gate_request(
+    user_id: &str,
+    gate_request_id: uuid::Uuid,
+    outcome: ironclaw_engine::GateResolutionOutcome,
+) -> Option<ironclaw_engine::types::mission::MissionId> {
+    let lock = ENGINE_STATE.get()?;
+    let guard = lock.read().await;
+    let state = guard.as_ref()?;
+    let mission_manager = state.effect_adapter.mission_manager().await?;
+    match mission_manager
+        .resume_paused_for_request_id(gate_request_id, outcome, user_id)
+        .await
+    {
+        Ok(Some(id)) => {
+            tracing::debug!(
+                user_id = %user_id,
+                %gate_request_id,
+                mission_id = %id,
+                outcome = ?outcome,
+                "mission auto-resume after gate resolution"
+            );
+            Some(id)
+        }
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!(
+                user_id = %user_id,
+                %gate_request_id,
+                error = %e,
+                "failed to auto-resume paused mission after gate resolution"
+            );
+            None
+        }
+    }
+}
+
 /// Handle an approval response (yes/no/always) for engine v2.
 ///
 /// Called from `handle_message` when the user responds to an approval request.

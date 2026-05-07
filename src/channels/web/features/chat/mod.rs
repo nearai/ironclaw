@@ -238,16 +238,35 @@ pub(crate) async fn chat_gate_resolve_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     Json(req): Json<GateResolveRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    match req.resolution {
+    // Half-2 of #3133: a paused background mission may be waiting on
+    // this same `request_id`. After the foreground gate is resolved we
+    // fan the disposition out to the mission auto-resume path so a
+    // paused mission re-fires (Approved) or gets marked Failed
+    // (Denied / Cancelled). CredentialProvided is excluded — the
+    // credential-write path itself triggers
+    // `resume_paused_missions_for_credential` from the OAuth completion
+    // path. Best-effort dispatch — failures inside the helper are
+    // logged and never surfaced as a gate-resolve error.
+    let mission_outcome = match req.resolution {
+        GateResolutionPayload::Approved { .. } => {
+            Some(ironclaw_engine::GateResolutionOutcome::Approved)
+        }
+        GateResolutionPayload::Denied => Some(ironclaw_engine::GateResolutionOutcome::Denied),
+        GateResolutionPayload::Cancelled => Some(ironclaw_engine::GateResolutionOutcome::Cancelled),
+        GateResolutionPayload::CredentialProvided { .. } => None,
+    };
+    let mission_resume = mission_outcome.zip(Uuid::parse_str(&req.request_id).ok());
+
+    let response: Result<Json<ActionResponse>, (StatusCode, String)> = match req.resolution {
         GateResolutionPayload::Approved { always } => {
             let action = if always { "always" } else { "approve" }.to_string();
             let _ = chat_approval_handler(
-                State(state),
-                AuthenticatedUser(user),
+                State(state.clone()),
+                AuthenticatedUser(user.clone()),
                 Json(ApprovalRequest {
-                    request_id: req.request_id,
+                    request_id: req.request_id.clone(),
                     action,
-                    thread_id: req.thread_id,
+                    thread_id: req.thread_id.clone(),
                 }),
             )
             .await?;
@@ -255,12 +274,12 @@ pub(crate) async fn chat_gate_resolve_handler(
         }
         GateResolutionPayload::Denied => {
             let _ = chat_approval_handler(
-                State(state),
-                AuthenticatedUser(user),
+                State(state.clone()),
+                AuthenticatedUser(user.clone()),
                 Json(ApprovalRequest {
-                    request_id: req.request_id,
+                    request_id: req.request_id.clone(),
                     action: "deny".into(),
-                    thread_id: req.thread_id,
+                    thread_id: req.thread_id.clone(),
                 }),
             )
             .await?;
@@ -319,7 +338,18 @@ pub(crate) async fn chat_gate_resolve_handler(
             .await?;
             Ok(Json(ActionResponse::ok("Gate cancelled.")))
         }
+    };
+
+    if let Some((outcome, gate_request_id)) = mission_resume {
+        let _ = crate::bridge::resume_paused_missions_for_gate_request(
+            &user.user_id,
+            gate_request_id,
+            outcome,
+        )
+        .await;
     }
+
+    response
 }
 
 pub(crate) async fn chat_auth_token_handler(

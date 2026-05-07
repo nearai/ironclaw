@@ -5233,6 +5233,16 @@ impl ExtensionManager {
                     .await
                     .map_err(|e| e.to_string())?;
 
+                    // Half-2 of #3133: resume any paused background mission
+                    // whose `paused_gate` was waiting on this credential.
+                    // Best-effort; the helper logs and swallows errors so a
+                    // resume failure does NOT undo the credential write.
+                    let _ = crate::bridge::resume_paused_missions_for_credential(
+                        &user_id,
+                        &secret_name,
+                    )
+                    .await;
+
                     Ok(())
                 }
                 .await;

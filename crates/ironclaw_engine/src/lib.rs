@@ -89,8 +89,10 @@ pub use runtime::manager::{
 };
 pub use runtime::messaging::ThreadOutcome;
 pub use runtime::mission::{
-    BudgetGate, FireRateLimit, MissionGateInfo, MissionManager, MissionNotification, MissionUpdate,
+    BudgetGate, FireRateLimit, GateResolutionOutcome, MissionManager, MissionNotification,
+    MissionUpdate,
 };
+pub use types::mission::MissionGateInfo;
 pub use runtime::tree::ThreadTree;
 
 pub use types::conversation::{

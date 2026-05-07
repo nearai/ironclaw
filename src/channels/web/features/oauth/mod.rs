@@ -407,6 +407,18 @@ pub(crate) async fn oauth_callback_handler(
     }
 
     if success {
+        // Half-2 of #3133: auto-resume any paused background missions
+        // whose child thread tripped an OAuth gate on this credential.
+        // Done before resolving the foreground gate so a paused mission
+        // and its sister foreground prompt can both proceed off the same
+        // OAuth completion. Best-effort — failures are logged inside the
+        // bridge helper and never block the OAuth landing page.
+        let _ = crate::bridge::resume_paused_missions_for_credential(
+            &flow.user_id,
+            &flow.secret_name,
+        )
+        .await;
+
         match crate::bridge::resolve_engine_auth_callback(&flow.user_id, &flow.secret_name).await {
             Ok(crate::bridge::AuthCallbackContinuation::ResolveGateExternal {
                 channel,
