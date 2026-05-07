@@ -29,7 +29,10 @@ I18n.register('zh-CN', {
   'restart.progressSubtitle': '请等待进程重启...',
   'restart.checkLogs': '重启完成后，请查看日志标签页了解详情。',
   'restart.closeTooltip': '关闭',
-  
+  'restart.timedOut': '重启耗时比预期更长。服务可能尚未恢复——请待连接指示灯变绿后刷新页面。',
+  'restart.refreshPage': '刷新页面',
+  'restart.dismiss': '关闭',
+
   // 主题
   'theme.tooltipDark': '主题：深色（点击切换浅色）',
   'theme.tooltipLight': '主题：浅色（点击切换跟随系统）',
@@ -402,6 +405,7 @@ I18n.register('zh-CN', {
   'tools.defaultBadge': '默认',
   'tools.noTools': '未注册任何工具',
   'tools.saveFailed': '保存失败：{message}',
+  'tools.help': '"始终允许" 直接执行工具，无需询问。"每次询问" 在每次调用前暂停并请求你的批准。"已禁用" 会对智能体彻底隐藏该工具。安全的只读工具（HTTP GET、time、JSON、内存搜索）默认 "始终允许"；写入或会消费资源的工具（shell、文件写入、重启）默认 "每次询问"。',
 
 
   // TEE

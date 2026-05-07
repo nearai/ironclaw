@@ -359,6 +359,41 @@ function apiFetch(path, options) {
 
 let isRestarting = false; // Track if we're currently restarting
 let restartEnabled = false; // Track if restart is available in this deployment
+let _restartWatchdogTimer = null; // Bug #3082: surface stuck restarts to the user.
+const RESTART_WATCHDOG_MS = 45000;
+
+function clearRestartWatchdog() {
+  if (_restartWatchdogTimer) {
+    clearTimeout(_restartWatchdogTimer);
+    _restartWatchdogTimer = null;
+  }
+}
+
+function showRestartLoaderError(message) {
+  const errEl = document.getElementById('restart-loader-error');
+  const errText = document.getElementById('restart-loader-error-text');
+  if (!errEl || !errText) return;
+  errText.textContent = message;
+  errEl.style.display = 'block';
+  // Hide the indeterminate progress bar so the user understands the wait is over.
+  const bar = document.querySelector('#restart-loader .restart-progress-bar');
+  if (bar) bar.style.display = 'none';
+}
+
+function dismissRestartLoader() {
+  clearRestartWatchdog();
+  const loaderEl = document.getElementById('restart-loader');
+  if (loaderEl) loaderEl.style.display = 'none';
+  const errEl = document.getElementById('restart-loader-error');
+  if (errEl) errEl.style.display = 'none';
+  const bar = document.querySelector('#restart-loader .restart-progress-bar');
+  if (bar) bar.style.display = '';
+  isRestarting = false;
+  const restartBtn = document.getElementById('restart-btn');
+  const restartIcon = document.getElementById('restart-icon');
+  if (restartBtn) restartBtn.disabled = false;
+  if (restartIcon) restartIcon.classList.remove('spinning');
+}
 
 function triggerRestart() {
   if (!currentThreadId) {
@@ -392,6 +427,21 @@ function confirmRestart() {
   // Show progress modal
   const loaderEl = document.getElementById('restart-loader');
   loaderEl.style.display = 'flex';
+  const errEl = document.getElementById('restart-loader-error');
+  if (errEl) errEl.style.display = 'none';
+  const bar = document.querySelector('#restart-loader .restart-progress-bar');
+  if (bar) bar.style.display = '';
+
+  // Watchdog: if SSE doesn't reconnect within RESTART_WATCHDOG_MS the restart
+  // is stuck (process didn't exit, container loop didn't pick it up, or the
+  // browser can't reach the new instance). Surface a recovery prompt instead
+  // of a permanently spinning bar (#3082).
+  clearRestartWatchdog();
+  _restartWatchdogTimer = setTimeout(() => {
+    _restartWatchdogTimer = null;
+    if (!isRestarting) return;
+    showRestartLoaderError(I18n.t('restart.timedOut'));
+  }, RESTART_WATCHDOG_MS);
 
   // Send restart command via chat
   console.log('[confirmRestart] Sending /restart command to server');
@@ -409,10 +459,9 @@ function confirmRestart() {
     .catch((err) => {
       console.error('[confirmRestart] Restart request failed:', err);
       addMessage('system', I18n.t('error.restartFailed', { message: err.message }));
-      isRestarting = false;
-      restartBtn.disabled = false;
-      if (restartIcon) restartIcon.classList.remove('spinning');
-      loaderEl.style.display = 'none';
+      // Surface the failure inside the loader so the user can act on it
+      // without scrolling chat (#3082).
+      showRestartLoaderError(I18n.t('error.restartFailed', { message: err.message }));
     });
 }
 

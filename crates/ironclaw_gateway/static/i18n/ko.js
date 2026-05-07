@@ -29,6 +29,9 @@ I18n.register('ko', {
   'restart.progressSubtitle': '프로세스가 재시작될 때까지 기다려 주세요...',
   'restart.checkLogs': '재시작이 완료된 후 자세한 내용은 로그 탭을 확인하세요.',
   'restart.closeTooltip': '닫기',
+  'restart.timedOut': '재시작이 예상보다 오래 걸리고 있습니다. 서버가 아직 복구되지 않았을 수 있습니다 — 연결 표시등이 녹색으로 바뀐 뒤 페이지를 새로 고쳐 주세요.',
+  'restart.refreshPage': '페이지 새로 고침',
+  'restart.dismiss': '닫기',
 
   // 테마
   'theme.tooltipDark': '테마: 다크 (클릭하여 라이트로 변경)',
@@ -400,6 +403,7 @@ I18n.register('ko', {
   'tools.defaultBadge': '기본',
   'tools.noTools': '등록된 도구가 없습니다',
   'tools.saveFailed': '저장 실패: {message}',
+  'tools.help': '"항상 허용"은 도구를 묻지 않고 실행합니다. "매번 묻기"는 호출 전마다 승인을 받기 위해 에이전트를 일시 중지합니다. "비활성화"는 에이전트에서 도구를 완전히 숨깁니다. 안전한 읽기 전용 도구(HTTP GET, time, JSON, 메모리 검색)는 기본값이 "항상 허용"이며, 쓰거나 비용이 발생하는 도구(shell, 파일 쓰기, 재시작)는 기본값이 "매번 묻기"입니다.',
 
 
   // TEE

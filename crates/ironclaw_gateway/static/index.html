@@ -149,6 +149,15 @@
       <p class="restart-modal-info" data-i18n="restart.checkLogs">
         Check the Logs tab for details after the restart completes.
       </p>
+      <div id="restart-loader-error" class="restart-loader-error" style="display: none;" role="alert">
+        <p class="restart-loader-error-text" id="restart-loader-error-text"></p>
+        <div class="restart-loader-error-actions">
+          <button type="button" class="restart-modal-btn confirm" id="restart-refresh-btn"
+            data-i18n="restart.refreshPage">Refresh page</button>
+          <button type="button" class="restart-modal-btn cancel" id="restart-dismiss-btn"
+            data-i18n="restart.dismiss">Dismiss</button>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -551,6 +560,12 @@
             <div class="extensions-container">
               <div class="extensions-section">
                 <h3 data-i18n="settings.tools">Tool Permissions</h3>
+                <p class="tool-permissions-help" data-i18n="tools.help">
+                  <strong>Always allow</strong> runs the tool without asking.
+                  <strong>Ask each time</strong> pauses the agent for your approval before every call.
+                  <strong>Disabled</strong> hides the tool from the agent entirely.
+                  Safe read-only tools (HTTP GET, time, JSON, memory search) default to Always allow; tools that write or spend (shell, file write, restart) default to Ask each time.
+                </p>
                 <div id="tools-permissions-list">
                   <div class="empty-state" data-i18n="common.loading">Loading...</div>
                 </div>

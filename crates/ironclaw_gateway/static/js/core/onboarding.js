@@ -1,3 +1,29 @@
+// Issue #2991: extract the most-load-bearing parameter as a one-line summary
+// so the user can decide without opening the parameter blob. Returns null
+// when no useful summary can be derived.
+function summarizeApprovalParams(toolName, params) {
+  if (!params || typeof params !== 'object') return null;
+  const name = String(toolName || '').toLowerCase().replace(/-/g, '_');
+  if (name === 'http' || name === 'http_request' || name === 'web_fetch') {
+    const method = String(params.method || 'GET').toUpperCase();
+    const url = params.url || params.endpoint;
+    if (typeof url === 'string' && url.length > 0) return method + ' ' + url;
+  }
+  if (name === 'shell' || name === 'bash' || name === 'exec') {
+    const cmd = params.command || params.cmd || params.script;
+    if (typeof cmd === 'string' && cmd.length > 0) return cmd;
+  }
+  if (name === 'file_write' || name === 'write_file' || name === 'apply_patch') {
+    const path = params.path || params.target;
+    if (typeof path === 'string' && path.length > 0) return path;
+  }
+  if (name === 'file_read' || name === 'read_file' || name === 'list_dir') {
+    const path = params.path || params.target;
+    if (typeof path === 'string' && path.length > 0) return path;
+  }
+  return null;
+}
+
 function showApproval(data) {
   // Avoid duplicate cards on reconnect/history refresh.
   const existing = document.querySelector('.approval-card[data-request-id="' + CSS.escape(data.request_id) + '"]');
@@ -21,6 +47,25 @@ function showApproval(data) {
   toolName.className = 'approval-tool-name';
   toolName.textContent = humanizeToolName(data.tool_name);
   card.appendChild(toolName);
+
+  // Try to render an actionable one-line summary from the parameters
+  // (e.g. "GET https://api.example.com/foo") so the approval prompt is
+  // self-explanatory instead of "A tool is requesting permission" (#2991).
+  let parsedParams = null;
+  if (data.parameters) {
+    try {
+      parsedParams = JSON.parse(data.parameters);
+    } catch (_e) {
+      parsedParams = null;
+    }
+  }
+  const summary = summarizeApprovalParams(data.tool_name, parsedParams);
+  if (summary) {
+    const summaryEl = document.createElement('div');
+    summaryEl.className = 'approval-summary';
+    summaryEl.textContent = summary;
+    card.appendChild(summaryEl);
+  }
 
   if (data.description) {
     const desc = document.createElement('div');
