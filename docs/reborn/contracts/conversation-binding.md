@@ -61,7 +61,9 @@ This is not the final durable transcript store. PostgreSQL/libSQL storage and la
 11. Adapter retries after a transient turn-submission failure must retry `TurnCoordinator.submit_turn(...)` with the same accepted message ref until the accepted message is marked submitted; retries after a successful submission do not submit a duplicate turn.
 12. Bound group/channel messages are authorized against thread participants; external channel membership alone is insufficient.
 13. Source binding and reply target binding refs are distinct. Egress must validate the stored reply target for the current actor/thread before sending, and validation returns the adapter kind, adapter installation id, and full external conversation route needed to address the reply.
-14. Message content crosses this boundary as a content ref. Raw user text is owned by the transcript/content storage boundary, not turn state.
+14. Accepted inbound message writes must validate that the supplied source binding ref and reply target binding ref belong to the same tenant/thread binding; loose caller-supplied ref tuples are rejected fail-closed.
+15. Public serialized external refs must enforce the same invariants as constructors. Deserialization cannot bypass empty/control-character/oversized ref validation.
+16. Message content crosses this boundary as a content ref. Raw user text is owned by the transcript/content storage boundary, not turn state.
 
 ---
 

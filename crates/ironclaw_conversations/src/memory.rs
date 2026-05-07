@@ -96,11 +96,7 @@ impl ConversationBindingService for InMemoryConversationServices {
             request.requested_project_id,
         )?;
         let resolution = binding.resolution(actor_user_id, request.tenant_id.clone());
-        state.reply_targets.insert(
-            binding.reply_target_binding_ref.as_str().to_string(),
-            binding.clone(),
-        );
-        state.bindings.insert(binding_key, binding);
+        state.store_binding(binding_key, binding);
         Ok(resolution)
     }
 
@@ -152,11 +148,7 @@ impl ConversationBindingService for InMemoryConversationServices {
             source_binding_ref: binding.source_binding_ref.clone(),
             reply_target_binding_ref: binding.reply_target_binding_ref.clone(),
         };
-        state.reply_targets.insert(
-            binding.reply_target_binding_ref.as_str().to_string(),
-            binding.clone(),
-        );
-        state.bindings.insert(binding_key, binding);
+        state.store_binding(binding_key, binding);
         Ok(linked)
     }
 
@@ -164,6 +156,7 @@ impl ConversationBindingService for InMemoryConversationServices {
         &self,
         tenant_id: &TenantId,
         actor_user_id: &UserId,
+        current_thread_id: &ThreadId,
         reply_target_binding_ref: &ReplyTargetBindingRef,
     ) -> Result<ReplyTargetBinding, InboundTurnError> {
         let state = self.lock_state()?;
@@ -176,7 +169,7 @@ impl ConversationBindingService for InMemoryConversationServices {
                 thread_id: reply_target_binding_ref.as_str().to_string(),
             });
         };
-        if binding.tenant_id != *tenant_id {
+        if binding.tenant_id != *tenant_id || binding.thread_id != *current_thread_id {
             return Err(InboundTurnError::AccessDenied {
                 actor_id: actor_user_id.to_string(),
                 thread_id: binding.thread_id.to_string(),
@@ -205,6 +198,13 @@ impl SessionThreadService for InMemoryConversationServices {
             &request.tenant_id,
             &request.actor.user_id,
             &request.thread_id,
+        )?;
+        state.ensure_binding_refs_match(
+            &request.tenant_id,
+            &request.thread_id,
+            request.source_binding_ref.as_str(),
+            request.reply_target_binding_ref.as_str(),
+            &request.actor.user_id,
         )?;
         let idempotency_key = MessageIdempotencyKey {
             tenant_id: request.tenant_id.clone(),
@@ -270,6 +270,7 @@ impl InMemoryConversationServices {
 struct InMemoryState {
     pairings: HashMap<ActorKey, UserId>,
     bindings: HashMap<BindingKey, BindingRecord>,
+    source_bindings: HashMap<String, BindingRecord>,
     reply_targets: HashMap<String, BindingRecord>,
     threads: HashMap<ThreadKey, ThreadRecord>,
     message_idempotency: HashMap<MessageIdempotencyKey, AcceptedInboundMessage>,
@@ -278,6 +279,51 @@ struct InMemoryState {
 }
 
 impl InMemoryState {
+    fn store_binding(&mut self, binding_key: BindingKey, binding: BindingRecord) {
+        self.source_bindings.insert(
+            binding.source_binding_ref.as_str().to_string(),
+            binding.clone(),
+        );
+        self.reply_targets.insert(
+            binding.reply_target_binding_ref.as_str().to_string(),
+            binding.clone(),
+        );
+        self.bindings.insert(binding_key, binding);
+    }
+
+    fn ensure_binding_refs_match(
+        &self,
+        tenant_id: &TenantId,
+        thread_id: &ThreadId,
+        source_binding_ref: &str,
+        reply_target_binding_ref: &str,
+        actor_user_id: &UserId,
+    ) -> Result<(), InboundTurnError> {
+        let Some(source_binding) = self.source_bindings.get(source_binding_ref) else {
+            return Err(InboundTurnError::ThreadNotFound {
+                thread_id: source_binding_ref.to_string(),
+            });
+        };
+        let Some(reply_binding) = self.reply_targets.get(reply_target_binding_ref) else {
+            return Err(InboundTurnError::ThreadNotFound {
+                thread_id: reply_target_binding_ref.to_string(),
+            });
+        };
+        if source_binding.tenant_id != *tenant_id
+            || reply_binding.tenant_id != *tenant_id
+            || source_binding.thread_id != *thread_id
+            || reply_binding.thread_id != *thread_id
+            || source_binding.source_binding_ref.as_str() != source_binding_ref
+            || source_binding.reply_target_binding_ref != reply_binding.reply_target_binding_ref
+        {
+            return Err(InboundTurnError::AccessDenied {
+                actor_id: actor_user_id.to_string(),
+                thread_id: thread_id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
     fn resolve_actor(
         &self,
         tenant_id: &TenantId,

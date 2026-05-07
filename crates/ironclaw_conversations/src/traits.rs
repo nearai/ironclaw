@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use ironclaw_host_api::{TenantId, UserId};
+use ironclaw_host_api::{TenantId, ThreadId, UserId};
 use ironclaw_turns::{AcceptedMessageRef, ReplyTargetBindingRef};
 
 use crate::{
@@ -24,6 +24,7 @@ pub trait ConversationBindingService: Send + Sync {
         &self,
         tenant_id: &TenantId,
         actor_user_id: &UserId,
+        current_thread_id: &ThreadId,
         reply_target_binding_ref: &ReplyTargetBindingRef,
     ) -> Result<ReplyTargetBinding, InboundTurnError>;
 }

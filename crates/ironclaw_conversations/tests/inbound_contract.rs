@@ -349,6 +349,7 @@ async fn validated_reply_target_preserves_adapter_installation_and_external_rout
         .validate_reply_target(
             &tenant(),
             &user("alice"),
+            &resolution.turn_scope.thread_id,
             &resolution.reply_target_binding_ref,
         )
         .await
@@ -881,6 +882,113 @@ async fn bound_group_message_from_non_participant_is_denied() {
 }
 
 #[tokio::test]
+async fn reply_target_validation_rejects_same_actor_wrong_thread_refs() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            web(),
+            default_installation(),
+            external_actor("alice-web"),
+            user("alice"),
+        )
+        .await;
+    let first = services
+        .resolve_or_create_binding(resolve_request(
+            web(),
+            external_actor("alice-web"),
+            external_conversation("alice-browser-a", None),
+            "alice-event-a",
+        ))
+        .await
+        .unwrap();
+    let second = services
+        .resolve_or_create_binding(resolve_request(
+            web(),
+            external_actor("alice-web"),
+            external_conversation("alice-browser-b", None),
+            "alice-event-b",
+        ))
+        .await
+        .unwrap();
+
+    let err = services
+        .validate_reply_target(
+            &tenant(),
+            &user("alice"),
+            &first.turn_scope.thread_id,
+            &second.reply_target_binding_ref,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, InboundTurnError::AccessDenied { .. }));
+}
+
+#[tokio::test]
+async fn accept_inbound_message_rejects_mixed_source_and_reply_bindings() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            web(),
+            default_installation(),
+            external_actor("alice-web"),
+            user("alice"),
+        )
+        .await;
+    let first = services
+        .resolve_or_create_binding(resolve_request(
+            web(),
+            external_actor("alice-web"),
+            external_conversation("alice-browser-a", None),
+            "alice-event-a",
+        ))
+        .await
+        .unwrap();
+    let second = services
+        .resolve_or_create_binding(resolve_request(
+            web(),
+            external_actor("alice-web"),
+            external_conversation("alice-browser-b", None),
+            "alice-event-b",
+        ))
+        .await
+        .unwrap();
+
+    let err = services
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            tenant_id: tenant(),
+            thread_id: first.turn_scope.thread_id,
+            actor: first.actor,
+            source_binding_ref: first.source_binding_ref,
+            reply_target_binding_ref: second.reply_target_binding_ref,
+            external_event_id: ExternalEventId::new("mixed-binding-event").unwrap(),
+            content_ref: InboundMessageContentRef::new("content:mixed-binding-event").unwrap(),
+            received_at: Utc.with_ymd_and_hms(2026, 5, 6, 12, 1, 0).unwrap(),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, InboundTurnError::AccessDenied { .. }));
+}
+
+#[test]
+fn serde_deserialization_revalidates_external_ref_invariants() {
+    assert!(serde_json::from_str::<AdapterKind>("\"\"").is_err());
+    assert!(
+        serde_json::from_str::<AdapterInstallationId>(&format!("\"{}\"", "x".repeat(513))).is_err()
+    );
+    assert!(serde_json::from_str::<ExternalEventId>("\"event\\u0000id\"").is_err());
+    assert!(serde_json::from_str::<InboundMessageContentRef>("\"\"").is_err());
+    assert!(serde_json::from_str::<ExternalActorRef>(r#"{"kind":"user","id":""}"#).is_err());
+    assert!(serde_json::from_str::<ExternalConversationRef>(
+        r#"{"space_id":null,"conversation_id":"chat-1","thread_id":"ok","message_id":"bad\u0001"}"#
+    )
+    .is_err());
+}
+
+#[tokio::test]
 async fn reply_target_validation_is_scoped_to_actor_and_binding() {
     let services = InMemoryConversationServices::default();
     services
@@ -921,7 +1029,12 @@ async fn reply_target_validation_is_scoped_to_actor_and_binding() {
         .unwrap();
 
     let target = services
-        .validate_reply_target(&tenant(), &user("alice"), &alice.reply_target_binding_ref)
+        .validate_reply_target(
+            &tenant(),
+            &user("alice"),
+            &alice.turn_scope.thread_id,
+            &alice.reply_target_binding_ref,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -930,7 +1043,12 @@ async fn reply_target_validation_is_scoped_to_actor_and_binding() {
     );
 
     let err = services
-        .validate_reply_target(&tenant(), &user("alice"), &bob.reply_target_binding_ref)
+        .validate_reply_target(
+            &tenant(),
+            &user("alice"),
+            &bob.turn_scope.thread_id,
+            &bob.reply_target_binding_ref,
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, InboundTurnError::AccessDenied { .. }));

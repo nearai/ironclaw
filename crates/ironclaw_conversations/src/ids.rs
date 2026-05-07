@@ -4,7 +4,7 @@ use crate::InboundTurnError;
 
 macro_rules! bounded_string_id {
     ($name:ident, $kind:literal) => {
-        #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
         #[serde(transparent)]
         pub struct $name(String);
 
@@ -25,6 +25,16 @@ macro_rules! bounded_string_id {
                 f.write_str(&self.0)
             }
         }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let value = String::deserialize(deserializer)?;
+                Self::new(value).map_err(serde::de::Error::custom)
+            }
+        }
     };
 }
 
@@ -33,7 +43,7 @@ bounded_string_id!(AdapterInstallationId, "adapter_installation_id");
 bounded_string_id!(ExternalEventId, "external_event_id");
 bounded_string_id!(InboundMessageContentRef, "inbound_message_content_ref");
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct ExternalActorRef {
     kind: String,
     id: String,
@@ -57,7 +67,7 @@ impl ExternalActorRef {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct ExternalConversationRef {
     space_id: Option<String>,
     conversation_id: String,
@@ -143,6 +153,46 @@ fn length_prefixed_fingerprint(parts: &[&str]) -> String {
         out.push('|');
     }
     out
+}
+
+impl<'de> Deserialize<'de> for ExternalActorRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawExternalActorRef {
+            kind: String,
+            id: String,
+        }
+
+        let raw = RawExternalActorRef::deserialize(deserializer)?;
+        Self::new(raw.kind, raw.id).map_err(serde::de::Error::custom)
+    }
+}
+
+impl<'de> Deserialize<'de> for ExternalConversationRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawExternalConversationRef {
+            space_id: Option<String>,
+            conversation_id: String,
+            thread_id: Option<String>,
+            message_id: Option<String>,
+        }
+
+        let raw = RawExternalConversationRef::deserialize(deserializer)?;
+        Self::new(
+            raw.space_id.as_deref(),
+            raw.conversation_id,
+            raw.thread_id.as_deref(),
+            raw.message_id.as_deref(),
+        )
+        .map_err(serde::de::Error::custom)
+    }
 }
 
 fn validate_external_id(kind: &'static str, value: &str) -> Result<(), InboundTurnError> {
