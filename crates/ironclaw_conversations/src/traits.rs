@@ -1,11 +1,10 @@
 use async_trait::async_trait;
-use ironclaw_host_api::{TenantId, ThreadId, UserId};
-use ironclaw_turns::{AcceptedMessageRef, IdempotencyKey, ReplyTargetBindingRef};
+use ironclaw_turns::{AcceptedMessageRef, IdempotencyKey};
 
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, ConversationBindingResolution,
     InboundTurnError, LinkConversationRequest, LinkedConversationBinding, ReplyTargetBinding,
-    ResolveConversationRequest,
+    ResolveConversationRequest, ValidateReplyTargetRequest,
 };
 
 #[async_trait]
@@ -22,10 +21,7 @@ pub trait ConversationBindingService: Send + Sync {
 
     async fn validate_reply_target(
         &self,
-        tenant_id: &TenantId,
-        actor_user_id: &UserId,
-        current_thread_id: &ThreadId,
-        reply_target_binding_ref: &ReplyTargetBindingRef,
+        request: ValidateReplyTargetRequest,
     ) -> Result<ReplyTargetBinding, InboundTurnError>;
 }
 

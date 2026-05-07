@@ -8,7 +8,7 @@ use ironclaw_conversations::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId, InMemoryConversationServices,
     InboundMessageContentRef, InboundTurnError, InboundTurnRequest, InboundTurnService,
     LinkConversationRequest, LinkedConversationBinding, MessageIdempotencyStatus,
-    ReplyTargetBinding, SessionThreadService, ThreadAccessDecision,
+    ReplyTargetBinding, SessionThreadService, ThreadAccessDecision, ValidateReplyTargetRequest,
 };
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
@@ -242,21 +242,25 @@ async fn per_message_external_ids_do_not_fork_conversation_bindings() {
         "accepted inbound messages need message-scoped reply targets even when binding identity is stable"
     );
     let first_target = services
-        .validate_reply_target(
-            &tenant(),
-            &user("alice"),
-            &first.resolution.turn_scope.thread_id,
-            &first.accepted_message.reply_target_binding_ref,
-        )
+        .validate_reply_target(validate_reply_request(
+            user("alice"),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-1"),
+            first.resolution.turn_scope.thread_id.clone(),
+            first.accepted_message.reply_target_binding_ref.clone(),
+        ))
         .await
         .unwrap();
     let second_target = services
-        .validate_reply_target(
-            &tenant(),
-            &user("alice"),
-            &second.resolution.turn_scope.thread_id,
-            &second.accepted_message.reply_target_binding_ref,
-        )
+        .validate_reply_target(validate_reply_request(
+            user("alice"),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-1"),
+            second.resolution.turn_scope.thread_id.clone(),
+            second.accepted_message.reply_target_binding_ref.clone(),
+        ))
         .await
         .unwrap();
     assert_eq!(
@@ -381,12 +385,14 @@ async fn validated_reply_target_preserves_adapter_installation_and_external_rout
         .unwrap();
 
     let target = services
-        .validate_reply_target(
-            &tenant(),
-            &user("alice"),
-            &resolution.turn_scope.thread_id,
-            &resolution.reply_target_binding_ref,
-        )
+        .validate_reply_target(validate_reply_request(
+            user("alice"),
+            telegram(),
+            AdapterInstallationId::new("workspace-a-installation").unwrap(),
+            external_actor("alice-telegram"),
+            resolution.turn_scope.thread_id.clone(),
+            resolution.reply_target_binding_ref.clone(),
+        ))
         .await
         .unwrap();
 
@@ -1104,6 +1110,157 @@ async fn duplicate_external_event_replays_message_and_does_not_submit_duplicate_
 }
 
 #[tokio::test]
+async fn direct_route_rejects_same_user_different_external_actor_alias() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            web(),
+            default_installation(),
+            external_actor("alice-primary"),
+            user("alice"),
+        )
+        .await;
+    services
+        .pair_external_actor(
+            tenant(),
+            web(),
+            default_installation(),
+            external_actor("alice-secondary"),
+            user("alice"),
+        )
+        .await;
+    let coordinator = Arc::new(RecordingTurnCoordinator::default());
+    let inbound = InboundTurnService::new(services.clone(), services.clone(), coordinator.clone());
+
+    let first = inbound
+        .handle_inbound_turn(inbound_request(
+            web(),
+            external_actor("alice-primary"),
+            external_conversation("alice-private", None),
+            "primary-event",
+        ))
+        .await
+        .unwrap();
+
+    let err = inbound
+        .handle_inbound_turn(inbound_request(
+            web(),
+            external_actor("alice-secondary"),
+            external_conversation("alice-private", None),
+            "secondary-event",
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, InboundTurnError::AccessDenied { .. }));
+
+    let err = services
+        .validate_reply_target(validate_reply_request(
+            user("alice"),
+            web(),
+            default_installation(),
+            external_actor("alice-secondary"),
+            first.resolution.turn_scope.thread_id.clone(),
+            first.accepted_message.reply_target_binding_ref.clone(),
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, InboundTurnError::AccessDenied { .. }));
+    assert_eq!(coordinator.submissions().len(), 1);
+}
+
+#[tokio::test]
+async fn duplicate_external_event_route_is_reserved_before_binding_creation() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-1"),
+            user("alice"),
+        )
+        .await;
+
+    services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            external_actor("telegram-user-1"),
+            external_conversation("chat-1", None),
+            "installation-event-before-accept",
+        ))
+        .await
+        .unwrap();
+
+    let err = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            external_actor("telegram-user-1"),
+            external_conversation("chat-2", None),
+            "installation-event-before-accept",
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, InboundTurnError::AccessDenied { .. }));
+}
+
+#[tokio::test]
+async fn shared_route_marker_widens_existing_direct_binding_for_participants() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("alice-telegram"),
+            user("alice"),
+        )
+        .await;
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("bob-telegram"),
+            user("bob"),
+        )
+        .await;
+    let coordinator = Arc::new(RecordingTurnCoordinator::default());
+    let inbound = InboundTurnService::new(services.clone(), services.clone(), coordinator.clone());
+    let group = external_conversation("group-late-shared", Some("topic-a"));
+    let alice = inbound
+        .handle_inbound_turn(inbound_request(
+            telegram(),
+            external_actor("alice-telegram"),
+            group.clone(),
+            "late-shared-alice",
+        ))
+        .await
+        .unwrap();
+    services
+        .add_thread_participant(
+            &tenant(),
+            &alice.resolution.turn_scope.thread_id,
+            user("bob"),
+        )
+        .await
+        .unwrap();
+    let mut bob_request = inbound_request(
+        telegram(),
+        external_actor("bob-telegram"),
+        group,
+        "late-shared-bob",
+    );
+    bob_request.route_kind = ConversationRouteKind::Shared;
+
+    let bob = inbound.handle_inbound_turn(bob_request).await.unwrap();
+
+    assert_eq!(bob.resolution.actor, TurnActor::new(user("bob")));
+    assert_eq!(coordinator.submissions().len(), 2);
+}
+
+#[tokio::test]
 async fn shared_group_participant_can_send_on_existing_binding() {
     let services = InMemoryConversationServices::default();
     services
@@ -1236,12 +1393,14 @@ async fn reply_target_validation_rejects_same_thread_different_actor_route() {
         .unwrap();
 
     let err = services
-        .validate_reply_target(
-            &tenant(),
-            &user("bob"),
-            &resolution.turn_scope.thread_id,
-            &resolution.reply_target_binding_ref,
-        )
+        .validate_reply_target(validate_reply_request(
+            user("bob"),
+            web(),
+            default_installation(),
+            external_actor("bob-web"),
+            resolution.turn_scope.thread_id.clone(),
+            resolution.reply_target_binding_ref.clone(),
+        ))
         .await
         .unwrap_err();
 
@@ -1278,6 +1437,9 @@ async fn message_scoped_reply_target_rejects_same_thread_different_actor_route()
             tenant_id: tenant(),
             thread_id: resolution.turn_scope.thread_id.clone(),
             actor: resolution.actor,
+            adapter_kind: web(),
+            adapter_installation_id: default_installation(),
+            external_actor_ref: external_actor("alice-web"),
             source_binding_ref: resolution.source_binding_ref,
             reply_target_binding_ref: resolution.reply_target_binding_ref,
             external_conversation_ref: ExternalConversationRef::new(
@@ -1296,12 +1458,14 @@ async fn message_scoped_reply_target_rejects_same_thread_different_actor_route()
         .unwrap();
 
     let err = services
-        .validate_reply_target(
-            &tenant(),
-            &user("bob"),
-            &accepted.thread_id,
-            &accepted.reply_target_binding_ref,
-        )
+        .validate_reply_target(validate_reply_request(
+            user("bob"),
+            web(),
+            default_installation(),
+            external_actor("bob-web"),
+            accepted.thread_id.clone(),
+            accepted.reply_target_binding_ref.clone(),
+        ))
         .await
         .unwrap_err();
 
@@ -1340,12 +1504,14 @@ async fn reply_target_validation_rejects_same_actor_wrong_thread_refs() {
         .unwrap();
 
     let err = services
-        .validate_reply_target(
-            &tenant(),
-            &user("alice"),
-            &first.turn_scope.thread_id,
-            &second.reply_target_binding_ref,
-        )
+        .validate_reply_target(validate_reply_request(
+            user("alice"),
+            web(),
+            default_installation(),
+            external_actor("alice-web"),
+            first.turn_scope.thread_id.clone(),
+            second.reply_target_binding_ref.clone(),
+        ))
         .await
         .unwrap_err();
 
@@ -1379,6 +1545,9 @@ async fn accept_inbound_message_rejects_external_route_mismatch() {
             tenant_id: tenant(),
             thread_id: resolution.turn_scope.thread_id,
             actor: resolution.actor,
+            adapter_kind: web(),
+            adapter_installation_id: default_installation(),
+            external_actor_ref: external_actor("alice-web"),
             source_binding_ref: resolution.source_binding_ref,
             reply_target_binding_ref: resolution.reply_target_binding_ref,
             external_conversation_ref: external_conversation("alice-browser-b", None),
@@ -1419,6 +1588,9 @@ async fn duplicate_accept_rejects_external_route_mismatch() {
             tenant_id: tenant(),
             thread_id: resolution.turn_scope.thread_id.clone(),
             actor: resolution.actor.clone(),
+            adapter_kind: web(),
+            adapter_installation_id: default_installation(),
+            external_actor_ref: external_actor("alice-web"),
             source_binding_ref: resolution.source_binding_ref.clone(),
             reply_target_binding_ref: resolution.reply_target_binding_ref.clone(),
             external_conversation_ref: external_conversation("alice-browser-a", None),
@@ -1435,6 +1607,9 @@ async fn duplicate_accept_rejects_external_route_mismatch() {
             tenant_id: tenant(),
             thread_id: resolution.turn_scope.thread_id,
             actor: resolution.actor,
+            adapter_kind: web(),
+            adapter_installation_id: default_installation(),
+            external_actor_ref: external_actor("alice-web"),
             source_binding_ref: resolution.source_binding_ref,
             reply_target_binding_ref: resolution.reply_target_binding_ref,
             external_conversation_ref: external_conversation("alice-browser-b", None),
@@ -1485,6 +1660,9 @@ async fn accept_inbound_message_rejects_mixed_source_and_reply_bindings() {
             tenant_id: tenant(),
             thread_id: first.turn_scope.thread_id,
             actor: first.actor,
+            adapter_kind: web(),
+            adapter_installation_id: default_installation(),
+            external_actor_ref: external_actor("alice-web"),
             source_binding_ref: first.source_binding_ref,
             reply_target_binding_ref: second.reply_target_binding_ref,
             external_conversation_ref: external_conversation("alice-browser-a", None),
@@ -1554,12 +1732,14 @@ async fn reply_target_validation_is_scoped_to_actor_and_binding() {
         .unwrap();
 
     let target = services
-        .validate_reply_target(
-            &tenant(),
-            &user("alice"),
-            &alice.turn_scope.thread_id,
-            &alice.reply_target_binding_ref,
-        )
+        .validate_reply_target(validate_reply_request(
+            user("alice"),
+            web(),
+            default_installation(),
+            external_actor("alice-web"),
+            alice.turn_scope.thread_id.clone(),
+            alice.reply_target_binding_ref.clone(),
+        ))
         .await
         .unwrap();
     assert_eq!(
@@ -1568,15 +1748,36 @@ async fn reply_target_validation_is_scoped_to_actor_and_binding() {
     );
 
     let err = services
-        .validate_reply_target(
-            &tenant(),
-            &user("alice"),
-            &bob.turn_scope.thread_id,
-            &bob.reply_target_binding_ref,
-        )
+        .validate_reply_target(validate_reply_request(
+            user("alice"),
+            web(),
+            default_installation(),
+            external_actor("alice-web"),
+            bob.turn_scope.thread_id.clone(),
+            bob.reply_target_binding_ref.clone(),
+        ))
         .await
         .unwrap_err();
     assert!(matches!(err, InboundTurnError::AccessDenied { .. }));
+}
+
+fn validate_reply_request(
+    actor_user_id: UserId,
+    adapter_kind: AdapterKind,
+    adapter_installation_id: AdapterInstallationId,
+    external_actor_ref: ExternalActorRef,
+    current_thread_id: ThreadId,
+    reply_target_binding_ref: ReplyTargetBindingRef,
+) -> ValidateReplyTargetRequest {
+    ValidateReplyTargetRequest {
+        tenant_id: tenant(),
+        actor_user_id,
+        adapter_kind,
+        adapter_installation_id,
+        external_actor_ref,
+        current_thread_id,
+        reply_target_binding_ref,
+    }
 }
 
 fn inbound_request(
@@ -1799,10 +2000,7 @@ impl ConversationBindingService for DriftBindingService {
 
     async fn validate_reply_target(
         &self,
-        _tenant_id: &TenantId,
-        _actor_user_id: &UserId,
-        _current_thread_id: &ThreadId,
-        _reply_target_binding_ref: &ReplyTargetBindingRef,
+        _request: ValidateReplyTargetRequest,
     ) -> Result<ReplyTargetBinding, InboundTurnError> {
         unimplemented!("not used by inbound facade tests")
     }

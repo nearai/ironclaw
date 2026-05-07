@@ -37,9 +37,9 @@ where
             .binding_service
             .resolve_or_create_binding(ResolveConversationRequest {
                 tenant_id: request.tenant_id.clone(),
-                adapter_kind: request.adapter_kind,
-                adapter_installation_id: request.adapter_installation_id,
-                external_actor_ref: request.external_actor_ref,
+                adapter_kind: request.adapter_kind.clone(),
+                adapter_installation_id: request.adapter_installation_id.clone(),
+                external_actor_ref: request.external_actor_ref.clone(),
                 external_conversation_ref: request.external_conversation_ref.clone(),
                 external_event_id: request.external_event_id.clone(),
                 route_kind: request.route_kind,
@@ -53,6 +53,9 @@ where
                 tenant_id: resolution.tenant_id.clone(),
                 thread_id: resolution.turn_scope.thread_id.clone(),
                 actor: resolution.actor.clone(),
+                adapter_kind: request.adapter_kind,
+                adapter_installation_id: request.adapter_installation_id,
+                external_actor_ref: request.external_actor_ref,
                 source_binding_ref: resolution.source_binding_ref.clone(),
                 reply_target_binding_ref: resolution.reply_target_binding_ref.clone(),
                 external_conversation_ref: request.external_conversation_ref,

@@ -62,6 +62,17 @@ pub struct LinkedConversationBinding {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidateReplyTargetRequest {
+    pub tenant_id: TenantId,
+    pub actor_user_id: UserId,
+    pub adapter_kind: AdapterKind,
+    pub adapter_installation_id: AdapterInstallationId,
+    pub external_actor_ref: ExternalActorRef,
+    pub current_thread_id: ThreadId,
+    pub reply_target_binding_ref: ReplyTargetBindingRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplyTargetBinding {
     pub tenant_id: TenantId,
     pub actor_user_id: UserId,
@@ -87,6 +98,9 @@ pub struct AcceptInboundMessageRequest {
     pub tenant_id: TenantId,
     pub thread_id: ThreadId,
     pub actor: TurnActor,
+    pub adapter_kind: AdapterKind,
+    pub adapter_installation_id: AdapterInstallationId,
+    pub external_actor_ref: ExternalActorRef,
     pub source_binding_ref: SourceBindingRef,
     pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub external_conversation_ref: ExternalConversationRef,

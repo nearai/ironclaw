@@ -26,4 +26,5 @@ pub use types::{
     ConversationRouteKind, InboundTurnRequest, InboundTurnResponse, LinkConversationRequest,
     LinkedConversationBinding, MessageIdempotencyStatus, ReplyTargetBinding,
     ResolveConversationRequest, ThreadAccessDecision, ThreadMessageRecord,
+    ValidateReplyTargetRequest,
 };
