@@ -252,6 +252,8 @@ pub enum InboundTurnError {
     },
     #[error("actor {actor_id} is not allowed to access thread {thread_id}")]
     AccessDenied { actor_id: String, thread_id: String },
+    #[error("external conversation is already bound to thread {thread_id}")]
+    BindingConflict { thread_id: String },
     #[error("thread {thread_id} was not found")]
     ThreadNotFound { thread_id: String },
     #[error("internal conversation state lock is poisoned")]
@@ -291,6 +293,16 @@ pub trait SessionThreadService: Send + Sync {
         &self,
         request: AcceptInboundMessageRequest,
     ) -> Result<AcceptedInboundMessage, InboundTurnError>;
+
+    async fn inbound_message_turn_submitted(
+        &self,
+        message_ref: &AcceptedMessageRef,
+    ) -> Result<bool, InboundTurnError>;
+
+    async fn mark_inbound_message_turn_submitted(
+        &self,
+        message_ref: &AcceptedMessageRef,
+    ) -> Result<(), InboundTurnError>;
 }
 
 #[derive(Clone)]
@@ -345,7 +357,12 @@ where
             })
             .await?;
 
-        if accepted_message.idempotency == MessageIdempotencyStatus::Duplicate {
+        if accepted_message.idempotency == MessageIdempotencyStatus::Duplicate
+            && self
+                .session_thread_service
+                .inbound_message_turn_submitted(&accepted_message.message_ref)
+                .await?
+        {
             return Ok(InboundTurnResponse {
                 resolution,
                 accepted_message,
@@ -353,11 +370,9 @@ where
             });
         }
 
-        let idempotency_key = IdempotencyKey::new(format!(
-            "accepted-message:{}",
-            accepted_message.message_ref.as_str()
-        ))
-        .map_err(|reason| InboundTurnError::InvalidCanonicalRef { reason })?;
+        let idempotency_key =
+            IdempotencyKey::new(accepted_message.message_ref.as_str().to_string())
+                .map_err(|reason| InboundTurnError::InvalidCanonicalRef { reason })?;
         let turn_submission = self
             .turn_coordinator
             .submit_turn(SubmitTurnRequest {
@@ -374,6 +389,9 @@ where
             .map_err(|error| InboundTurnError::TurnSubmissionFailed {
                 reason: error.to_string(),
             })?;
+        self.session_thread_service
+            .mark_inbound_message_turn_submitted(&accepted_message.message_ref)
+            .await?;
 
         Ok(InboundTurnResponse {
             resolution,
@@ -491,6 +509,18 @@ impl ConversationBindingService for InMemoryConversationServices {
             adapter_installation_id: request.adapter_installation_id.clone(),
             external_conversation_ref: request.external_conversation_ref.clone(),
         };
+        if let Some(existing) = state.bindings.get(&binding_key).cloned() {
+            if existing.thread_id == request.target_thread_id {
+                return Ok(LinkedConversationBinding {
+                    thread_id: existing.thread_id,
+                    source_binding_ref: existing.source_binding_ref,
+                    reply_target_binding_ref: existing.reply_target_binding_ref,
+                });
+            }
+            return Err(InboundTurnError::BindingConflict {
+                thread_id: existing.thread_id.to_string(),
+            });
+        }
         let binding = BindingRecord::new(
             request.tenant_id,
             request.adapter_kind,
@@ -590,6 +620,23 @@ impl SessionThreadService for InMemoryConversationServices {
         });
         Ok(accepted)
     }
+
+    async fn inbound_message_turn_submitted(
+        &self,
+        message_ref: &AcceptedMessageRef,
+    ) -> Result<bool, InboundTurnError> {
+        let state = self.lock_state()?;
+        Ok(state.submitted_message_refs.contains(message_ref))
+    }
+
+    async fn mark_inbound_message_turn_submitted(
+        &self,
+        message_ref: &AcceptedMessageRef,
+    ) -> Result<(), InboundTurnError> {
+        let mut state = self.lock_state()?;
+        state.submitted_message_refs.insert(message_ref.clone());
+        Ok(())
+    }
 }
 
 impl InMemoryConversationServices {
@@ -607,6 +654,7 @@ struct InMemoryState {
     reply_targets: HashMap<String, BindingRecord>,
     threads: HashMap<ThreadKey, ThreadRecord>,
     message_idempotency: HashMap<MessageIdempotencyKey, AcceptedInboundMessage>,
+    submitted_message_refs: HashSet<AcceptedMessageRef>,
     messages: Vec<ThreadMessageRecord>,
 }
 

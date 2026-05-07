@@ -55,10 +55,12 @@ This is not the final durable transcript store. PostgreSQL/libSQL storage and la
 5. Pairing/authenticated actor resolution is scoped by `(tenant_id, adapter_kind, adapter_installation_id, external_actor_ref)`; a pairing on one tenant or adapter installation does not authorize another.
 6. External actor/conversation refs stay structured for equality. String fingerprints, when exposed for diagnostics, must be collision-safe for delimiter-like external IDs.
 7. Explicit linking resolves the target thread inside the requested tenant; a caller cannot attach a different tenant's thread by reusing or guessing a thread id.
-8. External inbound idempotency is keyed by `(tenant_id, source_binding_ref, external_event_id)` and replays the original accepted message ref without submitting a duplicate turn.
-9. Bound group/channel messages are authorized against thread participants; external channel membership alone is insufficient.
-10. Source binding and reply target binding refs are distinct. Egress must validate the stored reply target for the current actor/thread before sending.
-11. Message content crosses this boundary as a content ref. Raw user text is owned by the transcript/content storage boundary, not turn state.
+8. Explicit linking is idempotent for the same target thread and fails closed rather than silently retargeting an already-bound external conversation to a different thread.
+9. External inbound idempotency is keyed by `(tenant_id, source_binding_ref, external_event_id)` and replays the original accepted message ref without inserting a duplicate message.
+10. Adapter retries after a transient turn-submission failure must retry `TurnCoordinator.submit_turn(...)` with the same accepted message ref until the accepted message is marked submitted; retries after a successful submission do not submit a duplicate turn.
+11. Bound group/channel messages are authorized against thread participants; external channel membership alone is insufficient.
+12. Source binding and reply target binding refs are distinct. Egress must validate the stored reply target for the current actor/thread before sending.
+13. Message content crosses this boundary as a content ref. Raw user text is owned by the transcript/content storage boundary, not turn state.
 
 ---
 
