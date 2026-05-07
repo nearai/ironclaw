@@ -1286,10 +1286,10 @@ async fn handle_execute_action(
                     })
                     .await;
 
-                if let Some(reason) =
-                    crate::executor::scripting::denial_reason_for_resolution(&resolution)
+                if let Some(outcome) =
+                    crate::executor::scripting::denial_outcome_for_resolution(&resolution)
                 {
-                    let error = format!("denied: {reason}");
+                    let error = outcome.event_error();
                     let output = serde_json::json!({"error": &error});
                     emit_and_record(
                         thread,
@@ -1635,10 +1635,10 @@ async fn handle_execute_actions_parallel(
                         })
                         .await;
 
-                    if let Some(reason) =
-                        crate::executor::scripting::denial_reason_for_resolution(&resolution)
+                    if let Some(outcome) =
+                        crate::executor::scripting::denial_outcome_for_resolution(&resolution)
                     {
-                        let error = format!("denied: {reason}");
+                        let error = outcome.event_error();
                         let output = serde_json::json!({"error": &error});
                         let result_json = serde_json::json!({
                             "output": &output,
@@ -2082,14 +2082,16 @@ async fn execute_single_action_with_inline_retry(
             })
             .await;
 
-        if let Some(reason) = crate::executor::scripting::denial_reason_for_resolution(&resolution)
+        if let Some(outcome) =
+            crate::executor::scripting::denial_outcome_for_resolution(&resolution)
         {
-            let denial = serde_json::json!({"error": format!("denied: {reason}")});
+            let error_msg = outcome.event_error();
+            let denial = serde_json::json!({"error": &error_msg});
             let denial_event = EventKind::ActionFailed {
                 step_id: exec_ctx.step_id,
                 action_name: name.to_string(),
                 call_id: call_id.to_string(),
-                error: format!("denied: {reason}"),
+                error: error_msg,
                 duration_ms: 0,
                 params_summary: params_summary.clone(),
             };
@@ -2135,6 +2137,12 @@ async fn execute_single_action_with_inline_retry(
     }
 
     // Retry budget exhausted — tool kept gating after every approval.
+    // The last loop iteration ended with a successful `find_and_consume`
+    // whose lease was never used; refund it before returning so a
+    // misbehaving tool can't slowly drain `max_uses` across approvals.
+    // Best-effort; if the lease was already revoked/expired the refund
+    // is a no-op.
+    let _ = leases.refund_use(current_lease.id).await;
     let err = serde_json::json!({
         "error": format!(
             "tool '{name}' still requires approval after {} retries",

@@ -222,13 +222,13 @@ pub async fn execute_action_calls(
                     })
                     .await;
 
-                let denial_reason =
-                    crate::executor::scripting::denial_reason_for_resolution(&resolution);
-                if let Some(reason_text) = denial_reason {
+                let denial = crate::executor::scripting::denial_outcome_for_resolution(&resolution);
+                if let Some(outcome) = denial {
+                    let error_msg = outcome.event_error();
                     let error_result = ActionResult {
                         call_id: call.id.clone(),
                         action_name: call.action_name.clone(),
-                        output: serde_json::json!({"error": format!("denied: {reason_text}")}),
+                        output: serde_json::json!({"error": &error_msg}),
                         is_error: true,
                         duration: std::time::Duration::ZERO,
                     };
@@ -236,7 +236,7 @@ pub async fn execute_action_calls(
                         step_id: context.step_id,
                         action_name: call.action_name.clone(),
                         call_id: call.id.clone(),
-                        error: reason_text,
+                        error: error_msg,
                         duration_ms: 0,
                         params_summary: crate::types::event::summarize_params(
                             &call.action_name,
@@ -695,11 +695,12 @@ async fn execute_with_inline_gate_retry(
             })
             .await;
 
-        if let Some(reason) = crate::executor::scripting::denial_reason_for_resolution(&resolution)
+        if let Some(outcome) =
+            crate::executor::scripting::denial_outcome_for_resolution(&resolution)
         {
             return (
                 Err(EngineError::Effect {
-                    reason: format!("denied: {reason}"),
+                    reason: outcome.effect_reason(),
                 }),
                 emitted_events,
             );
@@ -725,6 +726,12 @@ async fn execute_with_inline_gate_retry(
         }
     }
 
+    // Retry budget exhausted. The last loop iteration ended with a
+    // successful `find_and_consume` whose lease was never used —
+    // refund it before returning so a misbehaving tool can't slowly
+    // drain `max_uses` across approvals. Best-effort; if the lease
+    // was already revoked/expired the refund is a no-op.
+    let _ = leases.refund_use(current_lease.id).await;
     (
         Err(EngineError::Effect {
             reason: format!(

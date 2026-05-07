@@ -258,30 +258,95 @@ pub fn compact_output_metadata(stdout: &str, return_value: &serde_json::Value) -
 
 // ── Gate resolution mapping ─────────────────────────────────
 
-/// Translate a [`crate::gate::GateResolution`] into the deny-side
-/// reason string the executor emits to the script (and into events).
+/// Why a gate did not approve. Distinguishes user-driven denial from
+/// "no live approval handler reached the user" so script-facing and
+/// event-log messages don't mislabel a cancellation/expiry as a user
+/// denial.
 ///
-/// Returns `None` for `Approved` (the only outcome that lets execution
-/// continue). All other outcomes — `Denied`, `Cancelled`, plus the
-/// non-Approval kinds the controller should never hand back here —
-/// produce a typed reason; the caller wraps it into the appropriate
-/// Python exception or `EngineError::Effect`.
+/// Wrapping behavior used to be `format!("user denied tool 'X': {reason}")`
+/// for every non-`Approved` resolution; that incorrectly read
+/// "user denied tool 'X': cancelled" when the script ran under
+/// [`crate::gate::CancellingGateController`] (no controller wired) or
+/// when the bridge controller cancelled on expiry/shutdown. The user
+/// never saw a prompt in those cases — they didn't deny anything.
 ///
+/// Helpers here produce the right wording per surface
+/// (event-log error, script-facing exception, `EngineError::Effect`
+/// reason) so all Tier 0 / Tier 1 call sites stay consistent.
+#[derive(Debug, Clone)]
+pub(crate) enum DenialOutcome {
+    /// User actively denied the gate (or the host's controller treats
+    /// "no input" as deny). Reason text typically comes from the user
+    /// or the controller's deny reason.
+    DeniedByUser { reason: String },
+    /// No live approval handler reached the user — controller missing
+    /// (`CancellingGateController`), bridge controller cancelled on
+    /// expiry/shutdown, or the engine got back a resolution variant
+    /// the inline path doesn't support.
+    Unavailable { detail: String },
+}
+
+impl DenialOutcome {
+    /// Pre-formatted `error` string for `EventKind::ActionFailed`.
+    /// Surfaces in trace/audit/observer paths; a "denied:" prefix here
+    /// lined up with the policy-deny path before the gate controller
+    /// existed, so user-driven denials keep that prefix for continuity.
+    /// `Unavailable` uses a distinct prefix so an operator scanning
+    /// logs can tell apart "user said no" from "no prompt was shown".
+    pub(crate) fn event_error(&self) -> String {
+        match self {
+            Self::DeniedByUser { reason } => format!("denied: {reason}"),
+            Self::Unavailable { detail } => format!("approval unavailable: {detail}"),
+        }
+    }
+
+    /// Pre-formatted `RuntimeError` message for CodeAct scripts.
+    /// Identifies the tool by name so scripts can branch on the
+    /// failure cause, and surfaces the distinction between
+    /// user-driven denial and no-handler/cancelled directly in the
+    /// message text — pre-fix the latter incorrectly read
+    /// "user denied tool 'X': cancelled".
+    pub(crate) fn script_message(&self, tool_name: &str) -> String {
+        match self {
+            Self::DeniedByUser { reason } => {
+                format!("user denied tool '{tool_name}': {reason}")
+            }
+            Self::Unavailable { detail } => {
+                format!("approval for tool '{tool_name}' unavailable: {detail}")
+            }
+        }
+    }
+
+    /// Bare reason string for `EngineError::Effect` (Tier 0 structured
+    /// path, where the error gets bubbled up rather than rendered as
+    /// a Python exception). Same shape as `event_error`.
+    pub(crate) fn effect_reason(&self) -> String {
+        self.event_error()
+    }
+}
+
 /// Single source of truth shared by Tier 0 (`structured.rs`) and Tier 1
 /// (sync preflight + async output paths in this module) so denial
 /// messages can't drift between executors.
-pub(crate) fn denial_reason_for_resolution(
+///
+/// Returns `None` for `Approved` (the only outcome that lets execution
+/// continue).
+pub(crate) fn denial_outcome_for_resolution(
     resolution: &crate::gate::GateResolution,
-) -> Option<String> {
+) -> Option<DenialOutcome> {
     match resolution {
         crate::gate::GateResolution::Approved { .. } => None,
-        crate::gate::GateResolution::Denied { reason } => {
-            Some(reason.clone().unwrap_or_else(|| "denied by user".into()))
-        }
-        crate::gate::GateResolution::Cancelled => Some("cancelled".into()),
+        crate::gate::GateResolution::Denied { reason } => Some(DenialOutcome::DeniedByUser {
+            reason: reason.clone().unwrap_or_else(|| "denied by user".into()),
+        }),
+        crate::gate::GateResolution::Cancelled => Some(DenialOutcome::Unavailable {
+            detail: "approval cancelled".into(),
+        }),
         crate::gate::GateResolution::CredentialProvided { .. }
         | crate::gate::GateResolution::ExternalCallback { .. } => {
-            Some("unsupported gate resolution".into())
+            Some(DenialOutcome::Unavailable {
+                detail: "unsupported gate resolution".into(),
+            })
         }
     }
 }
@@ -806,7 +871,6 @@ pub async fn execute_code_with_skills(
                                 action_name,
                                 call_id: str_call_id,
                                 lease_id: lease.id,
-                                parameters: params.clone(),
                                 params_summary: ps,
                             },
                         );
@@ -926,9 +990,9 @@ pub async fn execute_code_with_skills(
                             })
                             .await;
 
-                        let denial_reason = denial_reason_for_resolution(&resolution);
+                        let denial = denial_outcome_for_resolution(&resolution);
 
-                        if let Some(reason) = denial_reason {
+                        if let Some(outcome) = denial {
                             // Record the denial in the thread event log
                             // before resuming Monty so observers / trace
                             // analysis see consistent ActionFailed output
@@ -938,7 +1002,7 @@ pub async fn execute_code_with_skills(
                                 step_id: execution_context.step_id,
                                 action_name: gate_action_name.clone(),
                                 call_id: gate_call_id.clone(),
-                                error: format!("denied: {reason}"),
+                                error: outcome.event_error(),
                                 duration_ms: 0,
                                 params_summary: crate::types::event::summarize_params(
                                     &gate_action_name,
@@ -948,10 +1012,13 @@ pub async fn execute_code_with_skills(
                             // Resume Monty with a typed exception. RuntimeError
                             // is what we emit; the message is explicit so users
                             // (and the LLM) can distinguish denial from other
-                            // runtime errors.
+                            // runtime errors. `script_message` distinguishes a
+                            // user-driven denial ("user denied tool 'X': ...")
+                            // from a no-handler / expired / cancelled gate
+                            // ("approval for tool 'X' unavailable: ...").
                             let ext_result = ExtFunctionResult::Error(MontyException::new(
                                 ExcType::RuntimeError,
-                                Some(format!("user denied tool '{gate_action_name}': {reason}")),
+                                Some(outcome.script_message(&gate_action_name)),
                             ));
                             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                 call.resume(ext_result, PrintWriter::CollectString(&mut stdout))
@@ -1033,7 +1100,6 @@ pub async fn execute_code_with_skills(
                                         action_name: gate_action_name,
                                         call_id: gate_call_id,
                                         lease_id: lease.id,
-                                        parameters: gate_parameters.clone(),
                                         params_summary: ps,
                                     },
                                 );
@@ -1146,7 +1212,6 @@ pub async fn execute_code_with_skills(
                                 action_name,
                                 call_id,
                                 lease_id,
-                                parameters,
                                 params_summary,
                             } => {
                                 resolve_tool_future(
@@ -1154,7 +1219,6 @@ pub async fn execute_code_with_skills(
                                     &action_name,
                                     &call_id,
                                     lease_id,
-                                    parameters,
                                     params_summary,
                                     leases,
                                     effects,
@@ -1373,12 +1437,18 @@ pub fn code_hash(code: &str) -> String {
 /// via `ResolveFutures`. Can be a tool execution or an LLM call.
 enum PendingFuture {
     /// Tool action execution.
+    ///
+    /// We deliberately don't carry the call's `parameters` here: when
+    /// the tool returns `EngineError::GatePaused`, the gate's own
+    /// parameter snapshot (potentially safety-transformed) is the
+    /// source of truth for the user-facing prompt and the inline
+    /// retry. Caching the original would make it a misleading second
+    /// source.
     Tool {
         handle: tokio::task::JoinHandle<(Result<ActionResult, EngineError>, u64)>,
         action_name: String,
         call_id: String,
         lease_id: crate::types::capability::LeaseId,
-        parameters: serde_json::Value,
         params_summary: Option<String>,
     },
     /// LLM call (llm_query / llm_query_batched / rlm_query).
@@ -2014,18 +2084,18 @@ async fn drive_inline_gate(
             })
             .await;
 
-        if let Some(reason) = denial_reason_for_resolution(&resolution) {
+        if let Some(outcome) = denial_outcome_for_resolution(&resolution) {
             events.push(EventKind::ActionFailed {
                 step_id: context.step_id,
                 action_name: gate.action_name.clone(),
                 call_id: gate.call_id.clone(),
-                error: format!("denied: {reason}"),
+                error: outcome.event_error(),
                 duration_ms: 0,
                 params_summary,
             });
             return ExtFunctionResult::Error(MontyException::new(
                 ExcType::RuntimeError,
-                Some(format!("user denied tool '{}': {reason}", gate.action_name)),
+                Some(outcome.script_message(&gate.action_name)),
             ));
         }
 
@@ -2176,18 +2246,19 @@ async fn drive_inline_gate(
 }
 
 /// Resolve a pending tool execution future.
+///
+/// Deliberately does NOT take the original `parameters`: when a tool
+/// returns `EngineError::GatePaused`, the gate carries its own
+/// parameter snapshot (possibly transformed by the safety layer) and
+/// that's what we surface to the user. Threading the original
+/// parameters through here would make them a misleading second
+/// source of truth.
 #[allow(clippy::too_many_arguments)]
 async fn resolve_tool_future(
     handle: tokio::task::JoinHandle<(Result<ActionResult, EngineError>, u64)>,
     action_name: &str,
     call_id: &str,
     lease_id: crate::types::capability::LeaseId,
-    // The original `parameters` are unused here — when a tool returns
-    // `EngineError::GatePaused`, the gate carries its own parameter
-    // snapshot (possibly transformed by the safety layer), and that's
-    // what we surface to the user. Keeping it on the function signature
-    // would be a misleading source of truth.
-    _parameters: serde_json::Value,
     params_summary: Option<String>,
     leases: &LeaseManager,
     effects: &Arc<dyn EffectExecutor>,
@@ -4381,11 +4452,18 @@ print(result)
     }
 
     /// With the default `CancellingGateController`, an `Approval` gate
-    /// raised mid-execution surfaces as a typed denial that the script
-    /// can catch as `RuntimeError`. The pre-fix bug message
-    /// (`"execution paused by gate 'approval'"`) must NEVER appear —
-    /// removing the inline-await wiring would otherwise silently
-    /// reproduce the original bug.
+    /// raised mid-execution surfaces as a typed cancellation that the
+    /// script can catch as `RuntimeError`. The message must read
+    /// "approval … unavailable" rather than "user denied" — the user
+    /// never saw a prompt, so the deny framing would be misleading.
+    ///
+    /// Two regression checks in one test:
+    /// - the pre-fix bug message (`"execution paused by gate 'approval'"`)
+    ///   must NEVER appear — removing the inline-await wiring would
+    ///   otherwise silently reproduce the original bug.
+    /// - the message must NOT misattribute the cancellation to a user
+    ///   denial; a future change that broadens `DenialOutcome::DeniedByUser`
+    ///   to cover `Cancelled` would regress to the misleading wording.
     #[tokio::test]
     async fn codeact_default_controller_cancels_approval_gates() {
         let thread = make_test_thread();
@@ -4432,11 +4510,23 @@ print(outcome)
             "the legacy bug message must never surface; got: {}",
             result.stdout
         );
+        // CancellingGateController returns `Cancelled`, which now maps
+        // to the `Unavailable` outcome — the script sees
+        // "approval for tool '…' unavailable: approval cancelled".
         assert!(
             result
                 .stdout
-                .contains("user denied tool 'github_create_issue'"),
-            "default controller must cancel as a typed denial; got: {}",
+                .contains("approval for tool 'github_create_issue' unavailable"),
+            "default controller must surface as approval-unavailable, not user-denied; got: {}",
+            result.stdout
+        );
+        // Cancellation must NOT misattribute to a user denial — the
+        // user never saw a prompt. A regression to "user denied tool
+        // …: cancelled" would silently reintroduce the misleading
+        // wording this DenialOutcome split exists to fix.
+        assert!(
+            !result.stdout.contains("user denied tool"),
+            "cancellation must not surface as user-denied; got: {}",
             result.stdout
         );
         // Cancellation does not retry the action.
