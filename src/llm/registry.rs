@@ -39,6 +39,14 @@ pub enum ProviderProtocol {
     Ollama,
     /// GitHub Copilot API (OpenAI-compatible with token exchange).
     GithubCopilot,
+    /// DeepSeek API. Routes through rig-core's dedicated DeepSeek client,
+    /// which round-trips `reasoning_content` for thinking-mode models —
+    /// the generic OpenAI client strips it. (#3201)
+    DeepSeek,
+    /// Google Gemini native API. Routes through rig-core's dedicated Gemini
+    /// client, which round-trips `thought_signature` on tool calls —
+    /// the OpenAI-compat shim strips it. (#3225)
+    Gemini,
 }
 
 /// How the setup wizard should collect credentials for this provider.
@@ -476,6 +484,35 @@ mod tests {
                 def.id
             );
         }
+    }
+
+    /// Regression for #3201 / #3225 — DeepSeek and Gemini must NOT use the
+    /// generic `OpenAiCompletions` protocol. The OpenAI-compat path goes
+    /// through rig-core's OpenAI client, which strips `reasoning_content`
+    /// (DeepSeek) and `thought_signature` (Gemini), breaking multi-turn
+    /// tool calling for thinking-mode models. They must route through the
+    /// dedicated rig-core providers via `DeepSeek` / `Gemini` protocol.
+    #[test]
+    fn deepseek_and_gemini_use_dedicated_protocol_not_openai_compat() {
+        let providers: Vec<ProviderDefinition> =
+            serde_json::from_str(include_str!("../../providers.json")).unwrap();
+        let by_id = |id: &str| providers.iter().find(|p| p.id == id).cloned();
+
+        let deepseek = by_id("deepseek").expect("deepseek entry must exist");
+        assert_eq!(
+            deepseek.protocol,
+            ProviderProtocol::DeepSeek,
+            "deepseek must use DeepSeek protocol — OpenAiCompletions strips \
+             reasoning_content and breaks thinking-mode tool calling (#3201)",
+        );
+
+        let gemini = by_id("gemini").expect("gemini entry must exist");
+        assert_eq!(
+            gemini.protocol,
+            ProviderProtocol::Gemini,
+            "gemini must use Gemini protocol — OpenAiCompletions strips \
+             thought_signature and breaks tool calling on thinking models (#3225)",
+        );
     }
 
     #[test]

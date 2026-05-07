@@ -187,6 +187,8 @@ fn create_registry_provider(
         ProviderProtocol::OpenAiCompletions => create_openai_compat_from_registry(config),
         ProviderProtocol::Anthropic => create_anthropic_from_registry(config),
         ProviderProtocol::Ollama => create_ollama_from_registry(config),
+        ProviderProtocol::DeepSeek => create_deepseek_from_registry(config),
+        ProviderProtocol::Gemini => create_gemini_from_registry(config),
         ProviderProtocol::GithubCopilot => {
             let provider =
                 github_copilot::GithubCopilotProvider::new(config, request_timeout_secs)?;
@@ -422,6 +424,108 @@ fn create_ollama_from_registry(
         .with_unsupported_params(config.unsupported_params.clone())
         .with_additional_params(serde_json::json!({ "think": true }));
     Ok(Arc::new(adapter))
+}
+
+/// Build a DeepSeek provider via rig-core's dedicated DeepSeek client.
+///
+/// Routing through this client (rather than the generic OpenAI-compat path)
+/// is what makes thinking-mode tool calling work: rig-core's DeepSeek
+/// implementation captures `reasoning_content` from each response and writes
+/// it back onto the assistant message in the next request. Without that
+/// round-trip the API rejects the second turn with HTTP 400 ("The
+/// reasoning_content in the thinking mode must be passed back to the API").
+/// See #3201.
+fn create_deepseek_from_registry(
+    config: &RegistryProviderConfig,
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    use rig::providers::deepseek;
+
+    let api_key = config
+        .api_key
+        .as_ref()
+        .map(|k| k.expose_secret().to_string())
+        .ok_or_else(|| LlmError::AuthFailed {
+            provider: config.provider_id.clone(),
+        })?;
+
+    let client: deepseek::Client = if config.base_url.is_empty() {
+        deepseek::Client::new(&api_key)
+    } else {
+        deepseek::Client::builder()
+            .api_key(&api_key)
+            .base_url(&config.base_url)
+            .build()
+    }
+    .map_err(|e| LlmError::RequestFailed {
+        provider: config.provider_id.clone(),
+        reason: format!("Failed to create DeepSeek client: {e}"),
+    })?;
+
+    let model = client.completion_model(&config.model);
+
+    tracing::debug!(
+        provider = %config.provider_id,
+        model = %config.model,
+        base_url = if config.base_url.is_empty() { "default" } else { &config.base_url },
+        "Using DeepSeek provider (preserves reasoning_content across turns)"
+    );
+
+    Ok(Arc::new(
+        RigAdapter::new(model, &config.model)
+            .with_unsupported_params(config.unsupported_params.clone()),
+    ))
+}
+
+/// Build a Gemini provider via rig-core's dedicated Gemini client.
+///
+/// Routing through this client (rather than the generic OpenAI-compat path
+/// at `/v1beta/openai`) is what makes Gemini thinking-mode tool calling
+/// work: rig-core's Gemini implementation round-trips `thought_signature`
+/// on each `functionCall`. Without that round-trip the API rejects the
+/// next turn with HTTP 400 ("Function call is missing a thought_signature
+/// in functionCall parts"). See #3225.
+///
+/// This is API-key auth only (`GEMINI_API_KEY`). Users on Gemini OAuth go
+/// through the separate `gemini_oauth` backend.
+fn create_gemini_from_registry(
+    config: &RegistryProviderConfig,
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    use rig::providers::gemini;
+
+    let api_key = config
+        .api_key
+        .as_ref()
+        .map(|k| k.expose_secret().to_string())
+        .ok_or_else(|| LlmError::AuthFailed {
+            provider: config.provider_id.clone(),
+        })?;
+
+    let client: gemini::Client = if config.base_url.is_empty() {
+        gemini::Client::new(&api_key)
+    } else {
+        gemini::Client::builder()
+            .api_key(&api_key)
+            .base_url(&config.base_url)
+            .build()
+    }
+    .map_err(|e| LlmError::RequestFailed {
+        provider: config.provider_id.clone(),
+        reason: format!("Failed to create Gemini client: {e}"),
+    })?;
+
+    let model = client.completion_model(&config.model);
+
+    tracing::debug!(
+        provider = %config.provider_id,
+        model = %config.model,
+        base_url = if config.base_url.is_empty() { "default" } else { &config.base_url },
+        "Using Gemini provider (preserves thought_signature across turns)"
+    );
+
+    Ok(Arc::new(
+        RigAdapter::new(model, &config.model)
+            .with_unsupported_params(config.unsupported_params.clone()),
+    ))
 }
 
 /// Create an OpenAI Codex provider with OAuth authentication.
