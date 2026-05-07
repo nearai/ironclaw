@@ -78,6 +78,7 @@ where
                 reply_target_binding_ref: resolution.reply_target_binding_ref.clone(),
                 external_conversation_ref: request.external_conversation_ref,
                 external_event_id: request.external_event_id,
+                route_kind: request.route_kind,
                 content_ref: request.content_ref,
                 received_at: request.received_at,
                 requested_run_profile: request.requested_run_profile,

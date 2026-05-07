@@ -1232,6 +1232,7 @@ async fn direct_route_rejects_borrowed_owner_actor_key() {
             reply_target_binding_ref: resolution.reply_target_binding_ref,
             external_conversation_ref: external_conversation("alice-private-borrowed-key", None),
             external_event_id: ExternalEventId::new("bob-borrowed-key-event").unwrap(),
+            route_kind: ConversationRouteKind::Direct,
             content_ref: InboundMessageContentRef::new("content:bob-borrowed-key-event").unwrap(),
             received_at: Utc.with_ymd_and_hms(2026, 5, 6, 12, 1, 0).unwrap(),
             requested_run_profile: None,
@@ -1369,6 +1370,7 @@ async fn shared_route_rejects_wrong_adapter_context() {
             reply_target_binding_ref: resolution.reply_target_binding_ref,
             external_conversation_ref: external_conversation("shared-adapter-route", None),
             external_event_id: ExternalEventId::new("wrong-adapter-accept-event").unwrap(),
+            route_kind: ConversationRouteKind::Direct,
             content_ref: InboundMessageContentRef::new("content:wrong-adapter-accept-event")
                 .unwrap(),
             received_at: Utc.with_ymd_and_hms(2026, 5, 6, 12, 1, 0).unwrap(),
@@ -1528,7 +1530,7 @@ async fn shared_route_marker_widens_existing_direct_binding_for_participants() {
     let mut bob_request = inbound_request(
         telegram(),
         external_actor("bob-telegram"),
-        group,
+        group.clone(),
         "late-shared-bob",
     );
     bob_request.route_kind = ConversationRouteKind::Shared;
@@ -1536,6 +1538,18 @@ async fn shared_route_marker_widens_existing_direct_binding_for_participants() {
     let bob = inbound.handle_inbound_turn(bob_request).await.unwrap();
 
     assert_eq!(bob.resolution.actor, TurnActor::new(user("bob")));
+    assert_eq!(coordinator.submissions().len(), 3);
+
+    let err = inbound
+        .handle_inbound_turn(inbound_request(
+            telegram(),
+            external_actor("bob-telegram"),
+            group,
+            "late-shared-bob-direct-regression",
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, InboundTurnError::AccessDenied { .. }));
     assert_eq!(coordinator.submissions().len(), 3);
 }
 
@@ -1731,6 +1745,7 @@ async fn accept_inbound_message_rejects_stale_message_scoped_reply_ref() {
             reply_target_binding_ref: first.accepted_message.reply_target_binding_ref,
             external_conversation_ref: group,
             external_event_id: ExternalEventId::new("stale-reply-ref-next").unwrap(),
+            route_kind: ConversationRouteKind::Direct,
             content_ref: InboundMessageContentRef::new("content:stale-reply-ref-next").unwrap(),
             received_at: Utc.with_ymd_and_hms(2026, 5, 6, 12, 2, 0).unwrap(),
             requested_run_profile: None,
@@ -1784,6 +1799,7 @@ async fn message_scoped_reply_target_rejects_same_thread_different_actor_route()
             )
             .unwrap(),
             external_event_id: ExternalEventId::new("alice-web-event-message-owner").unwrap(),
+            route_kind: ConversationRouteKind::Direct,
             content_ref: InboundMessageContentRef::new("content:alice-web-event-message-owner")
                 .unwrap(),
             received_at: Utc.with_ymd_and_hms(2026, 5, 6, 12, 1, 0).unwrap(),
@@ -1887,6 +1903,7 @@ async fn accept_inbound_message_rejects_external_route_mismatch() {
             reply_target_binding_ref: resolution.reply_target_binding_ref,
             external_conversation_ref: external_conversation("alice-browser-b", None),
             external_event_id: ExternalEventId::new("route-mismatch-event").unwrap(),
+            route_kind: ConversationRouteKind::Direct,
             content_ref: InboundMessageContentRef::new("content:route-mismatch-event").unwrap(),
             received_at: Utc.with_ymd_and_hms(2026, 5, 6, 12, 1, 0).unwrap(),
             requested_run_profile: None,
@@ -1931,6 +1948,7 @@ async fn duplicate_accept_rejects_external_route_mismatch() {
             reply_target_binding_ref: resolution.reply_target_binding_ref.clone(),
             external_conversation_ref: external_conversation("alice-browser-a", None),
             external_event_id: ExternalEventId::new("duplicate-route-mismatch-event").unwrap(),
+            route_kind: ConversationRouteKind::Direct,
             content_ref: InboundMessageContentRef::new("content:duplicate-route-mismatch-event")
                 .unwrap(),
             received_at: Utc.with_ymd_and_hms(2026, 5, 6, 12, 1, 0).unwrap(),
@@ -1951,6 +1969,7 @@ async fn duplicate_accept_rejects_external_route_mismatch() {
             reply_target_binding_ref: resolution.reply_target_binding_ref,
             external_conversation_ref: external_conversation("alice-browser-b", None),
             external_event_id: ExternalEventId::new("duplicate-route-mismatch-event").unwrap(),
+            route_kind: ConversationRouteKind::Direct,
             content_ref: InboundMessageContentRef::new("content:duplicate-route-mismatch-event")
                 .unwrap(),
             received_at: Utc.with_ymd_and_hms(2026, 5, 6, 12, 2, 0).unwrap(),
@@ -2005,6 +2024,7 @@ async fn accept_inbound_message_rejects_mixed_source_and_reply_bindings() {
             reply_target_binding_ref: second.reply_target_binding_ref,
             external_conversation_ref: external_conversation("alice-browser-a", None),
             external_event_id: ExternalEventId::new("mixed-binding-event").unwrap(),
+            route_kind: ConversationRouteKind::Direct,
             content_ref: InboundMessageContentRef::new("content:mixed-binding-event").unwrap(),
             received_at: Utc.with_ymd_and_hms(2026, 5, 6, 12, 1, 0).unwrap(),
             requested_run_profile: None,
