@@ -2877,25 +2877,9 @@ mod tests {
     }
 
     #[cfg(feature = "libsql")]
-    async fn make_thread_ops_test_db() -> (Arc<dyn crate::db::Database>, tempfile::TempDir) {
-        use crate::db::Database;
-
-        let dir = tempfile::tempdir().expect("failed to create temp dir");
-        let path = dir.path().join("test.db");
-        let backend = crate::db::libsql::LibSqlBackend::new_local(&path)
-            .await
-            .expect("failed to create test LibSqlBackend");
-        backend
-            .run_migrations()
-            .await
-            .expect("failed to run migrations");
-        (Arc::new(backend) as Arc<dyn crate::db::Database>, dir)
-    }
-
-    #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn process_compact_writes_summary_to_session_user_workspace() {
-        let (db, _dir) = make_thread_ops_test_db().await;
+        let (db, _dir) = crate::agent::test_support::make_libsql_test_db().await;
         let owner_workspace = Arc::new(crate::workspace::Workspace::new_with_db(
             "owner-scope",
             Arc::clone(&db),
