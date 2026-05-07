@@ -126,8 +126,9 @@ async function sendMessage() {
     preview_url: att.preview_url || null,
     preview_text: '',
   }));
-  const displayContent = content
-    || (pendingAttachmentsForDisplay.length > 0 ? '(files attached)' : '');
+  // Early-return at the top guarantees content or attachments is non-empty,
+  // so the fallback always reflects "files attached" when content is blank.
+  const displayContent = content || '(files attached)';
   const pendingCopyTextParts = [];
   if (displayContent) pendingCopyTextParts.push(displayContent);
   pendingAttachmentsForDisplay.forEach((att) => {
@@ -593,24 +594,24 @@ function attachmentMetaText(filename, mimeType, sizeLabel) {
     .join(' • ');
 }
 
-function appendAttachmentFileCard(container, itemClassName, nameClassName, metaClassName, filename, metaText, mimeType) {
+function appendAttachmentFileCard(container, classes, filename, metaText, mimeType) {
   const item = document.createElement('div');
-  item.className = itemClassName;
+  item.className = classes.item;
   // Mirror the staging preview: icon on the left, name + meta on the right.
   const iconEl = document.createElement('div');
-  iconEl.className = `${nameClassName.replace('-name', '-icon')}`;
+  iconEl.className = classes.icon;
   iconEl.innerHTML = attachmentIconSvg(mimeType);
   item.appendChild(iconEl);
   const metaWrap = document.createElement('div');
-  metaWrap.className = `${nameClassName.replace('-name', '-body')}`;
+  metaWrap.className = classes.body;
   const nameEl = document.createElement('div');
-  nameEl.className = nameClassName;
+  nameEl.className = classes.name;
   nameEl.textContent = filename || 'attachment';
   nameEl.title = filename || '';
   metaWrap.appendChild(nameEl);
   if (metaText) {
     const metaEl = document.createElement('div');
-    metaEl.className = metaClassName;
+    metaEl.className = classes.meta;
     metaEl.textContent = metaText;
     metaWrap.appendChild(metaEl);
   }
@@ -674,6 +675,130 @@ const MAX_ATTACHMENT_SIZE_BYTES = 7 * 1024 * 1024; // 7 MB per attachment (match
 const MAX_TOTAL_ATTACHMENT_BYTES = 10 * 1024 * 1024; // 10 MB decoded per message
 const MAX_STAGED_ATTACHMENTS = 5;
 
+// Image compression knobs for client-side resize before upload. The
+// pipeline:
+//   - Anything beyond IMAGE_COMPRESS_MAX_DIM gets resized via canvas.
+//   - JPEGs always re-encode to JPEG (no alpha to worry about).
+//   - PNGs sample the alpha channel of the resized canvas: if any pixel
+//     is non-opaque, we keep PNG to preserve transparency; if every
+//     pixel is opaque (typical for screenshots / phone-camera saves),
+//     we re-encode to JPEG to save 80%+ on the wire.
+//   - GIF / WebP / other bitmap MIMEs follow the same rule.
+// If the result is larger than the original (already-tight source PNG
+// of an icon, etc.), we fall back to the original and skip compression.
+const IMAGE_COMPRESS_MAX_DIM = 1600;
+const IMAGE_COMPRESS_QUALITY = 0.88;
+// MIME types we know how to round-trip through canvas. SVG and BMP and
+// other vector / unusual formats would lose fidelity; let them upload
+// as-is.
+const IMAGE_COMPRESS_RECODE_MIMES = new Set([
+  'image/jpeg', 'image/jpg', 'image/png', 'image/webp',
+]);
+
+// Sample the alpha channel of `canvas` to decide whether the image has
+// any transparent pixels. Returns `true` on the first non-opaque pixel
+// (early-out). Falls open (returns `true`) if `getImageData` throws
+// because of canvas tainting — better to keep PNG than silently drop
+// transparency.
+function canvasHasTransparency(canvas) {
+  try {
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return true;
+    const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    for (let i = 3; i < data.length; i += 4) {
+      if (data[i] < 255) return true;
+    }
+    return false;
+  } catch (_) {
+    return true;
+  }
+}
+
+// Re-encode an image data URL through canvas, downscaling to fit within
+// IMAGE_COMPRESS_MAX_DIM and choosing PNG vs JPEG output based on whether
+// the source has any transparent pixels. Returns `null` to signal "no
+// change" — caller falls back to the untouched original.
+function compressImageForUpload(dataUrl, mimeType) {
+  const lowerMime = (mimeType || '').toLowerCase();
+  if (!IMAGE_COMPRESS_RECODE_MIMES.has(lowerMime)) {
+    return Promise.resolve(null);
+  }
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const oversized = img.naturalWidth > IMAGE_COMPRESS_MAX_DIM
+          || img.naturalHeight > IMAGE_COMPRESS_MAX_DIM;
+        // For JPEGs: skip when both dimensions already fit — re-encoding
+        // would only lose quality. For PNGs: still pass through canvas
+        // when in-bounds *if* MIME translation could shrink it (an
+        // opaque PNG → JPEG re-encode is a big win even at native size).
+        const isOpaqueOrigin = lowerMime === 'image/jpeg' || lowerMime === 'image/jpg';
+        if (!oversized && isOpaqueOrigin) {
+          resolve(null);
+          return;
+        }
+        const ratio = Math.min(
+          IMAGE_COMPRESS_MAX_DIM / img.naturalWidth,
+          IMAGE_COMPRESS_MAX_DIM / img.naturalHeight,
+          1,
+        );
+        const w = Math.max(1, Math.round(img.naturalWidth * ratio));
+        const h = Math.max(1, Math.round(img.naturalHeight * ratio));
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) { resolve(null); return; }
+        ctx.drawImage(img, 0, 0, w, h);
+        // Pick output MIME based on actual transparency, not source MIME.
+        // A PNG with no alpha pixels (the common screenshot case) gets
+        // a JPEG re-encode; a true alpha-using PNG keeps PNG.
+        let outMime = 'image/jpeg';
+        if (lowerMime === 'image/png' || lowerMime === 'image/webp') {
+          if (canvasHasTransparency(canvas)) {
+            outMime = 'image/png';
+          }
+        }
+        const compressed = outMime === 'image/png'
+          ? canvas.toDataURL('image/png')
+          : canvas.toDataURL('image/jpeg', IMAGE_COMPRESS_QUALITY);
+        // Bail if the re-encode is larger than the original (highly
+        // optimized source PNGs of icons can land here).
+        if (compressed.length >= dataUrl.length) {
+          resolve(null);
+          return;
+        }
+        resolve({ dataUrl: compressed, mimeType: outMime });
+      } catch (_) {
+        resolve(null);
+      }
+    };
+    img.onerror = () => resolve(null);
+    img.src = dataUrl;
+  });
+}
+
+// Replace the filename's extension to match the post-compression bytes.
+// `image/png` → `.png`, anything else (the common case after re-encode)
+// → `.jpg`.
+function withCompressedExtension(filename, outputMime) {
+  const ext = outputMime === 'image/png' ? '.png' : '.jpg';
+  if (!filename) return `image${ext}`;
+  const dot = filename.lastIndexOf('.');
+  return dot > 0 ? filename.slice(0, dot) + ext : filename + ext;
+}
+
+// Approximate decoded bytes from a base64 data URL without re-decoding.
+function dataUrlDecodedBytes(dataUrl) {
+  const commaIdx = dataUrl.indexOf(',');
+  if (commaIdx === -1) return dataUrl.length;
+  // base64 expands by 4/3; padding accounts for at most 2 trailing '=' bytes.
+  const b64Len = dataUrl.length - commaIdx - 1;
+  const padding = (dataUrl.endsWith('==')) ? 2 : (dataUrl.endsWith('=') ? 1 : 0);
+  return Math.max(0, Math.floor(b64Len * 3 / 4) - padding);
+}
+
 function handleAttachmentFiles(files) {
   let projectedCount = stagedAttachments.length + pendingAttachmentCount;
   let projectedTotalBytes = stagedAttachments.reduce((sum, att) => sum + (att.size_bytes || 0), 0) + pendingAttachmentBytes;
@@ -719,20 +844,33 @@ function handleAttachmentFiles(files) {
       const dataUrl = e.target.result;
       const commaIdx = dataUrl.indexOf(',');
       const meta = dataUrl.substring(0, commaIdx);
-      const base64 = dataUrl.substring(commaIdx + 1);
       const parsedType = meta.replace('data:', '').replace(';base64', '');
       const mediaType = (!parsedType || parsedType === 'application/octet-stream') ? mimeType : parsedType;
-      stagedAttachments.push({
-        kind: mediaType.startsWith('image/') ? 'image' : 'document',
-        mime_type: mediaType,
-        filename: file.name || null,
-        data_base64: base64,
-        preview_url: mediaType.startsWith('image/') ? dataUrl : null,
-        size_bytes: file.size,
-        size_label: formatAttachmentSize(file.size),
+      // Recode bitmap images client-side: oversized images get downscaled,
+      // and opaque PNGs get re-encoded as JPEG to drop ~80% of bytes
+      // (`compressImageForUpload` samples the alpha channel before
+      // committing to JPEG so true transparent PNGs keep PNG output).
+      compressImageForUpload(dataUrl, mediaType).then((compressed) => {
+        const finalDataUrl = compressed ? compressed.dataUrl : dataUrl;
+        const finalMime = compressed ? compressed.mimeType : mediaType;
+        const finalCommaIdx = finalDataUrl.indexOf(',');
+        const finalBase64 = finalDataUrl.substring(finalCommaIdx + 1);
+        const finalSize = compressed ? dataUrlDecodedBytes(finalDataUrl) : file.size;
+        const finalFilename = compressed
+          ? withCompressedExtension(file.name, finalMime)
+          : (file.name || null);
+        stagedAttachments.push({
+          kind: finalMime.startsWith('image/') ? 'image' : 'document',
+          mime_type: finalMime,
+          filename: finalFilename,
+          data_base64: finalBase64,
+          preview_url: finalMime.startsWith('image/') ? finalDataUrl : null,
+          size_bytes: finalSize,
+          size_label: formatAttachmentSize(finalSize),
+        });
+        renderAttachmentPreviews();
+        finalizeRead();
       });
-      renderAttachmentPreviews();
-      finalizeRead();
     };
     reader.onerror = function() {
       alert(I18n.t('error.unknown'));
@@ -841,6 +979,20 @@ function parseUserMessageContent(content) {
   return { text, attachments, copyText: copyParts.join('\n') };
 }
 
+// Fetch a Bearer-protected resource and convert it to a blob URL the
+// browser can hand to `<img src>`. The Authorization header keeps the
+// token out of the URL (vs. `?token=` query auth, which leaks via logs
+// and Referer per src/channels/web/platform/auth.rs).
+function fetchAttachmentAsBlobUrl(url) {
+  const opts = oidcProxyAuth ? {} : { headers: { 'Authorization': 'Bearer ' + token } };
+  return fetch(url, opts).then((resp) => {
+    if (!resp.ok) {
+      throw new Error('attachment fetch ' + resp.status);
+    }
+    return resp.blob();
+  }).then((blob) => URL.createObjectURL(blob));
+}
+
 function renderMessageAttachments(container, attachments) {
   if (!attachments || attachments.length === 0) return;
   const strip = document.createElement('div');
@@ -854,12 +1006,50 @@ function renderMessageAttachments(container, attachments) {
       strip.appendChild(image);
       return;
     }
+    if (att.kind === 'image' && att.url) {
+      // Server-side persistence path: fetch the bytes via the
+      // /api/attachments/... route (Bearer-auth'd) and render inline.
+      // Fall back to a file card if the fetch fails so the user still
+      // sees what was attached.
+      const image = document.createElement('img');
+      image.className = 'message-attachment-image';
+      image.alt = att.filename || 'Attached image';
+      strip.appendChild(image);
+      fetchAttachmentAsBlobUrl(att.url)
+        .then((blobUrl) => { image.src = blobUrl; })
+        .catch(() => {
+          // Fetch failed (404, network, auth) — replace the empty <img>
+          // with the file-card fallback so the bubble doesn't show a
+          // broken image icon.
+          if (image.parentNode === strip) {
+            strip.removeChild(image);
+          }
+          appendAttachmentFileCard(
+            strip,
+            {
+              item: 'message-attachment-file',
+              icon: 'message-attachment-file-icon',
+              body: 'message-attachment-file-body',
+              name: 'message-attachment-file-name',
+              meta: 'message-attachment-file-meta',
+            },
+            att.filename || 'attachment',
+            attachmentMetaText(att.filename, att.mime_type, att.size_label),
+            att.mime_type
+          );
+        });
+      return;
+    }
     // Match the staging preview: type-aware icon + filename + (type • size).
     appendAttachmentFileCard(
       strip,
-      'message-attachment-file',
-      'message-attachment-file-name',
-      'message-attachment-file-meta',
+      {
+        item: 'message-attachment-file',
+        icon: 'message-attachment-file-icon',
+        body: 'message-attachment-file-body',
+        name: 'message-attachment-file-name',
+        meta: 'message-attachment-file-meta',
+      },
       att.filename || 'attachment',
       attachmentMetaText(att.filename, att.mime_type, att.size_label),
       att.mime_type
@@ -882,7 +1072,7 @@ function showImageLightbox(src, alt) {
   overlay.className = 'image-lightbox-overlay';
   overlay.setAttribute('role', 'dialog');
   overlay.setAttribute('aria-modal', 'true');
-  overlay.setAttribute('aria-label', 'Image preview');
+  overlay.setAttribute('aria-label', I18n.t('chat.imagePreview'));
   overlay.tabIndex = -1;
 
   const img = document.createElement('img');
@@ -909,17 +1099,23 @@ function showImageLightbox(src, alt) {
 
 // Delegate click handling to document.body so dynamically-added images
 // (history rerenders, generated images, staging strip) are picked up
-// without rebinding listeners.
+// without rebinding listeners. Idempotent: re-injection of the bundle
+// (e.g. hot-reload) won't stack duplicate listeners.
 (function wireImageLightbox() {
+  if (window.__lightboxWired) return;
+  window.__lightboxWired = true;
   document.addEventListener('click', (e) => {
     const target = e.target;
     if (!(target instanceof HTMLImageElement)) return;
-    if (target.classList.contains('image-preview')
+    if (!(target.classList.contains('image-preview')
         || target.classList.contains('message-attachment-image')
-        || target.classList.contains('generated-image')) {
-      if (e.defaultPrevented) return;
-      e.preventDefault();
-      showImageLightbox(target.src, target.alt || '');
+        || target.classList.contains('generated-image'))) {
+      return;
     }
+    // Don't hijack clicks on images wrapped in anchors — let the link navigate.
+    if (target.closest('a')) return;
+    if (e.defaultPrevented) return;
+    e.preventDefault();
+    showImageLightbox(target.src, target.alt || '');
   });
 })();

@@ -120,7 +120,16 @@ fn bridge_outcome_for_failed_thread(
     }
 }
 
+/// Directory inside the project root where v2 stores user-uploaded
+/// attachments. The shared HTTP route at `/api/attachments/...` serves
+/// files from this tree. Kept here (not in `channels/attachments.rs`)
+/// because v2's layout is project-aware and intentionally separate from
+/// the legacy v1 layout.
 const PROJECT_ATTACHMENT_DIR: &str = ".ironclaw/attachments";
+
+use crate::channels::{
+    fallback_attachment_filename, persist_attachment_at, sanitize_attachment_segment,
+};
 
 #[derive(Debug, Clone)]
 struct AttachmentIndexNote {
@@ -128,30 +137,6 @@ struct AttachmentIndexNote {
     content: String,
     metadata: serde_json::Value,
     tags: Vec<String>,
-}
-
-fn sanitize_attachment_segment(raw: &str) -> String {
-    let sanitized: String = raw
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let sanitized = sanitized.trim_matches('.');
-    if sanitized.is_empty() {
-        "attachment".to_string()
-    } else {
-        sanitized.to_string()
-    }
-}
-
-fn fallback_attachment_filename(index: usize, mime_type: &str) -> String {
-    let ext = crate::channels::attachment_extension_for_mime(mime_type);
-    format!("attachment-{}.{}", index + 1, ext)
 }
 
 fn attachment_project_relative_path(
@@ -284,42 +269,34 @@ async fn persist_project_attachments(
     let mut notes = Vec::new();
 
     for (index, attachment) in attachments.iter_mut().enumerate() {
-        if attachment.data.is_empty() || attachment.local_path.is_some() {
-            continue;
-        }
-
         let relative_path =
             attachment_project_relative_path(message, project_id, attachment, index);
         let absolute_path = project_root.join(Path::new(&relative_path));
-        let Some(parent) = absolute_path.parent() else {
-            tracing::warn!(path = %absolute_path.display(), "engine v2: attachment path had no parent");
-            continue;
-        };
 
-        if let Err(e) = tokio::fs::create_dir_all(parent).await {
-            tracing::warn!(path = %parent.display(), error = %e, "engine v2: failed to create attachment directory");
-            continue;
+        match persist_attachment_at(&absolute_path, &relative_path, attachment).await {
+            Ok(true) => {
+                // Build the index note while `data` is still populated so the
+                // fallback to `data.len()` in `attachment_index_note` reports
+                // the real payload size when `size_bytes` wasn't pre-filled.
+                notes.push(attachment_index_note(message, attachment, &relative_path));
+                // Intentionally *don't* clear `attachment.data` here. The
+                // caller (`handle_with_engine_inner` in this file) immediately
+                // feeds the same slice to `augment_with_attachments`, which
+                // only emits multimodal `image_parts` for images when
+                // `att.data` is non-empty. Clearing the buffer here would
+                // silently drop every uploaded image from the engine-v2 LLM
+                // request — the file is on disk but the model never sees the
+                // bytes.
+            }
+            Ok(false) => { /* deliberate skip — empty data or already-persisted */ }
+            Err(e) => {
+                tracing::warn!(
+                    path = %absolute_path.display(),
+                    error = %e,
+                    "engine v2: failed to persist attachment file",
+                );
+            }
         }
-
-        if let Err(e) = tokio::fs::write(&absolute_path, &attachment.data).await {
-            tracing::warn!(path = %absolute_path.display(), error = %e, "engine v2: failed to persist attachment file");
-            continue;
-        }
-
-        attachment.local_path = Some(relative_path.clone());
-        // Build the index note while `data` is still populated so the
-        // fallback to `data.len()` in `attachment_index_note` reports the
-        // real payload size when `size_bytes` wasn't pre-filled.
-        notes.push(attachment_index_note(message, attachment, &relative_path));
-        // Intentionally *don't* clear `attachment.data` here. The caller
-        // (`handle_with_engine_inner` in this file) immediately feeds the
-        // same slice to `augment_with_attachments`, which only emits
-        // multimodal `image_parts` for images when `att.data` is non-empty.
-        // Clearing the buffer here would silently drop every uploaded image
-        // from the engine-v2 LLM request — the file is on disk but the
-        // model never sees the bytes. The `persisted_attachments` Vec is
-        // local to the request and is dropped once the engine dispatch
-        // returns, so "storage hygiene" is a no-op anyway.
     }
 
     notes

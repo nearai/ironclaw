@@ -580,6 +580,104 @@ async def test_gateway_files_only_attachments_reload_from_history(page, ironclaw
     assert "Rendered from persisted history." in (last_turn.get("user_input") or "")
 
 
+async def test_gateway_user_image_survives_page_refresh(page, ironclaw_server, mock_llm_server):
+    """Regression for #1341: user-uploaded image attachments must keep
+    rendering inline after a page refresh.
+
+    Before the persist-then-fetch path landed, the persisted `<attachments>`
+    XML carried metadata only (filename / mime / size) — no pixels. On
+    refresh the chat surface degraded every image into a generic file
+    card, which read as "the image was lost". This test:
+
+      1. uploads a PNG and sends it through the browser UI,
+      2. waits for the turn to land in `/api/chat/history` with a populated
+         `user_attachments[].url` (the server-side parse of the persisted
+         `project_path` attribute),
+      3. reloads the page,
+      4. asserts the user message still has an `<img>` (not a file card),
+         and the image's eventual `src` is a `blob:` URL — proving the
+         frontend fetched `/api/attachments/...` over Bearer auth and
+         materialized the bytes back into the DOM rather than reading from
+         the (gone) optimistic-send data URL.
+    """
+    attachment_input = page.locator(SEL["attachment_input"])
+    chat_input = page.locator(SEL["chat_input"])
+    thread_id = await _wait_for_current_thread_id(page)
+
+    await attachment_input.set_input_files(
+        files=[
+            {
+                "name": "kitten.png",
+                "mimeType": "image/png",
+                "buffer": ONE_BY_ONE_PNG,
+            },
+        ]
+    )
+    await chat_input.fill("Look at this cat.")
+    await chat_input.press("Enter")
+
+    history = await _wait_for_thread_response(
+        ironclaw_server,
+        thread_id,
+        expected_user_input="Look at this cat.",
+        timeout=45.0,
+    )
+
+    last_turn = history["turns"][-1]
+    user_attachments = last_turn.get("user_attachments") or []
+    assert len(user_attachments) == 1, last_turn
+    served = user_attachments[0]
+    assert served["filename"] == "kitten.png", served
+    assert served["kind"] == "image", served
+    assert served["url"].startswith("/api/attachments/"), served
+    # The persisted XML must point inside the attachments serving root —
+    # a `project_path` outside that prefix would mean the persist helper
+    # dropped to a path the route can't resolve.
+    assert ".ironclaw/attachments/" in (last_turn.get("user_input") or ""), last_turn
+
+    await page.reload(wait_until="domcontentloaded")
+    await page.locator(SEL["auth_screen"]).wait_for(state="hidden", timeout=15000)
+    await page.wait_for_function(
+        """targetThreadId => (
+          typeof sseHasConnectedBefore !== 'undefined' &&
+          sseHasConnectedBefore === true &&
+          typeof currentThreadId !== 'undefined' &&
+          currentThreadId === targetThreadId &&
+          document.querySelectorAll('#chat-messages .message.user').length > 0
+        )""",
+        arg=thread_id,
+        timeout=15000,
+    )
+
+    # Wait for the async fetch+blob swap on the rebuilt `<img>`. Without
+    # the fetch path the image element would either never appear or stay
+    # blank; with the fetch path it gets a `blob:` src once the bytes
+    # land. Polling here keeps the test resilient to small latency
+    # variations on slow CI runners.
+    await page.wait_for_function(
+        """() => {
+          const users = document.querySelectorAll('#chat-messages .message.user');
+          if (!users.length) return false;
+          const lastUser = users[users.length - 1];
+          const img = lastUser.querySelector('.message-attachment-image');
+          if (!img) return false;
+          return typeof img.src === 'string' && img.src.startsWith('blob:');
+        }""",
+        timeout=15000,
+    )
+
+    reloaded_state = await _last_user_message_state(page)
+    assert reloaded_state is not None
+    # The whole point of this regression test: after refresh we get an
+    # `<img>`, not a file card.
+    assert reloaded_state["imageCards"] == 1, reloaded_state
+    assert reloaded_state["fileCards"] == 0, reloaded_state
+    # And the user-typed text is still rendered cleanly without the
+    # `<attachments>` block leaking into visible markup.
+    assert "Look at this cat." in reloaded_state["text"], reloaded_state
+    assert "<attachments>" not in reloaded_state["text"], reloaded_state
+
+
 async def test_gateway_attachment_unextractable_file_uses_placeholder(page, ironclaw_server, mock_llm_server):
     """A PDF that passes the MIME allowlist + header check but fails content
     extraction reaches the backend with a fallback "[Failed to extract…]"
