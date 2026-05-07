@@ -3404,10 +3404,41 @@ impl ExtensionManager {
             .await?;
         self.invalidate_latent_wasm_provider_actions_cache().await;
 
+        // Register the WASM tool with the engine's tool registry
+        // immediately so the model can call it without a preceding
+        // `tool_activate(name=...)` step. Auth is checked at execute
+        // time by `AuthManager::check_action_auth`, which raises an
+        // `Authentication` gate when the declared credential is
+        // missing — the inline-await machinery (#3133/#3166) parks
+        // the caller until OAuth completes, then retries the action.
+        //
+        // Best-effort: a registration failure here doesn't unwind the
+        // download. The user can retry via the existing /activate
+        // endpoint, or the next ensure_extension_ready cycle picks
+        // it up. We log so a CI failure isn't silent.
+        match self.activate_wasm_tool(name, &self.user_id).await {
+            Ok(_) => {
+                tracing::debug!(
+                    extension = %name,
+                    "Auto-registered WASM tool with registry on install"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    extension = %name,
+                    error = %e,
+                    "Failed to auto-register WASM tool on install — \
+                     falling back to lazy activation. The tool will \
+                     not be callable until the user resolves the \
+                     activation error or completes setup."
+                );
+            }
+        }
+
         Ok(InstallResult {
             name: name.to_string(),
             kind: ExtensionKind::WasmTool,
-            message: format!("WASM tool '{}' installed. Run activate to load it.", name),
+            message: format!("WASM tool '{}' installed and ready.", name),
         })
     }
 
