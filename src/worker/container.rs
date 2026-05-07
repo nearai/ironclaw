@@ -23,11 +23,12 @@ use crate::context::JobContext;
 use crate::error::WorkerError;
 use crate::llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext, ResponseMetadata};
 use crate::tools::ToolRegistry;
-use crate::tools::execute::{execute_tool_simple, process_tool_result};
+use crate::tools::builtin::{FinishJobStatus, parse_finish_job_signal_from_output};
+use crate::tools::execute::{execute_job_tool_simple, process_tool_result};
 use crate::worker::api::{CompletionReport, JobEventPayload, StatusUpdate, WorkerHttpClient};
 use crate::worker::autonomous_recovery::{
     AutonomousRecoveryAction, AutonomousRecoveryState, EMPTY_TOOL_COMPLETION_FAILURE,
-    EMPTY_TOOL_COMPLETION_NUDGE, FORCE_TEXT_RECOVERY_PROMPT,
+    EMPTY_TOOL_COMPLETION_NUDGE, EMPTY_TOOL_COMPLETION_STRICT,
 };
 use crate::worker::proxy_llm::ProxyLlmProvider;
 use ironclaw_safety::SafetyLayer;
@@ -90,7 +91,7 @@ impl WorkerRuntime {
         }));
 
         let tools = Arc::new(ToolRegistry::new());
-        // Register only container-safe tools
+        // Register container-safe tools plus job-only completion controls.
         tools.register_container_tools();
 
         Ok(Self {
@@ -155,12 +156,16 @@ Job: {}
 Description: {}
 
 You have tools for shell commands, file operations, and code editing.
-Work independently to complete this job. When finished, your final message MUST include the phrase "The job is complete" to signal termination."#,
+Work independently to complete this job.
+The only way to end this job is to call the `finish_job` tool.
+Call `finish_job` only after all other work is done.
+Use status \"completed\" when all required work is finished,
+or status \"failed\" when you hit an unresolvable blocker."#,
             job.title, job.description
         )));
 
-        // Load tool definitions
-        reason_ctx.available_tools = self.tools.tool_definitions().await;
+        // Load tool definitions (use job context so finish_job is visible from the first iteration)
+        reason_ctx.available_tools = self.tools.tool_definitions_for_job().await;
 
         // Shared iteration tracker — read after the loop to report accurate counts.
         let iteration_tracker = Arc::new(Mutex::new(0u32));
@@ -318,7 +323,7 @@ Work independently to complete this job. When finished, your final message MUST 
 /// Container delegate: implements `LoopDelegate` for the Docker container context.
 ///
 /// Tools execute sequentially. Events are posted to the orchestrator via HTTP.
-/// Completion is detected via `llm_signals_completion()`.
+/// Completion is detected when the LLM calls the `finish_job` tool.
 struct ContainerDelegate {
     client: Arc<WorkerHttpClient>,
     safety: Arc<SafetyLayer>,
@@ -371,7 +376,9 @@ impl ContainerDelegate {
 
 #[async_trait]
 impl LoopDelegate for ContainerDelegate {
-    async fn check_signals(&self) -> LoopSignal {
+    type Outcome = LoopOutcome;
+
+    async fn check_signals(&self) -> LoopSignal<Self::Outcome> {
         // Container runtime has no stop signals — the orchestrator manages lifecycle.
         LoopSignal::Continue
     }
@@ -403,17 +410,15 @@ impl LoopDelegate for ContainerDelegate {
         // conversation. Ensure the last message is user-role before calling the LLM.
         crate::util::ensure_ends_with_user_message(&mut reason_ctx.messages);
 
-        let force_text_recovery = {
+        let recovery_mode_active = {
             let mut recovery = self.recovery_state.lock().await;
             recovery.begin_iteration()
         };
-        if force_text_recovery {
-            tracing::warn!("Switching to text-only recovery after malformed tool completions");
-            reason_ctx.available_tools.clear();
-        } else {
-            // Refresh tools (in case WASM tools were built)
-            reason_ctx.available_tools = self.tools.tool_definitions().await;
+        if recovery_mode_active {
+            tracing::warn!("Retrying after malformed tool completions with tools still enabled");
         }
+        // Refresh tools (in case WASM tools were built)
+        reason_ctx.available_tools = self.tools.tool_definitions_for_job().await;
 
         None
     }
@@ -436,7 +441,7 @@ impl LoopDelegate for ContainerDelegate {
         text: &str,
         metadata: ResponseMetadata,
         reason_ctx: &mut ReasoningContext,
-    ) -> TextAction {
+    ) -> TextAction<Self::Outcome> {
         let action = {
             let mut recovery = self.recovery_state.lock().await;
             recovery.on_text_response(metadata, text)
@@ -456,20 +461,20 @@ impl LoopDelegate for ContainerDelegate {
                     .push(ChatMessage::user(EMPTY_TOOL_COMPLETION_NUDGE));
                 return TextAction::Continue;
             }
-            AutonomousRecoveryAction::ForceTextRecovery => {
+            AutonomousRecoveryAction::StrictToolRecovery => {
                 tracing::warn!(
-                    "Repeated malformed tool completions detected; switching to text-only recovery"
+                    "Autonomous recovery escalated; requiring a valid tool call on the next reply"
                 );
                 self.post_event(
                     "status",
                     serde_json::json!({
-                        "message": "Model returned repeated empty tool-completion responses; requesting a final status update without tools.",
+                        "message": "Model failed to recover after a tool-use nudge; requiring a valid tool call or finish_job next.",
                     }),
                 )
                 .await;
                 reason_ctx
                     .messages
-                    .push(ChatMessage::user(FORCE_TEXT_RECOVERY_PROMPT));
+                    .push(ChatMessage::user(EMPTY_TOOL_COMPLETION_STRICT));
                 return TextAction::Continue;
             }
             AutonomousRecoveryAction::Fail => {
@@ -481,6 +486,13 @@ impl LoopDelegate for ContainerDelegate {
             AutonomousRecoveryAction::Continue => {}
         }
 
+        // Empty text: do not auto-complete. Completion is only via finish_job.
+        // The agentic loop's max_iterations cap and nudge mechanism handle
+        // persistent empty responses.
+        if text.is_empty() {
+            return TextAction::Continue;
+        }
+
         self.post_event(
             "message",
             serde_json::json!({
@@ -489,17 +501,6 @@ impl LoopDelegate for ContainerDelegate {
             }),
         )
         .await;
-
-        // Check for completion
-        if crate::util::llm_signals_completion(text) {
-            let last = self.last_output.lock().await;
-            let output = if last.is_empty() {
-                text.to_string()
-            } else {
-                last.clone()
-            };
-            return TextAction::Return(LoopOutcome::Response(output));
-        }
 
         reason_ctx.messages.push(ChatMessage::assistant(text));
         TextAction::Continue
@@ -516,6 +517,21 @@ impl LoopDelegate for ContainerDelegate {
             recovery.on_valid_tool_call();
         }
 
+        // Partition: keep all non-finish_job calls first, then handle every
+        // finish_job call at the end. If the model emits multiple finish_job
+        // calls, only the last one decides the final status/summary.
+        let mut finish_job_calls: Vec<crate::llm::ToolCall> = Vec::new();
+        let mut other_calls: Vec<crate::llm::ToolCall> = Vec::with_capacity(tool_calls.len());
+        for mut tc in tool_calls {
+            let resolved_name = self.tools.resolve_name_for_job(&tc.name).await;
+            if resolved_name.as_deref() == Some("finish_job") {
+                tc.name = "finish_job".to_string();
+                finish_job_calls.push(tc);
+            } else {
+                other_calls.push(tc);
+            }
+        }
+
         if let Some(ref text) = content {
             self.post_event(
                 "message",
@@ -527,18 +543,25 @@ impl LoopDelegate for ContainerDelegate {
             .await;
         }
 
+        // Build the full tool_calls list for the assistant message (protocol requires it).
+        let all_calls_for_msg: Vec<crate::llm::ToolCall> = other_calls
+            .iter()
+            .cloned()
+            .chain(finish_job_calls.iter().cloned())
+            .collect();
+
         // Add assistant message with tool_calls (OpenAI protocol)
         reason_ctx
             .messages
             .push(ChatMessage::assistant_with_tool_calls(
                 content,
-                tool_calls.clone(),
+                all_calls_for_msg,
             ));
 
-        // Execute tools sequentially (container context — no parallel execution)
+        // Execute non-finish_job tools sequentially (container context — no parallel execution)
         let mut tool_failure_count: usize = 0;
-        let total_tools = tool_calls.len();
-        for tc in tool_calls {
+        let total_tools = other_calls.len() + finish_job_calls.len();
+        for tc in other_calls {
             self.post_event(
                 "tool_use",
                 serde_json::json!({
@@ -553,7 +576,7 @@ impl LoopDelegate for ContainerDelegate {
                 ..Default::default()
             };
 
-            let result = execute_tool_simple(
+            let result = execute_job_tool_simple(
                 &self.tools,
                 &self.safety,
                 &tc.name,
@@ -591,6 +614,80 @@ impl LoopDelegate for ContainerDelegate {
         reason_ctx.last_tool_batch_all_failed =
             total_tools > 0 && tool_failure_count == total_tools;
 
+        // Now handle finish_job — always runs last so other tools complete first.
+        for (idx, tc) in finish_job_calls.iter().enumerate() {
+            let is_last_finish_job = idx + 1 == finish_job_calls.len();
+            self.post_event(
+                "tool_use",
+                serde_json::json!({
+                    "tool_name": tc.name,
+                    "input": truncate_for_preview(&tc.arguments.to_string(), 500),
+                }),
+            )
+            .await;
+
+            let job_ctx = JobContext {
+                extra_env: self.extra_env.clone(),
+                ..Default::default()
+            };
+            let result = execute_job_tool_simple(
+                &self.tools,
+                &self.safety,
+                &tc.name,
+                tc.arguments.clone(),
+                &job_ctx,
+            )
+            .await;
+
+            self.post_event(
+                "tool_result",
+                serde_json::json!({
+                    "tool_name": tc.name,
+                    "output": match &result {
+                        Ok(output) => truncate_for_preview(output, 2000),
+                        Err(e) => format!("Error: {}", truncate_for_preview(e, 500)).into(),
+                    },
+                    "success": result.is_ok(),
+                }),
+            )
+            .await;
+
+            if result.is_err() {
+                tool_failure_count += 1;
+                let (_, message) = process_tool_result(&self.safety, &tc.name, &tc.id, &result);
+                reason_ctx.messages.push(message);
+                reason_ctx.last_tool_batch_all_failed =
+                    total_tools > 0 && tool_failure_count == total_tools;
+                if is_last_finish_job {
+                    return Ok(None);
+                }
+                continue;
+            }
+
+            let (_, message) = process_tool_result(&self.safety, &tc.name, &tc.id, &result);
+            reason_ctx.messages.push(message);
+
+            if is_last_finish_job {
+                let signal = match &result {
+                    Ok(output) => parse_finish_job_signal_from_output(output),
+                    Err(_) => unreachable!("finish_job error path already returned"),
+                }
+                .map_err(|e| {
+                    crate::error::Error::from(crate::error::ToolError::ExecutionFailed {
+                        name: "finish_job".to_string(),
+                        reason: format!(
+                            "finish_job executed but result could not be interpreted: {e}"
+                        ),
+                    })
+                })?;
+
+                if signal.status == FinishJobStatus::Completed {
+                    return Ok(Some(LoopOutcome::Response(signal.summary)));
+                }
+                return Ok(Some(LoopOutcome::Failure(signal.summary)));
+            }
+        }
+
         Ok(None)
     }
 
@@ -609,6 +706,10 @@ impl LoopDelegate for ContainerDelegate {
     async fn after_iteration(&self, _iteration: usize) {
         // Brief pause between iterations
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    fn max_iterations_outcome(&self) -> Self::Outcome {
+        LoopOutcome::MaxIterations
     }
 }
 

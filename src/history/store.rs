@@ -354,6 +354,44 @@ impl Store {
         Ok(())
     }
 
+    /// Atomically persist a terminal result event and matching job status.
+    pub async fn record_job_terminal_result(
+        &self,
+        id: Uuid,
+        status: JobState,
+        failure_reason: Option<&str>,
+        result_payload: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        let mut conn = self.conn().await?;
+        let tx = conn.transaction().await?;
+
+        let status_str = status.to_string();
+        let updated = tx
+            .execute(
+                "UPDATE agent_jobs SET status = $2, failure_reason = $3 WHERE id = $1",
+                &[&id, &status_str, &failure_reason],
+            )
+            .await?;
+        if updated == 0 {
+            return Err(DatabaseError::NotFound {
+                entity: "job".to_string(),
+                id: id.to_string(),
+            });
+        }
+
+        tx.execute(
+            r#"
+            INSERT INTO job_events (job_id, event_type, data)
+            VALUES ($1, 'result', $2)
+            "#,
+            &[&id, result_payload],
+        )
+        .await?;
+
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Mark job as stuck.
     pub async fn mark_job_stuck(&self, id: Uuid) -> Result<(), DatabaseError> {
         let conn = self.conn().await?;
@@ -1124,6 +1162,16 @@ pub struct JobEventRecord {
     pub created_at: DateTime<Utc>,
 }
 
+pub(crate) fn job_result_event_message(event: &JobEventRecord) -> Option<String> {
+    event.data.get("message").and_then(|value| {
+        value
+            .as_str()
+            .map(str::trim)
+            .filter(|message| !message.is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
 #[cfg(feature = "postgres")]
 impl Store {
     /// Persist a job event (fire-and-forget from orchestrator handler).
@@ -1194,6 +1242,34 @@ impl Store {
                 created_at: r.get("created_at"),
             })
             .collect())
+    }
+
+    pub async fn get_latest_job_event_by_type(
+        &self,
+        job_id: Uuid,
+        event_type: &str,
+    ) -> Result<Option<JobEventRecord>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                r#"
+                SELECT id, job_id, event_type, data, created_at
+                FROM job_events
+                WHERE job_id = $1 AND event_type = $2
+                ORDER BY id DESC
+                LIMIT 1
+                "#,
+                &[&job_id, &event_type],
+            )
+            .await?;
+
+        Ok(row.map(|r| JobEventRecord {
+            id: r.get("id"),
+            job_id: r.get("job_id"),
+            event_type: r.get("event_type"),
+            data: r.get("data"),
+            created_at: r.get("created_at"),
+        }))
     }
 
     /// Update the job_mode column for a sandbox job.

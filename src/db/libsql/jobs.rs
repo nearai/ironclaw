@@ -160,6 +160,46 @@ impl JobStore for LibSqlBackend {
         Ok(())
     }
 
+    async fn record_job_terminal_result(
+        &self,
+        id: Uuid,
+        status: JobState,
+        failure_reason: Option<&str>,
+        result_payload: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.connect().await?;
+        let tx = conn
+            .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
+            .await
+            .map_err(|e| DatabaseError::Query(format!("begin transaction failed: {e}")))?;
+
+        let updated = tx
+            .execute(
+                "UPDATE agent_jobs SET status = ?2, failure_reason = ?3 WHERE id = ?1",
+                params![id.to_string(), status.to_string(), opt_text(failure_reason)],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        if updated == 0 {
+            return Err(DatabaseError::NotFound {
+                entity: "job".to_string(),
+                id: id.to_string(),
+            });
+        }
+
+        tx.execute(
+            "INSERT INTO job_events (job_id, event_type, data) VALUES (?1, 'result', ?2)",
+            params![id.to_string(), result_payload.to_string()],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(())
+    }
+
     async fn mark_job_stuck(&self, id: Uuid) -> Result<(), DatabaseError> {
         let conn = self.connect().await?;
         let now = fmt_ts(&Utc::now());
@@ -565,5 +605,50 @@ impl JobStore for LibSqlBackend {
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         Ok(id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::db::{Database, JobStore, SandboxStore};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn terminal_result_transaction_rolls_back_event_when_job_missing() {
+        let tmp = tempfile::tempdir().unwrap(); // safety: test
+        let backend = LibSqlBackend::new_local(&tmp.path().join("test.db"))
+            .await
+            .unwrap(); // safety: test
+        backend.run_migrations().await.unwrap(); // safety: test
+        let job_id = Uuid::new_v4();
+
+        let err = backend
+            .record_job_terminal_result(
+                job_id,
+                JobState::Completed,
+                None,
+                &serde_json::json!({
+                    "status": "completed",
+                    "success": true,
+                    "message": "should not commit",
+                }),
+            )
+            .await
+            .expect_err("missing job must reject the terminal transaction");
+
+        assert!(
+            matches!(err, DatabaseError::NotFound { .. }),
+            "expected missing-job error, got {err}"
+        );
+
+        let result_event = backend
+            .get_latest_job_event_by_type(job_id, "result")
+            .await
+            .unwrap(); // safety: test
+        assert!(
+            result_event.is_none(),
+            "failed terminal transaction must not leave an orphan result event"
+        );
     }
 }

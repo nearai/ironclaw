@@ -134,15 +134,37 @@ impl Agent {
                 if let Some(store) = tenant.store()
                     && let Ok(Some(ctx)) = store.get_job(uuid).await
                 {
+                    let result_summary = match ctx.state {
+                        JobState::Completed => store
+                            .get_agent_job_result_message(uuid)
+                            .await
+                            .ok()
+                            .flatten(),
+                        JobState::Failed | JobState::Cancelled => {
+                            match store.get_agent_job_failure_reason(uuid).await {
+                                Ok(Some(reason)) => Some(reason),
+                                _ => store
+                                    .get_agent_job_result_message(uuid)
+                                    .await
+                                    .ok()
+                                    .flatten(),
+                            }
+                        }
+                        _ => None,
+                    };
+
                     return Ok(format!(
-                        "Job: {}\nStatus: {:?}\nCreated: {}\nStarted: {}\nActual cost: {}",
+                        "Job: {}\nStatus: {:?}\nCreated: {}\nStarted: {}\nActual cost: {}{}",
                         ctx.title,
                         ctx.state,
                         ctx.created_at.format("%Y-%m-%d %H:%M:%S"),
                         ctx.started_at
                             .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
                             .unwrap_or_else(|| "Not started".to_string()),
-                        ctx.actual_cost
+                        ctx.actual_cost,
+                        result_summary
+                            .map(|summary| format!("\nResult: {}", summary))
+                            .unwrap_or_default()
                     ));
                 }
 
@@ -151,15 +173,29 @@ impl Agent {
                     return Err(crate::error::JobError::NotFound { id: uuid }.into());
                 }
 
+                let result_summary = if matches!(
+                    ctx.state,
+                    JobState::Completed | JobState::Failed | JobState::Cancelled
+                ) {
+                    ctx.transitions
+                        .last()
+                        .and_then(|transition| transition.reason.clone())
+                } else {
+                    None
+                };
+
                 Ok(format!(
-                    "Job: {}\nStatus: {:?}\nCreated: {}\nStarted: {}\nActual cost: {}",
+                    "Job: {}\nStatus: {:?}\nCreated: {}\nStarted: {}\nActual cost: {}{}",
                     ctx.title,
                     ctx.state,
                     ctx.created_at.format("%Y-%m-%d %H:%M:%S"),
                     ctx.started_at
                         .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
                         .unwrap_or_else(|| "Not started".to_string()),
-                    ctx.actual_cost
+                    ctx.actual_cost,
+                    result_summary
+                        .map(|summary| format!("\nResult: {}", summary))
+                        .unwrap_or_default()
                 ))
             }
             None => {

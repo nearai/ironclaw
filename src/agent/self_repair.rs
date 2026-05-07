@@ -713,7 +713,9 @@ mod tests {
         assert!(is_protected_tool_name("json"));
         assert!(is_protected_tool_name("message"));
         assert!(is_protected_tool_name("read_file"));
+        assert!(is_protected_tool_name("read-file"));
         assert!(is_protected_tool_name("memory_write"));
+        assert!(is_protected_tool_name("memory-write"));
 
         // Job, extension, skill, secret tools
         assert!(is_protected_tool_name("job_events"));
@@ -742,24 +744,24 @@ mod tests {
             tools,
         );
 
-        // "http" is a built-in tool — repair should skip it without invoking
-        // the builder.
-        let broken = BrokenTool {
-            name: "http".to_string(),
-            failure_count: 20,
-            last_error: Some("invalid params".to_string()),
-            first_failure: Utc::now(),
-            last_failure: Utc::now(),
-            last_build_result: None,
-            repair_attempts: 0,
-        };
+        for name in ["http", "read-file"] {
+            let broken = BrokenTool {
+                name: name.to_string(),
+                failure_count: 20,
+                last_error: Some("invalid params".to_string()),
+                first_failure: Utc::now(),
+                last_failure: Utc::now(),
+                last_build_result: None,
+                repair_attempts: 0,
+            };
 
-        let result = repair.repair_broken_tool(&broken).await.unwrap();
-        assert!(
-            matches!(result, RepairResult::Success { .. }),
-            "Built-in tool repair should return Success (skip), got: {:?}",
-            result
-        );
+            let result = repair.repair_broken_tool(&broken).await.unwrap();
+            assert!(
+                matches!(result, RepairResult::Success { .. }),
+                "Built-in tool repair should return Success (skip), got: {:?}",
+                result
+            );
+        }
 
         // Builder must NOT have been called
         assert_eq!(
@@ -962,8 +964,8 @@ mod tests {
     }
 
     /// Regression: detect_broken_tools must filter out built-in tools from the
-    /// database results. Seed failures for both a built-in ("http") and a
-    /// dynamic tool, then verify only the dynamic tool is returned.
+    /// database results. Seed failures for built-ins (including a hyphenated
+    /// alias) and a dynamic tool, then verify only the dynamic tool is returned.
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn detect_broken_tools_filters_out_builtins() {
@@ -971,11 +973,14 @@ mod tests {
         let (db, _tmp_dir) = crate::testing::test_db().await;
         let store = crate::tenant::SystemScope::new(Arc::clone(&db));
 
-        // Seed 6 failures for "http" (built-in) and "my_custom_tool" (dynamic).
-        // The threshold is 5, so both would qualify as "broken" without filtering.
+        // The threshold is 5, so each tool would qualify as "broken" without filtering.
         for _ in 0..6 {
             store
                 .record_tool_failure("http", "invalid params")
+                .await
+                .unwrap();
+            store
+                .record_tool_failure("read-file", "invalid params")
                 .await
                 .unwrap();
             store
@@ -988,7 +993,8 @@ mod tests {
 
         let broken = repair.detect_broken_tools().await;
 
-        // Only the dynamic tool should be returned; "http" must be filtered.
+        // Only the dynamic tool should be returned; built-ins and their aliases
+        // must be filtered.
         assert_eq!(broken.len(), 1, "Expected 1 broken tool, got: {:?}", broken);
         assert_eq!(broken[0].name, "my_custom_tool");
     }
