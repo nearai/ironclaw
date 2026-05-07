@@ -1431,7 +1431,7 @@ impl EffectBridgeAdapter {
                         credential = %cred.credential_name,
                         tool = %lookup_name,
                         user = %context.user_id,
-                        "Pre-flight auth: credential missing — blocking tool call"
+                        "Pre-flight auth: credential missing — raising Authentication gate"
                     );
                     return Err(Self::gate_paused(
                         "authentication",

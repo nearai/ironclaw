@@ -548,7 +548,8 @@ impl GateController for BridgeGateController {
             debug!(
                 user = %request.user_id,
                 thread = %request.thread_id,
-                "BridgeGateController: no per-execution context registered; cancelling",
+                kind = %request.resume_kind.kind_name(),
+                "BridgeGateController: no per-execution context — cancelling (mission/background path)"
             );
             return GateResolution::Cancelled;
         };
