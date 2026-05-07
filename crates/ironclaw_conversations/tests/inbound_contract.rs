@@ -733,6 +733,45 @@ async fn first_bind_does_not_trust_unvalidated_requested_scope_hints() {
 }
 
 #[tokio::test]
+async fn duplicate_external_event_on_different_route_fails_before_second_submit() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-1"),
+            user("alice"),
+        )
+        .await;
+    let coordinator = Arc::new(RecordingTurnCoordinator::default());
+    let inbound = InboundTurnService::new(services.clone(), services.clone(), coordinator.clone());
+
+    inbound
+        .handle_inbound_turn(inbound_request(
+            telegram(),
+            external_actor("telegram-user-1"),
+            external_conversation("chat-1", None),
+            "installation-wide-event-1",
+        ))
+        .await
+        .unwrap();
+
+    let err = inbound
+        .handle_inbound_turn(inbound_request(
+            telegram(),
+            external_actor("telegram-user-1"),
+            external_conversation("chat-2", None),
+            "installation-wide-event-1",
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, InboundTurnError::AccessDenied { .. }));
+    assert_eq!(coordinator.submissions().len(), 1);
+}
+
+#[tokio::test]
 async fn explicit_link_uses_existing_thread_scope_not_spoofed_link_scope() {
     let services = InMemoryConversationServices::default();
     services
@@ -1095,6 +1134,105 @@ async fn bound_group_message_from_non_participant_is_denied() {
             group,
             "group-event-2",
         ))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, InboundTurnError::AccessDenied { .. }));
+}
+
+#[tokio::test]
+async fn reply_target_validation_rejects_same_thread_different_actor_route() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            web(),
+            default_installation(),
+            external_actor("alice-web"),
+            user("alice"),
+        )
+        .await;
+    let resolution = services
+        .resolve_or_create_binding(resolve_request(
+            web(),
+            external_actor("alice-web"),
+            external_conversation("alice-browser", None),
+            "alice-web-event-owner",
+        ))
+        .await
+        .unwrap();
+    services
+        .add_thread_participant(&tenant(), &resolution.turn_scope.thread_id, user("bob"))
+        .await
+        .unwrap();
+
+    let err = services
+        .validate_reply_target(
+            &tenant(),
+            &user("bob"),
+            &resolution.turn_scope.thread_id,
+            &resolution.reply_target_binding_ref,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, InboundTurnError::AccessDenied { .. }));
+}
+
+#[tokio::test]
+async fn message_scoped_reply_target_rejects_same_thread_different_actor_route() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            web(),
+            default_installation(),
+            external_actor("alice-web"),
+            user("alice"),
+        )
+        .await;
+    let resolution = services
+        .resolve_or_create_binding(resolve_request(
+            web(),
+            external_actor("alice-web"),
+            external_conversation("alice-browser", None),
+            "alice-web-event-message-owner",
+        ))
+        .await
+        .unwrap();
+    services
+        .add_thread_participant(&tenant(), &resolution.turn_scope.thread_id, user("bob"))
+        .await
+        .unwrap();
+    let accepted = services
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            tenant_id: tenant(),
+            thread_id: resolution.turn_scope.thread_id.clone(),
+            actor: resolution.actor,
+            source_binding_ref: resolution.source_binding_ref,
+            reply_target_binding_ref: resolution.reply_target_binding_ref,
+            external_conversation_ref: ExternalConversationRef::new(
+                None,
+                "alice-browser",
+                None,
+                Some("message-1"),
+            )
+            .unwrap(),
+            external_event_id: ExternalEventId::new("alice-web-event-message-owner").unwrap(),
+            content_ref: InboundMessageContentRef::new("content:alice-web-event-message-owner")
+                .unwrap(),
+            received_at: Utc.with_ymd_and_hms(2026, 5, 6, 12, 1, 0).unwrap(),
+        })
+        .await
+        .unwrap();
+
+    let err = services
+        .validate_reply_target(
+            &tenant(),
+            &user("bob"),
+            &accepted.thread_id,
+            &accepted.reply_target_binding_ref,
+        )
         .await
         .unwrap_err();
 
