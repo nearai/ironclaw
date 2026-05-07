@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use ironclaw_host_api::*;
 use ironclaw_run_state::{
-    ApprovalRequestStore, ApprovalStatus, RunStart, RunStateApprovalStore, RunStateStore,
+    ApprovalRecord, ApprovalRequestStore, ApprovalStatus, RunRecord, RunStart,
+    RunStateApprovalStore, RunStateError, RunStateStore,
 };
 
 #[cfg(feature = "libsql")]
@@ -240,6 +241,83 @@ async fn libsql_stores_preserve_scope_isolation_and_pending_discard() {
     assert!(approvals.get(&scope, request_id).await.unwrap().is_none());
 }
 
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_rejects_run_rows_when_payload_invocation_id_does_not_match_row_key() {
+    let (db_path, _dir) = libsql_db_path();
+    let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+    let runs = LibSqlRunStateStore::new(Arc::clone(&db));
+    runs.run_migrations().await.unwrap();
+
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant-libsql-mismatch", "user-a");
+    let record = runs
+        .start(RunStart {
+            invocation_id,
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            scope: scope.clone(),
+        })
+        .await
+        .unwrap();
+    let mismatched_payload = RunRecord {
+        invocation_id: InvocationId::new(),
+        ..record
+    };
+    let payload = serde_json::to_string(&mismatched_payload).unwrap();
+    let conn = db.connect().unwrap();
+    conn.execute(
+        "UPDATE reborn_run_state_records SET payload = ?1 WHERE invocation_id = ?2",
+        libsql::params![payload, invocation_id.to_string()],
+    )
+    .await
+    .unwrap();
+
+    let err = runs.get(&scope, invocation_id).await.unwrap_err();
+    assert!(
+        matches!(err, RunStateError::Deserialization(_)),
+        "expected deserialization integrity error, got {err:?}"
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_rejects_approval_rows_when_payload_request_id_does_not_match_row_key() {
+    let (db_path, _dir) = libsql_db_path();
+    let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+    let approvals = LibSqlApprovalRequestStore::new(Arc::clone(&db));
+    approvals.run_migrations().await.unwrap();
+
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant-libsql-approval-mismatch", "user-a");
+    let approval = approval_request(invocation_id);
+    let request_id = approval.id;
+    approvals
+        .save_pending(scope.clone(), approval.clone())
+        .await
+        .unwrap();
+    let mut mismatched_request = approval;
+    mismatched_request.id = ApprovalRequestId::new();
+    let mismatched_payload = ApprovalRecord {
+        scope: scope.clone(),
+        request: mismatched_request,
+        status: ApprovalStatus::Pending,
+    };
+    let payload = serde_json::to_string(&mismatched_payload).unwrap();
+    let conn = db.connect().unwrap();
+    conn.execute(
+        "UPDATE reborn_approval_request_records SET payload = ?1 WHERE request_id = ?2",
+        libsql::params![payload, request_id.to_string()],
+    )
+    .await
+    .unwrap();
+
+    let err = approvals.get(&scope, request_id).await.unwrap_err();
+    assert!(
+        matches!(err, RunStateError::Deserialization(_)),
+        "expected deserialization integrity error, got {err:?}"
+    );
+}
+
 #[cfg(feature = "postgres")]
 #[tokio::test]
 async fn postgres_run_state_and_approval_stores_persist_across_instances_when_configured() {
@@ -404,6 +482,93 @@ async fn postgres_combined_store_blocks_with_pending_approval_atomically_when_co
         .unwrap();
     assert_eq!(saved.status, ApprovalStatus::Pending);
     assert_eq!(saved.request, approval);
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_rejects_run_rows_when_payload_invocation_id_does_not_match_row_key() {
+    let Some(pool) = postgres_pool().await else {
+        return;
+    };
+    let suffix = unique_suffix();
+    let tenant = format!("tenant-pg-run-mismatch-{suffix}");
+    let user = format!("user-pg-run-mismatch-{suffix}");
+    let runs = PostgresRunStateStore::new(pool.clone());
+    runs.run_migrations().await.unwrap();
+
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, &tenant, &user);
+    let record = runs
+        .start(RunStart {
+            invocation_id,
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            scope: scope.clone(),
+        })
+        .await
+        .unwrap();
+    let mismatched_payload = RunRecord {
+        invocation_id: InvocationId::new(),
+        ..record
+    };
+    let payload = serde_json::to_string(&mismatched_payload).unwrap();
+    let client = pool.get().await.unwrap();
+    client
+        .execute(
+            "UPDATE reborn_run_state_records SET payload = $1::jsonb WHERE invocation_id = $2",
+            &[&payload, &invocation_id.to_string()],
+        )
+        .await
+        .unwrap();
+
+    let err = runs.get(&scope, invocation_id).await.unwrap_err();
+    assert!(
+        matches!(err, RunStateError::Deserialization(_)),
+        "expected deserialization integrity error, got {err:?}"
+    );
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_rejects_approval_rows_when_payload_request_id_does_not_match_row_key() {
+    let Some(pool) = postgres_pool().await else {
+        return;
+    };
+    let suffix = unique_suffix();
+    let tenant = format!("tenant-pg-approval-mismatch-{suffix}");
+    let user = format!("user-pg-approval-mismatch-{suffix}");
+    let approvals = PostgresApprovalRequestStore::new(pool.clone());
+    approvals.run_migrations().await.unwrap();
+
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, &tenant, &user);
+    let approval = approval_request(invocation_id);
+    let request_id = approval.id;
+    approvals
+        .save_pending(scope.clone(), approval.clone())
+        .await
+        .unwrap();
+    let mut mismatched_request = approval;
+    mismatched_request.id = ApprovalRequestId::new();
+    let mismatched_payload = ApprovalRecord {
+        scope: scope.clone(),
+        request: mismatched_request,
+        status: ApprovalStatus::Pending,
+    };
+    let payload = serde_json::to_string(&mismatched_payload).unwrap();
+    let client = pool.get().await.unwrap();
+    client
+        .execute(
+            "UPDATE reborn_approval_request_records SET payload = $1::jsonb WHERE request_id = $2",
+            &[&payload, &request_id.to_string()],
+        )
+        .await
+        .unwrap();
+
+    let err = approvals.get(&scope, request_id).await.unwrap_err();
+    assert!(
+        matches!(err, RunStateError::Deserialization(_)),
+        "expected deserialization integrity error, got {err:?}"
+    );
 }
 
 #[cfg(feature = "postgres")]

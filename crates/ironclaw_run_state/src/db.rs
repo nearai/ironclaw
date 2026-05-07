@@ -182,18 +182,30 @@ impl RunStateStore for LibSqlRunStateStore {
         let owner_key = owner_key(scope)?;
         let mut rows = conn
             .query(
-                "SELECT payload FROM reborn_run_state_records WHERE owner_key = ?1 ORDER BY invocation_id",
+                "SELECT invocation_id, capability_id, status, approval_request_id, error_kind, payload FROM reborn_run_state_records WHERE owner_key = ?1 ORDER BY invocation_id",
                 libsql::params![owner_key],
             )
             .await
             .map_err(db_error)?;
         let mut records = Vec::new();
         while let Some(row) = rows.next().await.map_err(db_error)? {
-            let payload: String = row.get(0).map_err(db_error)?;
-            let record = from_json::<RunRecord>(&payload)?;
-            if crate::same_scope_owner(&record.scope, scope) {
-                records.push(record);
-            }
+            let row_invocation_id: String = row.get(0).map_err(db_error)?;
+            let row_invocation_id = parse_invocation_id_column(&row_invocation_id)?;
+            let capability_id: String = row.get(1).map_err(db_error)?;
+            let status: String = row.get(2).map_err(db_error)?;
+            let approval_request_id: Option<String> = row.get(3).map_err(db_error)?;
+            let error_kind: Option<String> = row.get(4).map_err(db_error)?;
+            let payload: String = row.get(5).map_err(db_error)?;
+            let record = validate_run_row(
+                from_json::<RunRecord>(&payload)?,
+                scope,
+                row_invocation_id,
+                &capability_id,
+                &status,
+                approval_request_id.as_deref(),
+                error_kind.as_deref(),
+            )?;
+            records.push(record);
         }
         records.sort_by_key(|record| record.invocation_id.as_uuid());
         Ok(records)
@@ -507,12 +519,14 @@ impl ApprovalRequestStore for LibSqlApprovalRequestStore {
                     status: record.status,
                 });
             }
-            conn.execute(
-                "DELETE FROM reborn_approval_request_records WHERE owner_key = ?1 AND request_id = ?2",
-                libsql::params![owner_key(scope)?, request_id.to_string()],
-            )
-            .await
-            .map_err(db_error)?;
+            let affected = conn
+                .execute(
+                    "DELETE FROM reborn_approval_request_records WHERE owner_key = ?1 AND request_id = ?2",
+                    libsql::params![owner_key(scope)?, request_id.to_string()],
+                )
+                .await
+                .map_err(db_error)?;
+            require_single_affected_row(affected, "discard approval")?;
             Ok(record)
         }
         .await;
@@ -527,18 +541,24 @@ impl ApprovalRequestStore for LibSqlApprovalRequestStore {
         let owner_key = owner_key(scope)?;
         let mut rows = conn
             .query(
-                "SELECT payload FROM reborn_approval_request_records WHERE owner_key = ?1 ORDER BY request_id",
+                "SELECT request_id, status, payload FROM reborn_approval_request_records WHERE owner_key = ?1 ORDER BY request_id",
                 libsql::params![owner_key],
             )
             .await
             .map_err(db_error)?;
         let mut records = Vec::new();
         while let Some(row) = rows.next().await.map_err(db_error)? {
-            let payload: String = row.get(0).map_err(db_error)?;
-            let record = from_json::<ApprovalRecord>(&payload)?;
-            if crate::same_scope_owner(&record.scope, scope) {
-                records.push(record);
-            }
+            let request_id: String = row.get(0).map_err(db_error)?;
+            let request_id = parse_approval_request_id_column(&request_id)?;
+            let status: String = row.get(1).map_err(db_error)?;
+            let payload: String = row.get(2).map_err(db_error)?;
+            let record = validate_approval_row(
+                from_json::<ApprovalRecord>(&payload)?,
+                scope,
+                request_id,
+                &status,
+            )?;
+            records.push(record);
         }
         records.sort_by_key(|record| record.request.id.as_uuid());
         Ok(records)
@@ -686,7 +706,7 @@ impl RunStateStore for PostgresRunStateStore {
         let client = self.client().await?;
         let rows = client
             .query(
-                "SELECT payload::text FROM reborn_run_state_records WHERE owner_key = $1 ORDER BY invocation_id",
+                "SELECT invocation_id, capability_id, status, approval_request_id, error_kind, payload::text FROM reborn_run_state_records WHERE owner_key = $1 ORDER BY invocation_id",
                 &[&owner_key(scope)?],
             )
             .await
@@ -694,11 +714,24 @@ impl RunStateStore for PostgresRunStateStore {
         let mut records = rows
             .into_iter()
             .map(|row| {
-                let payload: String = row.get(0);
-                from_json::<RunRecord>(&payload)
+                let row_invocation_id: String = row.get(0);
+                let row_invocation_id = parse_invocation_id_column(&row_invocation_id)?;
+                let capability_id: String = row.get(1);
+                let status: String = row.get(2);
+                let approval_request_id: Option<String> = row.get(3);
+                let error_kind: Option<String> = row.get(4);
+                let payload: String = row.get(5);
+                validate_run_row(
+                    from_json::<RunRecord>(&payload)?,
+                    scope,
+                    row_invocation_id,
+                    &capability_id,
+                    &status,
+                    approval_request_id.as_deref(),
+                    error_kind.as_deref(),
+                )
             })
             .collect::<Result<Vec<_>, _>>()?;
-        records.retain(|record| crate::same_scope_owner(&record.scope, scope));
         records.sort_by_key(|record| record.invocation_id.as_uuid());
         Ok(records)
     }
@@ -1009,12 +1042,14 @@ impl ApprovalRequestStore for PostgresApprovalRequestStore {
                 status: record.status,
             });
         }
-        txn.execute(
-            "DELETE FROM reborn_approval_request_records WHERE owner_key = $1 AND request_id = $2",
-            &[&owner_key(scope)?, &request_id.to_string()],
-        )
-        .await
-        .map_err(db_error)?;
+        let affected = txn
+            .execute(
+                "DELETE FROM reborn_approval_request_records WHERE owner_key = $1 AND request_id = $2",
+                &[&owner_key(scope)?, &request_id.to_string()],
+            )
+            .await
+            .map_err(db_error)?;
+        require_single_affected_row(affected, "discard approval")?;
         txn.commit().await.map_err(db_error)?;
         Ok(record)
     }
@@ -1026,7 +1061,7 @@ impl ApprovalRequestStore for PostgresApprovalRequestStore {
         let client = self.client().await?;
         let rows = client
             .query(
-                "SELECT payload::text FROM reborn_approval_request_records WHERE owner_key = $1 ORDER BY request_id",
+                "SELECT request_id, status, payload::text FROM reborn_approval_request_records WHERE owner_key = $1 ORDER BY request_id",
                 &[&owner_key(scope)?],
             )
             .await
@@ -1034,11 +1069,18 @@ impl ApprovalRequestStore for PostgresApprovalRequestStore {
         let mut records = rows
             .into_iter()
             .map(|row| {
-                let payload: String = row.get(0);
-                from_json::<ApprovalRecord>(&payload)
+                let request_id: String = row.get(0);
+                let request_id = parse_approval_request_id_column(&request_id)?;
+                let status: String = row.get(1);
+                let payload: String = row.get(2);
+                validate_approval_row(
+                    from_json::<ApprovalRecord>(&payload)?,
+                    scope,
+                    request_id,
+                    &status,
+                )
             })
             .collect::<Result<Vec<_>, _>>()?;
-        records.retain(|record| crate::same_scope_owner(&record.scope, scope));
         records.sort_by_key(|record| record.request.id.as_uuid());
         Ok(records)
     }
@@ -1129,7 +1171,7 @@ async fn libsql_get_run(
 ) -> Result<Option<RunRecord>, RunStateError> {
     let mut rows = conn
         .query(
-            "SELECT payload FROM reborn_run_state_records WHERE owner_key = ?1 AND invocation_id = ?2",
+            "SELECT capability_id, status, approval_request_id, error_kind, payload FROM reborn_run_state_records WHERE owner_key = ?1 AND invocation_id = ?2",
             libsql::params![owner_key(scope)?, invocation_id.to_string()],
         )
         .await
@@ -1137,13 +1179,21 @@ async fn libsql_get_run(
     let Some(row) = rows.next().await.map_err(db_error)? else {
         return Ok(None);
     };
-    let payload: String = row.get(0).map_err(db_error)?;
-    let record = from_json::<RunRecord>(&payload)?;
-    if crate::same_scope_owner(&record.scope, scope) {
-        Ok(Some(record))
-    } else {
-        Ok(None)
-    }
+    let capability_id: String = row.get(0).map_err(db_error)?;
+    let status: String = row.get(1).map_err(db_error)?;
+    let approval_request_id: Option<String> = row.get(2).map_err(db_error)?;
+    let error_kind: Option<String> = row.get(3).map_err(db_error)?;
+    let payload: String = row.get(4).map_err(db_error)?;
+    validate_run_row(
+        from_json::<RunRecord>(&payload)?,
+        scope,
+        invocation_id,
+        &capability_id,
+        &status,
+        approval_request_id.as_deref(),
+        error_kind.as_deref(),
+    )
+    .map(Some)
 }
 
 #[cfg(feature = "libsql")]
@@ -1173,21 +1223,22 @@ async fn libsql_update_run(
     conn: &libsql::Connection,
     record: &RunRecord,
 ) -> Result<(), RunStateError> {
-    conn.execute(
-        "UPDATE reborn_run_state_records SET capability_id = ?3, status = ?4, approval_request_id = ?5, error_kind = ?6, payload = ?7 WHERE owner_key = ?1 AND invocation_id = ?2",
-        libsql::params![
-            owner_key(&record.scope)?,
-            record.invocation_id.to_string(),
-            record.capability_id.as_str(),
-            run_status_key(record.status),
-            record.approval_request_id.map(|id| id.to_string()),
-            record.error_kind.clone(),
-            to_json(record)?,
-        ],
-    )
-    .await
-    .map_err(db_error)?;
-    Ok(())
+    let affected = conn
+        .execute(
+            "UPDATE reborn_run_state_records SET capability_id = ?3, status = ?4, approval_request_id = ?5, error_kind = ?6, payload = ?7 WHERE owner_key = ?1 AND invocation_id = ?2",
+            libsql::params![
+                owner_key(&record.scope)?,
+                record.invocation_id.to_string(),
+                record.capability_id.as_str(),
+                run_status_key(record.status),
+                record.approval_request_id.map(|id| id.to_string()),
+                record.error_kind.clone(),
+                to_json(record)?,
+            ],
+        )
+        .await
+        .map_err(db_error)?;
+    require_single_affected_row(affected, "update run")
 }
 
 #[cfg(feature = "libsql")]
@@ -1198,7 +1249,7 @@ async fn libsql_get_approval(
 ) -> Result<Option<ApprovalRecord>, RunStateError> {
     let mut rows = conn
         .query(
-            "SELECT payload FROM reborn_approval_request_records WHERE owner_key = ?1 AND request_id = ?2",
+            "SELECT status, payload FROM reborn_approval_request_records WHERE owner_key = ?1 AND request_id = ?2",
             libsql::params![owner_key(scope)?, request_id.to_string()],
         )
         .await
@@ -1206,13 +1257,15 @@ async fn libsql_get_approval(
     let Some(row) = rows.next().await.map_err(db_error)? else {
         return Ok(None);
     };
-    let payload: String = row.get(0).map_err(db_error)?;
-    let record = from_json::<ApprovalRecord>(&payload)?;
-    if crate::same_scope_owner(&record.scope, scope) {
-        Ok(Some(record))
-    } else {
-        Ok(None)
-    }
+    let status: String = row.get(0).map_err(db_error)?;
+    let payload: String = row.get(1).map_err(db_error)?;
+    validate_approval_row(
+        from_json::<ApprovalRecord>(&payload)?,
+        scope,
+        request_id,
+        &status,
+    )
+    .map(Some)
 }
 
 #[cfg(feature = "libsql")]
@@ -1239,18 +1292,19 @@ async fn libsql_update_approval(
     conn: &libsql::Connection,
     record: &ApprovalRecord,
 ) -> Result<(), RunStateError> {
-    conn.execute(
-        "UPDATE reborn_approval_request_records SET status = ?3, payload = ?4 WHERE owner_key = ?1 AND request_id = ?2",
-        libsql::params![
-            owner_key(&record.scope)?,
-            record.request.id.to_string(),
-            approval_status_key(record.status),
-            to_json(record)?,
-        ],
-    )
-    .await
-    .map_err(db_error)?;
-    Ok(())
+    let affected = conn
+        .execute(
+            "UPDATE reborn_approval_request_records SET status = ?3, payload = ?4 WHERE owner_key = ?1 AND request_id = ?2",
+            libsql::params![
+                owner_key(&record.scope)?,
+                record.request.id.to_string(),
+                approval_status_key(record.status),
+                to_json(record)?,
+            ],
+        )
+        .await
+        .map_err(db_error)?;
+    require_single_affected_row(affected, "update approval")
 }
 
 #[cfg(feature = "postgres")]
@@ -1270,7 +1324,7 @@ async fn postgres_get_run(
 ) -> Result<Option<RunRecord>, RunStateError> {
     let row = client
         .query_opt(
-            "SELECT payload::text FROM reborn_run_state_records WHERE owner_key = $1 AND invocation_id = $2",
+            "SELECT capability_id, status, approval_request_id, error_kind, payload::text FROM reborn_run_state_records WHERE owner_key = $1 AND invocation_id = $2",
             &[&owner_key(scope)?, &invocation_id.to_string()],
         )
         .await
@@ -1278,13 +1332,21 @@ async fn postgres_get_run(
     let Some(row) = row else {
         return Ok(None);
     };
-    let payload: String = row.get(0);
-    let record = from_json::<RunRecord>(&payload)?;
-    if crate::same_scope_owner(&record.scope, scope) {
-        Ok(Some(record))
-    } else {
-        Ok(None)
-    }
+    let capability_id: String = row.get(0);
+    let status: String = row.get(1);
+    let approval_request_id: Option<String> = row.get(2);
+    let error_kind: Option<String> = row.get(3);
+    let payload: String = row.get(4);
+    validate_run_row(
+        from_json::<RunRecord>(&payload)?,
+        scope,
+        invocation_id,
+        &capability_id,
+        &status,
+        approval_request_id.as_deref(),
+        error_kind.as_deref(),
+    )
+    .map(Some)
 }
 
 #[cfg(feature = "postgres")]
@@ -1295,7 +1357,7 @@ async fn postgres_get_run_for_update(
 ) -> Result<Option<RunRecord>, RunStateError> {
     let row = client
         .query_opt(
-            "SELECT payload::text FROM reborn_run_state_records WHERE owner_key = $1 AND invocation_id = $2 FOR UPDATE",
+            "SELECT capability_id, status, approval_request_id, error_kind, payload::text FROM reborn_run_state_records WHERE owner_key = $1 AND invocation_id = $2 FOR UPDATE",
             &[&owner_key(scope)?, &invocation_id.to_string()],
         )
         .await
@@ -1303,13 +1365,21 @@ async fn postgres_get_run_for_update(
     let Some(row) = row else {
         return Ok(None);
     };
-    let payload: String = row.get(0);
-    let record = from_json::<RunRecord>(&payload)?;
-    if crate::same_scope_owner(&record.scope, scope) {
-        Ok(Some(record))
-    } else {
-        Ok(None)
-    }
+    let capability_id: String = row.get(0);
+    let status: String = row.get(1);
+    let approval_request_id: Option<String> = row.get(2);
+    let error_kind: Option<String> = row.get(3);
+    let payload: String = row.get(4);
+    validate_run_row(
+        from_json::<RunRecord>(&payload)?,
+        scope,
+        invocation_id,
+        &capability_id,
+        &status,
+        approval_request_id.as_deref(),
+        error_kind.as_deref(),
+    )
+    .map(Some)
 }
 
 #[cfg(feature = "postgres")]
@@ -1342,7 +1412,7 @@ async fn postgres_update_run(
     record: &RunRecord,
 ) -> Result<(), RunStateError> {
     let payload = to_json(record)?;
-    client
+    let affected = client
         .execute(
             "UPDATE reborn_run_state_records SET capability_id = $3, status = $4, approval_request_id = $5, error_kind = $6, payload = $7::jsonb WHERE owner_key = $1 AND invocation_id = $2",
             &[
@@ -1357,7 +1427,7 @@ async fn postgres_update_run(
         )
         .await
         .map_err(db_error)?;
-    Ok(())
+    require_single_affected_row(affected, "update run")
 }
 
 #[cfg(feature = "postgres")]
@@ -1368,7 +1438,7 @@ async fn postgres_get_approval(
 ) -> Result<Option<ApprovalRecord>, RunStateError> {
     let row = client
         .query_opt(
-            "SELECT payload::text FROM reborn_approval_request_records WHERE owner_key = $1 AND request_id = $2",
+            "SELECT status, payload::text FROM reborn_approval_request_records WHERE owner_key = $1 AND request_id = $2",
             &[&owner_key(scope)?, &request_id.to_string()],
         )
         .await
@@ -1376,13 +1446,15 @@ async fn postgres_get_approval(
     let Some(row) = row else {
         return Ok(None);
     };
-    let payload: String = row.get(0);
-    let record = from_json::<ApprovalRecord>(&payload)?;
-    if crate::same_scope_owner(&record.scope, scope) {
-        Ok(Some(record))
-    } else {
-        Ok(None)
-    }
+    let status: String = row.get(0);
+    let payload: String = row.get(1);
+    validate_approval_row(
+        from_json::<ApprovalRecord>(&payload)?,
+        scope,
+        request_id,
+        &status,
+    )
+    .map(Some)
 }
 
 #[cfg(feature = "postgres")]
@@ -1393,7 +1465,7 @@ async fn postgres_get_approval_for_update(
 ) -> Result<Option<ApprovalRecord>, RunStateError> {
     let row = client
         .query_opt(
-            "SELECT payload::text FROM reborn_approval_request_records WHERE owner_key = $1 AND request_id = $2 FOR UPDATE",
+            "SELECT status, payload::text FROM reborn_approval_request_records WHERE owner_key = $1 AND request_id = $2 FOR UPDATE",
             &[&owner_key(scope)?, &request_id.to_string()],
         )
         .await
@@ -1401,13 +1473,15 @@ async fn postgres_get_approval_for_update(
     let Some(row) = row else {
         return Ok(None);
     };
-    let payload: String = row.get(0);
-    let record = from_json::<ApprovalRecord>(&payload)?;
-    if crate::same_scope_owner(&record.scope, scope) {
-        Ok(Some(record))
-    } else {
-        Ok(None)
-    }
+    let status: String = row.get(0);
+    let payload: String = row.get(1);
+    validate_approval_row(
+        from_json::<ApprovalRecord>(&payload)?,
+        scope,
+        request_id,
+        &status,
+    )
+    .map(Some)
 }
 
 #[cfg(feature = "postgres")]
@@ -1437,7 +1511,7 @@ async fn postgres_update_approval(
     record: &ApprovalRecord,
 ) -> Result<(), RunStateError> {
     let payload = to_json(record)?;
-    client
+    let affected = client
         .execute(
             "UPDATE reborn_approval_request_records SET status = $3, payload = $4::jsonb WHERE owner_key = $1 AND request_id = $2",
             &[
@@ -1449,7 +1523,87 @@ async fn postgres_update_approval(
         )
         .await
         .map_err(db_error)?;
-    Ok(())
+    require_single_affected_row(affected, "update approval")
+}
+
+fn parse_invocation_id_column(value: &str) -> Result<InvocationId, RunStateError> {
+    InvocationId::parse(value).map_err(|error| {
+        RunStateError::Deserialization(format!("invalid invocation_id column: {error}"))
+    })
+}
+
+fn parse_approval_request_id_column(value: &str) -> Result<ApprovalRequestId, RunStateError> {
+    ApprovalRequestId::parse(value).map_err(|error| {
+        RunStateError::Deserialization(format!("invalid request_id column: {error}"))
+    })
+}
+
+fn validate_run_row(
+    record: RunRecord,
+    expected_scope: &ResourceScope,
+    row_invocation_id: InvocationId,
+    row_capability_id: &str,
+    row_status: &str,
+    row_approval_request_id: Option<&str>,
+    row_error_kind: Option<&str>,
+) -> Result<RunRecord, RunStateError> {
+    if !crate::same_scope_owner(&record.scope, expected_scope) {
+        return Err(row_integrity_error("run-state", "owner_key"));
+    }
+    if record.invocation_id != row_invocation_id {
+        return Err(row_integrity_error("run-state", "invocation_id"));
+    }
+    if record.capability_id.as_str() != row_capability_id {
+        return Err(row_integrity_error("run-state", "capability_id"));
+    }
+    if run_status_key(record.status) != row_status {
+        return Err(row_integrity_error("run-state", "status"));
+    }
+    let record_approval_request_id = record.approval_request_id.map(|id| id.to_string());
+    if record_approval_request_id.as_deref() != row_approval_request_id {
+        return Err(row_integrity_error("run-state", "approval_request_id"));
+    }
+    if record.error_kind.as_deref() != row_error_kind {
+        return Err(row_integrity_error("run-state", "error_kind"));
+    }
+    Ok(record)
+}
+
+fn validate_approval_row(
+    record: ApprovalRecord,
+    expected_scope: &ResourceScope,
+    row_request_id: ApprovalRequestId,
+    row_status: &str,
+) -> Result<ApprovalRecord, RunStateError> {
+    if !crate::same_scope_owner(&record.scope, expected_scope) {
+        return Err(row_integrity_error("approval-request", "owner_key"));
+    }
+    if record.request.id != row_request_id {
+        return Err(row_integrity_error("approval-request", "request_id"));
+    }
+    if approval_status_key(record.status) != row_status {
+        return Err(row_integrity_error("approval-request", "status"));
+    }
+    Ok(record)
+}
+
+fn row_integrity_error(entity: &'static str, field: &'static str) -> RunStateError {
+    RunStateError::Deserialization(format!(
+        "{entity} row payload does not match {field} column"
+    ))
+}
+
+fn require_single_affected_row(
+    affected: u64,
+    operation: &'static str,
+) -> Result<(), RunStateError> {
+    if affected == 1 {
+        Ok(())
+    } else {
+        Err(RunStateError::Backend(format!(
+            "{operation} affected unexpected row count"
+        )))
+    }
 }
 
 fn owner_key(scope: &ResourceScope) -> Result<String, RunStateError> {
