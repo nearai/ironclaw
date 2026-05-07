@@ -103,11 +103,98 @@ find_open_issue() {
     --jq 'map(select(.title == env.ALERT_ISSUE_TITLE))[0].number // empty'
 }
 
+# Collect PRs merged into the alert branch since the previous successful run of
+# this workflow, so the failure issue can @-mention authors who landed in the
+# blame window. All API calls are best-effort: if any step fails (no prior
+# green run, missing GroOT pulls endpoint, transient API error) the function
+# writes a one-line note to its output file and returns 0 so the rest of the
+# alert body renders normally.
+collect_merged_prs() {
+  local output_file="$1"
+  local branch="${ALERT_BRANCH:-${GITHUB_REF_NAME:-main}}"
+  local current_sha="${ALERT_SHA}"
+  local max_prs="${ALERT_MAX_MERGED_PRS:-30}"
+
+  : > "$output_file"
+
+  local last_good_sha
+  last_good_sha="$(
+    gh run list \
+      --repo "$REPO" \
+      --workflow "$ALERT_WORKFLOW_NAME" \
+      --branch "$branch" \
+      --status success \
+      --limit 1 \
+      --json headSha \
+      --jq '.[0].headSha // empty' \
+      2>/dev/null
+  )" || true
+
+  if [[ -z "$last_good_sha" || "$last_good_sha" == "$current_sha" ]]; then
+    echo "_No prior successful \`${ALERT_WORKFLOW_NAME}\` run on \`${branch}\` to attribute against._" > "$output_file"
+    return 0
+  fi
+
+  local commits
+  commits="$(
+    gh api "repos/${REPO}/compare/${last_good_sha}...${current_sha}" \
+      --jq '.commits[].sha' \
+      2>/dev/null
+  )" || true
+
+  if [[ -z "$commits" ]]; then
+    echo "_No new commits between \`${last_good_sha:0:7}\` (last green) and \`${current_sha:0:7}\` (this run)._" > "$output_file"
+    return 0
+  fi
+
+  local pr_rows
+  pr_rows="$(mktemp)"
+  while IFS= read -r sha; do
+    [[ -z "$sha" ]] && continue
+    gh api "repos/${REPO}/commits/${sha}/pulls" \
+      --jq '.[] | select(.merged_at != null) | "\(.number)\t\(.user.login)\t\(.title)"' \
+      2>/dev/null \
+      >> "$pr_rows" || true
+  done <<< "$commits"
+
+  if [[ ! -s "$pr_rows" ]]; then
+    {
+      echo "Commits since last green at \`${last_good_sha:0:7}\` (no associated merged PRs found):"
+      echo
+      while IFS= read -r sha; do
+        [[ -z "$sha" ]] && continue
+        echo "- \`${sha:0:7}\`"
+      done <<< "$commits"
+    } > "$output_file"
+    rm -f "$pr_rows"
+    return 0
+  fi
+
+  local total_prs
+  total_prs="$(sort -k1,1n "$pr_rows" | awk -F'\t' '!seen[$1]++' | wc -l | tr -d ' ')"
+  {
+    echo "PRs merged into \`${branch}\` between \`${last_good_sha:0:7}\` (last green) and \`${current_sha:0:7}\` (this run):"
+    echo
+    sort -k1,1n "$pr_rows" \
+      | awk -F'\t' '!seen[$1]++' \
+      | head -n "$max_prs" \
+      | while IFS=$'\t' read -r number author title; do
+          echo "- #${number} ${title} — @${author}"
+        done
+    if [[ "$total_prs" -gt "$max_prs" ]]; then
+      echo
+      echo "_Showing first ${max_prs} of ${total_prs} PRs in the window._"
+    fi
+  } > "$output_file"
+  rm -f "$pr_rows"
+}
+
 write_failure_body() {
   local body_file="$1"
   local jobs_file="$2"
   local excerpt_file="$3"
   local log_error_file="$4"
+  local merged_prs_file="${5:-}"
 
   {
     echo "❌ ${ALERT_WORKFLOW_NAME} scheduled run failed."
@@ -142,6 +229,12 @@ write_failure_body() {
     sed 's/```/` ` `/g' "$excerpt_file"
     echo '```'
     echo
+    if [[ -n "$merged_prs_file" && -s "$merged_prs_file" ]]; then
+      echo "## Merged since last green"
+      echo
+      cat "$merged_prs_file"
+      echo
+    fi
     echo "This issue is updated in place on repeated failures to avoid notification spam. If the next scheduled run passes, the nightly alert job will close this issue automatically."
   } > "$body_file"
 }
@@ -191,12 +284,13 @@ main() {
     exit 0
   fi
 
-  local tmp_dir log_file log_error failed_jobs excerpt body
+  local tmp_dir log_file log_error failed_jobs excerpt body merged_prs
   tmp_dir="$(mktemp -d)"
   log_file="${tmp_dir}/failed.log"
   log_error="${tmp_dir}/failed-log-error.txt"
   failed_jobs="${tmp_dir}/failed-jobs.md"
   excerpt="${tmp_dir}/excerpt.txt"
+  merged_prs="${tmp_dir}/merged-prs.md"
   body="${tmp_dir}/issue.md"
 
   if ! gh run view "$ALERT_RUN_ID" --repo "$REPO" --log-failed > "$log_file" 2> "$log_error"; then
@@ -207,8 +301,10 @@ main() {
     --jq '.jobs[] | select(.status == "completed" and .conclusion != "success" and .conclusion != "skipped") | "- \(.name) (`\(.conclusion // "unknown")`): \(.html_url)"' \
     > "$failed_jobs" || true
 
+  collect_merged_prs "$merged_prs"
+
   extract_failure_excerpt "$log_file" "$excerpt" "${MAX_EXCERPT_LINES:-220}"
-  write_failure_body "$body" "$failed_jobs" "$excerpt" "$log_error"
+  write_failure_body "$body" "$failed_jobs" "$excerpt" "$log_error" "$merged_prs"
   truncate_file_chars "$body" "${body}.bounded" "${MAX_ISSUE_BODY_CHARS:-60000}" "issue body"
   mv "${body}.bounded" "$body"
 
