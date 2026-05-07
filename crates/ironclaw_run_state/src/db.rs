@@ -1309,11 +1309,40 @@ async fn libsql_update_approval(
 
 #[cfg(feature = "postgres")]
 async fn run_postgres_migrations(pool: &deadpool_postgres::Pool) -> Result<(), RunStateError> {
-    let client = pool.get().await.map_err(db_error)?;
-    client
-        .batch_execute(POSTGRES_RUN_STATE_SCHEMA)
+    const MIGRATION_LOCK_ID: i64 = 0x1c10_0001;
+
+    let mut client = pool.get().await.map_err(db_error)?;
+    let txn = client.transaction().await.map_err(db_error)?;
+    txn.query_one("SELECT pg_advisory_xact_lock($1)", &[&MIGRATION_LOCK_ID])
         .await
-        .map_err(db_error)
+        .map_err(db_error)?;
+    if !postgres_schema_present(&txn).await? {
+        txn.batch_execute(POSTGRES_RUN_STATE_SCHEMA)
+            .await
+            .map_err(db_error)?;
+    }
+    txn.commit().await.map_err(db_error)
+}
+
+#[cfg(feature = "postgres")]
+async fn postgres_schema_present(
+    client: &impl deadpool_postgres::GenericClient,
+) -> Result<bool, RunStateError> {
+    let row = client
+        .query_one(
+            "SELECT
+                to_regclass('public.reborn_run_state_records') IS NOT NULL,
+                to_regclass('public.idx_reborn_run_state_records_owner_status') IS NOT NULL,
+                to_regclass('public.reborn_approval_request_records') IS NOT NULL,
+                to_regclass('public.idx_reborn_approval_request_records_owner_status') IS NOT NULL",
+            &[],
+        )
+        .await
+        .map_err(db_error)?;
+    Ok(row.get::<_, bool>(0)
+        && row.get::<_, bool>(1)
+        && row.get::<_, bool>(2)
+        && row.get::<_, bool>(3))
 }
 
 #[cfg(feature = "postgres")]
@@ -1390,7 +1419,7 @@ async fn postgres_insert_run(
     let payload = to_json(record)?;
     let affected = client
         .execute(
-            "INSERT INTO reborn_run_state_records (owner_key, invocation_id, capability_id, status, approval_request_id, error_kind, payload) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb) ON CONFLICT DO NOTHING",
+            "INSERT INTO reborn_run_state_records (owner_key, invocation_id, capability_id, status, approval_request_id, error_kind, payload) VALUES ($1, $2, $3, $4, $5, $6, $7::text::jsonb) ON CONFLICT DO NOTHING",
             &[
                 &owner_key(&record.scope)?,
                 &record.invocation_id.to_string(),
@@ -1414,7 +1443,7 @@ async fn postgres_update_run(
     let payload = to_json(record)?;
     let affected = client
         .execute(
-            "UPDATE reborn_run_state_records SET capability_id = $3, status = $4, approval_request_id = $5, error_kind = $6, payload = $7::jsonb WHERE owner_key = $1 AND invocation_id = $2",
+            "UPDATE reborn_run_state_records SET capability_id = $3, status = $4, approval_request_id = $5, error_kind = $6, payload = $7::text::jsonb WHERE owner_key = $1 AND invocation_id = $2",
             &[
                 &owner_key(&record.scope)?,
                 &record.invocation_id.to_string(),
@@ -1492,7 +1521,7 @@ async fn postgres_insert_approval(
     let payload = to_json(record)?;
     let affected = client
         .execute(
-            "INSERT INTO reborn_approval_request_records (owner_key, request_id, status, payload) VALUES ($1, $2, $3, $4::jsonb) ON CONFLICT DO NOTHING",
+            "INSERT INTO reborn_approval_request_records (owner_key, request_id, status, payload) VALUES ($1, $2, $3, $4::text::jsonb) ON CONFLICT DO NOTHING",
             &[
                 &owner_key(&record.scope)?,
                 &record.request.id.to_string(),
@@ -1513,7 +1542,7 @@ async fn postgres_update_approval(
     let payload = to_json(record)?;
     let affected = client
         .execute(
-            "UPDATE reborn_approval_request_records SET status = $3, payload = $4::jsonb WHERE owner_key = $1 AND request_id = $2",
+            "UPDATE reborn_approval_request_records SET status = $3, payload = $4::text::jsonb WHERE owner_key = $1 AND request_id = $2",
             &[
                 &owner_key(&record.scope)?,
                 &record.request.id.to_string(),

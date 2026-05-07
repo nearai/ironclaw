@@ -320,6 +320,30 @@ async fn libsql_rejects_approval_rows_when_payload_request_id_does_not_match_row
 
 #[cfg(feature = "postgres")]
 #[tokio::test]
+async fn postgres_migrations_are_serialized_when_called_concurrently() {
+    let Some(pool) = postgres_pool().await else {
+        return;
+    };
+    let store_a = PostgresRunStateStore::new(pool.clone());
+    let store_b = PostgresRunStateStore::new(pool.clone());
+    let store_c = PostgresApprovalRequestStore::new(pool.clone());
+    let store_d = PostgresRunStateApprovalStore::new(pool);
+
+    let (a, b, c, d) = tokio::join!(
+        store_a.run_migrations(),
+        store_b.run_migrations(),
+        store_c.run_migrations(),
+        store_d.run_migrations(),
+    );
+
+    a.unwrap();
+    b.unwrap();
+    c.unwrap();
+    d.unwrap();
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
 async fn postgres_run_state_and_approval_stores_persist_across_instances_when_configured() {
     let Some(pool) = postgres_pool().await else {
         return;
@@ -514,7 +538,7 @@ async fn postgres_rejects_run_rows_when_payload_invocation_id_does_not_match_row
     let client = pool.get().await.unwrap();
     client
         .execute(
-            "UPDATE reborn_run_state_records SET payload = $1::jsonb WHERE invocation_id = $2",
+            "UPDATE reborn_run_state_records SET payload = $1::text::jsonb WHERE invocation_id = $2",
             &[&payload, &invocation_id.to_string()],
         )
         .await
@@ -558,7 +582,7 @@ async fn postgres_rejects_approval_rows_when_payload_request_id_does_not_match_r
     let client = pool.get().await.unwrap();
     client
         .execute(
-            "UPDATE reborn_approval_request_records SET payload = $1::jsonb WHERE request_id = $2",
+            "UPDATE reborn_approval_request_records SET payload = $1::text::jsonb WHERE request_id = $2",
             &[&payload, &request_id.to_string()],
         )
         .await
