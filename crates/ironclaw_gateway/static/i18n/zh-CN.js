@@ -253,8 +253,14 @@ I18n.register('zh-CN', {
   'mcp.noServers': '没有可用的 MCP 服务器',
   'mcp.addCustom': '添加自定义 MCP 服务器',
   'mcp.add': '添加',
+  'mcp.addServer': '添加服务器',
   'mcp.addedSuccess': '已添加 MCP 服务器 {name}',
-  'mcp.authorizationHeaderPlaceholder': 'Authorization header 值（可选，例如 Bearer token）',
+  'mcp.serverUrl': '服务器 URL',
+  'mcp.urlPlaceholder': 'https://.../mcp',
+  'mcp.optionalSettings': '可选设置',
+  'mcp.authOptionTitle': '认证',
+  'mcp.authOptionDescription': '当 MCP 服务需要 Authorization header 时填写。',
+  'mcp.authorizationHeaderPlaceholder': 'Bearer sk-...',
 
 
   // 技能标签页

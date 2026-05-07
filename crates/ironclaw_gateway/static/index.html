@@ -490,11 +490,32 @@
                   <div class="empty-state" data-i18n="common.loading">Loading...</div>
                 </div>
                 <h4 data-i18n="mcp.addCustom">Add Custom MCP Server</h4>
-                <div class="ext-install-form">
-                  <input type="text" id="mcp-install-name" data-i18n-placeholder="common.name" placeholder="Server name">
-                  <input type="text" id="mcp-install-url" placeholder="MCP server URL (https://...)">
-                  <input type="password" id="mcp-install-auth-header" data-i18n-placeholder="mcp.authorizationHeaderPlaceholder" placeholder="Authorization header value (optional)">
-                  <button id="mcp-add-btn" data-i18n="mcp.add">Add</button>
+                <div class="ext-install-form mcp-install-form">
+                  <label class="mcp-install-field">
+                    <span data-i18n="common.name">Name</span>
+                    <input type="text" id="mcp-install-name" data-i18n-placeholder="common.name" placeholder="Server name">
+                  </label>
+                  <label class="mcp-install-field">
+                    <span data-i18n="mcp.serverUrl">Server URL</span>
+                    <input type="text" id="mcp-install-url" data-i18n-placeholder="mcp.urlPlaceholder" placeholder="https://.../mcp">
+                  </label>
+                  <details class="mcp-install-options">
+                    <summary data-i18n="mcp.optionalSettings">Optional settings</summary>
+                    <div class="mcp-options-panel">
+                      <div class="mcp-option-card">
+                        <div class="mcp-option-copy">
+                          <div class="mcp-option-title" data-i18n="mcp.authOptionTitle">Authentication</div>
+                          <div class="mcp-option-description" data-i18n="mcp.authOptionDescription">Use this when the MCP server requires an Authorization header.</div>
+                        </div>
+                        <label class="mcp-install-field">
+                          <input type="password" id="mcp-install-auth-header" data-i18n-placeholder="mcp.authorizationHeaderPlaceholder" placeholder="Bearer sk-..." aria-label="Authorization header value">
+                        </label>
+                      </div>
+                    </div>
+                  </details>
+                  <div class="mcp-install-actions">
+                    <button id="mcp-add-btn" data-i18n="mcp.addServer">Add server</button>
+                  </div>
                 </div>
               </div>
             </div>

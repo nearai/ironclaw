@@ -693,3 +693,104 @@
 .ext-install-form button:active {
   transform: scale(0.97);
 }
+
+.mcp-install-form {
+  display: grid;
+  align-items: stretch;
+  gap: var(--space-3);
+  max-width: 720px;
+}
+
+.mcp-install-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.mcp-install-field span {
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
+.mcp-install-field input {
+  box-sizing: border-box;
+  width: 100%;
+}
+
+.mcp-install-options {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  padding: 0;
+}
+
+.mcp-install-options summary {
+  background: var(--bg);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  list-style-position: inside;
+  padding: 10px 12px;
+  user-select: none;
+}
+
+.mcp-install-options[open] summary {
+  border-bottom: 1px solid var(--border);
+}
+
+.mcp-options-panel {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-2);
+}
+
+.mcp-option-card {
+  display: grid;
+  grid-template-columns: minmax(160px, 0.38fr) minmax(0, 0.62fr);
+  gap: var(--space-3);
+  align-items: center;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-3);
+}
+
+.mcp-option-title {
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.mcp-option-description {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  line-height: 1.45;
+}
+
+.mcp-install-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.mcp-install-actions button {
+  min-width: 112px;
+}
+
+@media (max-width: 768px) {
+  .mcp-install-form {
+    max-width: none;
+  }
+
+  .mcp-option-card {
+    grid-template-columns: 1fr;
+  }
+
+  .mcp-install-actions button {
+    width: 100%;
+  }
+}

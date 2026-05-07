@@ -253,8 +253,14 @@ I18n.register('en', {
   'mcp.noServers': 'No MCP servers available',
   'mcp.addCustom': 'Add Custom MCP Server',
   'mcp.add': 'Add',
+  'mcp.addServer': 'Add server',
   'mcp.addedSuccess': 'Added MCP server {name}',
-  'mcp.authorizationHeaderPlaceholder': 'Authorization header value (optional, e.g. Bearer token)',
+  'mcp.serverUrl': 'Server URL',
+  'mcp.urlPlaceholder': 'https://.../mcp',
+  'mcp.optionalSettings': 'Optional settings',
+  'mcp.authOptionTitle': 'Authentication',
+  'mcp.authOptionDescription': 'Use this when the MCP server requires an Authorization header.',
+  'mcp.authorizationHeaderPlaceholder': 'Bearer sk-...',
 
 
   // Skills Tab

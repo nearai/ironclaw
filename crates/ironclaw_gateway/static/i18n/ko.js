@@ -253,8 +253,14 @@ I18n.register('ko', {
   'mcp.noServers': '사용 가능한 MCP 서버가 없습니다',
   'mcp.addCustom': '사용자 지정 MCP 서버 추가',
   'mcp.add': '추가',
+  'mcp.addServer': '서버 추가',
   'mcp.addedSuccess': 'MCP 서버 {name}이(가) 추가되었습니다',
-  'mcp.authorizationHeaderPlaceholder': 'Authorization 헤더 값 (선택, 예: Bearer token)',
+  'mcp.serverUrl': '서버 URL',
+  'mcp.urlPlaceholder': 'https://.../mcp',
+  'mcp.optionalSettings': '선택 설정',
+  'mcp.authOptionTitle': '인증',
+  'mcp.authOptionDescription': 'MCP 서버에 Authorization 헤더가 필요할 때 사용하세요.',
+  'mcp.authorizationHeaderPlaceholder': 'Bearer sk-...',
 
 
   // 기술 탭
