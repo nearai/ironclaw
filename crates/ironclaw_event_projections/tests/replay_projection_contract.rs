@@ -3,19 +3,92 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_event_projections::{
-    EventProjectionService, MAX_PROJECTION_PAGE_LIMIT, ProjectionCursor, ProjectionError,
-    ProjectionRequest, ProjectionScope, ReplayEventProjectionService, RunProjectionStatus,
-    TimelineEntryKind,
+    AuditProjectionRequest, AuditProjectionService, AuditProjectionStage, EventProjectionService,
+    MAX_PROJECTION_PAGE_LIMIT, ProjectionCursor, ProjectionError, ProjectionRequest,
+    ProjectionScope, ReplayAuditProjectionService, ReplayEventProjectionService,
+    RunProjectionStatus, TimelineEntryKind,
 };
 use ironclaw_events::{
-    DurableEventLog, EventCursor, EventError, EventLogEntry, EventReplay, EventStreamKey,
-    InMemoryDurableEventLog, ReadScope, RuntimeEvent, RuntimeEventId, RuntimeEventKind,
-    UNCLASSIFIED_ERROR_KIND,
+    DurableAuditLog, DurableEventLog, EventCursor, EventError, EventLogEntry, EventReplay,
+    EventStreamKey, InMemoryDurableAuditLog, InMemoryDurableEventLog, ReadScope, RuntimeEvent,
+    RuntimeEventId, RuntimeEventKind, UNCLASSIFIED_ERROR_KIND,
 };
 use ironclaw_host_api::{
-    AgentId, CapabilityId, ExtensionId, InvocationId, ProcessId, ProjectId, ResourceScope,
-    RuntimeKind, TenantId, ThreadId, UserId,
+    Action, ActionSummary, AgentId, AuditEnvelope, AuditStage, CapabilityId, CapabilitySet,
+    CorrelationId, DenyReason, ExtensionId, InvocationId, MountView, ProcessId, ProjectId,
+    ResourceScope, RuntimeKind, ScopedPath, TenantId, ThreadId, TrustClass, UserId,
 };
+
+#[tokio::test]
+async fn replay_audit_projection_preserves_valid_capability_targets() {
+    let log = Arc::new(InMemoryDurableAuditLog::new());
+    let service = ReplayAuditProjectionService::new(Arc::clone(&log));
+    let ctx = execution_context_for_scope(scope_for_thread(ThreadId::new("thread-a").unwrap()));
+    let action = Action::Dispatch {
+        capability: CapabilityId::new("1234567890123456789012345-cap.echo").unwrap(),
+        estimated_resources: Default::default(),
+    };
+
+    log.append(AuditEnvelope::denied(
+        &ctx,
+        AuditStage::Denied,
+        ActionSummary::from_action(&action),
+        DenyReason::PolicyDenied,
+    ))
+    .await
+    .unwrap();
+
+    let snapshot = service
+        .snapshot(AuditProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&ctx.resource_scope),
+            after: None,
+            limit: 10,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.entries.len(), 1);
+    assert_eq!(snapshot.entries[0].action_kind, "dispatch");
+    assert_eq!(
+        snapshot.entries[0].action_target.as_deref(),
+        Some("1234567890123456789012345-cap.echo")
+    );
+}
+
+#[tokio::test]
+async fn replay_audit_projection_does_not_expose_unsafe_action_targets() {
+    let log = Arc::new(InMemoryDurableAuditLog::new());
+    let service = ReplayAuditProjectionService::new(Arc::clone(&log));
+    let ctx = execution_context_for_scope(scope_for_thread(ThreadId::new("thread-a").unwrap()));
+    let action = Action::ReadFile {
+        path: ScopedPath::new("/workspace/AUDIT_TARGET_SENTINEL_3022.md").unwrap(),
+    };
+
+    log.append(AuditEnvelope::denied(
+        &ctx,
+        AuditStage::Denied,
+        ActionSummary::from_action(&action),
+        DenyReason::PolicyDenied,
+    ))
+    .await
+    .unwrap();
+
+    let snapshot = service
+        .snapshot(AuditProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&ctx.resource_scope),
+            after: None,
+            limit: 10,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.entries.len(), 1);
+    assert_eq!(snapshot.entries[0].stage, AuditProjectionStage::Denied);
+    assert_eq!(snapshot.entries[0].action_kind, "read_file");
+    assert_eq!(snapshot.entries[0].action_target, None);
+    let serialized = serde_json::to_string(&snapshot).unwrap();
+    assert!(!serialized.contains("AUDIT_TARGET_SENTINEL_3022"));
+}
 
 #[tokio::test]
 async fn replay_projection_service_projects_timeline_and_run_status_by_scope() {
@@ -445,6 +518,29 @@ fn scope_for_thread_with_invocation(
         thread_id: Some(thread_id),
         invocation_id,
     }
+}
+
+fn execution_context_for_scope(scope: ResourceScope) -> ironclaw_host_api::ExecutionContext {
+    let context = ironclaw_host_api::ExecutionContext {
+        invocation_id: scope.invocation_id,
+        correlation_id: CorrelationId::new(),
+        process_id: None,
+        parent_process_id: None,
+        tenant_id: scope.tenant_id.clone(),
+        user_id: scope.user_id.clone(),
+        agent_id: scope.agent_id.clone(),
+        project_id: scope.project_id.clone(),
+        mission_id: scope.mission_id.clone(),
+        thread_id: scope.thread_id.clone(),
+        extension_id: ExtensionId::new("caller").unwrap(),
+        runtime: RuntimeKind::Script,
+        trust: TrustClass::UserTrusted,
+        grants: CapabilitySet::default(),
+        mounts: MountView::default(),
+        resource_scope: scope,
+    };
+    context.validate().unwrap();
+    context
 }
 
 fn capability_id() -> CapabilityId {

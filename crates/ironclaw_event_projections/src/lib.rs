@@ -10,12 +10,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_events::{
-    DurableEventLog, EventCursor, EventError, EventLogEntry, EventStreamKey, ReadScope,
-    RuntimeEvent, RuntimeEventKind, sanitize_error_kind,
+    DurableAuditLog, DurableEventLog, EventCursor, EventError, EventLogEntry, EventStreamKey,
+    ReadScope, RuntimeEvent, RuntimeEventKind, sanitize_error_kind,
 };
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, InvocationId, ProcessId, ResourceScope, RuntimeKind, ThreadId,
-    Timestamp,
+    ApprovalRequestId, AuditEnvelope, AuditEventId, AuditStage, CapabilityId, ExtensionId,
+    InvocationId, ProcessId, ResourceScope, RuntimeKind, ThreadId, Timestamp,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -235,6 +235,238 @@ pub enum ProjectionError {
     },
     #[error("projection source failed during {operation}")]
     Source { operation: &'static str },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct AuditProjectionCursor {
+    pub audit: EventCursor,
+    pub scope: ProjectionScope,
+}
+
+impl AuditProjectionCursor {
+    pub fn for_scope(scope: ProjectionScope, audit: EventCursor) -> Self {
+        Self { audit, scope }
+    }
+
+    pub fn origin_for_scope(scope: ProjectionScope) -> Self {
+        Self {
+            audit: EventCursor::origin(),
+            scope,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditProjectionRequest {
+    pub scope: ProjectionScope,
+    pub after: Option<AuditProjectionCursor>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditProjectionSnapshot {
+    pub entries: Vec<AuditProjectionEntry>,
+    pub next_cursor: AuditProjectionCursor,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditProjectionReplay {
+    pub entries: Vec<AuditProjectionEntry>,
+    pub next_cursor: AuditProjectionCursor,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditProjectionEntry {
+    pub cursor: EventCursor,
+    pub event_id: AuditEventId,
+    pub timestamp: Timestamp,
+    pub stage: AuditProjectionStage,
+    pub invocation_id: InvocationId,
+    pub thread_id: Option<ThreadId>,
+    pub process_id: Option<ProcessId>,
+    pub approval_request_id: Option<ApprovalRequestId>,
+    pub extension_id: Option<ExtensionId>,
+    pub action_kind: String,
+    pub action_target: Option<String>,
+    pub decision_kind: String,
+    pub result_status: Option<String>,
+    pub output_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditProjectionStage {
+    Before,
+    After,
+    Denied,
+    ApprovalRequested,
+    ApprovalResolved,
+    ResourceReserved,
+    ResourceReconciled,
+    ResourceReleased,
+}
+
+impl From<AuditStage> for AuditProjectionStage {
+    fn from(stage: AuditStage) -> Self {
+        match stage {
+            AuditStage::Before => Self::Before,
+            AuditStage::After => Self::After,
+            AuditStage::Denied => Self::Denied,
+            AuditStage::ApprovalRequested => Self::ApprovalRequested,
+            AuditStage::ApprovalResolved => Self::ApprovalResolved,
+            AuditStage::ResourceReserved => Self::ResourceReserved,
+            AuditStage::ResourceReconciled => Self::ResourceReconciled,
+            AuditStage::ResourceReleased => Self::ResourceReleased,
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum AuditProjectionError {
+    #[error("audit projection request rejected: {reason}")]
+    InvalidRequest { reason: &'static str },
+    #[error(
+        "audit projection rebase required: requested audit cursor {requested:?} cannot replay from earliest retained audit cursor {earliest:?}"
+    )]
+    RebaseRequired {
+        requested: Box<AuditProjectionCursor>,
+        earliest: Box<AuditProjectionCursor>,
+    },
+    #[error("audit projection source failed during {operation}")]
+    Source { operation: &'static str },
+}
+
+#[async_trait]
+pub trait AuditProjectionService: Send + Sync {
+    async fn snapshot(
+        &self,
+        request: AuditProjectionRequest,
+    ) -> Result<AuditProjectionSnapshot, AuditProjectionError>;
+
+    async fn updates(
+        &self,
+        request: AuditProjectionRequest,
+    ) -> Result<AuditProjectionReplay, AuditProjectionError>;
+}
+
+#[derive(Clone)]
+pub struct ReplayAuditProjectionService {
+    audit_log: Arc<dyn DurableAuditLog>,
+}
+
+impl ReplayAuditProjectionService {
+    pub fn new<T>(audit_log: Arc<T>) -> Self
+    where
+        T: DurableAuditLog + 'static,
+    {
+        let audit_log: Arc<dyn DurableAuditLog> = audit_log;
+        Self { audit_log }
+    }
+
+    pub fn from_audit_log(audit_log: Arc<dyn DurableAuditLog>) -> Self {
+        Self { audit_log }
+    }
+
+    async fn read_audit(
+        &self,
+        request: AuditProjectionRequest,
+    ) -> Result<ProjectedAuditPage, AuditProjectionError> {
+        if request.limit == 0 {
+            return Err(AuditProjectionError::InvalidRequest {
+                reason: "limit must be greater than zero",
+            });
+        }
+        if request.limit > MAX_PROJECTION_PAGE_LIMIT {
+            return Err(AuditProjectionError::InvalidRequest {
+                reason: "limit exceeds MAX_PROJECTION_PAGE_LIMIT",
+            });
+        }
+        if let Some(cursor) = request.after.as_ref()
+            && cursor.scope != request.scope
+        {
+            return Err(AuditProjectionError::RebaseRequired {
+                requested: Box::new(cursor.clone()),
+                earliest: Box::new(AuditProjectionCursor::origin_for_scope(
+                    request.scope.clone(),
+                )),
+            });
+        }
+        let fetch_limit =
+            request
+                .limit
+                .checked_add(1)
+                .ok_or(AuditProjectionError::InvalidRequest {
+                    reason: "limit is too large",
+                })?;
+        let after = request.after.as_ref().map(|cursor| cursor.audit);
+        let replay = self
+            .audit_log
+            .read_after_cursor(
+                &request.scope.stream,
+                &request.scope.read_scope,
+                after,
+                fetch_limit,
+            )
+            .await
+            .map_err(|error| map_audit_projection_error(error, "audit replay", &request.scope))?;
+        let mut entries = replay.entries;
+        let truncated = entries.len() > request.limit;
+        if truncated {
+            entries.truncate(request.limit);
+        }
+        let next_cursor = if truncated {
+            entries
+                .last()
+                .map(|entry| entry.cursor)
+                .unwrap_or_else(|| after.unwrap_or_else(EventCursor::origin))
+        } else {
+            replay.next_cursor
+        };
+        Ok(ProjectedAuditPage {
+            entries,
+            next_cursor: AuditProjectionCursor::for_scope(request.scope.clone(), next_cursor),
+            truncated,
+        })
+    }
+}
+
+impl std::fmt::Debug for ReplayAuditProjectionService {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReplayAuditProjectionService")
+            .field("audit_log", &"<durable_audit_log>")
+            .finish()
+    }
+}
+
+#[async_trait]
+impl AuditProjectionService for ReplayAuditProjectionService {
+    async fn snapshot(
+        &self,
+        request: AuditProjectionRequest,
+    ) -> Result<AuditProjectionSnapshot, AuditProjectionError> {
+        let page = self.read_audit(request).await?;
+        Ok(AuditProjectionSnapshot {
+            entries: project_audit_entries(&page.entries),
+            next_cursor: page.next_cursor,
+            truncated: page.truncated,
+        })
+    }
+
+    async fn updates(
+        &self,
+        request: AuditProjectionRequest,
+    ) -> Result<AuditProjectionReplay, AuditProjectionError> {
+        let page = self.read_audit(request).await?;
+        Ok(AuditProjectionReplay {
+            entries: project_audit_entries(&page.entries),
+            next_cursor: page.next_cursor,
+            truncated: page.truncated,
+        })
+    }
 }
 
 #[async_trait]
@@ -531,6 +763,52 @@ impl EventProjectionService for ReplayEventProjectionService {
     }
 }
 
+struct ProjectedAuditPage {
+    entries: Vec<EventLogEntry<AuditEnvelope>>,
+    next_cursor: AuditProjectionCursor,
+    truncated: bool,
+}
+
+fn project_audit_entries(entries: &[EventLogEntry<AuditEnvelope>]) -> Vec<AuditProjectionEntry> {
+    entries.iter().map(project_audit_entry).collect()
+}
+
+fn project_audit_entry(entry: &EventLogEntry<AuditEnvelope>) -> AuditProjectionEntry {
+    let audit = &entry.record;
+    let action_kind = sanitize_error_kind(audit.action.kind.clone());
+    AuditProjectionEntry {
+        cursor: entry.cursor,
+        event_id: audit.event_id,
+        timestamp: audit.timestamp,
+        stage: audit.stage.into(),
+        invocation_id: audit.invocation_id,
+        thread_id: audit.thread_id.clone(),
+        process_id: audit.process_id,
+        approval_request_id: audit.approval_request_id,
+        extension_id: audit.extension_id.clone(),
+        action_target: safe_audit_action_target(&action_kind, audit.action.target.as_ref()),
+        action_kind,
+        decision_kind: sanitize_error_kind(audit.decision.kind.clone()),
+        result_status: audit
+            .result
+            .as_ref()
+            .and_then(|result| result.status.clone())
+            .map(sanitize_error_kind),
+        output_bytes: audit.result.as_ref().and_then(|result| result.output_bytes),
+    }
+}
+
+fn safe_audit_action_target(action_kind: &str, target: Option<&String>) -> Option<String> {
+    match action_kind {
+        "dispatch" | "spawn_capability" => target.and_then(|target| {
+            CapabilityId::new(target.clone())
+                .ok()
+                .map(|capability| capability.into_string())
+        }),
+        _ => None,
+    }
+}
+
 struct ProjectedRuntimePage {
     entries: Vec<EventLogEntry<RuntimeEvent>>,
     next_cursor: ProjectionCursor,
@@ -656,6 +934,28 @@ fn run_status_for_event(
             RunProjectionStatus::Failed
         }
         RuntimeEventKind::ProcessKilled => RunProjectionStatus::Killed,
+    }
+}
+
+fn map_audit_projection_error(
+    error: EventError,
+    operation: &'static str,
+    scope: &ProjectionScope,
+) -> AuditProjectionError {
+    match error {
+        EventError::ReplayGap {
+            requested,
+            earliest,
+        } => AuditProjectionError::RebaseRequired {
+            requested: Box::new(AuditProjectionCursor::for_scope(scope.clone(), requested)),
+            earliest: Box::new(AuditProjectionCursor::for_scope(scope.clone(), earliest)),
+        },
+        EventError::InvalidReplayRequest { .. } => AuditProjectionError::InvalidRequest {
+            reason: "invalid durable replay request",
+        },
+        EventError::Serialize { .. } | EventError::Sink { .. } | EventError::DurableLog { .. } => {
+            AuditProjectionError::Source { operation }
+        }
     }
 }
 
