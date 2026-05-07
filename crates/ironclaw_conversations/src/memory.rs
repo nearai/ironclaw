@@ -6,8 +6,8 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
-    AcceptedMessageRef, IdempotencyKey, ReplyTargetBindingRef, SourceBindingRef, TurnActor,
-    TurnScope,
+    AcceptedMessageRef, IdempotencyKey, ReplyTargetBindingRef, SourceBindingRef,
+    SubmitTurnResponse, TurnActor, TurnScope,
 };
 use uuid::Uuid;
 
@@ -400,6 +400,8 @@ impl SessionThreadService for InMemoryConversationServices {
             message_ref,
             source_binding_ref: request.source_binding_ref,
             reply_target_binding_ref: message_reply_target_binding_ref,
+            received_at: request.received_at,
+            requested_run_profile: request.requested_run_profile,
             idempotency: MessageIdempotencyStatus::Inserted,
         };
         state
@@ -415,12 +417,12 @@ impl SessionThreadService for InMemoryConversationServices {
         Ok(accepted)
     }
 
-    async fn inbound_message_turn_submitted(
+    async fn inbound_message_turn_submission(
         &self,
         message_ref: &AcceptedMessageRef,
-    ) -> Result<bool, InboundTurnError> {
+    ) -> Result<Option<SubmitTurnResponse>, InboundTurnError> {
         let state = self.lock_state()?;
-        Ok(state.submitted_message_refs.contains(message_ref))
+        Ok(state.submitted_message_responses.get(message_ref).cloned())
     }
 
     async fn inbound_message_turn_submission_key(
@@ -453,9 +455,12 @@ impl SessionThreadService for InMemoryConversationServices {
     async fn mark_inbound_message_turn_submitted(
         &self,
         message_ref: &AcceptedMessageRef,
+        response: SubmitTurnResponse,
     ) -> Result<(), InboundTurnError> {
         let mut state = self.lock_state()?;
-        state.submitted_message_refs.insert(message_ref.clone());
+        state
+            .submitted_message_responses
+            .insert(message_ref.clone(), response);
         Ok(())
     }
 }
@@ -483,7 +488,7 @@ struct InMemoryState {
     external_event_routes: HashMap<ExternalEventRouteKey, ExternalConversationIdentity>,
     message_idempotency: HashMap<MessageIdempotencyKey, AcceptedInboundMessage>,
     submission_keys: HashMap<AcceptedMessageRef, IdempotencyKey>,
-    submitted_message_refs: HashSet<AcceptedMessageRef>,
+    submitted_message_responses: HashMap<AcceptedMessageRef, SubmitTurnResponse>,
     messages: Vec<ThreadMessageRecord>,
 }
 

@@ -62,21 +62,22 @@ where
                 external_event_id: request.external_event_id,
                 content_ref: request.content_ref,
                 received_at: request.received_at,
+                requested_run_profile: request.requested_run_profile,
             })
             .await?;
 
         resolution.actor = accepted_message.actor.clone();
 
         if accepted_message.idempotency == MessageIdempotencyStatus::Duplicate
-            && self
+            && let Some(turn_submission) = self
                 .session_thread_service
-                .inbound_message_turn_submitted(&accepted_message.message_ref)
+                .inbound_message_turn_submission(&accepted_message.message_ref)
                 .await?
         {
             return Ok(InboundTurnResponse {
                 resolution,
                 accepted_message,
-                turn_submission: None,
+                turn_submission: Some(turn_submission),
             });
         }
 
@@ -92,9 +93,9 @@ where
                 accepted_message_ref: accepted_message.message_ref.clone(),
                 source_binding_ref: accepted_message.source_binding_ref.clone(),
                 reply_target_binding_ref: accepted_message.reply_target_binding_ref.clone(),
-                requested_run_profile: request.requested_run_profile,
+                requested_run_profile: accepted_message.requested_run_profile.clone(),
                 idempotency_key,
-                received_at: request.received_at,
+                received_at: accepted_message.received_at,
             })
             .await;
         let turn_submission = match turn_submission_result {
@@ -109,7 +110,10 @@ where
             }
         };
         self.session_thread_service
-            .mark_inbound_message_turn_submitted(&accepted_message.message_ref)
+            .mark_inbound_message_turn_submitted(
+                &accepted_message.message_ref,
+                turn_submission.clone(),
+            )
             .await?;
 
         Ok(InboundTurnResponse {

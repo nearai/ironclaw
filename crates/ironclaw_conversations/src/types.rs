@@ -107,6 +107,7 @@ pub struct AcceptInboundMessageRequest {
     pub external_event_id: ExternalEventId,
     pub content_ref: InboundMessageContentRef,
     pub received_at: DateTime<Utc>,
+    pub requested_run_profile: Option<RunProfileRequest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,6 +118,8 @@ pub struct AcceptedInboundMessage {
     pub message_ref: AcceptedMessageRef,
     pub source_binding_ref: SourceBindingRef,
     pub reply_target_binding_ref: ReplyTargetBindingRef,
+    pub received_at: DateTime<Utc>,
+    pub requested_run_profile: Option<RunProfileRequest>,
     pub idempotency: MessageIdempotencyStatus,
 }
 

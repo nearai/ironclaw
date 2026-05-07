@@ -13,9 +13,9 @@ use ironclaw_conversations::{
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey,
-    ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
-    TurnCoordinator, TurnError, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileRequest,
+    RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
+    TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
 
 #[tokio::test]
@@ -1010,12 +1010,14 @@ async fn busy_thread_retry_uses_fresh_submit_key_for_same_accepted_message() {
         .await;
     let coordinator = Arc::new(BusyFirstUniqueKeyCoordinator::default());
     let inbound = InboundTurnService::new(services.clone(), services.clone(), coordinator.clone());
-    let request = inbound_request(
+    let mut request = inbound_request(
         telegram(),
         external_actor("telegram-user-1"),
         external_conversation("chat-1", None),
         "telegram-event-busy-retry",
     );
+    request.requested_run_profile = Some(RunProfileRequest::new("fast-profile").unwrap());
+    let original_received_at = request.received_at;
 
     let err = inbound
         .handle_inbound_turn(request.clone())
@@ -1023,6 +1025,8 @@ async fn busy_thread_retry_uses_fresh_submit_key_for_same_accepted_message() {
         .unwrap_err();
     assert!(matches!(err, InboundTurnError::TurnSubmissionFailed { .. }));
 
+    request.received_at = Utc.with_ymd_and_hms(2026, 5, 6, 12, 30, 0).unwrap();
+    request.requested_run_profile = Some(RunProfileRequest::new("slow-profile").unwrap());
     let retry = inbound.handle_inbound_turn(request).await.unwrap();
 
     assert_eq!(services.accepted_messages().await.len(), 1);
@@ -1035,6 +1039,14 @@ async fn busy_thread_retry_uses_fresh_submit_key_for_same_accepted_message() {
         coordinator.submissions()[0].idempotency_key,
         coordinator.submissions()[1].idempotency_key,
         "busy/admission idempotency replays must not strand the accepted inbound message forever"
+    );
+    assert_eq!(
+        coordinator.submissions()[1].received_at,
+        original_received_at
+    );
+    assert_eq!(
+        coordinator.submissions()[1].requested_run_profile,
+        Some(RunProfileRequest::new("fast-profile").unwrap())
     );
     assert!(retry.turn_submission.is_some());
 }
@@ -1107,6 +1119,8 @@ async fn duplicate_external_event_replays_message_and_does_not_submit_duplicate_
         first.accepted_message.message_ref
     );
     assert_eq!(coordinator.submissions().len(), 1);
+    assert_eq!(duplicate.turn_submission, first.turn_submission);
+    assert!(duplicate.turn_submission.is_some());
 }
 
 #[tokio::test]
@@ -1171,6 +1185,7 @@ async fn direct_route_rejects_borrowed_owner_actor_key() {
             external_event_id: ExternalEventId::new("bob-borrowed-key-event").unwrap(),
             content_ref: InboundMessageContentRef::new("content:bob-borrowed-key-event").unwrap(),
             received_at: Utc.with_ymd_and_hms(2026, 5, 6, 12, 1, 0).unwrap(),
+            requested_run_profile: None,
         })
         .await
         .unwrap_err();
@@ -1308,6 +1323,7 @@ async fn shared_route_rejects_wrong_adapter_context() {
             content_ref: InboundMessageContentRef::new("content:wrong-adapter-accept-event")
                 .unwrap(),
             received_at: Utc.with_ymd_and_hms(2026, 5, 6, 12, 1, 0).unwrap(),
+            requested_run_profile: None,
         })
         .await
         .unwrap_err();
@@ -1667,6 +1683,7 @@ async fn message_scoped_reply_target_rejects_same_thread_different_actor_route()
             content_ref: InboundMessageContentRef::new("content:alice-web-event-message-owner")
                 .unwrap(),
             received_at: Utc.with_ymd_and_hms(2026, 5, 6, 12, 1, 0).unwrap(),
+            requested_run_profile: None,
         })
         .await
         .unwrap();
@@ -1768,6 +1785,7 @@ async fn accept_inbound_message_rejects_external_route_mismatch() {
             external_event_id: ExternalEventId::new("route-mismatch-event").unwrap(),
             content_ref: InboundMessageContentRef::new("content:route-mismatch-event").unwrap(),
             received_at: Utc.with_ymd_and_hms(2026, 5, 6, 12, 1, 0).unwrap(),
+            requested_run_profile: None,
         })
         .await
         .unwrap_err();
@@ -1812,6 +1830,7 @@ async fn duplicate_accept_rejects_external_route_mismatch() {
             content_ref: InboundMessageContentRef::new("content:duplicate-route-mismatch-event")
                 .unwrap(),
             received_at: Utc.with_ymd_and_hms(2026, 5, 6, 12, 1, 0).unwrap(),
+            requested_run_profile: None,
         })
         .await
         .unwrap();
@@ -1831,6 +1850,7 @@ async fn duplicate_accept_rejects_external_route_mismatch() {
             content_ref: InboundMessageContentRef::new("content:duplicate-route-mismatch-event")
                 .unwrap(),
             received_at: Utc.with_ymd_and_hms(2026, 5, 6, 12, 2, 0).unwrap(),
+            requested_run_profile: None,
         })
         .await
         .unwrap_err();
@@ -1883,6 +1903,7 @@ async fn accept_inbound_message_rejects_mixed_source_and_reply_bindings() {
             external_event_id: ExternalEventId::new("mixed-binding-event").unwrap(),
             content_ref: InboundMessageContentRef::new("content:mixed-binding-event").unwrap(),
             received_at: Utc.with_ymd_and_hms(2026, 5, 6, 12, 1, 0).unwrap(),
+            requested_run_profile: None,
         })
         .await
         .unwrap_err();
@@ -2095,7 +2116,7 @@ fn external_conversation(
 struct FixedMessageSessionService {
     message_ref: AcceptedMessageRef,
     accepted: Mutex<Option<AcceptedInboundMessage>>,
-    submitted: Mutex<bool>,
+    submitted: Mutex<Option<SubmitTurnResponse>>,
 }
 
 impl FixedMessageSessionService {
@@ -2103,7 +2124,7 @@ impl FixedMessageSessionService {
         Self {
             message_ref,
             accepted: Mutex::new(None),
-            submitted: Mutex::new(false),
+            submitted: Mutex::new(None),
         }
     }
 }
@@ -2127,17 +2148,19 @@ impl SessionThreadService for FixedMessageSessionService {
             message_ref: self.message_ref.clone(),
             source_binding_ref: request.source_binding_ref,
             reply_target_binding_ref: request.reply_target_binding_ref,
+            received_at: request.received_at,
+            requested_run_profile: request.requested_run_profile,
             idempotency: MessageIdempotencyStatus::Inserted,
         };
         *accepted = Some(message.clone());
         Ok(message)
     }
 
-    async fn inbound_message_turn_submitted(
+    async fn inbound_message_turn_submission(
         &self,
         _message_ref: &AcceptedMessageRef,
-    ) -> Result<bool, InboundTurnError> {
-        Ok(*self.submitted.lock().unwrap())
+    ) -> Result<Option<SubmitTurnResponse>, InboundTurnError> {
+        Ok(self.submitted.lock().unwrap().clone())
     }
 
     async fn inbound_message_turn_submission_key(
@@ -2158,8 +2181,9 @@ impl SessionThreadService for FixedMessageSessionService {
     async fn mark_inbound_message_turn_submitted(
         &self,
         _message_ref: &AcceptedMessageRef,
+        response: SubmitTurnResponse,
     ) -> Result<(), InboundTurnError> {
-        *self.submitted.lock().unwrap() = true;
+        *self.submitted.lock().unwrap() = Some(response);
         Ok(())
     }
 }
