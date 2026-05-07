@@ -14,6 +14,7 @@ pub mod loop_exit;
 pub mod memory;
 pub mod request;
 pub mod response;
+pub mod run_profile;
 pub mod runner;
 pub mod scope;
 pub mod status;
@@ -45,6 +46,17 @@ pub use request::{
     CancelRunRequest, GetRunStateRequest, ResumeTurnRequest, SubmitTurnRequest, TurnTimestamp,
 };
 pub use response::{CancelRunResponse, ResumeTurnResponse, SubmitTurnResponse, ThreadBusy};
+pub use run_profile::{
+    AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverHost,
+    AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, CancellationPolicy,
+    CapabilitySurfaceProfileId, CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass,
+    ContextProfileId, InMemoryRunProfileRegistry, InMemoryRunProfileResolver, LoopDriverId,
+    ModelProfileId, PrivilegedRunProfileDimension, RedactedRunProfileProvenance,
+    RedactedRunProfileSource, ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier,
+    RunClassId, RunProfileFingerprint, RunProfileRequestAuthority, RunProfileResolutionError,
+    RunProfileResolutionRequest, RunProfileResolver, RunProfileSourceLayer, RunProfileSourceRef,
+    RunnerPoolId, RuntimeProfileConstraints, SchedulingClass, SteeringPolicy,
+};
 pub use scope::{TurnActor, TurnScope};
 pub use status::{
     AdmissionRejection, AdmissionRejectionReason, BlockedReason, SanitizedCancelReason,
