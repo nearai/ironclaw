@@ -11673,4 +11673,570 @@ mod tests {
         *lock.write().await = None;
         outcome.expect("inline resolve regression");
     }
+
+    /// Helper: park a real `pause()` future for a fresh thread and
+    /// return the controller-allocated `request_id` once it has reached
+    /// `rx.await`. Used by the multi-scenario tests below.
+    async fn park_inline_pause_for_test(
+        controller: Arc<crate::bridge::gate_controller::BridgeGateController>,
+        pending_gates: Arc<crate::gate::store::PendingGateStore>,
+        user_id: &str,
+        thread_id: ironclaw_engine::ThreadId,
+        source_channel: &str,
+    ) -> (
+        uuid::Uuid,
+        tokio::task::JoinHandle<ironclaw_engine::GateResolution>,
+    ) {
+        use crate::bridge::PerExecutionContext;
+        use ironclaw_engine::{ConversationId, GateController, GatePauseRequest, ResumeKind};
+        use std::time::Duration;
+
+        let conversation_id = ConversationId::new();
+        controller
+            .set_execution_context(
+                user_id.to_string(),
+                thread_id,
+                PerExecutionContext {
+                    conversation_id,
+                    source_channel: source_channel.to_string(),
+                    scope_thread_id: None,
+                    channel_metadata: serde_json::json!({}),
+                    original_message: None,
+                },
+            )
+            .await;
+
+        let controller_for_pause = Arc::clone(&controller);
+        let user_for_pause = user_id.to_string();
+        let pause_task = tokio::spawn(async move {
+            controller_for_pause
+                .pause(GatePauseRequest {
+                    thread_id,
+                    user_id: user_for_pause,
+                    gate_name: "approval".into(),
+                    action_name: "shell".into(),
+                    call_id: format!("call-{thread_id}"),
+                    parameters: serde_json::json!({"cmd": "ls"}),
+                    resume_kind: ResumeKind::Approval { allow_always: true },
+                    conversation_id: Some(conversation_id),
+                })
+                .await
+        });
+
+        let key = crate::gate::pending::PendingGateKey {
+            user_id: user_id.to_string(),
+            thread_id,
+        };
+        let mut request_id = None;
+        for _ in 0..200 {
+            tokio::task::yield_now().await;
+            if let Some(view) = pending_gates.peek(&key).await
+                && let Ok(parsed) = uuid::Uuid::parse_str(&view.request_id)
+            {
+                request_id = Some(parsed);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let request_id =
+            request_id.expect("park_inline_pause_for_test: pause() did not insert a pending gate");
+        // Yield so pause() advances past register() into rx.await.
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+        (request_id, pause_task)
+    }
+
+    /// Build a controller + state pair that share `pending_gates` and
+    /// `gate_controller`, install into `ENGINE_STATE`, and return both
+    /// Arcs for the test to reuse. Caller still owns the global
+    /// `ENGINE_STATE_TEST_LOCK` guard.
+    async fn install_inline_test_state() -> (
+        Arc<crate::gate::store::PendingGateStore>,
+        Arc<crate::bridge::gate_controller::BridgeGateController>,
+    ) {
+        let pending_gates = Arc::new(crate::gate::store::PendingGateStore::in_memory());
+        let resolutions = Arc::new(crate::bridge::gate_controller::GateResolutions::new());
+        let controller = Arc::new(crate::bridge::gate_controller::BridgeGateController::new(
+            Arc::clone(&pending_gates),
+            None,
+            Arc::new(crate::tools::ToolRegistry::new()),
+            None,
+            None,
+            Arc::new(crate::channels::ChannelManager::new()),
+            Arc::clone(&resolutions),
+        ));
+        let store = Arc::new(TestStore::new());
+        let mut state = make_expected_test_state(store);
+        state.pending_gates = Arc::clone(&pending_gates);
+        state.gate_controller = Arc::clone(&controller);
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = Some(state);
+        (pending_gates, controller)
+    }
+
+    /// In-memory `SettingsStore` used by the always-allow rollback test.
+    /// Records every write so the test can assert that the rollback path
+    /// actually deleted the just-installed `tool_permissions.<tool>` key.
+    struct TestSettingsStore {
+        data: tokio::sync::RwLock<
+            std::collections::HashMap<String, std::collections::HashMap<String, serde_json::Value>>,
+        >,
+    }
+
+    impl TestSettingsStore {
+        fn new() -> Self {
+            Self {
+                data: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::db::SettingsStore for TestSettingsStore {
+        async fn get_setting(
+            &self,
+            user_id: &str,
+            key: &str,
+        ) -> Result<Option<serde_json::Value>, crate::error::DatabaseError> {
+            Ok(self
+                .data
+                .read()
+                .await
+                .get(user_id)
+                .and_then(|m| m.get(key).cloned()))
+        }
+        async fn get_setting_full(
+            &self,
+            _user_id: &str,
+            _key: &str,
+        ) -> Result<Option<crate::history::SettingRow>, crate::error::DatabaseError> {
+            Ok(None)
+        }
+        async fn set_setting(
+            &self,
+            user_id: &str,
+            key: &str,
+            value: &serde_json::Value,
+        ) -> Result<(), crate::error::DatabaseError> {
+            self.data
+                .write()
+                .await
+                .entry(user_id.to_string())
+                .or_default()
+                .insert(key.to_string(), value.clone());
+            Ok(())
+        }
+        async fn delete_setting(
+            &self,
+            user_id: &str,
+            key: &str,
+        ) -> Result<bool, crate::error::DatabaseError> {
+            Ok(self
+                .data
+                .write()
+                .await
+                .get_mut(user_id)
+                .and_then(|m| m.remove(key))
+                .is_some())
+        }
+        async fn list_settings(
+            &self,
+            _user_id: &str,
+        ) -> Result<Vec<crate::history::SettingRow>, crate::error::DatabaseError> {
+            Ok(vec![])
+        }
+        async fn get_all_settings(
+            &self,
+            user_id: &str,
+        ) -> Result<std::collections::HashMap<String, serde_json::Value>, crate::error::DatabaseError>
+        {
+            Ok(self
+                .data
+                .read()
+                .await
+                .get(user_id)
+                .cloned()
+                .unwrap_or_default())
+        }
+        async fn set_all_settings(
+            &self,
+            user_id: &str,
+            settings: &std::collections::HashMap<String, serde_json::Value>,
+        ) -> Result<(), crate::error::DatabaseError> {
+            self.data
+                .write()
+                .await
+                .insert(user_id.to_string(), settings.clone());
+            Ok(())
+        }
+        async fn has_settings(&self, user_id: &str) -> Result<bool, crate::error::DatabaseError> {
+            Ok(self
+                .data
+                .read()
+                .await
+                .get(user_id)
+                .is_some_and(|m| !m.is_empty()))
+        }
+    }
+
+    /// `try_resolve_inline_approval_gate` must roll back any
+    /// `tool_permissions.<tool>` AlwaysAllow it provisionally installed
+    /// when `try_deliver` reports no live VM. Without rollback, a
+    /// caller resolving an Approval gate from a non-engine path would
+    /// silently install a session-wide auto-approve preference even
+    /// though the resume never executed.
+    #[tokio::test]
+    async fn try_resolve_inline_approval_gate_rolls_back_always_when_no_live_vm() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let outcome = async {
+            let (pending_gates, controller) = install_inline_test_state().await;
+
+            // Insert a pending Approval gate but DO NOT register a oneshot —
+            // simulating the post-restart shape where invalidate_stranded
+            // somehow missed a row, or any future code path that creates a
+            // gate without parking a VM.
+            let thread_id = ironclaw_engine::ThreadId::new();
+            let user_id = "alice";
+            let request_id = uuid::Uuid::new_v4();
+            let pending = sample_pending_gate_with_request_id(
+                user_id,
+                thread_id,
+                request_id,
+                ironclaw_engine::ResumeKind::Approval { allow_always: true },
+            );
+            let mut pending = pending;
+            pending.action_name = "http".into();
+            pending.source_channel = "gateway".into();
+            pending_gates
+                .insert(pending.clone())
+                .await
+                .expect("insert pending gate");
+
+            let settings = Arc::new(TestSettingsStore::new());
+            let settings_ref: &(dyn crate::db::SettingsStore + Send + Sync) = settings.as_ref();
+
+            let result = super::try_resolve_inline_approval_gate(
+                user_id,
+                "gateway",
+                thread_id,
+                request_id,
+                ironclaw_engine::GateResolution::Approved { always: true },
+                Some(settings_ref),
+            )
+            .await
+            .expect("inline resolve must succeed (no-live-VM path)");
+
+            assert!(
+                matches!(result, super::InlineGateOutcome::NoLiveVm),
+                "no parked future ⇒ NoLiveVm; got {result:?}"
+            );
+
+            // Auto-approve preference must be reverted — the resume
+            // never executed, so a stale always_allow would be a leak.
+            let perm_key = format!("tool_permissions.{}", pending.action_name);
+            assert!(
+                crate::db::SettingsStore::get_setting(settings_ref, user_id, &perm_key)
+                    .await
+                    .expect("settings get")
+                    .is_none(),
+                "always_allow must NOT be persisted on no-live-VM path"
+            );
+
+            // Pending gate must be back in the store so the legacy mpsc
+            // dispatch path can find it.
+            let key = crate::gate::pending::PendingGateKey {
+                user_id: user_id.to_string(),
+                thread_id,
+            };
+            assert!(
+                pending_gates.peek(&key).await.is_some(),
+                "pending gate must be re-inserted on no-live-VM"
+            );
+
+            drop(controller);
+            Ok::<(), crate::error::Error>(())
+        }
+        .await;
+
+        *lock.write().await = None;
+        outcome.expect("rollback regression");
+    }
+
+    /// Cross-channel security: a gate raised on `telegram` (a non-trusted
+    /// source channel) cannot be resolved by `slack` (also non-trusted).
+    /// `take_verified` rejects the channel mismatch; the inline-resolve
+    /// surface must propagate that as an `authorization` error so the
+    /// HTTP handler returns 403, not silently drop into the legacy
+    /// fall-through. The parked alpha must remain parked.
+    #[tokio::test]
+    async fn try_resolve_inline_approval_gate_rejects_cross_channel_resolve() {
+        use std::time::Duration;
+
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let outcome = async {
+            let (pending_gates, controller) = install_inline_test_state().await;
+            let thread_id = ironclaw_engine::ThreadId::new();
+            let user_id = "alice";
+
+            let (request_id, pause_task) = park_inline_pause_for_test(
+                Arc::clone(&controller),
+                Arc::clone(&pending_gates),
+                user_id,
+                thread_id,
+                "telegram",
+            )
+            .await;
+
+            // Slack tries to approve a Telegram-raised gate. Neither is
+            // in TRUSTED_GATE_CHANNELS, so this is a true cross-channel
+            // attempt and must be rejected.
+            let err = super::try_resolve_inline_approval_gate(
+                user_id,
+                "slack",
+                thread_id,
+                request_id,
+                ironclaw_engine::GateResolution::Approved { always: false },
+                None,
+            )
+            .await
+            .expect_err("cross-channel resolve must error");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("authorization") || msg.contains("Channel"),
+                "channel-mismatch error must be authorization-shaped; got: {msg}"
+            );
+
+            // Parked alpha must NOT have woken — the rejection happens
+            // inside take_verified, before any try_deliver call.
+            let still_parked =
+                tokio::time::timeout(Duration::from_millis(200), &mut { pause_task })
+                    .await
+                    .is_err();
+            assert!(
+                still_parked,
+                "rejected cross-channel resolve must not wake the parked future"
+            );
+
+            // The original gate must still be in the store (take_verified
+            // bails *before* the remove).
+            let key = crate::gate::pending::PendingGateKey {
+                user_id: user_id.to_string(),
+                thread_id,
+            };
+            assert!(
+                pending_gates.peek(&key).await.is_some(),
+                "rejected cross-channel resolve must leave the pending gate in place"
+            );
+
+            // Clean up the parked task — cancel via controller so the
+            // test process doesn't leak the spawned tokio task.
+            use ironclaw_engine::GateController;
+            controller.cancel_thread(thread_id).await;
+
+            Ok::<(), crate::error::Error>(())
+        }
+        .await;
+
+        *lock.write().await = None;
+        outcome.expect("cross-channel rejection regression");
+    }
+
+    /// Two concurrent inline-resolve calls for the same `request_id`:
+    /// `take_verified` is atomic, so exactly one wins and delivers,
+    /// while the other gets a stale-/not-found-shaped error. The parked
+    /// alpha receives the resolution from the winner.
+    #[tokio::test]
+    async fn try_resolve_inline_approval_gate_concurrent_resolves_one_wins() {
+        use std::time::Duration;
+
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let outcome = async {
+            let (pending_gates, controller) = install_inline_test_state().await;
+            let thread_id = ironclaw_engine::ThreadId::new();
+            let user_id = "alice";
+
+            let (request_id, pause_task) = park_inline_pause_for_test(
+                Arc::clone(&controller),
+                Arc::clone(&pending_gates),
+                user_id,
+                thread_id,
+                "gateway",
+            )
+            .await;
+
+            // Two callers race on the same request_id.
+            let resolution = ironclaw_engine::GateResolution::Approved { always: false };
+            let (a, b) = tokio::join!(
+                super::try_resolve_inline_approval_gate(
+                    user_id,
+                    "gateway",
+                    thread_id,
+                    request_id,
+                    resolution.clone(),
+                    None,
+                ),
+                super::try_resolve_inline_approval_gate(
+                    user_id, "gateway", thread_id, request_id, resolution, None,
+                ),
+            );
+
+            let mut delivered_count = 0;
+            let mut error_count = 0;
+            for r in [&a, &b] {
+                match r {
+                    Ok(super::InlineGateOutcome::Delivered) => delivered_count += 1,
+                    Ok(super::InlineGateOutcome::NoLiveVm) => {
+                        panic!("concurrent resolve must not surface as NoLiveVm; got {r:?}")
+                    }
+                    Err(_) => error_count += 1,
+                }
+            }
+            assert_eq!(
+                delivered_count, 1,
+                "exactly one concurrent resolve must report Delivered"
+            );
+            assert_eq!(
+                error_count, 1,
+                "the loser must error (stale / not found), not silently succeed"
+            );
+
+            // Alpha woke once with the winning resolution.
+            let woken = tokio::time::timeout(Duration::from_secs(2), pause_task)
+                .await
+                .expect("alpha must wake once after the winner delivers")
+                .expect("pause task did not panic");
+            assert!(
+                matches!(
+                    woken,
+                    ironclaw_engine::GateResolution::Approved { always: false }
+                ),
+                "winner's resolution must reach the parked future; got {woken:?}"
+            );
+
+            drop(controller);
+            Ok::<(), crate::error::Error>(())
+        }
+        .await;
+
+        *lock.write().await = None;
+        outcome.expect("concurrent-resolves regression");
+    }
+
+    /// Two parallel Approval gates for the same user on different
+    /// threads must each get their own oneshot. Resolving thread A
+    /// wakes only A; B stays parked until its own resolve. Verifies
+    /// `try_deliver` routes by `request_id`, not by `(user, thread)`,
+    /// and that `BridgeGateController`'s per-(user, thread) gate lock
+    /// doesn't bleed between threads.
+    #[tokio::test]
+    async fn try_resolve_inline_approval_gate_parallel_threads_same_user_independent() {
+        use std::time::Duration;
+
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let outcome = async {
+            let (pending_gates, controller) = install_inline_test_state().await;
+            let user_id = "alice";
+
+            let thread_a = ironclaw_engine::ThreadId::new();
+            let thread_b = ironclaw_engine::ThreadId::new();
+
+            let (req_a, mut pause_a) = park_inline_pause_for_test(
+                Arc::clone(&controller),
+                Arc::clone(&pending_gates),
+                user_id,
+                thread_a,
+                "gateway",
+            )
+            .await;
+            let (req_b, mut pause_b) = park_inline_pause_for_test(
+                Arc::clone(&controller),
+                Arc::clone(&pending_gates),
+                user_id,
+                thread_b,
+                "gateway",
+            )
+            .await;
+            assert_ne!(req_a, req_b, "each thread must have its own request_id");
+
+            // Resolve A only.
+            let res = super::try_resolve_inline_approval_gate(
+                user_id,
+                "gateway",
+                thread_a,
+                req_a,
+                ironclaw_engine::GateResolution::Approved { always: false },
+                None,
+            )
+            .await
+            .expect("inline resolve A must succeed");
+            assert!(
+                matches!(res, super::InlineGateOutcome::Delivered),
+                "thread A must deliver; got {res:?}"
+            );
+
+            let woken_a = tokio::time::timeout(Duration::from_secs(2), &mut pause_a)
+                .await
+                .expect("A must wake within 2s")
+                .expect("pause A did not panic");
+            assert!(matches!(
+                woken_a,
+                ironclaw_engine::GateResolution::Approved { always: false }
+            ));
+
+            // B must remain parked — explicitly verify with a short
+            // timeout window.
+            let still_parked = tokio::time::timeout(Duration::from_millis(200), &mut pause_b)
+                .await
+                .is_err();
+            assert!(
+                still_parked,
+                "thread B must remain parked while only A is resolved"
+            );
+
+            // Now resolve B; it should wake independently.
+            let res = super::try_resolve_inline_approval_gate(
+                user_id,
+                "gateway",
+                thread_b,
+                req_b,
+                ironclaw_engine::GateResolution::Denied { reason: None },
+                None,
+            )
+            .await
+            .expect("inline resolve B must succeed");
+            assert!(
+                matches!(res, super::InlineGateOutcome::Delivered),
+                "thread B must deliver; got {res:?}"
+            );
+
+            let woken_b = tokio::time::timeout(Duration::from_secs(2), pause_b)
+                .await
+                .expect("B must wake within 2s after its own resolve")
+                .expect("pause B did not panic");
+            assert!(
+                matches!(woken_b, ironclaw_engine::GateResolution::Denied { .. }),
+                "thread B must receive its own Denied resolution; got {woken_b:?}"
+            );
+
+            drop(controller);
+            Ok::<(), crate::error::Error>(())
+        }
+        .await;
+
+        *lock.write().await = None;
+        outcome.expect("parallel-threads regression");
+    }
 }
