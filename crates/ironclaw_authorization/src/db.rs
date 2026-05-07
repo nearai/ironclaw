@@ -392,7 +392,7 @@ async fn libsql_leases_for_scope(
     while let Some(row) = rows.next().await.map_err(db_error)? {
         let invocation_id: String = row.get(0).map_err(db_error)?;
         let lease_id: String = row.get(1).map_err(db_error)?;
-        let lease_id = parse_lease_id(&lease_id)?;
+        let lease_id = parse_lease_id_column(&lease_id)?;
         let status: String = row.get(2).map_err(db_error)?;
         let payload: String = row.get(3).map_err(db_error)?;
         leases.push(validate_lease_row(
@@ -465,7 +465,7 @@ async fn postgres_leases_for_scope(
     for row in rows {
         let invocation_id: String = row.get(0);
         let lease_id: String = row.get(1);
-        let lease_id = parse_lease_id(&lease_id)?;
+        let lease_id = parse_lease_id_column(&lease_id)?;
         let status: String = row.get(2);
         let payload: String = row.get(3);
         leases.push(validate_lease_row(
@@ -528,10 +528,17 @@ fn lease_status_key(status: CapabilityLeaseStatus) -> &'static str {
     }
 }
 
-fn parse_lease_id(value: &str) -> Result<CapabilityGrantId, CapabilityLeaseError> {
-    CapabilityGrantId::parse(value).map_err(|error| CapabilityLeaseError::Persistence {
-        reason: error.to_string(),
-    })
+fn parse_lease_id_column(value: &str) -> Result<CapabilityGrantId, CapabilityLeaseError> {
+    let lease_id =
+        CapabilityGrantId::parse(value).map_err(|error| CapabilityLeaseError::Persistence {
+            reason: error.to_string(),
+        })?;
+    if value != lease_id.to_string() {
+        return Err(CapabilityLeaseError::Persistence {
+            reason: "capability lease row has non-canonical lease_id column".to_string(),
+        });
+    }
+    Ok(lease_id)
 }
 
 fn to_json<T: serde::Serialize>(value: &T) -> Result<String, CapabilityLeaseError> {

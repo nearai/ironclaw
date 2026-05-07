@@ -89,7 +89,43 @@ async fn libsql_capability_lease_store_preserves_fingerprint_claim_guard() {
     ));
 }
 
+#[tokio::test]
+async fn libsql_capability_lease_store_ignores_non_canonical_lease_id_rows() {
+    let (store, db) = libsql_store_with_db().await;
+    let context = execution_context(CapabilitySet::default());
+    let lease = lease_for(&context);
+    let canonical_lease_id = lease.grant.id.to_string();
+    let non_canonical_lease_id = canonical_lease_id.to_uppercase();
+    assert_ne!(canonical_lease_id, non_canonical_lease_id);
+
+    let conn = db.connect().unwrap();
+    conn.execute(
+        "INSERT INTO reborn_capability_lease_records (owner_key, invocation_id, lease_id, status, payload) VALUES (?1, ?2, ?3, ?4, ?5)",
+        libsql::params![
+            owner_key(&context.resource_scope),
+            context.resource_scope.invocation_id.to_string(),
+            non_canonical_lease_id,
+            "active",
+            serde_json::to_string(&lease).unwrap(),
+        ],
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        store
+            .leases_for_scope(&context.resource_scope)
+            .await
+            .is_empty(),
+        "non-canonical row keys must not produce authorizing leases that exact consume/revoke lookups cannot find"
+    );
+}
+
 async fn libsql_store() -> LibSqlCapabilityLeaseStore {
+    libsql_store_with_db().await.0
+}
+
+async fn libsql_store_with_db() -> (LibSqlCapabilityLeaseStore, Arc<libsql::Database>) {
     let dir = tempfile::tempdir().unwrap().keep();
     let db = Arc::new(
         libsql::Builder::new_local(dir.join("capability-leases.db"))
@@ -97,9 +133,30 @@ async fn libsql_store() -> LibSqlCapabilityLeaseStore {
             .await
             .unwrap(),
     );
-    let store = LibSqlCapabilityLeaseStore::new(db);
+    let store = LibSqlCapabilityLeaseStore::new(Arc::clone(&db));
     store.run_migrations().await.unwrap();
-    store
+    (store, db)
+}
+
+fn owner_key(scope: &ResourceScope) -> String {
+    #[derive(serde::Serialize)]
+    struct OwnerKey<'a> {
+        tenant_id: &'a str,
+        user_id: &'a str,
+        agent_id: Option<&'a str>,
+        project_id: Option<&'a str>,
+        mission_id: Option<&'a str>,
+        thread_id: Option<&'a str>,
+    }
+    serde_json::to_string(&OwnerKey {
+        tenant_id: scope.tenant_id.as_str(),
+        user_id: scope.user_id.as_str(),
+        agent_id: scope.agent_id.as_ref().map(|id| id.as_str()),
+        project_id: scope.project_id.as_ref().map(|id| id.as_str()),
+        mission_id: scope.mission_id.as_ref().map(|id| id.as_str()),
+        thread_id: scope.thread_id.as_ref().map(|id| id.as_str()),
+    })
+    .unwrap()
 }
 
 fn lease_for(context: &ExecutionContext) -> CapabilityLease {
