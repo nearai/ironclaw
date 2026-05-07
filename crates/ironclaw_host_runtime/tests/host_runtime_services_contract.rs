@@ -41,7 +41,7 @@ use ironclaw_processes::{
     ProcessServices, ProcessStart, ProcessStatus, ProcessStore,
 };
 use ironclaw_reborn_event_store::{
-    RebornEventStoreConfig, RebornProfile, build_reborn_event_stores,
+    RebornEventStoreConfig, RebornEventStoreError, RebornProfile, build_reborn_event_stores,
 };
 use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits,
@@ -182,6 +182,130 @@ fn production_wiring_validation_rejects_unsupported_runtime_requirements() {
             ProductionWiringIssueKind::UnsupportedRequirement
         ),
         "unsupported runtime backend requirement should be reported: {report:?}"
+    );
+}
+
+#[tokio::test]
+async fn production_event_store_config_rejects_jsonl_without_single_node_acceptance() {
+    let temp = tempfile::tempdir().unwrap();
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    );
+
+    let result = services
+        .with_reborn_event_store_config(
+            RebornProfile::Production,
+            RebornEventStoreConfig::Jsonl {
+                root: temp.path().join("reborn-event-store"),
+                accept_single_node_durable: false,
+            },
+        )
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(RebornEventStoreError::ProductionJsonlRequiresAcceptance)
+    ));
+}
+
+#[tokio::test]
+async fn local_reborn_event_store_config_does_not_satisfy_production_wiring() {
+    let temp = tempfile::tempdir().unwrap();
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_reborn_event_store_config(
+        RebornProfile::LocalDev,
+        RebornEventStoreConfig::Jsonl {
+            root: temp.path().join("local-reborn-event-store"),
+            accept_single_node_durable: false,
+        },
+    )
+    .await
+    .unwrap();
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]))
+        .expect_err("LocalDev stores are not production-verified event/audit sinks");
+
+    assert!(
+        report.contains(
+            ProductionWiringComponent::EventSink,
+            ProductionWiringIssueKind::UnverifiedProductionImplementation
+        ),
+        "LocalDev Reborn event store must not satisfy production event sink guardrail: {report:?}"
+    );
+    assert!(
+        report.contains(
+            ProductionWiringComponent::AuditSink,
+            ProductionWiringIssueKind::UnverifiedProductionImplementation
+        ),
+        "LocalDev Reborn audit store must not satisfy production audit sink guardrail: {report:?}"
+    );
+}
+
+#[tokio::test]
+async fn production_event_store_config_installs_verified_event_and_audit_sinks() {
+    let temp = tempfile::tempdir().unwrap();
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_reborn_event_store_config(
+        RebornProfile::Production,
+        RebornEventStoreConfig::Jsonl {
+            root: temp.path().join("accepted-reborn-event-store"),
+            accept_single_node_durable: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]))
+        .expect_err("other local test services are still not production-ready");
+
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::EventSink,
+            ProductionWiringIssueKind::Missing
+        ),
+        "event sink must be installed from Reborn event store config: {report:?}"
+    );
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::AuditSink,
+            ProductionWiringIssueKind::Missing
+        ),
+        "audit sink must be installed from Reborn event store config: {report:?}"
+    );
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::EventSink,
+            ProductionWiringIssueKind::UnverifiedProductionImplementation
+        ),
+        "Reborn durable event store adapter must not be treated as erased unverified sink: {report:?}"
+    );
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::AuditSink,
+            ProductionWiringIssueKind::UnverifiedProductionImplementation
+        ),
+        "Reborn durable audit store adapter must not be treated as erased unverified sink: {report:?}"
     );
 }
 

@@ -34,6 +34,10 @@ use ironclaw_processes::{
     BackgroundFailureStage, ProcessExecutionError, ProcessExecutionRequest, ProcessExecutionResult,
     ProcessExecutor, ProcessManager, ProcessResultStore, ProcessServices, ProcessStore,
 };
+use ironclaw_reborn_event_store::{
+    RebornEventStoreConfig, RebornEventStoreError, RebornEventStores, RebornProfile,
+    build_reborn_event_stores,
+};
 use ironclaw_resources::ResourceGovernor;
 use ironclaw_run_state::{ApprovalRequestStore, RunStateStore};
 use ironclaw_scripts::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};
@@ -45,6 +49,8 @@ use ironclaw_wasm::{
     WitToolRequest, WitToolRuntime, WitToolRuntimeConfig,
 };
 
+use thiserror::Error;
+
 use crate::{
     BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntimeError,
     NetworkObligationPolicyStore, ProcessObligationLifecycleStore, RuntimeBackendHealth,
@@ -52,6 +58,20 @@ use crate::{
 };
 
 type SharedRuntimeHttpEgress = Arc<Mutex<Option<Arc<dyn RuntimeHttpEgress>>>>;
+
+#[derive(Debug, Error)]
+pub enum ProductionEventStoreWiringError {
+    #[error("failed to build Reborn event stores: {0}")]
+    EventStore(#[from] RebornEventStoreError),
+    #[error("host runtime production wiring failed")]
+    ProductionWiring(ProductionWiringReport),
+}
+
+impl From<ProductionWiringReport> for ProductionEventStoreWiringError {
+    fn from(report: ProductionWiringReport) -> Self {
+        Self::ProductionWiring(report)
+    }
+}
 
 /// Production wiring requirements used by composition roots before exposing a
 /// [`HostRuntimeServices`] graph as production-ready.
@@ -425,6 +445,46 @@ where
         let audit_log: Arc<dyn DurableAuditLog> = audit_log;
         self.audit_sink = Some(Arc::new(DurableAuditSink::new(audit_log)));
         self
+    }
+
+    /// Attaches a pre-built Reborn durable event/audit store pair to the host
+    /// runtime graph. This is the production composition seam for store
+    /// selection: callers choose Postgres/libSQL/accepted-JSONL through
+    /// `ironclaw_reborn_event_store`, then this method adapts the durable logs
+    /// into the live sink traits consumed by runtime services.
+    pub fn with_reborn_event_stores(self, stores: RebornEventStores) -> Self {
+        self.with_reborn_event_stores_verified(stores, false)
+    }
+
+    fn with_reborn_event_stores_verified(
+        mut self,
+        stores: RebornEventStores,
+        production_verified: bool,
+    ) -> Self {
+        if production_verified {
+            self.component_types.event_sink = Some(type_name::<RebornEventStores>());
+            self.component_types.audit_sink = Some(type_name::<RebornEventStores>());
+        } else {
+            // Prebuilt/LocalDev/Test stores are useful for tests and lower-level
+            // composition, but must not silently satisfy production guardrails.
+            self.component_types.event_sink = Some(type_name::<DurableEventSink>());
+            self.component_types.audit_sink = Some(type_name::<DurableAuditSink>());
+        }
+        self.event_sink = Some(Arc::new(DurableEventSink::new(stores.events)));
+        self.audit_sink = Some(Arc::new(DurableAuditSink::new(stores.audit)));
+        self
+    }
+
+    /// Builds Reborn event/audit stores from profile/config and attaches them
+    /// to this service graph. Production JSONL/in-memory restrictions are
+    /// enforced by `build_reborn_event_stores` before sinks are installed.
+    pub async fn with_reborn_event_store_config(
+        self,
+        profile: RebornProfile,
+        config: RebornEventStoreConfig,
+    ) -> Result<Self, RebornEventStoreError> {
+        let stores = build_reborn_event_stores(profile, config).await?;
+        Ok(self.with_reborn_event_stores_verified(stores, profile == RebornProfile::Production))
     }
 
     pub fn with_secret_store<T>(mut self, secret_store: Arc<T>) -> Self
@@ -825,6 +885,19 @@ where
     ) -> Result<DefaultHostRuntime, ProductionWiringReport> {
         self.validate_production_wiring(config)?;
         Ok(self.build_host_runtime())
+    }
+
+    /// Builds and attaches the configured Reborn durable event/audit stores,
+    /// validates production wiring, and returns the host runtime facade.
+    pub async fn host_runtime_for_production_with_event_store_config(
+        self,
+        event_store_config: RebornEventStoreConfig,
+        production_config: &ProductionWiringConfig,
+    ) -> Result<DefaultHostRuntime, ProductionEventStoreWiringError> {
+        let services = self
+            .with_reborn_event_store_config(RebornProfile::Production, event_store_config)
+            .await?;
+        Ok(services.host_runtime_for_production(production_config)?)
     }
 
     /// Builds a runtime dispatcher with every configured runtime adapter.

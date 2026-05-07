@@ -18,6 +18,7 @@ ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_mcp = { path = "../ironclaw_mcp" }
 ironclaw_network = { path = "../ironclaw_network" }
 ironclaw_processes = { path = "../ironclaw_processes" }
+ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store" }
 ironclaw_resources = { path = "../ironclaw_resources" }
 ironclaw_run_state = { path = "../ironclaw_run_state" }
 ironclaw_runtime_policy = { path = "../ironclaw_runtime_policy" }
@@ -36,7 +37,6 @@ url = "2"
 
 [dev-dependencies]
 ironclaw_event_projections = { path = "../ironclaw_event_projections" }
-ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store" }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "time"] }
 wat = "1.245.1"
