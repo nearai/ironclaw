@@ -149,6 +149,12 @@ pub enum EngineError {
         resume_kind: Box<crate::gate::ResumeKind>,
         resume_output: Option<Box<serde_json::Value>>,
         paused_lease: Option<Box<crate::types::capability::CapabilityLease>>,
+        /// Optional human-readable reason for the pause (e.g. tirith finding
+        /// summary). When `None`, downstream renderers fall back to a generic
+        /// "Tool 'X' requires Y" string. Boxed to keep the variant under
+        /// clippy's `result_large_err` threshold (matches the existing
+        /// `Option<Box<...>>` pattern on `resume_output` / `paused_lease`).
+        reason: Option<Box<String>>,
     },
 }
 

@@ -229,6 +229,72 @@ External content passes through multiple security layers:
 - No telemetry, analytics, or data sharing
 - Full audit log of all tool executions
 
+### Tirith pre-exec command scanning
+
+[Tirith](https://github.com/sheeki03/tirith) is an external terminal-security
+CLI that intercepts shell commands and inspects them for homograph URLs,
+pipe-to-shell patterns, ANSI/bidi terminal injection, obfuscated payloads,
+data-exfiltration, and similar attacks before they execute. IronClaw runs
+Tirith as a subprocess on every shell tool call that passes through the
+**interactive shell approval paths** (v1 dispatcher initial path, v1
+thread_ops deferred-replay path, and v2 effect bridge), so a flagged
+command surfaces as an approval prompt instead of running unattended.
+
+Tirith verdicts (block / warn / warn_ack) all become approvable prompts
+with `allow_always = false` — users cannot permanently allow-list a
+finding. **Fail-closed is a hard denial, not approvable**: when
+`safety.tirith_fail_open = false` and Tirith is missing, times out, or
+returns an unknown exit, the call is rejected outright rather than
+surfacing as a prompt the user could click through.
+
+Default-on with fail-open: machines without Tirith on PATH see no
+behavior change.
+
+#### Install
+
+| Method                | Command                                                              |
+|-----------------------|----------------------------------------------------------------------|
+| Homebrew              | `brew install sheeki03/tap/tirith`                                   |
+| Cargo                 | `cargo install tirith`                                               |
+| Release tarball / zip | <https://github.com/sheeki03/tirith/releases>                        |
+
+#### Configuration
+
+| Setting                       | Default     | Env var                       | Notes                                                                                |
+|-------------------------------|-------------|-------------------------------|--------------------------------------------------------------------------------------|
+| `safety.tirith_enabled`       | `true`      | `SAFETY_TIRITH_ENABLED`       | Master switch. `false` short-circuits before any subprocess spawn.                   |
+| `safety.tirith_bin`           | `tirith`    | `SAFETY_TIRITH_BIN`           | Bare name (PATH-resolved via `which`) or explicit path. `~/...` is expanded.         |
+| `safety.tirith_timeout_ms`    | `5000`      | `SAFETY_TIRITH_TIMEOUT_MS`    | Per-scan subprocess timeout.                                                         |
+| `safety.tirith_fail_open`     | `true`      | `SAFETY_TIRITH_FAIL_OPEN`     | `false` hard-denies on missing binary, timeout, or unknown exit (never approvable).  |
+
+#### Behavior matrix
+
+| Tirith state                          | `fail_open=true` (default)                              | `fail_open=false`                                          |
+|---------------------------------------|---------------------------------------------------------|------------------------------------------------------------|
+| Binary present, exit 0 (Allow)        | Tool runs (subject to existing approval rules)          | Tool runs (subject to existing approval rules)             |
+| Binary present, exit 1 (Block)        | Approval prompt with finding, `allow_always = false`    | Approval prompt with finding, `allow_always = false`       |
+| Binary present, exit 2 (Warn)         | Approval prompt with finding, `allow_always = false`    | Approval prompt with finding, `allow_always = false`       |
+| Binary present, exit 3 (WarnAck)      | Approval prompt with finding, `allow_always = false`    | Approval prompt with finding, `allow_always = false`       |
+| Binary missing / spawn fail / timeout | Falls through to existing approval logic                | **Hard rejection** (never an approval prompt)              |
+| Binary present, unknown exit          | Falls through to existing approval logic                | **Hard rejection** (never an approval prompt)              |
+| Tool != `shell` (e.g. `http`)         | Helper short-circuits to Allow before spawn             | Helper short-circuits to Allow before spawn                |
+
+#### Coverage in this release
+
+| Path                                                              | Scanned? |
+|-------------------------------------------------------------------|----------|
+| v1 dispatcher initial tool-call (`src/agent/dispatcher.rs`)       | Yes      |
+| v1 thread_ops deferred-replay (`src/agent/thread_ops.rs`)         | Yes      |
+| v2 effect bridge (`src/bridge/effect_adapter.rs`)                 | Yes      |
+| Autonomous worker / job (`src/worker/job.rs`)                     | Not yet  |
+| Scheduler (`src/agent/scheduler.rs`)                              | Not yet  |
+| Routine engine (`src/agent/routine_engine.rs`)                    | Not yet  |
+| Container-mode shell dispatch                                     | Not yet  |
+| Inline `ShellTool::execute_command` defense-in-depth              | Not yet  |
+
+The non-interactive paths and the inline defense-in-depth guard are
+deliberate follow-ups — see the design notes in the upstream PR.
+
 ## Architecture
 
 ```

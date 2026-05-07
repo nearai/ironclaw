@@ -21,6 +21,7 @@ pub(crate) mod shell;
 pub mod skill_tools;
 pub mod system;
 mod time;
+pub mod tirith_guard;
 mod tool_info;
 
 pub use echo::EchoTool;
@@ -52,6 +53,10 @@ pub use shell::ShellTool;
 pub use skill_tools::{SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool};
 pub use system::{SystemToolsListTool, SystemVersionTool};
 pub use time::TimeTool;
+pub use tirith_guard::{
+    TirithAction, TirithConfig, TirithFinding, TirithPreflightDecision, TirithVerdict,
+    tirith_preflight,
+};
 pub use tool_info::ToolInfoTool;
 mod html_converter;
 pub mod image_analyze;

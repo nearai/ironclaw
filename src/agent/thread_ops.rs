@@ -1689,17 +1689,78 @@ impl Agent {
 
             // === Phase 1: Preflight (sequential) ===
             // Walk deferred tools checking approval. Collect runnable
-            // tools; stop at the first that needs approval.
-            let mut runnable: Vec<crate::llm::ToolCall> = Vec::new();
-            let mut approval_needed: Option<(
+            // tools; stop at the first that needs approval. The 5-tuple
+            // shape mirrors the same loop in `src/agent/dispatcher.rs` —
+            // kept module-local since it's per-loop scratch state, not API.
+            type ApprovalNeeded = (
                 usize,
                 crate::llm::ToolCall,
                 Arc<dyn crate::tools::Tool>,
-                bool, // allow_always
-            )> = None;
+                bool,           // allow_always
+                Option<String>, // optional tirith-supplied description override
+            );
+            let mut runnable: Vec<crate::llm::ToolCall> = Vec::new();
+            let mut approval_needed: Option<ApprovalNeeded> = None;
 
-            for (idx, tc) in deferred_tool_calls.iter().enumerate() {
+            // Deferred tool calls inherit the channel of the originating
+            // message. Mirror dispatcher.rs's relay auto-deny so a tirith
+            // finding (or any approval prompt) cannot get stuck or be prompt-
+            // injected from a shared channel.
+            let in_non_dm_relay_deferred = {
+                let is_relay = message.channel.ends_with("-relay");
+                let is_dm = message.metadata.get("event_type").and_then(|v| v.as_str())
+                    == Some("direct_message");
+                is_relay && !is_dm
+            };
+
+            // Indices of deferred tool calls rejected synchronously by tirith
+            // (Deny outcome, or relay-channel rejection of a flagged call).
+            // Captured here so the post-flight loop can push synthetic tool-
+            // result messages for them — the existing post-flight code only
+            // walks `runnable`, so anything we want sanitized + recorded in
+            // context must show up either in runnable or in the rejection
+            // bookkeeping below.
+            let mut deferred_rejections: Vec<(usize, crate::llm::ToolCall, String)> = Vec::new();
+
+            'preflight: for (idx, tc) in deferred_tool_calls.iter().enumerate() {
                 if let Some(tool) = self.tools().get(&tc.name).await {
+                    // Tirith pre-exec scan runs first — auto_approve_tools
+                    // cannot bypass it. Scan the resolved tool's canonical
+                    // `name()`, not `tc.name`, so a shell alias cannot
+                    // sneak past the helper's `tool_name == "shell"` check.
+                    let tirith_decision = match self.tools().tirith_config() {
+                        Some(cfg) => {
+                            crate::tools::builtin::tirith_preflight(tool.name(), &tc.arguments, cfg)
+                                .await
+                        }
+                        None => crate::tools::builtin::TirithPreflightDecision::Allow,
+                    };
+                    match tirith_decision {
+                        crate::tools::builtin::TirithPreflightDecision::Allow => {}
+                        crate::tools::builtin::TirithPreflightDecision::Approval { reason } => {
+                            if in_non_dm_relay_deferred {
+                                let reject_msg = format!(
+                                    "Tool '{}' was flagged by content scanning and cannot run \
+                                     in shared channels. Ask the user to message me directly \
+                                     (DM) to use this tool. Finding: {}",
+                                    tc.name, reason
+                                );
+                                deferred_rejections.push((idx, tc.clone(), reject_msg));
+                                continue 'preflight;
+                            }
+                            approval_needed = Some((idx, tc.clone(), tool, false, Some(reason)));
+                            break 'preflight;
+                        }
+                        crate::tools::builtin::TirithPreflightDecision::Deny { reason } => {
+                            let reject_msg = format!(
+                                "Tool '{}' was rejected by content scanning: {}",
+                                tc.name, reason
+                            );
+                            deferred_rejections.push((idx, tc.clone(), reject_msg));
+                            continue 'preflight;
+                        }
+                    }
+
                     // Match dispatcher.rs: when auto_approve_tools is true, skip
                     // all approval checks (including ApprovalRequirement::Always).
                     let (needs_approval, allow_always) = if self.config.auto_approve_tools {
@@ -1719,7 +1780,7 @@ impl Agent {
                     };
 
                     if needs_approval {
-                        approval_needed = Some((idx, tc.clone(), tool, allow_always));
+                        approval_needed = Some((idx, tc.clone(), tool, allow_always, None));
                         break; // remaining tools stay deferred
                     }
                 }
@@ -1870,8 +1931,63 @@ impl Agent {
             // === Phase 3: Post-flight (sequential, in original order) ===
             // Process all results before any conditional return so every
             // tool result is recorded in the session audit trail.
+            //
+            // Order is the original deferred-call order. Tirith-driven
+            // rejections (Deny / relay-channel block) and runnable execution
+            // results are interleaved here so that for a deferred sequence
+            // `[A=runnable, B=rejected, C=runnable]` the LLM sees
+            // A-result, B-rejection, C-result rather than B-rejection
+            // sandwiched outside the runnable pair.
+            let approval_idx_limit = approval_needed.as_ref().map(|n| n.0).unwrap_or(usize::MAX);
+            let mut rejection_by_id: std::collections::HashMap<String, String> =
+                deferred_rejections
+                    .into_iter()
+                    .map(|(_, tc, msg)| (tc.id, msg))
+                    .collect();
+            let mut exec_by_id: std::collections::HashMap<String, Result<String, Error>> =
+                exec_results.into_iter().map(|(tc, r)| (tc.id, r)).collect();
 
-            for (tc, deferred_result) in exec_results {
+            for (idx, tc) in deferred_tool_calls.iter().enumerate() {
+                if idx >= approval_idx_limit {
+                    break;
+                }
+
+                if let Some(reject_msg) = rejection_by_id.remove(&tc.id) {
+                    let synthetic: Result<String, String> = Err(reject_msg);
+                    let (deferred_content, _) = crate::tools::execute::process_tool_result(
+                        self.safety(),
+                        &tc.name,
+                        &tc.id,
+                        &synthetic,
+                    );
+                    {
+                        let mut sess = session.lock().await;
+                        if let Some(thread) = sess.threads.get_mut(&thread_id)
+                            && let Some(turn) = thread.last_turn_mut()
+                        {
+                            turn.record_tool_error_for(&tc.id, deferred_content.clone());
+                        }
+                    }
+                    context_messages.push(ChatMessage::tool_result(
+                        &tc.id,
+                        &tc.name,
+                        deferred_content,
+                    ));
+                    continue;
+                }
+
+                let Some(deferred_result) = exec_by_id.remove(&tc.id) else {
+                    // Defensive: an unmatched id here would mean Phase-1
+                    // book-keeping drifted. Skip rather than panic so a
+                    // single inconsistency doesn't drop the entire turn.
+                    tracing::debug!(
+                        %thread_id,
+                        tool = %tc.name,
+                        "deferred tool call had no execution result and no rejection — skipping"
+                    );
+                    continue;
+                };
+
                 if let Ok(ref output) = deferred_result
                     && !output.is_empty()
                 {
@@ -1931,7 +2047,9 @@ impl Agent {
             }
 
             // Handle approval if a tool needed it
-            if let Some((approval_idx, tc, tool, allow_always)) = approval_needed {
+            if let Some((approval_idx, tc, tool, allow_always, description_override)) =
+                approval_needed
+            {
                 // Emit auth prompt alongside the approval card so the user
                 // sees the connect button without waiting for approval to resolve.
                 if let Some((ref ext_name, ref auth_data)) = selected_auth_prompt {
@@ -1952,7 +2070,8 @@ impl Agent {
                     tool_name: tc.name.clone(),
                     parameters: tc.arguments.clone(),
                     display_parameters: redact_params(&tc.arguments, tool.sensitive_params()),
-                    description: tool.description().to_string(),
+                    description: description_override
+                        .unwrap_or_else(|| tool.description().to_string()),
                     tool_call_id: tc.id.clone(),
                     context_messages: context_messages.clone(),
                     deferred_tool_calls: deferred_tool_calls[approval_idx + 1..].to_vec(),

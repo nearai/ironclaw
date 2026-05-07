@@ -516,7 +516,9 @@ impl AppBuilder {
         } else {
             crate::tools::EngineVersion::V1
         };
-        let mut registry = ToolRegistry::new().with_engine_version(engine_version);
+        let mut registry = ToolRegistry::new()
+            .with_engine_version(engine_version)
+            .with_tirith_config(self.config.tirith.clone());
         if let Some(ref db) = self.db {
             registry = registry.with_database(Arc::clone(db));
         }

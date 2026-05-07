@@ -1030,7 +1030,7 @@ async fn handle_execute_code_step(
                 "had_error": result.failure.is_some(),
                 "pending_gate": result.need_approval.as_ref().map(|na| {
                     match na {
-                        ThreadOutcome::GatePaused { gate_name, action_name, call_id, parameters, resume_kind, resume_output, paused_lease } => serde_json::json!({
+                        ThreadOutcome::GatePaused { gate_name, action_name, call_id, parameters, resume_kind, resume_output, paused_lease, reason } => serde_json::json!({
                             "gate_paused": true,
                             "gate_name": gate_name,
                             "action_name": action_name,
@@ -1039,6 +1039,7 @@ async fn handle_execute_code_step(
                             "resume_kind": serde_json::to_value(resume_kind).unwrap_or_default(),
                             "resume_output": resume_output,
                             "paused_lease": paused_lease,
+                            "reason": reason,
                         }),
                         _ => serde_json::Value::Null,
                     }
@@ -1351,6 +1352,7 @@ async fn handle_execute_action(
             resume_kind,
             resume_output,
             paused_lease,
+            reason,
         }) => {
             let _ = leases.refund_use(lease.id).await;
             let output = serde_json::json!({"status": "gate_paused", "gate_name": gate_name});
@@ -1361,7 +1363,7 @@ async fn handle_execute_action(
                     action_name: name.clone(),
                     call_id: call_id.clone(),
                     parameters: Some((*parameters).clone()),
-                    description: None,
+                    description: reason.as_deref().cloned(),
                     allow_always: match resume_kind.as_ref() {
                         crate::gate::ResumeKind::Approval { allow_always } => Some(*allow_always),
                         _ => None,
@@ -1904,13 +1906,14 @@ async fn execute_single_action(
             resume_kind,
             resume_output,
             paused_lease,
+            reason,
         }) => {
             let output = serde_json::json!({"status": "gate_paused", "gate_name": &gate_name});
             let event = EventKind::ApprovalRequested {
                 action_name: name.to_string(),
                 call_id: call_id.to_string(),
                 parameters: Some((*parameters).clone()),
-                description: None,
+                description: reason.as_deref().cloned(),
                 allow_always: match resume_kind.as_ref() {
                     crate::gate::ResumeKind::Approval { allow_always } => Some(*allow_always),
                     _ => None,
@@ -2875,6 +2878,10 @@ fn parse_outcome(result: &serde_json::Value) -> ThreadOutcome {
                     .get("paused_lease")
                     .cloned()
                     .and_then(|value| serde_json::from_value(value).ok()),
+                reason: result
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .map(|s| Box::new(s.to_string())),
             }
         }
         _ => ThreadOutcome::Completed { response: None },
@@ -3797,6 +3804,7 @@ mod tests {
             resume_kind: crate::gate::ResumeKind::Approval { allow_always: true },
             resume_output: None,
             paused_lease: None,
+            reason: None,
         };
         normalize_pause_outcome(&mut thread, &outcome).unwrap();
         assert_eq!(thread.state, ThreadState::Waiting);

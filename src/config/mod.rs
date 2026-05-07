@@ -66,7 +66,7 @@ pub use self::oauth::OAuthConfig;
 pub use self::relay::RelayConfig;
 pub use self::routines::RoutineConfig;
 pub use self::safety::SafetyConfig;
-use self::safety::resolve_safety_config;
+use self::safety::{resolve_safety_config, resolve_tirith_config};
 pub use self::sandbox::{AcpModeConfig, ClaudeCodeConfig, SandboxModeConfig};
 pub use self::search::WorkspaceSearchConfig;
 pub use self::secrets::SecretsConfig;
@@ -109,6 +109,9 @@ pub struct Config {
     pub channels: ChannelsConfig,
     pub agent: AgentConfig,
     pub safety: SafetyConfig,
+    /// Pre-exec scanning of shell tool calls via the external Tirith CLI.
+    /// See <https://github.com/sheeki03/tirith> for the upstream project.
+    pub tirith: crate::tools::builtin::TirithConfig,
     pub wasm: WasmConfig,
     pub secrets: SecretsConfig,
     pub builder: BuilderModeConfig,
@@ -205,6 +208,15 @@ impl Config {
             safety: SafetyConfig {
                 max_output_length: 100_000,
                 injection_check_enabled: false,
+            },
+            // Production default for `tirith.enabled` is `true`, but tests
+            // run on machines/CI that may happen to have `tirith` on PATH;
+            // leaving it enabled would surface surprise approval pauses in
+            // suites unrelated to tirith. Tests that exercise tirith opt
+            // back in via `ToolRegistry::with_tirith_config(...)`.
+            tirith: crate::tools::builtin::TirithConfig {
+                enabled: false,
+                ..crate::tools::builtin::TirithConfig::default()
             },
             wasm: WasmConfig {
                 enabled: false,
@@ -592,6 +604,7 @@ impl Config {
             channels,
             agent: AgentConfig::resolve(settings)?,
             safety: resolve_safety_config(settings)?,
+            tirith: resolve_tirith_config(settings)?,
             wasm: WasmConfig::resolve(settings)?,
             secrets: SecretsConfig::resolve().await?,
             builder: BuilderModeConfig::resolve(settings)?,
