@@ -405,7 +405,6 @@ I18n.register('zh-CN', {
   'tools.defaultBadge': '默认',
   'tools.noTools': '未注册任何工具',
   'tools.saveFailed': '保存失败：{message}',
-  'tools.help': '"始终允许" 直接执行工具，无需询问。"每次询问" 在每次调用前暂停并请求你的批准。"已禁用" 会对智能体彻底隐藏该工具。安全的只读工具（HTTP GET、time、JSON、内存搜索）默认 "始终允许"；写入或会消费资源的工具（shell、文件写入、重启）默认 "每次询问"。',
 
 
   // TEE

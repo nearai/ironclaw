@@ -1,15 +1,4 @@
 /* --- Tool Permissions Tab --- */
-.tool-permissions-help {
-  font-size: var(--text-xs);
-  color: var(--text-muted);
-  line-height: 1.5;
-  margin: 0 0 var(--space-3) 0;
-  padding: var(--space-2) var(--space-3);
-  background: var(--bg-secondary);
-  border-radius: var(--radius-md);
-  border-left: 2px solid var(--accent);
-}
-
 .tool-permission-row {
   display: flex;
   align-items: center;

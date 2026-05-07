@@ -406,7 +406,6 @@ I18n.register('en', {
   'tools.defaultBadge': 'Default',
   'tools.noTools': 'No tools registered',
   'tools.saveFailed': 'Failed to save: {message}',
-  'tools.help': 'Always allow runs the tool without asking. Ask each time pauses the agent for your approval before every call. Disabled hides the tool from the agent entirely. Safe read-only tools (HTTP GET, time, JSON, memory search) default to Always allow; tools that write or spend (shell, file write, restart) default to Ask each time.',
   
   
   // TEE
