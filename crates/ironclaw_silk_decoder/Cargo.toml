@@ -1,0 +1,19 @@
+# Standalone — explicitly NOT part of the IronClaw workspace so the main
+# `cargo build` does not pull in `silk-codec` (which requires `bindgen` +
+# `libclang` and a C toolchain). See `crates/ironclaw_silk_decoder/README.md`.
+[workspace]
+
+[package]
+name = "ironclaw_silk_decoder"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Standalone helper that decodes WeChat raw SILK v3 voice notes to WAV. Isolated here so the main IronClaw build does not require libclang."
+
+[[bin]]
+name = "ironclaw-silk-decoder"
+path = "src/main.rs"
+
+[dependencies]
+silk-codec = "0.2.0"

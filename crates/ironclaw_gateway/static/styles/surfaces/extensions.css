@@ -191,15 +191,18 @@
 /* WASM channel setup stepper */
 .ext-stepper {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 0;
   margin: 8px 0 4px;
+  min-width: 0;
 }
 
 .stepper-step {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 0;
 }
 
 .stepper-circle {
@@ -216,7 +219,10 @@
 
 .stepper-label {
   font-size: var(--text-xs);
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.25;
+  min-width: 0;
 }
 
 .stepper-step.completed .stepper-circle {
@@ -269,11 +275,11 @@
 }
 
 .stepper-connector {
-  width: 20px;
   height: 2px;
   background: var(--border);
   margin: 0 4px;
-  flex-shrink: 0;
+  flex: 0 0 20px;
+  align-self: center;
 }
 
 .stepper-connector.completed {
@@ -544,6 +550,77 @@
   color: var(--text-secondary);
   font-size: var(--text-sm);
   line-height: 1.5;
+}
+
+.configure-verification {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 16px 0 0 0;
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+}
+
+.configure-qr-login {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 16px 0 0 0;
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+}
+
+.configure-verification-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.configure-verification-instructions {
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.configure-verification-code {
+  display: inline-block;
+  width: fit-content;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+}
+
+.configure-verification-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--accent);
+  background: var(--accent-subtle);
+  color: var(--accent, var(--text-link, #4ea3ff));
+  font-size: var(--text-sm);
+  font-weight: 600;
+  text-decoration: none;
+  transition: background var(--transition-fast), transform 150ms var(--ease-spring);
+}
+
+.configure-verification-link:hover {
+  background: var(--badge-sandbox-bg);
+  transform: translateY(-1px);
+  text-decoration: none;
+}
+
+.configure-verification-link:active {
+  transform: scale(0.98);
 }
 
 .configure-inline-error {

@@ -367,6 +367,7 @@ mod tests {
             tools: vec![format!("{name}_send")],
             needs_setup: false,
             has_auth: true,
+            requires_binding: false,
             installed: true,
             activation_error: None,
             version: None,

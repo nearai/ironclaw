@@ -150,6 +150,116 @@ pub trait ExecutionGate: Send + Sync {
     async fn evaluate(&self, ctx: &GateContext<'_>) -> GateDecision;
 }
 
+// ── Inline gate await ────────────────────────────────────────
+
+/// What the executor needs to surface to the user when an `Approval`
+/// gate fires inside a live execution.
+///
+/// The host implementation of [`GateController`] is responsible for:
+/// 1. Persisting whatever metadata the UI / channel layer needs to
+///    render the approval prompt.
+/// 2. Dispatching the prompt to the originating channel.
+/// 3. Awaiting the user's response and returning it as a
+///    [`GateResolution`] without re-entering the engine.
+///
+/// Carries `thread_id` and `user_id` so a single shared controller
+/// can route the request to the right host-side per-execution context
+/// (conversation id, channel metadata, etc.) without the engine having
+/// to thread bridge-internal types through.
+#[derive(Debug, Clone)]
+pub struct GatePauseRequest {
+    pub thread_id: crate::types::thread::ThreadId,
+    pub user_id: String,
+    pub gate_name: String,
+    pub action_name: String,
+    pub call_id: String,
+    pub parameters: serde_json::Value,
+    pub resume_kind: ResumeKind,
+    /// Originating conversation, if any. Lets the host route an inline
+    /// gate to the right UI surface when the same user has multiple
+    /// concurrent conversations (e.g. two browser tabs). `None` for
+    /// background mission threads.
+    pub conversation_id: Option<crate::types::conversation::ConversationId>,
+}
+
+/// Host-supplied callback that pauses a live engine execution until
+/// the user resolves an `Approval` gate.
+///
+/// This is the mechanism that lets both Tier 0 (structured) and Tier 1
+/// (CodeAct/Monty) executions wait for user input *without* unwinding
+/// the call stack. The executor stays inside its own loop awaiting
+/// `pause()`, so all in-memory state (Monty VM frame, partially-executed
+/// parallel batch, leases) is preserved across the wait. On resolution
+/// the executor proceeds inline — no thread re-entry, no replay, no
+/// double-execution of side effects from earlier tool calls in the
+/// same step.
+///
+/// Restricted to `ResumeKind::Approval`. Authentication and External
+/// resume kinds keep their existing re-entry-based flow because their
+/// resolution installs new state (credentials, callback payloads) that
+/// only takes effect on the next run-through, not via direct hand-back
+/// to the suspended call.
+#[async_trait]
+pub trait GateController: Send + Sync {
+    /// Pause execution until the user resolves the gate.
+    ///
+    /// Implementations MUST eventually return some [`GateResolution`]
+    /// (returning `Cancelled` is acceptable on shutdown / timeout).
+    /// They MUST NOT block forever — callers rely on this future
+    /// completing so the surrounding execution can either continue or
+    /// terminate cleanly.
+    async fn pause(&self, request: GatePauseRequest) -> GateResolution;
+
+    /// Wake any [`pause`] futures currently parked on `thread_id` with
+    /// [`GateResolution::Cancelled`] and discard their pending state.
+    ///
+    /// `ThreadManager::stop_thread()` calls this before sending
+    /// `ThreadSignal::Stop`. Without it, an engine task parked inside
+    /// `pause()` is not polling the thread signal channel and will
+    /// continue waiting for the user (or up to the host's gate-expiry
+    /// window) before observing the stop request — leaving the running
+    /// task and pending prompt orphaned.
+    ///
+    /// Default implementation is a no-op; overrides should be
+    /// idempotent and tolerant of concurrent calls. Implementations
+    /// that don't track per-thread waiters can ignore this call.
+    ///
+    /// [`pause`]: GateController::pause
+    async fn cancel_thread(&self, _thread_id: crate::types::thread::ThreadId) {}
+}
+
+/// Default [`GateController`] that cancels every pause request.
+///
+/// `ThreadExecutionContext::gate_controller` is non-optional: every
+/// execution context must carry *some* controller. This impl is the
+/// drop-in for code paths where pausing is meaningless or already
+/// resolved upstream:
+///
+/// - **Post-resolution replay** (`execute_pending_gate_action`) — the
+///   gate has already been resolved before this call site runs.
+/// - **Mission protected writes** — background paths with no
+///   originating user channel to surface a prompt on.
+/// - **Tests** that don't exercise the gate flow.
+///
+/// Returning [`GateResolution::Cancelled`] surfaces as a typed denial
+/// in both Tier 0 and Tier 1 — never as the original user-visible
+/// "execution paused by gate" bug message.
+pub struct CancellingGateController;
+
+impl CancellingGateController {
+    /// Construct as a `dyn`-trait Arc, the form most call sites need.
+    pub fn arc() -> std::sync::Arc<dyn GateController> {
+        std::sync::Arc::new(Self)
+    }
+}
+
+#[async_trait]
+impl GateController for CancellingGateController {
+    async fn pause(&self, _request: GatePauseRequest) -> GateResolution {
+        GateResolution::Cancelled
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

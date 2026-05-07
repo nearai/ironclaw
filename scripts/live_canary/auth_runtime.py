@@ -69,9 +69,11 @@ async def wait_for_extension_state(
     timeout: float = 60.0,
 ) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
+    last_observed: dict[str, Any] | None = None
     while time.monotonic() < deadline:
         extension = await get_extension(base_url, token, name)
         if extension is not None:
+            last_observed = extension
             if authenticated is not None and extension.get("authenticated") != authenticated:
                 await _sleep()
                 continue
@@ -80,7 +82,25 @@ async def wait_for_extension_state(
                 continue
             return extension
         await _sleep()
-    raise CanaryError(f"Timed out waiting for extension state: {name}")
+    # Surface what we actually observed so the failure is debuggable
+    # without IronClaw gateway logs (CI artifacts don't capture them).
+    expected_parts = []
+    if authenticated is not None:
+        expected_parts.append(f"authenticated={authenticated}")
+    if active is not None:
+        expected_parts.append(f"active={active}")
+    expected = ", ".join(expected_parts) if expected_parts else "(any)"
+    if last_observed is None:
+        observed = "extension never appeared in /api/extensions listing"
+    else:
+        observed = (
+            f"last observed: authenticated={last_observed.get('authenticated')}, "
+            f"active={last_observed.get('active')}"
+        )
+    raise CanaryError(
+        f"Timed out waiting for extension state: {name} "
+        f"(expected {expected}; {observed})"
+    )
 
 
 async def install_extension(

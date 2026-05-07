@@ -375,12 +375,23 @@ async fn fetch_provider_models(req: ListModelsRequest) -> ListModelsResponse {
 /// (has_api_key presence flag, model override, base_url override).
 /// API keys are never returned — only a boolean `has_api_key`.
 pub async fn llm_providers_handler(
+    State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(_user): AuthenticatedUser,
 ) -> Json<serde_json::Value> {
-    Json(build_llm_providers())
+    // For NEAR AI, the OAuth onboarding writes a session token into
+    // `SessionManager` (loaded from `~/.ironclaw/session.json` or the
+    // `NEARAI_SESSION_TOKEN` env var) and never populates `NEARAI_API_KEY`.
+    // The configure surface treats `has_api_key` as the credential gate, so
+    // a host configured with only a session token would otherwise show NEAR
+    // AI as "Not Configured" and hide the Use button.
+    let nearai_has_session_token = match state.llm_session_manager.as_ref() {
+        Some(session) => session.has_token().await,
+        None => false,
+    };
+    Json(build_llm_providers(nearai_has_session_token))
 }
 
-fn build_llm_providers() -> serde_json::Value {
+fn build_llm_providers(nearai_has_session_token: bool) -> serde_json::Value {
     use crate::config::helpers::optional_env;
     use crate::llm::registry::ProviderRegistry;
 
@@ -408,10 +419,12 @@ fn build_llm_providers() -> serde_json::Value {
         entry.insert("api_key_required".into(), true.into());
         entry.insert("base_url_required".into(), false.into());
         entry.insert("can_list_models".into(), true.into());
-        // Env defaults
+        // Env defaults — true if either an env API key OR a loaded session
+        // token is present; the frontend treats either as "credentials
+        // configured" because both reach NEAR AI as `Bearer <token>`.
         entry.insert(
             "has_api_key".into(),
-            read_env("NEARAI_API_KEY").is_some().into(),
+            (read_env("NEARAI_API_KEY").is_some() || nearai_has_session_token).into(),
         );
         if let Some(model) = read_env("NEARAI_MODEL") {
             entry.insert("env_model".into(), serde_json::Value::String(model));
@@ -496,14 +509,17 @@ fn build_llm_providers() -> serde_json::Value {
 /// configured), resolve it from:
 /// 1. the encrypted secrets store (per-user vaulted key), then
 /// 2. for built-in providers, the environment variable declared by the
-///    registry (e.g. `NEARAI_API_KEY`, `OPENAI_API_KEY`).
+///    registry (e.g. `NEARAI_API_KEY`, `OPENAI_API_KEY`), then
+/// 3. for NEAR AI specifically, the live `SessionManager` token (loaded
+///    from `~/.ironclaw/session.json` or set via `NEARAI_SESSION_TOKEN`).
 ///
 /// Fallback (2) matters because the default onboarding flow
 /// (`api_key_login()` in `llm/session.rs`) writes the key to the
 /// `NEARAI_API_KEY` env var + `~/.ironclaw/.env`, not to the secrets
-/// vault. Without the fallback, `list_models` / `test_connection`
-/// requests from the configure dialog end up with no Authorization
-/// header and the provider responds 401 even though `has_api_key`
+/// vault. Fallback (3) covers the OAuth path: the session-token onboarding
+/// writes only `~/.ironclaw/session.json`, so a host that has neither
+/// `NEARAI_API_KEY` nor a vaulted secret would otherwise hit the configure
+/// dialog with no Authorization header even though `has_api_key`
 /// (surfaced by `build_llm_providers`) is true.
 async fn resolve_api_key_from_secrets(
     state: &GatewayState,
@@ -539,6 +555,25 @@ async fn resolve_api_key_from_secrets(
         && let Some(val) = crate::config::helpers::env_or_override(&env_name)
     {
         *api_key = Some(val);
+        return;
+    }
+
+    // 3. NEAR AI session-token fallback. The OAuth onboarding path and the
+    //    `NEARAI_SESSION_TOKEN` env var both end up in `SessionManager` but
+    //    write nothing to `NEARAI_API_KEY` or the secrets vault, so a host
+    //    where only a session token is configured (the default
+    //    `~/.ironclaw/session.json` setup) would otherwise hit the configure
+    //    dialog with no Authorization header. NEAR AI accepts the session
+    //    token as `Bearer <token>` exactly like an API key — same wire shape
+    //    used by `NearAiChatProvider::resolve_bearer_token`.
+    if pid == "nearai"
+        && !matches!(provider_type.as_deref(), Some("custom"))
+        && let Some(session) = state.llm_session_manager.as_ref()
+        && session.has_token().await
+        && let Ok(token) = session.get_token().await
+    {
+        use secrecy::ExposeSecret;
+        *api_key = Some(token.expose_secret().to_string());
     }
 }
 
@@ -633,7 +668,7 @@ mod tests {
             std::env::set_var("NEARAI_BASE_URL", "https://test.near.ai/v1");
         }
 
-        let result = build_llm_providers();
+        let result = build_llm_providers(false);
         let arr = result.as_array().expect("should be an array");
 
         let nearai = find_provider(arr, "nearai").expect("nearai entry");
@@ -671,8 +706,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_llm_providers_nearai_has_api_key_true_when_only_session_token() {
+        // Regression: a host with no `NEARAI_API_KEY` but a loaded session
+        // token (the default `~/.ironclaw/session.json` setup) was reported
+        // with `has_api_key: false`, so `isProviderConfigured` in
+        // `static/js/surfaces/config.js` hid the Use button and rendered a
+        // "Not Configured" badge — even though NEAR AI authenticates fine
+        // with the session token via `Bearer <token>`.
+        let result = build_llm_providers(true);
+        let arr = result.as_array().expect("should be an array");
+        let nearai = find_provider(arr, "nearai").expect("nearai entry");
+        assert_eq!(
+            nearai.get("has_api_key").and_then(|v| v.as_bool()),
+            Some(true),
+            "session-token-only NEAR AI must surface as configured"
+        );
+    }
+
+    #[tokio::test]
     async fn test_llm_providers_includes_registry_and_special_providers() {
-        let result = build_llm_providers();
+        let result = build_llm_providers(false);
         let arr = result.as_array().expect("should be an array");
 
         // Registry providers should be present
@@ -726,7 +779,7 @@ mod tests {
     async fn test_openai_compatible_exposes_base_url_required_true() {
         // Regression: openai_compatible has base_url_required=true (no default).
         // The frontend needs this flag to gate activation on a configured URL.
-        let result = build_llm_providers();
+        let result = build_llm_providers(false);
         let arr = result.as_array().expect("should be an array");
         let oc =
             find_provider(arr, "openai_compatible").expect("openai_compatible should be present");
@@ -1124,6 +1177,140 @@ mod tests {
             auth_header.as_deref(),
             Some(format!("Bearer {test_key}").as_str()),
             "handler must forward NEARAI_API_KEY env var as Authorization header"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_llm_list_models_falls_back_to_session_token_for_nearai() {
+        // Regression: OAuth onboarding writes the session token to
+        // ~/.ironclaw/session.json (loaded into `SessionManager`) but never
+        // populates `NEARAI_API_KEY` or the secrets vault. Without the
+        // session-token fallback in `resolve_api_key_from_secrets`, a host
+        // configured with only the session token (the canonical
+        // `NEARAI_BASE_URL=https://private.near.ai` setup) would send no
+        // Authorization header and NEAR AI would respond 401 — even though
+        // the running provider authenticates fine.
+        use std::sync::{Arc, Mutex};
+
+        use axum::body::Body;
+        use secrecy::SecretString;
+        use tower::ServiceExt;
+
+        // The env-var fallback runs before the session-token fallback, so
+        // `NEARAI_API_KEY` must be unset for this test to exercise the new
+        // path. Take `lock_env()` to serialize against the env-var test in
+        // this module that sets/unsets `NEARAI_API_KEY`.
+        let _env_lock = crate::config::helpers::lock_env();
+        // SAFETY: serialized via the lock above; mirrors the surrounding
+        // test pattern.
+        unsafe {
+            std::env::remove_var("NEARAI_API_KEY");
+            std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
+        }
+
+        let captured_auth: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let captured_auth_clone = Arc::clone(&captured_auth);
+        let mock = axum::Router::new().route(
+            "/v1/models",
+            axum::routing::get(move |headers: axum::http::HeaderMap| {
+                let auth = headers
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .map(String::from);
+                *captured_auth_clone.lock().unwrap() = auth;
+                async move {
+                    axum::Json(serde_json::json!({
+                        "data": [{"id": "mock-model"}]
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock server");
+        let addr = listener.local_addr().expect("mock server addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, mock).await;
+        });
+
+        // Build a `SessionManager` with a token seeded directly — same shape
+        // as `~/.ironclaw/session.json` having been loaded at startup.
+        let session = crate::llm::SessionManager::new_async(crate::llm::SessionConfig {
+            auth_base_url: "https://private.near.ai".to_string(),
+            session_path: std::env::temp_dir().join("ironclaw-test-no-such-file.json"),
+        })
+        .await;
+        let test_token = "sess_test_session_token_xyz";
+        session
+            .set_token(SecretString::from(test_token.to_string()))
+            .await;
+        let session = Arc::new(session);
+
+        // Build a state that exposes the session manager. `test_gateway_state`
+        // doesn't take a session manager argument; the Arc it returns is
+        // unique here so we can mutate the field in place rather than
+        // re-creating the whole struct.
+        let mut base = test_gateway_state(None);
+        Arc::get_mut(&mut base)
+            .expect("unique Arc returned by test_gateway_state")
+            .llm_session_manager = Some(session);
+        let state = base;
+
+        let app = Router::new()
+            .route("/api/llm/list_models", post(llm_list_models_handler))
+            .with_state(state);
+
+        // The session-token fallback is independent of the URL shape; use
+        // a 127.0.0.1 mock with `/v1` already on the base so
+        // `models_endpoint_base` returns it unchanged and the handler hits
+        // `/v1/models` on the mock.
+        let req_body = serde_json::json!({
+            "adapter": "nearai",
+            "base_url": format!("http://{addr}/v1"),
+            "provider_id": "nearai",
+            "provider_type": "builtin",
+        });
+
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/llm/list_models")
+            .header("content-type", "application/json")
+            .body(Body::from(req_body.to_string()))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "admin-user".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        let status = resp.status();
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+
+        // SAFETY: serialized via `lock_env()`.
+        unsafe {
+            std::env::remove_var("NO_PROXY");
+        }
+
+        assert_eq!(status, StatusCode::OK);
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json response");
+        assert_eq!(
+            parsed["ok"],
+            serde_json::Value::Bool(true),
+            "handler must report success: {parsed}"
+        );
+
+        let auth_header = captured_auth.lock().unwrap().clone();
+        assert_eq!(
+            auth_header.as_deref(),
+            Some(format!("Bearer {test_token}").as_str()),
+            "handler must forward the SessionManager token as Authorization header \
+             when no NEARAI_API_KEY / vaulted secret is available"
         );
     }
 }

@@ -88,6 +88,12 @@ function connectSSE(lastEventIdOverride) {
     // Refresh sidebar so stale spinners are removed immediately.
     processingThreads.clear();
     debouncedLoadThreads();
+    // Retry any first-load loader (chat history, threads, missions) that
+    // raced engine init and failed silently. SSE-accept implies the
+    // backend has stabilized — see init-auth.js for the rationale (#3274).
+    if (typeof runInitialHydrationRetry === 'function') {
+      runInitialHydrationRetry();
+    }
     sseHasConnectedBefore = true;
   };
 
@@ -177,7 +183,25 @@ function connectSSE(lastEventIdOverride) {
       _doneWithoutResponseTimer = null;
     }
     finalizeActivityGroup();
-    addMessage('assistant', data.content);
+
+    const messages = document.querySelectorAll('#chat-messages .message');
+    const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
+    const lastAssistantAlreadyHasResponse = Boolean(
+      lastMessage
+        && lastMessage.classList.contains('assistant')
+        && (lastMessage.getAttribute('data-raw') || '') === data.content
+    );
+
+    // Streamed responses already accumulated `data.content` into the
+    // bubble we just finalized. Separately, a thread switch or history
+    // refresh can render the completed response from /history before the
+    // matching SSE response arrives. In both cases, adding another bubble
+    // would render the same final assistant message twice. Only create a
+    // new bubble when the final response is not already the latest chat
+    // message (the normal non-streaming path).
+    if (!streamingMsg && !lastAssistantAlreadyHasResponse) {
+      addMessage('assistant', data.content);
+    }
     pruneOldMessages();
     enableChatInput();
     // Refresh thread list so new titles appear after first message
@@ -390,8 +414,6 @@ function connectSSE(lastEventIdOverride) {
 
   addTrackedEventListener('approval_needed', (e) => {
     const data = JSON.parse(e.data);
-    const hasThread = !!data.thread_id;
-    const forCurrentThread = !hasThread || isCurrentThread(data.thread_id);
     if (data.thread_id) {
       activeWorkStore.updateThread(data.thread_id, {
         statusText: ActivityEntry.t('activity.waitingApproval', 'Waiting for approval'),
@@ -399,9 +421,9 @@ function connectSSE(lastEventIdOverride) {
       });
     }
 
-    if (forCurrentThread) {
+    if (isCurrentThread(data.thread_id)) {
       showApproval(data);
-    } else {
+    } else if (data.thread_id) {
       // Keep thread list fresh when approval is requested in a background thread.
       unreadThreads.set(data.thread_id, (unreadThreads.get(data.thread_id) || 0) + 1);
       debouncedLoadThreads();
@@ -545,7 +567,7 @@ function connectSSE(lastEventIdOverride) {
   // Plan progress checklist
   addTrackedEventListener('plan_update', (e) => {
     const data = JSON.parse(e.data);
-    if (data.thread_id && !isCurrentThread(data.thread_id)) return;
+    if (!isCurrentThread(data.thread_id)) return;
     renderPlanChecklist(data);
   });
 }

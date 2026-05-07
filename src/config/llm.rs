@@ -181,9 +181,10 @@ impl LlmConfig {
         // The previously-selected model was tied to the unusable backend
         // (e.g. "openai/gpt-4o" for OpenRouter, "kimi-k2-turbo-preview" for
         // a custom kimi provider). Sending it to NearAI would 404. Clear it
-        // so resolve_model falls through to NearAI's default. The DB sync in
-        // Config::re_resolve_llm_with_secrets deletes the row persistently;
-        // this keeps the in-memory config consistent for the current process.
+        // so resolve_model falls through to NearAI's default. This is
+        // in-memory only — the user's DB-persisted selected_model is
+        // deliberately preserved so a transient hydration failure does not
+        // destroy their configured selection on next restart (#3229).
         fallback.selected_model = None;
         let cfg = Self::resolve(&fallback).map_err(|e| {
             tracing::error!(

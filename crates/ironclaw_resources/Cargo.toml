@@ -1,0 +1,20 @@
+[package]
+name = "ironclaw_resources"
+version = "0.1.0"
+edition = "2024"
+# Keep in sync with the workspace-level package.rust-version.
+rust-version = "1.92"
+description = "Resource reservation governor for IronClaw Reborn"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[dependencies]
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
+thiserror = "2"
+
+[dev-dependencies]
+rust_decimal_macros = "1"

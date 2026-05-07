@@ -1,0 +1,41 @@
+[package]
+name = "ironclaw_host_runtime"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+ironclaw_approvals = { path = "../ironclaw_approvals" }
+ironclaw_authorization = { path = "../ironclaw_authorization" }
+ironclaw_capabilities = { path = "../ironclaw_capabilities" }
+ironclaw_dispatcher = { path = "../ironclaw_dispatcher" }
+ironclaw_events = { path = "../ironclaw_events" }
+ironclaw_extensions = { path = "../ironclaw_extensions" }
+ironclaw_filesystem = { path = "../ironclaw_filesystem" }
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_mcp = { path = "../ironclaw_mcp" }
+ironclaw_network = { path = "../ironclaw_network" }
+ironclaw_processes = { path = "../ironclaw_processes" }
+ironclaw_resources = { path = "../ironclaw_resources" }
+ironclaw_run_state = { path = "../ironclaw_run_state" }
+ironclaw_safety = { path = "../ironclaw_safety" }
+ironclaw_scripts = { path = "../ironclaw_scripts" }
+ironclaw_secrets = { path = "../ironclaw_secrets" }
+ironclaw_trust = { path = "../ironclaw_trust" }
+ironclaw_wasm = { path = "../ironclaw_wasm" }
+rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
+secrecy = "0.10"
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "time"] }
+tracing = "0.1"
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt", "time"] }
+wat = "1.245.1"
+wit-component = "0.245.1"
+wit-parser = "0.245.1"

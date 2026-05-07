@@ -8,7 +8,7 @@
 //! 5. Embeddings
 //! 6. Channel configuration
 //! 7. Extensions (tool installation from registry)
-//! 8. Docker sandbox
+//! 8. Container sandbox
 //! 9. Heartbeat (background tasks)
 
 use std::collections::{HashMap, HashSet};
@@ -459,9 +459,9 @@ impl SetupWizard {
             print_step(7, total_steps, "Extensions");
             self.step_extensions().await?;
 
-            // Step 8: Docker Sandbox
-            print_step(8, total_steps, "Docker Sandbox");
-            self.step_docker_sandbox().await?;
+            // Step 8: Container Sandbox
+            print_step(8, total_steps, "Container Sandbox");
+            self.step_container_sandbox().await?;
             self.persist_after_step().await;
 
             // Step 9: Heartbeat
@@ -2936,7 +2936,7 @@ impl SetupWizard {
     }
 
     /// Step 8: Container Sandbox -- select runtime, configure, and validate.
-    async fn step_docker_sandbox(&mut self) -> Result<(), SetupError> {
+    async fn step_container_sandbox(&mut self) -> Result<(), SetupError> {
         print_info("IronClaw can execute code, run builds, and use tools inside");
         print_info("containers. This keeps your system safe -- commands from the LLM run");
         print_info("in an isolated sandbox with no access to your credentials, limited");

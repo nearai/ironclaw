@@ -68,7 +68,22 @@ fn check_mode_enabled(mode: JobMode, jm: &ContainerJobManager) -> Result<(), (St
     }
 }
 
-fn sandbox_job_creation_error_response(
+enum SandboxJobErrorContext {
+    CreateJob,
+    ApplyWorkspaceChanges,
+}
+
+impl SandboxJobErrorContext {
+    fn internal_message(&self) -> &'static str {
+        match self {
+            Self::CreateJob => "Failed to create sandbox job",
+            Self::ApplyWorkspaceChanges => "Failed to apply workspace changes",
+        }
+    }
+}
+
+fn sandbox_job_error_response(
+    context: SandboxJobErrorContext,
     error: &crate::error::OrchestratorError,
 ) -> (StatusCode, String) {
     if let Some(reason) = error.capability_contract_reason() {
@@ -76,10 +91,7 @@ fn sandbox_job_creation_error_response(
     } else {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!(
-                "Failed to create container: {}",
-                error.user_facing_message()
-            ),
+            context.internal_message().to_string(),
         )
     }
 }
@@ -386,7 +398,10 @@ pub async fn jobs_apply_changes_handler(
             StatusCode::CONFLICT,
             "No pending workspace changes to apply".to_string(),
         )),
-        Err(e) => Err(sandbox_job_creation_error_response(&e)),
+        Err(e) => Err(sandbox_job_error_response(
+            SandboxJobErrorContext::ApplyWorkspaceChanges,
+            &e,
+        )),
     }
 }
 
@@ -636,7 +651,10 @@ pub async fn jobs_restart_handler(
                             Some(chrono::Utc::now()),
                         )
                         .await;
-                    return Err(sandbox_job_creation_error_response(&e));
+                    return Err(sandbox_job_error_response(
+                        SandboxJobErrorContext::CreateJob,
+                        &e,
+                    ));
                 }
             };
 
@@ -1119,21 +1137,34 @@ mod tests {
             reason: "kubernetes runtime is currently Stage 1 worker runtime. It can run workers, but not project-backed jobs because project content is not available yet. Use Docker for jobs that need a project directory.".to_string(),
         };
 
-        let (status, body) = sandbox_job_creation_error_response(&error);
+        let (status, body) = sandbox_job_error_response(SandboxJobErrorContext::CreateJob, &error);
         assert_eq!(status, StatusCode::CONFLICT);
         assert!(body.contains("Stage 1 worker runtime"));
-        assert!(!body.contains("Failed to create container"));
+        assert!(!body.contains("Failed to create sandbox job"));
     }
 
     #[test]
-    fn test_sandbox_job_creation_error_response_keeps_internal_failures_internal() {
+    fn test_sandbox_job_creation_error_response_uses_context_specific_message() {
         let error = crate::error::OrchestratorError::ContainerCreationFailed {
             job_id: Uuid::new_v4(),
             reason: "failed to write bootstrap file".to_string(),
         };
 
-        let (status, body) = sandbox_job_creation_error_response(&error);
+        let (status, body) = sandbox_job_error_response(SandboxJobErrorContext::CreateJob, &error);
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(body.contains("Failed to create container"));
+        assert_eq!(body, "Failed to create sandbox job");
+    }
+
+    #[test]
+    fn test_sandbox_apply_changes_error_response_uses_context_specific_message() {
+        let error = crate::error::OrchestratorError::ContainerCreationFailed {
+            job_id: Uuid::new_v4(),
+            reason: "failed to write bootstrap file".to_string(),
+        };
+
+        let (status, body) =
+            sandbox_job_error_response(SandboxJobErrorContext::ApplyWorkspaceChanges, &error);
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body, "Failed to apply workspace changes");
     }
 }

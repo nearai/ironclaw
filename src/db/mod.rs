@@ -1192,6 +1192,15 @@ pub trait ChannelPairingStore: Send + Sync {
         channel: &str,
         external_id: &str,
     ) -> Result<(), DatabaseError>;
+
+    /// Create or update a channel identity directly (trusted path, e.g. OAuth).
+    /// Inserts into channel_identities without requiring a pairing code.
+    async fn create_channel_identity(
+        &self,
+        channel: &str,
+        external_id: &str,
+        owner_id: &str,
+    ) -> Result<(), DatabaseError>;
 }
 
 /// Generates an 8-character pairing code from an unambiguous alphabet.

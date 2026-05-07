@@ -6,6 +6,16 @@ function startGatewayStatusPolling() {
   gatewayStatusInterval = setInterval(fetchGatewayStatus, 30000);
 }
 
+// Sets userHasLegacyRoutines from /api/routines/summary. Resolves
+// regardless of fetch outcome so the caller's chained UI work always
+// runs. A failure leaves the global at its current value (default false),
+// which matches the pre-fix behaviour for v2 deployments.
+function refreshLegacyRoutinesPresence() {
+  return apiFetch('/api/routines/summary').then(function(s) {
+    userHasLegacyRoutines = !!(s && (s.total || 0) > 0);
+  }).catch(function() {});
+}
+
 function formatTokenCount(n) {
   if (n == null || n === 0) return '0';
   if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
@@ -30,20 +40,38 @@ function shortModelName(model) {
 
 function fetchGatewayStatus() {
   apiFetch('/api/gateway/status').then(function(data) {
-    activeWorkStore.setEngineV2Enabled(!!data.engine_v2);
-    applyEngineModeUi();
+    // Single canonical wire field: `engine_v2_enabled`. Reading two
+    // different field names from the same response was a divergence
+    // hazard called out in .claude/rules/types.md and triggered the
+    // ordering bug behind #2982.
+    var enabled = !!data.engine_v2_enabled;
+
+    // Apply engine v2 / v1 tab visibility once. Set the global before
+    // any UI helper reads it. The flag flips synchronously so that a
+    // second status poll firing while the first refresh is still in
+    // flight does not kick off a duplicate /api/routines/summary
+    // request. refreshLegacyRoutinesPresence swallows fetch errors, so
+    // the trailing .then() still runs on failure with
+    // userHasLegacyRoutines = false (the safe default).
+    if (!engineModeApplied) {
+      engineModeApplied = true;
+      engineV2Enabled = enabled;
+      // Refresh legacy-routine count once on first status so v1 users
+      // upgrading to v2 keep the Routines tab affordance (#2982).
+      refreshLegacyRoutinesPresence().then(function() {
+        applyEngineModeToTabs();
+        applyEngineModeUi();
+      });
+    } else {
+      applyEngineModeUi();
+    }
+
+    activeWorkStore.setEngineV2Enabled(enabled);
     refreshPersistentActivityBar();
 
     // Update restart button visibility
     restartEnabled = data.restart_enabled || false;
     updateRestartButtonVisibility();
-
-    // Apply engine v2 / v1 tab visibility once.
-    if (!engineModeApplied) {
-      engineV2Enabled = !!data.engine_v2_enabled;
-      applyEngineModeToTabs();
-      engineModeApplied = true;
-    }
 
     var popover = document.getElementById('gateway-popover');
     var html = '';

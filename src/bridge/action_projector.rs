@@ -367,6 +367,7 @@ mod tests {
             tools: vec![format!("{name}_search")],
             needs_setup: false,
             has_auth: true,
+            requires_binding: false,
             installed: true,
             activation_error: None,
             version: None,
@@ -654,6 +655,9 @@ mod tests {
             thread_goal: None,
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            gate_controller: ironclaw_engine::CancellingGateController::arc(),
+            call_approval_granted: false,
+            conversation_id: None,
         }
     }
 

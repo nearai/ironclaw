@@ -1,0 +1,26 @@
+[package]
+name = "ironclaw_capabilities"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+ironclaw_authorization = { path = "../ironclaw_authorization" }
+ironclaw_extensions = { path = "../ironclaw_extensions" }
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_processes = { path = "../ironclaw_processes" }
+ironclaw_run_state = { path = "../ironclaw_run_state" }
+ironclaw_trust = { path = "../ironclaw_trust" }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+chrono = "0.4"
+ironclaw_approvals = { path = "../ironclaw_approvals" }
+ironclaw_dispatcher = { path = "../ironclaw_dispatcher" }
+ironclaw_events = { path = "../ironclaw_events" }
+ironclaw_filesystem = { path = "../ironclaw_filesystem" }
+ironclaw_resources = { path = "../ironclaw_resources" }
+tokio = { version = "1", features = ["macros", "rt"] }

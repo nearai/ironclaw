@@ -1,4 +1,35 @@
+// Tracks loaders that failed on the very first call after `initApp()`. The
+// SSE `onopen` handler in `core/sse.js` retries each flagged loader exactly
+// once — see `runInitialHydrationRetry` below. Defensive net for the upgrade
+// race in #3274 where the first hydration request loses to in-flight engine
+// state initialization or DB migration; a manual refresh used to be the only
+// recovery path. See `.claude/rules/error-handling.md` (silent-failure rule).
+function runInitialHydrationRetry() {
+  var pending = window._initialHydrationPending;
+  if (!pending || window._hydrationRetryDone) return;
+  window._hydrationRetryDone = true;
+  if (pending.threads && typeof loadThreads === 'function') {
+    console.info('[hydration] retrying loadThreads after SSE connect');
+    loadThreads();
+  }
+  if (pending.history && typeof loadHistory === 'function') {
+    console.info('[hydration] retrying loadHistory after SSE connect');
+    loadHistory();
+  }
+  if (pending.missions
+      && currentTab === 'missions'
+      && typeof loadMissions === 'function') {
+    console.info('[hydration] retrying loadMissions after SSE connect');
+    loadMissions();
+  }
+  window._initialHydrationPending = null;
+}
+
 function initApp() {
+  // Reset hydration tracker each time we (re-)initialize the app — token
+  // re-auth and OIDC auto-auth both flow through here.
+  window._initialHydrationPending = { threads: false, history: false, missions: false };
+  window._hydrationRetryDone = false;
   var authScreen = document.getElementById('auth-screen');
   var app = document.getElementById('app');
   // Cross-fade: fade out auth screen, then show app

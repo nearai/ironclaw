@@ -354,7 +354,7 @@ async fn save_attachment_index_notes(
     }
 }
 
-fn gate_display_parameters(pending: &PendingGate) -> serde_json::Value {
+pub(super) fn gate_display_parameters(pending: &PendingGate) -> serde_json::Value {
     pending
         .display_parameters
         .clone()
@@ -417,7 +417,7 @@ async fn resolve_extension_for_action(
 /// resolver delegates to [`resolve_extension_for_action`]. Non-auth
 /// gate variants (`Approval`, `External`) don't have an extension
 /// identity and return `None`.
-async fn resolve_auth_gate_extension_name(
+pub(super) async fn resolve_auth_gate_extension_name(
     auth_manager: Option<&AuthManager>,
     extension_manager: Option<&crate::extensions::ExtensionManager>,
     tools: &crate::tools::ToolRegistry,
@@ -1087,6 +1087,19 @@ async fn execute_pending_gate_action(
         thread_goal: Some(thread.goal.clone()),
         available_actions_snapshot: None,
         available_action_inventory_snapshot: None,
+        // Post-resolution replay: the gate has already been resolved
+        // upstream, so a real controller is unnecessary. The inert
+        // controller surfaces any unexpected re-gate as a typed denial
+        // rather than reproducing the pre-fix unwind bug.
+        gate_controller: ironclaw_engine::CancellingGateController::arc(),
+        // The legacy resolved-pending path passes its own
+        // `approval_already_granted` to `execute_resolved_pending_action`
+        // directly, so this field is irrelevant for that path. Reset
+        // here to keep the default obvious.
+        call_approval_granted: false,
+        // Post-resolution replay never triggers a fresh inline gate;
+        // the conversation routing is moot here.
+        conversation_id: None,
     };
     let active_leases = state
         .thread_manager
@@ -1268,6 +1281,11 @@ struct EngineState {
     extension_manager: Option<Arc<crate::extensions::ExtensionManager>>,
     /// Filesystem root for project-local attachment persistence.
     project_root: PathBuf,
+    /// Inline gate-await controller. Lets the engine pause Tier 0 and
+    /// Tier 1 executions in place on `Approval` gates, rather than
+    /// unwinding back to the orchestrator and re-entering on resume
+    /// (which would re-execute earlier non-idempotent tool calls).
+    gate_controller: Arc<crate::bridge::gate_controller::BridgeGateController>,
 }
 
 /// Global engine state, initialized on first use.
@@ -1760,6 +1778,9 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         let sse_ref = agent.deps.sse_tx.clone();
         let db_ref = agent.deps.store.clone();
         let conv_mgr_ref = Arc::clone(&conversation_manager);
+        let auth_mgr_ref = agent.deps.auth_manager.clone();
+        let tools_ref = Arc::clone(&agent.deps.tools);
+        let ext_mgr_ref = agent.deps.extension_manager.clone();
         tokio::spawn(async move {
             loop {
                 match notification_rx.recv().await {
@@ -1770,6 +1791,9 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
                             sse_ref.as_ref(),
                             db_ref.as_ref(),
                             Some(conv_mgr_ref.as_ref()),
+                            auth_mgr_ref.as_deref(),
+                            Some(&tools_ref),
+                            ext_mgr_ref.as_deref(),
                         )
                         .await;
                     }
@@ -1898,9 +1922,30 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
     if let Err(e) = pending_gates.restore_from_persistence().await {
         debug!("engine v2: failed to restore pending gates: {e}");
     }
+    // Restart sweep: any in-flight Approval gate from a prior boot has
+    // lost its in-memory await receiver. Falling through to legacy
+    // re-entry would re-run the LLM step and double-execute non-idempotent
+    // earlier tool calls in the same script (the very bug the inline-await
+    // path exists to prevent). Drop them at startup so the user gets a
+    // clean retry path instead.
+    invalidate_stranded_approval_gates(&pending_gates, agent.deps.sse_tx.as_ref()).await;
     if let Err(e) = reconcile_pending_gate_state(&store_dyn, &pending_gates).await {
         debug!("engine v2: pending gate reconciliation failed: {e}");
     }
+
+    let resolutions = Arc::new(crate::bridge::gate_controller::GateResolutions::new());
+    let gate_controller = Arc::new(crate::bridge::gate_controller::BridgeGateController::new(
+        Arc::clone(&pending_gates),
+        agent.deps.sse_tx.clone(),
+        Arc::clone(effect_adapter.tools()),
+        auth_manager.clone(),
+        agent.deps.extension_manager.clone(),
+        Arc::clone(&agent.channels),
+        Arc::clone(&resolutions),
+    ));
+    thread_manager
+        .set_gate_controller(gate_controller.clone() as Arc<dyn ironclaw_engine::GateController>)
+        .await;
 
     *guard = Some(EngineState {
         thread_manager,
@@ -1915,9 +1960,43 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         auth_manager,
         extension_manager: agent.deps.extension_manager.clone(),
         project_root: resolve_project_root(),
+        gate_controller,
     });
 
     Ok(())
+}
+
+/// Boot-time sweep: invalidate `Approval`-kind pending gates carried
+/// over from a prior process. Their inline-await receivers are gone,
+/// and re-entry would re-run earlier non-idempotent tool calls. Auth
+/// and External gates survive — they don't depend on a live VM.
+async fn invalidate_stranded_approval_gates(
+    pending_gates: &crate::gate::store::PendingGateStore,
+    sse: Option<&Arc<SseManager>>,
+) {
+    let restored = pending_gates.list_all().await;
+    for gate in restored {
+        if !matches!(
+            gate.resume_kind,
+            ironclaw_engine::ResumeKind::Approval { .. }
+        ) {
+            continue;
+        }
+        let _ = pending_gates.discard(&gate.key()).await;
+        if let Some(sse) = sse {
+            sse.broadcast_for_user(
+                &gate.user_id,
+                ironclaw_common::AppEvent::GateResolved {
+                    request_id: gate.request_id.to_string(),
+                    gate_name: gate.gate_name.clone(),
+                    tool_name: gate.action_name.clone(),
+                    resolution: "expired".into(),
+                    message: "Approval interrupted by restart. Please retry.".into(),
+                    thread_id: Some(gate.effective_wire_thread_id()),
+                },
+            ); // projection-exempt: bridge dispatcher, restart-time gate cleanup before threads exist
+        }
+    }
 }
 
 async fn resolve_pending_gate_for_user(
@@ -2405,6 +2484,114 @@ pub async fn resolve_gate(
                 other => engine_err("gate", other),
             }
         })?;
+
+    // Inline gate-await fast path: if the engine is actively awaiting
+    // this gate (live Tier 0 batch or Tier 1 CodeAct VM), hand the
+    // resolution back through the controller's in-memory channel.
+    // The engine continues from the exact suspension point — no
+    // re-entry, no replay, no double-execution of earlier non-idempotent
+    // tool calls in the same step.
+    //
+    // We still install any auto-approve preference *before* delivery so
+    // subsequent gates in the same execution see policy `Allow` rather
+    // than gating again.
+    if matches!(
+        resolution,
+        ironclaw_engine::GateResolution::Approved { .. }
+            | ironclaw_engine::GateResolution::Denied { .. }
+            | ironclaw_engine::GateResolution::Cancelled
+    ) {
+        let always_for_inline = match &resolution {
+            ironclaw_engine::GateResolution::Approved { always } => {
+                clamp_always_to_resume_kind(*always, &pending.resume_kind)
+            }
+            _ => false,
+        };
+
+        let legacy_registry_name = legacy_extension_alias(&pending.action_name);
+        let prior_permission = if always_for_inline {
+            state
+                .effect_adapter
+                .auto_approve_tool(&pending.action_name)
+                .await;
+            if let Some(ref registry_name) = legacy_registry_name {
+                state.effect_adapter.auto_approve_tool(registry_name).await;
+            }
+            persist_always_allow(agent, state, &pending).await
+        } else {
+            None
+        };
+
+        // Re-build the resolution clamped to the pending gate's policy.
+        let inline_resolution = match &resolution {
+            ironclaw_engine::GateResolution::Approved { .. } => {
+                ironclaw_engine::GateResolution::Approved {
+                    always: always_for_inline,
+                }
+            }
+            ironclaw_engine::GateResolution::Denied { reason } => {
+                ironclaw_engine::GateResolution::Denied {
+                    reason: reason.clone(),
+                }
+            }
+            ironclaw_engine::GateResolution::Cancelled => {
+                ironclaw_engine::GateResolution::Cancelled
+            }
+            _ => unreachable!("guarded by outer matches!()"),
+        };
+
+        if state
+            .gate_controller
+            .try_deliver(request_id, inline_resolution)
+            .await
+        {
+            if let Some(ref sse) = state.sse {
+                let (label, status_msg) = match &resolution {
+                    ironclaw_engine::GateResolution::Approved { .. } => {
+                        if always_for_inline {
+                            ("approved_always", "Gate approved. Resuming execution.")
+                        } else {
+                            ("approved", "Gate approved. Resuming execution.")
+                        }
+                    }
+                    ironclaw_engine::GateResolution::Denied { .. } => ("denied", "Gate denied."),
+                    ironclaw_engine::GateResolution::Cancelled => ("cancelled", "Gate cancelled."),
+                    _ => unreachable!(),
+                };
+                sse.broadcast_for_user(
+                    &message.user_id,
+                    AppEvent::GateResolved {
+                        request_id: pending.request_id.to_string(),
+                        gate_name: pending.gate_name.clone(),
+                        tool_name: pending.action_name.clone(),
+                        resolution: label.into(),
+                        message: status_msg.into(),
+                        thread_id: Some(pending.effective_wire_thread_id()),
+                    },
+                ); // projection-exempt: bridge dispatcher, inline-await fast-path resolution event
+            }
+            return Ok(BridgeOutcome::Pending);
+        }
+
+        // Delivery failed — no live VM was waiting (process restart, or
+        // gate was created via a code path that didn't register an
+        // inline-await receiver). Roll back any auto-approve we just
+        // installed so subsequent calls don't see a stale preference,
+        // then fall through to the legacy re-entry path below.
+        if always_for_inline {
+            state
+                .effect_adapter
+                .revoke_auto_approve(&pending.action_name)
+                .await;
+            if let Some(registry_name) = legacy_registry_name {
+                state
+                    .effect_adapter
+                    .revoke_auto_approve(&registry_name)
+                    .await;
+            }
+            revert_always_allow(agent, &pending, prior_permission).await;
+        }
+    }
 
     match resolution {
         ironclaw_engine::GateResolution::Approved { always } => {
@@ -3555,8 +3742,36 @@ async fn handle_with_engine_inner(
         cfg
     };
 
-    // Handle the message — spawns a new thread or injects into active one
-    let thread_id = state
+    // Pre-bind per-execution context BEFORE the engine spawns the
+    // thread. `handle_user_message` allocates and starts the engine
+    // task internally; if a fast tool gate fires before
+    // `set_execution_context` lands, the controller's `pause()` would
+    // otherwise find no entry and cancel the gate silently. The
+    // pre-execution slot is keyed by user_id and the per-conversation
+    // lock upstream guarantees at most one bridge turn per
+    // conversation is in flight.
+    let scope_thread_id = message
+        .conversation_scope()
+        .and_then(|s| ironclaw_common::ExternalThreadId::new(s).ok());
+    let per_exec_context = crate::bridge::gate_controller::PerExecutionContext {
+        conversation_id: conv_id,
+        source_channel: message.channel.clone(),
+        scope_thread_id,
+        channel_metadata: message.metadata.clone(),
+        original_message: Some(message.content.clone()),
+    };
+    state
+        .gate_controller
+        .set_pre_execution_context(message.user_id.clone(), conv_id, per_exec_context.clone())
+        .await;
+
+    // Handle the message — spawns a new thread or injects into active one.
+    // On error we must clear the pre-execution slot we just installed:
+    // without this, a failed `handle_user_message` (engine spawn / inject
+    // failed before any thread_id was allocated) leaves a stale entry
+    // keyed by user_id that would mis-route the next gate prompt for
+    // the same user.
+    let thread_id = match state
         .conversation_manager
         .handle_user_message(
             conv_id,
@@ -3567,7 +3782,25 @@ async fn handle_with_engine_inner(
             validated_tz.as_ref().map(|tz| tz.name()),
         )
         .await
-        .map_err(|e| engine_err("thread error", e))?;
+    {
+        Ok(tid) => tid,
+        Err(e) => {
+            state
+                .gate_controller
+                .clear_pre_execution_context(&message.user_id, conv_id)
+                .await;
+            return Err(engine_err("thread error", e));
+        }
+    };
+
+    // Promote the pre-execution entry to (user, thread)-keyed. From
+    // here on, gates from this thread land on the thread-keyed entry
+    // first; the per-user fallback covers any gates that fire before
+    // this promotion lands.
+    state
+        .gate_controller
+        .set_execution_context(message.user_id.clone(), thread_id, per_exec_context)
+        .await;
 
     if !attachment_notes.is_empty() {
         save_attachment_index_notes(
@@ -3611,7 +3844,88 @@ async fn handle_with_engine_inner(
     }
 
     debug!(thread_id = %thread_id, "engine v2: thread spawned");
-    await_thread_outcome(agent, state, message, conv_id, thread_id).await
+    let outcome = await_thread_outcome(agent, state, message, conv_id, thread_id).await;
+    // Drop per-execution context. The `PendingGate` row (if a gate
+    // fired) carries everything the resolver needs from here on.
+    //
+    // BridgeOutcome::Pending means the request handler hit its deadline
+    // while the engine was still running (typically parked in
+    // `BridgeGateController::pause` waiting for an approval). Clearing
+    // context here would strand the parked thread — its eventual
+    // resolution would call `pause()` for any subsequent gate with no
+    // registered context, surfacing as silent `Cancelled`. Defer the
+    // cleanup to a background task that watches for thread completion
+    // and clears once the engine is actually done.
+    if matches!(outcome, Ok(BridgeOutcome::Pending))
+        && state.thread_manager.is_running(thread_id).await
+    {
+        spawn_deferred_context_cleanup(
+            Arc::clone(&state.gate_controller),
+            Arc::clone(&state.thread_manager),
+            message.user_id.clone(),
+            thread_id,
+            conv_id,
+        );
+    } else {
+        state
+            .gate_controller
+            .clear_execution_context(&message.user_id, thread_id, conv_id)
+            .await;
+    }
+    outcome
+}
+
+/// Watch a still-running thread for completion and clear its
+/// per-execution context once the engine task has actually finished.
+///
+/// Used when `await_thread_outcome` returned [`BridgeOutcome::Pending`]
+/// because the request-level deadline fired while the thread was
+/// parked in [`crate::bridge::gate_controller::BridgeGateController::pause`].
+/// The thread is still alive and the (user, thread)-keyed context must
+/// stay registered until the eventual gate resolution drives the engine
+/// to completion — otherwise a follow-up gate from the same execution
+/// surfaces as silent `Cancelled` (no prompt).
+///
+/// Polls `is_running` with a coarse cadence; gate `expires_at` (30 min)
+/// upper-bounds how long the thread can stay parked, so the watcher is
+/// guaranteed to terminate. The cap is a defensive safety against any
+/// future code path that could deadlock the engine task.
+fn spawn_deferred_context_cleanup(
+    gate_controller: Arc<crate::bridge::gate_controller::BridgeGateController>,
+    thread_manager: Arc<ironclaw_engine::ThreadManager>,
+    user_id: String,
+    thread_id: ironclaw_engine::ThreadId,
+    conv_id: ironclaw_engine::ConversationId,
+) {
+    tokio::spawn(async move {
+        // Poll cadence: 30s (cheap; thread completion is on the order
+        // of seconds-to-minutes once the user resolves). Cap at one
+        // hour — well past the 30-min PendingGate expiry that bounds
+        // any pause() call.
+        let poll_interval = std::time::Duration::from_secs(30);
+        let max_wait = std::time::Duration::from_secs(60 * 60);
+        let started = tokio::time::Instant::now();
+        loop {
+            if !thread_manager.is_running(thread_id).await {
+                break;
+            }
+            if started.elapsed() >= max_wait {
+                tracing::warn!(
+                    thread_id = %thread_id,
+                    "deferred context cleanup hit one-hour cap; clearing context anyway"
+                );
+                break;
+            }
+            tokio::time::sleep(poll_interval).await;
+        }
+        gate_controller
+            .clear_execution_context(&user_id, thread_id, conv_id)
+            .await;
+        debug!(
+            thread_id = %thread_id,
+            "engine v2: deferred context cleanup ran"
+        );
+    });
 }
 
 /// Fire active OnEvent missions whose pattern matches the inbound message.
@@ -3707,6 +4021,7 @@ async fn await_thread_outcome(
     // break out to avoid hanging the user session forever (e.g. after
     // a denied approval where the thread fails to resume).
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
+    let mut timed_out = false;
 
     loop {
         tokio::select! {
@@ -3754,10 +4069,23 @@ async fn await_thread_outcome(
                         thread_id = %thread_id,
                         "await_thread_outcome timed out after 5 minutes — breaking to avoid hang"
                     );
+                    timed_out = true;
                     break;
                 }
             }
         }
+    }
+
+    // If we hit the deadline and the thread is still running (typically
+    // because it's parked in `BridgeGateController::pause` waiting for
+    // an approval the user hasn't acted on), do NOT call `join_thread`
+    // — that would block the request handler for up to the gate's
+    // `expires_at` (30 min) on the same parked task. Surface as
+    // `Pending`: the live `PendingGate` row stays available, the user
+    // can still resolve it, and the resolver path will deliver the
+    // resolution into the parked oneshot.
+    if timed_out && state.thread_manager.is_running(thread_id).await {
+        return Ok(BridgeOutcome::Pending);
     }
 
     let outcome = state
@@ -4128,18 +4456,104 @@ fn interpret_message_event(role: &str, content_preview: &str) -> Option<&'static
 ///    consistent with what the user actually saw.
 // pub(crate) for #[cfg(test)] re-export in mod.rs; the module itself
 // is private so this has no production visibility beyond router.rs.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_mission_notification(
     notif: &ironclaw_engine::MissionNotification,
     channels: &std::sync::Arc<crate::channels::ChannelManager>,
     sse: Option<&Arc<SseManager>>,
     db: Option<&Arc<dyn Database>>,
     conv_mgr: Option<&ironclaw_engine::ConversationManager>,
+    auth_manager: Option<&AuthManager>,
+    tools: Option<&Arc<crate::tools::ToolRegistry>>,
+    extension_manager: Option<&crate::extensions::ExtensionManager>,
 ) {
     let Some(ref text) = notif.response else {
         return;
     };
 
     let full_text = format!("**[{}]** {text}", notif.mission_name);
+
+    // If the mission paused on a gate (auth, approval, external), surface
+    // the gate on every notify_channel via a structured StatusUpdate. This
+    // is what lights up the gateway UI's auth tray (or the equivalent in
+    // chat-only channels). The friendly text response below is still
+    // delivered alongside so the user sees the prompt in chat history.
+    //
+    // Pinned by issue #3133: previously a mission's child thread that
+    // paused on Gmail OAuth would emit no channel signal at all — the
+    // user got nothing actionable, the cron would re-fire on the same
+    // gate, and the LLM eventually narrated "Status: None Error: None"
+    // when its `http` fallback failed. The mission is now Paused
+    // (engine-side) AND the user gets an auth-tray entry to resolve.
+    if let Some(gate) = &notif.gate
+        && let Some(tools) = tools
+    {
+        for channel_name in &notif.notify_channels {
+            let metadata = serde_json::json!({"user_id": notif.user_id});
+            let status = match &gate.resume_kind {
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name,
+                    instructions,
+                    auth_url,
+                } => {
+                    let extension_name = resolve_extension_for_action(
+                        auth_manager,
+                        extension_manager,
+                        tools,
+                        &gate.action_name,
+                        &gate.parameters,
+                        credential_name.as_str(),
+                        &notif.user_id,
+                    )
+                    .await;
+                    // Forward `gate_request_id` (a freshly-generated
+                    // UUID), NOT the engine `call_id`. The gateway's
+                    // gate-resolve handler at
+                    // `channels/web/features/chat/mod.rs:183` (and the
+                    // WS handler at `platform/ws.rs:236`) call
+                    // `Uuid::parse_str` on the inbound `request_id` and
+                    // 400 on non-UUIDs — `call_id` ("call_xyz...") would
+                    // make the auth-tray entry unresolvable. Engine
+                    // `call_id` is preserved on `MissionGateInfo` for
+                    // half-2 auto-resume (#3166).
+                    StatusUpdate::AuthRequired {
+                        extension_name,
+                        instructions: Some(instructions.clone()),
+                        auth_url: auth_url.clone(),
+                        setup_url: None,
+                        request_id: Some(gate.gate_request_id.to_string()),
+                    }
+                }
+                ironclaw_engine::ResumeKind::Approval { allow_always } => {
+                    StatusUpdate::ApprovalNeeded {
+                        // See the AuthRequired arm above for why we
+                        // forward `gate_request_id` rather than the
+                        // engine `call_id`.
+                        request_id: gate.gate_request_id.to_string(),
+                        tool_name: gate.action_name.clone(),
+                        description: format!(
+                            "Mission '{}' is waiting for approval to run '{}'.",
+                            notif.mission_name, gate.action_name
+                        ),
+                        parameters: gate.parameters.clone(),
+                        allow_always: *allow_always,
+                    }
+                }
+                // External callbacks (webhooks etc.) don't have a
+                // user-facing tray entry — there's nothing the user can do
+                // beyond wait for the external system to reply. The text
+                // response still tells them what's pending.
+                ironclaw_engine::ResumeKind::External { .. } => continue,
+            };
+            if let Err(e) = channels.send_status(channel_name, status, &metadata).await {
+                debug!(
+                    channel = %channel_name,
+                    mission = %notif.mission_name,
+                    "failed to surface mission gate status: {e}"
+                );
+            }
+        }
+    }
 
     // `notify_user` takes precedence over the mission owner's user_id when
     // set — it lets a routine/mission deliver to a specific recipient
@@ -5346,6 +5760,35 @@ pub async fn get_engine_project(
         }))
 }
 
+/// Whether `thread` should be surfaced as a user-actionable failure.
+///
+/// A thread counts as a "real" failure for the projects "needs attention"
+/// feed when:
+/// - its state is `Failed`, AND
+/// - it failed within the last 24 hours, AND
+/// - it was NOT force-failed by `recover_project_threads` on engine
+///   restart (those carry the
+///   [`ironclaw_engine::ENGINE_RESTART_RECOVERY_METADATA_KEY`] flag and
+///   are crash-recovery artifacts, not user errors).
+///
+/// Filtering on the metadata flag fixes #3274: an upgrade transitioned
+/// every still-running thread to `Failed`, which then flooded the
+/// Projects tab with phantom "Thread failed" warnings.
+fn is_real_thread_failure(
+    thread: &ironclaw_engine::types::thread::Thread,
+    h24_ago: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    matches!(
+        thread.state,
+        ironclaw_engine::types::thread::ThreadState::Failed
+    ) && thread.updated_at >= h24_ago
+        && !thread
+            .metadata
+            .get(ironclaw_engine::ENGINE_RESTART_RECOVERY_METADATA_KEY)
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+}
+
 /// Projects overview — health, stats, attention items for all projects.
 ///
 /// Iterates all projects, computes per-project stats from missions and threads,
@@ -5441,12 +5884,14 @@ pub async fn get_engine_projects_overview(
             .map(|t| t.total_cost_usd)
             .sum();
 
+        // Filter restart-recovery noise: `recover_project_threads`
+        // force-fails non-terminal threads on engine restart and tags
+        // them with `engine_restart_recovery`. They aren't actionable
+        // failures, so we exclude them from both the count and the
+        // attention feed (#3274).
         let failures_24h = threads
             .iter()
-            .filter(|t| {
-                matches!(t.state, ironclaw_engine::types::thread::ThreadState::Failed)
-                    && t.updated_at >= h24_ago
-            })
+            .filter(|t| is_real_thread_failure(t, h24_ago))
             .count() as u64;
 
         let last_activity = threads
@@ -5475,11 +5920,7 @@ pub async fn get_engine_projects_overview(
             });
         }
         for thread in &threads {
-            if matches!(
-                thread.state,
-                ironclaw_engine::types::thread::ThreadState::Failed
-            ) && thread.updated_at >= h24_ago
-            {
+            if is_real_thread_failure(thread, h24_ago) {
                 attention.push(AttentionItem {
                     kind: "failure".to_string(),
                     project_id: pid.to_string(),
@@ -6049,6 +6490,15 @@ pub(crate) mod test_support {
             secrets_store: None,
             auth_manager: None,
             extension_manager: None,
+            gate_controller: Arc::new(crate::bridge::gate_controller::BridgeGateController::new(
+                Arc::new(crate::gate::store::PendingGateStore::in_memory()),
+                None,
+                Arc::new(crate::tools::ToolRegistry::new()),
+                None,
+                None,
+                Arc::new(crate::channels::ChannelManager::new()),
+                Arc::new(crate::bridge::gate_controller::GateResolutions::new()),
+            )),
             project_root: super::resolve_project_root(),
         };
 
@@ -7109,6 +7559,95 @@ mod tests {
         ));
     }
 
+    /// Boot-time sweep must evict every `Approval` gate row carried
+    /// over from a prior process — they have no live `oneshot::Sender`
+    /// to deliver to, and falling through to `execute_pending_gate_action`
+    /// would re-run the LLM step and replay earlier non-idempotent tool
+    /// calls (the bug the inline-await path exists to prevent).
+    /// Authentication and External rows survive because their resume
+    /// path doesn't depend on a live VM.
+    #[tokio::test]
+    async fn invalidate_stranded_approval_gates_evicts_only_approval_kind() {
+        let store = crate::gate::store::PendingGateStore::in_memory();
+
+        let approval_a = uuid::Uuid::new_v4();
+        let approval_b = uuid::Uuid::new_v4();
+        let auth = uuid::Uuid::new_v4();
+        let external = uuid::Uuid::new_v4();
+
+        store
+            .insert(sample_pending_gate_with_request_id(
+                "alice",
+                ironclaw_engine::ThreadId::new(),
+                approval_a,
+                ironclaw_engine::ResumeKind::Approval { allow_always: true },
+            ))
+            .await
+            .unwrap();
+        store
+            .insert(sample_pending_gate_with_request_id(
+                "bob",
+                ironclaw_engine::ThreadId::new(),
+                approval_b,
+                ironclaw_engine::ResumeKind::Approval {
+                    allow_always: false,
+                },
+            ))
+            .await
+            .unwrap();
+        store
+            .insert(sample_pending_gate_with_request_id(
+                "alice",
+                ironclaw_engine::ThreadId::new(),
+                auth,
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name: ironclaw_common::CredentialName::new("github").unwrap(),
+                    instructions: "paste token".into(),
+                    auth_url: None,
+                },
+            ))
+            .await
+            .unwrap();
+        store
+            .insert(sample_pending_gate_with_request_id(
+                "alice",
+                ironclaw_engine::ThreadId::new(),
+                external,
+                ironclaw_engine::ResumeKind::External {
+                    callback_id: "cb-1".into(),
+                },
+            ))
+            .await
+            .unwrap();
+
+        // No SSE wired — exercises the `if let Some(sse)` skip branch.
+        invalidate_stranded_approval_gates(&store, None).await;
+
+        let surviving: std::collections::HashSet<uuid::Uuid> = store
+            .list_all()
+            .await
+            .into_iter()
+            .map(|g| g.request_id)
+            .collect();
+        assert!(
+            !surviving.contains(&approval_a),
+            "approval gate for alice must be evicted"
+        );
+        assert!(
+            !surviving.contains(&approval_b),
+            "approval gate for bob must be evicted"
+        );
+        assert!(
+            surviving.contains(&auth),
+            "auth gate must survive: {surviving:?}"
+        );
+        assert!(
+            surviving.contains(&external),
+            "external gate must survive: {surviving:?}"
+        );
+        assert_eq!(surviving.len(), 2, "exactly two non-Approval gates remain");
+    }
+
     #[tokio::test]
     async fn handle_approval_ignores_pending_gate_from_different_thread() {
         let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
@@ -8145,6 +8684,15 @@ mod tests {
             secrets_store: None,
             auth_manager: None,
             extension_manager: None,
+            gate_controller: Arc::new(crate::bridge::gate_controller::BridgeGateController::new(
+                Arc::new(crate::gate::store::PendingGateStore::in_memory()),
+                None,
+                Arc::new(crate::tools::ToolRegistry::new()),
+                None,
+                None,
+                Arc::new(crate::channels::ChannelManager::new()),
+                Arc::new(crate::bridge::gate_controller::GateResolutions::new()),
+            )),
             project_root: resolve_project_root(),
         }
     }
@@ -8295,6 +8843,15 @@ mod tests {
             secrets_store: None,
             auth_manager: None,
             extension_manager: None,
+            gate_controller: Arc::new(crate::bridge::gate_controller::BridgeGateController::new(
+                Arc::new(crate::gate::store::PendingGateStore::in_memory()),
+                None,
+                Arc::new(crate::tools::ToolRegistry::new()),
+                None,
+                None,
+                Arc::new(crate::channels::ChannelManager::new()),
+                Arc::new(crate::bridge::gate_controller::GateResolutions::new()),
+            )),
             project_root: resolve_project_root(),
         }
     }
@@ -9764,6 +10321,88 @@ mod tests {
         );
     }
 
+    // ── is_real_thread_failure (#3274) ──────────────────────────────────
+
+    /// Helper: build a Failed thread with a configurable updated_at.
+    fn make_failed_thread(updated_at: chrono::DateTime<chrono::Utc>) -> ironclaw_engine::Thread {
+        let mut t = ironclaw_engine::Thread::new(
+            "test goal",
+            ironclaw_engine::ThreadType::Foreground,
+            ironclaw_engine::ProjectId::new(),
+            "alice",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        t.transition_to(ironclaw_engine::ThreadState::Running, None)
+            .unwrap();
+        t.transition_to(
+            ironclaw_engine::ThreadState::Failed,
+            Some("LLM error".into()),
+        )
+        .unwrap();
+        t.updated_at = updated_at;
+        t
+    }
+
+    #[test]
+    fn real_failure_recent_within_window() {
+        let now = chrono::Utc::now();
+        let h24_ago = now - chrono::Duration::hours(24);
+        let t = make_failed_thread(now);
+        assert!(
+            super::is_real_thread_failure(&t, h24_ago),
+            "recent failed thread should surface as a real failure"
+        );
+    }
+
+    #[test]
+    fn real_failure_excluded_when_older_than_24h() {
+        let now = chrono::Utc::now();
+        let h24_ago = now - chrono::Duration::hours(24);
+        let t = make_failed_thread(now - chrono::Duration::hours(25));
+        assert!(
+            !super::is_real_thread_failure(&t, h24_ago),
+            "stale failure outside the 24h window must not be surfaced"
+        );
+    }
+
+    #[test]
+    fn real_failure_excludes_engine_restart_recovery() {
+        let now = chrono::Utc::now();
+        let h24_ago = now - chrono::Duration::hours(24);
+        let mut t = make_failed_thread(now);
+        // Simulate `recover_project_threads` having tagged the thread.
+        if let Some(obj) = t.metadata.as_object_mut() {
+            obj.insert(
+                ironclaw_engine::ENGINE_RESTART_RECOVERY_METADATA_KEY.to_string(),
+                serde_json::Value::Bool(true),
+            );
+        }
+        assert!(
+            !super::is_real_thread_failure(&t, h24_ago),
+            "restart-recovery threads must not surface as user-actionable failures"
+        );
+    }
+
+    #[test]
+    fn real_failure_ignores_non_failed_states() {
+        let now = chrono::Utc::now();
+        let h24_ago = now - chrono::Duration::hours(24);
+        let mut t = ironclaw_engine::Thread::new(
+            "still running",
+            ironclaw_engine::ThreadType::Foreground,
+            ironclaw_engine::ProjectId::new(),
+            "alice",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        t.transition_to(ironclaw_engine::ThreadState::Running, None)
+            .unwrap();
+        t.updated_at = now;
+        assert!(
+            !super::is_real_thread_failure(&t, h24_ago),
+            "Running thread must not be classified as a failure"
+        );
+    }
+
     // ── persist_always_allow / revert_always_allow ─────────────────────
 
     /// Minimal in-memory SettingsStore for persistence tests.
@@ -9961,6 +10600,15 @@ mod tests {
             secrets_store: None,
             auth_manager: None,
             extension_manager: None,
+            gate_controller: Arc::new(crate::bridge::gate_controller::BridgeGateController::new(
+                Arc::new(crate::gate::store::PendingGateStore::in_memory()),
+                None,
+                Arc::new(crate::tools::ToolRegistry::new()),
+                None,
+                None,
+                Arc::new(crate::channels::ChannelManager::new()),
+                Arc::new(crate::bridge::gate_controller::GateResolutions::new()),
+            )),
             project_root: resolve_project_root(),
         }
     }
