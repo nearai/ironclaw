@@ -106,6 +106,11 @@ CREATE TABLE IF NOT EXISTS turn_lifecycle_events (
     payload TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_turn_events_scope_cursor ON turn_lifecycle_events(scope_key, event_cursor);
+
+CREATE TABLE IF NOT EXISTS turn_store_metadata (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 "#;
 
 #[cfg(feature = "postgres")]
@@ -164,6 +169,11 @@ CREATE TABLE IF NOT EXISTS turn_lifecycle_events (
     payload JSONB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_turn_events_scope_cursor ON turn_lifecycle_events(scope_key, event_cursor);
+
+CREATE TABLE IF NOT EXISTS turn_store_metadata (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 "#;
 
 #[cfg(feature = "libsql")]
@@ -307,11 +317,13 @@ impl TurnEventProjectionSource for LibSqlTurnStateStore {
         after: Option<EventCursor>,
         limit: usize,
     ) -> Result<TurnEventPage, TurnError> {
+        let snapshot = self.load_snapshot().await?;
         Ok(project_turn_events(
-            &self.load_snapshot().await?.events,
+            &snapshot.events,
             scope,
             after,
             limit,
+            snapshot.event_retention_floor,
         ))
     }
 }
@@ -575,11 +587,13 @@ impl TurnEventProjectionSource for PostgresTurnStateStore {
         after: Option<EventCursor>,
         limit: usize,
     ) -> Result<TurnEventPage, TurnError> {
+        let snapshot = self.load_snapshot().await?;
         Ok(project_turn_events(
-            &self.load_snapshot().await?.events,
+            &snapshot.events,
             scope,
             after,
             limit,
+            snapshot.event_retention_floor,
         ))
     }
 }
@@ -720,6 +734,24 @@ where
 }
 
 #[cfg(feature = "libsql")]
+async fn libsql_load_event_retention_floor(
+    conn: &libsql::Connection,
+) -> Result<EventCursor, TurnError> {
+    let mut rows = conn
+        .query(
+            "SELECT value FROM turn_store_metadata WHERE key = 'event_retention_floor'",
+            (),
+        )
+        .await
+        .map_err(db_error)?;
+    let Some(row) = rows.next().await.map_err(db_error)? else {
+        return Ok(EventCursor::default());
+    };
+    let value: String = row.get(0).map_err(db_error)?;
+    value.parse::<u64>().map(EventCursor).map_err(db_error)
+}
+
+#[cfg(feature = "libsql")]
 async fn libsql_load_snapshot(
     conn: &libsql::Connection,
 ) -> Result<TurnPersistenceSnapshot, TurnError> {
@@ -753,6 +785,7 @@ async fn libsql_load_snapshot(
         "SELECT payload FROM turn_lifecycle_events ORDER BY event_cursor, event_key",
     )
     .await?;
+    let event_retention_floor = libsql_load_event_retention_floor(conn).await?;
     Ok(TurnPersistenceSnapshot {
         turns,
         runs,
@@ -760,6 +793,7 @@ async fn libsql_load_snapshot(
         checkpoints,
         idempotency_records,
         events,
+        event_retention_floor,
     })
 }
 
@@ -786,6 +820,7 @@ async fn libsql_replace_snapshot(
     snapshot: &TurnPersistenceSnapshot,
 ) -> Result<(), TurnError> {
     for table in [
+        "turn_store_metadata",
         "turn_lifecycle_events",
         "turn_idempotency_records",
         "turn_checkpoints",
@@ -882,6 +917,12 @@ async fn libsql_replace_snapshot(
         .await
         .map_err(db_error)?;
     }
+    conn.execute(
+        "INSERT INTO turn_store_metadata (key, value) VALUES ('event_retention_floor', ?1)",
+        libsql::params![snapshot.event_retention_floor.0.to_string()],
+    )
+    .await
+    .map_err(db_error)?;
     Ok(())
 }
 
@@ -891,7 +932,7 @@ async fn lock_postgres_turn_tables(
     mode: &str,
 ) -> Result<(), TurnError> {
     let statement = format!(
-        "LOCK TABLE turn_records, turn_run_records, turn_active_locks, turn_checkpoints, turn_idempotency_records, turn_lifecycle_events IN {mode}"
+        "LOCK TABLE turn_records, turn_run_records, turn_active_locks, turn_checkpoints, turn_idempotency_records, turn_lifecycle_events, turn_store_metadata IN {mode}"
     );
     client.batch_execute(&statement).await.map_err(db_error)
 }
@@ -911,6 +952,24 @@ where
             serde_json::from_str(&payload).map_err(db_error)
         })
         .collect()
+}
+
+#[cfg(feature = "postgres")]
+async fn postgres_load_event_retention_floor(
+    client: &impl deadpool_postgres::GenericClient,
+) -> Result<EventCursor, TurnError> {
+    let Some(row) = client
+        .query_opt(
+            "SELECT value FROM turn_store_metadata WHERE key = 'event_retention_floor'",
+            &[],
+        )
+        .await
+        .map_err(db_error)?
+    else {
+        return Ok(EventCursor::default());
+    };
+    let value: String = row.get(0);
+    value.parse::<u64>().map(EventCursor).map_err(db_error)
 }
 
 #[cfg(feature = "postgres")]
@@ -947,6 +1006,7 @@ async fn postgres_load_snapshot(
         "SELECT payload::text FROM turn_lifecycle_events ORDER BY event_cursor, event_key",
     )
     .await?;
+    let event_retention_floor = postgres_load_event_retention_floor(client).await?;
     Ok(TurnPersistenceSnapshot {
         turns,
         runs,
@@ -954,6 +1014,7 @@ async fn postgres_load_snapshot(
         checkpoints,
         idempotency_records,
         events,
+        event_retention_floor,
     })
 }
 
@@ -963,6 +1024,7 @@ async fn postgres_replace_snapshot(
     snapshot: &TurnPersistenceSnapshot,
 ) -> Result<(), TurnError> {
     for table in [
+        "turn_store_metadata",
         "turn_lifecycle_events",
         "turn_idempotency_records",
         "turn_checkpoints",
@@ -1065,6 +1127,12 @@ async fn postgres_replace_snapshot(
         .await
         .map_err(db_error)?;
     }
+    txn.execute(
+        "INSERT INTO turn_store_metadata (key, value) VALUES ('event_retention_floor', $1)",
+        &[&snapshot.event_retention_floor.0.to_string()],
+    )
+    .await
+    .map_err(db_error)?;
     Ok(())
 }
 

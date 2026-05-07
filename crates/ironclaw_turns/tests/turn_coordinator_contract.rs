@@ -20,11 +20,12 @@ use ironclaw_turns::{
     RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
     SanitizedCancelReason, SanitizedFailure, SourceBindingRef, SubmitTurnRequest,
     SubmitTurnResponse, ThreadBusy, TurnActor, TurnAdmissionPolicy, TurnCheckpointId,
-    TurnCoordinator, TurnError, TurnErrorCategory, TurnEventKind, TurnEventProjectionError,
-    TurnEventProjectionRequest, TurnEventProjectionService, TurnEventSink,
-    TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnLeaseToken, TurnLifecycleEvent,
-    TurnLockVersion, TurnRunId, TurnRunProfile, TurnRunState, TurnRunWake, TurnRunWakeNotifier,
-    TurnRunWakeNotifyError, TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
+    TurnCoordinator, TurnError, TurnErrorCategory, TurnEventKind, TurnEventProjectionCursor,
+    TurnEventProjectionError, TurnEventProjectionRequest, TurnEventProjectionService,
+    TurnEventSink, TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnLeaseToken,
+    TurnLifecycleEvent, TurnLockVersion, TurnRunId, TurnRunProfile, TurnRunState, TurnRunWake,
+    TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnRunnerId, TurnScope, TurnStateStore,
+    TurnStatus,
     events::EventCursor,
     runner::{
         ApplyLoopExitRequest, ApplyValidatedLoopExitRequest, BlockRunRequest,
@@ -201,6 +202,86 @@ async fn turn_lifecycle_projection_replays_submit_block_resume_complete_without_
         assert!(
             !serialized.contains(forbidden),
             "turn lifecycle projection leaked {forbidden}: {serialized}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn turn_lifecycle_projection_requires_rebase_for_pruned_or_fabricated_cursors() {
+    let store = Arc::new(InMemoryTurnStateStore::with_limits(
+        InMemoryTurnStateStoreLimits {
+            max_events: 2,
+            ..InMemoryTurnStateStoreLimits::default()
+        },
+    ));
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+    let mut request = submit_request("thread-turn-gap", "idem-turn-gap-submit");
+    request.accepted_message_ref =
+        AcceptedMessageRef::new("message-TURN_GAP_RAW_SENTINEL_3022 /tmp/turn-gap-private")
+            .unwrap();
+
+    let run_id = accepted_run_id(&coordinator.submit_turn(request.clone()).await.unwrap());
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(request.scope.clone()),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .heartbeat(HeartbeatRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        })
+        .await
+        .unwrap();
+
+    let projection = TurnEventProjectionService::new(store.clone());
+    let origin = TurnEventProjectionCursor::origin_for_scope(request.scope.clone());
+    let pruned_origin = projection
+        .snapshot(TurnEventProjectionRequest {
+            scope: request.scope.clone(),
+            after: Some(origin),
+            limit: 10,
+        })
+        .await
+        .expect_err("pruned turn lifecycle origin cursor must require rebase");
+    assert!(matches!(
+        pruned_origin,
+        TurnEventProjectionError::RebaseRequired { .. }
+    ));
+
+    let fabricated = projection
+        .updates(TurnEventProjectionRequest {
+            scope: request.scope.clone(),
+            after: Some(TurnEventProjectionCursor::for_scope(
+                request.scope.clone(),
+                EventCursor(999),
+            )),
+            limit: 10,
+        })
+        .await
+        .expect_err("fabricated beyond-head turn lifecycle cursor must require rebase");
+    assert!(matches!(
+        fabricated,
+        TurnEventProjectionError::RebaseRequired { .. }
+    ));
+
+    let serialized_events = serde_json::to_string(&store.events()).unwrap();
+    let debug_errors = format!("{pruned_origin:?} {fabricated:?}");
+    for forbidden in ["TURN_GAP_RAW_SENTINEL_3022", "/tmp/turn-gap-private"] {
+        assert!(
+            !serialized_events.contains(forbidden),
+            "retained turn events leaked {forbidden}: {serialized_events}"
+        );
+        assert!(
+            !debug_errors.contains(forbidden),
+            "turn projection rebase error leaked {forbidden}: {debug_errors}"
         );
     }
 }

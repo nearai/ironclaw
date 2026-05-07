@@ -81,6 +81,7 @@ struct Inner {
     cancel_idempotency_order: VecDeque<RunIdempotencyKey>,
     idempotency_record_order: VecDeque<PersistedIdempotencyKey>,
     events: Vec<TurnLifecycleEvent>,
+    event_retention_floor: EventCursor,
     limits: InMemoryTurnStateStoreLimits,
 }
 
@@ -239,7 +240,14 @@ impl TurnEventProjectionSource for InMemoryTurnStateStore {
         after: Option<EventCursor>,
         limit: usize,
     ) -> Result<TurnEventPage, TurnError> {
-        Ok(project_turn_events(&self.events(), scope, after, limit))
+        let inner = self.lock_inner()?;
+        Ok(project_turn_events(
+            &inner.events,
+            scope,
+            after,
+            limit,
+            inner.event_retention_floor,
+        ))
     }
 }
 
@@ -723,6 +731,7 @@ impl Inner {
 
         let events = snapshot.events;
         cursor = cursor.max(events.iter().map(|event| event.cursor.0).max().unwrap_or(0));
+        cursor = cursor.max(snapshot.event_retention_floor.0);
 
         Ok(Self {
             cursor,
@@ -742,6 +751,7 @@ impl Inner {
             cancel_idempotency_order,
             idempotency_record_order,
             events,
+            event_retention_floor: snapshot.event_retention_floor,
             limits,
         })
     }
@@ -772,6 +782,9 @@ impl Inner {
         });
         if self.events.len() > self.limits.max_events {
             let excess = self.events.len() - self.limits.max_events;
+            if let Some(last_pruned) = self.events.get(excess.saturating_sub(1)) {
+                self.event_retention_floor = self.event_retention_floor.max(last_pruned.cursor);
+            }
             self.events.drain(0..excess);
         }
     }
@@ -806,6 +819,7 @@ impl Inner {
             checkpoints,
             idempotency_records,
             events: self.events.clone(),
+            event_retention_floor: self.event_retention_floor,
         }
     }
 

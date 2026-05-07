@@ -114,6 +114,7 @@ pub struct TurnEventPage {
     pub entries: Vec<TurnLifecycleEvent>,
     pub next_cursor: EventCursor,
     pub truncated: bool,
+    pub rebase_required: Option<EventCursor>,
 }
 
 #[derive(Debug, Error)]
@@ -195,6 +196,17 @@ where
             .map_err(|_| TurnEventProjectionError::Source {
                 operation: "read_turn_events_after",
             })?;
+        if let Some(rebase_cursor) = page.rebase_required {
+            return Err(TurnEventProjectionError::RebaseRequired {
+                requested: Box::new(request.after.unwrap_or_else(|| {
+                    TurnEventProjectionCursor::origin_for_scope(request.scope.clone())
+                })),
+                earliest: Box::new(TurnEventProjectionCursor::for_scope(
+                    request.scope,
+                    rebase_cursor,
+                )),
+            });
+        }
         Ok(TurnEventProjectionSnapshot {
             entries: page.entries,
             next_cursor: TurnEventProjectionCursor::for_scope(request.scope, page.next_cursor),
@@ -208,14 +220,38 @@ pub(crate) fn project_turn_events(
     scope: &TurnScope,
     after: Option<EventCursor>,
     limit: usize,
+    retention_floor: EventCursor,
 ) -> TurnEventPage {
     let after = after.unwrap_or_default();
-    let mut matching = events
+    let mut scoped_events = events
         .iter()
-        .filter(|event| &event.scope == scope && event.cursor > after)
+        .filter(|event| &event.scope == scope)
         .cloned()
         .collect::<Vec<_>>();
-    matching.sort_by_key(|event| event.cursor);
+    scoped_events.sort_by_key(|event| event.cursor);
+
+    let latest_scoped_cursor = scoped_events.last().map(|event| event.cursor);
+    let rebase_required = if retention_floor > EventCursor::default() && after <= retention_floor {
+        Some(retention_floor)
+    } else if let Some(latest) = latest_scoped_cursor {
+        (after > latest).then_some(latest)
+    } else {
+        (after > retention_floor).then_some(retention_floor)
+    };
+
+    if let Some(rebase_cursor) = rebase_required {
+        return TurnEventPage {
+            entries: Vec::new(),
+            next_cursor: rebase_cursor,
+            truncated: false,
+            rebase_required: Some(rebase_cursor),
+        };
+    }
+
+    let mut matching = scoped_events
+        .into_iter()
+        .filter(|event| event.cursor > after)
+        .collect::<Vec<_>>();
     let truncated = matching.len() > limit;
     if truncated {
         matching.truncate(limit);
@@ -225,5 +261,6 @@ pub(crate) fn project_turn_events(
         entries: matching,
         next_cursor,
         truncated,
+        rebase_required: None,
     }
 }

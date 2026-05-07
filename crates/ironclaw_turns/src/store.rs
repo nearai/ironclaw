@@ -277,4 +277,6 @@ pub struct TurnPersistenceSnapshot {
     pub idempotency_records: Vec<TurnIdempotencyRecord>,
     #[serde(default)]
     pub events: Vec<TurnLifecycleEvent>,
+    #[serde(default)]
+    pub event_retention_floor: EventCursor,
 }

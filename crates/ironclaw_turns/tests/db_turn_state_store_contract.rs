@@ -13,16 +13,18 @@ use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, DefaultTurnCoordinator, IdempotencyKey,
-    InMemoryRunProfileResolver, LoopCompleted, LoopCompletionKind, LoopExit,
-    LoopExitInvalidHandling, LoopExitValidationPolicy, LoopMessageRef, ReplyTargetBindingRef,
-    ResolvedRunProfile, RunProfileRequest, RunProfileResolutionError, RunProfileResolutionRequest,
-    RunProfileResolver, SanitizedCancelReason, SanitizedFailure, SourceBindingRef,
-    SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor, TurnCoordinator, TurnError,
-    TurnEventKind, TurnEventProjectionRequest, TurnEventProjectionService, TurnRunId, TurnScope,
-    TurnStatus,
+    InMemoryRunProfileResolver, InMemoryTurnStateStoreLimits, LoopCompleted, LoopCompletionKind,
+    LoopExit, LoopExitInvalidHandling, LoopExitValidationPolicy, LoopMessageRef,
+    ReplyTargetBindingRef, ResolvedRunProfile, RunProfileRequest, RunProfileResolutionError,
+    RunProfileResolutionRequest, RunProfileResolver, SanitizedCancelReason, SanitizedFailure,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
+    TurnCoordinator, TurnError, TurnEventKind, TurnEventProjectionCursor, TurnEventProjectionError,
+    TurnEventProjectionRequest, TurnEventProjectionService, TurnLeaseToken, TurnRunId,
+    TurnRunnerId, TurnScope, TurnStatus,
+    events::EventCursor,
     runner::{
-        ApplyLoopExitRequest, ClaimRunRequest, RecoverExpiredLeasesRequest, TurnRunTransitionPort,
-        apply_loop_exit,
+        ApplyLoopExitRequest, ClaimRunRequest, HeartbeatRequest, RecoverExpiredLeasesRequest,
+        TurnRunTransitionPort, apply_loop_exit,
     },
 };
 
@@ -105,6 +107,73 @@ async fn libsql_turn_event_projection_replays_submit_after_reopen_without_raw_re
             "libSQL turn lifecycle projection leaked {forbidden}: {serialized}"
         );
     }
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_turn_event_projection_replays_gap_rebase_after_reopen() {
+    let (db, _dir) = libsql_db().await;
+    let limits = InMemoryTurnStateStoreLimits {
+        max_events: 2,
+        ..InMemoryTurnStateStoreLimits::default()
+    };
+    let store = Arc::new(LibSqlTurnStateStore::new(db.clone()).with_limits(limits));
+    store.run_migrations().await.unwrap();
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+    let request = submit_request("thread-turn-event-db-gap", "idem-turn-event-db-gap");
+    let accepted = coordinator.submit_turn(request.clone()).await.unwrap();
+    let run_id = accepted_run_id(&accepted);
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(request.scope.clone()),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .heartbeat(HeartbeatRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        })
+        .await
+        .unwrap();
+
+    let projection = TurnEventProjectionService::new(Arc::new(LibSqlTurnStateStore::new(db)));
+    let pruned_origin = projection
+        .snapshot(TurnEventProjectionRequest {
+            scope: request.scope.clone(),
+            after: Some(TurnEventProjectionCursor::origin_for_scope(
+                request.scope.clone(),
+            )),
+            limit: 10,
+        })
+        .await
+        .expect_err("libSQL retained turn event tail must persist rebase metadata");
+    assert!(matches!(
+        pruned_origin,
+        TurnEventProjectionError::RebaseRequired { .. }
+    ));
+
+    let fabricated = projection
+        .updates(TurnEventProjectionRequest {
+            scope: request.scope.clone(),
+            after: Some(TurnEventProjectionCursor::for_scope(
+                request.scope,
+                EventCursor(999),
+            )),
+            limit: 10,
+        })
+        .await
+        .expect_err("libSQL turn event projection must reject beyond-head cursors");
+    assert!(matches!(
+        fabricated,
+        TurnEventProjectionError::RebaseRequired { .. }
+    ));
 }
 
 #[cfg(feature = "libsql")]
