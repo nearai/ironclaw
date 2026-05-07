@@ -3,8 +3,9 @@ use std::sync::Arc;
 use ironclaw_turns::{AdmissionRejectionReason, SubmitTurnRequest, TurnCoordinator, TurnError};
 
 use crate::{
-    AcceptInboundMessageRequest, ConversationBindingService, InboundTurnError, InboundTurnRequest,
-    InboundTurnResponse, MessageIdempotencyStatus, ResolveConversationRequest,
+    AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageLookup,
+    ConversationBindingResolution, ConversationBindingService, InboundTurnError,
+    InboundTurnRequest, InboundTurnResponse, MessageIdempotencyStatus, ResolveConversationRequest,
     SessionThreadService,
 };
 
@@ -33,7 +34,24 @@ where
         &self,
         request: InboundTurnRequest,
     ) -> Result<InboundTurnResponse, InboundTurnError> {
-        let mut resolution = self
+        if let Some(replay) = self
+            .session_thread_service
+            .replay_accepted_inbound_message(AcceptedInboundMessageLookup {
+                tenant_id: request.tenant_id.clone(),
+                adapter_kind: request.adapter_kind.clone(),
+                adapter_installation_id: request.adapter_installation_id.clone(),
+                external_actor_ref: request.external_actor_ref.clone(),
+                external_conversation_ref: request.external_conversation_ref.clone(),
+                external_event_id: request.external_event_id.clone(),
+            })
+            .await?
+        {
+            return self
+                .submit_or_replay(replay.resolution, replay.accepted_message)
+                .await;
+        }
+
+        let resolution = self
             .binding_service
             .resolve_or_create_binding(ResolveConversationRequest {
                 tenant_id: request.tenant_id.clone(),
@@ -66,6 +84,14 @@ where
             })
             .await?;
 
+        self.submit_or_replay(resolution, accepted_message).await
+    }
+
+    async fn submit_or_replay(
+        &self,
+        mut resolution: ConversationBindingResolution,
+        accepted_message: AcceptedInboundMessage,
+    ) -> Result<InboundTurnResponse, InboundTurnError> {
         resolution.actor = accepted_message.actor.clone();
 
         if accepted_message.idempotency == MessageIdempotencyStatus::Duplicate

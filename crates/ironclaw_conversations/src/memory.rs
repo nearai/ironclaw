@@ -12,7 +12,8 @@ use ironclaw_turns::{
 use uuid::Uuid;
 
 use crate::{
-    AcceptInboundMessageRequest, AcceptedInboundMessage, AdapterInstallationId, AdapterKind,
+    AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageLookup,
+    AcceptedInboundMessageReplay, AdapterInstallationId, AdapterKind,
     ConversationBindingResolution, ConversationBindingService, ConversationRouteKind,
     ExternalActorRef, ExternalConversationIdentity, ExternalConversationRef, InboundTurnError,
     LinkConversationRequest, LinkedConversationBinding, MessageIdempotencyStatus,
@@ -363,6 +364,13 @@ impl SessionThreadService for InMemoryConversationServices {
             &external_conversation_identity,
             &request.actor.user_id,
         )?;
+        let replay_key = AcceptedMessageReplayKey::new(
+            &request.tenant_id,
+            &request.adapter_kind,
+            &request.adapter_installation_id,
+            &request.external_actor_ref,
+            &request.external_event_id,
+        );
         let idempotency_key = MessageIdempotencyKey {
             tenant_id: request.tenant_id.clone(),
             source_binding_ref: request.source_binding_ref.as_str().to_string(),
@@ -407,6 +415,17 @@ impl SessionThreadService for InMemoryConversationServices {
         state
             .message_idempotency
             .insert(idempotency_key, accepted.clone());
+        state.message_replays.insert(
+            replay_key,
+            StoredAcceptedMessageReplay {
+                external_conversation_identity,
+                replay: AcceptedInboundMessageReplay {
+                    resolution: source_binding
+                        .resolution(accepted.actor.user_id.clone(), accepted.tenant_id.clone()),
+                    accepted_message: accepted.clone(),
+                },
+            },
+        );
         state.messages.push(ThreadMessageRecord {
             accepted: accepted.clone(),
             actor: request.actor,
@@ -415,6 +434,32 @@ impl SessionThreadService for InMemoryConversationServices {
             received_at: request.received_at,
         });
         Ok(accepted)
+    }
+
+    async fn replay_accepted_inbound_message(
+        &self,
+        lookup: AcceptedInboundMessageLookup,
+    ) -> Result<Option<AcceptedInboundMessageReplay>, InboundTurnError> {
+        let state = self.lock_state()?;
+        let key = AcceptedMessageReplayKey::new(
+            &lookup.tenant_id,
+            &lookup.adapter_kind,
+            &lookup.adapter_installation_id,
+            &lookup.external_actor_ref,
+            &lookup.external_event_id,
+        );
+        let Some(stored) = state.message_replays.get(&key) else {
+            return Ok(None);
+        };
+        if stored.external_conversation_identity != lookup.external_conversation_ref.identity() {
+            return Err(InboundTurnError::AccessDenied {
+                actor_id: lookup.external_actor_ref.id().to_string(),
+                thread_id: "external_event_route_mismatch".to_string(),
+            });
+        }
+        let mut replay = stored.replay.clone();
+        replay.accepted_message.idempotency = MessageIdempotencyStatus::Duplicate;
+        Ok(Some(replay))
     }
 
     async fn inbound_message_turn_submission(
@@ -487,6 +532,7 @@ struct InMemoryState {
     threads: HashMap<ThreadKey, ThreadRecord>,
     external_event_routes: HashMap<ExternalEventRouteKey, ExternalConversationIdentity>,
     message_idempotency: HashMap<MessageIdempotencyKey, AcceptedInboundMessage>,
+    message_replays: HashMap<AcceptedMessageReplayKey, StoredAcceptedMessageReplay>,
     submission_keys: HashMap<AcceptedMessageRef, IdempotencyKey>,
     submitted_message_responses: HashMap<AcceptedMessageRef, SubmitTurnResponse>,
     messages: Vec<ThreadMessageRecord>,
@@ -557,6 +603,7 @@ impl InMemoryState {
             || source_binding.adapter_installation_id != route_actor_key.adapter_installation_id
             || reply_binding.adapter_installation_id != route_actor_key.adapter_installation_id
             || source_binding.source_binding_ref.as_str() != source_binding_ref
+            || source_binding.reply_target_binding_ref.as_str() != reply_target_binding_ref
             || reply_binding.reply_target_binding_ref.as_str() != reply_target_binding_ref
             || source_binding.source_binding_ref != reply_binding.source_binding_ref
             || !reply_binding.route_access.allows(route_actor_key)
@@ -914,6 +961,39 @@ impl BindingRecord {
             source_binding_ref: self.source_binding_ref.clone(),
             reply_target_binding_ref: self.reply_target_binding_ref.clone(),
             access: ThreadAccessDecision::Allowed,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct StoredAcceptedMessageReplay {
+    external_conversation_identity: ExternalConversationIdentity,
+    replay: AcceptedInboundMessageReplay,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct AcceptedMessageReplayKey {
+    tenant_id: TenantId,
+    adapter_kind: AdapterKind,
+    adapter_installation_id: AdapterInstallationId,
+    external_actor_ref: ExternalActorRef,
+    external_event_id: crate::ExternalEventId,
+}
+
+impl AcceptedMessageReplayKey {
+    fn new(
+        tenant_id: &TenantId,
+        adapter_kind: &AdapterKind,
+        adapter_installation_id: &AdapterInstallationId,
+        external_actor_ref: &ExternalActorRef,
+        external_event_id: &crate::ExternalEventId,
+    ) -> Self {
+        Self {
+            tenant_id: tenant_id.clone(),
+            adapter_kind: adapter_kind.clone(),
+            adapter_installation_id: adapter_installation_id.clone(),
+            external_actor_ref: external_actor_ref.clone(),
+            external_event_id: external_event_id.clone(),
         }
     }
 }

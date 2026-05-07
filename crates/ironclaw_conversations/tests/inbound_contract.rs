@@ -3,7 +3,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use ironclaw_conversations::{
-    AcceptInboundMessageRequest, AcceptedInboundMessage, AdapterInstallationId, AdapterKind,
+    AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageLookup,
+    AcceptedInboundMessageReplay, AdapterInstallationId, AdapterKind,
     ConversationBindingResolution, ConversationBindingService, ConversationRouteKind,
     ExternalActorRef, ExternalConversationRef, ExternalEventId, InMemoryConversationServices,
     InboundMessageContentRef, InboundTurnError, InboundTurnRequest, InboundTurnService,
@@ -844,6 +845,54 @@ async fn explicit_link_uses_existing_thread_scope_not_spoofed_link_scope() {
 }
 
 #[tokio::test]
+async fn duplicate_retry_after_submit_failure_survives_pairing_churn() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-1"),
+            user("alice"),
+        )
+        .await;
+    let coordinator = Arc::new(FailFirstTurnCoordinator::default());
+    let inbound = InboundTurnService::new(services.clone(), services.clone(), coordinator.clone());
+    let request = inbound_request(
+        telegram(),
+        external_actor("telegram-user-1"),
+        external_conversation("chat-pairing-churn", None),
+        "telegram-event-pairing-churn",
+    );
+
+    let err = inbound
+        .handle_inbound_turn(request.clone())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, InboundTurnError::TurnSubmissionFailed { .. }));
+    services
+        .unpair_external_actor(
+            &tenant(),
+            &telegram(),
+            &default_installation(),
+            &external_actor("telegram-user-1"),
+        )
+        .await;
+
+    let retry = inbound.handle_inbound_turn(request).await.unwrap();
+
+    assert_eq!(
+        retry.accepted_message.idempotency,
+        MessageIdempotencyStatus::Duplicate
+    );
+    assert_eq!(coordinator.submissions().len(), 2);
+    assert_eq!(
+        coordinator.submissions()[1].actor,
+        TurnActor::new(user("alice"))
+    );
+}
+
+#[tokio::test]
 async fn duplicate_external_event_after_submit_failure_reuses_original_actor() {
     let binding = DriftBindingService::new();
     let session =
@@ -1638,6 +1687,61 @@ async fn reply_target_validation_rejects_same_thread_different_actor_route() {
 }
 
 #[tokio::test]
+async fn accept_inbound_message_rejects_stale_message_scoped_reply_ref() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("alice-telegram"),
+            user("alice"),
+        )
+        .await;
+    let coordinator = Arc::new(RecordingTurnCoordinator::default());
+    let inbound = InboundTurnService::new(services.clone(), services.clone(), coordinator);
+    let group = external_conversation("stale-reply-ref-group", Some("topic-a"));
+    let first = inbound
+        .handle_inbound_turn(inbound_request(
+            telegram(),
+            external_actor("alice-telegram"),
+            group.clone(),
+            "stale-reply-ref-first",
+        ))
+        .await
+        .unwrap();
+    let mut widen = inbound_request(
+        telegram(),
+        external_actor("alice-telegram"),
+        group.clone(),
+        "stale-reply-ref-widen",
+    );
+    widen.route_kind = ConversationRouteKind::Shared;
+    inbound.handle_inbound_turn(widen).await.unwrap();
+
+    let err = services
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            tenant_id: tenant(),
+            thread_id: first.resolution.turn_scope.thread_id,
+            actor: first.resolution.actor,
+            adapter_kind: telegram(),
+            adapter_installation_id: default_installation(),
+            external_actor_ref: external_actor("alice-telegram"),
+            source_binding_ref: first.resolution.source_binding_ref,
+            reply_target_binding_ref: first.accepted_message.reply_target_binding_ref,
+            external_conversation_ref: group,
+            external_event_id: ExternalEventId::new("stale-reply-ref-next").unwrap(),
+            content_ref: InboundMessageContentRef::new("content:stale-reply-ref-next").unwrap(),
+            received_at: Utc.with_ymd_and_hms(2026, 5, 6, 12, 2, 0).unwrap(),
+            requested_run_profile: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, InboundTurnError::AccessDenied { .. }));
+}
+
+#[tokio::test]
 async fn message_scoped_reply_target_rejects_same_thread_different_actor_route() {
     let services = InMemoryConversationServices::default();
     services
@@ -2154,6 +2258,13 @@ impl SessionThreadService for FixedMessageSessionService {
         };
         *accepted = Some(message.clone());
         Ok(message)
+    }
+
+    async fn replay_accepted_inbound_message(
+        &self,
+        _lookup: AcceptedInboundMessageLookup,
+    ) -> Result<Option<AcceptedInboundMessageReplay>, InboundTurnError> {
+        Ok(None)
     }
 
     async fn inbound_message_turn_submission(

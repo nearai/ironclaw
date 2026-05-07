@@ -2,8 +2,9 @@ use async_trait::async_trait;
 use ironclaw_turns::{AcceptedMessageRef, IdempotencyKey, SubmitTurnResponse};
 
 use crate::{
-    AcceptInboundMessageRequest, AcceptedInboundMessage, ConversationBindingResolution,
-    InboundTurnError, LinkConversationRequest, LinkedConversationBinding, ReplyTargetBinding,
+    AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageLookup,
+    AcceptedInboundMessageReplay, ConversationBindingResolution, InboundTurnError,
+    LinkConversationRequest, LinkedConversationBinding, ReplyTargetBinding,
     ResolveConversationRequest, ValidateReplyTargetRequest,
 };
 
@@ -34,6 +35,11 @@ pub trait SessionThreadService: Send + Sync {
         &self,
         request: AcceptInboundMessageRequest,
     ) -> Result<AcceptedInboundMessage, InboundTurnError>;
+
+    async fn replay_accepted_inbound_message(
+        &self,
+        lookup: AcceptedInboundMessageLookup,
+    ) -> Result<Option<AcceptedInboundMessageReplay>, InboundTurnError>;
 
     async fn inbound_message_turn_submission(
         &self,

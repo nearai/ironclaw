@@ -94,6 +94,22 @@ pub enum MessageIdempotencyStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcceptedInboundMessageLookup {
+    pub tenant_id: TenantId,
+    pub adapter_kind: AdapterKind,
+    pub adapter_installation_id: AdapterInstallationId,
+    pub external_actor_ref: ExternalActorRef,
+    pub external_conversation_ref: ExternalConversationRef,
+    pub external_event_id: ExternalEventId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcceptedInboundMessageReplay {
+    pub resolution: ConversationBindingResolution,
+    pub accepted_message: AcceptedInboundMessage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AcceptInboundMessageRequest {
     pub tenant_id: TenantId,
     pub thread_id: ThreadId,
