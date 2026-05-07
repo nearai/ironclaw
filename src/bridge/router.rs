@@ -848,6 +848,19 @@ async fn persist_always_allow(
     state: &EngineState,
     pending: &PendingGate,
 ) -> Option<serde_json::Value> {
+    persist_always_allow_with_store(agent.deps.settings_store.as_deref(), state, pending).await
+}
+
+/// Same as [`persist_always_allow`] but takes the settings store directly
+/// rather than reaching through `&Agent`. Lets the gateway HTTP fast-path
+/// (`try_resolve_inline_approval_gate`) install the AlwaysAllow preference
+/// without an `Agent` reference, since the agent-loop mpsc is the very
+/// thing that path is bypassing.
+async fn persist_always_allow_with_store(
+    settings_store: Option<&(dyn crate::db::SettingsStore + Send + Sync)>,
+    state: &EngineState,
+    pending: &PendingGate,
+) -> Option<serde_json::Value> {
     // Validate tool name before using it as a settings key. Reject names
     // that contain dots or other characters that could collide with the
     // dotted-path settings namespace.
@@ -888,8 +901,8 @@ async fn persist_always_allow(
     // stale data until the 5-minute TTL expires. In production the settings
     // store is always available when the DB is; the fallback was dead code
     // that actively broke cache coherence in tests and edge deployments.
-    let store: &(dyn crate::db::SettingsStore + Send + Sync) = match &agent.deps.settings_store {
-        Some(ss) => ss.as_ref(),
+    let store: &(dyn crate::db::SettingsStore + Send + Sync) = match settings_store {
+        Some(ss) => ss,
         None => return None,
     };
 
@@ -939,8 +952,19 @@ async fn revert_always_allow(
     pending: &PendingGate,
     prior: Option<serde_json::Value>,
 ) {
-    let store: &(dyn crate::db::SettingsStore + Send + Sync) = match &agent.deps.settings_store {
-        Some(ss) => ss.as_ref(),
+    revert_always_allow_with_store(agent.deps.settings_store.as_deref(), pending, prior).await
+}
+
+/// Same as [`revert_always_allow`] but takes the settings store directly.
+/// Pairs with [`persist_always_allow_with_store`] for the gateway HTTP
+/// fast-path that bypasses the agent-loop mpsc.
+async fn revert_always_allow_with_store(
+    settings_store: Option<&(dyn crate::db::SettingsStore + Send + Sync)>,
+    pending: &PendingGate,
+    prior: Option<serde_json::Value>,
+) {
+    let store: &(dyn crate::db::SettingsStore + Send + Sync) = match settings_store {
+        Some(ss) => ss,
         None => return,
     };
 
@@ -2434,6 +2458,221 @@ async fn pending_gate_thread_id_for_request(
         .map(|gate| gate.thread_id);
     drop(guard);
     Ok(pending)
+}
+
+/// Outcome of a fast-path inline gate resolution attempt.
+///
+/// See [`try_resolve_inline_approval_gate`].
+#[derive(Debug)]
+#[must_use]
+pub enum InlineGateOutcome {
+    /// The resolution was delivered directly to a parked engine VM. The
+    /// pending gate has been consumed; SSE `GateResolved` was broadcast.
+    Delivered,
+    /// No live VM was waiting for this gate (engine uninitialized, no
+    /// matching parked future, or non-Approval resume kind). The pending
+    /// gate has been left in place — the caller should fall through to
+    /// the legacy mpsc dispatch path so the agent loop's `resolve_gate`
+    /// can resume the thread normally.
+    NoLiveVm,
+}
+
+/// Fast-path inline resolution for an Approval gate, intended to be
+/// callable from HTTP handlers without going through the agent-loop
+/// mpsc.
+///
+/// **Why this exists.** When `BridgeGateController::pause` parks a Tier 0
+/// or Tier 1 execution on an Approval gate, the engine call sits in
+/// `await rx`. That await is held by the bridge call invoked from the
+/// agent loop's `handle_message`, which means the per-user agent loop
+/// is blocked at `match self.handle_message(...).await` and cannot
+/// drain new submissions from `msg_tx`. A subsequent `ExecApproval`
+/// posted to `/api/chat/approval` and forwarded through `msg_tx` would
+/// queue indefinitely behind the parked alpha — so `try_deliver` would
+/// never run and alpha would only wake on the 30-minute pause timeout.
+///
+/// This function lets the HTTP handler skip the mpsc and call into
+/// the gate controller's in-memory delivery channel directly. The
+/// engine resumes from its exact suspension point, and the handler
+/// returns 202 to the user.
+///
+/// On `NoLiveVm` the caller should still dispatch the legacy
+/// `ExecApproval` submission so the agent loop can resume the thread
+/// via `state.thread_manager.resume_thread`. That path uses
+/// `&Agent` for status updates and remains the source of truth for
+/// non-inline resolutions (Authentication, External callbacks).
+///
+/// Errors are returned only when the gate exists but verification
+/// fails (channel mismatch, stale request_id, expired). Those map to
+/// 4xx responses; the caller should not fall through.
+pub async fn try_resolve_inline_approval_gate(
+    user_id: &str,
+    channel: &str,
+    thread_id: ironclaw_engine::ThreadId,
+    request_id: uuid::Uuid,
+    resolution: ironclaw_engine::GateResolution,
+    settings_store: Option<&(dyn crate::db::SettingsStore + Send + Sync)>,
+) -> Result<InlineGateOutcome, Error> {
+    // Only Approval-shaped resolutions are eligible for inline-await.
+    // `BridgeGateController::pause` returns Cancelled immediately for
+    // Authentication and External resume kinds without parking, so
+    // there's nothing to deliver to and we'd just need the legacy
+    // resume path.
+    if !matches!(
+        resolution,
+        ironclaw_engine::GateResolution::Approved { .. }
+            | ironclaw_engine::GateResolution::Denied { .. }
+            | ironclaw_engine::GateResolution::Cancelled
+    ) {
+        return Ok(InlineGateOutcome::NoLiveVm);
+    }
+
+    let Some(lock) = ENGINE_STATE.get() else {
+        return Ok(InlineGateOutcome::NoLiveVm);
+    };
+    let guard = lock.read().await;
+    let Some(state) = guard.as_ref() else {
+        return Ok(InlineGateOutcome::NoLiveVm);
+    };
+
+    let key = crate::gate::pending::PendingGateKey {
+        user_id: user_id.to_string(),
+        thread_id,
+    };
+
+    // take_verified atomically removes + verifies (request_id, channel
+    // auth, expiry). Verification failures surface as Err so the HTTP
+    // handler returns 4xx rather than silently falling through.
+    let pending = state
+        .pending_gates
+        .take_verified(&key, request_id, channel)
+        .await
+        .map_err(|e| {
+            use crate::gate::store::GateStoreError;
+            match e {
+                GateStoreError::ChannelMismatch { expected, actual } => engine_err(
+                    "authorization",
+                    format!("Channel '{actual}' cannot resolve gates from channel '{expected}'"),
+                ),
+                GateStoreError::RequestIdMismatch => {
+                    engine_err("stale", "Approval request is stale or already resolved")
+                }
+                GateStoreError::Expired => engine_err("expired", "Approval request has expired"),
+                other => engine_err("gate", other),
+            }
+        })?;
+
+    // Only Approval-resume gates are parked by the gate controller. A
+    // non-Approval gate hitting take_verified here means a different
+    // resume_kind happened to share the request_id — re-insert and tell
+    // the caller to fall back to legacy resume.
+    if !matches!(
+        pending.resume_kind,
+        ironclaw_engine::ResumeKind::Approval { .. }
+    ) {
+        if let Err(e) = state.pending_gates.insert(pending.clone()).await {
+            debug!(
+                user_id = %user_id,
+                thread_id = %thread_id,
+                error = %e,
+                "try_resolve_inline_approval_gate: failed to re-insert non-Approval gate"
+            );
+        }
+        return Ok(InlineGateOutcome::NoLiveVm);
+    }
+
+    let always_for_inline = match &resolution {
+        ironclaw_engine::GateResolution::Approved { always } => {
+            clamp_always_to_resume_kind(*always, &pending.resume_kind)
+        }
+        _ => false,
+    };
+
+    let legacy_registry_name = legacy_extension_alias(&pending.action_name);
+    let prior_permission = if always_for_inline {
+        state
+            .effect_adapter
+            .auto_approve_tool(&pending.action_name)
+            .await;
+        if let Some(ref registry_name) = legacy_registry_name {
+            state.effect_adapter.auto_approve_tool(registry_name).await;
+        }
+        persist_always_allow_with_store(settings_store, state, &pending).await
+    } else {
+        None
+    };
+
+    let inline_resolution = match &resolution {
+        ironclaw_engine::GateResolution::Approved { .. } => {
+            ironclaw_engine::GateResolution::Approved {
+                always: always_for_inline,
+            }
+        }
+        ironclaw_engine::GateResolution::Denied { reason } => {
+            ironclaw_engine::GateResolution::Denied {
+                reason: reason.clone(),
+            }
+        }
+        ironclaw_engine::GateResolution::Cancelled => ironclaw_engine::GateResolution::Cancelled,
+        _ => unreachable!("guarded by outer matches!()"),
+    };
+
+    if state
+        .gate_controller
+        .try_deliver(request_id, inline_resolution)
+        .await
+    {
+        if let Some(ref sse) = state.sse {
+            let (label, status_msg) = match &resolution {
+                ironclaw_engine::GateResolution::Approved { .. } => {
+                    if always_for_inline {
+                        ("approved_always", "Gate approved. Resuming execution.")
+                    } else {
+                        ("approved", "Gate approved. Resuming execution.")
+                    }
+                }
+                ironclaw_engine::GateResolution::Denied { .. } => ("denied", "Gate denied."),
+                ironclaw_engine::GateResolution::Cancelled => ("cancelled", "Gate cancelled."),
+                _ => unreachable!(),
+            };
+            let event = AppEvent::GateResolved {
+                request_id: pending.request_id.to_string(),
+                gate_name: pending.gate_name.clone(),
+                tool_name: pending.action_name.clone(),
+                resolution: label.into(),
+                message: status_msg.into(),
+                thread_id: Some(pending.effective_wire_thread_id()),
+            };
+            sse.broadcast_for_user(user_id, event); // projection-exempt: bridge dispatcher, inline-await fast-path resolution event
+        }
+        return Ok(InlineGateOutcome::Delivered);
+    }
+
+    // try_deliver returned false: no parked future for this request_id.
+    // Roll back the auto-approve preference we installed and re-insert
+    // the pending gate so the legacy mpsc dispatch path can find it.
+    if always_for_inline {
+        state
+            .effect_adapter
+            .revoke_auto_approve(&pending.action_name)
+            .await;
+        if let Some(registry_name) = legacy_registry_name {
+            state
+                .effect_adapter
+                .revoke_auto_approve(&registry_name)
+                .await;
+        }
+        revert_always_allow_with_store(settings_store, &pending, prior_permission).await;
+    }
+    if let Err(e) = state.pending_gates.insert(pending).await {
+        debug!(
+            user_id = %user_id,
+            thread_id = %thread_id,
+            error = %e,
+            "try_resolve_inline_approval_gate: failed to re-insert pending gate after no-live-VM"
+        );
+    }
+    Ok(InlineGateOutcome::NoLiveVm)
 }
 
 /// Resolve a unified pending gate.
@@ -11277,5 +11516,161 @@ mod tests {
         );
         let info = thread_to_info(&thread);
         assert_eq!(info.title.as_deref(), Some("Short first line"));
+    }
+
+    /// Regression: when an Approval gate is parked in
+    /// `BridgeGateController::pause`, the agent loop is blocked at
+    /// `handle_message`, so the legacy mpsc-driven `ExecApproval`
+    /// submission would never reach `try_deliver`. The new
+    /// `try_resolve_inline_approval_gate` entry point bypasses the
+    /// agent loop and delivers the resolution directly to the parked
+    /// engine VM. Without this fix the parked future would only wake
+    /// on the 30-minute pause expiry — failure mode #3157 follow-up.
+    #[tokio::test]
+    async fn try_resolve_inline_approval_gate_wakes_parked_pause() {
+        use crate::bridge::PerExecutionContext;
+        use ironclaw_engine::{
+            ConversationId, GateController, GatePauseRequest, ResumeKind, ThreadId,
+        };
+        use std::time::Duration;
+
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let outcome = async {
+            // Build an EngineState whose pending_gates and gate_controller
+            // share the same Arc<PendingGateStore> + Arc<GateResolutions>,
+            // matching the production wiring in `init_engine`.
+            let pending_gates = Arc::new(crate::gate::store::PendingGateStore::in_memory());
+            let resolutions = Arc::new(crate::bridge::gate_controller::GateResolutions::new());
+            let controller = Arc::new(crate::bridge::gate_controller::BridgeGateController::new(
+                Arc::clone(&pending_gates),
+                None,
+                Arc::new(crate::tools::ToolRegistry::new()),
+                None,
+                None,
+                Arc::new(crate::channels::ChannelManager::new()),
+                Arc::clone(&resolutions),
+            ));
+
+            let store = Arc::new(TestStore::new());
+            let mut state = make_expected_test_state(store);
+            state.pending_gates = Arc::clone(&pending_gates);
+            state.gate_controller = Arc::clone(&controller);
+            *lock.write().await = Some(state);
+
+            let thread_id = ThreadId::new();
+            let user_id = "alice".to_string();
+            let conversation_id = ConversationId::new();
+
+            controller
+                .set_execution_context(
+                    user_id.clone(),
+                    thread_id,
+                    PerExecutionContext {
+                        conversation_id,
+                        source_channel: "gateway".into(),
+                        scope_thread_id: None,
+                        channel_metadata: serde_json::json!({}),
+                        original_message: None,
+                    },
+                )
+                .await;
+
+            // Spawn alpha: parks in `pause()` until our inline-resolve
+            // delivers a resolution. This mirrors the production timing
+            // where the agent loop's handle_message is blocked here.
+            let controller_for_pause = Arc::clone(&controller);
+            let user_for_pause = user_id.clone();
+            let pause_task = tokio::spawn(async move {
+                controller_for_pause
+                    .pause(GatePauseRequest {
+                        thread_id,
+                        user_id: user_for_pause,
+                        gate_name: "approval".into(),
+                        action_name: "shell".into(),
+                        call_id: "call-1".into(),
+                        parameters: serde_json::json!({"cmd": "ls"}),
+                        resume_kind: ResumeKind::Approval { allow_always: true },
+                        conversation_id: Some(conversation_id),
+                    })
+                    .await
+            });
+
+            // Wait until pause() inserts its pending gate and registers
+            // its oneshot. peek() lifting Some signals insert completed;
+            // we follow up with a small sleep so the spawned task can
+            // also advance past register() and reach `rx.await`.
+            let key = crate::gate::pending::PendingGateKey {
+                user_id: user_id.clone(),
+                thread_id,
+            };
+            let mut request_id = None;
+            for _ in 0..200 {
+                tokio::task::yield_now().await;
+                if let Some(view) = pending_gates.peek(&key).await
+                    && let Ok(parsed) = uuid::Uuid::parse_str(&view.request_id)
+                {
+                    request_id = Some(parsed);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            let request_id =
+                request_id.expect("pause() must insert a pending gate with a request_id");
+            // Yield a few more times so the spawned pause_task moves
+            // from `register()` past it into `rx.await`.
+            for _ in 0..5 {
+                tokio::task::yield_now().await;
+            }
+
+            // Beta: gateway HTTP fast-path — call try_resolve_inline_approval_gate
+            // directly, not through the agent-loop mpsc.
+            let result = super::try_resolve_inline_approval_gate(
+                &user_id,
+                "gateway",
+                thread_id,
+                request_id,
+                ironclaw_engine::GateResolution::Approved { always: false },
+                None,
+            )
+            .await
+            .expect("inline resolve must succeed");
+
+            assert!(
+                matches!(result, super::InlineGateOutcome::Delivered),
+                "expected Delivered for parked Approval gate; got {result:?}"
+            );
+
+            // Alpha must wake promptly with our resolution — well under the
+            // 30-minute pause expiry.
+            let resolution = tokio::time::timeout(Duration::from_secs(2), pause_task)
+                .await
+                .expect("inline-resolve must wake parked pause within 2s")
+                .expect("pause task did not panic");
+            assert!(
+                matches!(
+                    resolution,
+                    ironclaw_engine::GateResolution::Approved { always: false }
+                ),
+                "delivered resolution must reach the parked future; got {resolution:?}"
+            );
+
+            // The pending gate must be consumed — `take_verified` runs
+            // inside the inline path and the rollback branch only fires
+            // when try_deliver returns false.
+            assert!(
+                pending_gates.peek(&key).await.is_none(),
+                "pending gate must be removed after successful inline delivery"
+            );
+
+            drop(controller);
+            Ok::<(), crate::error::Error>(())
+        }
+        .await;
+
+        *lock.write().await = None;
+        outcome.expect("inline resolve regression");
     }
 }

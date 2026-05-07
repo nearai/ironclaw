@@ -187,6 +187,63 @@ pub(crate) async fn chat_approval_handler(
         )
     })?;
 
+    // Inline fast-path: when an Approval gate parks the live engine VM
+    // via `BridgeGateController::pause`, the per-user agent loop is
+    // blocked at `handle_message` awaiting the bridge call, so an
+    // ExecApproval submission posted to msg_tx would queue indefinitely
+    // behind the parked execution. Bypass the mpsc and call into the
+    // gate controller's in-memory delivery channel directly. On
+    // `NoLiveVm` we fall through to the legacy mpsc path so engine v1
+    // approvals (and any post-restart Approval gates without a parked
+    // future) still resolve correctly.
+    if let Some(ref thread_id_str) = req.thread_id
+        && let Ok(thread_uuid) = Uuid::parse_str(thread_id_str)
+    {
+        let resolution = if approved {
+            ironclaw_engine::GateResolution::Approved { always }
+        } else {
+            ironclaw_engine::GateResolution::Denied { reason: None }
+        };
+        let settings_store: Option<&(dyn crate::db::SettingsStore + Send + Sync)> = state
+            .settings_cache
+            .as_deref()
+            .map(|s| s as &(dyn crate::db::SettingsStore + Send + Sync));
+        match crate::bridge::try_resolve_inline_approval_gate(
+            &user.user_id,
+            "gateway",
+            ironclaw_engine::ThreadId(thread_uuid),
+            request_id,
+            resolution,
+            settings_store,
+        )
+        .await
+        {
+            Ok(crate::bridge::InlineGateOutcome::Delivered) => {
+                return Ok((
+                    StatusCode::ACCEPTED,
+                    Json(SendMessageResponse {
+                        message_id: Uuid::new_v4(),
+                        status: "accepted",
+                    }),
+                ));
+            }
+            Ok(crate::bridge::InlineGateOutcome::NoLiveVm) => {
+                // Fall through to the legacy mpsc dispatch below.
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                let status = if msg.contains("authorization") {
+                    StatusCode::FORBIDDEN
+                } else if msg.contains("stale") || msg.contains("expired") {
+                    StatusCode::CONFLICT
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                };
+                return Err((status, msg));
+            }
+        }
+    }
+
     // Build a structured ExecApproval submission as JSON, sent through the
     // existing message pipeline so the agent loop picks it up.
     let approval = crate::agent::submission::Submission::ExecApproval {
