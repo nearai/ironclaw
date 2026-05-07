@@ -1,29 +1,23 @@
 //! Architecture/boundary tests for the ProductAdapter contract.
-//!
-//! These tests fence the contract boundary so future PRs cannot quietly
-//! reach into kernel/runtime internals or invent shortcuts that bypass the
-//! workflow facade.
 
 use std::path::Path;
+use std::process::Command;
 
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, DeclaredEgressHost, DeliveryStatus,
-    EgressCredentialHandle, ExternalActorRef, ExternalConversationRef, ExternalEventId,
-    FakeOutboundDeliverySink, FakeProductWorkflow, FakeProtocolHttpEgress, OutboundDeliverySink,
-    ProductAdapterCapabilities, ProductAdapterError, ProductAdapterId, ProductAttachmentDescriptor,
-    ProductAttachmentKind, ProductCapabilityFlag, ProductInboundAck, ProductInboundEnvelope,
-    ProductInboundPayload, ProductOutboundEnvelope, ProductOutboundPayload, ProductRejection,
+    EgressCredentialHandle, EgressMethod, EgressPath, EgressRequest, ExternalActorRef,
+    ExternalConversationRef, ExternalEventId, FakeOutboundDeliverySink, FakeProductWorkflow,
+    FakeProjectionStream, FakeProtocolHttpEgress, InboundCommandPayload, OutboundDeliverySink,
+    ParsedProductInbound, ProductAdapterCapabilities, ProductAdapterError, ProductAdapterId,
+    ProductAttachmentDescriptor, ProductAttachmentKind, ProductCapabilityFlag, ProductInboundAck,
+    ProductInboundEnvelope, ProductInboundPayload, ProductOutboundEnvelope, ProductOutboundPayload,
+    ProductOutboundTarget, ProductProjectionItem, ProductProjectionState, ProductRejection,
     ProductRejectionKind, ProductSurfaceKind, ProductTriggerReason, ProductWorkflow,
     ProjectionCursor, ProjectionStream, ProjectionSubscriptionRequest, ProtocolAuthEvidence,
     ProtocolHttpEgress, ProtocolHttpEgressError, REDACTED_PLACEHOLDER, RedactedDebug,
-    UserMessagePayload, auth::mark_shared_secret_header_verified, fakes::FakeProjectionStream,
-    inbound::ProductInboundPayload as PayloadAlias,
+    RedactedString, TrustedInboundContext, UserMessagePayload,
 };
-use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId};
-
-// ---------------------------------------------------------------------------
-// Cargo manifest boundary check
-// ---------------------------------------------------------------------------
+use ironclaw_turns::{AcceptedMessageRef, ReplyTargetBindingRef, TurnRunId};
 
 const FORBIDDEN_DEPENDENCIES: &[&str] = &[
     "ironclaw_dispatcher",
@@ -57,34 +51,57 @@ const FORBIDDEN_DEPENDENCIES: &[&str] = &[
 #[test]
 fn cargo_manifest_does_not_pull_in_forbidden_lower_layers() {
     let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
-    let manifest = std::fs::read_to_string(&manifest_path).expect("read Cargo.toml");
-    for forbidden in FORBIDDEN_DEPENDENCIES {
-        let needle = format!("{forbidden} =");
-        let needle_bracket = format!("{forbidden}.");
+    let output = Command::new("cargo")
+        .args([
+            "metadata",
+            "--format-version",
+            "1",
+            "--no-deps",
+            "--manifest-path",
+            manifest_path.to_str().expect("utf8 path"),
+        ])
+        .output()
+        .expect("cargo metadata");
+    assert!(output.status.success(), "cargo metadata failed: {output:?}");
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("metadata json");
+    let packages = metadata["packages"].as_array().expect("packages");
+    let package = packages
+        .iter()
+        .find(|package| package["name"] == "ironclaw_product_adapters")
+        .expect("product adapter package");
+    let deps = package["dependencies"].as_array().expect("deps");
+    for dep in deps {
+        let name = dep["name"].as_str().expect("dep name");
+        let package_name = dep
+            .get("package")
+            .and_then(|value| value.as_str())
+            .unwrap_or(name);
         assert!(
-            !manifest.contains(&needle) && !manifest.contains(&needle_bracket),
-            "ironclaw_product_adapters must not depend on {forbidden}; \
-             ProductAdapter contracts stay above the kernel/runtime layer"
+            !FORBIDDEN_DEPENDENCIES.contains(&name)
+                && !FORBIDDEN_DEPENDENCIES.contains(&package_name),
+            "ironclaw_product_adapters must not depend on forbidden lower layer {name}/{package_name}"
         );
     }
 }
 
 #[test]
 fn source_does_not_import_runner_transition_apis() {
-    // ironclaw_turns::runner contains trusted transition APIs reserved for
-    // workers. Adapter contracts must use only the adapter-safe surface
-    // (TurnCoordinator types via the workflow facade).
     let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut violations = Vec::new();
     for entry in walk_rs_files(&src_root) {
         let body = std::fs::read_to_string(&entry).expect("read source file");
-        if body.contains("ironclaw_turns::runner") {
+        let compact: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+        if compact.contains("ironclaw_turns::runner")
+            || compact.contains("ironclaw_turns::{runner")
+            || (compact.contains("ironclaw_turns::{") && compact.contains("runner::"))
+        {
             violations.push(entry.display().to_string());
         }
     }
     assert!(
         violations.is_empty(),
-        "files import ironclaw_turns::runner: {violations:?}"
+        "files import runner APIs: {violations:?}"
     );
 }
 
@@ -110,16 +127,60 @@ fn walk_rs_files(root: &Path) -> Vec<std::path::PathBuf> {
     out
 }
 
-// ---------------------------------------------------------------------------
-// DTO redaction checks
-// ---------------------------------------------------------------------------
+fn adapter_id() -> ProductAdapterId {
+    ProductAdapterId::new("telegram_v2").expect("valid")
+}
+
+fn installation_id() -> AdapterInstallationId {
+    AdapterInstallationId::new("install_alpha").expect("valid")
+}
+
+fn auth_context() -> TrustedInboundContext {
+    let evidence = ProtocolAuthEvidence::test_verified(
+        AuthRequirement::SharedSecretHeader {
+            header_name: "X-Telegram-Bot-Api-Secret-Token".into(),
+        },
+        "telegram_install_alpha",
+    );
+    TrustedInboundContext::from_verified_evidence(
+        adapter_id(),
+        installation_id(),
+        chrono::Utc::now(),
+        &evidence,
+    )
+    .expect("verified")
+}
+
+fn sample_parsed(event_id: &str) -> ParsedProductInbound {
+    ParsedProductInbound::new(
+        ExternalEventId::new(event_id).expect("valid"),
+        ExternalActorRef::new("telegram_user", "777", Option::<String>::None).expect("valid"),
+        ExternalConversationRef::new(None, "12345", Some("topic-7"), Some("msg-100"))
+            .expect("valid"),
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new("hello", vec![], ProductTriggerReason::DirectChat)
+                .expect("valid"),
+        ),
+    )
+    .expect("parsed")
+}
+
+fn sample_envelope(event_id: &str) -> ProductInboundEnvelope {
+    ProductInboundEnvelope::from_trusted_parse(auth_context(), sample_parsed(event_id))
+        .expect("envelope")
+}
+
+fn sample_target() -> ProductOutboundTarget {
+    ProductOutboundTarget::new(
+        ReplyTargetBindingRef::new("reply:fake-1").expect("valid"),
+        ExternalConversationRef::new(None, "12345", Some("topic-7"), Some("msg-100"))
+            .expect("valid"),
+        Some(ExternalActorRef::new("telegram_user", "777", Option::<String>::None).expect("valid")),
+    )
+}
 
 #[test]
 fn inbound_envelope_debug_does_not_leak_secret_in_redacted_field() {
-    use ironclaw_product_adapters::RedactedString;
-
-    // Manufacture an Internal error wrapping a sensitive string and assert
-    // its Debug never reveals the inner value.
     let err = ProductAdapterError::Internal {
         detail: RedactedString::new("bot12345:AAEFGH-private-token"),
     };
@@ -143,78 +204,25 @@ fn attachment_descriptor_serialization_excludes_byte_fields() {
     for forbidden in ["data", "bytes", "source_url", "local_path", "file_path"] {
         assert!(
             !object.contains_key(forbidden),
-            "attachment descriptor leaked field: {forbidden}"
+            "attachment leaked field: {forbidden}"
         );
     }
 }
 
-// ---------------------------------------------------------------------------
-// Auth evidence sealing
-// ---------------------------------------------------------------------------
-
 #[test]
-fn verified_auth_evidence_only_constructible_via_host_helpers() {
-    // Adapters cannot mint a `Verified` evidence directly. The variant
-    // requires a `HostAuthSeal` whose constructor is `pub(crate)`. The only
-    // public way to obtain a `Verified` evidence is via the `mark_*_verified`
-    // helpers on `crate::auth` — exercise each to pin the contract.
-    let signature = ironclaw_product_adapters::auth::mark_request_signature_verified(
-        "X-Slack-Signature",
-        Some("X-Slack-Request-Timestamp".into()),
-        "T01ABCDEF",
-    );
-    let shared = mark_shared_secret_header_verified(
-        "X-Telegram-Bot-Api-Secret-Token",
-        "telegram_install_alpha",
-    );
-    let session =
-        ironclaw_product_adapters::auth::mark_session_verified("ironclaw_session", "alice");
-    let bearer = ironclaw_product_adapters::auth::mark_bearer_token_verified("alice");
-
-    for evidence in [signature, shared, session, bearer] {
-        assert!(matches!(evidence, ProtocolAuthEvidence::Verified { .. }));
-        assert!(evidence.is_verified());
-        assert!(evidence.claim().is_some());
-    }
-}
-
-// ---------------------------------------------------------------------------
-// FakeProductWorkflow contract behavior
-// ---------------------------------------------------------------------------
-
-fn sample_envelope(event_id: &str) -> ProductInboundEnvelope {
-    ProductInboundEnvelope {
-        adapter_id: ProductAdapterId::new("telegram_v2").expect("valid"),
-        installation_id: AdapterInstallationId::new("install_alpha").expect("valid"),
-        external_event_id: ExternalEventId::new(event_id).expect("valid"),
-        external_actor_ref: ExternalActorRef::new("telegram_user", "777", None).expect("valid"),
-        external_conversation_ref: ExternalConversationRef::new(
-            None,
-            "12345",
-            Some("topic-7"),
-            Some("msg-100"),
-        )
-        .expect("valid"),
-        auth_claim: ironclaw_product_adapters::auth::VerifiedAuthClaim {
-            requirement: ironclaw_product_adapters::AuthRequirement::SharedSecretHeader {
-                header_name: "X-Telegram-Bot-Api-Secret-Token".into(),
-            },
-            subject: "telegram_install_alpha".into(),
-        },
-        received_at: chrono::Utc::now(),
-        payload: ProductInboundPayload::UserMessage(
-            UserMessagePayload::new("hello", vec![], ProductTriggerReason::DirectChat)
-                .expect("valid"),
-        ),
-    }
+fn verified_auth_evidence_only_constructible_for_tests_via_test_support() {
+    let evidence = ProtocolAuthEvidence::test_verified(AuthRequirement::BearerToken, "alice");
+    assert!(evidence.is_verified());
+    assert_eq!(evidence.claim().expect("claim").subject(), "alice");
+    let json = serde_json::to_string(&evidence).expect("serialize");
+    assert!(serde_json::from_str::<ProtocolAuthEvidence>(&json).is_err());
 }
 
 #[tokio::test]
 async fn workflow_default_behavior_accepts_inbound_and_records_envelope() {
     let workflow = FakeProductWorkflow::new();
-    let envelope = sample_envelope("update:1");
     let ack = workflow
-        .accept_inbound(envelope.clone())
+        .accept_inbound(sample_envelope("update:1"))
         .await
         .expect("accept");
     assert!(matches!(ack, ProductInboundAck::Accepted { .. }));
@@ -222,43 +230,33 @@ async fn workflow_default_behavior_accepts_inbound_and_records_envelope() {
 }
 
 #[tokio::test]
-async fn workflow_dedupes_duplicate_external_event_id() {
+async fn workflow_dedupes_duplicate_external_event_id_per_source_binding() {
     let workflow = FakeProductWorkflow::new();
-    let envelope = sample_envelope("update:42");
-    let first = workflow
-        .accept_inbound(envelope.clone())
-        .await
-        .expect("first call");
-    assert!(matches!(first, ProductInboundAck::Accepted { .. }));
-    let second = workflow
-        .accept_inbound(envelope.clone())
-        .await
-        .expect("dup");
-    let ProductInboundAck::Duplicate { prior } = second else {
-        panic!("expected Duplicate, got {second:?}");
-    };
-    assert!(matches!(*prior, ProductInboundAck::Accepted { .. }));
-    // Duplicate path must NOT count as a fresh accepted envelope.
+    let first = sample_envelope("update:42");
+    let second = sample_envelope("update:42");
+    let first_ack = workflow.accept_inbound(first).await.expect("first");
+    assert!(matches!(first_ack, ProductInboundAck::Accepted { .. }));
+    let second_ack = workflow.accept_inbound(second).await.expect("duplicate");
+    assert!(matches!(second_ack, ProductInboundAck::Duplicate { .. }));
     assert_eq!(workflow.accepted_count(), 1);
 }
 
 #[tokio::test]
 async fn workflow_returns_programmed_outcomes() {
     let workflow = FakeProductWorkflow::new();
-
     workflow.program_outcome(
         ExternalEventId::new("update:busy").expect("valid"),
         ProductInboundAck::DeferredBusy {
-            accepted_message_ref: "msg:busy".into(),
+            accepted_message_ref: AcceptedMessageRef::new("msg:busy").expect("valid"),
             active_run_id: TurnRunId::new(),
         },
     );
     workflow.program_outcome(
         ExternalEventId::new("update:reject").expect("valid"),
-        ProductInboundAck::Rejected(ProductRejection {
-            kind: ProductRejectionKind::PolicyDenied,
-            reason: "rate limit".into(),
-        }),
+        ProductInboundAck::Rejected(ProductRejection::retryable(
+            ProductRejectionKind::PolicyDenied,
+            "rate limit",
+        )),
     );
 
     let busy_ack = workflow
@@ -278,7 +276,7 @@ async fn workflow_returns_programmed_outcomes() {
 async fn workflow_propagates_transient_failure() {
     let workflow = FakeProductWorkflow::new();
     workflow.force_failure(ProductAdapterError::WorkflowTransient {
-        reason: "store unavailable".into(),
+        reason: RedactedString::new("store unavailable"),
     });
     let err = workflow
         .accept_inbound(sample_envelope("update:1"))
@@ -287,21 +285,14 @@ async fn workflow_propagates_transient_failure() {
     assert!(err.is_retryable());
 }
 
-// ---------------------------------------------------------------------------
-// Egress contract behavior
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn egress_to_undeclared_host_fails_closed() {
     let egress = FakeProtocolHttpEgress::new(["api.telegram.org".to_string()]);
-    let request = ironclaw_product_adapters::EgressRequest {
-        host: DeclaredEgressHost::new("evil.example.com").expect("valid"),
-        method: "POST".into(),
-        path: "/bot/sendMessage".into(),
-        headers: Default::default(),
-        body: vec![],
-        credential_handle: None,
-    };
+    let request = EgressRequest::new(
+        DeclaredEgressHost::new("evil.example.com").expect("valid"),
+        EgressMethod::post(),
+        EgressPath::new("/bot/sendMessage").expect("valid"),
+    );
     let err = egress.send(request).await.expect_err("undeclared host");
     assert!(matches!(
         err,
@@ -312,14 +303,14 @@ async fn egress_to_undeclared_host_fails_closed() {
 #[tokio::test]
 async fn egress_with_unknown_credential_handle_fails_closed() {
     let egress = FakeProtocolHttpEgress::new(["api.telegram.org".to_string()]);
-    let request = ironclaw_product_adapters::EgressRequest {
-        host: DeclaredEgressHost::new("api.telegram.org").expect("valid"),
-        method: "POST".into(),
-        path: "/bot/sendMessage".into(),
-        headers: Default::default(),
-        body: vec![],
-        credential_handle: Some(EgressCredentialHandle::new("ghost_token").expect("valid")),
-    };
+    let request = EgressRequest::new(
+        DeclaredEgressHost::new("api.telegram.org").expect("valid"),
+        EgressMethod::post(),
+        EgressPath::new("/bot/sendMessage").expect("valid"),
+    )
+    .with_credential_handle(Some(
+        EgressCredentialHandle::new("ghost_token").expect("valid"),
+    ));
     let err = egress.send(request).await.expect_err("unknown handle");
     assert!(matches!(
         err,
@@ -331,25 +322,19 @@ async fn egress_with_unknown_credential_handle_fails_closed() {
 async fn egress_with_declared_host_and_handle_succeeds() {
     let egress = FakeProtocolHttpEgress::new(["api.telegram.org".to_string()]);
     egress.allow_credential_handle("telegram_bot_token");
-    let request = ironclaw_product_adapters::EgressRequest {
-        host: DeclaredEgressHost::new("api.telegram.org").expect("valid"),
-        method: "POST".into(),
-        path: "/bot/sendMessage".into(),
-        headers: Default::default(),
-        body: br#"{"text":"hi"}"#.to_vec(),
-        credential_handle: Some(EgressCredentialHandle::new("telegram_bot_token").expect("valid")),
-    };
+    let request = EgressRequest::new(
+        DeclaredEgressHost::new("api.telegram.org").expect("valid"),
+        EgressMethod::post(),
+        EgressPath::new("/bot/sendMessage").expect("valid"),
+    )
+    .with_body(br#"{"text":"hi"}"#.to_vec())
+    .with_credential_handle(Some(
+        EgressCredentialHandle::new("telegram_bot_token").expect("valid"),
+    ));
     let response = egress.send(request).await.expect("ok");
-    assert_eq!(response.status, 200);
-    let calls = egress.calls();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].host, "api.telegram.org");
-    assert_eq!(calls[0].method, "POST");
+    assert_eq!(response.status(), 200);
+    assert_eq!(egress.calls()[0].method, "POST");
 }
-
-// ---------------------------------------------------------------------------
-// Capability gating contract
-// ---------------------------------------------------------------------------
 
 #[test]
 fn external_channel_default_capabilities_omit_progress_and_gate_push() {
@@ -360,52 +345,46 @@ fn external_channel_default_capabilities_omit_progress_and_gate_push() {
     assert!(!caps.contains(ProductCapabilityFlag::ExternalGatePush));
 }
 
-// ---------------------------------------------------------------------------
-// Projection stream contract behavior
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn projection_stream_drains_queued_envelopes() {
     let stream = FakeProjectionStream::new();
-    let envelope = ProductOutboundEnvelope {
-        adapter_id: ProductAdapterId::new("telegram_v2").expect("valid"),
-        installation_id: AdapterInstallationId::new("install_alpha").expect("valid"),
-        target: ReplyTargetBindingRef::new("reply:fake-1").expect("valid"),
-        projection_cursor: Some(ProjectionCursor::new("cursor:1")),
-        payload: ProductOutboundPayload::FinalReply(ironclaw_product_adapters::FinalReplyView {
+    let envelope = ProductOutboundEnvelope::new(
+        adapter_id(),
+        installation_id(),
+        sample_target(),
+        ProjectionCursor::new("cursor:1").expect("valid"),
+        ProductOutboundPayload::FinalReply(ironclaw_product_adapters::FinalReplyView {
             turn_run_id: TurnRunId::new(),
             text: "hi".into(),
             generated_at: chrono::Utc::now(),
         }),
-        delivery_attempt_id: uuid::Uuid::new_v4(),
-    };
-    stream.push(envelope.clone());
-    let scope = ironclaw_turns::TurnScope::new(
-        ironclaw_host_api::TenantId::new("tenant-a").expect("valid"),
-        None,
-        None,
-        ironclaw_host_api::ThreadId::new("thread-1").expect("valid"),
     );
-    let actor =
-        ironclaw_turns::TurnActor::new(ironclaw_host_api::UserId::new("alice").expect("valid"));
+    stream.push(envelope.clone());
     let drained = stream
-        .drain(ProjectionSubscriptionRequest {
-            actor,
-            scope,
-            after_cursor: None,
-        })
+        .drain(sample_subscription(None))
         .await
         .expect("drain");
     assert_eq!(drained.len(), 1);
     assert_eq!(drained[0].installation_id, envelope.installation_id);
 }
 
-// ---------------------------------------------------------------------------
-// Delivery sink contract behavior
-// ---------------------------------------------------------------------------
+fn sample_subscription(after_cursor: Option<ProjectionCursor>) -> ProjectionSubscriptionRequest {
+    ProjectionSubscriptionRequest {
+        actor: ironclaw_turns::TurnActor::new(
+            ironclaw_host_api::UserId::new("alice").expect("valid"),
+        ),
+        scope: ironclaw_turns::TurnScope::new(
+            ironclaw_host_api::TenantId::new("tenant-a").expect("valid"),
+            None,
+            None,
+            ironclaw_host_api::ThreadId::new("thread-1").expect("valid"),
+        ),
+        after_cursor,
+    }
+}
 
 #[tokio::test]
-async fn delivery_sink_records_success_and_failure_separately() {
+async fn delivery_sink_dedupes_attempt_id() {
     let sink = FakeOutboundDeliverySink::new();
     let target = ReplyTargetBindingRef::new("reply:fake-1").expect("valid");
     let attempt_id = uuid::Uuid::new_v4();
@@ -416,19 +395,13 @@ async fn delivery_sink_records_success_and_failure_separately() {
     })
     .await;
     sink.record(DeliveryStatus::FailedRetryable {
-        attempt_id: uuid::Uuid::new_v4(),
-        target: target.clone(),
+        attempt_id,
+        target,
         run_id: None,
-        reason: "telegram 502".into(),
+        reason: RedactedString::new("telegram 502"),
     })
     .await;
-    let statuses = sink.statuses();
-    assert_eq!(statuses.len(), 2);
-    assert!(matches!(statuses[0], DeliveryStatus::Delivered { .. }));
-    assert!(matches!(
-        statuses[1],
-        DeliveryStatus::FailedRetryable { .. }
-    ));
+    assert_eq!(sink.statuses().len(), 1);
 }
 
 #[test]
@@ -447,7 +420,6 @@ fn product_surface_kinds_round_trip() {
 
 #[test]
 fn auth_requirement_telegram_shape() {
-    // Telegram uses a shared-secret header.
     let requirement = AuthRequirement::SharedSecretHeader {
         header_name: "X-Telegram-Bot-Api-Secret-Token".into(),
     };
@@ -456,9 +428,32 @@ fn auth_requirement_telegram_shape() {
 }
 
 #[test]
+fn projection_state_is_renderable() {
+    let state = ProductProjectionState::new(
+        "thread-1",
+        vec![ProductProjectionItem::Text {
+            id: "message-1".into(),
+            body: "hello".into(),
+        }],
+    )
+    .expect("state");
+    assert_eq!(state.items.len(), 1);
+}
+
+#[test]
+fn command_payload_bounds_are_public_contract() {
+    assert!(InboundCommandPayload::new("help", "", ProductTriggerReason::BotCommand).is_ok());
+    assert!(InboundCommandPayload::new("help", "short", ProductTriggerReason::BotCommand).is_ok());
+    assert!(
+        InboundCommandPayload::new("h".repeat(257), "", ProductTriggerReason::BotCommand).is_err()
+    );
+}
+
+#[test]
 fn payload_alias_matches_reexport() {
-    // Smoke check: the re-export and the alias resolve to the same type.
-    fn _coerce(p: PayloadAlias) -> ProductInboundPayload {
+    fn _coerce(
+        p: ironclaw_product_adapters::inbound::ProductInboundPayload,
+    ) -> ProductInboundPayload {
         p
     }
 }

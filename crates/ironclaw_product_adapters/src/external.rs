@@ -1,16 +1,13 @@
 //! External-protocol reference normalization.
-//!
-//! Adapters parse raw protocol payloads (Telegram update, Slack event, etc.)
-//! into these structured references before calling the workflow facade.
-//! The references must contain only stable protocol identifiers — never raw
-//! secrets, host paths, bot tokens, source URLs, or arbitrary attacker-supplied
-//! free text inside a field that flows further through the system.
 
-use serde::{Deserialize, Serialize};
+use std::hash::{Hash, Hasher};
+
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::error::ProductAdapterError;
 
 const MAX_REF_LEN: usize = 512;
+const MAX_FILENAME_LEN: usize = 256;
 
 fn validate_external_id(kind: &'static str, value: &str) -> Result<(), ProductAdapterError> {
     if value.is_empty() {
@@ -34,12 +31,7 @@ fn validate_external_id(kind: &'static str, value: &str) -> Result<(), ProductAd
     Ok(())
 }
 
-/// Stable external event identifier scoped to adapter installation.
-///
-/// For Telegram this is `update_id`, for Slack it is `event_id`/`client_msg_id`,
-/// and so on. The combination of `(adapter_installation_id, source_binding,
-/// external_event_id)` is the idempotency key the workflow uses to dedupe.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
 pub struct ExternalEventId(String);
 
@@ -55,16 +47,25 @@ impl ExternalEventId {
     }
 }
 
+impl<'de> Deserialize<'de> for ExternalEventId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
 impl std::fmt::Display for ExternalEventId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
 }
 
-/// External actor reference. `kind` carries the protocol-specific actor kind
-/// (`telegram_user`, `slack_user`, etc.); `id` is the protocol's stable user
-/// identifier.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// External actor reference. Equality/hash use only stable identity
+/// (`kind`, `id`); `display_name` is presentation metadata.
+#[derive(Debug, Clone, Serialize)]
 pub struct ExternalActorRef {
     kind: String,
     id: String,
@@ -75,10 +76,11 @@ impl ExternalActorRef {
     pub fn new(
         kind: impl Into<String>,
         id: impl Into<String>,
-        display_name: Option<String>,
+        display_name: Option<impl Into<String>>,
     ) -> Result<Self, ProductAdapterError> {
         let kind = kind.into();
         let id = id.into();
+        let display_name = display_name.map(Into::into);
         validate_external_id("external_actor_kind", &kind)?;
         validate_external_id("external_actor_id", &id)?;
         if let Some(name) = &display_name {
@@ -104,21 +106,45 @@ impl ExternalActorRef {
     }
 }
 
-/// External conversation reference.
-///
-/// For Telegram this is keyed by `(chat_id, optional message_thread_id)` — the
-/// reply/message id is **not** part of the conversation key (that is
-/// reply-target/idempotency data). For Slack it is keyed by `(team_id,
-/// channel_id, thread_ts)`. `space_id` is the optional outer namespace where
-/// applicable (workspace, guild).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Deserialize)]
+struct ExternalActorRefWire {
+    kind: String,
+    id: String,
+    display_name: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for ExternalActorRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = ExternalActorRefWire::deserialize(deserializer)?;
+        Self::new(wire.kind, wire.id, wire.display_name).map_err(serde::de::Error::custom)
+    }
+}
+
+impl PartialEq for ExternalActorRef {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind && self.id == other.id
+    }
+}
+
+impl Eq for ExternalActorRef {}
+
+impl Hash for ExternalActorRef {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.kind.hash(state);
+        self.id.hash(state);
+    }
+}
+
+/// External conversation reference. Equality/hash use only stable conversation
+/// identity; `reply_target_message_id` is reply-target metadata.
+#[derive(Debug, Clone, Serialize)]
 pub struct ExternalConversationRef {
     space_id: Option<String>,
     conversation_id: String,
     topic_id: Option<String>,
-    /// Optional protocol-level reply-target hint. **Not** part of the
-    /// canonical conversation key; carried so the workflow can construct a
-    /// `ReplyTargetBindingRef` value that survives across reply chains.
     reply_target_message_id: Option<String>,
 }
 
@@ -164,36 +190,71 @@ impl ExternalConversationRef {
         self.reply_target_message_id.as_deref()
     }
 
-    /// Canonical conversation fingerprint. Excludes `reply_target_message_id`
-    /// — that field is reply-target data, not part of the conversation key.
+    /// Canonical conversation fingerprint. Length-prefixed segments prevent
+    /// delimiter collisions and the reply-target hint is deliberately excluded.
     pub fn conversation_fingerprint(&self) -> String {
+        fn seg(name: &str, value: Option<&str>) -> String {
+            let value = value.unwrap_or("");
+            format!("{name}:{}:{value};", value.len())
+        }
         format!(
-            "space={};conversation={};topic={}",
-            self.space_id.as_deref().unwrap_or(""),
-            self.conversation_id,
-            self.topic_id.as_deref().unwrap_or(""),
+            "{}{}{}",
+            seg("space", self.space_id.as_deref()),
+            seg("conversation", Some(&self.conversation_id)),
+            seg("topic", self.topic_id.as_deref()),
         )
     }
 }
 
+#[derive(Deserialize)]
+struct ExternalConversationRefWire {
+    space_id: Option<String>,
+    conversation_id: String,
+    topic_id: Option<String>,
+    reply_target_message_id: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for ExternalConversationRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = ExternalConversationRefWire::deserialize(deserializer)?;
+        Self::new(
+            wire.space_id.as_deref(),
+            wire.conversation_id,
+            wire.topic_id.as_deref(),
+            wire.reply_target_message_id.as_deref(),
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+impl PartialEq for ExternalConversationRef {
+    fn eq(&self, other: &Self) -> bool {
+        self.space_id == other.space_id
+            && self.conversation_id == other.conversation_id
+            && self.topic_id == other.topic_id
+    }
+}
+
+impl Eq for ExternalConversationRef {}
+
+impl Hash for ExternalConversationRef {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.space_id.hash(state);
+        self.conversation_id.hash(state);
+        self.topic_id.hash(state);
+    }
+}
+
 /// Bounded attachment descriptor.
-///
-/// Adapters MUST NOT include raw bytes, source URLs that require credentials,
-/// host-local paths, or extracted text in the inbound envelope. The workflow
-/// stages durable attachment refs (downloads via constrained egress, blob
-/// store handles, etc.) before the turn coordinator sees the message.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProductAttachmentDescriptor {
-    /// Protocol-side stable file id (Telegram `file_id`, Slack `file.id`, ...).
     pub external_file_id: String,
-    /// MIME type, normalized to lowercase ASCII (validated to not contain
-    /// control characters).
     pub mime_type: String,
-    /// Original filename if the protocol provided one. Caps at 256 bytes.
     pub filename: Option<String>,
-    /// File size in bytes, if the protocol provided it.
     pub size_bytes: Option<u64>,
-    /// Coarse kind for the workflow's attachment-staging policy.
     pub kind: ProductAttachmentKind,
 }
 
@@ -220,10 +281,11 @@ impl ProductAttachmentDescriptor {
         let external_file_id = external_file_id.into();
         let mime_type = mime_type.into();
         validate_external_id("attachment_external_file_id", &external_file_id)?;
-        validate_external_id("attachment_mime_type", &mime_type)?;
+        validate_mime_type(&mime_type)?;
         if let Some(name) = &filename {
-            validate_external_id("attachment_filename", name)?;
+            validate_attachment_filename(name)?;
         }
+        validate_attachment_kind(&mime_type, kind)?;
         Ok(Self {
             external_file_id,
             mime_type,
@@ -232,6 +294,83 @@ impl ProductAttachmentDescriptor {
             kind,
         })
     }
+}
+
+#[derive(Deserialize)]
+struct ProductAttachmentDescriptorWire {
+    external_file_id: String,
+    mime_type: String,
+    filename: Option<String>,
+    size_bytes: Option<u64>,
+    kind: ProductAttachmentKind,
+}
+
+impl<'de> Deserialize<'de> for ProductAttachmentDescriptor {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = ProductAttachmentDescriptorWire::deserialize(deserializer)?;
+        Self::new(
+            wire.external_file_id,
+            wire.mime_type,
+            wire.filename,
+            wire.size_bytes,
+            wire.kind,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+fn validate_mime_type(value: &str) -> Result<(), ProductAdapterError> {
+    validate_external_id("attachment_mime_type", value)?;
+    if !value.is_ascii() || value.chars().any(|c| c.is_ascii_uppercase()) {
+        return Err(ProductAdapterError::InvalidIdentifier {
+            kind: "attachment_mime_type",
+            reason: "must be normalized lowercase ASCII".into(),
+        });
+    }
+    if !value.contains('/') || value.starts_with('/') || value.ends_with('/') {
+        return Err(ProductAdapterError::InvalidIdentifier {
+            kind: "attachment_mime_type",
+            reason: "must be a type/subtype MIME value".into(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_attachment_filename(value: &str) -> Result<(), ProductAdapterError> {
+    validate_external_id("attachment_filename", value)?;
+    if value.len() > MAX_FILENAME_LEN {
+        return Err(ProductAdapterError::InvalidIdentifier {
+            kind: "attachment_filename",
+            reason: format!("must be at most {MAX_FILENAME_LEN} bytes"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_attachment_kind(
+    mime_type: &str,
+    kind: ProductAttachmentKind,
+) -> Result<(), ProductAdapterError> {
+    let base = mime_type.split('/').next().unwrap_or_default();
+    let expected = match base {
+        "image" => Some(ProductAttachmentKind::Image),
+        "audio" => Some(ProductAttachmentKind::Audio),
+        "video" => Some(ProductAttachmentKind::Video),
+        _ => None,
+    };
+    if let Some(expected) = expected
+        && kind != expected
+        && kind != ProductAttachmentKind::Other
+    {
+        return Err(ProductAdapterError::InvalidIdentifier {
+            kind: "attachment_kind",
+            reason: "must match normalized MIME base type".into(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -249,28 +388,37 @@ mod tests {
     #[test]
     fn external_event_id_rejects_control_chars() {
         assert!(ExternalEventId::new("foo\nbar").is_err());
+        assert!(serde_json::from_str::<ExternalEventId>("\"foo\\nbar\"").is_err());
+    }
+
+    #[test]
+    fn actor_equality_ignores_display_name() {
+        let a = ExternalActorRef::new("telegram_user", "777", Some("Alice")).expect("valid");
+        let b = ExternalActorRef::new("telegram_user", "777", Some("Alice Cooper")).expect("valid");
+        assert_eq!(a, b);
     }
 
     #[test]
     fn conversation_fingerprint_excludes_reply_target() {
-        // Same conversation, different reply target — fingerprints must be
-        // identical because reply-target is NOT part of the conversation key.
         let a = ExternalConversationRef::new(None, "12345", Some("topic-7"), Some("msg-100"))
             .expect("valid");
         let b = ExternalConversationRef::new(None, "12345", Some("topic-7"), Some("msg-200"))
             .expect("valid");
+        assert_eq!(a, b);
         assert_eq!(a.conversation_fingerprint(), b.conversation_fingerprint());
     }
 
     #[test]
-    fn conversation_fingerprint_distinguishes_topic() {
-        let a = ExternalConversationRef::new(None, "12345", Some("topic-7"), None).expect("valid");
-        let b = ExternalConversationRef::new(None, "12345", Some("topic-8"), None).expect("valid");
+    fn conversation_fingerprint_distinguishes_delimiter_ambiguous_parts() {
+        let a = ExternalConversationRef::new(Some("a;conversation=b"), "c", Some("d"), None)
+            .expect("valid");
+        let b =
+            ExternalConversationRef::new(Some("a"), "b;topic=c", Some("d"), None).expect("valid");
         assert_ne!(a.conversation_fingerprint(), b.conversation_fingerprint());
     }
 
     #[test]
-    fn attachment_descriptor_rejects_control_chars_in_mime() {
+    fn attachment_descriptor_rejects_invalid_metadata() {
         assert!(
             ProductAttachmentDescriptor::new(
                 "file_42",
@@ -281,13 +429,30 @@ mod tests {
             )
             .is_err()
         );
+        assert!(
+            ProductAttachmentDescriptor::new(
+                "file_42",
+                "Image/JPEG",
+                None,
+                Some(2048),
+                ProductAttachmentKind::Image,
+            )
+            .is_err()
+        );
+        assert!(
+            ProductAttachmentDescriptor::new(
+                "file_42",
+                "image/jpeg",
+                Some("a".repeat(MAX_FILENAME_LEN + 1)),
+                Some(2048),
+                ProductAttachmentKind::Image,
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn attachment_descriptor_does_not_contain_url_fields() {
-        // The descriptor type itself has no source_url / local_path / data
-        // fields — this assertion is a compile-time guarantee, but we exercise
-        // construction paths to make the intent explicit in tests.
         let attachment = ProductAttachmentDescriptor::new(
             "file_42",
             "image/jpeg",

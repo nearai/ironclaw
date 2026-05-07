@@ -1,25 +1,4 @@
 //! Product-adapter contracts for IronClaw Reborn.
-//!
-//! This crate defines the boundary between channel/transport-specific code and
-//! the canonical Reborn pipeline ([`ironclaw_turns::TurnCoordinator`] via the
-//! [`ProductWorkflow`] facade). Concrete adapters (Telegram v2, Slack v2, Web,
-//! CLI, API) live in separate crates/components and depend on this contract.
-//!
-//! See `CLAUDE.md` for the full guardrail list. The high-level shape is:
-//!
-//! ```text
-//! protocol event
-//!   -> host verifies protocol auth (mints ProtocolAuthEvidence::Verified)
-//!   -> adapter parses payload into ProductInboundEnvelope
-//!   -> ProductWorkflow resolves canonical actor/thread, dedupes by external_event_id,
-//!      stages attachments, and submits/defers/rejects via TurnCoordinator
-//!   -> ProductInboundAck returned to adapter (used to choose protocol response code)
-//!
-//! projection update
-//!   -> ProductOutboundEnvelope (FinalReply / Progress / GatePrompt / ...)
-//!   -> adapter renders + delivers via ProtocolHttpEgress
-//!   -> OutboundDeliverySink records DeliveryStatus
-//! ```
 
 #![forbid(unsafe_code)]
 
@@ -39,13 +18,17 @@ pub mod redaction;
 pub mod workflow;
 
 pub use adapter::{ProductAdapter, ProductAdapterHealth};
+pub use auth::{AuthRequirement, ProtocolAuthEvidence, ProtocolAuthFailure, VerifiedAuthClaim};
+#[cfg(feature = "host-auth-mint")]
 pub use auth::{
-    AuthRequirement, HostAuthSeal, ProtocolAuthEvidence, ProtocolAuthFailure, VerifiedAuthClaim,
+    mark_bearer_token_verified, mark_request_signature_verified, mark_session_verified,
+    mark_shared_secret_header_verified,
 };
 pub use capabilities::{ProductAdapterCapabilities, ProductCapabilityFlag};
 pub use egress::{
-    DeclaredEgressHost, DeliveryAttemptId, DeliveryStatus, EgressCredentialHandle, EgressRequest,
-    EgressResponse, OutboundDeliverySink, ProtocolHttpEgress, ProtocolHttpEgressError,
+    DeclaredEgressHost, DeclaredEgressTarget, DeliveryAttemptId, DeliveryStatus,
+    EgressCredentialHandle, EgressHeader, EgressMethod, EgressPath, EgressRequest, EgressResponse,
+    OutboundDeliverySink, ProtocolHttpEgress, ProtocolHttpEgressError,
 };
 pub use error::ProductAdapterError;
 pub use external::{
@@ -59,13 +42,17 @@ pub use fakes::{
 };
 pub use identity::{AdapterInstallationId, ProductAdapterId, ProductSurfaceKind};
 pub use inbound::{
-    InboundCommandPayload, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
-    ProductRejection, ProductRejectionKind, ProductTriggerReason, UserMessagePayload,
+    ApprovalDecision, ApprovalResolutionPayload, AuthResolutionPayload, AuthResolutionResult,
+    InboundCommandPayload, InboundRetryDisposition, LinkedThreadActionPayload,
+    ParsedProductInbound, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
+    ProductRejection, ProductRejectionDisposition, ProductRejectionKind, ProductTriggerReason,
+    ProjectionSubscriptionPayload, TrustedInboundContext, UserMessagePayload,
 };
 pub use outbound::{
     AuthPromptView, FinalReplyView, GatePromptView, ProductOutboundEnvelope,
-    ProductOutboundPayload, ProgressKind, ProgressUpdateView, ProjectionCursor, ProjectionSnapshot,
-    ProjectionUpdate,
+    ProductOutboundPayload, ProductOutboundTarget, ProductProjectionItem, ProductProjectionState,
+    ProductRenderOutcome, ProductSynchronousResponse, ProgressKind, ProgressUpdateView,
+    ProjectionCursor,
 };
 pub use projection::{ProjectionStream, ProjectionSubscriptionRequest};
 pub use redaction::{REDACTED_PLACEHOLDER, RedactedDebug, RedactedString};

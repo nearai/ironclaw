@@ -1,23 +1,16 @@
 //! ProductAdapter trait.
-//!
-//! Concrete adapter implementations (Telegram v2, Web, CLI, Slack v2, ...)
-//! implement this trait against the contract defined in this crate. Adapters
-//! parse external protocol payloads into a [`crate::ProductInboundEnvelope`],
-//! and protocol-translate [`crate::ProductOutboundEnvelope`] back into the
-//! external surface using the constrained egress capability.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::auth::ProtocolAuthEvidence;
+use crate::auth::{AuthRequirement, ProtocolAuthEvidence};
 use crate::capabilities::ProductAdapterCapabilities;
-use crate::egress::ProtocolHttpEgress;
+use crate::egress::{DeclaredEgressTarget, OutboundDeliverySink, ProtocolHttpEgress};
 use crate::error::ProductAdapterError;
 use crate::identity::{AdapterInstallationId, ProductAdapterId, ProductSurfaceKind};
-use crate::inbound::ProductInboundEnvelope;
-use crate::outbound::ProductOutboundEnvelope;
+use crate::inbound::ParsedProductInbound;
+use crate::outbound::{ProductOutboundEnvelope, ProductRenderOutcome};
 
-/// Health snapshot for ops/observability surfaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProductAdapterHealth {
@@ -36,25 +29,34 @@ pub trait ProductAdapter: Send + Sync {
 
     fn capabilities(&self) -> &ProductAdapterCapabilities;
 
-    /// Parse a verified protocol payload into a structured inbound envelope.
-    ///
-    /// `auth_evidence` is constructed by the host before this call. The
-    /// adapter MUST refuse to construct an envelope when the evidence is not
-    /// `Verified`.
+    /// Host-visible protocol-auth policy. The host must enforce this before it
+    /// constructs verified auth evidence and calls [`Self::parse_inbound`].
+    fn auth_requirement(&self) -> &AuthRequirement;
+
+    /// Host-visible egress allowlist and credential handles declared by this
+    /// adapter installation.
+    fn declared_egress(&self) -> &[DeclaredEgressTarget] {
+        &[]
+    }
+
+    /// Parse an authenticated protocol payload into adapter-controlled fields.
+    /// Trusted fields (adapter id, installation id, auth claim, received_at)
+    /// are stamped by the host via [`crate::TrustedInboundContext`]. Ignored
+    /// authenticated events must return an explicit `ProductInboundPayload::NoOp`.
     fn parse_inbound(
         &self,
         raw_payload: &[u8],
-        auth_evidence: ProtocolAuthEvidence,
-    ) -> Result<Option<ProductInboundEnvelope>, ProductAdapterError>;
+        auth_evidence: &ProtocolAuthEvidence,
+    ) -> Result<ParsedProductInbound, ProductAdapterError>;
 
-    /// Render a projection-derived outbound envelope into the external
-    /// surface. Adapters use the supplied [`ProtocolHttpEgress`] for any
-    /// network I/O.
+    /// Render a projection-derived outbound envelope into the external surface.
+    /// Implementations use `delivery_sink` to report the exact attempt outcome.
     async fn render_outbound(
         &self,
         envelope: ProductOutboundEnvelope,
         egress: &dyn ProtocolHttpEgress,
-    ) -> Result<(), ProductAdapterError>;
+        delivery_sink: &dyn OutboundDeliverySink,
+    ) -> Result<ProductRenderOutcome, ProductAdapterError>;
 
     fn health(&self) -> ProductAdapterHealth {
         ProductAdapterHealth::Healthy
