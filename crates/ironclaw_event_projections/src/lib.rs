@@ -483,6 +483,82 @@ pub trait EventProjectionService: Send + Sync {
     ) -> Result<ProjectionReplay, ProjectionError>;
 }
 
+/// Transport-agnostic facade for scoped Reborn projection replay.
+///
+/// Product transports should enter through this manager rather than reaching
+/// directly into durable logs. The manager intentionally keeps runtime and
+/// audit projections domain-specific: it validates and routes requests to the
+/// owning projection services without flattening them into a generic event
+/// union DTO.
+#[derive(Clone)]
+pub struct EventStreamManager {
+    runtime_projection: Arc<dyn EventProjectionService>,
+    audit_projection: Arc<dyn AuditProjectionService>,
+}
+
+impl EventStreamManager {
+    pub fn new<R, A>(runtime_projection: Arc<R>, audit_projection: Arc<A>) -> Self
+    where
+        R: EventProjectionService + 'static,
+        A: AuditProjectionService + 'static,
+    {
+        let runtime_projection: Arc<dyn EventProjectionService> = runtime_projection;
+        let audit_projection: Arc<dyn AuditProjectionService> = audit_projection;
+        Self {
+            runtime_projection,
+            audit_projection,
+        }
+    }
+
+    pub fn from_services(
+        runtime_projection: Arc<dyn EventProjectionService>,
+        audit_projection: Arc<dyn AuditProjectionService>,
+    ) -> Self {
+        Self {
+            runtime_projection,
+            audit_projection,
+        }
+    }
+
+    pub async fn runtime_snapshot(
+        &self,
+        request: ProjectionRequest,
+    ) -> Result<ProjectionSnapshot, ProjectionError> {
+        self.runtime_projection.snapshot(request).await
+    }
+
+    pub async fn runtime_updates(
+        &self,
+        request: ProjectionRequest,
+    ) -> Result<ProjectionReplay, ProjectionError> {
+        self.runtime_projection.updates(request).await
+    }
+
+    pub async fn audit_snapshot(
+        &self,
+        request: AuditProjectionRequest,
+    ) -> Result<AuditProjectionSnapshot, AuditProjectionError> {
+        self.audit_projection.snapshot(request).await
+    }
+
+    pub async fn audit_updates(
+        &self,
+        request: AuditProjectionRequest,
+    ) -> Result<AuditProjectionReplay, AuditProjectionError> {
+        self.audit_projection.updates(request).await
+    }
+}
+
+impl std::fmt::Debug for EventStreamManager {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EventStreamManager")
+            .field("runtime_projection", &"<event_projection_service>")
+            .field("audit_projection", &"<audit_projection_service>")
+            .finish()
+    }
+}
+
 #[derive(Clone)]
 pub struct ReplayEventProjectionService {
     runtime_log: Arc<dyn DurableEventLog>,

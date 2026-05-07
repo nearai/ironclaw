@@ -122,6 +122,12 @@ client reconnects with last_event_id
 -> transport resumes live tail
 ```
 
+`EventStreamManager` is the transport-agnostic facade over domain projection
+services. It routes scoped runtime and audit replay requests through their
+owning projection services and preserves their domain-specific DTOs/cursors;
+it must not flatten runtime, audit, transcript, or future memory facts into a
+single generic event payload.
+
 Rules:
 
 - event ids are scoped; a user cannot replay another user's stream
