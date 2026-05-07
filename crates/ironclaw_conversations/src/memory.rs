@@ -1,0 +1,459 @@
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex},
+};
+
+use async_trait::async_trait;
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_turns::{
+    AcceptedMessageRef, ReplyTargetBindingRef, SourceBindingRef, TurnActor, TurnScope,
+};
+use uuid::Uuid;
+
+use crate::{
+    AcceptInboundMessageRequest, AcceptedInboundMessage, AdapterInstallationId, AdapterKind,
+    ConversationBindingResolution, ConversationBindingService, ExternalActorRef,
+    ExternalConversationRef, InboundTurnError, LinkConversationRequest, LinkedConversationBinding,
+    MessageIdempotencyStatus, ReplyTargetBinding, ResolveConversationRequest, SessionThreadService,
+    ThreadAccessDecision, ThreadMessageRecord,
+};
+
+#[derive(Clone, Default)]
+pub struct InMemoryConversationServices {
+    state: Arc<Mutex<InMemoryState>>,
+}
+
+impl InMemoryConversationServices {
+    pub async fn pair_external_actor(
+        &self,
+        tenant_id: TenantId,
+        adapter_kind: AdapterKind,
+        adapter_installation_id: AdapterInstallationId,
+        external_actor_ref: ExternalActorRef,
+        user_id: UserId,
+    ) {
+        if let Ok(mut state) = self.state.lock() {
+            state.pairings.insert(
+                ActorKey::new(
+                    &tenant_id,
+                    &adapter_kind,
+                    &adapter_installation_id,
+                    &external_actor_ref,
+                ),
+                user_id,
+            );
+        }
+    }
+
+    pub async fn accepted_messages(&self) -> Vec<ThreadMessageRecord> {
+        match self.state.lock() {
+            Ok(state) => state.messages.clone(),
+            Err(_) => Vec::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl ConversationBindingService for InMemoryConversationServices {
+    async fn resolve_or_create_binding(
+        &self,
+        request: ResolveConversationRequest,
+    ) -> Result<ConversationBindingResolution, InboundTurnError> {
+        let mut state = self.lock_state()?;
+        let actor_user_id = state.resolve_actor(
+            &request.tenant_id,
+            &request.adapter_kind,
+            &request.adapter_installation_id,
+            &request.external_actor_ref,
+        )?;
+        let binding_key = BindingKey::from_request(&request);
+
+        if let Some(binding) = state.bindings.get(&binding_key).cloned() {
+            state.ensure_participant(&request.tenant_id, &actor_user_id, &binding.thread_id)?;
+            return Ok(binding.resolution(actor_user_id, request.tenant_id));
+        }
+
+        let thread_id = ThreadId::new(Uuid::new_v4().to_string()).map_err(|error| {
+            InboundTurnError::InvalidCanonicalRef {
+                reason: error.to_string(),
+            }
+        })?;
+        let thread = ThreadRecord {
+            agent_id: request.requested_agent_id.clone(),
+            project_id: request.requested_project_id.clone(),
+            participants: HashSet::from([actor_user_id.clone()]),
+        };
+        state
+            .threads
+            .insert(ThreadKey::new(&request.tenant_id, &thread_id), thread);
+        let binding = BindingRecord::new(
+            request.tenant_id.clone(),
+            request.adapter_kind,
+            request.adapter_installation_id,
+            request.external_conversation_ref,
+            thread_id,
+            request.requested_agent_id,
+            request.requested_project_id,
+        )?;
+        let resolution = binding.resolution(actor_user_id, request.tenant_id.clone());
+        state.reply_targets.insert(
+            binding.reply_target_binding_ref.as_str().to_string(),
+            binding.clone(),
+        );
+        state.bindings.insert(binding_key, binding);
+        Ok(resolution)
+    }
+
+    async fn link_conversation_to_thread(
+        &self,
+        request: LinkConversationRequest,
+    ) -> Result<LinkedConversationBinding, InboundTurnError> {
+        let mut state = self.lock_state()?;
+        let actor_user_id = state.resolve_actor(
+            &request.tenant_id,
+            &request.adapter_kind,
+            &request.adapter_installation_id,
+            &request.external_actor_ref,
+        )?;
+        let target_thread = state.thread_for_participant(
+            &request.tenant_id,
+            &actor_user_id,
+            &request.target_thread_id,
+        )?;
+        let binding_key = BindingKey {
+            tenant_id: request.tenant_id.clone(),
+            adapter_kind: request.adapter_kind.clone(),
+            adapter_installation_id: request.adapter_installation_id.clone(),
+            external_conversation_ref: request.external_conversation_ref.clone(),
+        };
+        if let Some(existing) = state.bindings.get(&binding_key).cloned() {
+            if existing.thread_id == request.target_thread_id {
+                return Ok(LinkedConversationBinding {
+                    thread_id: existing.thread_id,
+                    source_binding_ref: existing.source_binding_ref,
+                    reply_target_binding_ref: existing.reply_target_binding_ref,
+                });
+            }
+            return Err(InboundTurnError::BindingConflict {
+                thread_id: existing.thread_id.to_string(),
+            });
+        }
+        let binding = BindingRecord::new(
+            request.tenant_id,
+            request.adapter_kind,
+            request.adapter_installation_id,
+            request.external_conversation_ref,
+            request.target_thread_id,
+            target_thread.agent_id,
+            target_thread.project_id,
+        )?;
+        let linked = LinkedConversationBinding {
+            thread_id: binding.thread_id.clone(),
+            source_binding_ref: binding.source_binding_ref.clone(),
+            reply_target_binding_ref: binding.reply_target_binding_ref.clone(),
+        };
+        state.reply_targets.insert(
+            binding.reply_target_binding_ref.as_str().to_string(),
+            binding.clone(),
+        );
+        state.bindings.insert(binding_key, binding);
+        Ok(linked)
+    }
+
+    async fn validate_reply_target(
+        &self,
+        tenant_id: &TenantId,
+        actor_user_id: &UserId,
+        reply_target_binding_ref: &ReplyTargetBindingRef,
+    ) -> Result<ReplyTargetBinding, InboundTurnError> {
+        let state = self.lock_state()?;
+        let Some(binding) = state
+            .reply_targets
+            .get(reply_target_binding_ref.as_str())
+            .cloned()
+        else {
+            return Err(InboundTurnError::ThreadNotFound {
+                thread_id: reply_target_binding_ref.as_str().to_string(),
+            });
+        };
+        if binding.tenant_id != *tenant_id {
+            return Err(InboundTurnError::AccessDenied {
+                actor_id: actor_user_id.to_string(),
+                thread_id: binding.thread_id.to_string(),
+            });
+        }
+        state.ensure_participant(&binding.tenant_id, actor_user_id, &binding.thread_id)?;
+        Ok(ReplyTargetBinding {
+            tenant_id: binding.tenant_id,
+            actor_user_id: actor_user_id.clone(),
+            thread_id: binding.thread_id,
+            external_conversation_ref: binding.external_conversation_ref,
+        })
+    }
+}
+
+#[async_trait]
+impl SessionThreadService for InMemoryConversationServices {
+    async fn accept_inbound_message(
+        &self,
+        request: AcceptInboundMessageRequest,
+    ) -> Result<AcceptedInboundMessage, InboundTurnError> {
+        let mut state = self.lock_state()?;
+        state.ensure_participant(
+            &request.tenant_id,
+            &request.actor.user_id,
+            &request.thread_id,
+        )?;
+        let idempotency_key = MessageIdempotencyKey {
+            tenant_id: request.tenant_id.clone(),
+            source_binding_ref: request.source_binding_ref.as_str().to_string(),
+            external_event_id: request.external_event_id.clone(),
+        };
+        if let Some(existing) = state.message_idempotency.get(&idempotency_key) {
+            let mut duplicate = existing.clone();
+            duplicate.idempotency = MessageIdempotencyStatus::Duplicate;
+            return Ok(duplicate);
+        }
+
+        let message_ref = AcceptedMessageRef::new(format!("message:{}", Uuid::new_v4()))
+            .map_err(|reason| InboundTurnError::InvalidCanonicalRef { reason })?;
+        let accepted = AcceptedInboundMessage {
+            tenant_id: request.tenant_id,
+            thread_id: request.thread_id,
+            message_ref,
+            source_binding_ref: request.source_binding_ref,
+            reply_target_binding_ref: request.reply_target_binding_ref,
+            idempotency: MessageIdempotencyStatus::Inserted,
+        };
+        state
+            .message_idempotency
+            .insert(idempotency_key, accepted.clone());
+        state.messages.push(ThreadMessageRecord {
+            accepted: accepted.clone(),
+            actor: request.actor,
+            external_event_id: request.external_event_id,
+            content_ref: request.content_ref,
+            received_at: request.received_at,
+        });
+        Ok(accepted)
+    }
+
+    async fn inbound_message_turn_submitted(
+        &self,
+        message_ref: &AcceptedMessageRef,
+    ) -> Result<bool, InboundTurnError> {
+        let state = self.lock_state()?;
+        Ok(state.submitted_message_refs.contains(message_ref))
+    }
+
+    async fn mark_inbound_message_turn_submitted(
+        &self,
+        message_ref: &AcceptedMessageRef,
+    ) -> Result<(), InboundTurnError> {
+        let mut state = self.lock_state()?;
+        state.submitted_message_refs.insert(message_ref.clone());
+        Ok(())
+    }
+}
+
+impl InMemoryConversationServices {
+    fn lock_state(&self) -> Result<std::sync::MutexGuard<'_, InMemoryState>, InboundTurnError> {
+        self.state
+            .lock()
+            .map_err(|_| InboundTurnError::StatePoisoned)
+    }
+}
+
+#[derive(Default)]
+struct InMemoryState {
+    pairings: HashMap<ActorKey, UserId>,
+    bindings: HashMap<BindingKey, BindingRecord>,
+    reply_targets: HashMap<String, BindingRecord>,
+    threads: HashMap<ThreadKey, ThreadRecord>,
+    message_idempotency: HashMap<MessageIdempotencyKey, AcceptedInboundMessage>,
+    submitted_message_refs: HashSet<AcceptedMessageRef>,
+    messages: Vec<ThreadMessageRecord>,
+}
+
+impl InMemoryState {
+    fn resolve_actor(
+        &self,
+        tenant_id: &TenantId,
+        adapter_kind: &AdapterKind,
+        adapter_installation_id: &AdapterInstallationId,
+        external_actor_ref: &ExternalActorRef,
+    ) -> Result<UserId, InboundTurnError> {
+        self.pairings
+            .get(&ActorKey::new(
+                tenant_id,
+                adapter_kind,
+                adapter_installation_id,
+                external_actor_ref,
+            ))
+            .cloned()
+            .ok_or_else(|| InboundTurnError::BindingRequired {
+                adapter_kind: adapter_kind.as_str().to_string(),
+                external_actor_id: external_actor_ref.id().to_string(),
+            })
+    }
+
+    fn ensure_participant(
+        &self,
+        tenant_id: &TenantId,
+        actor_user_id: &UserId,
+        thread_id: &ThreadId,
+    ) -> Result<(), InboundTurnError> {
+        self.thread_for_participant(tenant_id, actor_user_id, thread_id)
+            .map(|_| ())
+    }
+
+    fn thread_for_participant(
+        &self,
+        tenant_id: &TenantId,
+        actor_user_id: &UserId,
+        thread_id: &ThreadId,
+    ) -> Result<ThreadRecord, InboundTurnError> {
+        let Some(thread) = self.threads.get(&ThreadKey::new(tenant_id, thread_id)) else {
+            return Err(InboundTurnError::ThreadNotFound {
+                thread_id: thread_id.to_string(),
+            });
+        };
+        if !thread.participants.contains(actor_user_id) {
+            return Err(InboundTurnError::AccessDenied {
+                actor_id: actor_user_id.to_string(),
+                thread_id: thread_id.to_string(),
+            });
+        }
+        Ok(thread.clone())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ActorKey {
+    tenant_id: TenantId,
+    adapter_kind: AdapterKind,
+    adapter_installation_id: AdapterInstallationId,
+    external_actor_ref: ExternalActorRef,
+}
+
+impl ActorKey {
+    fn new(
+        tenant_id: &TenantId,
+        adapter_kind: &AdapterKind,
+        adapter_installation_id: &AdapterInstallationId,
+        external_actor_ref: &ExternalActorRef,
+    ) -> Self {
+        Self {
+            tenant_id: tenant_id.clone(),
+            adapter_kind: adapter_kind.clone(),
+            adapter_installation_id: adapter_installation_id.clone(),
+            external_actor_ref: external_actor_ref.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct BindingKey {
+    tenant_id: TenantId,
+    adapter_kind: AdapterKind,
+    adapter_installation_id: AdapterInstallationId,
+    external_conversation_ref: ExternalConversationRef,
+}
+
+impl BindingKey {
+    fn from_request(request: &ResolveConversationRequest) -> Self {
+        Self {
+            tenant_id: request.tenant_id.clone(),
+            adapter_kind: request.adapter_kind.clone(),
+            adapter_installation_id: request.adapter_installation_id.clone(),
+            external_conversation_ref: request.external_conversation_ref.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ThreadKey {
+    tenant_id: TenantId,
+    thread_id: ThreadId,
+}
+
+impl ThreadKey {
+    fn new(tenant_id: &TenantId, thread_id: &ThreadId) -> Self {
+        Self {
+            tenant_id: tenant_id.clone(),
+            thread_id: thread_id.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ThreadRecord {
+    agent_id: Option<AgentId>,
+    project_id: Option<ProjectId>,
+    participants: HashSet<UserId>,
+}
+
+#[derive(Debug, Clone)]
+struct BindingRecord {
+    tenant_id: TenantId,
+    external_conversation_ref: ExternalConversationRef,
+    thread_id: ThreadId,
+    agent_id: Option<AgentId>,
+    project_id: Option<ProjectId>,
+    source_binding_ref: SourceBindingRef,
+    reply_target_binding_ref: ReplyTargetBindingRef,
+}
+
+impl BindingRecord {
+    fn new(
+        tenant_id: TenantId,
+        _adapter_kind: AdapterKind,
+        _adapter_installation_id: AdapterInstallationId,
+        external_conversation_ref: ExternalConversationRef,
+        thread_id: ThreadId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+    ) -> Result<Self, InboundTurnError> {
+        let source_binding_ref = SourceBindingRef::new(format!("source:{}", Uuid::new_v4()))
+            .map_err(|reason| InboundTurnError::InvalidCanonicalRef { reason })?;
+        let reply_target_binding_ref =
+            ReplyTargetBindingRef::new(format!("reply:{}", Uuid::new_v4()))
+                .map_err(|reason| InboundTurnError::InvalidCanonicalRef { reason })?;
+        Ok(Self {
+            tenant_id,
+            external_conversation_ref,
+            thread_id,
+            agent_id,
+            project_id,
+            source_binding_ref,
+            reply_target_binding_ref,
+        })
+    }
+
+    fn resolution(
+        &self,
+        actor_user_id: UserId,
+        tenant_id: TenantId,
+    ) -> ConversationBindingResolution {
+        ConversationBindingResolution {
+            tenant_id: tenant_id.clone(),
+            actor: TurnActor::new(actor_user_id),
+            turn_scope: TurnScope::new(
+                tenant_id,
+                self.agent_id.clone(),
+                self.project_id.clone(),
+                self.thread_id.clone(),
+            ),
+            source_binding_ref: self.source_binding_ref.clone(),
+            reply_target_binding_ref: self.reply_target_binding_ref.clone(),
+            access: ThreadAccessDecision::Allowed,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct MessageIdempotencyKey {
+    tenant_id: TenantId,
+    source_binding_ref: String,
+    external_event_id: crate::ExternalEventId,
+}
