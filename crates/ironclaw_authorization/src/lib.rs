@@ -5,6 +5,14 @@
 //! runtime internals. The first slices implement grant- and lease-backed gates
 //! for capability dispatch.
 
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+mod db;
+
+#[cfg(feature = "libsql")]
+pub use db::LibSqlCapabilityLeaseStore;
+#[cfg(feature = "postgres")]
+pub use db::PostgresCapabilityLeaseStore;
+
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, MutexGuard},
@@ -1174,14 +1182,14 @@ where
     }
 }
 
-fn lease_is_authorizing(lease: &CapabilityLease, context: &ExecutionContext) -> bool {
+pub(crate) fn lease_is_authorizing(lease: &CapabilityLease, context: &ExecutionContext) -> bool {
     lease.status == CapabilityLeaseStatus::Active
         && lease.scope.invocation_id == context.invocation_id
         && !lease_is_expired(lease)
         && lease.grant.constraints.max_invocations != Some(0)
 }
 
-fn ensure_claimable(
+pub(crate) fn ensure_claimable(
     lease: &CapabilityLease,
     invocation_fingerprint: &InvocationFingerprint,
 ) -> Result<(), CapabilityLeaseError> {
@@ -1198,7 +1206,7 @@ fn ensure_claimable(
     ensure_not_expired_or_exhausted(lease)
 }
 
-fn ensure_consumable(lease: &CapabilityLease) -> Result<(), CapabilityLeaseError> {
+pub(crate) fn ensure_consumable(lease: &CapabilityLease) -> Result<(), CapabilityLeaseError> {
     let lease_id = lease.grant.id;
     match lease.status {
         CapabilityLeaseStatus::Active | CapabilityLeaseStatus::Claimed => {}
@@ -1241,7 +1249,7 @@ fn lease_is_expired(lease: &CapabilityLease) -> bool {
         .is_some_and(|expires_at| expires_at <= Utc::now())
 }
 
-fn same_scope_owner(left: &ResourceScope, right: &ResourceScope) -> bool {
+pub(crate) fn same_scope_owner(left: &ResourceScope, right: &ResourceScope) -> bool {
     left.tenant_id == right.tenant_id
         && left.user_id == right.user_id
         && left.agent_id == right.agent_id
