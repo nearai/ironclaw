@@ -4214,6 +4214,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "deadpool-postgres",
  "ironclaw_approvals",
  "ironclaw_authorization",
  "ironclaw_capabilities",

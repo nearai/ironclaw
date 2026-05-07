@@ -55,6 +55,8 @@ use ironclaw_reborn_event_store::{
 use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits,
 };
+#[cfg(feature = "libsql")]
+use ironclaw_run_state::LibSqlRunStateApprovalStore;
 use ironclaw_run_state::{
     ApprovalRecord, ApprovalRequestStore, InMemoryApprovalRequestStore, InMemoryRunStateStore,
     RunRecord, RunStart, RunStateApprovalStore, RunStateError, RunStateStore, RunStatus,
@@ -240,6 +242,120 @@ fn production_wiring_validation_rejects_unsupported_runtime_requirements() {
             ProductionWiringIssueKind::UnsupportedRequirement
         ),
         "unsupported runtime backend requirement should be reported: {report:?}"
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_run_state_store_selection_satisfies_production_run_state_guardrails() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let db_path = db_dir.path().join("run-state-selection.db");
+    let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_libsql_run_state_approval_store(Arc::clone(&db))
+    .await
+    .unwrap();
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]))
+        .expect_err("other local services remain intentionally unready");
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::RunState,
+            ProductionWiringIssueKind::Missing
+        ),
+        "LibSqlRunStateApprovalStore must satisfy run-state presence: {report:?}"
+    );
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::ApprovalRequests,
+            ProductionWiringIssueKind::Missing
+        ),
+        "LibSqlRunStateApprovalStore must satisfy approval-store presence: {report:?}"
+    );
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::RunState,
+            ProductionWiringIssueKind::LocalOnlyImplementation
+        ),
+        "LibSqlRunStateApprovalStore must not be classified local-only: {report:?}"
+    );
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::ApprovalRequests,
+            ProductionWiringIssueKind::LocalOnlyImplementation
+        ),
+        "LibSqlRunStateApprovalStore must not be classified local-only: {report:?}"
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_run_state_store_selection_persists_runtime_approval_block() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let db_path = db_dir.path().join("run-state-runtime-approval.db");
+    let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenGrantAuthorizer),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_libsql_run_state_approval_store(Arc::clone(&db))
+    .await
+    .unwrap()
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability],
+    )))
+    .with_script_runtime(Arc::new(ScriptRuntime::new(
+        ScriptRuntimeConfig::for_testing(),
+        EchoScriptBackend,
+    )));
+
+    let runtime = services.host_runtime_for_local_testing();
+    let context = execution_context_without_grants();
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context.clone(),
+            script_capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "durable approval"}),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    let RuntimeCapabilityOutcome::ApprovalRequired(gate) = outcome else {
+        panic!("expected approval gate, got {outcome:?}");
+    };
+    let store = LibSqlRunStateApprovalStore::new(db);
+    let run_record = RunStateStore::get(&store, &context.resource_scope, context.invocation_id)
+        .await
+        .unwrap()
+        .expect("run record persisted");
+    assert_eq!(run_record.status, RunStatus::BlockedApproval);
+    assert_eq!(
+        run_record.approval_request_id,
+        Some(gate.approval_request_id)
+    );
+    let approval_record =
+        ApprovalRequestStore::get(&store, &context.resource_scope, gate.approval_request_id)
+            .await
+            .unwrap()
+            .expect("approval record persisted");
+    assert_eq!(
+        approval_record.status,
+        ironclaw_run_state::ApprovalStatus::Pending
     );
 }
 

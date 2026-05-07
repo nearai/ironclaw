@@ -43,6 +43,12 @@ use ironclaw_reborn_event_store::{
     build_reborn_event_stores,
 };
 use ironclaw_resources::ResourceGovernor;
+#[cfg(feature = "libsql")]
+use ironclaw_run_state::LibSqlRunStateApprovalStore;
+#[cfg(feature = "postgres")]
+use ironclaw_run_state::PostgresRunStateApprovalStore;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_run_state::RunStateError;
 use ironclaw_run_state::{ApprovalRequestStore, RunStateApprovalStore, RunStateStore};
 use ironclaw_scripts::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};
 use ironclaw_secrets::SecretStore;
@@ -490,6 +496,30 @@ where
         self.approval_requests = Some(store.clone());
         self.run_state_approval_store = Some(store);
         self
+    }
+
+    /// Builds and attaches the libSQL transactional combined run-state and
+    /// approval-request store for production/shared callers.
+    #[cfg(feature = "libsql")]
+    pub async fn with_libsql_run_state_approval_store(
+        self,
+        db: Arc<libsql::Database>,
+    ) -> Result<Self, RunStateError> {
+        let store = Arc::new(LibSqlRunStateApprovalStore::new(db));
+        store.run_migrations().await?;
+        Ok(self.with_run_state_approval_store(store))
+    }
+
+    /// Builds and attaches the PostgreSQL transactional combined run-state and
+    /// approval-request store for production/shared callers.
+    #[cfg(feature = "postgres")]
+    pub async fn with_postgres_run_state_approval_store(
+        self,
+        pool: deadpool_postgres::Pool,
+    ) -> Result<Self, RunStateError> {
+        let store = Arc::new(PostgresRunStateApprovalStore::new(pool));
+        store.run_migrations().await?;
+        Ok(self.with_run_state_approval_store(store))
     }
 
     pub fn with_capability_leases<T>(mut self, capability_leases: Arc<T>) -> Self
