@@ -40,9 +40,10 @@ Adapters pass structured external actor/conversation refs to this boundary. The 
 - typed external refs: `AdapterKind`, `AdapterInstallationId`, `ExternalActorRef`, `ExternalConversationRef`, `ExternalEventId`;
 - `ConversationBindingService`, `SessionThreadService`, and `InboundTurnService` traits/DTOs;
 - `InMemoryConversationServices` for semantic contract tests and future adapter wiring spikes;
+- optional `RebornLibSqlConversationServices` and `RebornPostgresConversationServices` durable wrappers backed by normalized PostgreSQL/libSQL tables for pairings, threads/participants, bindings, reply targets, event routes, accepted messages, replay records, submit idempotency keys, and submit responses;
 - caller-level tests proving the facade submits only canonical refs to `TurnCoordinator`.
 
-This is not the final durable transcript store. PostgreSQL/libSQL storage and lazy v1 transcript migration remain downstream of #3204.
+This is not the final durable transcript store. The conversation contract stores accepted-message refs and content refs; durable raw transcript content and lazy v1 transcript migration remain downstream of the transcript/thread storage boundary (#3204).
 
 ---
 

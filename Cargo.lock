@@ -4056,12 +4056,17 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "deadpool-postgres",
  "ironclaw_host_api",
  "ironclaw_turns",
+ "libsql",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-postgres",
  "uuid",
 ]
 

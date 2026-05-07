@@ -75,11 +75,22 @@ pub struct ExternalConversationRef {
     message_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct ExternalConversationIdentity {
-    space_id: Option<String>,
-    conversation_id: String,
-    thread_id: Option<String>,
+    pub(crate) space_id: Option<String>,
+    pub(crate) conversation_id: String,
+    pub(crate) thread_id: Option<String>,
+}
+
+impl ExternalConversationIdentity {
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    pub(crate) fn conversation_fingerprint(&self) -> String {
+        length_prefixed_fingerprint(&[
+            self.space_id.as_deref().unwrap_or(""),
+            &self.conversation_id,
+            self.thread_id.as_deref().unwrap_or(""),
+        ])
+    }
 }
 
 impl ExternalConversationRef {
@@ -177,6 +188,30 @@ impl<'de> Deserialize<'de> for ExternalActorRef {
 
         let raw = RawExternalActorRef::deserialize(deserializer)?;
         Self::new(raw.kind, raw.id).map_err(serde::de::Error::custom)
+    }
+}
+
+impl<'de> Deserialize<'de> for ExternalConversationIdentity {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawExternalConversationIdentity {
+            space_id: Option<String>,
+            conversation_id: String,
+            thread_id: Option<String>,
+        }
+
+        let raw = RawExternalConversationIdentity::deserialize(deserializer)?;
+        ExternalConversationRef::new(
+            raw.space_id.as_deref(),
+            raw.conversation_id.as_str(),
+            raw.thread_id.as_deref(),
+            None,
+        )
+        .map(|conversation_ref| conversation_ref.identity())
+        .map_err(serde::de::Error::custom)
     }
 }
 

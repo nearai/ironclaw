@@ -6,10 +6,11 @@ use ironclaw_conversations::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageLookup,
     AcceptedInboundMessageReplay, AdapterInstallationId, AdapterKind,
     ConversationBindingResolution, ConversationBindingService, ConversationRouteKind,
-    ExternalActorRef, ExternalConversationRef, ExternalEventId, InMemoryConversationServices,
-    InboundMessageContentRef, InboundTurnError, InboundTurnRequest, InboundTurnService,
-    LinkConversationRequest, LinkedConversationBinding, MessageIdempotencyStatus,
-    ReplyTargetBinding, SessionThreadService, ThreadAccessDecision, ValidateReplyTargetRequest,
+    ExternalActorRef, ExternalConversationIdentity, ExternalConversationRef, ExternalEventId,
+    InMemoryConversationServices, InboundMessageContentRef, InboundTurnError, InboundTurnRequest,
+    InboundTurnService, LinkConversationRequest, LinkedConversationBinding,
+    MessageIdempotencyStatus, ReplyTargetBinding, SessionThreadService, ThreadAccessDecision,
+    ValidateReplyTargetRequest,
 };
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
@@ -844,6 +845,266 @@ async fn explicit_link_uses_existing_thread_scope_not_spoofed_link_scope() {
     assert_eq!(telegram_resolution.turn_scope, web_resolution.turn_scope);
 }
 
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_conversation_services_survive_restart_for_retry_replay() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("conversations.db");
+    let db = Arc::new(
+        libsql::Builder::new_local(db_path.display().to_string())
+            .build()
+            .await
+            .unwrap(),
+    );
+    let services = ironclaw_conversations::RebornLibSqlConversationServices::new(db)
+        .await
+        .unwrap();
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-1"),
+            user("alice"),
+        )
+        .await
+        .unwrap();
+    let coordinator = Arc::new(FailFirstTurnCoordinator::default());
+    let inbound = InboundTurnService::new(services.clone(), services.clone(), coordinator.clone());
+    let request = inbound_request(
+        telegram(),
+        external_actor("telegram-user-1"),
+        external_conversation("durable-chat", None),
+        "durable-event-1",
+    );
+
+    let err = inbound
+        .handle_inbound_turn(request.clone())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, InboundTurnError::TurnSubmissionFailed { .. }));
+    drop(inbound);
+    drop(services);
+
+    let reopened_db = Arc::new(
+        libsql::Builder::new_local(db_path.display().to_string())
+            .build()
+            .await
+            .unwrap(),
+    );
+    let reopened = ironclaw_conversations::RebornLibSqlConversationServices::new(reopened_db)
+        .await
+        .unwrap();
+    reopened
+        .unpair_external_actor(
+            &tenant(),
+            &telegram(),
+            &default_installation(),
+            &external_actor("telegram-user-1"),
+        )
+        .await
+        .unwrap();
+    let retry_inbound = InboundTurnService::new(reopened.clone(), reopened, coordinator.clone());
+
+    let retry = retry_inbound.handle_inbound_turn(request).await.unwrap();
+
+    assert_eq!(
+        retry.accepted_message.idempotency,
+        MessageIdempotencyStatus::Duplicate
+    );
+    assert_eq!(coordinator.submissions().len(), 2);
+    assert_eq!(
+        coordinator.submissions()[1].actor,
+        TurnActor::new(user("alice"))
+    );
+
+    let inspect_db = libsql::Builder::new_local(db_path.display().to_string())
+        .build()
+        .await
+        .unwrap();
+    let inspect_conn = inspect_db.connect().unwrap();
+    assert_eq!(
+        table_count(&inspect_conn, "reborn_conversation_actor_pairings").await,
+        0
+    );
+    assert_eq!(
+        table_count(&inspect_conn, "reborn_conversation_bindings").await,
+        1
+    );
+    assert_eq!(
+        table_count(&inspect_conn, "reborn_conversation_reply_targets").await,
+        2
+    );
+    assert_eq!(
+        table_count(&inspect_conn, "reborn_conversation_accepted_messages").await,
+        1
+    );
+    assert_eq!(
+        table_count(&inspect_conn, "reborn_conversation_message_replays").await,
+        1
+    );
+    assert_eq!(
+        table_count(&inspect_conn, "reborn_conversation_submission_keys").await,
+        1
+    );
+    assert_eq!(
+        table_count(&inspect_conn, "reborn_conversation_submit_responses").await,
+        1
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_stale_service_write_fails_without_overwriting_newer_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("stale-conversations.db");
+    let db_a = Arc::new(
+        libsql::Builder::new_local(db_path.display().to_string())
+            .build()
+            .await
+            .unwrap(),
+    );
+    let db_b = Arc::new(
+        libsql::Builder::new_local(db_path.display().to_string())
+            .build()
+            .await
+            .unwrap(),
+    );
+    let services_a = ironclaw_conversations::RebornLibSqlConversationServices::new(db_a)
+        .await
+        .unwrap();
+    let services_b = ironclaw_conversations::RebornLibSqlConversationServices::new(db_b)
+        .await
+        .unwrap();
+
+    services_a
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("alice-telegram"),
+            user("alice"),
+        )
+        .await
+        .unwrap();
+
+    services_b
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("bob-telegram"),
+            user("bob"),
+        )
+        .await
+        .unwrap();
+    let bob = services_b
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            external_actor("bob-telegram"),
+            external_conversation("stale-chat", None),
+            "stale-event",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(bob.actor, TurnActor::new(user("bob")));
+
+    let inspect_db = libsql::Builder::new_local(db_path.display().to_string())
+        .build()
+        .await
+        .unwrap();
+    let inspect_conn = inspect_db.connect().unwrap();
+    assert_eq!(
+        table_count(&inspect_conn, "reborn_conversation_actor_pairings").await,
+        2
+    );
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_conversation_services_round_trip_restart_replay_when_available() {
+    let Ok(database_url) = std::env::var("DATABASE_URL") else {
+        eprintln!("skipping Postgres conversation contract: DATABASE_URL is not set");
+        return;
+    };
+    let config: tokio_postgres::Config = database_url
+        .parse()
+        .expect("DATABASE_URL must parse as a Postgres connection string");
+    let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
+    let pool = deadpool_postgres::Pool::builder(manager)
+        .max_size(2)
+        .build()
+        .expect("Postgres pool must build");
+    let _connection = pool
+        .get()
+        .await
+        .expect("DATABASE_URL must point at a reachable Postgres test database");
+
+    let suffix = Utc::now().timestamp_nanos_opt().unwrap_or_default();
+    let actor_ref = external_actor(&format!("pg-telegram-user-{suffix}"));
+    let conversation_ref = external_conversation(&format!("pg-durable-chat-{suffix}"), None);
+    let event_id = format!("pg-durable-event-{suffix}");
+    let services = ironclaw_conversations::RebornPostgresConversationServices::new(pool.clone())
+        .await
+        .unwrap();
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            actor_ref.clone(),
+            user("alice"),
+        )
+        .await
+        .unwrap();
+    let coordinator = Arc::new(FailFirstTurnCoordinator::default());
+    let inbound = InboundTurnService::new(services.clone(), services.clone(), coordinator.clone());
+    let request = inbound_request(
+        telegram(),
+        actor_ref.clone(),
+        conversation_ref.clone(),
+        &event_id,
+    );
+
+    let err = inbound
+        .handle_inbound_turn(request.clone())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, InboundTurnError::TurnSubmissionFailed { .. }));
+    drop(inbound);
+    drop(services);
+
+    let reopened = ironclaw_conversations::RebornPostgresConversationServices::new(pool)
+        .await
+        .unwrap();
+    reopened
+        .unpair_external_actor(&tenant(), &telegram(), &default_installation(), &actor_ref)
+        .await
+        .unwrap();
+    let retry_inbound = InboundTurnService::new(reopened.clone(), reopened, coordinator.clone());
+    let retry = retry_inbound.handle_inbound_turn(request).await.unwrap();
+
+    assert_eq!(
+        retry.accepted_message.idempotency,
+        MessageIdempotencyStatus::Duplicate
+    );
+    assert_eq!(coordinator.submissions().len(), 2);
+    assert_eq!(
+        coordinator.submissions()[1].actor,
+        TurnActor::new(user("alice"))
+    );
+}
+
+#[cfg(feature = "libsql")]
+async fn table_count(conn: &libsql::Connection, table: &str) -> i64 {
+    let mut rows = conn
+        .query(&format!("SELECT COUNT(*) FROM {table}"), ())
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    row.get(0).unwrap()
+}
+
 #[tokio::test]
 async fn duplicate_retry_after_submit_failure_survives_pairing_churn() {
     let services = InMemoryConversationServices::default();
@@ -1478,6 +1739,68 @@ async fn duplicate_external_event_route_is_reserved_before_binding_creation() {
 }
 
 #[tokio::test]
+async fn failed_resolve_does_not_reserve_external_event_route() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("alice-telegram"),
+            user("alice"),
+        )
+        .await;
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("bob-telegram"),
+            user("bob"),
+        )
+        .await;
+    let alice_direct = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            external_actor("alice-telegram"),
+            external_conversation("alice-direct-poison-source", None),
+            "alice-direct-poison-source-event",
+        ))
+        .await
+        .unwrap();
+    services
+        .add_thread_participant(&tenant(), &alice_direct.turn_scope.thread_id, user("bob"))
+        .await
+        .unwrap();
+
+    let mut denied = resolve_request(
+        telegram(),
+        external_actor("bob-telegram"),
+        external_conversation("alice-direct-poison-source", None),
+        "denied-event-must-not-reserve-route",
+    );
+    denied.route_kind = ConversationRouteKind::Shared;
+    assert!(matches!(
+        services
+            .resolve_or_create_binding(denied)
+            .await
+            .unwrap_err(),
+        InboundTurnError::AccessDenied { .. }
+    ));
+
+    let legitimate = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            external_actor("alice-telegram"),
+            external_conversation("alice-legitimate-after-denied", None),
+            "denied-event-must-not-reserve-route",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(legitimate.actor, TurnActor::new(user("alice")));
+}
+
+#[tokio::test]
 async fn shared_route_marker_widens_existing_direct_binding_for_participants() {
     let services = InMemoryConversationServices::default();
     services
@@ -2048,6 +2371,12 @@ fn serde_deserialization_revalidates_external_ref_invariants() {
         r#"{"space_id":null,"conversation_id":"chat-1","thread_id":"ok","message_id":"bad\u0001"}"#
     )
     .is_err());
+    assert!(
+        serde_json::from_str::<ExternalConversationIdentity>(
+            r#"{"space_id":null,"conversation_id":"","thread_id":null}"#
+        )
+        .is_err()
+    );
 }
 
 #[tokio::test]

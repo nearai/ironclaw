@@ -9,7 +9,13 @@
 mod error;
 mod ids;
 mod inbound;
+#[cfg(feature = "libsql")]
+mod libsql;
 mod memory;
+#[cfg(feature = "postgres")]
+mod postgres;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+mod state_store;
 mod traits;
 mod types;
 
@@ -19,7 +25,11 @@ pub use ids::{
     ExternalConversationRef, ExternalEventId, InboundMessageContentRef,
 };
 pub use inbound::InboundTurnService;
+#[cfg(feature = "libsql")]
+pub use libsql::{RebornLibSqlConversationServices, RebornLibSqlConversationStateStore};
 pub use memory::InMemoryConversationServices;
+#[cfg(feature = "postgres")]
+pub use postgres::{RebornPostgresConversationServices, RebornPostgresConversationStateStore};
 pub use traits::{ConversationBindingService, ConversationBindingServiceExt, SessionThreadService};
 pub use types::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageLookup,
