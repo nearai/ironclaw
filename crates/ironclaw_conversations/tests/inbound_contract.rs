@@ -957,6 +957,46 @@ async fn reply_target_validation_rejects_same_actor_wrong_thread_refs() {
 }
 
 #[tokio::test]
+async fn accept_inbound_message_rejects_external_route_mismatch() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            web(),
+            default_installation(),
+            external_actor("alice-web"),
+            user("alice"),
+        )
+        .await;
+    let resolution = services
+        .resolve_or_create_binding(resolve_request(
+            web(),
+            external_actor("alice-web"),
+            external_conversation("alice-browser-a", None),
+            "alice-event-a",
+        ))
+        .await
+        .unwrap();
+
+    let err = services
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            tenant_id: tenant(),
+            thread_id: resolution.turn_scope.thread_id,
+            actor: resolution.actor,
+            source_binding_ref: resolution.source_binding_ref,
+            reply_target_binding_ref: resolution.reply_target_binding_ref,
+            external_conversation_ref: external_conversation("alice-browser-b", None),
+            external_event_id: ExternalEventId::new("route-mismatch-event").unwrap(),
+            content_ref: InboundMessageContentRef::new("content:route-mismatch-event").unwrap(),
+            received_at: Utc.with_ymd_and_hms(2026, 5, 6, 12, 1, 0).unwrap(),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, InboundTurnError::AccessDenied { .. }));
+}
+
+#[tokio::test]
 async fn accept_inbound_message_rejects_mixed_source_and_reply_bindings() {
     let services = InMemoryConversationServices::default();
     services

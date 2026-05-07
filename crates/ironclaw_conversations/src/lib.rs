@@ -15,8 +15,8 @@ mod types;
 
 pub use error::InboundTurnError;
 pub use ids::{
-    AdapterInstallationId, AdapterKind, ExternalActorRef, ExternalConversationRef, ExternalEventId,
-    InboundMessageContentRef,
+    AdapterInstallationId, AdapterKind, ExternalActorRef, ExternalConversationIdentity,
+    ExternalConversationRef, ExternalEventId, InboundMessageContentRef,
 };
 pub use inbound::InboundTurnService;
 pub use memory::InMemoryConversationServices;

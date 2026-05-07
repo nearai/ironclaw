@@ -13,9 +13,10 @@ use uuid::Uuid;
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AdapterInstallationId, AdapterKind,
     ConversationBindingResolution, ConversationBindingService, ExternalActorRef,
-    ExternalConversationRef, InboundTurnError, LinkConversationRequest, LinkedConversationBinding,
-    MessageIdempotencyStatus, ReplyTargetBinding, ResolveConversationRequest, SessionThreadService,
-    ThreadAccessDecision, ThreadMessageRecord, ids::ExternalConversationIdentity,
+    ExternalConversationIdentity, ExternalConversationRef, InboundTurnError,
+    LinkConversationRequest, LinkedConversationBinding, MessageIdempotencyStatus,
+    ReplyTargetBinding, ResolveConversationRequest, SessionThreadService, ThreadAccessDecision,
+    ThreadMessageRecord,
 };
 
 #[derive(Clone, Default)]
@@ -219,6 +220,21 @@ impl SessionThreadService for InMemoryConversationServices {
 
         let message_ref = AcceptedMessageRef::new(format!("message:{}", Uuid::new_v4()))
             .map_err(|reason| InboundTurnError::InvalidCanonicalRef { reason })?;
+        let source_binding = state
+            .source_bindings
+            .get(request.source_binding_ref.as_str())
+            .cloned()
+            .ok_or_else(|| InboundTurnError::ThreadNotFound {
+                thread_id: request.source_binding_ref.as_str().to_string(),
+            })?;
+        if source_binding.external_conversation_identity
+            != request.external_conversation_ref.identity()
+        {
+            return Err(InboundTurnError::AccessDenied {
+                actor_id: request.actor.user_id.to_string(),
+                thread_id: request.thread_id.to_string(),
+            });
+        }
         let reply_target_record = state
             .reply_targets
             .get(request.reply_target_binding_ref.as_str())
@@ -509,6 +525,7 @@ struct BindingRecord {
     adapter_kind: AdapterKind,
     adapter_installation_id: AdapterInstallationId,
     external_conversation_ref: ExternalConversationRef,
+    external_conversation_identity: ExternalConversationIdentity,
     thread_id: ThreadId,
     agent_id: Option<AgentId>,
     project_id: Option<ProjectId>,
@@ -531,11 +548,13 @@ impl BindingRecord {
         let reply_target_binding_ref =
             ReplyTargetBindingRef::new(format!("reply:{}", Uuid::new_v4()))
                 .map_err(|reason| InboundTurnError::InvalidCanonicalRef { reason })?;
+        let external_conversation_identity = external_conversation_ref.identity();
         Ok(Self {
             tenant_id,
             adapter_kind,
             adapter_installation_id,
             external_conversation_ref,
+            external_conversation_identity,
             thread_id,
             agent_id,
             project_id,

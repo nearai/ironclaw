@@ -76,7 +76,7 @@ pub struct ExternalConversationRef {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct ExternalConversationIdentity {
+pub struct ExternalConversationIdentity {
     space_id: Option<String>,
     conversation_id: String,
     thread_id: Option<String>,
