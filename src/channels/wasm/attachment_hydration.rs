@@ -707,16 +707,19 @@ mod tests {
 
     #[test]
     fn resolve_silk_decoder_command_prefers_env_var() {
-        // SAFETY: tests are single-threaded by default within a process; this
-        // is the conventional pattern used elsewhere in this file's test
-        // module. Pre-existing value (if any) is restored before exit.
+        // Serialize against any other env-mutating test in the workspace.
+        // Without this, the cargo-test default thread pool can interleave
+        // this test with the EnvGuard-protected stub-binary tests below,
+        // producing flaky results.
+        let _env_lock = crate::config::helpers::lock_env();
         let previous = std::env::var_os(SILK_DECODER_ENV_VAR);
-        // SAFETY: see above note on test threading.
+        // SAFETY: env-mutation under the global env-test lock; cargo-test
+        // workers contending on this var are blocked until the guard drops.
         unsafe {
             std::env::set_var(SILK_DECODER_ENV_VAR, "/opt/custom/decoder");
         }
         let resolved = resolve_silk_decoder_command();
-        // SAFETY: see above note on test threading.
+        // SAFETY: restore prior state before releasing the lock.
         unsafe {
             match previous {
                 Some(value) => std::env::set_var(SILK_DECODER_ENV_VAR, value),
@@ -731,12 +734,14 @@ mod tests {
 
     #[test]
     fn resolve_silk_decoder_command_falls_back_to_path_lookup() {
-        // SAFETY: see env-var note above.
+        let _env_lock = crate::config::helpers::lock_env();
         let previous = std::env::var_os(SILK_DECODER_ENV_VAR);
+        // SAFETY: env-mutation under the global env-test lock.
         unsafe {
             std::env::remove_var(SILK_DECODER_ENV_VAR);
         }
         let resolved = resolve_silk_decoder_command();
+        // SAFETY: restore prior state before releasing the lock.
         unsafe {
             if let Some(value) = previous {
                 std::env::set_var(SILK_DECODER_ENV_VAR, value);
@@ -772,24 +777,35 @@ mod tests {
     struct EnvGuard {
         key: &'static str,
         prior: Option<std::ffi::OsString>,
+        // Serializes env-var mutation across cargo-test's parallel thread
+        // pool. Held until Drop so the test that set the var also owns the
+        // process-wide env state for its full duration. Released last so
+        // the restoration writes happen before another test takes the lock.
+        _env_lock: std::sync::MutexGuard<'static, ()>,
     }
 
     #[cfg(unix)]
     impl EnvGuard {
         fn set(key: &'static str, value: &std::path::Path) -> Self {
+            let env_lock = crate::config::helpers::lock_env();
             let prior = std::env::var_os(key);
-            // SAFETY: tests in this module are single-threaded by default.
+            // SAFETY: env-mutation under the global env-test lock — held in
+            // the returned guard for the full lifetime of the test.
             unsafe {
                 std::env::set_var(key, value);
             }
-            Self { key, prior }
+            Self {
+                key,
+                prior,
+                _env_lock: env_lock,
+            }
         }
     }
 
     #[cfg(unix)]
     impl Drop for EnvGuard {
         fn drop(&mut self) {
-            // SAFETY: see EnvGuard::set.
+            // SAFETY: see EnvGuard::set; lock is still held via _env_lock.
             unsafe {
                 match self.prior.take() {
                     Some(value) => std::env::set_var(self.key, value),
