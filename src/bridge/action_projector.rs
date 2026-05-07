@@ -791,7 +791,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn needs_auth_provider_tools_omitted_from_available_actions() {
+    async fn needs_auth_provider_tools_stay_in_available_actions() {
+        // Post-#3133/#3166: a NeedsAuth provider tool (e.g. installed-
+        // but-unauthed gmail) stays on the callable surface. The
+        // engine's auth preflight (`AuthManager::check_action_auth`)
+        // raises an `Authentication` gate at execute time when a
+        // declared credential is missing, the inline-await machinery
+        // parks the VM, and the OAuth callback delivers `Approved`
+        // to retry the action against the now-present secret. The
+        // model can call the tool directly without a preceding
+        // `tool_activate(name=...)` step. Pre-#3133 this was the
+        // opposite contract — the tool was hidden from the callable
+        // surface until auth completed and the LLM was expected to
+        // navigate via `tool_activate` first.
         let inventory = projected_inventory(
             "gmail_send",
             "Send a Gmail message",
@@ -801,20 +813,13 @@ mod tests {
         .await;
 
         assert!(
-            !inventory
+            inventory
                 .inline
                 .iter()
                 .any(|action| action.name == "gmail_send"),
-            "NeedsAuth provider tool should be omitted from available_actions, got: {:?}",
+            "NeedsAuth provider tool should be callable; auth resolves at \
+             execute time via inline-await. inline={:?}",
             inventory.inline
-        );
-        assert!(
-            inventory
-                .discoverable
-                .iter()
-                .any(|action| action.name == "gmail_send"),
-            "NeedsAuth provider tool should remain discoverable, got: {:?}",
-            inventory.discoverable
         );
     }
 

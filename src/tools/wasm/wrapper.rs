@@ -1229,6 +1229,27 @@ impl Tool for WasmToolWrapper {
         Some(&self.prepared.name)
     }
 
+    /// Walk the WASM tool's declared HTTP credentials and return every
+    /// non-optional `secret_name`. The engine's auth preflight
+    /// (`AuthManager::check_action_auth`) uses this to raise an
+    /// `Authentication` gate when the tool is called and any required
+    /// credential is missing from the secrets store — so the model can
+    /// call e.g. `gmail` directly without needing a preceding
+    /// `tool_activate(name="gmail")` step.
+    fn required_credentials(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(http) = &self.capabilities.http {
+            for mapping in http.credentials.values() {
+                if !mapping.optional {
+                    out.push(mapping.secret_name.clone());
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// Compose the tool schema for LLM function calling.
     ///
     /// When the advertised schema is permissive (no typed properties), appends

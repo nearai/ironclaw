@@ -6372,7 +6372,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn available_actions_omit_installed_needs_auth_provider_action() {
+    async fn available_actions_keep_installed_needs_auth_provider_action() {
+        // Post-#3133/#3166: an installed-but-unauthenticated provider
+        // tool (e.g. gmail) STAYS on the callable surface. The engine
+        // raises an Authentication gate at execute time when the
+        // declared credential is missing and the inline-await
+        // machinery resumes the action after OAuth completes. The
+        // model can call the tool directly; `tool_activate(name=...)`
+        // is no longer required as a precondition. Pre-#3133 the
+        // action was hidden until auth completed.
         let fixture = make_adapter_with_installed_provider_fixture(
             "gmail",
             "gmail_send",
@@ -6403,7 +6411,11 @@ mod tests {
             .available_actions(&[], &exec_ctx(ironclaw_engine::ThreadId::new(), None))
             .await
             .expect("actions");
-        assert!(!actions.iter().any(|action| action.name == "gmail_send"));
+        assert!(
+            actions.iter().any(|action| action.name == "gmail_send"),
+            "NeedsAuth provider tool should be callable; auth resolves at \
+             execute time via inline-await. actions={actions:?}"
+        );
     }
 
     #[tokio::test]
