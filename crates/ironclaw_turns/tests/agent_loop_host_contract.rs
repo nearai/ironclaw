@@ -11,20 +11,23 @@ use ironclaw_turns::{
     LoopCompleted, LoopCompletionKind, LoopExit, LoopExitId, LoopGateRef, LoopMessageRef,
     ReplyTargetBindingRef, RunProfileRequest, RunProfileVersion, SourceBindingRef,
     SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnCoordinator,
-    TurnLeaseToken, TurnRunId, TurnRunnerId,
+    TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnStatus,
+    events::EventCursor,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
         CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDescriptorView,
         CapabilityInputRef, CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion,
-        FinalizeAssistantMessage, HostManagedLoopModelPort, InMemoryLoopHostMilestoneSink,
-        LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
-        LoopCheckpointStateRef, LoopContextBundle, LoopContextMessage, LoopContextPort,
-        LoopContextRequest, LoopDriverNoteKind, LoopHostMilestone, LoopHostMilestoneEmitter,
-        LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputBatch, LoopInputCursor,
-        LoopInputCursorToken, LoopInputPort, LoopModelGateway, LoopModelGatewayError,
-        LoopModelGatewayRequest, LoopModelMessage, LoopModelPort, LoopModelRequest,
-        LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopRunContext, LoopRunInfoPort,
-        LoopTranscriptPort, ParentLoopOutput, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        FinalizeAssistantMessage, HostManagedLoopModelPort, HostManagedLoopPromptPort,
+        InMemoryLoopHostMilestoneSink, LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort,
+        LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle, LoopContextMessage,
+        LoopContextPort, LoopContextRequest, LoopDriverId, LoopDriverNoteKind, LoopHostMilestone,
+        LoopHostMilestoneEmitter, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputBatch,
+        LoopInputCursor, LoopInputCursorToken, LoopInputPort, LoopModelGateway,
+        LoopModelGatewayError, LoopModelGatewayRequest, LoopModelMessage, LoopModelPort,
+        LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
+        LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
+        LoopRunInfoPort, LoopTranscriptPort, ParentLoopOutput, PromptMode,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::{ClaimRunRequest, TurnRunTransitionPort},
 };
@@ -58,8 +61,10 @@ async fn two_fake_drivers_use_the_same_per_run_agent_loop_host_contract() {
     assert_eq!(
         host.effects(),
         vec![
-            "context",
             "visible_capabilities",
+            "prompt_bundle",
+            "context",
+            "milestone:prompt_bundle_built",
             "model",
             "milestone:model_started",
             "milestone:model_completed",
@@ -80,6 +85,7 @@ async fn two_fake_drivers_use_the_same_per_run_agent_loop_host_contract() {
     assert_eq!(
         host.milestone_kind_names(),
         vec![
+            "prompt_bundle_built",
             "model_started",
             "model_completed",
             "assistant_reply_finalized",
@@ -88,7 +94,7 @@ async fn two_fake_drivers_use_the_same_per_run_agent_loop_host_contract() {
     let milestones = host.milestones();
     assert!(matches!(
         &milestones[0].kind,
-        LoopHostMilestoneKind::ModelStarted { .. }
+        LoopHostMilestoneKind::PromptBundleBuilt { .. }
     ));
     assert!(milestones.iter().all(|milestone| {
         milestone.scope == host.context.scope
@@ -226,6 +232,198 @@ async fn host_managed_model_port_sanitizes_gateway_errors() {
 }
 
 #[tokio::test]
+async fn loop_prompt_port_builds_text_only_bundle_from_context_refs() {
+    let host = Arc::new(RecordingAgentLoopHost::new(claimed_run_context().await));
+    let surface_version = CapabilitySurfaceVersion::new("surface-v1").unwrap();
+    let port = HostManagedLoopPromptPort::new(
+        host.context.clone(),
+        host.clone(),
+        host.milestone_sink.clone(),
+    );
+
+    let bundle = port
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: Some(surface_version.clone()),
+            checkpoint_state_ref: None,
+            max_tokens: Some(8),
+        })
+        .await
+        .unwrap();
+
+    assert!(bundle.bundle_ref.is_for_run(&host.context));
+    assert_eq!(bundle.surface_version, Some(surface_version));
+    assert_eq!(
+        bundle.messages,
+        vec![LoopModelMessage {
+            role: "user".to_string(),
+            content_ref: LoopMessageRef::new("msg:user-message").unwrap(),
+        }]
+    );
+    assert_eq!(host.effects(), vec!["context"]);
+    assert_eq!(host.milestone_kind_names(), vec!["prompt_bundle_built"]);
+}
+
+#[tokio::test]
+async fn loop_prompt_port_rejects_unsupported_prompt_mode() {
+    let host = Arc::new(RecordingAgentLoopHost::new(codeact_run_context().await));
+    let port = HostManagedLoopPromptPort::new(
+        host.context.clone(),
+        host.clone(),
+        host.milestone_sink.clone(),
+    );
+
+    let error = port
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::CodeAct,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_tokens: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+    assert_eq!(host.effects(), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn loop_prompt_port_rejects_malformed_same_run_checkpoint_ref() {
+    let host = Arc::new(RecordingAgentLoopHost::new(claimed_run_context().await));
+    let port = HostManagedLoopPromptPort::new(
+        host.context.clone(),
+        host.clone(),
+        host.milestone_sink.clone(),
+    );
+
+    let error = port
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: Some(
+                LoopCheckpointStateRef::new(format!(
+                    "checkpoint:{}:/host/path",
+                    host.context.run_id
+                ))
+                .unwrap(),
+            ),
+            max_tokens: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    assert_eq!(host.effects(), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn loop_prompt_port_rejects_cross_run_checkpoint_ref() {
+    let host = Arc::new(RecordingAgentLoopHost::new(claimed_run_context().await));
+    let other_context = LoopRunContext::new(
+        host.context.scope.clone(),
+        host.context.turn_id,
+        TurnRunId::new(),
+        host.context.resolved_run_profile.clone(),
+    );
+    let port = HostManagedLoopPromptPort::new(
+        host.context.clone(),
+        host.clone(),
+        host.milestone_sink.clone(),
+    );
+
+    let error = port
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: Some(
+                LoopCheckpointStateRef::for_run(&other_context, "foreign-state").unwrap(),
+            ),
+            max_tokens: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::ScopeMismatch);
+    assert_eq!(host.effects(), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn loop_prompt_bundle_public_serialization_hides_raw_content() {
+    let host = Arc::new(
+        RecordingAgentLoopHost::new(claimed_run_context().await)
+            .with_context_message_safe_summary("RAW_PROMPT_SENTINEL /host/path secret"),
+    );
+    let port = HostManagedLoopPromptPort::new(
+        host.context.clone(),
+        host.clone(),
+        host.milestone_sink.clone(),
+    );
+
+    let bundle = port
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_tokens: None,
+        })
+        .await
+        .unwrap();
+
+    let status = TurnRunState {
+        scope: host.context.scope.clone(),
+        turn_id: host.context.turn_id,
+        run_id: host.context.run_id,
+        status: TurnStatus::Running,
+        accepted_message_ref: AcceptedMessageRef::new("message-loop-host").unwrap(),
+        source_binding_ref: SourceBindingRef::new("source-loop-host").unwrap(),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-loop-host").unwrap(),
+        resolved_run_profile_id: host.context.resolved_run_profile.profile_id.clone(),
+        resolved_run_profile_version: host.context.resolved_run_profile.profile_version,
+        received_at: Utc.with_ymd_and_hms(2026, 5, 7, 12, 0, 0).unwrap(),
+        checkpoint_id: None,
+        gate_ref: None,
+        failure: None,
+        event_cursor: EventCursor(0),
+    };
+    let public_json = serde_json::to_string(&(bundle, host.milestones(), status)).unwrap();
+    assert!(public_json.contains("prompt_bundle_built"));
+    assert!(!public_json.contains("RAW_PROMPT_SENTINEL"));
+    assert!(!public_json.contains("/host/path"));
+    assert!(!public_json.contains("secret"));
+}
+
+#[test]
+fn prompt_mode_wire_shape_uses_issue_contract_spelling() {
+    assert_eq!(
+        serde_json::to_string(&PromptMode::TextOnly).unwrap(),
+        "\"text_only\""
+    );
+    assert_eq!(
+        serde_json::to_string(&PromptMode::CodeAct).unwrap(),
+        "\"codeact\""
+    );
+    assert_eq!(
+        serde_json::from_str::<PromptMode>("\"codeact\"").unwrap(),
+        PromptMode::CodeAct
+    );
+}
+
+#[tokio::test]
+async fn prompt_bundle_refs_are_scoped_and_bounded() {
+    let context = claimed_run_context().await;
+    let bundle_ref = LoopPromptBundleRef::for_run(&context, "bundle-one").unwrap();
+
+    assert!(bundle_ref.is_for_run(&context));
+    assert!(LoopPromptBundleRef::new("prompt:missing-run-scope").is_err());
+    assert!(LoopPromptBundleRef::for_run(&context, "x".repeat(200)).is_err());
+}
+
+#[tokio::test]
 async fn capability_invocations_must_cite_visible_surface_before_host_dispatch() {
     let host = Arc::new(RecordingAgentLoopHost::new(claimed_run_context().await));
     let foreign = CapabilityId::new("demo.foreign").unwrap();
@@ -360,24 +558,25 @@ impl AgentLoopDriver for ReplyDriver {
     ) -> Result<LoopExit, AgentLoopDriverError> {
         assert_eq!(host.run_context().turn_id, request.turn_id);
         assert_eq!(host.run_context().run_id, request.run_id);
-        let context = host
-            .load_loop_context(LoopContextRequest {
-                after: None,
-                limit: 8,
+        let surface = host
+            .visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .map_err(driver_error)?;
+        let prompt = host
+            .build_prompt_bundle(LoopPromptBundleRequest {
+                mode: PromptMode::TextOnly,
+                context_cursor: None,
+                surface_version: Some(surface.version),
+                checkpoint_state_ref: None,
+                max_tokens: Some(8),
             })
             .await
             .map_err(driver_error)?;
-        assert_eq!(context.messages.len(), 1);
-        host.visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .map_err(driver_error)?;
+        assert_eq!(prompt.messages.len(), 1);
         let response = host
             .stream_model(LoopModelRequest {
-                messages: vec![LoopModelMessage {
-                    role: "user".to_string(),
-                    content_ref: context.messages[0].message_ref.clone(),
-                }],
-                surface_version: Some(CapabilitySurfaceVersion::new("surface-v1").unwrap()),
+                messages: prompt.messages,
+                surface_version: prompt.surface_version,
                 model_preference: Some(
                     host.run_context()
                         .resolved_run_profile
@@ -565,6 +764,7 @@ struct RecordingAgentLoopHost {
     capability_outcomes: Mutex<Vec<CapabilityOutcome>>,
     visible_surface: VisibleCapabilitySurface,
     milestone_sink: Arc<InMemoryLoopHostMilestoneSink>,
+    context_message_safe_summary: String,
 }
 
 impl RecordingAgentLoopHost {
@@ -585,7 +785,13 @@ impl RecordingAgentLoopHost {
                     safe_description: "Returns an opaque result ref".to_string(),
                 }],
             },
+            context_message_safe_summary: "hello".to_string(),
         }
+    }
+
+    fn with_context_message_safe_summary(mut self, safe_summary: impl Into<String>) -> Self {
+        self.context_message_safe_summary = safe_summary.into();
+        self
     }
 
     fn push_model_response(&self, response: LoopModelResponse) {
@@ -637,7 +843,7 @@ impl LoopContextPort for RecordingAgentLoopHost {
             messages: vec![LoopContextMessage {
                 message_ref: LoopMessageRef::new("msg:user-message").unwrap(),
                 role: "user".to_string(),
-                safe_summary: "hello".to_string(),
+                safe_summary: self.context_message_safe_summary.clone(),
             }],
             instruction_snippets: Vec::new(),
             memory_snippets: Vec::new(),
@@ -663,6 +869,46 @@ impl LoopInputPort for RecordingAgentLoopHost {
 
     async fn ack_inputs(&self, _cursor: LoopInputCursor) -> Result<(), AgentLoopHostError> {
         Ok(())
+    }
+}
+
+#[async_trait]
+impl LoopPromptPort for RecordingAgentLoopHost {
+    async fn build_prompt_bundle(
+        &self,
+        request: LoopPromptBundleRequest,
+    ) -> Result<LoopPromptBundle, AgentLoopHostError> {
+        self.record("prompt_bundle");
+        let context = self
+            .load_loop_context(LoopContextRequest {
+                after: request.context_cursor,
+                limit: request.max_tokens.unwrap_or(8) as usize,
+            })
+            .await?;
+        let bundle = LoopPromptBundle {
+            bundle_ref: LoopPromptBundleRef::for_run(&self.context, "recording-host").map_err(
+                |reason| AgentLoopHostError::new(AgentLoopHostErrorKind::Internal, reason),
+            )?,
+            messages: context
+                .messages
+                .into_iter()
+                .map(|message| LoopModelMessage {
+                    role: message.role,
+                    content_ref: message.message_ref,
+                })
+                .collect(),
+            surface_version: request.surface_version,
+        };
+        self.milestone_emitter()
+            .prompt_bundle_built(
+                bundle.bundle_ref.clone(),
+                request.mode,
+                bundle.surface_version.clone(),
+                bundle.messages.len(),
+            )
+            .await?;
+        self.record("milestone:prompt_bundle_built");
+        Ok(bundle)
     }
 }
 
@@ -777,6 +1023,16 @@ impl LoopProgressPort for RecordingAgentLoopHost {
         self.record(format!("progress:{}", event.kind_name()));
         Ok(())
     }
+}
+
+async fn codeact_run_context() -> LoopRunContext {
+    let mut context = claimed_run_context().await;
+    let codeact_descriptor =
+        AgentLoopDriverDescriptor::new("codeact_loop", RunProfileVersion::new(1)).unwrap();
+    context.loop_driver_id = LoopDriverId::new("codeact_loop").unwrap();
+    context.loop_driver_version = codeact_descriptor.version;
+    context.resolved_run_profile.loop_driver = codeact_descriptor;
+    context
 }
 
 async fn claimed_run_context() -> LoopRunContext {

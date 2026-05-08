@@ -46,6 +46,23 @@ fn validate_prefixed_loop_ref(
     Ok(value)
 }
 
+fn validate_loop_opaque_token(
+    value: String,
+    label: &'static str,
+    max_bytes: usize,
+) -> Result<String, String> {
+    let value = validate_bounded_loop_string(value, label, max_bytes)?;
+    if !value
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.'))
+    {
+        return Err(format!(
+            "{label} must contain only ASCII letters, digits, _, -, or ."
+        ));
+    }
+    Ok(value)
+}
+
 fn validate_loop_safe_summary(value: String) -> Result<String, String> {
     let value = validate_bounded_loop_string(value, "loop safe summary", 512)?;
     if value.chars().any(|character| {
@@ -149,6 +166,87 @@ bounded_loop_ref!(
     256
 );
 bounded_loop_ref!(LoopProcessRef, "loop process ref", "process:", 256);
+
+impl LoopCheckpointStateRef {
+    pub fn for_run(context: &LoopRunContext, token: impl Into<String>) -> Result<Self, String> {
+        let token = validate_loop_opaque_token(token.into(), "loop checkpoint state token", 96)?;
+        Self::new(format!("checkpoint:{}:{token}", context.run_id))
+    }
+
+    pub fn is_for_run(&self, context: &LoopRunContext) -> bool {
+        let Some(token) = self
+            .0
+            .strip_prefix(&format!("checkpoint:{}:", context.run_id))
+        else {
+            return false;
+        };
+        validate_loop_opaque_token(token.to_string(), "loop checkpoint state token", 96).is_ok()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct LoopPromptBundleRef(String);
+
+impl LoopPromptBundleRef {
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        let value =
+            validate_prefixed_loop_ref("loop prompt bundle ref", "prompt:", 256, value.into())?;
+        let suffix = value
+            .strip_prefix("prompt:")
+            .ok_or_else(|| "loop prompt bundle ref must start with `prompt:`".to_string())?;
+        let (run_id, token) = suffix.split_once(':').ok_or_else(|| {
+            "loop prompt bundle ref must include scoped run id and opaque token".to_string()
+        })?;
+        uuid::Uuid::parse_str(run_id)
+            .map_err(|_| "loop prompt bundle ref run id must be a UUID".to_string())?;
+        validate_loop_opaque_token(token.to_string(), "loop prompt bundle token", 96)?;
+        Ok(Self(value))
+    }
+
+    pub fn for_run(context: &LoopRunContext, token: impl Into<String>) -> Result<Self, String> {
+        let token = validate_loop_opaque_token(token.into(), "loop prompt bundle token", 96)?;
+        Self::new(format!("prompt:{}:{token}", context.run_id))
+    }
+
+    pub(crate) fn fresh_for_run(context: &LoopRunContext) -> Self {
+        Self(format!(
+            "prompt:{}:{}",
+            context.run_id,
+            uuid::Uuid::new_v4()
+        ))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn is_for_run(&self, context: &LoopRunContext) -> bool {
+        self.0.starts_with(&format!("prompt:{}:", context.run_id))
+    }
+}
+
+impl AsRef<str> for LoopPromptBundleRef {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for LoopPromptBundleRef {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for LoopPromptBundleRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
@@ -458,6 +556,47 @@ pub struct LoopModelMessage {
     pub content_ref: LoopMessageRef,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptMode {
+    TextOnly,
+    #[serde(rename = "codeact")]
+    CodeAct,
+}
+
+impl PromptMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TextOnly => "text_only",
+            Self::CodeAct => "codeact",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoopPromptBundleRequest {
+    pub mode: PromptMode,
+    pub context_cursor: Option<LoopInputCursor>,
+    pub surface_version: Option<CapabilitySurfaceVersion>,
+    pub checkpoint_state_ref: Option<LoopCheckpointStateRef>,
+    pub max_tokens: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoopPromptBundle {
+    pub bundle_ref: LoopPromptBundleRef,
+    pub messages: Vec<LoopModelMessage>,
+    pub surface_version: Option<CapabilitySurfaceVersion>,
+}
+
+#[async_trait]
+pub trait LoopPromptPort: Send + Sync {
+    async fn build_prompt_bundle(
+        &self,
+        request: LoopPromptBundleRequest,
+    ) -> Result<LoopPromptBundle, AgentLoopHostError>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopModelResponse {
     pub chunks: Vec<ModelStreamChunk>,
@@ -737,6 +876,7 @@ pub trait LoopProgressPort: Send + Sync {
 pub trait AgentLoopDriverHost:
     LoopRunInfoPort
     + LoopContextPort
+    + LoopPromptPort
     + LoopInputPort
     + LoopModelPort
     + LoopCapabilityPort
@@ -751,6 +891,7 @@ pub trait AgentLoopDriverHost:
 impl<T> AgentLoopDriverHost for T where
     T: LoopRunInfoPort
         + LoopContextPort
+        + LoopPromptPort
         + LoopInputPort
         + LoopModelPort
         + LoopCapabilityPort

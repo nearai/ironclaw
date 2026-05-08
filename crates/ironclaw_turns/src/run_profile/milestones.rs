@@ -9,8 +9,8 @@ use crate::{
 };
 
 use super::host::{
-    AgentLoopHostError, AgentLoopHostErrorKind, LoopCheckpointKind, LoopDriverNoteKind,
-    LoopRunContext, LoopSafeSummary,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilitySurfaceVersion, LoopCheckpointKind,
+    LoopDriverNoteKind, LoopPromptBundleRef, LoopRunContext, LoopSafeSummary, PromptMode,
 };
 use super::refs::{LoopDriverId, ModelProfileId};
 use crate::{LoopCompletionKind, LoopFailureKind};
@@ -39,6 +39,12 @@ impl LoopHostMilestone {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LoopHostMilestoneKind {
+    PromptBundleBuilt {
+        bundle_ref: LoopPromptBundleRef,
+        mode: PromptMode,
+        surface_version: Option<CapabilitySurfaceVersion>,
+        message_count: usize,
+    },
     ModelStarted {
         requested_model_profile_id: Option<ModelProfileId>,
     },
@@ -76,6 +82,7 @@ pub enum LoopHostMilestoneKind {
 impl LoopHostMilestoneKind {
     pub fn kind_name(&self) -> &'static str {
         match self {
+            Self::PromptBundleBuilt { .. } => "prompt_bundle_built",
             Self::ModelStarted { .. } => "model_started",
             Self::ModelCompleted { .. } => "model_completed",
             Self::CapabilityInvoked { .. } => "capability_invoked",
@@ -143,6 +150,22 @@ where
 {
     pub fn new(context: LoopRunContext, sink: Arc<S>) -> Self {
         Self { context, sink }
+    }
+
+    pub async fn prompt_bundle_built(
+        &self,
+        bundle_ref: LoopPromptBundleRef,
+        mode: PromptMode,
+        surface_version: Option<CapabilitySurfaceVersion>,
+        message_count: usize,
+    ) -> Result<(), AgentLoopHostError> {
+        self.publish(LoopHostMilestoneKind::PromptBundleBuilt {
+            bundle_ref,
+            mode,
+            surface_version,
+            message_count,
+        })
+        .await
     }
 
     pub async fn model_started(
