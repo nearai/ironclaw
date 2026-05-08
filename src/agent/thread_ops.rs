@@ -2899,22 +2899,32 @@ mod tests {
             thread.id
         };
 
+        let before_date = chrono::Utc::now().format("%Y-%m-%d").to_string();
         let result = agent
             .process_compact(Arc::clone(&session), thread_id)
             .await
             .expect("manual compaction should run");
+        let after_date = chrono::Utc::now().format("%Y-%m-%d").to_string();
         assert!(
             matches!(result, SubmissionResult::Ok { .. }),
             "unexpected compact result: {result:?}"
         );
 
-        let date = chrono::Utc::now().format("%Y-%m-%d");
-        let path = format!("daily/{date}.md");
+        let mut candidate_paths = vec![format!("daily/{before_date}.md")];
+        if after_date != before_date {
+            candidate_paths.push(format!("daily/{after_date}.md"));
+        }
+
         let alice_ws = crate::workspace::Workspace::new_with_db("alice", Arc::clone(&db));
-        let alice_doc = alice_ws
-            .read(&path)
-            .await
-            .expect("compaction summary should be written to the session user's workspace");
+        let mut stored = None;
+        for path in &candidate_paths {
+            if let Ok(doc) = alice_ws.read(path).await {
+                stored = Some((path.clone(), doc));
+                break;
+            }
+        }
+        let (path, alice_doc) =
+            stored.expect("compaction summary should be written to the session user's workspace");
         assert!(alice_doc.content.contains("Context Summary"));
 
         let owner_ws = crate::workspace::Workspace::new_with_db("owner-scope", Arc::clone(&db));

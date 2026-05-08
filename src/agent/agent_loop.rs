@@ -2452,15 +2452,25 @@ mod tests {
                 duration_secs: None,
             }]);
 
+        let before_date = chrono::Utc::now().format("%Y-%m-%d").to_string();
         agent.store_extracted_documents(&message).await;
+        let after_date = chrono::Utc::now().format("%Y-%m-%d").to_string();
 
-        let date = chrono::Utc::now().format("%Y-%m-%d");
-        let path = format!("documents/{date}/conversation-notes.txt");
+        let mut candidate_paths = vec![format!("documents/{before_date}/conversation-notes.txt")];
+        if after_date != before_date {
+            candidate_paths.push(format!("documents/{after_date}/conversation-notes.txt"));
+        }
+
         let alice_ws = crate::workspace::Workspace::new_with_db("alice", Arc::clone(&db));
-        let alice_doc = alice_ws
-            .read(&path)
-            .await
-            .expect("extracted document should be stored under the message user");
+        let mut stored = None;
+        for path in &candidate_paths {
+            if let Ok(doc) = alice_ws.read(path).await {
+                stored = Some((path.clone(), doc));
+                break;
+            }
+        }
+        let (path, alice_doc) =
+            stored.expect("extracted document should be stored under the message user");
         assert!(
             alice_doc
                 .content
