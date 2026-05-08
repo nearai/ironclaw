@@ -249,6 +249,9 @@ document.getElementById('restart-close-btn').addEventListener('click', () => can
 document.getElementById('restart-cancel-btn').addEventListener('click', () => cancelRestart());
 document.getElementById('restart-confirm-btn').addEventListener('click', () => confirmRestart());
 document.getElementById('restart-btn').addEventListener('click', () => triggerRestart());
+// Bug #3082 recovery affordances on the progress modal.
+document.getElementById('restart-refresh-btn').addEventListener('click', () => window.location.reload());
+document.getElementById('restart-dismiss-btn').addEventListener('click', () => dismissRestartLoader());
 document.getElementById('thread-new-btn').addEventListener('click', () => createNewThread());
 document.getElementById('thread-toggle-btn').addEventListener('click', () => toggleThreadSidebar());
 document.getElementById('send-btn').addEventListener('click', () => sendMessage());

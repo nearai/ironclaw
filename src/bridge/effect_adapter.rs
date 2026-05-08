@@ -67,7 +67,7 @@ pub struct EffectBridgeAdapter {
     /// outbound requests through the interceptor. Without this, engine v2 tool
     /// calls bypass the recorder entirely — recorded traces end up with zero
     /// `http_exchanges` and replay can't substitute responses.
-    http_interceptor: RwLock<Option<Arc<dyn crate::llm::recording::HttpInterceptor>>>,
+    http_interceptor: RwLock<Option<Arc<dyn ironclaw_llm::recording::HttpInterceptor>>>,
     /// Engine v2 store used to mirror live-installed v1 skills into `DocType::Skill`.
     engine_store: RwLock<Option<Arc<dyn Store>>>,
     /// V1 skill registry used to load the just-installed skill for v2 sync.
@@ -154,7 +154,7 @@ impl EffectBridgeAdapter {
     /// interceptor, so http-aware tools will record/replay through it.
     pub async fn set_http_interceptor(
         &self,
-        interceptor: Arc<dyn crate::llm::recording::HttpInterceptor>,
+        interceptor: Arc<dyn ironclaw_llm::recording::HttpInterceptor>,
     ) {
         *self.http_interceptor.write().await = Some(interceptor);
     }

@@ -14,8 +14,8 @@ use crate::agent::{Agent, MessageIntent};
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobState;
 use crate::error::Error;
-use crate::llm::{ChatMessage, Reasoning};
 use crate::ownership::Owned;
+use ironclaw_llm::{ChatMessage, Reasoning};
 
 /// Format a count with a suffix, using K/M abbreviations for large numbers.
 fn format_count(n: u64, suffix: &str) -> String {
@@ -421,7 +421,7 @@ impl Agent {
         context.extend_from_slice(&messages[start..]);
         context.push(ChatMessage::user("Summarize this conversation."));
 
-        let request = crate::llm::CompletionRequest::new(context)
+        let request = ironclaw_llm::CompletionRequest::new(context)
             .with_max_tokens(512)
             .with_temperature(0.3);
 
@@ -470,7 +470,7 @@ impl Agent {
         context.extend_from_slice(&messages[start..]);
         context.push(ChatMessage::user("What should I do next?"));
 
-        let request = crate::llm::CompletionRequest::new(context)
+        let request = ironclaw_llm::CompletionRequest::new(context)
             .with_max_tokens(512)
             .with_temperature(0.5);
 
@@ -1114,7 +1114,7 @@ impl Agent {
         if let Err(e) = tokio::task::spawn_blocking(move || {
             // 3a. Update the backend-specific model env var in ~/.ironclaw/.env
             //     only if the var already exists (don't inject new vars).
-            let registry = crate::llm::ProviderRegistry::load();
+            let registry = ironclaw_llm::ProviderRegistry::load();
             let model_env = registry.model_env_var(&backend);
             let env_var_prefix = format!("{}=", model_env);
 

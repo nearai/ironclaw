@@ -38,6 +38,8 @@ pub use router::{
     EngineStepInfo,
     EngineThreadDetail,
     EngineThreadInfo,
+    InlineGateError,
+    InlineGateOutcome,
     ProjectOverviewEntry,
     ProjectsOverviewResponse,
     clear_engine_pending_auth,
@@ -74,6 +76,7 @@ pub use router::{
     resolve_gate,
     resume_engine_mission,
     transition_engine_pending_auth_request_to_pairing,
+    try_resolve_inline_approval_gate,
 };
 
 #[cfg(feature = "libsql")]

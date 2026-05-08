@@ -8,8 +8,6 @@ use tokio::sync::RwLock;
 use crate::context::ContextManager;
 use crate::db::{Database, UserStore};
 use crate::extensions::ExtensionManager;
-use crate::llm::recording::HttpInterceptor;
-use crate::llm::{LlmProvider, ToolDefinition};
 use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::secrets::SecretsStore;
 use crate::tools::builder::{
@@ -33,6 +31,8 @@ use crate::tools::wasm::{
     WasmStorageError, WasmToolRuntime, WasmToolStore, WasmToolWrapper,
 };
 use crate::workspace::Workspace;
+use ironclaw_llm::recording::HttpInterceptor;
+use ironclaw_llm::{LlmProvider, ToolDefinition};
 use ironclaw_skills::catalog::SkillCatalog;
 use ironclaw_skills::registry::SkillRegistry;
 
@@ -586,7 +586,7 @@ impl ToolRegistry {
     pub fn register_memory_tools_with_resolver(
         &self,
         resolver: Arc<dyn crate::tools::builtin::memory::WorkspaceResolver>,
-        reasoning_llm: Option<Arc<dyn crate::llm::LlmProvider>>,
+        reasoning_llm: Option<Arc<dyn ironclaw_llm::LlmProvider>>,
         reasoning_enabled: bool,
     ) {
         self.register_sync(Arc::new(MemorySearchTool::with_reasoning(

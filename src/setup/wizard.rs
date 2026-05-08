@@ -23,13 +23,6 @@ use crate::channels::wasm::{
     ChannelCapabilitiesFile, available_channel_names, install_bundled_channel,
 };
 use crate::config::OAUTH_PLACEHOLDER;
-use crate::llm::models::{
-    build_nearai_model_fetch_config, fetch_anthropic_models, fetch_ollama_models,
-    fetch_openai_compatible_models, fetch_openai_models,
-};
-#[cfg(test)]
-use crate::llm::models::{is_openai_chat_model, sort_openai_models};
-use crate::llm::{SessionConfig, SessionManager};
 use crate::secrets::{SecretsCrypto, SecretsStore};
 use crate::settings::{KeySource, Settings};
 use crate::setup::channels::{
@@ -39,6 +32,13 @@ use crate::setup::prompts::{
     confirm, input, optional_input, print_banner, print_error, print_header, print_info,
     print_step, print_success, secret_input, select_many, select_one,
 };
+use ironclaw_llm::models::{
+    build_nearai_model_fetch_config, fetch_anthropic_models, fetch_ollama_models,
+    fetch_openai_compatible_models, fetch_openai_models,
+};
+#[cfg(test)]
+use ironclaw_llm::models::{is_openai_chat_model, sort_openai_models};
+use ironclaw_llm::{SessionConfig, SessionManager};
 
 // unused const, keep commented for clarity / future use
 // const CHANNEL_INDEX_CLI: usize = 0;
@@ -316,7 +316,7 @@ impl SetupWizard {
                 }
                 self.llm_api_key = Some(SecretString::from(api_key));
                 if self.settings.selected_model.is_none() {
-                    let default = crate::llm::DEFAULT_MODEL;
+                    let default = ironclaw_llm::DEFAULT_MODEL;
                     self.settings.selected_model = Some(default.to_string());
                     print_info(&format!("Using default model: {default}"));
                 }
@@ -338,7 +338,7 @@ impl SetupWizard {
                     }
                 }
                 self.llm_api_key = Some(SecretString::from(api_key));
-                let registry = crate::llm::ProviderRegistry::load();
+                let registry = ironclaw_llm::ProviderRegistry::load();
                 if self.settings.selected_model.is_none() {
                     let default = registry
                         .find("anthropic")
@@ -361,7 +361,7 @@ impl SetupWizard {
                     }
                 }
                 self.llm_api_key = Some(SecretString::from(api_key));
-                let registry = crate::llm::ProviderRegistry::load();
+                let registry = ironclaw_llm::ProviderRegistry::load();
                 if self.settings.selected_model.is_none() {
                     let default = registry
                         .find("openai")
@@ -384,7 +384,7 @@ impl SetupWizard {
                     }
                 }
                 self.llm_api_key = Some(SecretString::from(api_key));
-                let registry = crate::llm::ProviderRegistry::load();
+                let registry = ironclaw_llm::ProviderRegistry::load();
                 if self.settings.selected_model.is_none() {
                     let default = registry
                         .find("openrouter")
@@ -1269,7 +1269,7 @@ impl SetupWizard {
     /// NearAI is always first (special auth), then all registry providers
     /// that have setup hints.
     async fn step_inference_provider(&mut self) -> Result<(), SetupError> {
-        let registry = crate::llm::ProviderRegistry::load();
+        let registry = ironclaw_llm::ProviderRegistry::load();
 
         // Show current provider if already configured
         if let Some(current) = self.settings.llm_backend.clone() {
@@ -1450,7 +1450,7 @@ impl SetupWizard {
     async fn run_provider_setup(
         &mut self,
         provider_id: &str,
-        registry: &crate::llm::ProviderRegistry,
+        registry: &ironclaw_llm::ProviderRegistry,
     ) -> Result<(), SetupError> {
         if provider_id == "nearai" {
             return self.setup_nearai().await;
@@ -1485,7 +1485,7 @@ impl SetupWizard {
         }
 
         match setup {
-            crate::llm::registry::SetupHint::ApiKey {
+            ironclaw_llm::registry::SetupHint::ApiKey {
                 secret_name,
                 key_url,
                 display_name,
@@ -1514,10 +1514,10 @@ impl SetupWizard {
                 )
                 .await?;
             }
-            crate::llm::registry::SetupHint::Ollama { .. } => {
+            ironclaw_llm::registry::SetupHint::Ollama { .. } => {
                 self.setup_ollama_generic(def)?;
             }
-            crate::llm::registry::SetupHint::OpenAiCompatible {
+            ironclaw_llm::registry::SetupHint::OpenAiCompatible {
                 secret_name,
                 display_name,
                 ..
@@ -1705,7 +1705,7 @@ impl SetupWizard {
             .build()
             .map_err(|e| SetupError::Auth(format!("Failed to create HTTP client: {e}")))?;
 
-        let device = crate::llm::github_copilot_auth::request_device_code(&client)
+        let device = ironclaw_llm::github_copilot_auth::request_device_code(&client)
             .await
             .map_err(|e| SetupError::Auth(e.to_string()))?;
 
@@ -1725,7 +1725,7 @@ impl SetupWizard {
         }
 
         print_info("Waiting for GitHub authorization...");
-        let token = crate::llm::github_copilot_auth::wait_for_device_login(&client, &device)
+        let token = ironclaw_llm::github_copilot_auth::wait_for_device_login(&client, &device)
             .await
             .map_err(|e| SetupError::Auth(e.to_string()))?;
 
@@ -1737,7 +1737,7 @@ impl SetupWizard {
         client: &reqwest::Client,
         token: &str,
     ) -> Result<(), SetupError> {
-        crate::llm::github_copilot_auth::validate_token(client, token)
+        ironclaw_llm::github_copilot_auth::validate_token(client, token)
             .await
             .map_err(|e| SetupError::Auth(e.to_string()))?;
 
@@ -1916,7 +1916,7 @@ impl SetupWizard {
         }
 
         use crate::config::OpenAiCodexConfig;
-        use crate::llm::OpenAiCodexSessionManager;
+        use ironclaw_llm::OpenAiCodexSessionManager;
 
         let config = OpenAiCodexConfig::default();
 
@@ -1934,7 +1934,7 @@ impl SetupWizard {
     /// Generic Ollama-style setup: just needs a base URL, no API key.
     fn setup_ollama_generic(
         &mut self,
-        def: &crate::llm::ProviderDefinition,
+        def: &ironclaw_llm::ProviderDefinition,
     ) -> Result<(), SetupError> {
         self.set_llm_backend_preserving_model(&def.id);
 
@@ -2108,8 +2108,8 @@ impl SetupWizard {
         println!();
 
         let creds_path = crate::config::GeminiOauthConfig::default_credentials_path();
-        let cred_manager =
-            crate::llm::gemini_oauth::CredentialManager::new(&creds_path).map_err(|e| {
+        let cred_manager = ironclaw_llm::gemini_oauth::CredentialManager::new(&creds_path)
+            .map_err(|e| {
                 SetupError::Config(format!(
                     "Failed to initialize Gemini credential manager: {}",
                     e
@@ -2157,14 +2157,14 @@ impl SetupWizard {
         }
 
         let backend = self.settings.llm_backend.as_deref().unwrap_or("nearai");
-        let registry = crate::llm::ProviderRegistry::load();
+        let registry = ironclaw_llm::ProviderRegistry::load();
 
         match backend {
             "nearai" => {
                 // NEAR AI: use existing provider list_models()
                 let fetched = self.fetch_nearai_models().await;
                 let models = if fetched.is_empty() {
-                    crate::llm::default_models()
+                    ironclaw_llm::default_models()
                 } else {
                     fetched.iter().map(|m| (m.clone(), m.clone())).collect()
                 };
@@ -2356,7 +2356,7 @@ impl SetupWizard {
             None => return vec![],
         };
 
-        use crate::llm::create_llm_provider;
+        use ironclaw_llm::create_llm_provider;
 
         let config = build_nearai_model_fetch_config();
 
@@ -4519,13 +4519,13 @@ mod tests {
         // to be kept during re-onboarding.
         let mut wizard = SetupWizard::new();
 
-        let mut providers: Vec<crate::llm::registry::ProviderDefinition> =
+        let mut providers: Vec<ironclaw_llm::registry::ProviderDefinition> =
             serde_json::from_str(include_str!("../../providers.json")).unwrap();
         // Add a provider with no setup hint
-        providers.push(crate::llm::registry::ProviderDefinition {
+        providers.push(ironclaw_llm::registry::ProviderDefinition {
             id: "custom_no_setup".to_string(),
             aliases: vec![],
-            protocol: crate::llm::registry::ProviderProtocol::OpenAiCompletions,
+            protocol: ironclaw_llm::registry::ProviderProtocol::OpenAiCompletions,
             default_base_url: Some("http://localhost:9999/v1".to_string()),
             base_url_env: None,
             base_url_required: false,
@@ -4538,7 +4538,7 @@ mod tests {
             setup: None,
             unsupported_params: vec![],
         });
-        let registry = crate::llm::ProviderRegistry::new(providers);
+        let registry = ironclaw_llm::ProviderRegistry::new(providers);
 
         let result = wizard
             .run_provider_setup("custom_no_setup", &registry)
