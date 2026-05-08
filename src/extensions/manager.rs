@@ -3415,13 +3415,17 @@ impl ExtensionManager {
         // Best-effort: a registration failure here doesn't unwind the
         // download. The user can retry via the existing /activate
         // endpoint, or the next ensure_extension_ready cycle picks
-        // it up. We log so a CI failure isn't silent.
-        match self.activate_wasm_tool(name, &self.user_id).await {
+        // it up. We log so a CI failure isn't silent. The
+        // `InstallResult.message` reflects which arm we hit so the
+        // caller / UI can prompt for follow-up instead of optimistically
+        // claiming readiness when activation actually failed.
+        let activated = match self.activate_wasm_tool(name, &self.user_id).await {
             Ok(_) => {
                 tracing::debug!(
                     extension = %name,
                     "Auto-registered WASM tool with registry on install"
                 );
+                true
             }
             Err(e) => {
                 tracing::warn!(
@@ -3432,13 +3436,24 @@ impl ExtensionManager {
                      not be callable until the user resolves the \
                      activation error or completes setup."
                 );
+                false
             }
-        }
+        };
+
+        let message = if activated {
+            format!("WASM tool '{}' installed and ready.", name)
+        } else {
+            format!(
+                "WASM tool '{}' installed; activation failed — \
+                 retry via the activate endpoint or complete setup.",
+                name
+            )
+        };
 
         Ok(InstallResult {
             name: name.to_string(),
             kind: ExtensionKind::WasmTool,
-            message: format!("WASM tool '{}' installed and ready.", name),
+            message,
         })
     }
 

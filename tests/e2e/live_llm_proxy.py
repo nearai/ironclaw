@@ -124,19 +124,24 @@ _SKILLS_END_BOUNDARIES = (
 
 
 def _normalize_skills_block(text: str) -> str:
-    """Replace `[SKILL] skill:NAME ...` blocks with a sorted name list.
+    """Drop the entire `[SKILL] skill:NAME ...` block, replacing it
+    with a single `[SKILLS]` placeholder.
 
     Skills appear in two forms: prefixed with `### ` (system prompt
     style) or bare (rendered into the user-facing mission goal). The
     full body of each skill varies as the registry adds/edits/removes
-    entries between recordings. For canonicalization we only care that
-    the *set* of active skills is the same — the LLM's response to our
-    deterministic test prompt does not branch on skill body content.
+    entries between recordings. The local skill registry is also
+    machine-specific, so even the *set* of active skill names cannot
+    be assumed stable across record/replay machines.
+
+    For canonicalization we therefore drop the whole block — the
+    deterministic test prompt is engineered so the LLM's response
+    does not branch on which skills are present. The resulting
+    placeholder is intentionally opaque (no embedded names).
 
     Strategy: locate the first `[SKILL] skill:NAME` marker, find the
     end of the skills section (next known top-level boundary or end
-    of string), drop the entire range, and replace with a sorted list
-    of just the skill names.
+    of string), and replace the entire range with `[SKILLS]`.
     """
     matches = list(_SKILL_MARKER_RE.finditer(text))
     if not matches:

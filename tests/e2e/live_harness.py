@@ -38,8 +38,6 @@ import asyncio
 import os
 import re
 import signal
-import socket
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -61,12 +59,6 @@ def is_live_mode() -> bool:
 def fixture_path_for(test_name: str) -> Path:
     """Return the JSON fixture path for a given test."""
     return FIXTURE_DIR / f"{test_name}.json"
-
-
-def _find_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 async def _wait_for_port_line(

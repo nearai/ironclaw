@@ -318,6 +318,16 @@ pub(crate) async fn chat_gate_resolve_handler(
     // `resume_paused_for_credential` re-check `paused_gate` atomically.
     // Best-effort dispatch — failures inside the helper are logged and
     // never surfaced as a gate-resolve error.
+    // Validate the request id once up front so every arm — including
+    // the Approved / Denied paths that delegate to chat_approval_handler
+    // — surfaces a uniform 400 on malformed UUIDs, and the mission
+    // auto-resume hook below isn't silently skipped on bad input.
+    let gate_request_id = Uuid::parse_str(&req.request_id).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Invalid request_id (expected UUID)".to_string(),
+        )
+    })?;
     let mission_outcome = match req.resolution {
         GateResolutionPayload::Approved { .. }
         | GateResolutionPayload::CredentialProvided { .. } => {
@@ -326,7 +336,7 @@ pub(crate) async fn chat_gate_resolve_handler(
         GateResolutionPayload::Denied => Some(ironclaw_engine::GateResolutionOutcome::Denied),
         GateResolutionPayload::Cancelled => Some(ironclaw_engine::GateResolutionOutcome::Cancelled),
     };
-    let mission_resume = mission_outcome.zip(Uuid::parse_str(&req.request_id).ok());
+    let mission_resume = mission_outcome.map(|outcome| (outcome, gate_request_id));
 
     let response: Result<Json<ActionResponse>, (StatusCode, String)> = match req.resolution {
         GateResolutionPayload::Approved { always } => {
@@ -361,14 +371,8 @@ pub(crate) async fn chat_gate_resolve_handler(
                 StatusCode::BAD_REQUEST,
                 "thread_id is required for credential resolution".to_string(),
             ))?;
-            let request_id = Uuid::parse_str(&req.request_id).map_err(|_| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    "Invalid request_id (expected UUID)".to_string(),
-                )
-            })?;
             let submission = crate::agent::submission::Submission::GateAuthResolution {
-                request_id,
+                request_id: gate_request_id,
                 resolution: crate::agent::submission::AuthGateResolution::CredentialProvided {
                     token,
                 },
@@ -397,14 +401,8 @@ pub(crate) async fn chat_gate_resolve_handler(
             // the structured cancellation as before so the parked VM
             // unwinds promptly.
             if let Some(thread_id) = req.thread_id.clone() {
-                let request_id = Uuid::parse_str(&req.request_id).map_err(|_| {
-                    (
-                        StatusCode::BAD_REQUEST,
-                        "Invalid request_id (expected UUID)".to_string(),
-                    )
-                })?;
                 let submission = crate::agent::submission::Submission::GateAuthResolution {
-                    request_id,
+                    request_id: gate_request_id,
                     resolution: crate::agent::submission::AuthGateResolution::Cancelled,
                 };
                 crate::channels::web::platform::engine_dispatch::dispatch_engine_submission(

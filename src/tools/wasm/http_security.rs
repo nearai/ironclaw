@@ -64,16 +64,17 @@ pub(crate) async fn validate_and_resolve_http_target(
             // Test escape hatch: when `IRONCLAW_TEST_HTTP_REWRITE_MAP`
             // is set, the URL has been rewritten by
             // `rewrite_http_url_for_tool_testing` to a loopback target
-            // (the rewrite itself enforces loopback-only). Allowing
-            // the request through here keeps test fixtures functional
-            // while preserving the SSRF guard for production. Only
-            // active in debug builds (the env var is checked by
+            // (the rewrite itself enforces loopback-only). Mirror that
+            // invariant here — only loopback IPs (127.0.0.0/8, ::1) are
+            // allowed; the unspecified address (0.0.0.0, ::) is never
+            // produced by the rewrite and remains rejected. Only
+            // active in debug/test builds (the env var is checked by
             // `rewrite_http_url_for_tool_testing`'s `cfg`).
             if cfg!(any(test, debug_assertions))
                 && std::env::var("IRONCLAW_TEST_HTTP_REWRITE_MAP")
                     .map(|v| !v.trim().is_empty())
                     .unwrap_or(false)
-                && (ip.is_loopback() || ip.is_unspecified())
+                && ip.is_loopback()
             {
                 tracing::debug!(
                     %ip,
