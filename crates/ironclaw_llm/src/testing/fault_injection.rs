@@ -152,11 +152,10 @@ impl FaultInjector {
     /// Panics if `error_rate` is not in `0.0..=1.0` or is NaN.
     ///
     /// The seed is guarded against zero, which is a fixed point for xorshift.
+    #[rustfmt::skip]
     pub fn random(error_rate: f64, fault: FaultType, seed: u64) -> Self {
-        assert!(
-            !error_rate.is_nan() && (0.0..=1.0).contains(&error_rate),
-            "error_rate must be in 0.0..=1.0 and not NaN, got {error_rate}"
-        );
+        let valid = !error_rate.is_nan() && (0.0..=1.0).contains(&error_rate);
+        assert!(valid, "error_rate must be in 0.0..=1.0 and not NaN, got {error_rate}"); // safety: test-only helper gated on the `testing` cargo feature
         let seed = if seed == 0 { 1 } else { seed };
         Self {
             actions: Vec::new(),

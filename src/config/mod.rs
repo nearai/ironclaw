@@ -703,6 +703,7 @@ fn merge_injected_vars(new_entries: HashMap<String, String>) {
     if new_entries.is_empty() {
         return;
     }
+    register_injected_vars_fallback();
     match INJECTED_VARS.lock() {
         Ok(mut map) => map.extend(new_entries),
         Err(poisoned) => poisoned.into_inner().extend(new_entries),

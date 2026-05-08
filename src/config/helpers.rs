@@ -7,21 +7,15 @@ use crate::config::INJECTED_VARS;
 
 /// Crate-wide mutex for tests that mutate process environment variables.
 ///
-/// The process environment is global state shared across all threads.
-/// Per-module mutexes do NOT prevent races between modules running in
-/// parallel.  Every `unsafe { set_var / remove_var }` call in tests
-/// MUST hold this single lock.
-#[cfg(test)]
-pub(crate) static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Acquire the env-var mutex, recovering from poison.
+/// Acquire the workspace-wide env-var mutex, recovering from poison.
 ///
-/// A poisoned mutex means a previous test panicked while holding the lock.
-/// The env state might be slightly stale, but cascading every subsequent
-/// test into a `PoisonError` panic is far worse. Recover and carry on.
+/// Delegates to [`ironclaw_common::env_helpers::lock_env`] so tests across
+/// every crate (`ironclaw`, `ironclaw_llm`, `ironclaw_common`) serialize on
+/// the same `Mutex`. Per-module mutexes would not prevent races between
+/// modules running in parallel.
 #[cfg(test)]
 pub(crate) fn lock_env() -> std::sync::MutexGuard<'static, ()> {
-    ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
+    ironclaw_common::env_helpers::lock_env()
 }
 
 /// Thread-safe mutable overlay for env vars set at runtime.
@@ -654,6 +648,8 @@ mod tests {
 
     #[test]
     fn lock_env_recovers_from_poisoned_mutex() {
+        use ironclaw_common::env_helpers::ENV_MUTEX;
+
         // Simulate a poisoned mutex: spawn a thread that panics while holding the lock.
         let _ = std::thread::spawn(|| {
             let _guard = ENV_MUTEX.lock().unwrap();

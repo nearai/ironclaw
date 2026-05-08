@@ -1197,17 +1197,22 @@ async fn async_main() -> anyhow::Result<()> {
         && let Some(ref ws) = components.workspace
     {
         let mut entries = Vec::new();
-        if let Ok(paths) = ws.list_all().await {
-            for path in paths {
-                match ws.read(&path).await {
-                    Ok(doc) => entries.push(ironclaw_llm::MemorySnapshotEntry {
-                        path: doc.path,
-                        content: doc.content,
-                    }),
-                    Err(e) => {
-                        tracing::debug!(path = %path, error = %e, "Skipped memory doc in snapshot")
+        match ws.list_all().await {
+            Ok(paths) => {
+                for path in paths {
+                    match ws.read(&path).await {
+                        Ok(doc) => entries.push(ironclaw_llm::MemorySnapshotEntry {
+                            path: doc.path,
+                            content: doc.content,
+                        }),
+                        Err(e) => {
+                            tracing::debug!(path = %path, error = %e, "Skipped memory doc in snapshot")
+                        }
                     }
                 }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to list memory documents; trace will have empty memory snapshot");
             }
         }
         recorder.snapshot_memory(entries).await;
