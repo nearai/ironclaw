@@ -16,12 +16,14 @@ use ironclaw_turns::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
         CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDescriptorView,
         CapabilityInputRef, CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion,
-        FinalizeAssistantMessage, LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort,
-        LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle, LoopContextMessage,
-        LoopContextPort, LoopContextRequest, LoopDriverNoteKind, LoopInputBatch, LoopInputCursor,
-        LoopInputCursorToken, LoopInputPort, LoopModelMessage, LoopModelPort, LoopModelRequest,
-        LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopRunContext, LoopRunInfoPort,
-        LoopTranscriptPort, ParentLoopOutput, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        FinalizeAssistantMessage, InMemoryLoopHostMilestoneSink, LoopCapabilityPort,
+        LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef,
+        LoopContextBundle, LoopContextMessage, LoopContextPort, LoopContextRequest,
+        LoopDriverNoteKind, LoopHostMilestoneEmitter, LoopHostMilestoneKind, LoopInputBatch,
+        LoopInputCursor, LoopInputCursorToken, LoopInputPort, LoopModelMessage, LoopModelPort,
+        LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopRunContext,
+        LoopRunInfoPort, LoopTranscriptPort, ParentLoopOutput, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     },
     runner::{ClaimRunRequest, TurnRunTransitionPort},
 };
@@ -58,7 +60,10 @@ async fn two_fake_drivers_use_the_same_per_run_agent_loop_host_contract() {
             "context",
             "visible_capabilities",
             "model",
+            "milestone:model_started",
+            "milestone:model_completed",
             "finalize_assistant",
+            "milestone:assistant_reply_finalized",
             "progress:driver_note",
             "visible_capabilities",
             "invoke:demo.echo",
@@ -71,6 +76,27 @@ async fn two_fake_drivers_use_the_same_per_run_agent_loop_host_contract() {
         host.run_context().thread_id,
         ThreadId::new("thread-loop-host").unwrap()
     );
+    assert_eq!(
+        host.milestone_kind_names(),
+        vec![
+            "model_started",
+            "model_completed",
+            "assistant_reply_finalized",
+        ]
+    );
+    let milestones = host.milestones();
+    assert!(matches!(
+        &milestones[0].kind,
+        LoopHostMilestoneKind::ModelStarted { .. }
+    ));
+    assert!(milestones.iter().all(|milestone| {
+        milestone.scope == host.context.scope
+            && milestone.turn_id == host.context.turn_id
+            && milestone.run_id == host.context.run_id
+    }));
+    let serialized = serde_json::to_string(&milestones).unwrap();
+    assert!(!serialized.contains("done"));
+    assert!(!serialized.contains("RAW_AGENT_LOOP_HOST_SENTINEL"));
 }
 
 #[tokio::test]
@@ -102,6 +128,48 @@ fn loop_host_refs_are_bounded_opaque_tokens() {
     assert!(LoopCheckpointStateRef::new("/host/path/checkpoint.json").is_err());
     assert!(LoopInputCursorToken::new("input-cursor:seen-1").is_ok());
     assert!(LoopInputCursorToken::new("999").is_err());
+    assert!(LoopProgressEvent::driver_note(LoopDriverNoteKind::Planning, "safe note").is_ok());
+    assert!(LoopProgressEvent::driver_note(LoopDriverNoteKind::Planning, "x".repeat(513)).is_err());
+    assert!(
+        LoopProgressEvent::driver_note(LoopDriverNoteKind::Planning, "{\"tool_input\":\"raw\"}")
+            .is_err()
+    );
+    assert!(
+        LoopProgressEvent::driver_note(
+            LoopDriverNoteKind::Planning,
+            "/Users/alice/project/secret.txt"
+        )
+        .is_err()
+    );
+    assert!(
+        LoopProgressEvent::driver_note(LoopDriverNoteKind::Planning, "api_key=sk-test-secret")
+            .is_err()
+    );
+    assert!(
+        LoopProgressEvent::driver_note(
+            LoopDriverNoteKind::Planning,
+            "provider error: 401 invalid_api_key"
+        )
+        .is_err()
+    );
+    assert!(
+        LoopProgressEvent::driver_note(
+            LoopDriverNoteKind::Planning,
+            "openai request failed: invalid api key"
+        )
+        .is_err()
+    );
+    assert!(
+        LoopProgressEvent::driver_note(
+            LoopDriverNoteKind::Planning,
+            "access token expired for provider"
+        )
+        .is_err()
+    );
+    assert!(
+        LoopProgressEvent::driver_note(LoopDriverNoteKind::Planning, "token:sk-test-secret")
+            .is_err()
+    );
 }
 
 #[test]
@@ -121,6 +189,16 @@ fn loop_host_refs_validate_when_deserialized() {
 
     let invalid_surface = serde_json::json!("surface\n1");
     assert!(serde_json::from_value::<CapabilitySurfaceVersion>(invalid_surface).is_err());
+
+    let forged_host_milestone = serde_json::json!({
+        "model_started": {"requested_model_profile_id": null}
+    });
+    assert!(serde_json::from_value::<LoopProgressEvent>(forged_host_milestone).is_err());
+
+    let unsafe_note = serde_json::json!({
+        "driver_note": {"kind": "planning", "safe_summary": "raw\nprovider error"}
+    });
+    assert!(serde_json::from_value::<LoopProgressEvent>(unsafe_note).is_err());
 }
 
 #[tokio::test]
@@ -192,10 +270,13 @@ impl AgentLoopDriver for ReplyDriver {
             .finalize_assistant_message(FinalizeAssistantMessage { reply })
             .await
             .map_err(driver_error)?;
-        host.emit_loop_progress(LoopProgressEvent::driver_note(
-            LoopDriverNoteKind::Planning,
-            "assistant transcript finalized",
-        ))
+        host.emit_loop_progress(
+            LoopProgressEvent::driver_note(
+                LoopDriverNoteKind::Planning,
+                "assistant transcript finalized",
+            )
+            .map_err(|reason| AgentLoopDriverError::InvalidRequest { reason })?,
+        )
         .await
         .map_err(driver_error)?;
         Ok(LoopExit::Completed(LoopCompleted {
@@ -262,10 +343,10 @@ impl AgentLoopDriver for CapabilityDriver {
             })
             .await
             .map_err(driver_error)?;
-        host.emit_loop_progress(LoopProgressEvent::driver_note(
-            LoopDriverNoteKind::Waiting,
-            "blocked on approval gate",
-        ))
+        host.emit_loop_progress(
+            LoopProgressEvent::driver_note(LoopDriverNoteKind::Waiting, "blocked on approval gate")
+                .map_err(|reason| AgentLoopDriverError::InvalidRequest { reason })?,
+        )
         .await
         .map_err(driver_error)?;
         Ok(LoopExit::Blocked(LoopBlocked {
@@ -299,6 +380,7 @@ struct RecordingAgentLoopHost {
     model_responses: Mutex<Vec<LoopModelResponse>>,
     capability_outcomes: Mutex<Vec<CapabilityOutcome>>,
     visible_surface: VisibleCapabilitySurface,
+    milestone_sink: Arc<InMemoryLoopHostMilestoneSink>,
 }
 
 impl RecordingAgentLoopHost {
@@ -308,6 +390,7 @@ impl RecordingAgentLoopHost {
             effects: Mutex::new(Vec::new()),
             model_responses: Mutex::new(Vec::new()),
             capability_outcomes: Mutex::new(Vec::new()),
+            milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             visible_surface: VisibleCapabilitySurface {
                 version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
                 descriptors: vec![CapabilityDescriptorView {
@@ -331,6 +414,21 @@ impl RecordingAgentLoopHost {
 
     fn effects(&self) -> Vec<String> {
         self.effects.lock().unwrap().clone()
+    }
+
+    fn milestones(&self) -> Vec<ironclaw_turns::run_profile::LoopHostMilestone> {
+        self.milestone_sink.milestones()
+    }
+
+    fn milestone_kind_names(&self) -> Vec<&'static str> {
+        self.milestones()
+            .iter()
+            .map(|milestone| milestone.kind.kind_name())
+            .collect()
+    }
+
+    fn milestone_emitter(&self) -> LoopHostMilestoneEmitter<InMemoryLoopHostMilestoneSink> {
+        LoopHostMilestoneEmitter::new(self.context.clone(), self.milestone_sink.clone())
     }
 
     fn record(&self, effect: impl Into<String>) {
@@ -388,15 +486,25 @@ impl LoopInputPort for RecordingAgentLoopHost {
 impl LoopModelPort for RecordingAgentLoopHost {
     async fn stream_model(
         &self,
-        _request: LoopModelRequest,
+        request: LoopModelRequest,
     ) -> Result<LoopModelResponse, AgentLoopHostError> {
         self.record("model");
-        self.model_responses.lock().unwrap().pop().ok_or_else(|| {
+        let emitter = self.milestone_emitter();
+        emitter
+            .model_started(request.model_preference.clone())
+            .await?;
+        self.record("milestone:model_started");
+        let response = self.model_responses.lock().unwrap().pop().ok_or_else(|| {
             AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,
                 "model response unavailable",
             )
-        })
+        })?;
+        emitter
+            .model_completed(response.effective_model_profile_id.clone())
+            .await?;
+        self.record("milestone:model_completed");
+        Ok(response)
     }
 }
 
@@ -458,8 +566,13 @@ impl LoopTranscriptPort for RecordingAgentLoopHost {
     ) -> Result<LoopMessageRef, AgentLoopHostError> {
         assert_eq!(request.reply.content, "done");
         self.record("finalize_assistant");
-        LoopMessageRef::new("msg:assistant-final")
-            .map_err(|reason| AgentLoopHostError::new(AgentLoopHostErrorKind::Internal, reason))
+        let message_ref = LoopMessageRef::new("msg:assistant-final")
+            .map_err(|reason| AgentLoopHostError::new(AgentLoopHostErrorKind::Internal, reason))?;
+        self.milestone_emitter()
+            .assistant_reply_finalized(message_ref.clone())
+            .await?;
+        self.record("milestone:assistant_reply_finalized");
+        Ok(message_ref)
     }
 }
 

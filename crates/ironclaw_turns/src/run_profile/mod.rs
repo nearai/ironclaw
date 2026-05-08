@@ -1,5 +1,6 @@
 mod driver;
 mod host;
+mod milestones;
 mod policy;
 mod refs;
 mod resolver;
@@ -20,9 +21,13 @@ pub use host::{
     LoopContextPort, LoopContextRequest, LoopContextSnippet, LoopDriverNoteKind, LoopInput,
     LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopInputPort, LoopInterruptKind,
     LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProcessRef,
-    LoopProgressEvent, LoopProgressPort, LoopRunContext, LoopRunInfoPort, LoopTranscriptPort,
-    ModelStreamChunk, ParentLoopOutput, ProcessHandleSummary, UpdateAssistantDraft,
-    VisibleCapabilityRequest, VisibleCapabilitySurface,
+    LoopProgressEvent, LoopProgressPort, LoopRunContext, LoopRunInfoPort, LoopSafeSummary,
+    LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput, ProcessHandleSummary,
+    UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
+};
+pub use milestones::{
+    InMemoryLoopHostMilestoneSink, LoopHostMilestone, LoopHostMilestoneEmitter,
+    LoopHostMilestoneKind, LoopHostMilestoneSink,
 };
 pub use policy::{
     CancellationPolicy, CheckpointPolicy, PrivilegedRunProfileDimension,
