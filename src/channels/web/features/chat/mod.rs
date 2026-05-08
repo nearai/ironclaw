@@ -393,14 +393,28 @@ pub(crate) async fn chat_gate_resolve_handler(
             // Mission-only gates have no foreground `thread_id` — the
             // gate is owned by a background mission's child thread, and
             // the gate-card UI doesn't surface a `thread_id` in the
-            // resolution payload. When `thread_id` is absent, skip the
-            // foreground submission and let the mission auto-resume
-            // path (`resume_paused_missions_for_gate_request`, fired
-            // below) carry the Cancelled outcome to the mission state
-            // machine. For foreground gates with a `thread_id`, dispatch
-            // the structured cancellation as before so the parked VM
-            // unwinds promptly.
-            if let Some(thread_id) = req.thread_id.clone() {
+            // resolution payload. For foreground inline-await gates,
+            // dispatch the structured cancellation so the parked VM
+            // unwinds promptly. The mission auto-resume path
+            // (`resume_paused_missions_for_gate_request`, fired below)
+            // independently carries the Cancelled outcome to the
+            // mission state machine.
+            //
+            // If the client omits `thread_id` for a foreground gate
+            // (regression from PR #3366 review: gate-card UI without
+            // foreground thread context), recover the owning thread
+            // from `PendingGateStore` so the parked VM is not stranded.
+            // Lookup is scoped to the requesting user via the store's
+            // own ownership check.
+            let dispatch_thread_id = match req.thread_id.clone() {
+                Some(t) => Some(t),
+                None => {
+                    crate::bridge::get_pending_gate_by_request_id(&user.user_id, gate_request_id)
+                        .await
+                        .map(|gate| gate.thread_id)
+                }
+            };
+            if let Some(thread_id) = dispatch_thread_id {
                 let submission = crate::agent::submission::Submission::GateAuthResolution {
                     request_id: gate_request_id,
                     resolution: crate::agent::submission::AuthGateResolution::Cancelled,

@@ -199,6 +199,32 @@ impl PendingGateStore {
             .map(PendingGateView::from)
     }
 
+    /// Read-only peek at a pending gate keyed by `request_id`, scoped to
+    /// the requesting user. Returns `None` if no gate matches, the gate
+    /// is owned by another user, or it has expired.
+    ///
+    /// Used by the foreground cancel path to recover the owning thread
+    /// when the client omits `thread_id` in the resolution payload —
+    /// without this, a foreground inline-await gate would be stranded
+    /// (gate marked cancelled, parked VM never unwound). See PR #3366
+    /// review.
+    pub async fn peek_by_request_id(
+        &self,
+        request_id: Uuid,
+        expected_user_id: &str,
+    ) -> Option<PendingGateView> {
+        let inner = self.inner.lock().await;
+        let key = inner.by_request_id.get(&request_id)?;
+        if key.user_id != expected_user_id {
+            return None;
+        }
+        inner
+            .by_key
+            .get(key)
+            .filter(|g| !g.is_expired())
+            .map(PendingGateView::from)
+    }
+
     /// List all non-expired gates for a user.
     pub async fn list_for_user(&self, user_id: &str) -> Vec<PendingGate> {
         let inner = self.inner.lock().await;
@@ -552,6 +578,61 @@ mod tests {
             .unwrap();
 
         assert_eq!(store.list_all().await.len(), 1);
+    }
+
+    // ── peek_by_request_id (foreground cancel fallback) ──────
+
+    #[tokio::test]
+    async fn test_peek_by_request_id_returns_view_for_owning_user() {
+        // Regression: PR #3366 review — chat_gate_resolve_handler's
+        // Cancelled arm uses this path to recover the owning thread when
+        // the client omits `thread_id`, otherwise the parked VM is
+        // stranded. Also asserts ownership scoping so a cross-user lookup
+        // doesn't leak the gate.
+        let store = PendingGateStore::in_memory();
+        let gate = sample_gate_with("alice", ThreadId::new(), "web", 300);
+        let request_id = gate.request_id;
+        store.insert(gate).await.unwrap();
+
+        let view = store
+            .peek_by_request_id(request_id, "alice")
+            .await
+            .expect("owning user sees the gate");
+        assert_eq!(view.request_id, request_id.to_string());
+
+        // Cross-user lookup yields None (do not leak gate existence).
+        assert!(store.peek_by_request_id(request_id, "bob").await.is_none());
+
+        // Unknown request_id yields None.
+        assert!(
+            store
+                .peek_by_request_id(Uuid::new_v4(), "alice")
+                .await
+                .is_none()
+        );
+
+        // Peek does not consume — second peek still works.
+        assert!(
+            store
+                .peek_by_request_id(request_id, "alice")
+                .await
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_peek_by_request_id_skips_expired() {
+        let store = PendingGateStore::in_memory();
+        let gate = sample_gate_with("alice", ThreadId::new(), "web", -1);
+        let request_id = gate.request_id;
+        store.insert(gate).await.unwrap();
+
+        assert!(
+            store
+                .peek_by_request_id(request_id, "alice")
+                .await
+                .is_none()
+        );
     }
 
     // ── Channel verification ─────────────────────────────────

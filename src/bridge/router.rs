@@ -2086,6 +2086,25 @@ pub async fn get_engine_pending_gate(
     }
 }
 
+/// Read-only lookup of a pending gate by `request_id`, scoped to the
+/// requesting user. Used by the chat cancel handler to recover the
+/// owning thread when the client omits `thread_id` in the resolution
+/// payload — without this, a foreground inline-await gate would be
+/// stranded (gate marked cancelled, parked VM never unwound). See PR
+/// #3366 review.
+pub async fn get_pending_gate_by_request_id(
+    user_id: &str,
+    request_id: uuid::Uuid,
+) -> Option<crate::gate::pending::PendingGateView> {
+    let lock = ENGINE_STATE.get()?;
+    let guard = lock.read().await;
+    let state = guard.as_ref()?;
+    state
+        .pending_gates
+        .peek_by_request_id(request_id, user_id)
+        .await
+}
+
 /// Check whether the user has *any* pending gate (resolved, ambiguous, or
 /// otherwise). Unlike `get_engine_pending_gate` which returns `None` for
 /// ambiguous resolutions, this returns `true` whenever at least one gate

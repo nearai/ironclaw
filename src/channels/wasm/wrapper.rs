@@ -4933,6 +4933,15 @@ fn is_loopback_test_rewrite_base(base: &str) -> bool {
     let Some(host) = parsed.host_str() else {
         return false;
     };
+    // The `url` crate keeps IPv6 brackets on `host_str()`. Strip them
+    // so `::1` parses as `IpAddr::V6` — without this, valid IPv6
+    // loopback rewrite targets (`http://[::1]:8443`) silently fall
+    // through and are rejected. Mirror in
+    // `tools::wasm::wrapper::is_loopback_test_rewrite_base`.
+    let host = host
+        .strip_prefix('[')
+        .and_then(|v| v.strip_suffix(']'))
+        .unwrap_or(host);
     host.eq_ignore_ascii_case("localhost")
         || host
             .parse::<std::net::IpAddr>()
