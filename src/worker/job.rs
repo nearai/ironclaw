@@ -589,7 +589,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
 
         // Run BeforeToolCall hook
         let effective_params = {
-            use crate::hooks::{HookError, HookEvent, HookOutcome};
+            use crate::hooks::{HookContext, HookError, HookEvent, HookOutcome};
             let hook_params = redact_params(&normalized_params, tool.sensitive_params());
             let event = HookEvent::ToolCall {
                 tool_name: tool_name.to_string(),
@@ -597,7 +597,18 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 user_id: job_ctx.user_id.clone(),
                 context: format!("job:{}", job_id),
             };
-            match deps.hooks.run(&event).await {
+            // Pass the job description as intent so the LLM judge can evaluate
+            // whether each tool call is consistent with the original job goal.
+            // An empty description falls back to None (judge skips evaluation).
+            let hook_ctx = HookContext {
+                intent: if job_ctx.description.is_empty() {
+                    None
+                } else {
+                    Some(job_ctx.description.clone())
+                },
+                ..Default::default()
+            };
+            match deps.hooks.run_with_context(&event, hook_ctx).await {
                 Err(HookError::Rejected { reason }) => {
                     return Err(crate::error::ToolError::ExecutionFailed {
                         name: tool_name.to_string(),

@@ -15,6 +15,7 @@
 pub mod bootstrap;
 pub mod bundled;
 pub mod hook;
+pub mod llm_judge;
 pub mod registry;
 pub mod session_summary;
 
@@ -23,5 +24,6 @@ pub use bundled::{
     HookBundleConfig, HookRegistrationSummary, register_bundle, register_bundled_hooks,
 };
 pub use hook::{Hook, HookContext, HookError, HookEvent, HookFailureMode, HookOutcome, HookPoint};
+pub use llm_judge::LlmJudgeHook;
 pub use registry::HookRegistry;
 pub use session_summary::SessionSummaryHook;
