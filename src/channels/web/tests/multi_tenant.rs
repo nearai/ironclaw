@@ -1092,6 +1092,50 @@ mod admin_api_contracts {
     }
 
     #[tokio::test]
+    async fn test_admin_user_list_handles_tiny_costs_from_libsql() {
+        let (db, _dir) = test_db().await;
+        db.create_user(&test_user(
+            "carol",
+            "Carol",
+            Some("carol@example.com"),
+            "active",
+            "member",
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+        let job_id = db.create_system_job("carol", "test").await.unwrap();
+        db.record_llm_call(&crate::history::LlmCallRecord {
+            job_id: Some(job_id),
+            conversation_id: None,
+            provider: "test",
+            model: "tiny-cost-model",
+            input_tokens: 1,
+            output_tokens: 1,
+            cost: rust_decimal::Decimal::from_str_exact("0.000075").unwrap(),
+            purpose: Some("test"),
+        })
+        .await
+        .unwrap();
+
+        let state = build_state(Some(db), None);
+        let app = admin_router(state, two_user_auth());
+
+        let req = Request::builder()
+            .uri("/api/admin/users")
+            .header("Authorization", "Bearer tok-alice")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: AdminUserListResponse = parse_json(resp).await;
+
+        let user = body.users.iter().find(|u| u.id == "carol").unwrap();
+        assert_eq!(user.job_count, 1);
+        assert_eq!(user.total_cost, "0.000075");
+    }
+
+    #[tokio::test]
     async fn test_admin_user_detail_response_contract() {
         let (db, _dir) = test_db().await;
         db.create_user(&test_user(
