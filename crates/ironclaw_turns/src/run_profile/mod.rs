@@ -1,6 +1,7 @@
 mod driver;
 mod host;
 mod milestones;
+mod model;
 mod policy;
 mod refs;
 mod resolver;
@@ -28,6 +29,9 @@ pub use host::{
 pub use milestones::{
     InMemoryLoopHostMilestoneSink, LoopHostMilestone, LoopHostMilestoneEmitter,
     LoopHostMilestoneKind, LoopHostMilestoneSink,
+};
+pub use model::{
+    HostManagedLoopModelPort, LoopModelGateway, LoopModelGatewayError, LoopModelGatewayRequest,
 };
 pub use policy::{
     CancellationPolicy, CheckpointPolicy, PrivilegedRunProfileDimension,

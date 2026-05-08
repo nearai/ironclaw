@@ -16,14 +16,15 @@ use ironclaw_turns::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
         CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDescriptorView,
         CapabilityInputRef, CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion,
-        FinalizeAssistantMessage, InMemoryLoopHostMilestoneSink, LoopCapabilityPort,
-        LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef,
-        LoopContextBundle, LoopContextMessage, LoopContextPort, LoopContextRequest,
-        LoopDriverNoteKind, LoopHostMilestoneEmitter, LoopHostMilestoneKind, LoopInputBatch,
-        LoopInputCursor, LoopInputCursorToken, LoopInputPort, LoopModelMessage, LoopModelPort,
-        LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopRunContext,
-        LoopRunInfoPort, LoopTranscriptPort, ParentLoopOutput, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        FinalizeAssistantMessage, HostManagedLoopModelPort, InMemoryLoopHostMilestoneSink,
+        LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
+        LoopCheckpointStateRef, LoopContextBundle, LoopContextMessage, LoopContextPort,
+        LoopContextRequest, LoopDriverNoteKind, LoopHostMilestone, LoopHostMilestoneEmitter,
+        LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputBatch, LoopInputCursor,
+        LoopInputCursorToken, LoopInputPort, LoopModelGateway, LoopModelGatewayError,
+        LoopModelGatewayRequest, LoopModelMessage, LoopModelPort, LoopModelRequest,
+        LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopRunContext, LoopRunInfoPort,
+        LoopTranscriptPort, ParentLoopOutput, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::{ClaimRunRequest, TurnRunTransitionPort},
 };
@@ -97,6 +98,131 @@ async fn two_fake_drivers_use_the_same_per_run_agent_loop_host_contract() {
     let serialized = serde_json::to_string(&milestones).unwrap();
     assert!(!serialized.contains("done"));
     assert!(!serialized.contains("RAW_AGENT_LOOP_HOST_SENTINEL"));
+}
+
+#[tokio::test]
+async fn host_managed_model_port_routes_gateway_and_emits_model_milestones() {
+    let context = claimed_run_context().await;
+    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let gateway = Arc::new(RecordingLoopModelGateway::default());
+    gateway.push_response(Ok(LoopModelResponse {
+        chunks: vec![ironclaw_turns::run_profile::ModelStreamChunk {
+            safe_text_delta: "safe delta".to_string(),
+        }],
+        output: ParentLoopOutput::AssistantReply(AssistantReply {
+            content: "RAW_ASSISTANT_CONTENT_SENTINEL".to_string(),
+        }),
+        effective_model_profile_id: context.resolved_run_profile.model_profile_id.clone(),
+    }));
+    let port =
+        HostManagedLoopModelPort::new(context.clone(), gateway.clone(), milestone_sink.clone());
+
+    let response = port
+        .stream_model(LoopModelRequest {
+            messages: vec![LoopModelMessage {
+                role: "user".to_string(),
+                content_ref: LoopMessageRef::new("msg:user-message").unwrap(),
+            }],
+            surface_version: Some(CapabilitySurfaceVersion::new("surface-v1").unwrap()),
+            model_preference: Some(context.resolved_run_profile.model_profile_id.clone()),
+        })
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        response.output,
+        ParentLoopOutput::AssistantReply(_)
+    ));
+    let requests = gateway.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].context.run_id, context.run_id);
+    assert_eq!(requests[0].context.scope, context.scope);
+    assert_eq!(
+        milestone_sink
+            .milestones()
+            .iter()
+            .map(|milestone| milestone.kind.kind_name())
+            .collect::<Vec<_>>(),
+        vec!["model_started", "model_completed"]
+    );
+    let serialized_milestones = serde_json::to_string(&milestone_sink.milestones()).unwrap();
+    assert!(!serialized_milestones.contains("RAW_ASSISTANT_CONTENT_SENTINEL"));
+}
+
+#[tokio::test]
+async fn host_managed_model_port_returns_response_when_model_completed_milestone_fails() {
+    let context = claimed_run_context().await;
+    let milestone_sink = Arc::new(FailingOnModelCompletedMilestoneSink::default());
+    let gateway = Arc::new(RecordingLoopModelGateway::default());
+    gateway.push_response(Ok(LoopModelResponse {
+        chunks: vec![ironclaw_turns::run_profile::ModelStreamChunk {
+            safe_text_delta: "safe delta".to_string(),
+        }],
+        output: ParentLoopOutput::AssistantReply(AssistantReply {
+            content: "model response survived milestone failure".to_string(),
+        }),
+        effective_model_profile_id: context.resolved_run_profile.model_profile_id.clone(),
+    }));
+    let port =
+        HostManagedLoopModelPort::new(context.clone(), gateway.clone(), milestone_sink.clone());
+
+    let response = port
+        .stream_model(LoopModelRequest {
+            messages: Vec::new(),
+            surface_version: None,
+            model_preference: None,
+        })
+        .await
+        .unwrap();
+
+    let ParentLoopOutput::AssistantReply(reply) = response.output else {
+        panic!("expected assistant reply");
+    };
+    assert_eq!(reply.content, "model response survived milestone failure");
+    assert_eq!(gateway.requests().len(), 1);
+    assert_eq!(milestone_sink.kind_names(), vec!["model_started"]);
+}
+
+#[tokio::test]
+async fn host_managed_model_port_sanitizes_gateway_errors() {
+    let context = claimed_run_context().await;
+    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let gateway = Arc::new(RecordingLoopModelGateway::default());
+    assert!(
+        LoopModelGatewayError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "openai request failed: invalid api key",
+        )
+        .is_err()
+    );
+    gateway.push_response(Err(LoopModelGatewayError::new(
+        AgentLoopHostErrorKind::Unavailable,
+        "model unavailable",
+    )
+    .unwrap()));
+    let port = HostManagedLoopModelPort::new(context.clone(), gateway, milestone_sink.clone());
+
+    let error = port
+        .stream_model(LoopModelRequest {
+            messages: Vec::new(),
+            surface_version: None,
+            model_preference: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+    assert_eq!(error.safe_summary, "model unavailable");
+    let serialized_error = serde_json::to_string(&error).unwrap();
+    assert!(!serialized_error.contains("invalid api key"));
+    assert_eq!(
+        milestone_sink
+            .milestones()
+            .iter()
+            .map(|milestone| milestone.kind.kind_name())
+            .collect::<Vec<_>>(),
+        vec!["model_started"]
+    );
 }
 
 #[tokio::test]
@@ -371,6 +497,64 @@ impl AgentLoopDriver for CapabilityDriver {
             host,
         )
         .await
+    }
+}
+
+#[derive(Default)]
+struct FailingOnModelCompletedMilestoneSink {
+    kind_names: Mutex<Vec<&'static str>>,
+}
+
+impl FailingOnModelCompletedMilestoneSink {
+    fn kind_names(&self) -> Vec<&'static str> {
+        self.kind_names.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl LoopHostMilestoneSink for FailingOnModelCompletedMilestoneSink {
+    async fn publish_loop_milestone(
+        &self,
+        milestone: LoopHostMilestone,
+    ) -> Result<(), AgentLoopHostError> {
+        if matches!(milestone.kind, LoopHostMilestoneKind::ModelCompleted { .. }) {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "milestone sink unavailable",
+            ));
+        }
+        self.kind_names
+            .lock()
+            .unwrap()
+            .push(milestone.kind.kind_name());
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct RecordingLoopModelGateway {
+    requests: Mutex<Vec<LoopModelGatewayRequest>>,
+    responses: Mutex<Vec<Result<LoopModelResponse, LoopModelGatewayError>>>,
+}
+
+impl RecordingLoopModelGateway {
+    fn push_response(&self, response: Result<LoopModelResponse, LoopModelGatewayError>) {
+        self.responses.lock().unwrap().push(response);
+    }
+
+    fn requests(&self) -> Vec<LoopModelGatewayRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl LoopModelGateway for RecordingLoopModelGateway {
+    async fn stream_model(
+        &self,
+        request: LoopModelGatewayRequest,
+    ) -> Result<LoopModelResponse, LoopModelGatewayError> {
+        self.requests.lock().unwrap().push(request);
+        self.responses.lock().unwrap().pop().unwrap()
     }
 }
 
