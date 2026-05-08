@@ -199,6 +199,7 @@ pub struct TuiChannel {
     user_id: String,
     event_tx: Arc<Mutex<Option<mpsc::Sender<TuiEvent>>>>,
     stop_tx: Arc<Mutex<Option<mpsc::Sender<()>>>>,
+    join_handle: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
     started: AtomicBool,
     version: String,
     model: String,
@@ -225,6 +226,7 @@ impl TuiChannel {
             user_id: user_id.into(),
             event_tx: Arc::new(Mutex::new(None)),
             stop_tx: Arc::new(Mutex::new(None)),
+            join_handle: Arc::new(Mutex::new(None)),
             started: AtomicBool::new(false),
             version: version.into(),
             context_window: infer_context_window(&model),
@@ -330,6 +332,7 @@ impl Channel for TuiChannel {
         } = start_tui(config);
 
         *self.stop_tx.lock().await = Some(stop_tx);
+        *self.join_handle.lock().await = Some(_join);
 
         // Store event_tx for sending status updates and responses
         *self.event_tx.lock().await = Some(event_tx.clone());
@@ -667,9 +670,9 @@ impl Channel for TuiChannel {
         // Should signal the TUI thread to exit, then wait for it to join. Otherwise maybe the iron process exit but the TUI thread is not exit correctly.
         if let Some(ref tx) = *self.stop_tx.lock().await {
             let _ = tx.send(()).await;
-            while tx.send(()).await.is_ok() {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
+        }
+        if let Some(join_handle) = self.join_handle.lock().await.take() {
+            let _ = join_handle.join();
         }
         Ok(())
     }

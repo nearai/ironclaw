@@ -274,23 +274,6 @@ async fn run_tui(
                 handle_event(event, &mut state, &mut widgets, &msg_tx, &layout).await;
             }
             _ = stop_rx.recv() => {
-                // Teardown
-                if let Err(e) = disable_raw_mode() {
-                    tracing::error!("Failed to disable raw mode: {}", e);
-                }
-                if let Err(e) = execute!(
-                    terminal.backend_mut(),
-                    DisableBracketedPaste,
-                    ratatui::crossterm::event::DisableMouseCapture,
-                    LeaveAlternateScreen
-                ) {
-                    tracing::error!("Failed to execute teardown commands: {}", e);
-                }
-                if let Err(e) = terminal.show_cursor() {
-                    tracing::error!("Failed to show cursor: {}", e);
-                }
-                restore_guard.disarm();
-                stop_rx.close();
                 break;
             }
         }
@@ -300,6 +283,16 @@ async fn run_tui(
         }
     }
 
+    // Teardown
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        DisableBracketedPaste,
+        ratatui::crossterm::event::DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
+    terminal.show_cursor()?;
+    restore_guard.disarm();
     Ok(())
 }
 
