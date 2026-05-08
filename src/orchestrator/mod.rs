@@ -14,6 +14,8 @@
 //! │    POST /worker/{id}/llm/complete_with_tools    │
 //! │    GET  /worker/{id}/job                        │
 //! │    GET  /worker/{id}/credentials                │
+//! │    GET  /worker/{id}/bootstrap                  │
+//! │    GET  /worker/{id}/bootstrap/{artifact}       │
 //! │    POST /worker/{id}/status                     │
 //! │    POST /worker/{id}/complete                   │
 //! │                                                 │
@@ -30,6 +32,7 @@
 
 pub mod api;
 pub mod auth;
+pub mod bootstrap_artifacts;
 pub mod job_manager;
 pub mod reaper;
 
@@ -65,10 +68,11 @@ pub struct OrchestratorSetup {
     pub container_job_manager: Option<Arc<ContainerJobManager>>,
     pub job_event_tx: Option<broadcast::Sender<(Uuid, String, AppEvent)>>,
     pub prompt_queue: Arc<Mutex<HashMap<Uuid, VecDeque<api::PendingPrompt>>>>,
-    pub docker_status: crate::sandbox::DockerStatus,
+    pub runtime_status: crate::sandbox::RuntimeStatus,
+    pub runtime: Option<Arc<dyn crate::sandbox::ContainerRuntime>>,
 }
 
-/// Detect Docker availability, create the container job manager, and start
+/// Detect runtime availability, create the container job manager, and start
 /// the orchestrator internal API in the background.
 pub async fn setup_orchestrator(
     config: &crate::config::Config,
@@ -76,36 +80,44 @@ pub async fn setup_orchestrator(
     db: Option<&Arc<dyn Database>>,
     secrets_store: Option<&Arc<dyn SecretsStore + Send + Sync>>,
 ) -> OrchestratorSetup {
+    use crate::sandbox::{ContainerRuntime, RuntimeStatus};
+
     let prompt_queue = Arc::new(Mutex::new(
         HashMap::<Uuid, VecDeque<api::PendingPrompt>>::new(),
     ));
 
-    let docker_status = if config.sandbox.enabled {
-        let detection = crate::sandbox::check_docker().await;
-        match detection.status {
-            crate::sandbox::DockerStatus::Available => {
-                tracing::info!("Docker is available");
-            }
-            crate::sandbox::DockerStatus::NotInstalled => {
-                tracing::warn!(
-                    "Docker is not installed -- sandbox disabled for this session. {}",
-                    detection.platform.install_hint()
-                );
-            }
-            crate::sandbox::DockerStatus::NotRunning => {
-                tracing::warn!(
-                    "Docker is installed but not running -- sandbox disabled for this session. {}",
-                    detection.platform.start_hint()
-                );
-            }
-            crate::sandbox::DockerStatus::Disabled => {}
-        }
-        detection.status
-    } else {
-        crate::sandbox::DockerStatus::Disabled
-    };
+    let (runtime_status, runtime): (RuntimeStatus, Option<Arc<dyn ContainerRuntime>>) =
+        if config.sandbox.enabled {
+            detect_and_connect_runtime(
+                config.sandbox.container_runtime.as_deref(),
+                &config.sandbox.k8s_namespace,
+                Some(config.owner_id.as_str()),
+                secrets_store.map(|store| store.as_ref()),
+            )
+            .await
+        } else {
+            (RuntimeStatus::Disabled, None)
+        };
 
-    let (job_event_tx, container_job_manager) = if config.sandbox.enabled && docker_status.is_ok() {
+    let (job_event_tx, container_job_manager) = if config.sandbox.enabled && runtime_status.is_ok()
+    {
+        let rt = match runtime.as_ref() {
+            Some(rt) => rt,
+            None => {
+                tracing::error!(
+                    "Container runtime status is Available but runtime handle is None — \
+                     this should not happen. Disabling sandbox for this session."
+                );
+                return OrchestratorSetup {
+                    container_job_manager: None,
+                    job_event_tx: None,
+                    prompt_queue,
+                    runtime_status: crate::sandbox::RuntimeStatus::NotRunning,
+                    runtime: None,
+                };
+            }
+        };
+
         let (tx, _) = broadcast::channel(256);
         let job_event_tx = Some(tx);
 
@@ -129,8 +141,15 @@ pub async fn setup_orchestrator(
                 .unwrap_or(false),
             claude_code_enabled: config.claude_code.enabled,
             acp_enabled: config.acp.enabled,
+            container_runtime: config.sandbox.container_runtime.clone(),
+            k8s_namespace: config.sandbox.k8s_namespace.clone(),
         };
-        let jm = Arc::new(ContainerJobManager::new(job_config, token_store.clone()));
+        let mut jm =
+            ContainerJobManager::with_runtime(job_config, token_store.clone(), Arc::clone(rt));
+        if let Some(store) = secrets_store.cloned() {
+            jm = jm.with_kubernetes_auth_context(config.owner_id.clone(), store);
+        }
+        let jm = Arc::new(jm);
 
         let orchestrator_state = api::OrchestratorState {
             llm: Arc::clone(llm),
@@ -168,7 +187,142 @@ pub async fn setup_orchestrator(
         container_job_manager,
         job_event_tx,
         prompt_queue,
-        docker_status,
+        runtime_status,
+        runtime,
+    }
+}
+
+/// Detect the configured container runtime and connect to it.
+///
+/// Precedence: `CONTAINER_RUNTIME` env var > `config_override` (DB setting) >
+/// compiled features default.
+async fn detect_and_connect_runtime(
+    config_override: Option<&str>,
+    namespace: &str,
+    owner_id: Option<&str>,
+    secrets_store: Option<&(dyn crate::secrets::SecretsStore + Send + Sync)>,
+) -> (
+    crate::sandbox::RuntimeStatus,
+    Option<Arc<dyn crate::sandbox::ContainerRuntime>>,
+) {
+    use crate::sandbox::runtime::resolve_runtime_backend;
+    use crate::sandbox::{RuntimeBackend, RuntimeStatus};
+
+    let backend = match resolve_runtime_backend(config_override) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("Container runtime resolution failed: {e}");
+            return (RuntimeStatus::NotInstalled, None);
+        }
+    };
+
+    match backend {
+        RuntimeBackend::Docker => detect_docker_runtime().await,
+        RuntimeBackend::Kubernetes => {
+            detect_kubernetes_runtime(namespace, owner_id, secrets_store).await
+        }
+    }
+}
+
+#[allow(unused_variables)]
+async fn detect_docker_runtime() -> (
+    crate::sandbox::RuntimeStatus,
+    Option<Arc<dyn crate::sandbox::ContainerRuntime>>,
+) {
+    use crate::sandbox::RuntimeStatus;
+
+    #[cfg(feature = "docker")]
+    {
+        use crate::sandbox::ContainerRuntime;
+        match crate::sandbox::docker::DockerRuntime::connect().await {
+            Ok(rt) => {
+                let detection = rt.detect().await;
+                match detection.status {
+                    RuntimeStatus::Available => {
+                        tracing::info!("Docker runtime is available");
+                        (
+                            RuntimeStatus::Available,
+                            Some(Arc::new(rt) as Arc<dyn crate::sandbox::ContainerRuntime>),
+                        )
+                    }
+                    RuntimeStatus::NotInstalled => {
+                        tracing::warn!(
+                            "Docker is not installed -- sandbox disabled for this session. {}",
+                            detection.install_hint
+                        );
+                        (RuntimeStatus::NotInstalled, None)
+                    }
+                    RuntimeStatus::NotRunning => {
+                        tracing::warn!(
+                            "Docker is installed but not running -- sandbox disabled for this session. {}",
+                            detection.start_hint
+                        );
+                        (RuntimeStatus::NotRunning, None)
+                    }
+                    RuntimeStatus::Disabled => (RuntimeStatus::Disabled, None),
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to connect to Docker: {e}");
+                (RuntimeStatus::NotRunning, None)
+            }
+        }
+    }
+    #[cfg(not(feature = "docker"))]
+    {
+        tracing::warn!("Docker feature not compiled in");
+        (RuntimeStatus::NotInstalled, None)
+    }
+}
+
+#[allow(unused_variables)]
+async fn detect_kubernetes_runtime(
+    namespace: &str,
+    owner_id: Option<&str>,
+    secrets_store: Option<&(dyn crate::secrets::SecretsStore + Send + Sync)>,
+) -> (
+    crate::sandbox::RuntimeStatus,
+    Option<Arc<dyn crate::sandbox::ContainerRuntime>>,
+) {
+    use crate::sandbox::RuntimeStatus;
+
+    #[cfg(feature = "kubernetes")]
+    {
+        use crate::sandbox::ContainerRuntime;
+        let auth = crate::sandbox::runtime::KubernetesAuthContext::new(owner_id, secrets_store);
+        match crate::sandbox::kubernetes::KubernetesRuntime::connect_with_auth(namespace, auth)
+            .await
+        {
+            Ok(rt) => {
+                let detection = rt.detect().await;
+                match detection.status {
+                    RuntimeStatus::Available => {
+                        tracing::info!("Kubernetes runtime is available");
+                        (
+                            RuntimeStatus::Available,
+                            Some(Arc::new(rt) as Arc<dyn crate::sandbox::ContainerRuntime>),
+                        )
+                    }
+                    RuntimeStatus::NotInstalled | RuntimeStatus::NotRunning => {
+                        tracing::warn!(
+                            "Kubernetes cluster not reachable -- sandbox disabled. {}",
+                            detection.start_hint
+                        );
+                        (detection.status, None)
+                    }
+                    RuntimeStatus::Disabled => (RuntimeStatus::Disabled, None),
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to connect to Kubernetes: {e}");
+                (RuntimeStatus::NotRunning, None)
+            }
+        }
+    }
+    #[cfg(not(feature = "kubernetes"))]
+    {
+        tracing::warn!("Kubernetes feature not compiled in");
+        (RuntimeStatus::NotInstalled, None)
     }
 }
 

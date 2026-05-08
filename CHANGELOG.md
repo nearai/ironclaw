@@ -60,55 +60,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- *(engine-v2)* add canonical capability status vocabulary for the v2 runtime contract ([#2825](https://github.com/nearai/ironclaw/pull/2825))
-- *(engine-v2)* centralize action-vs-capability surface policy across the prompt, runtime, bridge projection, and tool surface ([#2827](https://github.com/nearai/ironclaw/pull/2827))
-- *(bridge)* project 3 previously dropped engine events into AppEvents for gateway/runtime consumers ([#2797](https://github.com/nearai/ironclaw/pull/2797))
-- *(bridge)* project 7 additional engine events into AppEvents, expanding runtime event visibility ([#2844](https://github.com/nearai/ironclaw/pull/2844))
-- *(debug-panel)* expand Activity tab coverage for CodeAct execution, warnings, and richer event display ([#2850](https://github.com/nearai/ironclaw/pull/2850))
-- *(missions)* redesign the Missions overview surface with richer mission dossiers and project/thread context ([#2894](https://github.com/nearai/ironclaw/pull/2894))
-- *(credentials)* add path-based credential matching for per-endpoint auth and route the credential scope through WASM tools, HTTP tools, and sandbox proxy policy ([#2168](https://github.com/nearai/ironclaw/pull/2168))
-- *(engine)* add short-title support for v2 threads so sidebars and thread lists can display concise labels ([#2776](https://github.com/nearai/ironclaw/pull/2776))
-- *(tooling)* add fork support to the GitHub tool ([#2139](https://github.com/nearai/ironclaw/pull/2139))
-- *(canary)* add canary reporting for live workflow coverage ([#2874](https://github.com/nearai/ironclaw/pull/2874))
-
-### Fixed
-
-- *(auth)* prevent OAuth URL parameter truncation in callback and launch flows ([#2746](https://github.com/nearai/ironclaw/pull/2746))
-- *(auth)* harden error boundaries, TEE secrets, pairing, auth rehydration, and related bug-bash failures ([#2753](https://github.com/nearai/ironclaw/pull/2753))
-- *(bridge)* surface latent WASM provider actions to the LLM instead of hiding available provider affordances ([#2891](https://github.com/nearai/ironclaw/pull/2891))
-- *(bridge)* fix restart approval floor handling so restart requests keep the correct permission baseline ([#2978](https://github.com/nearai/ironclaw/pull/2978))
-- *(engine)* recover flattened tool calls in the v2 adapter path ([#2757](https://github.com/nearai/ironclaw/pull/2757))
-- *(engine)* stop failed missions from respawning after terminal failure ([#2760](https://github.com/nearai/ironclaw/pull/2760))
-- *(engine)* enforce real tool use for stop, pause, and cancel commands ([#2814](https://github.com/nearai/ironclaw/pull/2814))
-- *(engine)* make mission `threads_today` reset with timezone-aware boundaries ([#2989](https://github.com/nearai/ironclaw/pull/2989))
-- *(engine)* centralize tool permission defaults to avoid drift between projection and execution paths ([#3041](https://github.com/nearai/ironclaw/pull/3041))
-- *(gateway)* serve Responses API routes under the `/api/v1/` prefix ([#2748](https://github.com/nearai/ironclaw/pull/2748))
-- *(gateway)* use conversation-only chat sidebar state and remove non-conversation entries from chat history navigation ([#2867](https://github.com/nearai/ironclaw/pull/2867))
-- *(gateway)* resolve empty "Fetch available models" results for NEAR AI in settings ([#2890](https://github.com/nearai/ironclaw/pull/2890))
-- *(gateway)* drop `plan_update` and `approval_needed` SSE events that do not carry a thread id ([#2986](https://github.com/nearai/ironclaw/pull/2986))
-- *(gateway)* keep the Routines tab visible after engine v1 to v2 upgrades ([#2992](https://github.com/nearai/ironclaw/pull/2992))
-- *(gateway)* surface the NEAR AI session token to the configure UI ([#3014](https://github.com/nearai/ironclaw/pull/3014))
-- *(llm)* shape tool schemas correctly for NEAR AI provider compatibility ([#2951](https://github.com/nearai/ironclaw/pull/2951))
-- *(llm/config)* harden model provider configuration across web and CLI paths ([#2572](https://github.com/nearai/ironclaw/pull/2572))
-- *(tools)* fix v2 `tool_info` action inventory lookup ([#2994](https://github.com/nearai/ironclaw/pull/2994))
-- *(tools)* make available actions callable-only for providers blocked from executing unavailable tools ([#2868](https://github.com/nearai/ironclaw/pull/2868))
-- *(wasm)* remove the stale 10M fuel limit from settings databases and align libSQL migrations ([#2851](https://github.com/nearai/ironclaw/pull/2851))
-- *(cli)* fix `-m` handling so it does not quit unexpectedly ([#2150](https://github.com/nearai/ironclaw/pull/2150))
-- *(release)* correct the staged `ironclaw` version after a bad release metadata state ([#2981](https://github.com/nearai/ironclaw/pull/2981))
-
-### Security
-
-- *(document-extraction)* prevent zip-bomb denial of service while extracting uploaded documents ([#2093](https://github.com/nearai/ironclaw/pull/2093))
-- *(orchestrator)* scope orchestrator credentials to the job creator so sandboxed jobs cannot reuse another user's credentials ([#2698](https://github.com/nearai/ironclaw/pull/2698))
-- *(safety)* add projection-exempt linting for gateway event sources to keep event projection coverage explicit and auditable ([#2840](https://github.com/nearai/ironclaw/pull/2840))
-- *(auth/live-canary)* tighten auth flows and unify live canary coverage for auth-sensitive runtime paths ([#2367](https://github.com/nearai/ironclaw/pull/2367))
+- *(sandbox)* Container runtime abstraction (`ContainerRuntime` trait) decoupling sandbox/orchestrator/reaper from Docker
+- *(sandbox)* Kubernetes runtime backend (`--features kubernetes`) with pod lifecycle, exec, logs, and cluster-DNS networking
+- *(sandbox)* `CONTAINER_RUNTIME` env var to select Docker or Kubernetes backend at startup
+- *(sandbox)* Stage-aware Kubernetes runtime capability model with bootstrap-delivered project content and Stage 3 prerequisite reporting
+- *(wizard)* Interactive container runtime selection in onboarding wizard (Docker / Kubernetes menu when both features compiled)
+- *(wizard)* Kubernetes namespace prompt with default "ironclaw" and cluster connectivity validation during onboarding
+- *(settings)* `sandbox.container_runtime` and `sandbox.k8s_namespace` DB-persisted settings for runtime configuration
+- *(doctor)* Kubernetes cluster reachability check (when `kubernetes` feature is enabled)
 
 ### Changed
 
+- *(sandbox)* `bollard` Docker dependency is now optional (gated by `--features docker`, on by default)
+- *(sandbox)* `resolve_runtime_backend()` now accepts config override from DB settings (env var > DB > compiled default)
+- *(sandbox)* `KubernetesRuntime::connect()` accepts namespace parameter instead of reading env var directly
+- *(sandbox)* Kubernetes now presents Stage 2 project-backed behavior consistently across doctor, setup, job bootstrap, and worker startup surfaces
+- *(sandbox)* Read-only one-shot sandbox commands can now upload workspace archives into runtimes that lack host bind mounts, Kubernetes runtime config can use projected file delivery when Stage 3 prerequisites are declared ready, and workspace-write one-shot commands now fail closed until write-back exists
+- *(sandbox)* Shared workload specs now distinguish between replacing an image entrypoint and appending args to it, so Kubernetes worker pods preserve `ENTRYPOINT ["ironclaw"]` semantics while one-shot sandbox commands can still launch explicit shells
+- *(jobs)* `create_job` now accepts legacy `task` / `prompt` inputs and derives a fallback title when callers omit `title`
+- *(boot)* Renamed `BootInfo::docker_status` to `runtime_status` for runtime-agnostic naming
+- *(wizard)* Setup wizard Step 8 renamed from "Docker Sandbox" to "Container Sandbox" with runtime-agnostic UX copy
 - *(engine)* bump Monty to `v0.0.16` and update CodeAct orchestration docs and prompts to match the runtime ([#2784](https://github.com/nearai/ironclaw/pull/2784))
 - *(registry)* update WASM artifact SHA256 checksums for Feishu, Slack, Telegram, GitHub, and Portfolio artifacts ([#2775](https://github.com/nearai/ironclaw/pull/2775))
 - *(registry)* bump GitHub tool and Slack channel registry versions after artifact/source updates ([#3057](https://github.com/nearai/ironclaw/pull/3057))
 - *(rust)* update the documented minimum Rust version to 1.92 ([#2931](https://github.com/nearai/ironclaw/pull/2931))
+- *(web)* gateway onboarding/auth SSE now uses the unified `onboarding_state` event; external SSE clients should migrate from the older auth/pairing event names. Legacy WebSocket `auth_token` and `auth_cancel` client messages remain accepted during the temporary web v1-auth compatibility window.
+- *(web)* extension setup/auth `ActionResponse` payloads no longer include the legacy `verification` field; clients should use `onboarding_state` / `onboarding` data instead of that deprecated wire field.
 
 ### CI / Release
 

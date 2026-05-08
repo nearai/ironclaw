@@ -47,7 +47,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Bonjour/mDNS discovery | ✅ | ❌ | |
 | Tailscale integration | ✅ | ❌ | |
 | Health check endpoints | ✅ | ✅ | /api/health + /api/gateway/status + /healthz + /readyz, with channel-backed readiness probes |
-| `doctor` diagnostics | ✅ | 🚧 | 16 checks: settings, LLM, DB, embeddings, routines, gateway, MCP, skills, secrets, service, Docker daemon, tunnel binaries |
+| `doctor` diagnostics | ✅ | 🚧 | 17 checks: settings, LLM, DB, embeddings, routines, gateway, MCP, skills, secrets, service, Docker daemon, Kubernetes cluster, tunnel binaries |
 | Agent event broadcast | ✅ | 🚧 | SSE broadcast manager exists (SseManager) but tool/job-state events not fully wired |
 | Channel health monitor | ✅ | ❌ | Auto-restart with configurable interval |
 | Presence system | ✅ | ❌ | Beacons on connect, system presence for agents |
@@ -707,6 +707,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Cron webhook SSRF guard | ✅ | ❌ | SSRF checks on webhook delivery |
 | Loopback-first | ✅ | 🚧 | HTTP binds 0.0.0.0 |
 | Docker sandbox | ✅ | ✅ | Orchestrator/worker containers; opt-in `sandbox.docker.gpus` passthrough |
+| Kubernetes runtime | ❌ | 🚧 | Stage 2 project-backed runtime with job lifecycle, bootstrap-delivered project content, and explicit workspace-change apply flow; see [sandboxed tools docs](docs/capabilities/sandboxed-tools.mdx) |
 | Podman support | ✅ | ❌ | `--container` accepts both Docker + Podman |
 | WASM sandbox | ❌ | ✅ | IronClaw innovation |
 | Sandbox env sanitization | ✅ | 🚧 | Shell tool scrubs env vars (secret detection); docker container env sanitization partial |
@@ -782,6 +783,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ✅ Slack channel (WASM tool)
 - ✅ Telegram channel (WASM tool, MTProto)
 - ✅ Docker sandbox (orchestrator/worker)
+- 🚧 Kubernetes runtime (Stage 2 project-backed runtime with explicit workspace-change apply flow; see [sandboxed tools docs](docs/capabilities/sandboxed-tools.mdx))
 - ✅ Cron job scheduling (routines)
 - ✅ CLI subcommands (onboard, config, status, memory)
 - ✅ Gateway token auth

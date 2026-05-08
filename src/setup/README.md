@@ -109,7 +109,7 @@ Step 4: Model Selection
 Step 5: Embeddings
 Step 6: Channel Configuration
 Step 7: Extensions (tools)
-Step 8: Docker Sandbox
+Step 8: Container Sandbox
 Step 9: Background Tasks (heartbeat)
        ↓
    save_and_summarize()
@@ -412,7 +412,95 @@ Searches for `registry/` directory in order:
 
 ---
 
-### Step 8: Heartbeat
+### Step 8: Container Sandbox
+
+**Module:** `wizard.rs` → `step_docker_sandbox()`, `setup_docker_runtime()`,
+`setup_kubernetes_runtime()`
+
+**Goal:** Select a container runtime, configure it, validate connectivity,
+and persist the choice.
+
+The sandbox isolates LLM-initiated commands (shell, file writes, tool calls)
+inside ephemeral containers. Without a sandbox, those commands run directly
+on the host with no isolation.
+
+**Runtime selection:** When both `docker` and `kubernetes` features are
+compiled, the wizard presents an interactive menu to choose the runtime.
+When only one feature is compiled, that runtime is used automatically.
+The choice is persisted to `sandbox.container_runtime` in the DB settings
+table and respected at startup via `resolve_runtime_backend()`.
+
+**Flow (both features compiled):**
+
+1. Ask "Enable container sandbox?" (default: no)
+2. If declined → `sandbox.enabled = false`, done
+3. Present runtime menu: Docker / Kubernetes
+4. Dispatch to `setup_docker_runtime()` or `setup_kubernetes_runtime()`
+5. Store selected runtime in `sandbox.container_runtime`
+
+**Docker sub-flow (`setup_docker_runtime`):**
+
+1. Call `check_docker()` to detect Docker installation
+2. If available → enable sandbox, check/pull worker image via
+   `ensure_worker_image()`
+3. If not installed or not running → print platform hint, offer retry
+4. On retry success → enable + ensure image; on failure → disable
+
+**Kubernetes sub-flow (`setup_kubernetes_runtime`):**
+
+1. Prompt for namespace with default "ironclaw"
+2. Store namespace in `sandbox.k8s_namespace`
+3. Resolve Kubernetes credentials in this order:
+   in-cluster ServiceAccount → encrypted platform kubeconfig secret
+   (`sandbox_kubernetes_kubeconfig`) → local/default kubeconfig
+4. If no usable credential source exists, or the stored platform kubeconfig is
+   malformed, offer secure kubeconfig capture and store it in encrypted
+   secrets
+5. If the encrypted secrets backend cannot read or decrypt the platform
+   kubeconfig secret, stop with an explicit error and do not suggest replacing
+   the stored kubeconfig
+6. If cluster reachable (`is_available()`) → `sandbox.enabled = true`
+7. If not reachable → offer retry; on failure → disable
+
+The wizard reports which credential source won. Local/default kubeconfig is
+explicitly labeled as a compatibility source rather than platform-managed
+authentication.
+
+`ironclaw doctor` follows the same rule: local/default kubeconfig is only a
+compatibility fallback when the platform secret path is genuinely not in use.
+If bootstrap config, encrypted secret initialization, or secret-store access
+fails, doctor reports that platform-path failure directly instead of silently
+passing through a local kubeconfig.
+
+Note: the Kubernetes path does not verify worker image pullability at
+wizard time (deferred to first workload creation). It currently enables the
+Stage 2 project-backed runtime: worker pods can run, and project-backed jobs
+receive workspace content plus per-job config through orchestrator-served
+bootstrap artifacts. Allowlist-only sandboxed one-shot commands can use
+Kubernetes when native network controls are ready, while runtime config can
+switch to projected file delivery when `IRONCLAW_K8S_PROJECTED_RUNTIME_CONFIG=true`
+is present. Workspace-write one-shot commands can return pending workspace
+changes for explicit review and apply.
+
+`ironclaw doctor` reports the two cluster-side signals separately:
+
+- `IRONCLAW_K8S_NATIVE_NETWORK_CONTROLS=true`
+- `IRONCLAW_K8S_PROJECTED_RUNTIME_CONFIG=true`
+
+When native network controls are present, doctor reports that allowlist-only
+sandboxed one-shot commands can run on Kubernetes. When projected runtime
+config is present, doctor reports that runtime config can use projected file
+delivery. Workspace-write one-shot commands still return pending changes for
+explicit review and apply, so the runtime stays on the Stage 2 contract.
+
+**Flow (no runtime feature compiled):**
+
+1. Ask "Enable container sandbox?"
+2. `sandbox.enabled = false` with info message
+
+---
+
+### Step 9: Heartbeat
 
 **Module:** `wizard.rs` → `step_heartbeat()`
 

@@ -14,7 +14,15 @@ use uuid::Uuid;
 use crate::bootstrap::ironclaw_base_dir;
 use crate::error::OrchestratorError;
 use crate::orchestrator::auth::{CredentialGrant, TokenStore};
-use crate::sandbox::connect_docker;
+use crate::orchestrator::bootstrap_artifacts::{
+    render_worker_mcp_config_json, write_worker_mcp_config_tempfile,
+};
+use crate::sandbox::runtime::{
+    ContainerRuntime, InlineFileMount, VolumeMount, WorkloadCommandMode, WorkloadSpec,
+    format_workload_created_at_label,
+};
+use crate::sandbox::{ConfigDelivery, WorkspaceDelivery};
+use crate::secrets::SecretsStore;
 
 use ironclaw_common::MAX_WORKER_ITERATIONS;
 
@@ -45,6 +53,29 @@ impl std::fmt::Display for JobMode {
     }
 }
 
+fn project_backed_job_contract_failure(
+    rt: &dyn ContainerRuntime,
+    project_dir: &std::path::Path,
+) -> String {
+    crate::sandbox::format_stage_contract_failure(
+        rt.name(),
+        &rt.capabilities(),
+        &format!("project-backed jobs for {}", project_dir.display()),
+        &["project content"],
+        "Use Docker for jobs that need a project directory.",
+    )
+}
+
+fn per_job_mcp_contract_failure(rt: &dyn ContainerRuntime) -> String {
+    crate::sandbox::format_stage_contract_failure(
+        rt.name(),
+        &rt.capabilities(),
+        "jobs that need filtered MCP config",
+        &["runtime-scoped config delivery"],
+        "Use Docker for jobs that need filtered MCP config.",
+    )
+}
+
 /// Parameters for creating a container job, bundled to avoid positional
 /// argument proliferation on `create_job` / `execute_sandbox`.
 #[derive(Debug, Clone, Default)]
@@ -73,7 +104,7 @@ pub struct JobCreationParams {
 /// Configuration for the container job manager.
 #[derive(Debug, Clone)]
 pub struct ContainerJobConfig {
-    /// Docker image for worker containers.
+    /// Container image for worker workloads.
     pub image: String,
     /// Default memory limit in MB.
     pub memory_limit_mb: u64,
@@ -107,6 +138,10 @@ pub struct ContainerJobConfig {
     pub claude_code_enabled: bool,
     /// Whether ACP agent mode is available (from ACP_ENABLED).
     pub acp_enabled: bool,
+    /// Container runtime backend override from config ("docker" or "kubernetes").
+    pub container_runtime: Option<String>,
+    /// Kubernetes namespace for worker pods.
+    pub k8s_namespace: String,
 }
 
 impl Default for ContainerJobConfig {
@@ -127,6 +162,8 @@ impl Default for ContainerJobConfig {
             mcp_per_job_enabled: false,
             claude_code_enabled: false,
             acp_enabled: false,
+            container_runtime: None,
+            k8s_namespace: "ironclaw".to_string(),
         }
     }
 }
@@ -161,12 +198,15 @@ pub struct ContainerHandle {
     pub created_at: DateTime<Utc>,
     pub project_dir: Option<PathBuf>,
     pub task_description: String,
+    pub bootstrap: crate::orchestrator::bootstrap_artifacts::JobBootstrapArtifacts,
     /// Last status message reported by the worker (iteration count, progress, etc.).
     pub last_worker_status: Option<String>,
     /// Which iteration the worker is on (updated via status reports).
     pub worker_iteration: u32,
     /// Completion result from the worker (set when the worker reports done).
     pub completion_result: Option<CompletionResult>,
+    /// Returned workspace changes waiting for explicit host apply.
+    pub pending_workspace_changes: Option<crate::workspace_changes::WorkspaceChangesPayload>,
     // NOTE: auth_token is intentionally NOT in this struct.
     // It lives only in the TokenStore (never logged, serialized, or persisted).
 }
@@ -176,6 +216,7 @@ pub struct ContainerHandle {
 pub struct CompletionResult {
     pub success: bool,
     pub message: Option<String>,
+    pub workspace_changes: Option<crate::workspace_changes::WorkspaceChangesPayload>,
 }
 
 /// Validate that a project directory is under `~/.ironclaw/projects/`.
@@ -252,13 +293,15 @@ fn validate_bind_mount_path(
     Ok(canonical)
 }
 
-/// Manages the lifecycle of Docker containers for sandboxed job execution.
+/// Manages the lifecycle of container workloads for sandboxed job execution.
 pub struct ContainerJobManager {
     config: ContainerJobConfig,
     token_store: TokenStore,
     pub(crate) containers: Arc<RwLock<HashMap<Uuid, ContainerHandle>>>,
-    /// Cached Docker connection (created on first use).
-    docker: Arc<RwLock<Option<bollard::Docker>>>,
+    /// Container runtime backend (Docker, Kubernetes, etc.).
+    runtime: Arc<RwLock<Option<Arc<dyn ContainerRuntime>>>>,
+    kubernetes_owner_id: Option<String>,
+    kubernetes_secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
 }
 
 impl ContainerJobManager {
@@ -267,8 +310,36 @@ impl ContainerJobManager {
             config,
             token_store,
             containers: Arc::new(RwLock::new(HashMap::new())),
-            docker: Arc::new(RwLock::new(None)),
+            runtime: Arc::new(RwLock::new(None)),
+            kubernetes_owner_id: None,
+            kubernetes_secrets_store: None,
         }
+    }
+
+    /// Create a new job manager with a pre-initialized runtime.
+    pub fn with_runtime(
+        config: ContainerJobConfig,
+        token_store: TokenStore,
+        runtime: Arc<dyn ContainerRuntime>,
+    ) -> Self {
+        Self {
+            config,
+            token_store,
+            containers: Arc::new(RwLock::new(HashMap::new())),
+            runtime: Arc::new(RwLock::new(Some(runtime))),
+            kubernetes_owner_id: None,
+            kubernetes_secrets_store: None,
+        }
+    }
+
+    pub fn with_kubernetes_auth_context(
+        mut self,
+        owner_id: impl Into<String>,
+        secrets_store: Arc<dyn SecretsStore + Send + Sync>,
+    ) -> Self {
+        self.kubernetes_owner_id = Some(owner_id.into());
+        self.kubernetes_secrets_store = Some(secrets_store);
+        self
     }
 
     /// Whether Claude Code mode is enabled for job creation.
@@ -312,21 +383,34 @@ impl ContainerJobManager {
         }
     }
 
-    /// Get or create a Docker connection.
-    async fn docker(&self) -> Result<bollard::Docker, OrchestratorError> {
+    /// Get the container runtime, creating a connection if needed.
+    ///
+    /// Delegates to the shared runtime factory which respects config override,
+    /// `CONTAINER_RUNTIME` env var, compiled feature flags, and Kubernetes auth context.
+    async fn runtime(&self) -> Result<Arc<dyn ContainerRuntime>, OrchestratorError> {
         {
-            let guard = self.docker.read().await;
-            if let Some(ref d) = *guard {
-                return Ok(d.clone());
+            let guard = self.runtime.read().await;
+            if let Some(ref rt) = *guard {
+                return Ok(Arc::clone(rt));
             }
         }
-        let docker = connect_docker()
-            .await
-            .map_err(|e| OrchestratorError::Docker {
-                reason: e.to_string(),
-            })?;
-        *self.docker.write().await = Some(docker.clone());
-        Ok(docker)
+
+        let rt = crate::sandbox::runtime::connect_runtime_with_kubernetes_auth(
+            self.config.container_runtime.as_deref(),
+            &self.config.k8s_namespace,
+            crate::sandbox::runtime::KubernetesAuthContext::new(
+                self.kubernetes_owner_id.as_deref(),
+                self.kubernetes_secrets_store
+                    .as_ref()
+                    .map(|store| store.as_ref()),
+            ),
+        )
+        .await
+        .map_err(|e| OrchestratorError::Docker {
+            reason: e.to_string(),
+        })?;
+        *self.runtime.write().await = Some(Arc::clone(&rt));
+        Ok(rt)
     }
 
     /// Create and start a new container for a job.
@@ -374,9 +458,15 @@ impl ContainerJobManager {
             created_at: Utc::now(),
             project_dir: project_dir.clone(),
             task_description: task.to_string(),
+            bootstrap:
+                crate::orchestrator::bootstrap_artifacts::JobBootstrapArtifacts::metadata_only(
+                    job_id,
+                    project_dir.as_deref(),
+                ),
             last_worker_status: None,
             worker_iteration: 0,
             completion_result: None,
+            pending_workspace_changes: None,
         };
         self.containers.write().await.insert(job_id, handle);
 
@@ -417,14 +507,9 @@ impl ContainerJobManager {
         acp_agent: Option<crate::config::acp::AcpAgentConfig>,
         master_mcp_config: Option<serde_json::Value>,
     ) -> Result<(), OrchestratorError> {
-        // Connect to Docker (reuses cached connection)
-        let docker = self.docker().await?;
+        let rt = self.runtime().await?;
 
-        // Build container configuration
-        // Use host.docker.internal on all platforms — the extra_hosts mapping
-        // below resolves it to the actual host IP via Docker's host-gateway.
-        let orchestrator_host = "host.docker.internal";
-
+        let orchestrator_host = rt.orchestrator_host();
         let orchestrator_url = format!(
             "http://{}:{}",
             orchestrator_host, self.config.orchestrator_port
@@ -435,12 +520,33 @@ impl ContainerJobManager {
             format!("IRONCLAW_JOB_ID={}", job_id),
             format!("IRONCLAW_ORCHESTRATOR_URL={}", orchestrator_url),
         ];
+        let runtime_capabilities = rt.capabilities();
+        let mut use_bootstrap_artifacts = false;
 
         // Build volume mounts (validate project_dir stays within ~/.ironclaw/projects/)
-        let mut binds = Vec::new();
+        let mut mounts = Vec::new();
+        let mut inline_files = Vec::new();
+        let mut bootstrap_project_dir: Option<PathBuf> = None;
         if let Some(ref dir) = project_dir {
             let canonical = validate_bind_mount_path(dir, job_id)?;
-            binds.push(format!("{}:/workspace:rw", canonical.display()));
+            if !runtime_capabilities.supports_project_content() {
+                return Err(OrchestratorError::ContainerCreationFailed {
+                    job_id,
+                    reason: project_backed_job_contract_failure(rt.as_ref(), &canonical),
+                });
+            }
+            bootstrap_project_dir = Some(canonical.clone());
+            match runtime_capabilities.workspace_delivery {
+                WorkspaceDelivery::HostMount => mounts.push(VolumeMount {
+                    source: canonical.display().to_string(),
+                    target: "/workspace".to_string(),
+                    read_only: false,
+                }),
+                WorkspaceDelivery::OrchestratorBootstrap => {
+                    use_bootstrap_artifacts = true;
+                }
+                WorkspaceDelivery::Unsupported => unreachable!("project content already gated"),
+            }
             env_vec.push("IRONCLAW_WORKSPACE=/workspace".to_string());
         }
 
@@ -454,24 +560,47 @@ impl ContainerJobManager {
             env_vec.push(format!("IRONCLAW_MAX_ITERATIONS={}", capped));
         }
 
-        // Mount per-job MCP config when the feature is enabled. The master
-        // config comes from the caller (loaded from the per-user DB setting),
-        // not from a hardcoded host file path — bootstrap migrates the legacy
-        // ~/.ironclaw/mcp-servers.json into the DB on first run, so any
-        // file-based source would be empty on most installs.
+        // Mount per-job MCP config when the feature is enabled.
+        let mut bootstrap_mcp_config: Option<String> = None;
         if self.config.mcp_per_job_enabled {
-            match generate_worker_mcp_config(
+            match render_worker_mcp_config_json(
                 master_mcp_config.as_ref(),
                 mcp_servers.as_deref(),
                 job_id,
-            )
-            .await?
-            {
-                Some(config_path) => {
-                    binds.push(format!(
-                        "{}:/home/sandbox/.ironclaw/mcp-servers.json:ro",
-                        config_path.display()
-                    ));
+            )? {
+                Some(config_json) => {
+                    if !runtime_capabilities.supports_runtime_config() {
+                        return Err(OrchestratorError::ContainerCreationFailed {
+                            job_id,
+                            reason: per_job_mcp_contract_failure(rt.as_ref()),
+                        });
+                    }
+                    match runtime_capabilities.config_delivery {
+                        ConfigDelivery::HostMount => {
+                            bootstrap_mcp_config = Some(config_json.clone());
+                            let config_path =
+                                write_worker_mcp_config_tempfile(&config_json, job_id).await?;
+                            mounts.push(VolumeMount {
+                                source: config_path.display().to_string(),
+                                target: "/home/sandbox/.ironclaw/mcp-servers.json".to_string(),
+                                read_only: true,
+                            });
+                        }
+                        ConfigDelivery::OrchestratorBootstrap => {
+                            bootstrap_mcp_config = Some(config_json.clone());
+                            use_bootstrap_artifacts = true;
+                        }
+                        ConfigDelivery::ProjectedVolume => {
+                            inline_files.push(InlineFileMount {
+                                target: "/home/sandbox/.ironclaw/mcp-servers.json".to_string(),
+                                contents: config_json,
+                                mode: 0o444,
+                            });
+                        }
+                        ConfigDelivery::Unsupported => {
+                            unreachable!("runtime config already gated")
+                        }
+                    }
                     tracing::debug!(
                         job_id = %job_id,
                         filtered = mcp_servers.is_some(),
@@ -487,12 +616,19 @@ impl ContainerJobManager {
             }
         }
 
+        if use_bootstrap_artifacts {
+            env_vec.push("IRONCLAW_USE_BOOTSTRAP_ARTIFACTS=1".to_string());
+        }
+
+        if let Some(handle) = self.containers.write().await.get_mut(&job_id) {
+            handle.bootstrap = crate::orchestrator::bootstrap_artifacts::JobBootstrapArtifacts::new(
+                job_id,
+                bootstrap_project_dir.as_deref(),
+                bootstrap_mcp_config,
+            );
+        }
+
         // Claude Code mode: auth + tool allowlist.
-        //
-        // Auth strategies (first match wins):
-        //   1. ANTHROPIC_API_KEY: direct API key (pay-as-you-go billing).
-        //   2. CLAUDE_CODE_OAUTH_TOKEN: OAuth access token from `claude login`
-        //      session, extracted from the host's credential store.
         if mode == JobMode::ClaudeCode {
             if let Some(ref api_key) = self.config.claude_code_api_key {
                 env_vec.push(format!("ANTHROPIC_API_KEY={}", api_key));
@@ -517,27 +653,6 @@ impl ContainerJobManager {
             JobMode::ClaudeCode => self.config.claude_code_memory_limit_mb,
             JobMode::Acp => self.config.acp_memory_limit_mb,
             JobMode::Worker => self.config.memory_limit_mb,
-        };
-
-        // Create the container
-        use bollard::container::{Config, CreateContainerOptions};
-        use bollard::models::HostConfig;
-
-        let host_config = HostConfig {
-            binds: if binds.is_empty() { None } else { Some(binds) },
-            memory: Some((memory_mb * 1024 * 1024) as i64),
-            cpu_shares: Some(self.config.cpu_shares as i64),
-            network_mode: Some("bridge".to_string()),
-            extra_hosts: Some(vec!["host.docker.internal:host-gateway".to_string()]),
-            cap_drop: Some(vec!["ALL".to_string()]),
-            cap_add: Some(vec!["CHOWN".to_string()]),
-            security_opt: Some(vec!["no-new-privileges:true".to_string()]),
-            tmpfs: Some(
-                [("/tmp".to_string(), "size=512M".to_string())]
-                    .into_iter()
-                    .collect(),
-            ),
-            ..Default::default()
         };
 
         // Build CMD based on mode
@@ -569,57 +684,53 @@ impl ContainerJobManager {
             ],
         };
 
-        // Add Docker labels for reaper identification and orphan detection
+        // Labels for reaper identification and orphan detection
         let mut labels = std::collections::HashMap::new();
         labels.insert("ironclaw.job_id".to_string(), job_id.to_string());
         labels.insert(
             "ironclaw.created_at".to_string(),
-            chrono::Utc::now().to_rfc3339(),
+            format_workload_created_at_label(chrono::Utc::now()),
         );
-
-        let container_config = Config {
-            image: Some(self.config.image.clone()),
-            cmd: Some(cmd),
-            env: Some(env_vec),
-            host_config: Some(host_config),
-            user: Some("1000:1000".to_string()),
-            working_dir: Some("/workspace".to_string()),
-            labels: Some(labels),
-            ..Default::default()
-        };
 
         let container_name = match mode {
             JobMode::Worker => format!("ironclaw-worker-{}", job_id),
             JobMode::ClaudeCode => format!("ironclaw-claude-{}", job_id),
             JobMode::Acp => format!("ironclaw-acp-{}", job_id),
         };
-        let options = CreateContainerOptions {
+
+        let spec = WorkloadSpec {
             name: container_name,
+            image: self.config.image.clone(),
+            command: cmd,
+            command_mode: WorkloadCommandMode::AppendToEntrypoint,
+            env: env_vec,
+            working_dir: "/workspace".to_string(),
+            user: Some("1000:1000".to_string()),
+            labels,
+            mounts,
+            inline_files,
+            tmpfs_mounts: [("/tmp".to_string(), "size=512M".to_string())]
+                .into_iter()
+                .collect(),
+            memory_bytes: Some((memory_mb * 1024 * 1024) as i64),
+            cpu_shares: Some(self.config.cpu_shares as i64),
+            network_mode: Some("bridge".to_string()),
+            extra_hosts: vec!["host.docker.internal:host-gateway".to_string()],
+            readonly_rootfs: false,
+            auto_remove: false,
             ..Default::default()
         };
 
-        let response = docker
-            .create_container(Some(options), container_config)
-            .await
-            .map_err(|e| OrchestratorError::ContainerCreationFailed {
+        let workload_id = rt.create_and_start_workload(&spec).await.map_err(|e| {
+            OrchestratorError::ContainerCreationFailed {
                 job_id,
                 reason: e.to_string(),
-            })?;
+            }
+        })?;
 
-        let container_id = response.id;
-
-        // Start the container
-        docker
-            .start_container::<String>(&container_id, None)
-            .await
-            .map_err(|e| OrchestratorError::ContainerCreationFailed {
-                job_id,
-                reason: format!("failed to start container: {}", e),
-            })?;
-
-        // Update handle with container ID
+        // Update handle with workload ID
         if let Some(handle) = self.containers.write().await.get_mut(&job_id) {
-            handle.container_id = container_id;
+            handle.container_id = workload_id;
             handle.state = ContainerState::Running;
         }
 
@@ -648,30 +759,13 @@ impl ContainerJobManager {
             });
         }
 
-        let docker = self.docker().await?;
+        let rt = self.runtime().await?;
 
-        // Stop the container (10 second grace period)
-        if let Err(e) = docker
-            .stop_container(
-                &container_id,
-                Some(bollard::container::StopContainerOptions { t: 10 }),
-            )
-            .await
-        {
+        if let Err(e) = rt.stop_workload(&container_id, 10).await {
             tracing::warn!(job_id = %job_id, error = %e, "Failed to stop container (may already be stopped)");
         }
 
-        // Remove the container
-        if let Err(e) = docker
-            .remove_container(
-                &container_id,
-                Some(bollard::container::RemoveContainerOptions {
-                    force: true,
-                    ..Default::default()
-                }),
-            )
-            .await
-        {
+        if let Err(e) = rt.remove_workload(&container_id).await {
             tracing::warn!(job_id = %job_id, error = %e, "Failed to remove container (may require manual cleanup)");
         }
 
@@ -699,8 +793,10 @@ impl ContainerJobManager {
         {
             let mut containers = self.containers.write().await;
             if let Some(handle) = containers.get_mut(&job_id) {
+                let pending_workspace_changes = result.workspace_changes.clone();
                 handle.completion_result = Some(result);
                 handle.state = ContainerState::Stopped;
+                handle.pending_workspace_changes = pending_workspace_changes;
             }
         }
 
@@ -712,32 +808,17 @@ impl ContainerJobManager {
         if let Some(cid) = container_id
             && !cid.is_empty()
         {
-            match self.docker().await {
-                Ok(docker) => {
-                    if let Err(e) = docker
-                        .stop_container(
-                            &cid,
-                            Some(bollard::container::StopContainerOptions { t: 5 }),
-                        )
-                        .await
-                    {
+            match self.runtime().await {
+                Ok(rt) => {
+                    if let Err(e) = rt.stop_workload(&cid, 5).await {
                         tracing::warn!(job_id = %job_id, error = %e, "Failed to stop completed container");
                     }
-                    if let Err(e) = docker
-                        .remove_container(
-                            &cid,
-                            Some(bollard::container::RemoveContainerOptions {
-                                force: true,
-                                ..Default::default()
-                            }),
-                        )
-                        .await
-                    {
+                    if let Err(e) = rt.remove_workload(&cid).await {
                         tracing::warn!(job_id = %job_id, error = %e, "Failed to remove completed container");
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(job_id = %job_id, error = %e, "Failed to connect to Docker for container cleanup");
+                    tracing::warn!(job_id = %job_id, error = %e, "Failed to connect to runtime for container cleanup");
                 }
             }
         }
@@ -787,6 +868,85 @@ impl ContainerJobManager {
         self.containers.read().await.get(&job_id).cloned()
     }
 
+    pub async fn pending_workspace_changes(
+        &self,
+        job_id: Uuid,
+    ) -> Option<crate::workspace_changes::WorkspaceChangesPayload> {
+        self.containers
+            .read()
+            .await
+            .get(&job_id)
+            .and_then(|handle| handle.pending_workspace_changes.clone())
+    }
+
+    pub async fn apply_pending_workspace_changes(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Option<crate::workspace_changes::AppliedWorkspaceChanges>, OrchestratorError> {
+        let (project_dir, payload) = {
+            let containers = self.containers.read().await;
+            let Some(handle) = containers.get(&job_id) else {
+                return Ok(None);
+            };
+            (
+                handle.project_dir.clone(),
+                handle.pending_workspace_changes.clone(),
+            )
+        };
+
+        let Some(project_dir) = project_dir else {
+            return Err(OrchestratorError::ContainerCreationFailed {
+                job_id,
+                reason: "job has no project directory for applying returned changes".to_string(),
+            });
+        };
+        let Some(payload) = payload else {
+            return Ok(None);
+        };
+
+        let applied = crate::workspace_changes::apply_workspace_changes(&project_dir, &payload)
+            .map_err(|e| OrchestratorError::ContainerCreationFailed {
+                job_id,
+                reason: format!("failed to apply returned workspace changes: {e}"),
+            })?;
+
+        if let Some(handle) = self.containers.write().await.get_mut(&job_id) {
+            handle.pending_workspace_changes = None;
+        }
+
+        Ok(Some(applied))
+    }
+
+    pub async fn bootstrap_manifest(
+        &self,
+        job_id: Uuid,
+    ) -> Option<crate::worker::api::BootstrapManifest> {
+        self.containers
+            .read()
+            .await
+            .get(&job_id)
+            .map(|handle| handle.bootstrap.manifest())
+    }
+
+    pub async fn bootstrap_artifact(
+        &self,
+        job_id: Uuid,
+        artifact_id: &str,
+    ) -> Result<
+        Option<crate::orchestrator::bootstrap_artifacts::ResolvedBootstrapArtifact>,
+        OrchestratorError,
+    > {
+        let handle = {
+            let containers = self.containers.read().await;
+            containers.get(&job_id).cloned()
+        };
+
+        match handle {
+            Some(handle) => handle.bootstrap.resolve_artifact(job_id, artifact_id),
+            None => Ok(None),
+        }
+    }
+
     /// List all active container jobs.
     pub async fn list_jobs(&self) -> Vec<ContainerHandle> {
         self.containers.read().await.values().cloned().collect()
@@ -798,172 +958,191 @@ impl ContainerJobManager {
     }
 }
 
-/// Human-readable label for a `serde_json::Value` discriminant; used in error
-/// messages when a master MCP config field has the wrong shape.
-fn type_name_of(value: &serde_json::Value) -> &'static str {
-    match value {
-        serde_json::Value::Null => "null",
-        serde_json::Value::Bool(_) => "bool",
-        serde_json::Value::Number(_) => "number",
-        serde_json::Value::String(_) => "string",
-        serde_json::Value::Array(_) => "array",
-        serde_json::Value::Object(_) => "object",
-    }
-}
-
-/// Generate a per-job MCP config file from caller-provided master data,
-/// optionally filtering to specific servers.
+/// Generate a per-job MCP config temp file from caller-provided master data.
 ///
-/// - `master = None` → caller has no master config; no mount
-/// - `server_names = None` → mount the full master config as-is
-/// - `server_names = Some([])` → no MCP config (no mount)
-/// - `server_names = Some(["serpstat"])` → filtered config with matching servers
-///
-/// The master config is data, not a path: it is loaded from the per-user
-/// DB-backed `mcp_servers` setting by the caller (`job` tool / restart
-/// handler). This avoids the staging-regressions issue 3 where the
-/// orchestrator hardcoded a host file path that bootstrap moves into the
-/// DB on first run, leaving most installs with no MCP mount.
-///
-/// Temp files are written to `<temp_dir>/ironclaw-mcp-configs/` and cleaned
-/// up in `cleanup_job`.
+/// This remains as a thin wrapper for tests and for the current Docker mount
+/// path while Stage 2 bootstrap delivery is being introduced.
+#[cfg(test)]
 async fn generate_worker_mcp_config(
     master: Option<&serde_json::Value>,
     server_names: Option<&[String]>,
     job_id: Uuid,
 ) -> Result<Option<std::path::PathBuf>, OrchestratorError> {
-    let Some(master) = master else {
-        return Ok(None);
-    };
-
-    // Empty list → no MCP, regardless of master content.
-    if matches!(server_names, Some([])) {
-        return Ok(None);
+    match render_worker_mcp_config_json(master, server_names, job_id)? {
+        Some(config_json) => write_worker_mcp_config_tempfile(&config_json, job_id)
+            .await
+            .map(Some),
+        None => Ok(None),
     }
-
-    // Validate server names if a filter was provided. Reject path separators,
-    // null bytes, and excessively long names so the filter cannot escape the
-    // temp file directory or inject shell metacharacters if names ever flow
-    // into a path or command.
-    if let Some(names) = server_names {
-        for name in names {
-            if name.len() > 128 || name.contains('/') || name.contains('\\') || name.contains('\0')
-            {
-                return Err(OrchestratorError::ContainerCreationFailed {
-                    job_id,
-                    reason: format!("invalid MCP server name: {:?}", name),
-                });
-            }
-        }
-    }
-
-    // Filter the master config when a name filter is provided. When no filter
-    // is given we still serialize through this path so the on-disk file we
-    // mount has the same shape regardless of source — pre-fix, the no-filter
-    // path returned the master file as-is, which only worked when the master
-    // was a real on-disk file.
-    //
-    // The `servers` field is the load-bearing part of the config — if it is
-    // missing or the wrong type the master JSON is malformed and we must
-    // surface that loudly rather than silently mounting nothing. The trusted
-    // helper (`load_master_mcp_config_value`) always serializes a real
-    // `McpServersFile`, so reaching this branch means a future caller passed
-    // foreign JSON that does not match our expected shape.
-    let servers_value =
-        master
-            .get("servers")
-            .ok_or_else(|| OrchestratorError::ContainerCreationFailed {
-                job_id,
-                reason: "MCP master config is missing the required `servers` field".to_string(),
-            })?;
-    let servers_array =
-        servers_value
-            .as_array()
-            .ok_or_else(|| OrchestratorError::ContainerCreationFailed {
-                job_id,
-                reason: format!(
-                    "MCP master config `servers` field must be an array, got {}",
-                    type_name_of(servers_value)
-                ),
-            })?;
-    let servers_iter = servers_array.clone().into_iter();
-    let filtered_servers: Vec<serde_json::Value> = match server_names {
-        None => servers_iter
-            .filter(|s| s["enabled"].as_bool().unwrap_or(true))
-            .collect(),
-        Some(names) => servers_iter
-            .filter(|s| {
-                let name_matches = s["name"]
-                    .as_str()
-                    .map(|n| names.iter().any(|req| req.eq_ignore_ascii_case(n)))
-                    .unwrap_or(false);
-                let is_enabled = s["enabled"].as_bool().unwrap_or(true);
-                name_matches && is_enabled
-            })
-            .collect(),
-    };
-
-    if filtered_servers.is_empty() {
-        if let Some(names) = server_names {
-            tracing::warn!(
-                job_id = %job_id,
-                requested = ?names,
-                "No matching MCP servers found in master config; skipping MCP mount"
-            );
-        } else {
-            tracing::debug!(
-                job_id = %job_id,
-                "Master MCP config has no enabled servers; skipping MCP mount"
-            );
-        }
-        return Ok(None);
-    }
-
-    let schema_version = master
-        .get("schema_version")
-        .cloned()
-        .unwrap_or(serde_json::json!(1));
-    let filtered = serde_json::json!({
-        "servers": filtered_servers,
-        "schema_version": schema_version
-    });
-
-    let tmp_dir = std::env::temp_dir().join("ironclaw-mcp-configs");
-    tokio::fs::create_dir_all(&tmp_dir).await.map_err(|e| {
-        OrchestratorError::ContainerCreationFailed {
-            job_id,
-            reason: format!("failed to create MCP config temp dir: {e}"),
-        }
-    })?;
-
-    // Restrict directory permissions to owner-only (0o700) to prevent
-    // other users on the host from reading filtered MCP configs.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = tokio::fs::set_permissions(&tmp_dir, std::fs::Permissions::from_mode(0o700)).await;
-    }
-
-    let tmp_path = tmp_dir.join(format!("{}.json", job_id));
-    let config_json = serde_json::to_string_pretty(&filtered).map_err(|e| {
-        OrchestratorError::ContainerCreationFailed {
-            job_id,
-            reason: format!("failed to serialize filtered MCP config: {e}"),
-        }
-    })?;
-    tokio::fs::write(&tmp_path, config_json)
-        .await
-        .map_err(|e| OrchestratorError::ContainerCreationFailed {
-            job_id,
-            reason: format!("failed to write per-job MCP config: {e}"),
-        })?;
-
-    Ok(Some(tmp_path))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sandbox::error::SandboxError;
+    use crate::sandbox::runtime::{
+        ManagedWorkload, RuntimeDetection, RuntimeStatus, WorkloadOutput,
+        parse_workload_created_at_label,
+    };
+    use crate::sandbox::{
+        ConfigDelivery, NetworkIsolation, RuntimeCapabilities, RuntimeStage, WorkspaceDelivery,
+    };
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    struct RecordingRuntime {
+        capabilities: RuntimeCapabilities,
+        spec: Mutex<Option<WorkloadSpec>>,
+    }
+
+    impl RecordingRuntime {
+        fn with_bind_mount_support(supports_bind_mounts: bool) -> Self {
+            Self {
+                capabilities: RuntimeCapabilities::new(
+                    if supports_bind_mounts {
+                        RuntimeStage::Stage2ProjectBacked
+                    } else {
+                        RuntimeStage::Stage1Runtime
+                    },
+                    if supports_bind_mounts {
+                        WorkspaceDelivery::HostMount
+                    } else {
+                        WorkspaceDelivery::Unsupported
+                    },
+                    if supports_bind_mounts {
+                        ConfigDelivery::HostMount
+                    } else {
+                        ConfigDelivery::Unsupported
+                    },
+                    NetworkIsolation::HostProxyAllowlist,
+                    &[],
+                ),
+                spec: Mutex::new(None),
+            }
+        }
+
+        fn with_capabilities(capabilities: RuntimeCapabilities) -> Self {
+            Self {
+                capabilities,
+                spec: Mutex::new(None),
+            }
+        }
+
+        fn captured_spec(&self) -> WorkloadSpec {
+            self.spec
+                .lock()
+                .expect("recording runtime mutex poisoned") // safety: test
+                .clone()
+                .expect("create_job should capture workload spec") // safety: test
+        }
+    }
+
+    impl Default for RecordingRuntime {
+        fn default() -> Self {
+            Self::with_bind_mount_support(true)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ContainerRuntime for RecordingRuntime {
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+
+        fn capabilities(&self) -> RuntimeCapabilities {
+            self.capabilities.clone()
+        }
+
+        async fn is_available(&self) -> bool {
+            true
+        }
+
+        async fn detect(&self) -> RuntimeDetection {
+            RuntimeDetection {
+                status: RuntimeStatus::Available,
+                runtime_name: "recording",
+                install_hint: String::new(),
+                start_hint: String::new(),
+            }
+        }
+
+        async fn image_exists(&self, _image: &str) -> bool {
+            true
+        }
+
+        async fn pull_image(&self, _image: &str) -> Result<(), SandboxError> {
+            Ok(())
+        }
+
+        async fn build_image(
+            &self,
+            _image: &str,
+            _dockerfile_path: &Path,
+        ) -> Result<(), SandboxError> {
+            Ok(())
+        }
+
+        async fn create_and_start_workload(
+            &self,
+            spec: &WorkloadSpec,
+        ) -> Result<String, SandboxError> {
+            *self.spec.lock().expect("recording runtime mutex poisoned") = Some(spec.clone()); // safety: test
+            Ok("recording-workload".to_string())
+        }
+
+        async fn wait_workload(&self, _workload_id: &str) -> Result<i64, SandboxError> {
+            Ok(0)
+        }
+
+        async fn stop_workload(
+            &self,
+            _workload_id: &str,
+            _grace_period_secs: u32,
+        ) -> Result<(), SandboxError> {
+            Ok(())
+        }
+
+        async fn remove_workload(&self, _workload_id: &str) -> Result<(), SandboxError> {
+            Ok(())
+        }
+
+        async fn exec_in_workload(
+            &self,
+            _workload_id: &str,
+            _command: &[&str],
+            _working_dir: &str,
+            _max_output: usize,
+            _timeout: Duration,
+        ) -> Result<WorkloadOutput, SandboxError> {
+            Ok(WorkloadOutput {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                duration: Duration::from_secs(0),
+                truncated: false,
+            })
+        }
+
+        async fn collect_logs(
+            &self,
+            _workload_id: &str,
+            _max_output: usize,
+        ) -> Result<(String, String, bool), SandboxError> {
+            Ok((String::new(), String::new(), false))
+        }
+
+        async fn list_managed_workloads(
+            &self,
+            _label_key: &str,
+        ) -> Result<Vec<ManagedWorkload>, SandboxError> {
+            Ok(Vec::new())
+        }
+
+        fn orchestrator_host(&self) -> &str {
+            "orchestrator.test"
+        }
+    }
 
     #[test]
     fn test_container_job_config_default() {
@@ -1041,9 +1220,14 @@ mod tests {
                     created_at: chrono::Utc::now(),
                     project_dir: None,
                     task_description: "test job".to_string(),
+                    bootstrap: crate::orchestrator::bootstrap_artifacts::JobBootstrapArtifacts::metadata_only(
+                        job_id,
+                        None,
+                    ),
                     last_worker_status: None,
                     worker_iteration: 0,
                     completion_result: None,
+                    pending_workspace_changes: None,
                 },
             );
         }
@@ -1128,6 +1312,463 @@ mod tests {
         assert!(
             err.contains("not enabled"),
             "expected mode-disabled error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_job_writes_label_safe_created_at() {
+        let runtime = Arc::new(RecordingRuntime::default());
+        let manager = ContainerJobManager::with_runtime(
+            ContainerJobConfig::default(),
+            TokenStore::new(),
+            runtime.clone(),
+        );
+        let job_id = Uuid::new_v4();
+
+        manager
+            .create_job(
+                job_id,
+                "test task",
+                None,
+                JobMode::Worker,
+                JobCreationParams::default(),
+            )
+            .await
+            .expect("create_job should succeed with recording runtime"); // safety: test
+
+        let spec = runtime.captured_spec();
+        let created_at = spec
+            .labels
+            .get("ironclaw.created_at")
+            .expect("created_at label should be set"); // safety: test
+        assert!(
+            created_at.chars().all(|c| c.is_ascii_digit()),
+            "created_at label should use unix millis, got: {created_at}"
+        );
+        assert!(
+            parse_workload_created_at_label(created_at).is_some(),
+            "created_at label should round-trip through shared parser"
+        );
+
+        let expected_job_id = job_id.to_string();
+        assert_eq!(spec.labels.get("ironclaw.job_id"), Some(&expected_job_id));
+        assert_eq!(spec.command_mode, WorkloadCommandMode::AppendToEntrypoint);
+    }
+
+    #[tokio::test]
+    async fn test_create_job_registers_workspace_bootstrap_manifest() {
+        let runtime = Arc::new(RecordingRuntime::default());
+        let manager = ContainerJobManager::with_runtime(
+            ContainerJobConfig::default(),
+            TokenStore::new(),
+            runtime,
+        );
+        let projects_dir = crate::bootstrap::compute_ironclaw_base_dir().join("projects");
+        std::fs::create_dir_all(&projects_dir).expect("projects dir should exist for test");
+        let project_dir = projects_dir.join("test_create_job_registers_workspace_bootstrap");
+        std::fs::create_dir_all(&project_dir).expect("project dir should exist for test");
+        std::fs::write(project_dir.join("main.rs"), "fn main() {}")
+            .expect("fixture file should be written");
+        let job_id = Uuid::new_v4();
+
+        manager
+            .create_job(
+                job_id,
+                "test task",
+                Some(project_dir.clone()),
+                JobMode::Worker,
+                JobCreationParams::default(),
+            )
+            .await
+            .expect("job creation should succeed");
+
+        let manifest = manager
+            .bootstrap_manifest(job_id)
+            .await
+            .expect("manifest should exist");
+
+        assert_eq!(manifest.provenance.snapshot_source, "project-dir");
+        assert!(
+            manifest
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.id == "workspace-snapshot")
+        );
+
+        let _ = std::fs::remove_dir_all(&project_dir);
+    }
+
+    #[tokio::test]
+    async fn test_create_job_registers_mcp_bootstrap_artifact() {
+        let runtime = Arc::new(RecordingRuntime::default());
+        let manager = ContainerJobManager::with_runtime(
+            ContainerJobConfig {
+                mcp_per_job_enabled: true,
+                ..Default::default()
+            },
+            TokenStore::new(),
+            runtime,
+        );
+        let job_id = Uuid::new_v4();
+        let master = master_value(
+            r#"{"schema_version":1,"servers":[
+                {"name":"serpstat","enabled":true,"url":"http://localhost:8062"}
+            ]}"#,
+        );
+
+        manager
+            .create_job(
+                job_id,
+                "test task",
+                None,
+                JobMode::Worker,
+                JobCreationParams {
+                    mcp_servers: Some(vec!["serpstat".to_string()]),
+                    master_mcp_config: Some(master),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("job creation should succeed");
+
+        let manifest = manager
+            .bootstrap_manifest(job_id)
+            .await
+            .expect("manifest should exist");
+
+        assert!(
+            manifest
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.id == "mcp-config")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_job_uses_orchestrator_bootstrap_delivery_without_host_mounts() {
+        let runtime = Arc::new(RecordingRuntime::with_capabilities(
+            RuntimeCapabilities::new(
+                RuntimeStage::Stage2ProjectBacked,
+                WorkspaceDelivery::OrchestratorBootstrap,
+                ConfigDelivery::OrchestratorBootstrap,
+                NetworkIsolation::PodDirect,
+                &["allowlist-only networking is unavailable"],
+            ),
+        ));
+        let manager = ContainerJobManager::with_runtime(
+            ContainerJobConfig {
+                mcp_per_job_enabled: true,
+                ..Default::default()
+            },
+            TokenStore::new(),
+            runtime.clone(),
+        );
+        let projects_dir = crate::bootstrap::compute_ironclaw_base_dir().join("projects");
+        std::fs::create_dir_all(&projects_dir).expect("projects dir should exist for test");
+        let project_dir = projects_dir.join("test_create_job_uses_bootstrap_delivery");
+        std::fs::create_dir_all(&project_dir).expect("project dir should exist for test");
+        std::fs::write(project_dir.join("main.rs"), "fn main() {}")
+            .expect("fixture file should be written");
+        let job_id = Uuid::new_v4();
+        let master = master_value(
+            r#"{"schema_version":1,"servers":[
+                {"name":"serpstat","enabled":true,"url":"http://localhost:8062"}
+            ]}"#,
+        );
+
+        manager
+            .create_job(
+                job_id,
+                "test task",
+                Some(project_dir.clone()),
+                JobMode::Worker,
+                JobCreationParams {
+                    mcp_servers: Some(vec!["serpstat".to_string()]),
+                    master_mcp_config: Some(master),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("job creation should succeed");
+
+        let spec = runtime.captured_spec();
+        assert!(
+            spec.mounts.is_empty(),
+            "orchestrator bootstrap delivery should not rely on host mounts"
+        );
+        assert!(
+            spec.env
+                .iter()
+                .any(|env| env == "IRONCLAW_USE_BOOTSTRAP_ARTIFACTS=1"),
+            "worker should be told to fetch bootstrap artifacts"
+        );
+        assert!(
+            spec.env
+                .iter()
+                .any(|env| env == "IRONCLAW_WORKSPACE=/workspace"),
+            "workspace path should stay stable for project-backed jobs"
+        );
+
+        let manifest = manager
+            .bootstrap_manifest(job_id)
+            .await
+            .expect("manifest should exist");
+        assert_eq!(manifest.provenance.snapshot_source, "project-dir");
+        assert_eq!(manifest.artifacts.len(), 2);
+        assert!(
+            manifest
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.id == "workspace-snapshot")
+        );
+        assert!(
+            manifest
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.id == "mcp-config")
+        );
+
+        let _ = std::fs::remove_dir_all(&project_dir);
+    }
+
+    #[tokio::test]
+    async fn test_create_job_uses_projected_runtime_config_without_bootstrap_flag() {
+        let runtime = Arc::new(RecordingRuntime::with_capabilities(
+            RuntimeCapabilities::new(
+                RuntimeStage::Stage2ProjectBacked,
+                WorkspaceDelivery::HostMount,
+                ConfigDelivery::ProjectedVolume,
+                NetworkIsolation::KubernetesNativeControls,
+                &[],
+            ),
+        ));
+        let manager = ContainerJobManager::with_runtime(
+            ContainerJobConfig {
+                mcp_per_job_enabled: true,
+                ..Default::default()
+            },
+            TokenStore::new(),
+            runtime.clone(),
+        );
+        let job_id = Uuid::new_v4();
+        let master = master_value(
+            r#"{"schema_version":1,"servers":[
+                {"name":"serpstat","enabled":true,"url":"http://localhost:8062"}
+            ]}"#,
+        );
+
+        manager
+            .create_job(
+                job_id,
+                "test task",
+                None,
+                JobMode::Worker,
+                JobCreationParams {
+                    mcp_servers: Some(vec!["serpstat".to_string()]),
+                    master_mcp_config: Some(master),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("job creation should succeed");
+
+        let spec = runtime.captured_spec();
+        assert!(
+            spec.mounts.is_empty(),
+            "projected runtime config should not require a host mount"
+        );
+        assert_eq!(spec.inline_files.len(), 1);
+        assert_eq!(
+            spec.inline_files[0].target,
+            "/home/sandbox/.ironclaw/mcp-servers.json"
+        );
+        assert!(
+            spec.inline_files[0].contents.contains("\"serpstat\""),
+            "projected runtime config should contain the rendered MCP config"
+        );
+        assert_eq!(spec.inline_files[0].mode, 0o444);
+        assert!(
+            !spec
+                .env
+                .iter()
+                .any(|env| env == "IRONCLAW_USE_BOOTSTRAP_ARTIFACTS=1"),
+            "runtime-config-only projected delivery should not force bootstrap artifact fetching"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_job_can_mix_workspace_bootstrap_with_projected_runtime_config() {
+        let runtime = Arc::new(RecordingRuntime::with_capabilities(
+            RuntimeCapabilities::new(
+                RuntimeStage::Stage2ProjectBacked,
+                WorkspaceDelivery::OrchestratorBootstrap,
+                ConfigDelivery::ProjectedVolume,
+                NetworkIsolation::KubernetesNativeControls,
+                &[],
+            ),
+        ));
+        let manager = ContainerJobManager::with_runtime(
+            ContainerJobConfig {
+                mcp_per_job_enabled: true,
+                ..Default::default()
+            },
+            TokenStore::new(),
+            runtime.clone(),
+        );
+        let projects_dir = crate::bootstrap::compute_ironclaw_base_dir().join("projects");
+        std::fs::create_dir_all(&projects_dir).expect("projects dir should exist for test");
+        let project_dir = projects_dir.join("test_projected_runtime_config_with_workspace");
+        std::fs::create_dir_all(&project_dir).expect("project dir should exist for test");
+        std::fs::write(project_dir.join("main.rs"), "fn main() {}")
+            .expect("fixture file should be written");
+        let job_id = Uuid::new_v4();
+        let master = master_value(
+            r#"{"schema_version":1,"servers":[
+                {"name":"serpstat","enabled":true,"url":"http://localhost:8062"}
+            ]}"#,
+        );
+
+        manager
+            .create_job(
+                job_id,
+                "test task",
+                Some(project_dir.clone()),
+                JobMode::Worker,
+                JobCreationParams {
+                    mcp_servers: Some(vec!["serpstat".to_string()]),
+                    master_mcp_config: Some(master),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("job creation should succeed");
+
+        let spec = runtime.captured_spec();
+        assert_eq!(spec.inline_files.len(), 1);
+        assert!(
+            spec.env
+                .iter()
+                .any(|env| env == "IRONCLAW_USE_BOOTSTRAP_ARTIFACTS=1"),
+            "workspace bootstrap should still request bootstrap artifact fetching"
+        );
+
+        let manifest = manager
+            .bootstrap_manifest(job_id)
+            .await
+            .expect("manifest should exist");
+        assert!(
+            manifest
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.id == "workspace-snapshot"),
+            "workspace bootstrap should still register the workspace artifact"
+        );
+
+        let _ = std::fs::remove_dir_all(&project_dir);
+    }
+
+    #[tokio::test]
+    async fn test_create_job_rejects_runtime_without_bind_mounts_for_workspace() {
+        let runtime = Arc::new(RecordingRuntime::with_bind_mount_support(false));
+        let manager = ContainerJobManager::with_runtime(
+            ContainerJobConfig::default(),
+            TokenStore::new(),
+            runtime.clone(),
+        );
+        let projects_dir = crate::bootstrap::compute_ironclaw_base_dir().join("projects");
+        std::fs::create_dir_all(&projects_dir).expect("projects dir should exist for test");
+        let project_dir = projects_dir.join("test_create_job_rejects_bind_mounts");
+        std::fs::create_dir_all(&project_dir).expect("project dir should exist for test");
+        let job_id = Uuid::new_v4();
+
+        let err = manager
+            .create_job(
+                job_id,
+                "test task",
+                Some(project_dir.clone()),
+                JobMode::Worker,
+                JobCreationParams::default(),
+            )
+            .await
+            .expect_err("job creation should fail closed when bind mounts are unsupported")
+            .to_string();
+
+        assert!(
+            err.contains("Stage 1 worker runtime"),
+            "expected stage-aware project-dir failure, got: {err}"
+        );
+        assert!(
+            err.contains("project-backed jobs"),
+            "expected project-backed job guidance, got: {err}"
+        );
+        assert!(
+            runtime
+                .spec
+                .lock()
+                .expect("recording runtime mutex poisoned")
+                .is_none(),
+            "workload should not be created when workspace bind mounts are unsupported"
+        );
+
+        let _ = std::fs::remove_dir_all(&project_dir);
+    }
+
+    #[tokio::test]
+    async fn test_create_job_rejects_runtime_without_bind_mounts_for_mcp_config() {
+        let runtime = Arc::new(RecordingRuntime::with_bind_mount_support(false));
+        let manager = ContainerJobManager::with_runtime(
+            ContainerJobConfig {
+                mcp_per_job_enabled: true,
+                ..Default::default()
+            },
+            TokenStore::new(),
+            runtime.clone(),
+        );
+        let job_id = Uuid::new_v4();
+        let master = master_value(
+            r#"{"schema_version":1,"servers":[
+                {"name":"serpstat","enabled":true,"url":"http://localhost:8062"}
+            ]}"#,
+        );
+        let expected_path = std::env::temp_dir()
+            .join("ironclaw-mcp-configs")
+            .join(format!("{}.json", job_id));
+
+        let err = manager
+            .create_job(
+                job_id,
+                "test task",
+                None,
+                JobMode::Worker,
+                JobCreationParams {
+                    mcp_servers: Some(vec!["serpstat".to_string()]),
+                    master_mcp_config: Some(master),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("job creation should fail closed when MCP config cannot be mounted")
+            .to_string();
+
+        assert!(
+            err.contains("Stage 1 worker runtime"),
+            "expected stage-aware MCP failure, got: {err}"
+        );
+        assert!(
+            err.contains("filtered MCP config"),
+            "expected filtered MCP guidance, got: {err}"
+        );
+        assert!(
+            runtime
+                .spec
+                .lock()
+                .expect("recording runtime mutex poisoned")
+                .is_none(),
+            "workload should not be created when per-job MCP config mount is unsupported"
+        );
+        assert!(
+            !expected_path.exists(),
+            "generated MCP config should be cleaned up when job creation is rejected"
         );
     }
 

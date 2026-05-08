@@ -31,6 +31,7 @@ pub mod claude_bridge;
 pub mod container;
 pub mod job;
 pub mod proxy_llm;
+mod workspace_materializer;
 
 pub use acp_bridge::AcpBridgeRuntime;
 pub use api::WorkerHttpClient;

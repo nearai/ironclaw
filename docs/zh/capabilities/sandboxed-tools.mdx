@@ -165,3 +165,26 @@ ironclaw tool list
     无限循环会在 fuel 用尽时被强制终止。
   </Accordion>
 </AccordionGroup>
+
+---
+
+## 容器运行阶段
+
+IronClaw 对容器后端采用分阶段能力定义，而不是直接宣称所有后端都具备同等沙箱能力。
+
+- Docker 仍是完整沙箱的基准运行方式。
+- Kubernetes 目前属于第 2 阶段，可处理常见的带项目内容任务。
+- 第 2 阶段下，Kubernetes 任务通过 orchestrator 下发的 bootstrap artifacts 获取项目内容与任务配置。
+- Kubernetes 的唯读一次性沙箱命令现在会用上传的工作目录压缩包，而不是 host mount。
+- 当 `IRONCLAW_K8S_NATIVE_NETWORK_CONTROLS=true` 已就绪时，依赖 allowlist-only networking 的一次性沙箱命令可以在 Kubernetes 上运行。
+- 当 `IRONCLAW_K8S_PROJECTED_RUNTIME_CONFIG=true` 已就绪时，运行时配置文件会改走 Kubernetes projected file delivery，而不是本地挂载。
+- Kubernetes API 凭证属于主进程侧的平台凭证，不属于单个 job。IronClaw 会按这个顺序解析：in-cluster ServiceAccount、加密保存的平台 kubeconfig secret（`sandbox_kubernetes_kubeconfig`）、最后才是本地或默认 kubeconfig 兼容回退。
+- 需要写回工作目录的一次性沙箱命令，在 Kubernetes 上会返回待确认的工作目录变更，供显式审查与应用。
+- 依赖 allowlist-only networking 的一次性沙箱命令，在 Kubernetes 上仍会默认拒绝，除非 native network controls 已就绪。
+
+`ironclaw doctor` 还会显示剩余的集群侧信号是否已配置：
+
+- `IRONCLAW_K8S_NATIVE_NETWORK_CONTROLS=true`
+- `IRONCLAW_K8S_PROJECTED_RUNTIME_CONFIG=true`
+
+当 native network controls 已就绪时，doctor 会说明依赖 allowlist-only networking 的一次性沙箱命令可以在 Kubernetes 上运行。当 projected runtime config 已就绪时，doctor 会说明运行时配置已经可以改用 projected files。需要写回工作目录的一次性沙箱命令会继续返回待确认变更供显式应用，因此 Kubernetes 继续维持第 2 阶段对外承诺。

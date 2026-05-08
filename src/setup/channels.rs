@@ -56,6 +56,10 @@ impl SecretsContext {
         }
     }
 
+    pub fn store(&self) -> &(dyn SecretsStore + Send + Sync) {
+        self.store.as_ref()
+    }
+
     /// Create a new secrets context from a PostgreSQL pool and crypto.
     #[cfg(feature = "postgres")]
     pub fn new(pool: deadpool_postgres::Pool, crypto: Arc<SecretsCrypto>, user_id: &str) -> Self {

@@ -35,8 +35,8 @@ pub use glob_tool::GlobTool;
 pub use grep_tool::GrepTool;
 pub use http::{HttpTool, extract_host_from_params, extract_path_from_params};
 pub use job::{
-    CancelJobTool, CreateJobTool, JobEventsTool, JobPromptTool, JobStatusTool, ListJobsTool,
-    PromptQueue, SchedulerSlot,
+    CancelJobTool, CreateJobTool, JobApplyChangesTool, JobEventsTool, JobPromptTool, JobStatusTool,
+    ListJobsTool, PromptQueue, SchedulerSlot,
 };
 pub use json::JsonTool;
 pub use memory::{MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool};

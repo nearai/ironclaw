@@ -219,6 +219,9 @@ Secrets are encrypted at rest with AES-256-GCM using a per-secret HKDF-derived k
 
 Create or update a secret for the specified user. If a secret with the same name already exists, it is overwritten.
 
+For platform-managed Kubernetes access, store the kubeconfig under the fixed
+secret name `sandbox_kubernetes_kubeconfig` for the owner user.
+
 **Auth:** Admin
 
 **Path parameters:**

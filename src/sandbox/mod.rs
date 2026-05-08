@@ -1,10 +1,23 @@
-//! Docker execution sandbox for secure command execution.
+//! Container execution sandbox for secure command execution.
 //!
 //! This module provides a complete sandboxing solution for running untrusted commands:
-//! - **Container isolation**: Commands run in ephemeral Docker containers
+//! - **Container isolation**: Commands run in ephemeral containers (Docker or Kubernetes)
 //! - **Network proxy**: All network traffic goes through a validating proxy
 //! - **Credential injection**: Secrets are injected by the proxy, never exposed in containers
 //! - **Resource limits**: Memory, CPU, and timeout enforcement
+//!
+//! # Kubernetes caveats
+//!
+//! - **Read-only one-shot sandboxes** on Kubernetes can use uploaded
+//!   workspaces, and allowlist-constrained networking becomes available, when
+//!   Kubernetes-native network controls are explicitly declared ready.
+//!   Projected runtime config is a separate capability. `WorkspaceWrite`
+//!   one-shot commands return pending workspace changes for explicit apply
+//!   rather than silently syncing writes back to the host.
+//! - **Project-backed worker jobs are supported at Stage 2** through
+//!   orchestrator-delivered bootstrap artifacts rather than host mounts. The
+//!   persistent worker/job path is already covered; the remaining Kubernetes
+//!   gap is near-Docker behavior for the one-shot sandbox experience.
 //!
 //! # Architecture
 //!
@@ -15,16 +28,16 @@
 //! │  ┌─────────────────────────────────────────────────────────────────────┐    │
 //! │  │                        SandboxManager                                │    │
 //! │  │                                                                      │    │
-//! │  │  • Coordinates container creation and execution                     │    │
+//! │  │  • Coordinates workload creation and execution                      │    │
 //! │  │  • Manages proxy lifecycle                                          │    │
 //! │  │  • Enforces resource limits                                         │    │
 //! │  └─────────────────────────────────────────────────────────────────────┘    │
 //! │           │                              │                                   │
 //! │           ▼                              ▼                                   │
 //! │  ┌──────────────────┐          ┌───────────────────┐                        │
-//! │  │   Container      │          │   Network Proxy   │                        │
-//! │  │   Runner         │          │                   │                        │
-//! │  │                  │          │  • Allowlist      │                        │
+//! │  │  Container       │          │   Network Proxy   │                        │
+//! │  │  Runtime         │          │                   │                        │
+//! │  │  (Docker or K8s) │          │  • Allowlist      │                        │
 //! │  │  • Create        │◀────────▶│  • Credentials    │                        │
 //! │  │  • Execute       │          │  • Logging        │                        │
 //! │  │  • Cleanup       │          │                   │                        │
@@ -32,8 +45,8 @@
 //! │           │                              │                                   │
 //! │           ▼                              ▼                                   │
 //! │  ┌──────────────────┐          ┌───────────────────┐                        │
-//! │  │     Docker       │          │     Internet      │                        │
-//! │  │                  │          │   (allowed hosts) │                        │
+//! │  │  Docker / K8s    │          │     Internet      │                        │
+//! │  │  API             │          │   (allowed hosts) │                        │
 //! │  └──────────────────┘          └───────────────────┘                        │
 //! └─────────────────────────────────────────────────────────────────────────────┘
 //! ```
@@ -85,21 +98,45 @@
 //! - **Auto-cleanup**: Containers are removed after execution (--rm + explicit cleanup)
 //! - **Timeout enforcement**: Commands are killed after the timeout
 
+pub mod capabilities;
 pub mod config;
+#[cfg(feature = "docker")]
 pub mod container;
+#[cfg(feature = "docker")]
 pub mod detect;
+#[cfg(feature = "docker")]
+pub mod docker;
 pub mod error;
+#[cfg(feature = "kubernetes")]
+pub mod kubernetes;
+#[cfg(feature = "kubernetes")]
+pub mod kubernetes_policy;
 pub mod manager;
 pub mod proxy;
+pub mod runtime;
 
+pub use capabilities::{
+    ConfigDelivery, NetworkIsolation, RuntimeCapabilities, RuntimeStage, WorkspaceDelivery,
+    docker_runtime_capabilities, format_stage_contract_failure, is_capability_contract_violation,
+    kubernetes_runtime_capabilities, kubernetes_runtime_capabilities_with_controls,
+};
 pub use config::{ResourceLimits, SandboxConfig, SandboxPolicy};
+#[cfg(feature = "docker")]
 pub use container::{ContainerOutput, ContainerRunner, connect_docker};
+#[cfg(feature = "docker")]
 pub use detect::{DockerDetection, DockerStatus, Platform, check_docker};
 pub use error::{Result, SandboxError};
+#[cfg(feature = "kubernetes")]
+pub use kubernetes_policy::KubernetesIsolationReadiness;
 pub use manager::{ExecOutput, SandboxManager, SandboxManagerBuilder};
 pub use proxy::{
     CredentialResolver, DefaultPolicyDecider, DomainAllowlist, EnvCredentialResolver, HttpProxy,
     NetworkDecision, NetworkPolicyDecider, NetworkProxyBuilder, NetworkRequest,
+};
+pub use runtime::{
+    ContainerRuntime, ManagedWorkload, RuntimeBackend, RuntimeDetection, RuntimeStatus,
+    VolumeMount, WorkloadCommandMode, WorkloadOutput, WorkloadSpec, connect_runtime,
+    resolve_runtime_backend,
 };
 
 /// Default allowlist getter (re-export for convenience).
