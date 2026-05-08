@@ -226,9 +226,8 @@ async fn resolve_kubernetes_client(
         Err(err) => err,
     };
 
-    match try_platform_secret_resolution(auth).await? {
-        Some(resolved) => return Ok(resolved),
-        None => {}
+    if let Some(resolved) = try_platform_secret_resolution(auth).await? {
+        return Ok(resolved);
     }
 
     match KubeClientConfig::from_kubeconfig(&KubeConfigOptions::default()).await {
@@ -1282,6 +1281,25 @@ users:
         }
     }
 
+    fn set_test_kubernetes_env(kubeconfig: &std::path::Path) -> (EnvGuard, EnvGuard, EnvGuard) {
+        let _guard = lock_env();
+        let kubeconfig_guard = EnvGuard("KUBECONFIG", std::env::var("KUBECONFIG").ok());
+        let service_host_guard = EnvGuard(
+            "KUBERNETES_SERVICE_HOST",
+            std::env::var("KUBERNETES_SERVICE_HOST").ok(),
+        );
+        let service_port_guard = EnvGuard(
+            "KUBERNETES_SERVICE_PORT",
+            std::env::var("KUBERNETES_SERVICE_PORT").ok(),
+        );
+        unsafe {
+            std::env::set_var("KUBECONFIG", kubeconfig);
+            std::env::remove_var("KUBERNETES_SERVICE_HOST");
+            std::env::remove_var("KUBERNETES_SERVICE_PORT");
+        }
+        (kubeconfig_guard, service_host_guard, service_port_guard)
+    }
+
     struct FailingSecretsStore {
         error: SecretError,
     }
@@ -1343,22 +1361,9 @@ users:
 
     #[tokio::test]
     async fn resolver_prefers_platform_secret_before_local_default() {
-        let _guard = lock_env();
         let missing = std::env::temp_dir().join("ironclaw-missing-kubeconfig");
-        let _kubeconfig_guard = EnvGuard("KUBECONFIG", std::env::var("KUBECONFIG").ok());
-        let _service_host_guard = EnvGuard(
-            "KUBERNETES_SERVICE_HOST",
-            std::env::var("KUBERNETES_SERVICE_HOST").ok(),
-        );
-        let _service_port_guard = EnvGuard(
-            "KUBERNETES_SERVICE_PORT",
-            std::env::var("KUBERNETES_SERVICE_PORT").ok(),
-        );
-        unsafe {
-            std::env::set_var("KUBECONFIG", &missing);
-            std::env::remove_var("KUBERNETES_SERVICE_HOST");
-            std::env::remove_var("KUBERNETES_SERVICE_PORT");
-        }
+        let (_kubeconfig_guard, _service_host_guard, _service_port_guard) =
+            set_test_kubernetes_env(&missing);
 
         let store = test_secrets_store();
         store
@@ -1387,22 +1392,9 @@ users:
 
     #[tokio::test]
     async fn resolver_reports_invalid_platform_secret_without_falling_through() {
-        let _guard = lock_env();
         let missing = std::env::temp_dir().join("ironclaw-missing-kubeconfig-invalid");
-        let _kubeconfig_guard = EnvGuard("KUBECONFIG", std::env::var("KUBECONFIG").ok());
-        let _service_host_guard = EnvGuard(
-            "KUBERNETES_SERVICE_HOST",
-            std::env::var("KUBERNETES_SERVICE_HOST").ok(),
-        );
-        let _service_port_guard = EnvGuard(
-            "KUBERNETES_SERVICE_PORT",
-            std::env::var("KUBERNETES_SERVICE_PORT").ok(),
-        );
-        unsafe {
-            std::env::set_var("KUBECONFIG", &missing);
-            std::env::remove_var("KUBERNETES_SERVICE_HOST");
-            std::env::remove_var("KUBERNETES_SERVICE_PORT");
-        }
+        let (_kubeconfig_guard, _service_host_guard, _service_port_guard) =
+            set_test_kubernetes_env(&missing);
 
         let store = test_secrets_store();
         store
@@ -1431,22 +1423,9 @@ users:
 
     #[tokio::test]
     async fn resolver_reports_missing_credential_configuration() {
-        let _guard = lock_env();
         let missing = std::env::temp_dir().join("ironclaw-missing-kubeconfig-none");
-        let _kubeconfig_guard = EnvGuard("KUBECONFIG", std::env::var("KUBECONFIG").ok());
-        let _service_host_guard = EnvGuard(
-            "KUBERNETES_SERVICE_HOST",
-            std::env::var("KUBERNETES_SERVICE_HOST").ok(),
-        );
-        let _service_port_guard = EnvGuard(
-            "KUBERNETES_SERVICE_PORT",
-            std::env::var("KUBERNETES_SERVICE_PORT").ok(),
-        );
-        unsafe {
-            std::env::set_var("KUBECONFIG", &missing);
-            std::env::remove_var("KUBERNETES_SERVICE_HOST");
-            std::env::remove_var("KUBERNETES_SERVICE_PORT");
-        }
+        let (_kubeconfig_guard, _service_host_guard, _service_port_guard) =
+            set_test_kubernetes_env(&missing);
 
         let err = KubernetesRuntime::resolve_with_auth(KubernetesAuthContext::default())
             .await
@@ -1460,23 +1439,10 @@ users:
 
     #[tokio::test]
     async fn resolver_reports_platform_secret_access_failure_without_falling_through() {
-        let _guard = lock_env();
         let local = std::env::temp_dir().join("ironclaw-local-kubeconfig-access");
-        let _kubeconfig_guard = EnvGuard("KUBECONFIG", std::env::var("KUBECONFIG").ok());
-        let _service_host_guard = EnvGuard(
-            "KUBERNETES_SERVICE_HOST",
-            std::env::var("KUBERNETES_SERVICE_HOST").ok(),
-        );
-        let _service_port_guard = EnvGuard(
-            "KUBERNETES_SERVICE_PORT",
-            std::env::var("KUBERNETES_SERVICE_PORT").ok(),
-        );
         std::fs::write(&local, valid_kubeconfig_yaml()).unwrap();
-        unsafe {
-            std::env::set_var("KUBECONFIG", &local);
-            std::env::remove_var("KUBERNETES_SERVICE_HOST");
-            std::env::remove_var("KUBERNETES_SERVICE_PORT");
-        }
+        let (_kubeconfig_guard, _service_host_guard, _service_port_guard) =
+            set_test_kubernetes_env(&local);
 
         let store: Arc<dyn SecretsStore + Send + Sync> = Arc::new(FailingSecretsStore {
             error: SecretError::Database("backend unavailable".to_string()),
@@ -1497,23 +1463,10 @@ users:
 
     #[tokio::test]
     async fn resolver_reports_platform_secret_decryption_failure_without_falling_through() {
-        let _guard = lock_env();
         let local = std::env::temp_dir().join("ironclaw-local-kubeconfig-decryption");
-        let _kubeconfig_guard = EnvGuard("KUBECONFIG", std::env::var("KUBECONFIG").ok());
-        let _service_host_guard = EnvGuard(
-            "KUBERNETES_SERVICE_HOST",
-            std::env::var("KUBERNETES_SERVICE_HOST").ok(),
-        );
-        let _service_port_guard = EnvGuard(
-            "KUBERNETES_SERVICE_PORT",
-            std::env::var("KUBERNETES_SERVICE_PORT").ok(),
-        );
         std::fs::write(&local, valid_kubeconfig_yaml()).unwrap();
-        unsafe {
-            std::env::set_var("KUBECONFIG", &local);
-            std::env::remove_var("KUBERNETES_SERVICE_HOST");
-            std::env::remove_var("KUBERNETES_SERVICE_PORT");
-        }
+        let (_kubeconfig_guard, _service_host_guard, _service_port_guard) =
+            set_test_kubernetes_env(&local);
 
         let store: Arc<dyn SecretsStore + Send + Sync> = Arc::new(FailingSecretsStore {
             error: SecretError::DecryptionFailed("wrong key".to_string()),

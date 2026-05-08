@@ -372,6 +372,26 @@ mod tests {
     }
 
     #[cfg(feature = "kubernetes")]
+    fn set_test_kubernetes_env(kubeconfig: &std::path::Path) -> (EnvGuard, EnvGuard, EnvGuard) {
+        let _guard = crate::config::helpers::lock_env();
+        let kubeconfig_guard = EnvGuard("KUBECONFIG", std::env::var("KUBECONFIG").ok());
+        let service_host_guard = EnvGuard(
+            "KUBERNETES_SERVICE_HOST",
+            std::env::var("KUBERNETES_SERVICE_HOST").ok(),
+        );
+        let service_port_guard = EnvGuard(
+            "KUBERNETES_SERVICE_PORT",
+            std::env::var("KUBERNETES_SERVICE_PORT").ok(),
+        );
+        unsafe {
+            std::env::set_var("KUBECONFIG", kubeconfig);
+            std::env::remove_var("KUBERNETES_SERVICE_HOST");
+            std::env::remove_var("KUBERNETES_SERVICE_PORT");
+        }
+        (kubeconfig_guard, service_host_guard, service_port_guard)
+    }
+
+    #[cfg(feature = "kubernetes")]
     fn valid_kubeconfig_yaml() -> &'static str {
         r#"
 apiVersion: v1
@@ -399,22 +419,9 @@ users:
     #[cfg(feature = "kubernetes")]
     #[tokio::test]
     async fn admin_provisioned_kubeconfig_is_visible_to_runtime_resolver() {
-        let _guard = crate::config::helpers::lock_env();
         let missing = std::env::temp_dir().join("ironclaw-missing-admin-kubeconfig");
-        let _kubeconfig_guard = EnvGuard("KUBECONFIG", std::env::var("KUBECONFIG").ok());
-        let _service_host_guard = EnvGuard(
-            "KUBERNETES_SERVICE_HOST",
-            std::env::var("KUBERNETES_SERVICE_HOST").ok(),
-        );
-        let _service_port_guard = EnvGuard(
-            "KUBERNETES_SERVICE_PORT",
-            std::env::var("KUBERNETES_SERVICE_PORT").ok(),
-        );
-        unsafe {
-            std::env::set_var("KUBECONFIG", &missing);
-            std::env::remove_var("KUBERNETES_SERVICE_HOST");
-            std::env::remove_var("KUBERNETES_SERVICE_PORT");
-        }
+        let (_kubeconfig_guard, _service_host_guard, _service_port_guard) =
+            set_test_kubernetes_env(&missing);
 
         let secrets = test_secrets_store();
         let (state, _tmp) = test_gateway_state_with_store(Arc::clone(&secrets)).await;

@@ -1132,6 +1132,11 @@ mod tests {
         }
     }
 
+    fn with_locked_env<T>(setup: impl FnOnce() -> T) -> T {
+        let _guard = crate::config::helpers::lock_env();
+        setup()
+    }
+
     #[test]
     fn check_binary_finds_sh() {
         match check_binary("sh", &["-c", "echo ok"]) {
@@ -1482,8 +1487,8 @@ k8s_namespace = "doctor-test"
     #[cfg(feature = "docker")]
     #[tokio::test]
     async fn check_docker_daemon_reports_runtime_resolution_errors() {
-        let _guard = crate::config::helpers::lock_env();
-        let _container_runtime = EnvGuard::set("CONTAINER_RUNTIME", "not-a-runtime");
+        let _container_runtime =
+            with_locked_env(|| EnvGuard::set("CONTAINER_RUNTIME", "not-a-runtime"));
 
         match check_docker_daemon(&Settings::default()).await {
             CheckResult::Fail(msg) => {
@@ -1527,13 +1532,16 @@ k8s_namespace = "doctor-test"
     #[tokio::test]
     async fn load_kubernetes_context_for_doctor_records_platform_lookup_error_when_secrets_store_cannot_open()
      {
-        let _guard = crate::config::helpers::lock_env();
-        let _master_key = EnvGuard::set(
-            "SECRETS_MASTER_KEY",
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        );
-        let _database_backend = EnvGuard::set("DATABASE_BACKEND", "postgres");
-        let _database_url = EnvGuard::set("DATABASE_URL", "not-a-url");
+        let (_master_key, _database_backend, _database_url) = with_locked_env(|| {
+            (
+                EnvGuard::set(
+                    "SECRETS_MASTER_KEY",
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                ),
+                EnvGuard::set("DATABASE_BACKEND", "postgres"),
+                EnvGuard::set("DATABASE_URL", "not-a-url"),
+            )
+        });
 
         match load_kubernetes_context_for_doctor().await {
             DoctorKubernetesContextLoad::Ready(ctx) => {
@@ -1583,23 +1591,35 @@ users:
     #[cfg(feature = "kubernetes")]
     #[tokio::test]
     async fn check_kubernetes_cluster_ignores_unrelated_bootstrap_errors_for_platform_context() {
-        let _guard = crate::config::helpers::lock_env();
         let dir = tempdir().expect("tempdir");
         let kubeconfig_path = dir.path().join("config");
         let db_path = dir.path().join("ironclaw-doctor.db");
         std::fs::write(&kubeconfig_path, valid_kubeconfig_yaml()).expect("write kubeconfig");
 
-        let _container_runtime = EnvGuard::clear("CONTAINER_RUNTIME");
-        let _embedding_cache_size = EnvGuard::set("EMBEDDING_CACHE_SIZE", "0");
-        let _master_key = EnvGuard::set(
-            "SECRETS_MASTER_KEY",
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        );
-        let _database_backend = EnvGuard::set("DATABASE_BACKEND", "libsql");
-        let _libsql_path = EnvGuard::set("LIBSQL_PATH", db_path.to_string_lossy().as_ref());
-        let _kubeconfig = EnvGuard::set("KUBECONFIG", kubeconfig_path.to_string_lossy().as_ref());
-        let _service_host = EnvGuard::clear("KUBERNETES_SERVICE_HOST");
-        let _service_port = EnvGuard::clear("KUBERNETES_SERVICE_PORT");
+        let (
+            _container_runtime,
+            _embedding_cache_size,
+            _master_key,
+            _database_backend,
+            _libsql_path,
+            _kubeconfig,
+            _service_host,
+            _service_port,
+        ) = with_locked_env(|| {
+            (
+                EnvGuard::clear("CONTAINER_RUNTIME"),
+                EnvGuard::set("EMBEDDING_CACHE_SIZE", "0"),
+                EnvGuard::set(
+                    "SECRETS_MASTER_KEY",
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                ),
+                EnvGuard::set("DATABASE_BACKEND", "libsql"),
+                EnvGuard::set("LIBSQL_PATH", db_path.to_string_lossy().as_ref()),
+                EnvGuard::set("KUBECONFIG", kubeconfig_path.to_string_lossy().as_ref()),
+                EnvGuard::clear("KUBERNETES_SERVICE_HOST"),
+                EnvGuard::clear("KUBERNETES_SERVICE_PORT"),
+            )
+        });
 
         let result = check_kubernetes_cluster(&kubernetes_test_settings()).await;
 
@@ -1625,21 +1645,32 @@ users:
     #[tokio::test]
     async fn check_kubernetes_cluster_falls_back_to_local_kubeconfig_when_platform_store_is_unavailable()
      {
-        let _guard = crate::config::helpers::lock_env();
         let dir = tempdir().expect("tempdir");
         let kubeconfig_path = dir.path().join("config");
         std::fs::write(&kubeconfig_path, valid_kubeconfig_yaml()).expect("write kubeconfig");
 
-        let _container_runtime = EnvGuard::clear("CONTAINER_RUNTIME");
-        let _master_key = EnvGuard::set(
-            "SECRETS_MASTER_KEY",
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        );
-        let _database_backend = EnvGuard::set("DATABASE_BACKEND", "postgres");
-        let _database_url = EnvGuard::set("DATABASE_URL", "not-a-url");
-        let _kubeconfig = EnvGuard::set("KUBECONFIG", kubeconfig_path.to_string_lossy().as_ref());
-        let _service_host = EnvGuard::clear("KUBERNETES_SERVICE_HOST");
-        let _service_port = EnvGuard::clear("KUBERNETES_SERVICE_PORT");
+        let (
+            _container_runtime,
+            _master_key,
+            _database_backend,
+            _database_url,
+            _kubeconfig,
+            _service_host,
+            _service_port,
+        ) = with_locked_env(|| {
+            (
+                EnvGuard::clear("CONTAINER_RUNTIME"),
+                EnvGuard::set(
+                    "SECRETS_MASTER_KEY",
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                ),
+                EnvGuard::set("DATABASE_BACKEND", "postgres"),
+                EnvGuard::set("DATABASE_URL", "not-a-url"),
+                EnvGuard::set("KUBECONFIG", kubeconfig_path.to_string_lossy().as_ref()),
+                EnvGuard::clear("KUBERNETES_SERVICE_HOST"),
+                EnvGuard::clear("KUBERNETES_SERVICE_PORT"),
+            )
+        });
 
         let result = check_kubernetes_cluster(&kubernetes_test_settings()).await;
 
@@ -1668,8 +1699,8 @@ users:
     #[cfg(feature = "kubernetes")]
     #[tokio::test]
     async fn check_kubernetes_cluster_reports_invalid_sandbox_config() {
-        let _guard = crate::config::helpers::lock_env();
-        let _reaper_interval = EnvGuard::set("SANDBOX_REAPER_INTERVAL_SECS", "0");
+        let _reaper_interval =
+            with_locked_env(|| EnvGuard::set("SANDBOX_REAPER_INTERVAL_SECS", "0"));
 
         match check_kubernetes_cluster(&kubernetes_test_settings()).await {
             CheckResult::Fail(msg) => {
