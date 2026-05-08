@@ -733,6 +733,7 @@ impl LlmProvider for CodexChatGptProvider {
                     name: tc.name,
                     arguments: args,
                     reasoning: None,
+                    signature: None,
                 }
             })
             .collect();
@@ -755,6 +756,7 @@ impl LlmProvider for CodexChatGptProvider {
             finish_reason,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            reasoning: None,
         })
     }
 }
@@ -827,6 +829,7 @@ mod tests {
             name: "search".to_string(),
             arguments: json!({"query": "rust"}),
             reasoning: None,
+            signature: None,
         };
         let msg = ChatMessage::assistant_with_tool_calls(Some("thinking...".into()), vec![tc]);
         let items = CodexChatGptProvider::message_to_input_items(&msg);

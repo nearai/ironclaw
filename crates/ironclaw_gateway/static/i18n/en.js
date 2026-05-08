@@ -29,6 +29,9 @@ I18n.register('en', {
   'restart.progressSubtitle': 'Please wait for the process to restart...',
   'restart.checkLogs': 'Check the Logs tab for details after restart completes.',
   'restart.closeTooltip': 'Close',
+  'restart.timedOut': 'Restart is taking longer than expected. The server may not have come back online yet — refresh the page once the connection indicator turns green.',
+  'restart.refreshPage': 'Refresh page',
+  'restart.dismiss': 'Dismiss',
   
   // Theme
   'theme.tooltipDark': 'Theme: Dark (click for Light)',
@@ -105,7 +108,9 @@ I18n.register('en', {
   'status.restartTooltip': 'Gracefully restart the process',
   'status.active': 'Active',
   'status.installed': 'Installed',
+  'status.configured': 'Configured',
   'status.awaitingPairing': 'Awaiting Pairing',
+  'status.pairingShort': 'Pairing',
   
   // Dashboard
   'dashboard.connections': 'Connections',
@@ -322,16 +327,16 @@ I18n.register('en', {
   'time.daysFromNow': 'in {n}d',
   
   // Tool Approval
-  'approval.title': 'Tool requires approval',
-  'approval.description': 'A tool is requesting permission to run.',
+  'approval.title': 'Approve tool call',
+  'approval.description': 'The agent wants to run this tool. Approve to continue, or deny to stop here.',
   'approval.approve': 'Approve',
   'approval.deny': 'Deny',
-  'approval.always': 'Always',
+  'approval.always': 'Always allow',
   'approval.approved': 'Approved',
   'approval.alwaysApproved': 'Always approved',
   'approval.denied': 'Denied',
-  'approval.showParams': 'Show parameters',
-  'approval.hideParams': 'Hide parameters',
+  'approval.showParams': 'Show full parameters',
+  'approval.hideParams': 'Hide full parameters',
   
   // Authentication Required
   'authRequired.title': 'Authentication required for {name}',
@@ -499,6 +504,30 @@ I18n.register('en', {
 
   // Configure
   'config.title': 'Configure {name}',
+  'config.telegramOwnerHint': 'After saving, IronClaw will show a one-time code. Send `/start CODE` to your bot in Telegram and IronClaw will finish setup automatically.',
+  'config.telegramChallengeTitle': 'Telegram owner verification',
+  'config.telegramOwnerWaiting': 'Waiting for Telegram owner verification...',
+  'config.telegramCommandLabel': 'Send this in Telegram:',
+  'config.telegramStartOver': 'Start over',
+  'config.telegramStartOverHint': 'Telegram verification did not complete. Click Start over to generate a new code and try again.',
+  'config.telegramOpenBot': 'Open bot in Telegram',
+  'config.wechatHint': 'Open the WeChat QR page in a new tab, then scan and confirm in WeChat.',
+  'config.wechatConnect': 'Open QR Page',
+  'config.wechatWaiting': 'Waiting for scan...',
+  'config.wechatPreparingQr': 'Preparing WeChat QR page...',
+  'config.wechatQrTitle': 'Open WeChat QR Page',
+  'config.wechatQrOpen': 'Open QR Page',
+  'config.wechatQrIntro': 'The QR flow opens in a separate tab.',
+  'config.wechatQrReady': 'QR page is ready. Open it in a new tab, then scan and confirm in WeChat.',
+  'config.wechatQrWaiting': 'Preparing the WeChat QR page...',
+  'config.wechatQrScanned': 'QR scanned. Confirm the login in WeChat.',
+  'config.wechatQrRefreshed': 'QR page refreshed.',
+  'config.wechatQrRefreshedHint': 'The previous QR page expired. Open the new page and scan again.',
+  'config.wechatConnected': 'WeChat connected.',
+  'config.wechatQrFailed': 'WeChat connection failed.',
+  'config.interactiveLoginStartFailed': 'Failed to start interactive login',
+  'config.interactiveLoginFailed': 'Interactive login failed',
+  'config.connectedSuccess': '{name} connected successfully',
   'config.optional': ' (optional)',
   'config.alreadySet': '(already set — leave empty to keep)',
   'config.alreadyConfigured': 'Already configured',

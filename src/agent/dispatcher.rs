@@ -47,6 +47,19 @@ fn resolve_settings_temperature(
         .map(|t| (t as f32).clamp(0.0, 2.0))
 }
 
+fn chat_job_context(
+    message: &IncomingMessage,
+    thread_id: Uuid,
+    user_tz: chrono_tz::Tz,
+) -> JobContext {
+    let mut job_ctx = JobContext::with_user(&message.user_id, "chat", "Interactive chat session")
+        .with_requester_id(&message.sender_id);
+    job_ctx.conversation_id = Some(thread_id);
+    job_ctx.user_timezone = user_tz.name().to_string();
+    job_ctx.metadata = crate::agent::agent_loop::chat_tool_execution_metadata(message);
+    job_ctx
+}
+
 /// Result of the agentic loop execution.
 pub(super) enum AgenticLoopResult {
     /// Completed with a response.
@@ -247,12 +260,8 @@ impl Agent {
         }
 
         // Create a JobContext for tool execution (chat doesn't have a real job)
-        let mut job_ctx =
-            JobContext::with_user(&message.user_id, "chat", "Interactive chat session")
-                .with_requester_id(&message.sender_id);
+        let mut job_ctx = chat_job_context(message, thread_id, user_tz);
         job_ctx.http_interceptor = self.deps.http_interceptor.clone();
-        job_ctx.user_timezone = user_tz.name().to_string();
-        job_ctx.metadata = crate::agent::agent_loop::chat_tool_execution_metadata(message);
 
         // Build system prompts once for this turn. Two variants: with tools
         // (normal iterations) and without (force_text final iteration).
@@ -485,7 +494,6 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             self.tenant.user_id(),
             admin_policy,
         );
-
         // Apply per-user tool permission filtering.
         //
         // Load tool_permissions from the per-user DB settings store (same
@@ -550,7 +558,6 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 sess.auto_approve_tool(name);
             }
         }
-
         // Update context for this iteration
         reason_ctx.available_tools = tool_defs;
         // Preserve force_text if already set (e.g. by truncation escalation).
@@ -757,6 +764,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         tool_calls: Vec<crate::llm::ToolCall>,
         content: Option<String>,
         reason_ctx: &mut ReasoningContext,
+        reasoning: Option<String>,
     ) -> Result<Option<LoopOutcome>, Error> {
         // Extract and sanitize the narrative before consuming `content`.
         let narrative = content
@@ -773,12 +781,12 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
 
         // Add the assistant message with tool_calls to context.
         // OpenAI protocol requires this before tool-result messages.
-        reason_ctx
-            .messages
-            .push(ChatMessage::assistant_with_tool_calls(
-                content,
-                tool_calls.clone(),
-            ));
+        // Carry reasoning so the next request can echo it back — required for
+        // DeepSeek thinking-mode and Gemini 2.5+ to validate the chain (#3201, #3225).
+        reason_ctx.messages.push(
+            ChatMessage::assistant_with_tool_calls(content, tool_calls.clone())
+                .with_reasoning(reasoning),
+        );
 
         // Execute tools and add results to context
         let _ = self
@@ -1781,23 +1789,12 @@ fn image_generation_summary_tool_message(
     sentinel: &GeneratedImageSentinel,
 ) -> ChatMessage {
     let media_type = sentinel.media_type().unwrap_or("image");
-    let path = sentinel.path();
-    let summary = if let Some(path) = path {
-        serde_json::json!({
-            "type": "image_generated",
-            "status": "ok",
-            "media_type": media_type,
-            "path": path,
-        })
-        .to_string()
-    } else {
-        serde_json::json!({
-            "type": "image_generated",
-            "status": "ok",
-            "media_type": media_type,
-        })
-        .to_string()
-    };
+    let summary = serde_json::json!({
+        "type": "image_generated",
+        "status": "ok",
+        "media_type": media_type,
+    })
+    .to_string();
     let sanitized = safety.sanitize_tool_output(tool_name, &summary);
     let content = safety.wrap_for_llm(tool_name, &sanitized.content);
     ChatMessage::tool_result(tool_call_id, tool_name, content)
@@ -1818,7 +1815,7 @@ mod tests {
     use crate::agent::agent_loop::{Agent, AgentDeps};
     use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
     use crate::agent::session::Session;
-    use crate::channels::ChannelManager;
+    use crate::channels::{ChannelManager, IncomingMessage};
     use crate::config::{AgentConfig, SafetyConfig, SkillsConfig};
     use crate::context::{ContextManager, JobContext};
     use crate::error::Error;
@@ -1829,6 +1826,7 @@ mod tests {
     };
     use crate::tools::{ApprovalRequirement, Tool, ToolError, ToolOutput, ToolRegistry};
     use ironclaw_safety::SafetyLayer;
+    use uuid::Uuid;
 
     use super::{
         capture_auth_prompt, check_auth_required, extract_auth_prompt, parse_auth_result,
@@ -1878,6 +1876,7 @@ mod tests {
                 finish_reason: FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
     }
@@ -1920,6 +1919,7 @@ mod tests {
                 finish_reason: FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
     }
@@ -1963,6 +1963,7 @@ mod tests {
                     finish_reason: FinishReason::Stop,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
+                    reasoning: None,
                 });
             }
 
@@ -1974,12 +1975,14 @@ mod tests {
                         name: "tool_activate".to_string(),
                         arguments: serde_json::json!({}),
                         reasoning: None,
+                        signature: None,
                     },
                     ToolCall {
                         id: crate::llm::generate_tool_call_id(0, 1),
                         name: "approval_tool".to_string(),
                         arguments: serde_json::json!({"target": "danger"}),
                         reasoning: None,
+                        signature: None,
                     },
                 ],
                 input_tokens: 0,
@@ -1987,6 +1990,7 @@ mod tests {
                 finish_reason: FinishReason::ToolUse,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
     }
@@ -2324,12 +2328,14 @@ mod tests {
                     name: "http".to_string(),
                     arguments: serde_json::json!({"url": "https://example.com"}),
                     reasoning: None,
+                    signature: None,
                 },
                 ToolCall {
                     id: "call_3".to_string(),
                     name: "echo".to_string(),
                     arguments: serde_json::json!({"message": "done"}),
                     reasoning: None,
+                    signature: None,
                 },
             ],
             selected_auth_prompt: Some(crate::agent::session::PendingAuthPrompt::new(
@@ -2743,6 +2749,17 @@ mod tests {
         assert!(check_auth_required("tool_activate", &result).is_none());
     }
 
+    #[test]
+    fn test_chat_job_context_includes_thread_id_for_sse_scoped_tools() {
+        let thread_id = Uuid::new_v4();
+        let message = IncomingMessage::new("web", "test-user", "/plan Ship it");
+
+        let job_ctx = super::chat_job_context(&message, thread_id, chrono_tz::UTC);
+
+        assert_eq!(job_ctx.conversation_id, Some(thread_id));
+        assert_eq!(job_ctx.user_timezone, "UTC");
+    }
+
     #[tokio::test]
     async fn test_execute_chat_tool_standalone_success() {
         use crate::config::SafetyConfig;
@@ -2822,6 +2839,7 @@ mod tests {
                     name: "echo".to_string(),
                     arguments: serde_json::json!({"message": "hi"}),
                     reasoning: None,
+                    signature: None,
                 }],
             ),
             ChatMessage::tool_result("call_1", "echo", "hi"),
@@ -2915,12 +2933,14 @@ mod tests {
                         name: "http".to_string(),
                         arguments: serde_json::json!({}),
                         reasoning: None,
+                        signature: None,
                     },
                     ToolCall {
                         id: "c2".to_string(),
                         name: "echo".to_string(),
                         arguments: serde_json::json!({}),
                         reasoning: None,
+                        signature: None,
                     },
                 ],
             ),
@@ -2955,6 +2975,7 @@ mod tests {
                     name: "echo".to_string(),
                     arguments: serde_json::json!({}),
                     reasoning: None,
+                    signature: None,
                 }],
             ),
             ChatMessage::tool_result("c1", "echo", "done"),
@@ -3076,6 +3097,7 @@ mod tests {
                     finish_reason: FinishReason::Stop,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
+                    reasoning: None,
                 });
             }
             // Tools available: always call one.
@@ -3086,12 +3108,14 @@ mod tests {
                     name: "echo".to_string(),
                     arguments: serde_json::json!({"message": "looping"}),
                     reasoning: None,
+                    signature: None,
                 }],
                 input_tokens: 0,
                 output_tokens: 5,
                 finish_reason: FinishReason::ToolUse,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
     }
@@ -3285,6 +3309,7 @@ mod tests {
                     finish_reason: FinishReason::Stop,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
+                    reasoning: None,
                 });
             }
             // Always call a tool that does not exist in the registry.
@@ -3295,12 +3320,14 @@ mod tests {
                     name: "nonexistent_tool".to_string(),
                     arguments: serde_json::json!({}),
                     reasoning: None,
+                    signature: None,
                 }],
                 input_tokens: 0,
                 output_tokens: 5,
                 finish_reason: FinishReason::ToolUse,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
     }
@@ -3351,6 +3378,7 @@ mod tests {
                 finish_reason: FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
     }

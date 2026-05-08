@@ -653,6 +653,7 @@ impl LlmProvider for NearAiChatProvider {
                     name: tc.function.name,
                     arguments,
                     reasoning: None,
+                    signature: None,
                 }
             })
             .collect();
@@ -693,6 +694,7 @@ impl LlmProvider for NearAiChatProvider {
             output_tokens,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            reasoning: None,
         })
     }
 
@@ -1357,12 +1359,14 @@ mod tests {
                 name: "list_issues".to_string(),
                 arguments: serde_json::json!({"owner": "foo", "repo": "bar"}),
                 reasoning: None,
+                signature: None,
             },
             ToolCall {
                 id: "call_2".to_string(),
                 name: "search".to_string(),
                 arguments: serde_json::json!({"query": "test"}),
                 reasoning: None,
+                signature: None,
             },
         ];
 
@@ -1476,6 +1480,7 @@ mod tests {
             name: "test".to_string(),
             arguments: serde_json::json!({"key": "value"}),
             reasoning: None,
+            signature: None,
         };
         let msg = ChatMessage::assistant_with_tool_calls(None, vec![tc]);
         let chat_msg: ChatCompletionMessage = msg.into();
@@ -1727,6 +1732,7 @@ mod tests {
                     name: tc.function.name,
                     arguments,
                     reasoning: None,
+                    signature: None,
                 }
             })
             .collect();
@@ -1784,6 +1790,7 @@ mod tests {
                     name: tc.function.name,
                     arguments,
                     reasoning: None,
+                    signature: None,
                 }
             })
             .collect();
@@ -1884,6 +1891,7 @@ mod tests {
                     name: tc.function.name,
                     arguments,
                     reasoning: None,
+                    signature: None,
                 }
             })
             .collect();
@@ -2703,6 +2711,7 @@ mod tests {
                 name: "test".to_string(),
                 arguments: serde_json::json!({}),
                 reasoning: None,
+                signature: None,
             }],
         );
         let chat_msg: ChatCompletionMessage = msg.into();

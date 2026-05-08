@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.0](https://github.com/nearai/ironclaw/compare/ironclaw-v0.27.0...ironclaw-v0.28.0) - 2026-05-07
+
+### Added
+
+- *(reborn)* land the reborn-integration substrate on `main`, introducing host foundation crates, capability host, runtime dispatcher, process lifecycle, filesystem, secrets, network, and extension manifest registry boundaries
+- *(reborn)* add WIT-compatible WASM tool runtime ([#3097](https://github.com/nearai/ironclaw/pull/3097))
+- *(reborn)* add host runtime contract facade and services graph ([#3095](https://github.com/nearai/ironclaw/pull/3095), [#3126](https://github.com/nearai/ironclaw/pull/3126))
+- *(reborn)* add memory document storage boundary and search/plugin seams ([#3078](https://github.com/nearai/ironclaw/pull/3078), [#3079](https://github.com/nearai/ironclaw/pull/3079))
+- *(reborn)* add prompt write safety policy ([#3167](https://github.com/nearai/ironclaw/pull/3167))
+- *(reborn)* route WASM and MCP HTTP through shared egress ([#3123](https://github.com/nearai/ironclaw/pull/3123), [#3142](https://github.com/nearai/ironclaw/pull/3142))
+- *(reborn)* add host-controlled trust-class policy engine ([#3043](https://github.com/nearai/ironclaw/pull/3043))
+- *(channels)* add WeChat channel ([#1666](https://github.com/nearai/ironclaw/pull/1666))
+- *(channels)* add multi-tenant relay channel with per-user identity resolution ([#3253](https://github.com/nearai/ironclaw/pull/3253))
+- *(llm)* enable thinking for Ollama via default additional params ([#2372](https://github.com/nearai/ironclaw/pull/2372))
+
+### Fixed
+
+- *(llm)* route DeepSeek, Gemini, and OpenRouter through dedicated rig-core clients ([#3326](https://github.com/nearai/ironclaw/pull/3326))
+- *(config)* keep startup LLM fallback in-memory only ([#3324](https://github.com/nearai/ironclaw/pull/3324))
+- *(engine)* inline gate await for Tier 0 and Tier 1 Approval gates ([#3157](https://github.com/nearai/ironclaw/pull/3157))
+- *(engine,web)* suppress restart-recovery noise on Projects tab; retry empty hydration on SSE open ([#3328](https://github.com/nearai/ironclaw/pull/3328))
+- *(bridge)* coerce engine action params per schema ([#3197](https://github.com/nearai/ironclaw/pull/3197))
+- *(bridge)* `mission_*` tools accept name; resolves #2583 ([#3155](https://github.com/nearai/ironclaw/pull/3155))
+- *(libsql)* parse scientific notation cost aggregates ([#3297](https://github.com/nearai/ironclaw/pull/3297))
+- *(reborn)* harden capability approval lifecycle ([#3111](https://github.com/nearai/ironclaw/pull/3111))
+- *(reborn)* harden edge-case contracts and runtime network policy handoff ([#3165](https://github.com/nearai/ironclaw/pull/3165))
+
+### Changed
+
+- *(common)* clarify crate-level doc wording and align package description ([#3370](https://github.com/nearai/ironclaw/pull/3370), [#3372](https://github.com/nearai/ironclaw/pull/3372))
+
+### CI / Release
+
+- cut over workflows for main merge queue ([#3104](https://github.com/nearai/ironclaw/pull/3104))
+- build ironclaw docker image with staging tag from main branch ([#3301](https://github.com/nearai/ironclaw/pull/3301))
+- *(release)* bump cargo-dist to 0.31.0 to fix installer ([#3172](https://github.com/nearai/ironclaw/pull/3172))
+- add deterministic nightly deep checks and full browser suite nightly ([#3261](https://github.com/nearai/ironclaw/pull/3261), [#3262](https://github.com/nearai/ironclaw/pull/3262))
+- add nightly failure issue alerts ([#3293](https://github.com/nearai/ironclaw/pull/3293))
+
+### Docs
+
+- refresh feature parity against OpenClaw 2026.3.11–2026.4.30 ([#3310](https://github.com/nearai/ironclaw/pull/3310))
+- promote database and configuration pages from drafts to live; fix wrong defaults; expand variable reference
+
+### Tests
+
+- *(reborn)* add phase 1 integration coverage, host runtime vertical gates, and CapabilityHost integration coverage
+- *(e2e)* add dedicated reborn e2e gate and stabilize coverage suite
+
 ## [0.27.0](https://github.com/nearai/ironclaw/compare/ironclaw-v0.26.0...ironclaw-v0.27.0) - 2026-04-29
 
 ### Added

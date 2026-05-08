@@ -1,0 +1,46 @@
+name: Nightly E2E
+
+# Scheduled wrapper around the reusable E2E workflow. Keep alerting here rather
+# than inside e2e.yml so callers like Run Tests can reference e2e.yml without
+# inheriting schedule-only issue-writing permissions.
+on:
+  schedule:
+    - cron: "0 3 * * *" # Nightly full E2E at 03:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-e2e-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  e2e:
+    name: Full E2E
+    uses: ./.github/workflows/e2e.yml
+    with:
+      ref: ${{ github.sha }}
+      mode: full
+
+  nightly-alert:
+    name: Nightly E2E Alert
+    runs-on: ubuntu-latest
+    if: always() && github.event_name == 'schedule'
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    needs: [e2e]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Report nightly E2E result
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ALERT_WORKFLOW_NAME: Nightly E2E
+          ALERT_ISSUE_TITLE: Nightly E2E failed
+          ALERT_RESULT: ${{ needs.e2e.result }}
+        run: .github/scripts/nightly-alert-issue.sh

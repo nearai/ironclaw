@@ -127,6 +127,7 @@ pub trait LoopDelegate: Send + Sync {
         tool_calls: Vec<crate::llm::ToolCall>,
         content: Option<String>,
         reason_ctx: &mut ReasoningContext,
+        reasoning: Option<String>,
     ) -> Result<Option<LoopOutcome>, Error>;
 
     /// Called when the LLM expresses tool intent without actually calling a tool.
@@ -253,6 +254,7 @@ pub async fn run_agentic_loop(
             RespondResult::ToolCalls {
                 tool_calls,
                 content,
+                reasoning: _,
             } => {
                 let names: Vec<&str> = tool_calls.iter().map(|tc| tc.name.as_str()).collect();
                 tracing::debug!(
@@ -307,6 +309,7 @@ pub async fn run_agentic_loop(
             RespondResult::ToolCalls {
                 tool_calls,
                 content,
+                reasoning,
             } => {
                 // If the response was truncated, tool call parameters are likely
                 // incomplete. Discard them and tell the LLM to try a different
@@ -345,7 +348,7 @@ pub async fn run_agentic_loop(
                 reason_ctx.last_tool_batch_all_failed = false;
 
                 if let Some(outcome) = delegate
-                    .execute_tool_calls(tool_calls, content, reason_ctx)
+                    .execute_tool_calls(tool_calls, content, reason_ctx, reasoning)
                     .await?
                 {
                     return Ok(outcome);
@@ -434,6 +437,7 @@ mod tests {
             result: RespondResult::ToolCalls {
                 tool_calls: calls,
                 content: None,
+                reasoning: None,
             },
             usage: zero_usage(),
             finish_reason: FinishReason::ToolUse,
@@ -529,6 +533,7 @@ mod tests {
             _tool_calls: Vec<ToolCall>,
             _content: Option<String>,
             reason_ctx: &mut ReasoningContext,
+            _reasoning: Option<String>,
         ) -> Result<Option<LoopOutcome>, crate::error::Error> {
             self.tool_exec_count.fetch_add(1, Ordering::SeqCst);
             reason_ctx
@@ -577,6 +582,7 @@ mod tests {
             name: "echo".to_string(),
             arguments: serde_json::json!({}),
             reasoning: None,
+            signature: None,
         };
         let delegate = MockDelegate::new(vec![
             tool_calls_output(vec![tool_call]),
@@ -688,6 +694,7 @@ mod tests {
                 _: Vec<ToolCall>,
                 _: Option<String>,
                 _: &mut ReasoningContext,
+                _: Option<String>,
             ) -> Result<Option<LoopOutcome>, crate::error::Error> {
                 Ok(None)
             }
@@ -748,6 +755,7 @@ mod tests {
                 _: Vec<ToolCall>,
                 _: Option<String>,
                 _: &mut ReasoningContext,
+                _: Option<String>,
             ) -> Result<Option<LoopOutcome>, crate::error::Error> {
                 Ok(None)
             }
@@ -866,11 +874,13 @@ mod tests {
             name: "memory_write".to_string(),
             arguments: serde_json::json!({}), // empty — truncated
             reasoning: None,
+            signature: None,
         };
         let truncated_output = RespondOutput {
             result: RespondResult::ToolCalls {
                 tool_calls: vec![truncated_tool_call],
                 content: Some("I'll write the report.".to_string()),
+                reasoning: None,
             },
             usage: zero_usage(),
             finish_reason: FinishReason::Length, // response was truncated
@@ -918,8 +928,10 @@ mod tests {
                     name: "memory_write".to_string(),
                     arguments: serde_json::json!({}),
                     reasoning: None,
+                    signature: None,
                 }],
                 content: None,
+                reasoning: None,
             },
             usage: zero_usage(),
             finish_reason: FinishReason::Length,
@@ -962,6 +974,7 @@ mod tests {
             name: "echo".into(),
             arguments: serde_json::json!({"msg": "hi"}),
             reasoning: None,
+            signature: None,
         }];
         let fp = DuplicateToolCallTracker::fingerprint(&calls);
         // Tool succeeded — count stays at 0
@@ -977,6 +990,7 @@ mod tests {
             name: "http_get".into(),
             arguments: serde_json::json!({"url": "https://example.com"}),
             reasoning: None,
+            signature: None,
         }];
         let fp = DuplicateToolCallTracker::fingerprint(&calls);
         assert_eq!(tracker.record_with_fingerprint(fp, true), 1);
@@ -992,6 +1006,7 @@ mod tests {
             name: "http_get".into(),
             arguments: serde_json::json!({"url": "https://example.com"}),
             reasoning: None,
+            signature: None,
         }];
         let fp = DuplicateToolCallTracker::fingerprint(&calls);
         assert_eq!(tracker.record_with_fingerprint(fp, true), 1);
@@ -1010,12 +1025,14 @@ mod tests {
             name: "http_get".into(),
             arguments: serde_json::json!({"url": "https://a.com"}),
             reasoning: None,
+            signature: None,
         }];
         let calls_b = vec![ToolCall {
             id: "c1".into(),
             name: "http_get".into(),
             arguments: serde_json::json!({"url": "https://b.com"}),
             reasoning: None,
+            signature: None,
         }];
         let fp_a = DuplicateToolCallTracker::fingerprint(&calls_a);
         let fp_b = DuplicateToolCallTracker::fingerprint(&calls_b);
@@ -1033,12 +1050,14 @@ mod tests {
             name: "echo".into(),
             arguments: serde_json::json!({"a": 1, "b": 2}),
             reasoning: None,
+            signature: None,
         }];
         let calls_b = vec![ToolCall {
             id: "c1".into(),
             name: "echo".into(),
             arguments: serde_json::json!({"b": 2, "a": 1}),
             reasoning: None,
+            signature: None,
         }];
         assert_eq!(
             DuplicateToolCallTracker::fingerprint(&calls_a),
@@ -1055,6 +1074,7 @@ mod tests {
             name: "http_get".to_string(),
             arguments: serde_json::json!({"url": "https://broken.example.com"}),
             reasoning: None,
+            signature: None,
         };
         // 3 identical failing tool calls, then text response
         let mut delegate = MockDelegate::new(vec![
@@ -1103,6 +1123,7 @@ mod tests {
             name: "http_get".to_string(),
             arguments: serde_json::json!({"url": "https://broken.example.com"}),
             reasoning: None,
+            signature: None,
         };
         // 5 identical failing tool calls, then text response
         let mut delegate = MockDelegate::new(vec![
@@ -1140,6 +1161,7 @@ mod tests {
             name: "http_get".to_string(),
             arguments: serde_json::json!({"url": "https://broken.example.com"}),
             reasoning: None,
+            signature: None,
         };
         // 2 failing calls, then a text continuation, then 2 more of the same failing calls
         // The text response in the middle should reset the streak, so we never hit 3.
@@ -1193,6 +1215,7 @@ mod tests {
                 _: Vec<ToolCall>,
                 _: Option<String>,
                 reason_ctx: &mut ReasoningContext,
+                _reasoning: Option<String>,
             ) -> Result<Option<LoopOutcome>, crate::error::Error> {
                 self.tool_exec_count.fetch_add(1, Ordering::SeqCst);
                 reason_ctx.messages.push(ChatMessage::user("tool error"));

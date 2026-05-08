@@ -440,6 +440,7 @@ impl HeartbeatRunner {
             // because it was not supplied by a channel adapter.
             thread_id: thread_id.map(ironclaw_common::ExternalThreadId::from_trusted),
             attachments: Vec::new(),
+            inline_attachments: Vec::new(),
             metadata: serde_json::json!({
                 "source": "heartbeat",
                 "owner_id": self.workspace.user_id(),

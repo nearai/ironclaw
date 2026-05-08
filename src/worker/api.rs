@@ -80,6 +80,12 @@ pub struct ProxyToolCompletionResponse {
     pub cache_read_input_tokens: u32,
     #[serde(default)]
     pub cache_creation_input_tokens: u32,
+    /// Provider-emitted reasoning content that must be echoed on the next
+    /// turn (#3201, #3225). The orchestrator forwards it back to the
+    /// container worker, which attaches it to the assistant `ChatMessage`
+    /// before the next LLM call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
 }
 
 /// Completion result for the worker to report when done.
@@ -268,6 +274,7 @@ impl WorkerHttpClient {
             finish_reason: parse_finish_reason(&proxy_resp.finish_reason),
             cache_read_input_tokens: proxy_resp.cache_read_input_tokens,
             cache_creation_input_tokens: proxy_resp.cache_creation_input_tokens,
+            reasoning: proxy_resp.reasoning,
         })
     }
 

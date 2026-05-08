@@ -206,6 +206,7 @@ impl LlmProvider for BedrockProvider {
             output_tokens,
             finish_reason: map_stop_reason(response.stop_reason()),
             cache_creation_input_tokens: 0,
+            reasoning: None,
             cache_read_input_tokens: 0,
         })
     }
@@ -578,6 +579,7 @@ fn extract_content_blocks(
                     name: tu.name().to_string(),
                     arguments: document_to_json(tu.input()),
                     reasoning: None,
+                    signature: None,
                 });
             }
             // Ignore reasoning, citations, images, etc.
@@ -816,12 +818,14 @@ mod tests {
             name: "echo".to_string(),
             arguments: serde_json::json!({"text": "hi"}),
             reasoning: None,
+            signature: None,
         };
         let tc2 = crate::llm::provider::ToolCall {
             id: "call_2".to_string(),
             name: "time".to_string(),
             arguments: serde_json::json!({}),
             reasoning: None,
+            signature: None,
         };
 
         let messages = vec![
@@ -861,6 +865,7 @@ mod tests {
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "test"}),
             reasoning: None,
+            signature: None,
         };
 
         let messages = vec![
@@ -885,6 +890,7 @@ mod tests {
             name: "echo".to_string(),
             arguments: serde_json::json!({}),
             reasoning: None,
+            signature: None,
         };
 
         let messages = vec![
@@ -978,6 +984,7 @@ mod tests {
                 name: Some("echo".to_string()),
                 tool_calls: None,
                 content_parts: Vec::new(),
+                reasoning: None,
             },
         ];
 
@@ -1050,12 +1057,14 @@ mod tests {
             name: "get_weather".to_string(),
             arguments: serde_json::json!({"city": "NYC"}),
             reasoning: None,
+            signature: None,
         };
         let tc2 = crate::llm::provider::ToolCall {
             id: "call_def".to_string(),
             name: "get_time".to_string(),
             arguments: serde_json::json!({"tz": "EST"}),
             reasoning: None,
+            signature: None,
         };
 
         let messages = vec![
@@ -1218,6 +1227,7 @@ mod tests {
             name: "echo".to_string(),
             arguments: serde_json::json!({"text": "hi"}),
             reasoning: None,
+            signature: None,
         };
 
         let mut messages = vec![
@@ -1262,6 +1272,7 @@ mod tests {
             name: "get_weather".to_string(),
             arguments: serde_json::json!({"city": "NYC"}),
             reasoning: None,
+            signature: None,
         };
 
         let mut messages = vec![
@@ -1299,6 +1310,7 @@ mod tests {
             name: "time".to_string(),
             arguments: serde_json::json!({}),
             reasoning: None,
+            signature: None,
         };
 
         let mut messages = vec![
@@ -1336,6 +1348,7 @@ mod tests {
             name: "search".to_string(),
             arguments: serde_json::json!({"q": "test"}),
             reasoning: None,
+            signature: None,
         };
 
         let mut messages = vec![
@@ -1391,6 +1404,7 @@ mod tests {
             name: "echo".to_string(),
             arguments: serde_json::json!({}),
             reasoning: None,
+            signature: None,
         };
 
         let mut messages = vec![

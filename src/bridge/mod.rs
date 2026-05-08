@@ -10,6 +10,7 @@ mod capability_projector;
 mod cost_guard_gate;
 mod effect_adapter;
 mod engine_actions;
+mod gate_controller;
 mod llm_adapter;
 mod router;
 pub mod sandbox;
@@ -24,6 +25,7 @@ pub use cost_guard_gate::CostGuardBudgetGate;
 pub use workspace_reader::WorkspaceReaderAdapter;
 
 pub use effect_adapter::EffectBridgeAdapter;
+pub use gate_controller::{BridgeGateController, GateResolutions, PerExecutionContext};
 pub use router::{
     // DTO types
     AttentionItem,
@@ -36,6 +38,8 @@ pub use router::{
     EngineStepInfo,
     EngineThreadDetail,
     EngineThreadInfo,
+    InlineGateError,
+    InlineGateOutcome,
     ProjectOverviewEntry,
     ProjectsOverviewResponse,
     clear_engine_pending_auth,
@@ -72,6 +76,7 @@ pub use router::{
     resolve_gate,
     resume_engine_mission,
     transition_engine_pending_auth_request_to_pairing,
+    try_resolve_inline_approval_gate,
 };
 
 #[cfg(feature = "libsql")]

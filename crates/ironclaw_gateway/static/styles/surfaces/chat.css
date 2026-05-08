@@ -609,6 +609,17 @@
   font-family: var(--font-mono);
 }
 
+.approval-summary {
+  font-size: var(--text-sm);
+  color: var(--text);
+  font-family: var(--font-mono);
+  background: var(--code-bg);
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+
 .approval-description {
   font-size: var(--text-sm);
   color: var(--text-secondary);

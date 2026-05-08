@@ -967,6 +967,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                         } else {
                             Some(action.reasoning.clone())
                         },
+                        signature: None,
                     }],
                 ));
 
@@ -1503,6 +1504,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
                     result: RespondResult::ToolCalls {
                         tool_calls,
                         content: reasoning_text,
+                        reasoning: None,
                     },
                     usage: crate::llm::TokenUsage::default(),
                     finish_reason: crate::llm::FinishReason::ToolUse,
@@ -1671,6 +1673,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
         tool_calls: Vec<crate::llm::ToolCall>,
         content: Option<String>,
         reason_ctx: &mut ReasoningContext,
+        reasoning: Option<String>,
     ) -> Result<Option<LoopOutcome>, crate::error::Error> {
         {
             let mut recovery = self.recovery_state.lock().await;
@@ -1732,13 +1735,13 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             );
         }
 
-        // Add assistant message with tool_calls (OpenAI protocol)
-        reason_ctx
-            .messages
-            .push(ChatMessage::assistant_with_tool_calls(
-                content,
-                tool_calls.clone(),
-            ));
+        // Add assistant message with tool_calls (OpenAI protocol).
+        // Carry reasoning for the next turn — DeepSeek thinking-mode and
+        // Gemini 2.5+ reject the follow-up with HTTP 400 otherwise (#3201, #3225).
+        reason_ctx.messages.push(
+            ChatMessage::assistant_with_tool_calls(content, tool_calls.clone())
+                .with_reasoning(reasoning),
+        );
 
         // Convert to ToolSelections
         let selections: Vec<ToolSelection> = tool_calls
@@ -1816,6 +1819,7 @@ fn selections_to_tool_calls(selections: &[ToolSelection]) -> Vec<ToolCall> {
             } else {
                 Some(s.reasoning.clone())
             },
+            signature: None,
         })
         .collect()
 }

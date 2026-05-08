@@ -232,6 +232,7 @@ pub fn convert_messages(messages: &[OpenAiMessage]) -> Result<Vec<ChatMessage>, 
                                 arguments: serde_json::from_str(&tc.function.arguments)
                                     .unwrap_or(serde_json::Value::Object(Default::default())),
                                 reasoning: None,
+                                signature: None,
                             })
                             .collect();
                         Ok(ChatMessage::assistant_with_tool_calls(
@@ -249,6 +250,7 @@ pub fn convert_messages(messages: &[OpenAiMessage]) -> Result<Vec<ChatMessage>, 
                     tool_call_id: None,
                     name: m.name.clone(),
                     tool_calls: None,
+                    reasoning: None,
                 }),
             }
         })
@@ -956,6 +958,7 @@ mod tests {
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "rust"}),
             reasoning: None,
+            signature: None,
         }];
 
         let converted = convert_tool_calls_to_openai(&calls);

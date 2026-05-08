@@ -1,10 +1,13 @@
 [workspace]
-members = [".", "crates/ironclaw_common", "crates/ironclaw_safety", "crates/ironclaw_skills", "crates/ironclaw_engine", "crates/ironclaw_gateway", "crates/ironclaw_tui"]
+members = [".", "crates/ironclaw_common", "crates/ironclaw_host_api", "crates/ironclaw_filesystem", "crates/ironclaw_memory", "crates/ironclaw_events", "crates/ironclaw_extensions", "crates/ironclaw_processes", "crates/ironclaw_dispatcher", "crates/ironclaw_scripts", "crates/ironclaw_mcp", "crates/ironclaw_wasm", "crates/ironclaw_capabilities", "crates/ironclaw_secrets", "crates/ironclaw_network", "crates/ironclaw_host_runtime", "crates/ironclaw_authorization", "crates/ironclaw_run_state", "crates/ironclaw_approvals", "crates/ironclaw_resources", "crates/ironclaw_trust", "crates/ironclaw_architecture", "crates/ironclaw_safety", "crates/ironclaw_skills", "crates/ironclaw_engine", "crates/ironclaw_gateway", "crates/ironclaw_tui"]
 exclude = [
     "channels-src/discord",
+    "channels-src/feishu",
     "channels-src/telegram",
     "channels-src/slack",
+    "channels-src/wechat",
     "channels-src/whatsapp",
+    "crates/ironclaw_silk_decoder",
     "tools-src/composio",
     "tools-src/github",
     "tools-src/gmail",
@@ -21,7 +24,7 @@ exclude = [
 
 [package]
 name = "ironclaw"
-version = "0.27.0"
+version = "0.28.0"
 edition = "2024"
 rust-version = "1.92"
 description = "Secure personal AI assistant that protects your data and expands its capabilities on the fly"
@@ -113,7 +116,7 @@ cron = "0.13"
 jsonschema = { version = "0.45", default-features = false }
 
 # Shared types
-ironclaw_common = { path = "crates/ironclaw_common", version = "0.4.0" }
+ironclaw_common = { path = "crates/ironclaw_common", version = "0.4.1" }
 
 # Safety/sanitization
 ironclaw_engine = { path = "crates/ironclaw_engine", version = "0.1.0" }
@@ -155,9 +158,11 @@ wasmtime-wasi = "43.0.2"  # WASI support for component model
 wasmparser = "0.245.1"  # WASM binary parsing for validation
 
 # Cryptography for secrets management
+aes = "0.8"
 aes-gcm = "0.10"
 hkdf = "0.12"
 hmac = "0.12"
+md-5 = "0.10"
 sha2 = "0.10"
 blake3 = "1"
 rand = "0.8"

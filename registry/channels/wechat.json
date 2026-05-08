@@ -1,0 +1,37 @@
+{
+  "name": "wechat",
+  "display_name": "WeChat Channel",
+  "kind": "channel",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Talk to your agent through a WeChat iLink bot account",
+  "keywords": [
+    "messaging",
+    "chat",
+    "wechat",
+    "qr"
+  ],
+  "source": {
+    "dir": "channels-src/wechat",
+    "capabilities": "wechat.capabilities.json",
+    "crate_name": "wechat-channel"
+  },
+  "artifacts": {
+    "wasm32-wasip2": {
+      "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw-v0.28.0/channel-wechat-0.1.0-wasm32-wasip2.tar.gz",
+      "sha256": "1538dfd3554b533f5617475d4c88d2666615bf87c7f0a732df520d442f29e7c2"
+    }
+  },
+  "auth_summary": {
+    "method": "interactive",
+    "provider": "WeChat",
+    "secrets": [
+      "wechat_bot_token"
+    ],
+    "shared_auth": null,
+    "setup_url": "https://ilinkai.weixin.qq.com"
+  },
+  "tags": [
+    "messaging"
+  ]
+}

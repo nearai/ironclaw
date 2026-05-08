@@ -1,0 +1,22 @@
+[package]
+name = "ironclaw_trust"
+version = "0.1.0"
+edition = "2024"
+# Keep in sync with the workspace-level package.rust-version.
+rust-version = "1.92"
+description = "Host-controlled trust-class policy engine for IronClaw Reborn"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[dependencies]
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+[dev-dependencies]
+serde_json = "1"
+static_assertions = "1"

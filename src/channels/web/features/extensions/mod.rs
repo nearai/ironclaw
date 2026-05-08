@@ -50,7 +50,7 @@ pub(crate) fn derive_activation_status(
     has_owner_binding: bool,
 ) -> Option<ExtensionActivationStatus> {
     if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
-        classify_wasm_channel_activation(ext, has_paired, has_owner_binding)
+        classify_wasm_channel_activation(ext, has_paired, has_owner_binding, ext.requires_binding)
     } else if ext.kind == crate::extensions::ExtensionKind::ChannelRelay {
         Some(if ext.active {
             ExtensionActivationStatus::Active
@@ -536,9 +536,115 @@ pub(crate) async fn extensions_setup_handler(
         kind,
         secrets: setup.secrets,
         fields: setup.fields,
+        interactive_login: setup.interactive_login,
         onboarding_state: None,
         onboarding: None,
     }))
+}
+
+pub(crate) async fn extensions_login_start_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
+    Path(name): Path<String>,
+    Json(_req): Json<ExtensionInteractiveLoginStartRequest>,
+) -> Result<Json<ExtensionInteractiveLoginResponse>, (StatusCode, String)> {
+    let name = ironclaw_common::ExtensionName::new(&name).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid extension name: {e}"),
+        )
+    })?;
+    let ext_mgr = state.extension_manager.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Extension manager not available (secrets store required)".to_string(),
+    ))?;
+
+    match ext_mgr
+        .start_interactive_login(name.as_str(), &user.user_id)
+        .await
+    {
+        Ok(result) => Ok(Json(ExtensionInteractiveLoginResponse {
+            success: true,
+            status: result.status,
+            message: result.message,
+            session_id: Some(result.session_id),
+            qr_code_url: result.qr_code_url,
+            instructions: result.instructions,
+            activated: None,
+        })),
+        Err(e) => Ok(Json(ExtensionInteractiveLoginResponse {
+            success: false,
+            status: "failed".to_string(),
+            message: e.to_string(),
+            session_id: None,
+            qr_code_url: None,
+            instructions: None,
+            activated: Some(false),
+        })),
+    }
+}
+
+pub(crate) async fn extensions_login_poll_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
+    Path(name): Path<String>,
+    Json(req): Json<ExtensionInteractiveLoginPollRequest>,
+) -> Result<Json<ExtensionInteractiveLoginResponse>, (StatusCode, String)> {
+    let name = ironclaw_common::ExtensionName::new(&name).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid extension name: {e}"),
+        )
+    })?;
+    let ext_mgr = state.extension_manager.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Extension manager not available (secrets store required)".to_string(),
+    ))?;
+
+    match ext_mgr
+        .poll_interactive_login(name.as_str(), &req.session_id, &user.user_id)
+        .await
+    {
+        Ok(result) => {
+            if result.activated == Some(true) {
+                crate::channels::web::platform::legacy_auth::clear_auth_mode(&state, &user.user_id)
+                    .await;
+                state.sse.broadcast_for_user(
+                    &user.user_id,
+                    AppEvent::OnboardingState {
+                        extension_name: name.clone(),
+                        state: OnboardingStateDto::Ready,
+                        request_id: None,
+                        message: Some(result.message.clone()),
+                        instructions: None,
+                        auth_url: None,
+                        setup_url: None,
+                        onboarding: None,
+                        thread_id: None,
+                    },
+                );
+            }
+
+            Ok(Json(ExtensionInteractiveLoginResponse {
+                success: result.status != "failed",
+                status: result.status,
+                message: result.message,
+                session_id: Some(result.session_id),
+                qr_code_url: result.qr_code_url,
+                instructions: None,
+                activated: result.activated,
+            }))
+        }
+        Err(e) => Ok(Json(ExtensionInteractiveLoginResponse {
+            success: false,
+            status: "failed".to_string(),
+            message: e.to_string(),
+            session_id: Some(req.session_id),
+            qr_code_url: None,
+            instructions: None,
+            activated: Some(false),
+        })),
+    }
 }
 
 pub(crate) async fn extensions_setup_submit_handler(
@@ -701,6 +807,7 @@ mod tests {
             needs_setup: false,
             has_auth: false,
             installed: true,
+            requires_binding: true,
             activation_error: None,
             version: None,
         }
@@ -786,11 +893,12 @@ mod tests {
             needs_setup: true,
             has_auth: false,
             installed: true,
+            requires_binding: true,
             activation_error: None,
             version: None,
         };
 
-        let owner_bound = classify_wasm_channel_activation(&ext, false, true);
+        let owner_bound = classify_wasm_channel_activation(&ext, false, true, ext.requires_binding);
         if owner_bound != Some(ExtensionActivationStatus::Active) {
             return Err(format!(
                 "owner-bound channel should be active, got {:?}",
@@ -798,7 +906,7 @@ mod tests {
             ));
         }
 
-        let unbound = classify_wasm_channel_activation(&ext, false, false);
+        let unbound = classify_wasm_channel_activation(&ext, false, false, ext.requires_binding);
         if unbound != Some(ExtensionActivationStatus::Pairing) {
             return Err(format!(
                 "unbound channel should be pairing, got {:?}",
@@ -823,12 +931,13 @@ mod tests {
             needs_setup: true,
             has_auth: false,
             installed: true,
+            requires_binding: false,
             activation_error: None,
             version: None,
         };
 
         let status = if relay.kind == crate::extensions::ExtensionKind::WasmChannel {
-            classify_wasm_channel_activation(&relay, false, false)
+            classify_wasm_channel_activation(&relay, false, false, relay.requires_binding)
         } else if relay.kind == crate::extensions::ExtensionKind::ChannelRelay {
             Some(if relay.active {
                 ExtensionActivationStatus::Active
@@ -1168,6 +1277,7 @@ mod tests {
             needs_setup: false,
             has_auth: true,
             installed: true,
+            requires_binding: false,
             activation_error: Some("boom".to_string()),
             version: None,
         };
