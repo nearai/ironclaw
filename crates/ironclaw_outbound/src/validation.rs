@@ -3,11 +3,19 @@ use std::collections::HashSet;
 use ironclaw_turns::ReplyTargetBindingRef;
 
 use crate::{
-    AdvanceSubscriptionCursorRequest, LoadSubscriptionCursorRequest, OutboundDeliveryAttempt,
-    OutboundError, ProjectionSubscriptionRecord, ThreadNotificationPolicy,
+    AdvanceSubscriptionCursorRequest, DeliveryFailureKind, LoadSubscriptionCursorRequest,
+    OutboundDeliveryAttempt, OutboundDeliveryStatus, OutboundError, ProjectionSubscriptionRecord,
+    ThreadNotificationPolicy, UpdateDeliveryStatusRequest,
 };
 
+const MAX_NOTIFICATION_TARGETS: usize = 32;
+
 pub(crate) fn validate_policy(policy: &ThreadNotificationPolicy) -> Result<(), OutboundError> {
+    if policy.targets.len() > MAX_NOTIFICATION_TARGETS {
+        return Err(OutboundError::InvalidRequest {
+            reason: "notification policy has too many targets",
+        });
+    }
     let mut seen = HashSet::<ReplyTargetBindingRef>::new();
     for target in &policy.targets {
         if !target.final_replies && !target.progress {
@@ -67,7 +75,24 @@ pub(crate) fn validate_subscription_identity(
     {
         return Err(OutboundError::SubscriptionScopeMismatch);
     }
-    Ok(())
+    validate_subscription_cursor_progression(existing.cursor.as_ref(), incoming.cursor.as_ref())
+}
+
+pub(crate) fn validate_subscription_cursor_progression(
+    current: Option<&ironclaw_event_projections::ProjectionCursor>,
+    incoming: Option<&ironclaw_event_projections::ProjectionCursor>,
+) -> Result<(), OutboundError> {
+    match (current, incoming) {
+        (Some(_), None) => Err(OutboundError::InvalidRequest {
+            reason: "subscription cursor must not be cleared",
+        }),
+        (Some(current), Some(incoming)) if incoming.runtime < current.runtime => {
+            Err(OutboundError::InvalidRequest {
+                reason: "subscription cursor must not move backwards",
+            })
+        }
+        _ => Ok(()),
+    }
 }
 
 pub(crate) fn validate_advance_request(
@@ -81,7 +106,7 @@ pub(crate) fn validate_advance_request(
     {
         return Err(OutboundError::SubscriptionScopeMismatch);
     }
-    Ok(())
+    validate_subscription_cursor_progression(record.cursor.as_ref(), Some(&request.cursor))
 }
 
 pub(crate) fn validate_delivery_attempt(
@@ -92,7 +117,33 @@ pub(crate) fn validate_delivery_attempt(
             reason: "delivery candidate thread does not match scope",
         });
     }
-    Ok(())
+    validate_delivery_status(attempt.status, attempt.failure_kind)
+}
+
+pub(crate) fn validate_delivery_status_request(
+    request: &UpdateDeliveryStatusRequest,
+) -> Result<(), OutboundError> {
+    validate_delivery_status(request.status, request.failure_kind)
+}
+
+fn validate_delivery_status(
+    status: OutboundDeliveryStatus,
+    failure_kind: Option<DeliveryFailureKind>,
+) -> Result<(), OutboundError> {
+    match (status, failure_kind) {
+        (OutboundDeliveryStatus::Pending | OutboundDeliveryStatus::Delivered, None) => Ok(()),
+        (OutboundDeliveryStatus::Failed | OutboundDeliveryStatus::DeadLettered, Some(_)) => Ok(()),
+        (OutboundDeliveryStatus::Pending | OutboundDeliveryStatus::Delivered, Some(_)) => {
+            Err(OutboundError::InvalidRequest {
+                reason: "successful delivery statuses must not include failure kind",
+            })
+        }
+        (OutboundDeliveryStatus::Failed | OutboundDeliveryStatus::DeadLettered, None) => {
+            Err(OutboundError::InvalidRequest {
+                reason: "failed delivery statuses require failure kind",
+            })
+        }
+    }
 }
 
 pub(crate) fn validate_delivery_identity(

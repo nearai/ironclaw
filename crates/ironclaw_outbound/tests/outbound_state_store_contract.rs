@@ -12,6 +12,9 @@ async fn in_memory_defaults_policy_progress_opt_in_and_subscription_scope() {
     let store = InMemoryOutboundStateStore::default();
     durable_policy_subscription_delivery_flow(&store).await;
     subscription_cursor_rejects_mismatched_scope(&store).await;
+    subscription_cursor_rejects_backward_advancement(&store).await;
+    delivery_status_rejects_inconsistent_failure_kind(&store).await;
+    notification_policy_rejects_excessive_targets(&store).await;
 }
 
 #[cfg(feature = "libsql")]
@@ -25,6 +28,9 @@ async fn libsql_persists_outbound_state_across_reopen() {
 
     let reopened = LibSqlOutboundStateStore::new(db);
     assert_reopened_state(&reopened).await;
+    subscription_cursor_rejects_backward_advancement(&reopened).await;
+    delivery_status_rejects_inconsistent_failure_kind(&reopened).await;
+    notification_policy_rejects_excessive_targets(&reopened).await;
 }
 
 #[cfg(feature = "libsql")]
@@ -52,6 +58,9 @@ async fn postgres_persists_outbound_state_across_reopen_when_configured() {
 
     let reopened = PostgresOutboundStateStore::new(pool);
     assert_reopened_state(&reopened).await;
+    subscription_cursor_rejects_backward_advancement(&reopened).await;
+    delivery_status_rejects_inconsistent_failure_kind(&reopened).await;
+    notification_policy_rejects_excessive_targets(&reopened).await;
 }
 
 #[cfg(feature = "postgres")]
@@ -362,6 +371,145 @@ async fn subscription_cursor_rejects_mismatched_scope(store: &impl OutboundState
         rebind,
         Err(OutboundError::SubscriptionScopeMismatch)
     ));
+}
+
+async fn subscription_cursor_rejects_backward_advancement(store: &impl OutboundStateStore) {
+    let subscription_id =
+        ProjectionSubscriptionId::new(format!("webui-subscription-backward-{}", TurnRunId::new()))
+            .unwrap();
+    store
+        .upsert_subscription(ProjectionSubscriptionRecord {
+            subscription_id: subscription_id.clone(),
+            actor: actor(),
+            scope: projection_scope(),
+            thread_id: thread_id(),
+            cursor: Some(ProjectionCursor::for_scope(
+                projection_scope(),
+                EventCursor::new(42),
+            )),
+        })
+        .await
+        .unwrap();
+
+    let regression = store
+        .advance_subscription_cursor(AdvanceSubscriptionCursorRequest {
+            subscription_id: subscription_id.clone(),
+            actor: actor(),
+            thread_id: thread_id(),
+            cursor: ProjectionCursor::for_scope(projection_scope(), EventCursor::new(7)),
+        })
+        .await;
+    assert!(matches!(
+        regression,
+        Err(OutboundError::InvalidRequest { .. })
+    ));
+
+    let stale_upsert = store
+        .upsert_subscription(ProjectionSubscriptionRecord {
+            subscription_id: subscription_id.clone(),
+            actor: actor(),
+            scope: projection_scope(),
+            thread_id: thread_id(),
+            cursor: Some(ProjectionCursor::for_scope(
+                projection_scope(),
+                EventCursor::new(6),
+            )),
+        })
+        .await;
+    assert!(matches!(
+        stale_upsert,
+        Err(OutboundError::InvalidRequest { .. })
+    ));
+
+    let loaded = store
+        .load_subscription_cursor(LoadSubscriptionCursorRequest {
+            subscription_id,
+            actor: actor(),
+            scope: projection_scope(),
+            thread_id: thread_id(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded.runtime, EventCursor::new(42));
+}
+
+async fn delivery_status_rejects_inconsistent_failure_kind(store: &impl OutboundStateStore) {
+    let scope = turn_scope();
+    let delivery_id = OutboundDeliveryId::new();
+    let attempt = OutboundDeliveryAttempt {
+        delivery_id,
+        scope: scope.clone(),
+        candidate: OutboundPushCandidate {
+            thread_id: scope.thread_id.clone(),
+            turn_run_id: Some(TurnRunId::new()),
+            target: reply_ref("reply-status-validation"),
+            kind: OutboundPushKind::FinalReply,
+            projection_ref: ProjectionUpdateRef::new(format!(
+                "projection:status-validation:{}",
+                TurnRunId::new()
+            ))
+            .unwrap(),
+            requires_reply_target_revalidation: true,
+        },
+        status: OutboundDeliveryStatus::Pending,
+        attempted_at: now(),
+        failure_kind: None,
+    };
+    store.record_delivery_attempt(attempt).await.unwrap();
+
+    let delivered_with_failure = store
+        .update_delivery_status(UpdateDeliveryStatusRequest {
+            delivery_id,
+            scope: scope.clone(),
+            status: OutboundDeliveryStatus::Delivered,
+            updated_at: now(),
+            failure_kind: Some(DeliveryFailureKind::AuthorizationRevoked),
+        })
+        .await;
+    assert!(matches!(
+        delivered_with_failure,
+        Err(OutboundError::InvalidRequest { .. })
+    ));
+
+    let failed_without_failure = store
+        .update_delivery_status(UpdateDeliveryStatusRequest {
+            delivery_id,
+            scope: scope.clone(),
+            status: OutboundDeliveryStatus::Failed,
+            updated_at: now(),
+            failure_kind: None,
+        })
+        .await;
+    assert!(matches!(
+        failed_without_failure,
+        Err(OutboundError::InvalidRequest { .. })
+    ));
+
+    let deliveries = store.list_delivery_attempts(scope).await.unwrap();
+    let stored = deliveries
+        .iter()
+        .find(|attempt| attempt.delivery_id == delivery_id)
+        .unwrap();
+    assert_eq!(stored.status, OutboundDeliveryStatus::Pending);
+    assert_eq!(stored.failure_kind, None);
+}
+
+async fn notification_policy_rejects_excessive_targets(store: &impl OutboundStateStore) {
+    let targets = (0..33)
+        .map(|i| ThreadNotificationTarget {
+            target: reply_ref(&format!("reply-too-many-{i}")),
+            final_replies: true,
+            progress: false,
+        })
+        .collect();
+    let result = store
+        .put_thread_notification_policy(ThreadNotificationPolicy {
+            scope: turn_scope(),
+            targets,
+        })
+        .await;
+    assert!(matches!(result, Err(OutboundError::InvalidRequest { .. })));
 }
 
 async fn full_turn_scope_isolation(store: &impl OutboundStateStore, original_scope: TurnScope) {

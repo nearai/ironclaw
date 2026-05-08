@@ -10,8 +10,9 @@ use crate::db::{
     validate_policy_row, validate_subscription_row,
 };
 use crate::validation::{
-    validate_advance_request, validate_delivery_attempt, validate_policy,
-    validate_subscription_record, validate_subscription_request,
+    validate_advance_request, validate_delivery_attempt, validate_delivery_status_request,
+    validate_policy, validate_subscription_identity, validate_subscription_record,
+    validate_subscription_request,
 };
 use crate::{
     AdvanceSubscriptionCursorRequest, LoadSubscriptionCursorRequest, OutboundDeliveryAttempt,
@@ -106,6 +107,9 @@ impl OutboundStateStore for PostgresOutboundStateStore {
     ) -> Result<(), OutboundError> {
         validate_subscription_record(&record)?;
         self.run_migrations().await?;
+        if let Some(existing) = self.load_subscription(&record.subscription_id).await? {
+            validate_subscription_identity(&existing, &record)?;
+        }
         let client = self.client().await?;
         let cursor_runtime = record
             .cursor
@@ -119,7 +123,9 @@ impl OutboundStateStore for PostgresOutboundStateStore {
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
                  ON CONFLICT(subscription_id) DO UPDATE SET \
                  cursor_runtime = excluded.cursor_runtime, payload = excluded.payload \
-                 WHERE reborn_outbound_projection_subscriptions.identity_payload = excluded.identity_payload",
+                 WHERE reborn_outbound_projection_subscriptions.identity_payload = excluded.identity_payload \
+                 AND (reborn_outbound_projection_subscriptions.cursor_runtime IS NULL \
+                      OR (excluded.cursor_runtime IS NOT NULL AND excluded.cursor_runtime >= reborn_outbound_projection_subscriptions.cursor_runtime))",
                 &[
                     &record.subscription_id.as_str(),
                     &record.scope.stream.tenant_id.as_str(),
@@ -168,7 +174,8 @@ impl OutboundStateStore for PostgresOutboundStateStore {
         let affected = client
             .execute(
                 "UPDATE reborn_outbound_projection_subscriptions \
-                 SET cursor_runtime = $3, payload = $4 WHERE subscription_id = $1 AND identity_payload = $2",
+                 SET cursor_runtime = $3, payload = $4 WHERE subscription_id = $1 AND identity_payload = $2 \
+                 AND (cursor_runtime IS NULL OR $3 >= cursor_runtime)",
                 &[
                     &record.subscription_id.as_str(),
                     &identity_payload,
@@ -223,6 +230,7 @@ impl OutboundStateStore for PostgresOutboundStateStore {
         &self,
         request: UpdateDeliveryStatusRequest,
     ) -> Result<(), OutboundError> {
+        validate_delivery_status_request(&request)?;
         self.run_migrations().await?;
         let Some(mut attempt) = self.load_delivery(request.delivery_id).await? else {
             return Err(OutboundError::DeliveryNotFound);

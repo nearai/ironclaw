@@ -7,8 +7,8 @@ use ironclaw_turns::TurnScope;
 
 use crate::validation::{
     validate_advance_request, validate_delivery_attempt, validate_delivery_identity,
-    validate_policy, validate_subscription_identity, validate_subscription_record,
-    validate_subscription_request,
+    validate_delivery_status_request, validate_policy, validate_subscription_identity,
+    validate_subscription_record, validate_subscription_request,
 };
 use crate::{
     AdvanceSubscriptionCursorRequest, LoadSubscriptionCursorRequest, OutboundDeliveryAttempt,
@@ -131,6 +131,7 @@ impl OutboundStateStore for InMemoryOutboundStateStore {
         &self,
         request: UpdateDeliveryStatusRequest,
     ) -> Result<(), OutboundError> {
+        validate_delivery_status_request(&request)?;
         let _updated_at = request.updated_at;
         let mut state = self.lock_state()?;
         let Some(attempt) = state.deliveries.get_mut(&request.delivery_id) else {
