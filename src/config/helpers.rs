@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 
 use crate::error::ConfigError;
 
@@ -7,21 +7,15 @@ use crate::config::INJECTED_VARS;
 
 /// Crate-wide mutex for tests that mutate process environment variables.
 ///
-/// The process environment is global state shared across all threads.
-/// Per-module mutexes do NOT prevent races between modules running in
-/// parallel.  Every `unsafe { set_var / remove_var }` call in tests
-/// MUST hold this single lock.
-#[cfg(test)]
-pub(crate) static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Acquire the env-var mutex, recovering from poison.
+/// Acquire the workspace-wide env-var mutex, recovering from poison.
 ///
-/// A poisoned mutex means a previous test panicked while holding the lock.
-/// The env state might be slightly stale, but cascading every subsequent
-/// test into a `PoisonError` panic is far worse. Recover and carry on.
+/// Delegates to [`ironclaw_common::env_helpers::lock_env`] so tests across
+/// every crate (`ironclaw`, `ironclaw_llm`, `ironclaw_common`) serialize on
+/// the same `Mutex`. Per-module mutexes would not prevent races between
+/// modules running in parallel.
 #[cfg(test)]
 pub(crate) fn lock_env() -> std::sync::MutexGuard<'static, ()> {
-    ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
+    ironclaw_common::env_helpers::lock_env()
 }
 
 /// Thread-safe mutable overlay for env vars set at runtime.
@@ -32,52 +26,27 @@ pub(crate) fn lock_env() -> std::sync::MutexGuard<'static, ()> {
 /// otherwise be UB in multi-threaded programs (Rust 1.82+).
 ///
 /// Priority: real env vars > `RUNTIME_ENV_OVERRIDES` > `INJECTED_VARS`.
-static RUNTIME_ENV_OVERRIDES: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
-
-fn runtime_overrides() -> &'static Mutex<HashMap<String, String>> {
-    RUNTIME_ENV_OVERRIDES.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 /// Set a runtime environment override (thread-safe alternative to `std::env::set_var`).
 ///
-/// Values set here are visible to `optional_env()`, `env_or_override()`, and
-/// all config resolution that goes through those helpers. This avoids the UB
-/// of `std::env::set_var` in multi-threaded programs.
+/// Delegates to `ironclaw_common::env_helpers::set_runtime_env` so the
+/// override is visible to both this crate and `ironclaw_llm` (which reads
+/// the same overlay through `ironclaw_common::env_helpers::env_or_override`).
 pub fn set_runtime_env(key: &str, value: &str) {
-    runtime_overrides()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(key.to_string(), value.to_string());
+    ironclaw_common::env_helpers::set_runtime_env(key, value);
 }
 
-/// Read an env var, checking the real environment first, then runtime overrides.
+/// Read an env var, checking real env first, then the shared runtime
+/// overlay, then this crate's `INJECTED_VARS` (secrets injected from DB).
 ///
 /// Priority: real env vars > runtime overrides > `INJECTED_VARS`.
-/// Empty values are treated as unset at every layer for consistency with
-/// `optional_env()`.
-///
-/// Use this instead of `std::env::var()` when the value might have been set
-/// via `set_runtime_env()` (e.g., `NEARAI_API_KEY` during interactive login).
+/// Empty values are treated as unset at every layer.
 pub fn env_or_override(key: &str) -> Option<String> {
-    // Real env vars always win
-    if let Ok(val) = std::env::var(key)
-        && !val.is_empty()
-    {
+    // Real env + runtime overlay (shared with `ironclaw_llm`)
+    if let Some(val) = ironclaw_common::env_helpers::env_or_override(key) {
         return Some(val);
     }
 
-    // Check runtime overrides (skip empty values for consistency with optional_env)
-    if let Some(val) = runtime_overrides()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(key)
-        .filter(|v| !v.is_empty())
-        .cloned()
-    {
-        return Some(val);
-    }
-
-    // Check INJECTED_VARS (secrets from DB, set once at startup)
+    // Main-crate-only INJECTED_VARS overlay (DB-loaded secrets).
     if let Some(val) = INJECTED_VARS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -104,14 +73,9 @@ pub(crate) fn optional_env(key: &str) -> Result<Option<String>, ConfigError> {
         }
     }
 
-    // Fall back to runtime overrides (set via set_runtime_env)
-    if let Some(val) = runtime_overrides()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(key)
-        .filter(|v| !v.is_empty())
-        .cloned()
-    {
+    // Fall back to the shared runtime overrides (set via set_runtime_env;
+    // also reachable from `ironclaw_llm` via `ironclaw_common::env_helpers`).
+    if let Some(val) = ironclaw_common::env_helpers::env_or_override(key) {
         return Ok(Some(val));
     }
 
@@ -684,6 +648,8 @@ mod tests {
 
     #[test]
     fn lock_env_recovers_from_poisoned_mutex() {
+        use ironclaw_common::env_helpers::ENV_MUTEX;
+
         // Simulate a poisoned mutex: spawn a thread that panics while holding the lock.
         let _ = std::thread::spawn(|| {
             let _guard = ENV_MUTEX.lock().unwrap();

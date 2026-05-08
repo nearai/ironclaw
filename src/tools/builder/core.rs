@@ -40,14 +40,14 @@ use uuid::Uuid;
 
 use crate::context::JobContext;
 use crate::error::ToolError as AgentToolError;
-use crate::llm::{
-    ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult, ToolDefinition,
-};
 use crate::tools::tool::{
     ApprovalContext, ApprovalRequirement, EngineCompatibility, Tool, ToolError, ToolOutput,
     check_approval_in_context,
 };
 use crate::tools::{ToolRegistry, prepare_tool_params};
+use ironclaw_llm::{
+    ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult, ToolDefinition,
+};
 
 /// Deserialize `dependencies` from either a list of strings, a list of objects,
 /// or a flat object map.  LLMs often produce TOML-style inline tables

@@ -8,8 +8,8 @@
 use clap::Subcommand;
 use std::path::Path;
 
-use crate::llm::registry::ProviderRegistry;
 use crate::settings::Settings;
+use ironclaw_llm::registry::ProviderRegistry;
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum ModelsCommand {
@@ -183,7 +183,7 @@ async fn try_fetch_models(provider_id: &str, config_path: Option<&Path>) -> Opti
                 return None;
             }
             let base_url = def.default_base_url.clone().unwrap_or_default();
-            llm_config.provider = Some(crate::llm::RegistryProviderConfig {
+            llm_config.provider = Some(ironclaw_llm::RegistryProviderConfig {
                 protocol: def.protocol,
                 provider_id: def.id.clone(),
                 model: def.default_model.clone(),
@@ -200,8 +200,8 @@ async fn try_fetch_models(provider_id: &str, config_path: Option<&Path>) -> Opti
         }
     }
 
-    let session = crate::llm::create_session_manager(config.llm.session.clone()).await;
-    let provider = crate::llm::create_llm_provider(&llm_config, session)
+    let session = ironclaw_llm::create_session_manager(config.llm.session.clone()).await;
+    let provider = ironclaw_llm::create_llm_provider(&llm_config, session)
         .await
         .ok()?;
     provider.list_models().await.ok().filter(|m| !m.is_empty())

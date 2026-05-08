@@ -380,20 +380,20 @@ impl GatewayChannel {
     }
 
     /// Inject the LLM provider for OpenAI-compatible API proxy.
-    pub fn with_llm_provider(mut self, llm: Arc<dyn crate::llm::LlmProvider>) -> Self {
+    pub fn with_llm_provider(mut self, llm: Arc<dyn ironclaw_llm::LlmProvider>) -> Self {
         self.rebuild_state(|s| s.llm_provider = Some(llm));
         self
     }
 
     /// Inject the LLM hot-reload controller for the settings handlers.
-    pub fn with_llm_reload(mut self, reload: Arc<crate::llm::LlmReloadHandle>) -> Self {
+    pub fn with_llm_reload(mut self, reload: Arc<ironclaw_llm::LlmReloadHandle>) -> Self {
         self.rebuild_state(|s| s.llm_reload = Some(reload));
         self
     }
 
     /// Inject the LLM session manager so a hot-reload can rebuild the
     /// provider chain without dropping the current auth session.
-    pub fn with_llm_session_manager(mut self, sm: Arc<crate::llm::SessionManager>) -> Self {
+    pub fn with_llm_session_manager(mut self, sm: Arc<ironclaw_llm::SessionManager>) -> Self {
         self.rebuild_state(|s| s.llm_session_manager = Some(sm));
         self
     }

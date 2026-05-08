@@ -68,7 +68,7 @@ pub async fn setup_wasm_channels(
     extension_manager: Option<&Arc<ExtensionManager>>,
     database: Option<&Arc<dyn Database>>,
     registered_channel_names: &[String],
-    startup_active_channel_names: Option<&HashSet<String>>,
+    startup_active_channel_names: &HashSet<String>,
     ownership_cache: Arc<crate::ownership::OwnershipCache>,
 ) -> Option<WasmChannelSetup> {
     let runtime = match WasmChannelRuntime::new(WasmChannelRuntimeConfig::default()) {
@@ -110,9 +110,11 @@ pub async fn setup_wasm_channels(
         discovered_channels
             .into_iter()
             .filter_map(|(name, discovered)| {
-                startup_active_channel_names
-                    .is_none_or(|active_names| active_names.contains(&name))
-                    .then_some((name, discovered.wasm_path, discovered.capabilities_path))
+                startup_active_channel_names.contains(&name).then_some((
+                    name,
+                    discovered.wasm_path,
+                    discovered.capabilities_path,
+                ))
             })
             .collect();
 
@@ -122,11 +124,6 @@ pub async fn setup_wasm_channels(
     let load_results = futures::future::join_all(load_futures).await;
 
     let mut loaded_channels = Vec::new();
-    let startup_load_error_message = if startup_active_channel_names.is_some() {
-        "Failed to load persisted-active WASM channel at startup"
-    } else {
-        "Failed to load WASM channel at startup"
-    };
     for ((name, wasm_path, _), result) in startup_entries.into_iter().zip(load_results) {
         match result {
             Ok(loaded) => loaded_channels.push(loaded),
@@ -135,7 +132,7 @@ pub async fn setup_wasm_channels(
                     channel = %name,
                     path = %wasm_path.display(),
                     error = %err,
-                    "{startup_load_error_message}"
+                    "Failed to load active WASM channel at startup"
                 );
             }
         }
@@ -1234,5 +1231,107 @@ mod tests {
             Some(&serde_json::json!("owner-app-secret"))
         );
         Ok(())
+    }
+
+    /// Stage the real `telegram.wasm` + `telegram.capabilities.json` from
+    /// `channels-src/telegram/` into the given directory so a test can drive
+    /// `setup_wasm_channels` through the full discover -> load -> register
+    /// path. Returns `None` if the source artifacts aren't present (e.g. a
+    /// release tarball without `channels-src/`), in which case the caller
+    /// should skip the test rather than fail.
+    fn stage_real_telegram_channel(dir: &std::path::Path) -> Option<()> {
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let wasm_src = manifest_dir.join("channels-src/telegram/telegram.wasm");
+        let caps_src = manifest_dir.join("channels-src/telegram/telegram.capabilities.json");
+        if !wasm_src.exists() || !caps_src.exists() {
+            return None;
+        }
+        std::fs::copy(&wasm_src, dir.join("telegram.wasm")).ok()?;
+        std::fs::copy(&caps_src, dir.join("telegram.capabilities.json")).ok()?;
+        Some(())
+    }
+
+    /// Headless-startup regression: with `database = None`, `extension_manager = None`,
+    /// and `secrets_store = None`, `setup_wasm_channels` must still load and register
+    /// channels named in `startup_active_channel_names`. This pins down the linkage
+    /// from the `main.rs` config-fallback resolution to the actual filter inside
+    /// `setup_wasm_channels`. Pairs with the empty-set test below.
+    #[tokio::test]
+    async fn setup_wasm_channels_registers_configured_channel_in_headless_mode() {
+        let temp = tempfile::tempdir().unwrap();
+        let channels_dir = temp.path().join("channels");
+        std::fs::create_dir_all(&channels_dir).unwrap();
+        if stage_real_telegram_channel(&channels_dir).is_none() {
+            eprintln!("skipping: channels-src/telegram artifacts not present in this checkout");
+            return;
+        }
+
+        let (mut config, _config_temp) = test_config();
+        config.channels.wasm_channels_dir = channels_dir;
+        config.channels.wasm_channels_enabled = true;
+        config.channels.configured_wasm_channels = vec!["telegram".to_string()];
+
+        let mut active = std::collections::HashSet::new();
+        active.insert("telegram".to_string());
+
+        let setup = super::setup_wasm_channels(
+            &config,
+            &None,
+            None,
+            None,
+            &[],
+            &active,
+            Arc::new(crate::ownership::OwnershipCache::new()),
+        )
+        .await
+        .expect("setup_wasm_channels should return Some when a channel loads");
+
+        assert!(
+            setup.channel_names.iter().any(|n| n == "telegram"),
+            "headless config-fallback path must register telegram, got {:?}",
+            setup.channel_names
+        );
+        assert!(
+            setup.webhook_routes.is_some(),
+            "webhook_routes are always created so hot-activation works post-startup"
+        );
+    }
+
+    /// Empty `startup_active_channel_names` must register zero channels even
+    /// when discoverable channels exist on disk. This is the regression test
+    /// for the "empty set lets everything through" bug class — the previous
+    /// `Option<&HashSet>` filter signature treated `None` as "load all"; the
+    /// current `&HashSet` signature with an explicit empty set is the fix.
+    #[tokio::test]
+    async fn setup_wasm_channels_with_empty_active_set_registers_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let channels_dir = temp.path().join("channels");
+        std::fs::create_dir_all(&channels_dir).unwrap();
+        if stage_real_telegram_channel(&channels_dir).is_none() {
+            eprintln!("skipping: channels-src/telegram artifacts not present in this checkout");
+            return;
+        }
+
+        let (mut config, _config_temp) = test_config();
+        config.channels.wasm_channels_dir = channels_dir;
+        config.channels.wasm_channels_enabled = true;
+
+        let setup = super::setup_wasm_channels(
+            &config,
+            &None,
+            None,
+            None,
+            &[],
+            &std::collections::HashSet::new(),
+            Arc::new(crate::ownership::OwnershipCache::new()),
+        )
+        .await
+        .expect("setup_wasm_channels returns Some even with no channels to load");
+
+        assert!(
+            setup.channel_names.is_empty(),
+            "empty active set must register zero channels, got {:?}",
+            setup.channel_names
+        );
     }
 }

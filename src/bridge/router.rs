@@ -3001,7 +3001,7 @@ pub async fn resolve_gate(
             // require_action_attempt obligation, which then nudges the LLM
             // to issue another tool call — exactly the opposite of what a
             // denial should produce. Avoid every phrase in
-            // `crate::llm::user_signals_execution_intent`'s list (the
+            // `ironclaw_llm::user_signals_execution_intent`'s list (the
             // helper is defined in `src/llm/reasoning.rs` and re-exported
             // from `crate::llm`).
             let deny_msg = ironclaw_engine::ThreadMessage::user(format!(
@@ -4026,7 +4026,7 @@ async fn handle_with_engine_inner(
     // Detect execution intent and configure obligation accordingly
     let thread_config = {
         let mut cfg = ThreadConfig::default();
-        if crate::llm::user_signals_execution_intent(content) {
+        if ironclaw_llm::user_signals_execution_intent(content) {
             cfg.require_action_attempt = true;
         }
         cfg
@@ -7779,7 +7779,7 @@ mod tests {
         struct StaticLlmProvider;
 
         #[async_trait::async_trait]
-        impl crate::llm::LlmProvider for StaticLlmProvider {
+        impl ironclaw_llm::LlmProvider for StaticLlmProvider {
             fn model_name(&self) -> &str {
                 "static-mock"
             }
@@ -7790,13 +7790,13 @@ mod tests {
 
             async fn complete(
                 &self,
-                _request: crate::llm::CompletionRequest,
-            ) -> Result<crate::llm::CompletionResponse, crate::error::LlmError> {
-                Ok(crate::llm::CompletionResponse {
+                _request: ironclaw_llm::CompletionRequest,
+            ) -> Result<ironclaw_llm::CompletionResponse, crate::error::LlmError> {
+                Ok(ironclaw_llm::CompletionResponse {
                     content: "ok".to_string(),
                     input_tokens: 0,
                     output_tokens: 0,
-                    finish_reason: crate::llm::FinishReason::Stop,
+                    finish_reason: ironclaw_llm::FinishReason::Stop,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                 })
@@ -7804,14 +7804,14 @@ mod tests {
 
             async fn complete_with_tools(
                 &self,
-                _request: crate::llm::ToolCompletionRequest,
-            ) -> Result<crate::llm::ToolCompletionResponse, crate::error::LlmError> {
-                Ok(crate::llm::ToolCompletionResponse {
+                _request: ironclaw_llm::ToolCompletionRequest,
+            ) -> Result<ironclaw_llm::ToolCompletionResponse, crate::error::LlmError> {
+                Ok(ironclaw_llm::ToolCompletionResponse {
                     content: Some("ok".to_string()),
                     tool_calls: Vec::new(),
                     input_tokens: 0,
                     output_tokens: 0,
-                    finish_reason: crate::llm::FinishReason::Stop,
+                    finish_reason: ironclaw_llm::FinishReason::Stop,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                     reasoning: None,

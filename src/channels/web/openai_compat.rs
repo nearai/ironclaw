@@ -17,7 +17,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::llm::{
+use ironclaw_llm::{
     ChatMessage, CompletionRequest, FinishReason, Role, ToolCall, ToolCompletionRequest,
     ToolDefinition,
 };
@@ -597,7 +597,7 @@ pub async fn chat_completions_handler(
 /// proper HTTP errors instead of SSE error events. True token streaming can be
 /// added later by extending `LlmProvider` with a `complete_stream()` method.
 async fn handle_streaming(
-    llm: Arc<dyn crate::llm::LlmProvider>,
+    llm: Arc<dyn ironclaw_llm::LlmProvider>,
     req: OpenAiChatRequest,
     has_tools: bool,
 ) -> Result<Response, (StatusCode, Json<OpenAiErrorResponse>)> {
@@ -612,8 +612,8 @@ async fn handle_streaming(
     // Since streaming is simulated (LlmProvider returns complete responses),
     // this lets us return proper HTTP errors on failure.
     enum LlmResult {
-        Simple(crate::llm::CompletionResponse),
-        WithTools(crate::llm::ToolCompletionResponse),
+        Simple(ironclaw_llm::CompletionResponse),
+        WithTools(ironclaw_llm::ToolCompletionResponse),
     }
 
     let llm_result = if has_tools {

@@ -1442,28 +1442,28 @@ impl ExtensionManager {
     /// list after the user deactivates everything. The setup wizard's
     /// `channels.wasm_channels` list is only a first-run fallback before any
     /// runtime activation state has been persisted.
+    ///
+    /// Fails loud on settings-store errors: a DB outage or schema drift
+    /// returns `Err` rather than silently dropping the persisted state and
+    /// falling back to the configured list, which would mask the failure
+    /// and quietly re-activate channels the user had deactivated.
     pub async fn load_startup_active_channels(
         &self,
         user_id: &str,
         configured_names: Vec<String>,
-    ) -> Vec<String> {
+    ) -> Result<Vec<String>, crate::error::DatabaseError> {
         let Some(store) = self.settings_store() else {
-            return normalize_extension_names(configured_names);
+            return Ok(normalize_extension_names(configured_names));
         };
 
-        match store.get_setting(user_id, "activated_channels").await {
-            Ok(Some(value)) => match serde_json::from_value::<Vec<String>>(value) {
-                Ok(names) => normalize_extension_names(names),
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to deserialize activated_channels");
-                    Vec::new()
-                }
-            },
-            Ok(None) => normalize_extension_names(configured_names),
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to load activated_channels setting");
-                Vec::new()
+        match store.get_setting(user_id, "activated_channels").await? {
+            Some(value) => {
+                let names = serde_json::from_value::<Vec<String>>(value).map_err(|e| {
+                    crate::error::DatabaseError::Serialization(format!("activated_channels: {e}"))
+                })?;
+                Ok(normalize_extension_names(names))
             }
+            None => Ok(normalize_extension_names(configured_names)),
         }
     }
 
@@ -8862,7 +8862,8 @@ mod tests {
                 "test",
                 vec!["telegram".to_string(), "discord-bot".to_string()],
             )
-            .await;
+            .await
+            .expect("load");
 
         assert_eq!(actual, vec!["telegram", "discord_bot"]);
     }
@@ -8884,12 +8885,127 @@ mod tests {
 
         let actual = manager
             .load_startup_active_channels("test", vec!["telegram".to_string()])
-            .await;
+            .await
+            .expect("load");
 
         assert!(
             actual.is_empty(),
             "an explicit empty activated_channels setting should keep all channels inactive"
         );
+    }
+
+    /// Headless server path: no DB / no settings store at all. The configured
+    /// list (from the setup wizard's `channels.wasm_channels`) is the only
+    /// source of truth, and channels listed there must be activated at
+    /// startup. This is the regression scenario from #3105.
+    #[tokio::test]
+    async fn load_startup_active_channels_falls_back_to_configured_when_no_settings_store() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let manager = make_test_manager_with_dirs(
+            None,
+            temp_dir.path().join("tools"),
+            temp_dir.path().join("channels"),
+            None,
+        );
+
+        let actual = manager
+            .load_startup_active_channels(
+                "test",
+                vec!["telegram".to_string(), "discord-bot".to_string()],
+            )
+            .await
+            .expect("load");
+
+        assert_eq!(actual, vec!["telegram", "discord_bot"]);
+    }
+
+    /// Settings-store errors must propagate. Silently returning the
+    /// configured list (or an empty list) on a DB outage would mask the
+    /// failure and quietly re-activate channels the user had deactivated.
+    #[tokio::test]
+    async fn load_startup_active_channels_propagates_settings_store_errors() {
+        use crate::db::SettingsStore;
+        use std::sync::Arc;
+
+        struct FailingSettingsStore;
+
+        #[async_trait::async_trait]
+        impl SettingsStore for FailingSettingsStore {
+            async fn get_setting(
+                &self,
+                _user_id: &str,
+                _key: &str,
+            ) -> Result<Option<serde_json::Value>, crate::error::DatabaseError> {
+                Err(crate::error::DatabaseError::Query("simulated".into()))
+            }
+            async fn get_setting_full(
+                &self,
+                _user_id: &str,
+                _key: &str,
+            ) -> Result<Option<crate::history::SettingRow>, crate::error::DatabaseError>
+            {
+                unreachable!()
+            }
+            async fn set_setting(
+                &self,
+                _user_id: &str,
+                _key: &str,
+                _value: &serde_json::Value,
+            ) -> Result<(), crate::error::DatabaseError> {
+                unreachable!()
+            }
+            async fn delete_setting(
+                &self,
+                _user_id: &str,
+                _key: &str,
+            ) -> Result<bool, crate::error::DatabaseError> {
+                unreachable!()
+            }
+            async fn list_settings(
+                &self,
+                _user_id: &str,
+            ) -> Result<Vec<crate::history::SettingRow>, crate::error::DatabaseError> {
+                unreachable!()
+            }
+            async fn get_all_settings(
+                &self,
+                _user_id: &str,
+            ) -> Result<
+                std::collections::HashMap<String, serde_json::Value>,
+                crate::error::DatabaseError,
+            > {
+                unreachable!()
+            }
+            async fn set_all_settings(
+                &self,
+                _user_id: &str,
+                _settings: &std::collections::HashMap<String, serde_json::Value>,
+            ) -> Result<(), crate::error::DatabaseError> {
+                unreachable!()
+            }
+            async fn has_settings(
+                &self,
+                _user_id: &str,
+            ) -> Result<bool, crate::error::DatabaseError> {
+                unreachable!()
+            }
+        }
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let manager = make_test_manager_with_dirs(
+            None,
+            temp_dir.path().join("tools"),
+            temp_dir.path().join("channels"),
+            None,
+        )
+        .with_settings_store(Arc::new(FailingSettingsStore));
+
+        let err = manager
+            .load_startup_active_channels("test", vec!["telegram".to_string()])
+            .await
+            .expect_err("settings-store error must propagate");
+
+        assert!(matches!(err, crate::error::DatabaseError::Query(_)));
     }
 
     fn make_test_tar_gz(entries: &[(&str, &[u8])]) -> Vec<u8> {

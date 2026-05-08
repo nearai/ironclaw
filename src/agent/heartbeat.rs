@@ -31,10 +31,10 @@ use chrono_tz::Tz;
 use tokio::sync::mpsc;
 
 use crate::channels::OutgoingResponse;
-use crate::llm::{ChatMessage, CompletionRequest, LlmProvider, Reasoning};
 use crate::tenant::SystemScope;
 use crate::workspace::Workspace;
 use crate::workspace::hygiene::HygieneConfig;
+use ironclaw_llm::{ChatMessage, CompletionRequest, LlmProvider, Reasoning};
 
 /// Configuration for the heartbeat runner.
 #[derive(Debug, Clone)]
@@ -907,7 +907,7 @@ mod tests {
             HeartbeatConfig,
             HygieneConfig,
             Arc<crate::workspace::Workspace>,
-            Arc<dyn crate::llm::LlmProvider>,
+            Arc<dyn ironclaw_llm::LlmProvider>,
             Option<tokio::sync::mpsc::Sender<crate::channels::OutgoingResponse>>,
             Option<SystemScope>,
         ) -> tokio::task::JoinHandle<()> = spawn_heartbeat;

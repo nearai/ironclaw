@@ -338,7 +338,7 @@ mod advanced {
 
     #[tokio::test]
     async fn routine_news_digest() {
-        use ironclaw::llm::recording::{HttpExchange, HttpExchangeRequest, HttpExchangeResponse};
+        use ironclaw_llm::recording::{HttpExchange, HttpExchangeRequest, HttpExchangeResponse};
 
         let trace = LlmTrace::from_file(format!("{FIXTURES}/routine_news_digest.json")).unwrap();
 

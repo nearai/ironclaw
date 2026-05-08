@@ -25,9 +25,9 @@ use crate::channels::{ChatApprovalPrompt, HistoryMessage, IncomingMessage, Statu
 use crate::context::JobContext;
 use crate::error::Error;
 use crate::generated_images::GeneratedImageSentinel;
-use crate::llm::{ChatMessage, ToolCall};
 use crate::tools::redact_params;
 use ironclaw_common::truncate_preview;
+use ironclaw_llm::{ChatMessage, ToolCall};
 use ironclaw_safety::{PolicyAction, SafetyLayer, ValidationResult};
 
 const FORGED_THREAD_ID_ERROR: &str = "Invalid or unauthorized thread ID.";
@@ -1677,10 +1677,10 @@ impl Agent {
             // === Phase 1: Preflight (sequential) ===
             // Walk deferred tools checking approval. Collect runnable
             // tools; stop at the first that needs approval.
-            let mut runnable: Vec<crate::llm::ToolCall> = Vec::new();
+            let mut runnable: Vec<ironclaw_llm::ToolCall> = Vec::new();
             let mut approval_needed: Option<(
                 usize,
-                crate::llm::ToolCall,
+                ironclaw_llm::ToolCall,
                 Arc<dyn crate::tools::Tool>,
                 bool, // allow_always
             )> = None;
@@ -1715,7 +1715,8 @@ impl Agent {
             }
 
             // === Phase 2: Parallel execution ===
-            let exec_results: Vec<(crate::llm::ToolCall, Result<String, Error>)> = if runnable.len()
+            let exec_results: Vec<(ironclaw_llm::ToolCall, Result<String, Error>)> = if runnable
+                .len()
                 <= 1
             {
                 // Single tool (or none): execute inline
@@ -1819,7 +1820,7 @@ impl Agent {
                 }
 
                 // Collect and reorder by original index
-                let mut ordered: Vec<Option<(crate::llm::ToolCall, Result<String, Error>)>> =
+                let mut ordered: Vec<Option<(ironclaw_llm::ToolCall, Result<String, Error>)>> =
                     (0..runnable_count).map(|_| None).collect();
                 while let Some(join_result) = join_set.join_next().await {
                     match join_result {
@@ -2758,7 +2759,7 @@ mod tests {
         struct StaticLlmProvider;
 
         #[async_trait::async_trait]
-        impl crate::llm::LlmProvider for StaticLlmProvider {
+        impl ironclaw_llm::LlmProvider for StaticLlmProvider {
             fn model_name(&self) -> &str {
                 "static-mock"
             }
@@ -2769,13 +2770,13 @@ mod tests {
 
             async fn complete(
                 &self,
-                _request: crate::llm::CompletionRequest,
-            ) -> Result<crate::llm::CompletionResponse, crate::error::LlmError> {
-                Ok(crate::llm::CompletionResponse {
+                _request: ironclaw_llm::CompletionRequest,
+            ) -> Result<ironclaw_llm::CompletionResponse, crate::error::LlmError> {
+                Ok(ironclaw_llm::CompletionResponse {
                     content: "ok".to_string(),
                     input_tokens: 0,
                     output_tokens: 0,
-                    finish_reason: crate::llm::FinishReason::Stop,
+                    finish_reason: ironclaw_llm::FinishReason::Stop,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                 })
@@ -2783,14 +2784,14 @@ mod tests {
 
             async fn complete_with_tools(
                 &self,
-                _request: crate::llm::ToolCompletionRequest,
-            ) -> Result<crate::llm::ToolCompletionResponse, crate::error::LlmError> {
-                Ok(crate::llm::ToolCompletionResponse {
+                _request: ironclaw_llm::ToolCompletionRequest,
+            ) -> Result<ironclaw_llm::ToolCompletionResponse, crate::error::LlmError> {
+                Ok(ironclaw_llm::ToolCompletionResponse {
                     content: Some("ok".to_string()),
                     tool_calls: Vec::new(),
                     input_tokens: 0,
                     output_tokens: 0,
-                    finish_reason: crate::llm::FinishReason::Stop,
+                    finish_reason: ironclaw_llm::FinishReason::Stop,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                     reasoning: None,
@@ -2934,8 +2935,8 @@ mod tests {
         ];
         let result = rebuild_chat_messages_from_db(&messages);
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0].role, crate::llm::Role::User);
-        assert_eq!(result[1].role, crate::llm::Role::Assistant);
+        assert_eq!(result[0].role, ironclaw_llm::Role::User);
+        assert_eq!(result[1].role, ironclaw_llm::Role::Assistant);
     }
 
     /// Regression: a `PendingApproval` deserialized from a row written
@@ -3011,7 +3012,7 @@ mod tests {
         let result = Ok(AgenticLoopResult::Response {
             text: "done".to_string(),
             turn_usage: TurnUsageSummary {
-                usage: crate::llm::TokenUsage {
+                usage: ironclaw_llm::TokenUsage {
                     input_tokens: 12,
                     output_tokens: 3,
                     cache_read_input_tokens: 0,
@@ -3035,7 +3036,7 @@ mod tests {
             }
             .into(),
             turn_usage: TurnUsageSummary {
-                usage: crate::llm::TokenUsage {
+                usage: ironclaw_llm::TokenUsage {
                     input_tokens: 7,
                     output_tokens: 2,
                     cache_read_input_tokens: 0,
@@ -3089,10 +3090,10 @@ mod tests {
         assert_eq!(result.len(), 5);
 
         // user
-        assert_eq!(result[0].role, crate::llm::Role::User);
+        assert_eq!(result[0].role, ironclaw_llm::Role::User);
 
         // assistant with tool_calls
-        assert_eq!(result[1].role, crate::llm::Role::Assistant);
+        assert_eq!(result[1].role, ironclaw_llm::Role::Assistant);
         assert!(result[1].tool_calls.is_some());
         let tcs = result[1].tool_calls.as_ref().unwrap();
         assert_eq!(tcs.len(), 2);
@@ -3101,16 +3102,16 @@ mod tests {
         assert_eq!(tcs[1].name, "echo");
 
         // tool results
-        assert_eq!(result[2].role, crate::llm::Role::Tool);
+        assert_eq!(result[2].role, ironclaw_llm::Role::Tool);
         assert_eq!(result[2].tool_call_id, Some("call_0".to_string()));
         assert!(result[2].content.contains("Found 3 results"));
 
-        assert_eq!(result[3].role, crate::llm::Role::Tool);
+        assert_eq!(result[3].role, ironclaw_llm::Role::Tool);
         assert_eq!(result[3].tool_call_id, Some("call_1".to_string()));
         assert!(result[3].content.contains("timeout"));
 
         // final assistant
-        assert_eq!(result[4].role, crate::llm::Role::Assistant);
+        assert_eq!(result[4].role, ironclaw_llm::Role::Assistant);
         assert_eq!(result[4].content, "I found some results.");
     }
 
@@ -3134,7 +3135,7 @@ mod tests {
         let result = rebuild_chat_messages_from_db(&messages);
 
         assert_eq!(result.len(), 3);
-        assert_eq!(result[2].role, crate::llm::Role::Tool);
+        assert_eq!(result[2].role, ironclaw_llm::Role::Tool);
         assert_eq!(result[2].tool_call_id, Some("call_1".to_string()));
         assert_eq!(result[2].content, wrapped_error);
     }
@@ -3154,8 +3155,8 @@ mod tests {
 
         // Legacy rows are skipped, only user + assistant
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0].role, crate::llm::Role::User);
-        assert_eq!(result[1].role, crate::llm::Role::Assistant);
+        assert_eq!(result[0].role, ironclaw_llm::Role::User);
+        assert_eq!(result[1].role, ironclaw_llm::Role::Assistant);
     }
 
     #[test]
@@ -3201,12 +3202,12 @@ mod tests {
         // Verify turn boundaries
         assert_eq!(result[0].content, "Find X");
         assert!(result[1].tool_calls.is_some());
-        assert_eq!(result[2].role, crate::llm::Role::Tool);
+        assert_eq!(result[2].role, ironclaw_llm::Role::Tool);
         assert_eq!(result[3].content, "Found X");
 
         assert_eq!(result[4].content, "Write it");
         assert!(result[5].tool_calls.is_some());
-        assert_eq!(result[6].role, crate::llm::Role::Tool);
+        assert_eq!(result[6].role, ironclaw_llm::Role::Tool);
         assert_eq!(result[7].content, "Written");
     }
 
@@ -3276,7 +3277,7 @@ mod tests {
         let result = rebuild_chat_messages_from_db(&messages);
 
         assert_eq!(result.len(), 4);
-        assert_eq!(result[2].role, crate::llm::Role::Tool);
+        assert_eq!(result[2].role, ironclaw_llm::Role::Tool);
         assert_eq!(result[2].content, "Generated image (image/jpeg)");
     }
 

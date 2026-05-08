@@ -15,7 +15,7 @@ use ironclaw::channels::web::platform::state::GatewayState;
 use ironclaw::channels::web::sse::SseManager;
 use ironclaw::channels::web::ws::WsConnectionTracker;
 use ironclaw::error::LlmError;
-use ironclaw::llm::{
+use ironclaw_llm::{
     CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ToolCompletionRequest,
     ToolCompletionResponse,
 };
@@ -64,7 +64,7 @@ impl LlmProvider for MockLlmProvider {
             .messages
             .iter()
             .rev()
-            .find(|m| m.role == ironclaw::llm::Role::User)
+            .find(|m| m.role == ironclaw_llm::Role::User)
             .map(|m| m.content.clone())
             .unwrap_or_else(|| "no user message".to_string());
 
@@ -92,7 +92,7 @@ impl LlmProvider for MockLlmProvider {
         if let Some(tool) = req.tools.first() {
             Ok(ToolCompletionResponse {
                 content: None,
-                tool_calls: vec![ironclaw::llm::ToolCall {
+                tool_calls: vec![ironclaw_llm::ToolCall {
                     id: "call_mock_001".to_string(),
                     name: tool.name.clone(),
                     arguments: serde_json::json!({"test": true}),

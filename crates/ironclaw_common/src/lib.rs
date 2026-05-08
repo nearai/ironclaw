@@ -1,10 +1,15 @@
 //! Shared types and utilities used across the IronClaw workspace.
 
+pub mod attachment;
+pub mod env_helpers;
 mod event;
 mod identity;
+pub mod paths;
+pub mod platform;
 mod timezone;
 mod util;
 
+pub use attachment::{AttachmentKind, IncomingAttachment};
 pub use event::{
     AppEvent, CodeExecutionFailureCategory, JobResultStatus, JobResultStatusParseError,
     OnboardingStateDto, PlanStepDto, SelfImprovementPhase, ToolDecisionDto,
@@ -14,8 +19,10 @@ pub use identity::{
     MAX_EXTERNAL_THREAD_ID_LEN, MAX_MCP_SERVER_NAME_LEN, MAX_NAME_LEN, McpServerName,
     McpServerNameError,
 };
+pub use paths::{compute_ironclaw_base_dir, ironclaw_base_dir};
+pub use platform::PlatformInfo;
 pub use timezone::{ValidTimezone, deserialize_option_lenient};
-pub use util::truncate_preview;
+pub use util::{truncate_for_preview, truncate_preview};
 
 /// Maximum worker agent loop iterations. Used by the orchestrator (server-side
 /// clamp in `create_job_inner`) and the worker runtime (`worker/job.rs`).

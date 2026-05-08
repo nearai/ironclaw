@@ -15,11 +15,11 @@ mod tests {
     use async_trait::async_trait;
     use ironclaw::channels::IncomingMessage;
     use ironclaw::config::Config;
-    use ironclaw::llm::{
+    use ironclaw::tools::permissions::{ADMIN_SETTINGS_USER_ID, ADMIN_TOOL_POLICY_KEY};
+    use ironclaw_llm::{
         CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ToolCompletionRequest,
         ToolCompletionResponse,
     };
-    use ironclaw::tools::permissions::{ADMIN_SETTINGS_USER_ID, ADMIN_TOOL_POLICY_KEY};
     use rust_decimal::Decimal;
 
     use crate::support::test_rig::TestRigBuilder;
