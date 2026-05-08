@@ -46,6 +46,55 @@ fn validate_prefixed_loop_ref(
     Ok(value)
 }
 
+fn validate_loop_safe_summary(value: String) -> Result<String, String> {
+    let value = validate_bounded_loop_string(value, "loop safe summary", 512)?;
+    if value.chars().any(|character| {
+        matches!(
+            character,
+            '{' | '}' | '[' | ']' | '`' | '<' | '>' | '/' | '\\'
+        )
+    }) {
+        return Err(
+            "loop safe summary must not contain raw payload or path delimiters".to_string(),
+        );
+    }
+
+    let lower = value.to_ascii_lowercase();
+    for forbidden in [
+        "access token",
+        "api key",
+        "api_key",
+        "apikey",
+        "authorization:",
+        "bearer ",
+        "host path",
+        "invalid api key",
+        "invalid_api_key",
+        "password",
+        "passwd",
+        "provider error",
+        "raw runtime",
+        "secret",
+        "stack trace",
+        "tool input",
+        "tool_input",
+        "traceback",
+    ] {
+        if lower.contains(forbidden) {
+            return Err(format!(
+                "loop safe summary must not contain sensitive marker `{forbidden}`"
+            ));
+        }
+    }
+    if lower
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
+        .any(|token| token.starts_with("sk-"))
+    {
+        return Err("loop safe summary must not contain API-key-like tokens".to_string());
+    }
+    Ok(value)
+}
+
 macro_rules! bounded_loop_ref {
     ($name:ident, $label:literal, $prefix:literal, $max:expr) => {
         #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -100,6 +149,42 @@ bounded_loop_ref!(
     256
 );
 bounded_loop_ref!(LoopProcessRef, "loop process ref", "process:", 256);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct LoopSafeSummary(String);
+
+impl LoopSafeSummary {
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        validate_loop_safe_summary(value.into()).map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for LoopSafeSummary {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for LoopSafeSummary {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for LoopSafeSummary {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
 
 fn origin_input_cursor_token() -> LoopInputCursorToken {
     LoopInputCursorToken("input-cursor:origin".to_string())
@@ -610,16 +695,19 @@ pub trait LoopCheckpointPort: Send + Sync {
 pub enum LoopProgressEvent {
     DriverNote {
         kind: LoopDriverNoteKind,
-        safe_summary: String,
+        safe_summary: LoopSafeSummary,
     },
 }
 
 impl LoopProgressEvent {
-    pub fn driver_note(kind: LoopDriverNoteKind, safe_summary: impl Into<String>) -> Self {
-        Self::DriverNote {
+    pub fn driver_note(
+        kind: LoopDriverNoteKind,
+        safe_summary: impl Into<String>,
+    ) -> Result<Self, String> {
+        Ok(Self::DriverNote {
             kind,
-            safe_summary: safe_summary.into(),
-        }
+            safe_summary: LoopSafeSummary::new(safe_summary)?,
+        })
     }
 
     pub fn kind_name(&self) -> &'static str {
