@@ -2463,11 +2463,15 @@ async fn resolve_tool_future(
             // can't be handed back to a suspended call. Approval and
             // Authentication both go through `drive_inline_gate`:
             // Approval resolves on user click, Authentication resolves
-            // when `bridge::resume_paused_missions_for_credential`
-            // (the OAuth-callback hook from #3133 half-2) delivers
-            // `GateResolution::Approved` to the parked controller. In
-            // both cases the action retries inline and the script
-            // continues without unwinding.
+            // when `bridge::resolve_inline_gates_for_credential` (the
+            // OAuth-callback hook from #3133 half-2) delivers
+            // `GateResolution::Approved` to the parked controller.
+            // (Mission-scoped resumes go through
+            // `bridge::resume_paused_missions_for_credential` — that's
+            // a separate path for background missions whose child
+            // threads were paused on the same gate.) In both
+            // inline-await cases the action retries inline and the
+            // script continues without unwinding.
             if !matches!(
                 *resume_kind,
                 crate::gate::ResumeKind::Approval { .. }

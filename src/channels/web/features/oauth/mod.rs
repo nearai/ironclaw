@@ -421,7 +421,9 @@ pub(crate) async fn oauth_callback_handler(
         //    OAuth completed.
         // Both are best-effort — failures are logged inside the bridge
         // helpers and never block the OAuth landing page.
-        let _ = crate::bridge::resolve_inline_gates_for_credential(&flow.secret_name).await;
+        let _ =
+            crate::bridge::resolve_inline_gates_for_credential(&flow.user_id, &flow.secret_name)
+                .await;
         let _ =
             crate::bridge::resume_paused_missions_for_credential(&flow.user_id, &flow.secret_name)
                 .await;

@@ -5267,7 +5267,9 @@ impl ExtensionManager {
                     // Half-2 of #3133, two-pronged auto-resume. See
                     // `src/channels/web/features/oauth/mod.rs` for the
                     // matching wire on the gateway-OAuth path.
-                    let _ = crate::bridge::resolve_inline_gates_for_credential(&secret_name).await;
+                    let _ =
+                        crate::bridge::resolve_inline_gates_for_credential(&user_id, &secret_name)
+                            .await;
                     let _ = crate::bridge::resume_paused_missions_for_credential(
                         &user_id,
                         &secret_name,

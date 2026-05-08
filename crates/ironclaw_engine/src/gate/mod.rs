@@ -203,8 +203,11 @@ pub struct GatePauseRequest {
 /// the gate with `GateResolution::Approved` once the credential has
 /// been written to the secrets store (the OAuth-callback path on the
 /// gateway handles this — see
-/// `bridge::resume_paused_missions_for_credential`). The paused tool
-/// call retries inline and reads the credential the same way it would
+/// `bridge::resolve_inline_gates_for_credential`, which wakes parked
+/// inline-await waiters). `bridge::resume_paused_missions_for_credential`
+/// is the parallel path that resumes background missions whose
+/// child threads were paused by the same gate. The paused tool call
+/// retries inline and reads the credential the same way it would
 /// have on a fresh execution.
 #[async_trait]
 pub trait GateController: Send + Sync {

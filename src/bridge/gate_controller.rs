@@ -89,9 +89,12 @@ struct PreExecKey {
 /// [`GateResolutions::try_deliver`] (the resolve endpoint).
 ///
 /// Authentication gates additionally register their `request_id`
-/// under the `credential_name` they are waiting on, so the OAuth
-/// callback path can wake the parked VM by credential name without
-/// having to know the engine-internal request_id.
+/// under the `(user_id, credential_name)` pair they are waiting on,
+/// so the OAuth callback path can wake the parked VM by credential
+/// name without having to know the engine-internal request_id —
+/// scoped per user so a credential write under one account never
+/// wakes a parked gate from a different account that happens to share
+/// the same credential name.
 ///
 /// Stranded entries from a prior crash do not exist — restarting the
 /// process drops the registry. Stale `PendingGate` rows surviving
@@ -99,11 +102,13 @@ struct PreExecKey {
 #[derive(Default)]
 pub struct GateResolutions {
     inner: Mutex<HashMap<Uuid, oneshot::Sender<GateResolution>>>,
-    /// Secondary index: credential name → request_ids parked on it.
-    /// Used by [`Self::deliver_for_credential`] so the OAuth-callback
-    /// path can wake a Tier 0/Tier 1 inline-await for the credential
-    /// that was just written.
-    by_credential: Mutex<HashMap<String, HashSet<Uuid>>>,
+    /// Secondary index: `(user_id, credential_name)` → request_ids
+    /// parked on it. Used by [`Self::deliver_for_credential`] so the
+    /// OAuth-callback path can wake a Tier 0/Tier 1 inline-await for
+    /// the credential that was just written. The user_id component
+    /// keeps multi-tenant deployments from cross-waking — only the
+    /// owning user's parked gates fire.
+    by_credential: Mutex<HashMap<(String, String), HashSet<Uuid>>>,
 }
 
 impl GateResolutions {
@@ -134,16 +139,18 @@ impl GateResolutions {
     }
 
     /// Deliver `Approved` to every parked Authentication gate that was
-    /// waiting on `credential_name`. Returns the count of waiters
-    /// woken. Used by the OAuth-callback path: when a credential is
-    /// written, every paused tool call (Tier 0 or Tier 1, foreground
-    /// or mission child thread) that was blocked on that credential
-    /// can resume inline and retry the action against the now-present
-    /// secret.
-    pub async fn deliver_for_credential(&self, credential_name: &str) -> usize {
+    /// waiting on `(user_id, credential_name)`. Returns the count of
+    /// waiters woken. Used by the OAuth-callback path: when a
+    /// credential is written, every paused tool call (Tier 0 or
+    /// Tier 1, foreground or mission child thread) belonging to
+    /// `user_id` that was blocked on that credential can resume
+    /// inline and retry the action against the now-present secret.
+    /// Other users' parked gates on the same credential name are
+    /// left untouched.
+    pub async fn deliver_for_credential(&self, user_id: &str, credential_name: &str) -> usize {
         let request_ids: Vec<Uuid> = {
             let mut idx = self.by_credential.lock().await;
-            idx.remove(credential_name)
+            idx.remove(&(user_id.to_string(), credential_name.to_string()))
                 .map(|set| set.into_iter().collect())
                 .unwrap_or_default()
         };
@@ -163,13 +170,19 @@ impl GateResolutions {
         self.inner.lock().await.insert(request_id, sender);
     }
 
-    /// Register `request_id` against `credential_name` so an OAuth
-    /// completion can wake it by credential name later.
-    async fn register_credential(&self, credential_name: String, request_id: Uuid) {
+    /// Register `request_id` against `(user_id, credential_name)` so
+    /// an OAuth completion can wake it by credential name later,
+    /// scoped to the owning user.
+    async fn register_credential(
+        &self,
+        user_id: String,
+        credential_name: String,
+        request_id: Uuid,
+    ) {
         self.by_credential
             .lock()
             .await
-            .entry(credential_name)
+            .entry((user_id, credential_name))
             .or_default()
             .insert(request_id);
     }
@@ -621,7 +634,11 @@ impl GateController for BridgeGateController {
         } = request.resume_kind
         {
             self.resolutions
-                .register_credential(credential_name.as_str().to_string(), request_id)
+                .register_credential(
+                    request.user_id.clone(),
+                    credential_name.as_str().to_string(),
+                    request_id,
+                )
                 .await;
         }
 

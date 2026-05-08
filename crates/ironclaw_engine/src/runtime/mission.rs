@@ -1100,10 +1100,24 @@ impl MissionManager {
             if !matches {
                 continue;
             }
-            // Effective owner for resume: shared missions resume under the
-            // shared owner; user-owned missions resume under their owner.
-            let owner = mission.user_id.clone();
-            match self.resume_mission(mission.id, &owner).await {
+            // Resume scoping:
+            // - `resume_mission` itself enforces ownership: shared
+            //   missions accept a shared-owner caller, user-owned
+            //   missions accept only their owner. Pass `mission.user_id`
+            //   so the access check matches.
+            // - `fire_mission` runs the work — for shared missions it
+            //   should run under the requesting user (who just wrote
+            //   the credential that unblocked it), not under the
+            //   `__shared__` placeholder, because the spawned child
+            //   thread needs the requesting user's project / secret
+            //   scope.
+            let resume_owner = mission.user_id.clone();
+            let fire_owner = if mission.owner_id().is_shared() {
+                user_id.to_string()
+            } else {
+                resume_owner.clone()
+            };
+            match self.resume_mission(mission.id, &resume_owner).await {
                 Ok(()) => {
                     debug!(
                         mission_id = %mission.id,
@@ -1118,8 +1132,17 @@ impl MissionManager {
                     // OAuth was their continuation. Best-effort — a
                     // failure to spawn the immediate thread does not
                     // unwind the resume.
+                    //
+                    // Event-driven missions (`OnEvent`, `OnSystemEvent`,
+                    // `Webhook`) auto-fire here with `trigger_payload =
+                    // None`. The original triggering payload is gone by
+                    // the time OAuth lands — best-effort continuation
+                    // matches the legacy behavior. A future improvement
+                    // is to preserve the trigger payload on
+                    // `paused_gate` and replay it here; tracked as a
+                    // follow-up.
                     if !matches!(mission.cadence, MissionCadence::Manual)
-                        && let Err(e) = self.fire_mission(mission.id, &owner, None).await
+                        && let Err(e) = self.fire_mission(mission.id, &fire_owner, None).await
                     {
                         debug!(
                             mission_id = %mission.id,
@@ -1156,50 +1179,120 @@ impl MissionManager {
         user_id: &str,
     ) -> Result<Option<MissionId>, EngineError> {
         let candidates = self.list_paused_missions_for_user(user_id).await?;
-        let Some(mission) = candidates.into_iter().find(|m| {
+        let Some(snapshot) = candidates.into_iter().find(|m| {
             m.paused_gate
                 .as_ref()
                 .is_some_and(|g| g.gate_request_id == gate_request_id)
         }) else {
             return Ok(None);
         };
-        let owner = mission.user_id.clone();
+        let mission_id = snapshot.id;
+        // Re-load the mission and re-check that the same
+        // `paused_gate.gate_request_id` is still pending in a single
+        // mutate-and-save round-trip. Without this, between the
+        // snapshot scan above and `resume_mission`, the mission could
+        // have been manually resumed (or paused again on a different
+        // gate) — `resume_mission` itself accepts both `Paused` and
+        // `Failed`, so it would transition a freshly re-paused mission
+        // back to Active and silently clear the new gate.
+        let mut mission =
+            self.store
+                .load_mission(mission_id)
+                .await?
+                .ok_or_else(|| EngineError::Store {
+                    reason: format!("mission {mission_id} not found"),
+                })?;
+        // Ownership check (mirror of `resume_mission`).
+        let allowed = if mission.owner_id().is_shared() {
+            crate::types::is_shared_owner(user_id)
+        } else {
+            mission.is_owned_by(user_id)
+        };
+        if !allowed {
+            return Err(EngineError::AccessDenied {
+                user_id: user_id.to_string(),
+                entity: format!("mission {mission_id}"),
+            });
+        }
+        // Atomic gate-request-id match. If the live mission is no
+        // longer paused on this exact gate, return `None` instead of
+        // mutating — the caller can interpret that as "someone else
+        // already handled it".
+        let still_matches = mission.status == MissionStatus::Paused
+            && mission
+                .paused_gate
+                .as_ref()
+                .is_some_and(|g| g.gate_request_id == gate_request_id);
+        if !still_matches {
+            debug!(
+                mission_id = %mission_id,
+                %gate_request_id,
+                live_status = ?mission.status,
+                "mission no longer paused on this gate at resume time; skipping"
+            );
+            return Ok(None);
+        }
+        let cadence_for_fire = mission.cadence.clone();
+        // Resume scoping mirror of `resume_paused_for_credential`:
+        // ownership-check uses `mission.user_id`, fire uses the
+        // requesting user for shared missions so the spawned thread
+        // sees the requesting user's project / secret scope.
+        let fire_owner = if mission.owner_id().is_shared() {
+            user_id.to_string()
+        } else {
+            mission.user_id.clone()
+        };
         match resolution {
             GateResolutionOutcome::Approved => {
-                self.resume_mission(mission.id, &owner).await?;
+                mission.status = MissionStatus::Active;
+                mission.paused_gate = None;
+                if let MissionCadence::Cron {
+                    ref expression,
+                    ref timezone,
+                } = mission.cadence
+                {
+                    mission.next_fire_at =
+                        Some(next_cron_fire_required(expression, timezone.as_ref())?);
+                }
+                mission.updated_at = chrono::Utc::now();
+                self.store.save_mission(&mission).await?;
+                {
+                    let mut active = self.active.write().await;
+                    if !active.contains(&mission_id) {
+                        active.push(mission_id);
+                    }
+                }
                 debug!(
-                    mission_id = %mission.id,
+                    mission_id = %mission_id,
                     %gate_request_id,
                     "auto-resumed paused mission after approval gate resolved"
                 );
-                if !matches!(mission.cadence, MissionCadence::Manual)
-                    && let Err(e) = self.fire_mission(mission.id, &owner, None).await
+                if !matches!(cadence_for_fire, MissionCadence::Manual)
+                    && let Err(e) = self.fire_mission(mission_id, &fire_owner, None).await
                 {
                     debug!(
-                        mission_id = %mission.id,
+                        mission_id = %mission_id,
                         error = %e,
                         "post-resume immediate fire failed; will retry on next tick"
                     );
                 }
-                Ok(Some(mission.id))
+                Ok(Some(mission_id))
             }
             GateResolutionOutcome::Denied | GateResolutionOutcome::Cancelled => {
-                let mut m = mission;
-                m.status = MissionStatus::Failed;
-                m.paused_gate = None;
-                m.approach_history.push(format!(
-                    "FAILED: gate {} denied or cancelled",
-                    gate_request_id
+                mission.status = MissionStatus::Failed;
+                mission.paused_gate = None;
+                mission.approach_history.push(format!(
+                    "FAILED: gate {gate_request_id} denied or cancelled"
                 ));
-                m.updated_at = chrono::Utc::now();
-                self.store.save_mission(&m).await?;
-                self.active.write().await.retain(|mid| *mid != m.id);
+                mission.updated_at = chrono::Utc::now();
+                self.store.save_mission(&mission).await?;
+                self.active.write().await.retain(|mid| *mid != mission_id);
                 debug!(
-                    mission_id = %m.id,
+                    mission_id = %mission_id,
                     %gate_request_id,
                     "marked paused mission Failed after gate denial/cancel"
                 );
-                Ok(Some(m.id))
+                Ok(Some(mission_id))
             }
         }
     }

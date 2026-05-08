@@ -2158,20 +2158,21 @@ pub async fn resolve_engine_auth_callback(
 }
 
 /// Wake any Tier 0/Tier 1 inline-await waiters that paused on the
-/// credential named `credential_name`.
+/// credential `(user_id, credential_name)` pair.
 ///
 /// Half-2 of #3133, inline-await arm. The Tier 1 (CodeAct) and Tier 0
 /// (structured) paths now keep their VM/batch parked on
 /// `GateController::pause()` for Authentication gates the same way
 /// they do for Approval. When OAuth lands a credential, this helper
-/// delivers `GateResolution::Approved` to every parked waiter so the
-/// suspended action retries inline against the now-present secret —
-/// no thread re-entry, no replay of earlier side effects in the same
-/// step.
+/// delivers `GateResolution::Approved` to every parked waiter for
+/// `user_id` so the suspended action retries inline against the
+/// now-present secret — no thread re-entry, no replay of earlier
+/// side effects in the same step. Other users' parked waiters on the
+/// same credential name are left untouched.
 ///
 /// Returns the number of waiters woken (zero is normal — most
 /// credential writes don't unblock any inline VM).
-pub async fn resolve_inline_gates_for_credential(credential_name: &str) -> usize {
+pub async fn resolve_inline_gates_for_credential(user_id: &str, credential_name: &str) -> usize {
     let Some(lock) = ENGINE_STATE.get() else {
         return 0;
     };
@@ -2181,10 +2182,11 @@ pub async fn resolve_inline_gates_for_credential(credential_name: &str) -> usize
     };
     let woken = state
         .gate_resolutions
-        .deliver_for_credential(credential_name)
+        .deliver_for_credential(user_id, credential_name)
         .await;
     if woken > 0 {
         tracing::debug!(
+            user = %user_id,
             credential = %credential_name,
             woken,
             "delivered Approved to parked inline-await waiter(s) on credential write"
@@ -2196,13 +2198,21 @@ pub async fn resolve_inline_gates_for_credential(credential_name: &str) -> usize
 /// Auto-resume paused missions whose `paused_gate` was waiting for the
 /// credential named `credential_name`.
 ///
-/// Half-2 of #3133, mission arm. Called from the OAuth completion path
-/// and from `secrets_store::create` / `update`. Walks the engine state
-/// to locate the [`MissionManager`] and delegates to
+/// Half-2 of #3133, mission arm. Called from the OAuth completion
+/// paths in `channels::web::features::oauth::oauth_callback_handler`
+/// and `extensions::manager`'s WASM OAuth completion. Walks the
+/// engine state to locate the [`MissionManager`] and delegates to
 /// [`MissionManager::resume_paused_for_credential`], which transitions
 /// every matching mission `Paused → Active`, clears its `paused_gate`,
 /// and (for non-Manual cadences) kicks off an immediate fire so the
 /// user sees follow-through after completing OAuth.
+///
+/// Note: this hook is currently OAuth-only. Manual credential writes
+/// (`/api/secrets`, `tool_auth`, gate-resolution `CredentialProvided`)
+/// do NOT call this helper today; missions paused on a non-OAuth
+/// credential write are auto-resumed only when the user resubmits an
+/// OAuth callback against the same secret. Plumbing the manual path
+/// through this helper is tracked as a follow-up.
 ///
 /// Returns the count of missions that were resumed (zero is the normal
 /// case — most credential writes are not blocking any paused mission).
@@ -6635,6 +6645,12 @@ pub(crate) mod test_support {
         ));
         let cm = Arc::new(ConversationManager::new(Arc::clone(&tm), store_dyn.clone()));
 
+        // Share a single `Arc<GateResolutions>` between the gate
+        // controller and the EngineState field so
+        // `resolve_inline_gates_for_credential` reads the same index
+        // that `BridgeGateController::pause` writes to.
+        let test_gate_resolutions =
+            Arc::new(crate::bridge::gate_controller::GateResolutions::new());
         let state = EngineState {
             thread_manager: tm,
             conversation_manager: cm,
@@ -6654,9 +6670,9 @@ pub(crate) mod test_support {
                 None,
                 None,
                 Arc::new(crate::channels::ChannelManager::new()),
-                Arc::new(crate::bridge::gate_controller::GateResolutions::new()),
+                Arc::clone(&test_gate_resolutions),
             )),
-            gate_resolutions: Arc::new(crate::bridge::gate_controller::GateResolutions::new()),
+            gate_resolutions: test_gate_resolutions,
             project_root: super::resolve_project_root(),
         };
 
@@ -8830,6 +8846,11 @@ mod tests {
 
         let cm = Arc::new(ConversationManager::new(Arc::clone(&tm), store_dyn.clone()));
 
+        // Share a single `Arc<GateResolutions>` between the gate
+        // controller and the EngineState field so
+        // `resolve_inline_gates_for_credential` reads the same index
+        // that `BridgeGateController::pause` writes to.
+        let resolutions = Arc::new(crate::bridge::gate_controller::GateResolutions::new());
         EngineState {
             thread_manager: tm,
             conversation_manager: cm,
@@ -8849,9 +8870,9 @@ mod tests {
                 None,
                 None,
                 Arc::new(crate::channels::ChannelManager::new()),
-                Arc::new(crate::bridge::gate_controller::GateResolutions::new()),
+                Arc::clone(&resolutions),
             )),
-            gate_resolutions: Arc::new(crate::bridge::gate_controller::GateResolutions::new()),
+            gate_resolutions: resolutions,
             project_root: resolve_project_root(),
         }
     }
@@ -8990,6 +9011,11 @@ mod tests {
 
         let cm = Arc::new(ConversationManager::new(Arc::clone(&tm), store_dyn.clone()));
 
+        // Share a single `Arc<GateResolutions>` between the gate
+        // controller and the EngineState field so
+        // `resolve_inline_gates_for_credential` reads the same index
+        // that `BridgeGateController::pause` writes to.
+        let resolutions = Arc::new(crate::bridge::gate_controller::GateResolutions::new());
         EngineState {
             thread_manager: tm,
             conversation_manager: cm,
@@ -9009,9 +9035,9 @@ mod tests {
                 None,
                 None,
                 Arc::new(crate::channels::ChannelManager::new()),
-                Arc::new(crate::bridge::gate_controller::GateResolutions::new()),
+                Arc::clone(&resolutions),
             )),
-            gate_resolutions: Arc::new(crate::bridge::gate_controller::GateResolutions::new()),
+            gate_resolutions: resolutions,
             project_root: resolve_project_root(),
         }
     }
@@ -10745,6 +10771,11 @@ mod tests {
             Arc::new(LeaseManager::new()),
             Arc::new(PolicyEngine::new()),
         ));
+        // Share a single `Arc<GateResolutions>` between the gate
+        // controller and the EngineState field so
+        // `resolve_inline_gates_for_credential` reads the same index
+        // that `BridgeGateController::pause` writes to.
+        let resolutions = Arc::new(crate::bridge::gate_controller::GateResolutions::new());
         EngineState {
             conversation_manager: Arc::new(ConversationManager::new(
                 Arc::clone(&thread_manager),
@@ -10767,9 +10798,9 @@ mod tests {
                 None,
                 None,
                 Arc::new(crate::channels::ChannelManager::new()),
-                Arc::new(crate::bridge::gate_controller::GateResolutions::new()),
+                Arc::clone(&resolutions),
             )),
-            gate_resolutions: Arc::new(crate::bridge::gate_controller::GateResolutions::new()),
+            gate_resolutions: resolutions,
             project_root: resolve_project_root(),
         }
     }

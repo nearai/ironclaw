@@ -606,10 +606,13 @@ fn interrupted_call_needs_refund(result: &Result<ActionResult, EngineError>) -> 
 /// and the cap is only ever hit on bugs.
 ///
 /// Authentication resume kinds also flow through this loop now —
-/// `bridge::resume_paused_missions_for_credential` (the OAuth-callback
+/// `bridge::resolve_inline_gates_for_credential` (the OAuth-callback
 /// hook from #3133 half-2) delivers `GateResolution::Approved` to the
 /// parked controller as soon as the credential lands in the secrets
 /// store, so the retry sees the credential and the action succeeds.
+/// (`bridge::resume_paused_missions_for_credential` is the parallel
+/// path for missions whose child threads were paused — separate from
+/// the inline-await waiters this loop drives.)
 /// External resume kinds still keep the legacy re-entry path: their
 /// resolution installs callback-payload state that the suspended call
 /// can't see without unwinding.

@@ -241,19 +241,22 @@ pub(crate) async fn chat_gate_resolve_handler(
     // Half-2 of #3133: a paused background mission may be waiting on
     // this same `request_id`. After the foreground gate is resolved we
     // fan the disposition out to the mission auto-resume path so a
-    // paused mission re-fires (Approved) or gets marked Failed
-    // (Denied / Cancelled). CredentialProvided is excluded — the
-    // credential-write path itself triggers
-    // `resume_paused_missions_for_credential` from the OAuth completion
-    // path. Best-effort dispatch — failures inside the helper are
-    // logged and never surfaced as a gate-resolve error.
+    // paused mission re-fires (Approved / CredentialProvided) or gets
+    // marked Failed (Denied / Cancelled). For OAuth flows the
+    // credential-write path also triggers
+    // `resume_paused_missions_for_credential` from the OAuth callback
+    // handler — both hooks landing on the same mission are idempotent
+    // since `resume_paused_for_request_id` and
+    // `resume_paused_for_credential` re-check `paused_gate` atomically.
+    // Best-effort dispatch — failures inside the helper are logged and
+    // never surfaced as a gate-resolve error.
     let mission_outcome = match req.resolution {
-        GateResolutionPayload::Approved { .. } => {
+        GateResolutionPayload::Approved { .. }
+        | GateResolutionPayload::CredentialProvided { .. } => {
             Some(ironclaw_engine::GateResolutionOutcome::Approved)
         }
         GateResolutionPayload::Denied => Some(ironclaw_engine::GateResolutionOutcome::Denied),
         GateResolutionPayload::Cancelled => Some(ironclaw_engine::GateResolutionOutcome::Cancelled),
-        GateResolutionPayload::CredentialProvided { .. } => None,
     };
     let mission_resume = mission_outcome.zip(Uuid::parse_str(&req.request_id).ok());
 
@@ -315,27 +318,35 @@ pub(crate) async fn chat_gate_resolve_handler(
             Ok(Json(ActionResponse::ok("Credential submitted.")))
         }
         GateResolutionPayload::Cancelled => {
-            let thread_id = req.thread_id.ok_or((
-                StatusCode::BAD_REQUEST,
-                "thread_id is required for cancellation".to_string(),
-            ))?;
-            let request_id = Uuid::parse_str(&req.request_id).map_err(|_| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    "Invalid request_id (expected UUID)".to_string(),
+            // Mission-only gates have no foreground `thread_id` — the
+            // gate is owned by a background mission's child thread, and
+            // the gate-card UI doesn't surface a `thread_id` in the
+            // resolution payload. When `thread_id` is absent, skip the
+            // foreground submission and let the mission auto-resume
+            // path (`resume_paused_missions_for_gate_request`, fired
+            // below) carry the Cancelled outcome to the mission state
+            // machine. For foreground gates with a `thread_id`, dispatch
+            // the structured cancellation as before so the parked VM
+            // unwinds promptly.
+            if let Some(thread_id) = req.thread_id.clone() {
+                let request_id = Uuid::parse_str(&req.request_id).map_err(|_| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        "Invalid request_id (expected UUID)".to_string(),
+                    )
+                })?;
+                let submission = crate::agent::submission::Submission::GateAuthResolution {
+                    request_id,
+                    resolution: crate::agent::submission::AuthGateResolution::Cancelled,
+                };
+                crate::channels::web::platform::engine_dispatch::dispatch_engine_submission(
+                    &state,
+                    &user.user_id,
+                    &thread_id,
+                    submission,
                 )
-            })?;
-            let submission = crate::agent::submission::Submission::GateAuthResolution {
-                request_id,
-                resolution: crate::agent::submission::AuthGateResolution::Cancelled,
-            };
-            crate::channels::web::platform::engine_dispatch::dispatch_engine_submission(
-                &state,
-                &user.user_id,
-                &thread_id,
-                submission,
-            )
-            .await?;
+                .await?;
+            }
             Ok(Json(ActionResponse::ok("Gate cancelled.")))
         }
     };
