@@ -13,7 +13,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use ironclaw::error::LlmError;
-use ironclaw::llm::{
+use ironclaw_llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role, ToolCall,
     ToolCompletionRequest, ToolCompletionResponse,
 };
@@ -22,7 +22,7 @@ use ironclaw::llm::{
 // still import them from here.
 // Re-export all shared types so downstream test files can import from here.
 #[allow(unused_imports)]
-pub use ironclaw::llm::recording::{
+pub use ironclaw_llm::recording::{
     ExpectedToolResult, HttpExchange, HttpExchangeRequest, HttpExchangeResponse,
     MemorySnapshotEntry, RequestHint, TraceResponse, TraceStep, TraceToolCall,
 };
@@ -739,6 +739,7 @@ impl LlmProvider for TraceLlm {
                 finish_reason: FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             }),
             TraceResponse::ToolCalls {
                 tool_calls,
@@ -752,6 +753,7 @@ impl LlmProvider for TraceLlm {
                         name: tc.name,
                         arguments: tc.arguments,
                         reasoning: None,
+                        signature: None,
                     })
                     .collect();
                 Ok(ToolCompletionResponse {
@@ -762,6 +764,7 @@ impl LlmProvider for TraceLlm {
                     finish_reason: FinishReason::ToolUse,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
+                    reasoning: None,
                 })
             }
             TraceResponse::UserInput { .. } => Err(LlmError::RequestFailed {

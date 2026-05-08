@@ -54,7 +54,7 @@ impl std::fmt::Debug for CustomLlmProviderSettings {
 /// Per-provider overrides for built-in LLM providers (API key and/or model).
 ///
 /// Stored as `llm_builtin_overrides` in the settings store, keyed by provider ID
-/// (e.g. `"openai"`, `"gemini"`). Resolved at startup during `LlmConfig::resolve()`.
+/// (e.g. `"openai"`, `"gemini"`). Resolved at startup during `crate::config::llm::resolve()`.
 ///
 /// Note: The global `selected_model` (if set) takes precedence over these
 /// per-provider overrides, which in turn take precedence over environment variables.

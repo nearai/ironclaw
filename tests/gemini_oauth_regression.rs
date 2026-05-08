@@ -1,5 +1,5 @@
-use ironclaw::llm::ChatMessage;
-use ironclaw::llm::gemini_oauth::GeminiOauthProvider;
+use ironclaw_llm::ChatMessage;
+use ironclaw_llm::gemini_oauth::GeminiOauthProvider;
 
 /// Regression: Cloud Code API routing for Gemini 2.0+ models.
 /// Gemini 1.x → legacy generativelanguage.googleapis.com
@@ -90,10 +90,10 @@ fn test_regression_standardized_model_list() {
 #[test]
 fn test_regression_chat_message_helpers() {
     let user_msg = ChatMessage::user("hello");
-    assert_eq!(user_msg.role, ironclaw::llm::Role::User);
+    assert_eq!(user_msg.role, ironclaw_llm::Role::User);
     assert_eq!(user_msg.content, "hello");
 
     let system_msg = ChatMessage::system("you are helpful");
-    assert_eq!(system_msg.role, ironclaw::llm::Role::System);
+    assert_eq!(system_msg.role, ironclaw_llm::Role::System);
     assert_eq!(system_msg.content, "you are helpful");
 }

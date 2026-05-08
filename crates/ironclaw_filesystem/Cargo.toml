@@ -1,0 +1,30 @@
+[package]
+name = "ironclaw_filesystem"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Scoped filesystem service for IronClaw Reborn"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[features]
+default = []
+postgres = ["dep:deadpool-postgres", "dep:tokio-postgres"]
+libsql = ["dep:libsql"]
+
+[dependencies]
+async-trait = "0.1"
+deadpool-postgres = { version = "0.14", optional = true }
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "io-util"] }
+tokio-postgres = { version = "0.7", optional = true }
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt"] }

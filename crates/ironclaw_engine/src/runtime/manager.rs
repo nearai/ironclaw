@@ -44,6 +44,15 @@ pub struct ThreadManager {
     completed: Arc<RwLock<HashMap<ThreadId, ThreadOutcome>>>,
     /// Broadcast channel for thread events (for live status updates).
     event_tx: tokio::sync::broadcast::Sender<crate::types::event::ThreadEvent>,
+    /// Host-supplied callback that turns `Approval` gates into inline
+    /// awaits instead of unwinding the call stack. The engine attaches
+    /// it to every `ThreadExecutionContext` so both Tier 0 and Tier 1
+    /// executors can pause a live VM in place.
+    ///
+    /// Defaults to [`crate::gate::CancellingGateController`] — every
+    /// gate cancels with a typed denial. Hosts that want real inline
+    /// await call [`Self::set_gate_controller`] during bootstrap.
+    gate_controller: tokio::sync::RwLock<Arc<dyn crate::gate::GateController>>,
 }
 
 impl ThreadManager {
@@ -68,7 +77,22 @@ impl ThreadManager {
             running: Arc::new(RwLock::new(HashMap::new())),
             completed: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
+            gate_controller: tokio::sync::RwLock::new(crate::gate::CancellingGateController::arc()),
         }
+    }
+
+    /// Install (or replace) the host-supplied gate controller.
+    ///
+    /// Called once during bridge bootstrap. Subsequent thread spawns
+    /// pick up the controller and propagate it into every
+    /// `ThreadExecutionContext` they construct.
+    pub async fn set_gate_controller(&self, controller: Arc<dyn crate::gate::GateController>) {
+        *self.gate_controller.write().await = controller;
+    }
+
+    /// Snapshot the current gate controller.
+    pub async fn gate_controller(&self) -> Arc<dyn crate::gate::GateController> {
+        self.gate_controller.read().await.clone()
     }
 
     /// Subscribe to thread events for live status updates.
@@ -335,11 +359,21 @@ impl ThreadManager {
         let store_for_retrieval = Arc::clone(&self.store);
         let retrieval = crate::memory::RetrievalEngine::new(store_for_retrieval);
 
-        let exec_loop = ExecutionLoop::new(thread, llm, effects, leases, policy, rx, user_id)
-            .with_capabilities(Arc::clone(&self.capabilities))
-            .with_event_tx(self.event_tx.clone())
-            .with_retrieval(retrieval)
-            .with_store(Arc::clone(&self.store));
+        let gate_controller = self.gate_controller.read().await.clone();
+        let exec_loop = ExecutionLoop::new(
+            thread,
+            llm,
+            effects,
+            leases,
+            policy,
+            rx,
+            user_id,
+            gate_controller,
+        )
+        .with_capabilities(Arc::clone(&self.capabilities))
+        .with_event_tx(self.event_tx.clone())
+        .with_retrieval(retrieval)
+        .with_store(Arc::clone(&self.store));
 
         // Spawn background task
         let store_for_task = Arc::clone(&self.store);
@@ -416,6 +450,14 @@ impl ThreadManager {
     }
 
     /// Send a stop signal to a running thread.
+    ///
+    /// Wakes any [`crate::gate::GateController::pause`] futures that
+    /// are currently parked on this thread BEFORE sending
+    /// `ThreadSignal::Stop` so the engine task can observe the stop
+    /// promptly. Without the explicit cancel, a thread parked inside
+    /// `pause()` (inline approval await) is not polling the signal
+    /// channel and would continue waiting until the user resolves the
+    /// prompt or the gate expires.
     pub async fn stop_thread(&self, thread_id: ThreadId, user_id: &str) -> Result<(), EngineError> {
         // Validate ownership before allowing stop.
         if let Some(thread) = self.store.load_thread(thread_id).await?
@@ -426,6 +468,14 @@ impl ThreadManager {
                 entity: format!("thread {thread_id}"),
             });
         }
+
+        // Wake any inline gate await blocked on this thread first. The
+        // controller is shared across spawned engine tasks; a parked
+        // `pause()` future polled inside an executor doesn't see
+        // `ThreadSignal::Stop` directly.
+        let controller = self.gate_controller.read().await.clone();
+        controller.cancel_thread(thread_id).await;
+
         let running = self.running.read().await;
         if let Some(rt) = running.get(&thread_id) {
             let _ = rt.signal_tx.send(ThreadSignal::Stop).await;
@@ -598,13 +648,14 @@ impl ThreadManager {
     /// Reconcile persisted non-terminal threads after process startup.
     ///
     /// The current engine does not support mid-thread replay/resume, so any
-    /// thread left in a non-terminal state is marked failed-safe.
+    /// thread left in a non-terminal state is marked failed-safe. Threads
+    /// transitioned to `Failed` here carry the
+    /// [`ENGINE_RESTART_RECOVERY_METADATA_KEY`] flag so callers can
+    /// distinguish them from real, user-actionable failures.
     pub async fn recover_project_threads(
         &self,
         project_id: ProjectId,
     ) -> Result<Vec<ThreadId>, EngineError> {
-        const PENDING_APPROVAL_METADATA_KEY: &str = "pending_approval";
-        const RUNTIME_CHECKPOINT_METADATA_KEY: &str = "runtime_checkpoint";
         // System operation: recover all non-terminal threads regardless of user.
         let threads = self.store.list_all_threads(project_id).await?;
         let mut recovered = Vec::new();
@@ -638,6 +689,16 @@ impl ThreadManager {
                 continue;
             }
 
+            // Tag the thread before transitioning so downstream consumers
+            // (projects "needs attention" feed, health rollup) can skip
+            // restart-recovery noise and only surface real failures.
+            if let Some(obj) = thread.metadata.as_object_mut() {
+                obj.insert(
+                    ENGINE_RESTART_RECOVERY_METADATA_KEY.to_string(),
+                    serde_json::Value::Bool(true),
+                );
+            }
+
             if thread
                 .transition_to(
                     ThreadState::Failed,
@@ -654,6 +715,24 @@ impl ThreadManager {
         Ok(recovered)
     }
 }
+
+/// Metadata key set on a thread that has an in-flight pending-approval
+/// gate. Persisted threads carrying this key skip restart-recovery so the
+/// gate survives a process restart.
+pub const PENDING_APPROVAL_METADATA_KEY: &str = "pending_approval";
+
+/// Metadata key set on a thread that has a serialized runtime checkpoint
+/// (CodeAct VM state, nudge counters, compaction count). Threads carrying
+/// this key are suspended on restart instead of failed.
+pub const RUNTIME_CHECKPOINT_METADATA_KEY: &str = "runtime_checkpoint";
+
+/// Metadata key set on threads that were forced into `Failed` by
+/// [`ThreadManager::recover_project_threads`] because the process
+/// restarted before they could complete. The thread did not fail for
+/// user-visible reasons; the projects "needs attention" surface filters
+/// these out so an upgrade does not cascade into a wall of phantom
+/// failure warnings.
+pub const ENGINE_RESTART_RECOVERY_METADATA_KEY: &str = "engine_restart_recovery";
 
 fn is_resolved_call_message(message: &ThreadMessage, call_id: &str) -> bool {
     if message.role == MessageRole::ActionResult
@@ -782,7 +861,15 @@ mod tests {
             _: &[CapabilityLease],
             _: &crate::traits::effect::ThreadExecutionContext,
         ) -> Result<Vec<ActionDef>, EngineError> {
-            Ok(vec![])
+            Ok(vec![ActionDef {
+                name: "test_tool".into(),
+                description: "Test".into(),
+                parameters_schema: serde_json::json!({}),
+                effects: vec![EffectType::ReadLocal],
+                requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
+            }])
         }
 
         async fn available_capabilities(
@@ -1428,9 +1515,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Give it a moment to start, then stop
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        let _ = mgr.stop_thread(tid, "test-user").await;
+        mgr.stop_thread(tid, "user").await.unwrap();
 
         let outcome = mgr.join_thread(tid).await.unwrap();
         assert!(matches!(
@@ -1507,6 +1592,28 @@ mod tests {
         assert_eq!(saved.state, ThreadState::Failed);
         let events = store.load_events(running.id).await.unwrap();
         assert!(!events.is_empty());
+
+        // Restart-recovery flag must be set so the projects "needs
+        // attention" feed can filter these out (#3274).
+        assert_eq!(
+            saved
+                .metadata
+                .get(ENGINE_RESTART_RECOVERY_METADATA_KEY)
+                .and_then(|v| v.as_bool()),
+            Some(true),
+            "recovered thread should carry the engine_restart_recovery flag"
+        );
+
+        // Threads that were already terminal before recovery must NOT
+        // gain the flag — they failed for real reasons.
+        let saved_completed = store.load_thread(completed.id).await.unwrap().unwrap();
+        assert!(
+            saved_completed
+                .metadata
+                .get(ENGINE_RESTART_RECOVERY_METADATA_KEY)
+                .is_none(),
+            "pre-existing failed thread must not be flagged as restart-recovery"
+        );
     }
 
     #[tokio::test]

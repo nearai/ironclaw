@@ -30,8 +30,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ironclaw::llm::recording::RecordingLlm;
-use ironclaw::llm::{ChatMessage, CompletionRequest, LlmProvider, SessionConfig, SessionManager};
+use ironclaw_llm::recording::RecordingLlm;
+use ironclaw_llm::{ChatMessage, CompletionRequest, LlmProvider, SessionConfig, SessionManager};
 
 use crate::support::test_rig::{TestRig, TestRigBuilder};
 use crate::support::trace_llm::LlmTrace;
@@ -249,7 +249,7 @@ impl LiveTestHarness {
     /// `user_input` is the message that was sent to the agent.
     /// `responses` are the agent's text responses (from `wait_for_responses`).
     ///
-    /// The session log is written to `tests/fixtures/llm_traces/live/{name}.log`.
+    /// Live runs write a local debugging log beside the committed trace JSON.
     pub async fn finish(self, user_input: &str, responses: &[String]) {
         let turns = [SessionTurn {
             source: TurnSource::User,
@@ -338,7 +338,7 @@ impl LiveTestHarness {
 
     /// Write a human-readable session log.
     ///
-    /// Live mode writes to `tests/fixtures/llm_traces/live/{name}.log` (committed).
+    /// Live mode writes to `tests/fixtures/llm_traces/live/{name}.log` (ignored).
     /// Replay mode writes to a temp file so it can be diffed against the live log.
     fn save_session_log(&self, turns: &[SessionTurn]) {
         use ironclaw::channels::StatusUpdate;
@@ -706,7 +706,7 @@ impl LiveTestHarnessBuilder {
         let source_user_id = config.owner_id.clone();
 
         let session = Arc::new(SessionManager::new(SessionConfig::default()));
-        let (provider, cheap_llm, _, _) = ironclaw::llm::build_provider_chain(&config.llm, session)
+        let (provider, cheap_llm, _, _) = ironclaw_llm::build_provider_chain(&config.llm, session)
             .await
             .expect("Failed to build LLM provider chain for live test");
 

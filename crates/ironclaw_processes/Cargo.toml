@@ -1,0 +1,21 @@
+[package]
+name = "ironclaw_processes"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+futures = "0.3"
+ironclaw_events = { path = "../ironclaw_events" }
+ironclaw_filesystem = { path = "../ironclaw_filesystem" }
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_resources = { path = "../ironclaw_resources" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt", "time"] }

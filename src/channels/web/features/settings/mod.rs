@@ -1602,7 +1602,7 @@ mod tests {
         // What actually prevents such a config from being used at runtime:
         //   1. Frontend activation guard (isProviderConfigured in
         //      static/js/surfaces/config.js blocks the "Use" button).
-        //   2. Startup fallback in `LlmConfig::resolve_with_fallback`
+        //   2. Startup fallback in `crate::config::llm::resolve_with_fallback`
         //      (invoked from `Config::re_resolve_llm_with_secrets`) —
         //      demotes unusable custom providers to NearAI rather than
         //      crash-looping the instance (#2514).
@@ -1681,7 +1681,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // env guard must span async hot-reload flow
     async fn settings_set_handler_triggers_llm_provider_hot_reload() {
-        use crate::llm::{LlmConfig, SessionConfig, SessionManager, build_provider_chain};
+        use ironclaw_llm::{LlmConfig, SessionConfig, SessionManager, build_provider_chain};
 
         let _env_guard = lock_env();
         let secrets = test_secrets_store();
@@ -1691,7 +1691,7 @@ mod tests {
         let mut initial = LlmConfig {
             backend: "nearai".to_string(),
             session: SessionConfig::default(),
-            nearai: crate::llm::config::NearAiConfig {
+            nearai: ironclaw_llm::config::NearAiConfig {
                 model: "model-start".to_string(),
                 cheap_model: None,
                 base_url: "https://api.near.ai".to_string(),
@@ -1831,10 +1831,10 @@ mod tests {
     /// wrapper so tests can observe swap side effects.
     async fn hot_reload_harness() -> (
         Arc<GatewayState>,
-        Arc<dyn crate::llm::LlmProvider>,
+        Arc<dyn ironclaw_llm::LlmProvider>,
         tempfile::TempDir,
     ) {
-        use crate::llm::{LlmConfig, SessionConfig, SessionManager, build_provider_chain};
+        use ironclaw_llm::{LlmConfig, SessionConfig, SessionManager, build_provider_chain};
 
         let secrets = test_secrets_store();
         let (db, tmp) = crate::testing::test_db().await;
@@ -1842,7 +1842,7 @@ mod tests {
         let initial = LlmConfig {
             backend: "nearai".to_string(),
             session: SessionConfig::default(),
-            nearai: crate::llm::config::NearAiConfig {
+            nearai: ironclaw_llm::config::NearAiConfig {
                 model: "model-start".to_string(),
                 cheap_model: None,
                 base_url: "https://api.near.ai".to_string(),
@@ -2429,5 +2429,67 @@ mod tests {
             .expect("locked_test tool should be in the list");
         assert!(locked_entry.locked);
         assert!(locked_entry.locked_reason.is_some());
+    }
+
+    /// Regression for #3034: a new user with no persisted tool-permission
+    /// override must see the `http` tool as `always_allow` via the
+    /// `/api/settings/tools` listing — the same code path the web settings
+    /// UI consumes. The seeded baseline drives this; if it ever flips to
+    /// `disabled` or `ask_each_time`, every HTTP-dependent workflow stops
+    /// working out of the box.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_http_tool_default_is_always_allow_for_new_user() {
+        use std::sync::Arc;
+
+        use crate::db::Database;
+        use crate::tools::ToolRegistry;
+        use crate::tools::builtin::HttpTool;
+        use axum::extract::State;
+
+        let registry = Arc::new(ToolRegistry::new());
+        registry.register(Arc::new(HttpTool::new())).await;
+
+        let tmp_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp_dir.path().join("test.db");
+        let db = crate::db::libsql::LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("temp db");
+        db.run_migrations().await.expect("migrations");
+        let db: Arc<dyn Database> = Arc::new(db);
+
+        let state = Arc::new(GatewayState {
+            tool_registry: Some(registry),
+            store: Some(db),
+            ..test_gateway_state(test_secrets_store())
+        });
+
+        let result = settings_tools_list_handler(
+            State(state),
+            crate::channels::web::auth::AuthenticatedUser(
+                crate::channels::web::auth::UserIdentity {
+                    user_id: "fresh-user".to_string(),
+                    role: "regular".to_string(),
+                    workspace_read_scopes: vec![],
+                },
+            ),
+        )
+        .await;
+
+        let axum::Json(response) = result.expect("handler should succeed");
+        let http_entry = response
+            .tools
+            .iter()
+            .find(|t| t.name == "http")
+            .expect("http tool should be in the listing");
+
+        assert_eq!(
+            http_entry.current_state, "always_allow",
+            "http must default to always_allow for a user with no override (issue #3034)"
+        );
+        assert_eq!(
+            http_entry.default_state, "always_allow",
+            "http's surfaced default must be always_allow (issue #3034)"
+        );
     }
 }

@@ -78,13 +78,14 @@ All I/O is async with tokio. Use `Arc<T>` for shared state, `RwLock` for concurr
 
 ## Extracted Crates
 
-Safety logic lives in `crates/ironclaw_safety/`, skills in `crates/ironclaw_skills/`. **Import directly from the extracted crate** (e.g. `use ironclaw_safety::SafetyLayer`, `use ironclaw_skills::SkillRegistry`). Do not use `crate::safety::` or `crate::skills::` for types that originate in extracted crates — `src/safety/mod.rs` and `src/skills/mod.rs` no longer glob-re-export. Local items defined in those modules (e.g. `crate::skills::attenuate_tools`) are fine.
+Safety logic lives in `crates/ironclaw_safety/`, skills in `crates/ironclaw_skills/`, multi-provider LLM integration in `crates/ironclaw_llm/`. **Import directly from the extracted crate** (e.g. `use ironclaw_safety::SafetyLayer`, `use ironclaw_skills::SkillRegistry`, `use ironclaw_llm::{LlmProvider, LlmError}`). Do not use `crate::safety::`, `crate::skills::`, or `crate::llm::` for types that originate in extracted crates — `src/llm/` was deleted in the LLM extraction, and `src/safety/mod.rs` / `src/skills/mod.rs` no longer glob-re-export. Local items defined in those modules (e.g. `crate::skills::attenuate_tools`) are fine. The `crate::error::LlmError` alias and `crate::config::*Config` re-exports are kept as a thin convenience: they forward to `ironclaw_llm::*` so existing call sites compile, but new code should import from the extracted crate.
 
 ## Project Structure
 
 ```
 crates/
-└── ironclaw_safety/    # Extracted: prompt injection, validation, leak detection, policy
+├── ironclaw_safety/    # Extracted: prompt injection, validation, leak detection, policy
+└── ironclaw_llm/       # Extracted: multi-provider LLM integration (rig-core, OpenAI, Anthropic, NEAR AI, Bedrock, …)
 
 src/
 ├── lib.rs              # Library root, module declarations
@@ -156,7 +157,7 @@ src/
 │
 ├── safety/             # Re-export shim for crates/ironclaw_safety (see Extracted Crates)
 │
-├── llm/                # Multi-provider LLM integration — see src/llm/CLAUDE.md
+├── (llm/  was extracted to crates/ironclaw_llm/ — see Extracted Crates)
 │
 ├── tools/              # Extensible tool system
 │   ├── tool.rs         # Tool trait, ToolOutput, ToolError
@@ -230,7 +231,7 @@ When modifying a module with a spec, read the spec first. Code follows spec; spe
 | `src/agent/` | `src/agent/CLAUDE.md` |
 | `src/channels/web/` | `src/channels/web/CLAUDE.md` |
 | `src/db/` | `src/db/CLAUDE.md` |
-| `src/llm/` | `src/llm/CLAUDE.md` |
+| `crates/ironclaw_llm/` | `crates/ironclaw_llm/CLAUDE.md` |
 | `src/setup/` | `src/setup/README.md` |
 | `src/tools/` | `src/tools/README.md` |
 | `src/workspace/` | `src/workspace/README.md` |
@@ -256,7 +257,7 @@ SKILL.md files extend the agent's prompt with domain-specific instructions. See 
 
 ## Configuration
 
-See `.env.example` for all environment variables. LLM backends (`nearai`, `openai`, `anthropic`, `ollama`, `openai_compatible`, `tinfoil`, `bedrock`) documented in `src/llm/CLAUDE.md`.
+See `.env.example` for all environment variables. LLM backends (`nearai`, `openai`, `anthropic`, `ollama`, `openai_compatible`, `tinfoil`, `bedrock`) documented in `crates/ironclaw_llm/CLAUDE.md`.
 
 ## Adding a New Channel
 

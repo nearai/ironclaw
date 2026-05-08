@@ -11,57 +11,10 @@ use uuid::Uuid;
 
 use crate::error::ChannelError;
 
-/// Kind of attachment carried on an incoming message.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AttachmentKind {
-    /// Audio content (voice notes, audio files).
-    Audio,
-    /// Image content (photos, screenshots).
-    Image,
-    /// Document content (PDFs, files).
-    Document,
-}
-
-impl AttachmentKind {
-    /// Infer attachment kind from MIME type.
-    pub fn from_mime_type(mime: &str) -> Self {
-        let base = mime.split(';').next().unwrap_or(mime).trim();
-        if base.starts_with("audio/") {
-            Self::Audio
-        } else if base.starts_with("image/") {
-            Self::Image
-        } else {
-            Self::Document
-        }
-    }
-}
-
-/// A file or media attachment on an incoming message.
-#[derive(Debug, Clone)]
-pub struct IncomingAttachment {
-    /// Unique identifier within the channel (e.g., Telegram file_id).
-    pub id: String,
-    /// What kind of content this is.
-    pub kind: AttachmentKind,
-    /// MIME type (e.g., "image/jpeg", "audio/ogg", "application/pdf").
-    pub mime_type: String,
-    /// Original filename, if known.
-    pub filename: Option<String>,
-    /// File size in bytes, if known.
-    pub size_bytes: Option<u64>,
-    /// URL to download the file from the channel's API.
-    pub source_url: Option<String>,
-    /// Opaque key for host-side storage (e.g., after download/caching).
-    pub storage_key: Option<String>,
-    /// Relative path to a project-local copy saved on disk, if persisted.
-    pub local_path: Option<String>,
-    /// Extracted text content (e.g., OCR result, PDF text, audio transcript).
-    pub extracted_text: Option<String>,
-    /// Raw file bytes (for small files downloaded by the channel).
-    pub data: Vec<u8>,
-    /// Duration in seconds (for audio/video).
-    pub duration_secs: Option<u32>,
-}
+// Channel-agnostic attachment types live in `ironclaw_common::attachment`.
+// Re-exported here so the existing `crate::channels::AttachmentKind` /
+// `crate::channels::IncomingAttachment` import paths keep working.
+pub use ironclaw_common::attachment::{AttachmentKind, IncomingAttachment};
 
 /// A message received from an external channel.
 #[derive(Debug, Clone)]
@@ -319,6 +272,17 @@ pub fn routing_target_from_metadata(metadata: &serde_json::Value) -> Option<Stri
 /// Stream of incoming messages.
 pub type MessageStream = Pin<Box<dyn Stream<Item = IncomingMessage> + Send>>;
 
+/// In-memory attachment to send back to a channel.
+#[derive(Debug, Clone)]
+pub struct OutgoingAttachment {
+    /// Filename to present to the receiving channel.
+    pub filename: String,
+    /// MIME type (e.g., "image/png").
+    pub mime_type: String,
+    /// Raw attachment bytes.
+    pub data: Vec<u8>,
+}
+
 /// Response to send back to a channel.
 #[derive(Debug, Clone)]
 pub struct OutgoingResponse {
@@ -331,6 +295,8 @@ pub struct OutgoingResponse {
     pub thread_id: Option<ExternalThreadId>,
     /// Optional file paths to attach.
     pub attachments: Vec<String>,
+    /// Optional in-memory attachments to attach.
+    pub inline_attachments: Vec<OutgoingAttachment>,
     /// Channel-specific metadata for the response.
     pub metadata: serde_json::Value,
 }
@@ -342,6 +308,7 @@ impl OutgoingResponse {
             content: content.into(),
             thread_id: None,
             attachments: Vec::new(),
+            inline_attachments: Vec::new(),
             metadata: serde_json::Value::Null,
         }
     }
@@ -386,6 +353,12 @@ impl OutgoingResponse {
     /// Add attachments to the response.
     pub fn with_attachments(mut self, paths: Vec<String>) -> Self {
         self.attachments = paths;
+        self
+    }
+
+    /// Add in-memory attachments to the response.
+    pub fn with_inline_attachments(mut self, attachments: Vec<OutgoingAttachment>) -> Self {
+        self.inline_attachments = attachments;
         self
     }
 }

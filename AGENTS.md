@@ -9,7 +9,7 @@ Start with these deeper docs as needed:
 - `src/agent/CLAUDE.md`
 - `src/channels/web/CLAUDE.md`
 - `src/db/CLAUDE.md`
-- `src/llm/CLAUDE.md`
+- `crates/ironclaw_llm/CLAUDE.md`
 - `src/setup/README.md`
 - `src/tools/README.md`
 - `src/workspace/README.md`
@@ -29,7 +29,7 @@ Start with these deeper docs as needed:
 - Web gateway/API/SSE/WebSocket: `src/channels/web/`
 - Persistence and DB abstractions: `src/db/`
 - Setup/onboarding/configuration flow: `src/setup/`
-- LLM providers and routing: `src/llm/`
+- LLM providers and routing: `crates/ironclaw_llm/`
 - Workspace, memory, embeddings, search: `src/workspace/`
 - Extensions, tools, channels, MCP, WASM: `src/extensions/`, `src/tools/`, `src/channels/`
 

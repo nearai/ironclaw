@@ -61,15 +61,10 @@ function connectSSE(lastEventIdOverride) {
       setTimeout(() => { lostBanner.remove(); }, 2000);
     }
 
-    // If we were restarting, close the modal and reset button now that server is back
+    // If we were restarting, close the modal and reset button now that server is back.
+    // dismissRestartLoader() also clears the watchdog timer (#3082).
     if (isRestarting) {
-      const loaderEl = document.getElementById('restart-loader');
-      if (loaderEl) loaderEl.style.display = 'none';
-      const restartBtn = document.getElementById('restart-btn');
-      const restartIcon = document.getElementById('restart-icon');
-      if (restartBtn) restartBtn.disabled = false;
-      if (restartIcon) restartIcon.classList.remove('spinning');
-      isRestarting = false;
+      dismissRestartLoader();
     }
 
     if (sseHasConnectedBefore && currentThreadId) {
@@ -88,6 +83,12 @@ function connectSSE(lastEventIdOverride) {
     // Refresh sidebar so stale spinners are removed immediately.
     processingThreads.clear();
     debouncedLoadThreads();
+    // Retry any first-load loader (chat history, threads, missions) that
+    // raced engine init and failed silently. SSE-accept implies the
+    // backend has stabilized — see init-auth.js for the rationale (#3274).
+    if (typeof runInitialHydrationRetry === 'function') {
+      runInitialHydrationRetry();
+    }
     sseHasConnectedBefore = true;
   };
 
@@ -177,7 +178,25 @@ function connectSSE(lastEventIdOverride) {
       _doneWithoutResponseTimer = null;
     }
     finalizeActivityGroup();
-    addMessage('assistant', data.content);
+
+    const messages = document.querySelectorAll('#chat-messages .message');
+    const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
+    const lastAssistantAlreadyHasResponse = Boolean(
+      lastMessage
+        && lastMessage.classList.contains('assistant')
+        && (lastMessage.getAttribute('data-raw') || '') === data.content
+    );
+
+    // Streamed responses already accumulated `data.content` into the
+    // bubble we just finalized. Separately, a thread switch or history
+    // refresh can render the completed response from /history before the
+    // matching SSE response arrives. In both cases, adding another bubble
+    // would render the same final assistant message twice. Only create a
+    // new bubble when the final response is not already the latest chat
+    // message (the normal non-streaming path).
+    if (!streamingMsg && !lastAssistantAlreadyHasResponse) {
+      addMessage('assistant', data.content);
+    }
     pruneOldMessages();
     enableChatInput();
     // Refresh thread list so new titles appear after first message

@@ -1,5 +1,5 @@
 name: QA Bug Report
-description: Bug found during QA testing on staging or hosted environments
+description: Bug found during QA testing on hosted, staging, production, or local environments
 title: "[QA] "
 labels: ["qa-bug"]
 body:
@@ -20,7 +20,7 @@ body:
     id: version
     attributes:
       label: Version / Commit Hash
-      description: Paste the commit hash from staging at time of discovery (run `git rev-parse HEAD` or find it on the Railway deploy)
+      description: Paste the commit hash from the tested deployment at time of discovery (run `git rev-parse HEAD` or find it on the Railway deploy)
       placeholder: "e.g. abcdef1"
     validations:
       required: true
