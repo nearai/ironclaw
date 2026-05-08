@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::context::JobContext;
 use crate::pairing::PairingStore;
-use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 
 pub struct PairingApproveTool {
     store: Arc<PairingStore>,
@@ -56,11 +56,9 @@ impl Tool for PairingApproveTool {
             .and_then(|v| v.as_str())
             .unwrap_or("slack-relay");
 
-        let user_id = crate::ownership::UserId::new(
-            &ctx.user_id,
-            crate::ownership::UserRole::Regular,
-        )
-        .map_err(|e| ToolError::ExecutionFailed(format!("invalid user_id: {e}")))?;
+        let user_id =
+            crate::ownership::UserId::new(&ctx.user_id, crate::ownership::UserRole::Regular)
+                .map_err(|e| ToolError::ExecutionFailed(format!("invalid user_id: {e}")))?;
 
         match self.store.approve(channel, code, &user_id).await {
             Ok(approval) => {
@@ -71,7 +69,9 @@ impl Tool for PairingApproveTool {
                 Ok(ToolOutput::text(&msg, start.elapsed()))
             }
             Err(e) => {
-                let msg = format!("Pairing failed: {e}. Make sure the code is correct and hasn't expired.");
+                let msg = format!(
+                    "Pairing failed: {e}. Make sure the code is correct and hasn't expired."
+                );
                 Ok(ToolOutput::text(&msg, start.elapsed()))
             }
         }
@@ -79,5 +79,9 @@ impl Tool for PairingApproveTool {
 
     fn requires_sanitization(&self) -> bool {
         false
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
     }
 }

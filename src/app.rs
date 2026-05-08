@@ -1008,9 +1008,7 @@ impl AppBuilder {
             let manager = Arc::new(em);
             tools.register_extension_tools(Arc::clone(&manager));
             if let Some(ps) = pairing_store {
-                tools.register_sync(Arc::new(
-                    crate::tools::builtin::PairingApproveTool::new(ps),
-                ));
+                tools.register_sync(Arc::new(crate::tools::builtin::PairingApproveTool::new(ps)));
             }
 
             // Register permission management tool and upgrade tool_list with
