@@ -2404,6 +2404,23 @@ fn gate_view_is_authentication(gate: &crate::gate::pending::PendingGateView) -> 
     )
 }
 
+/// Format the user-visible message recorded on the thread when an approval
+/// gate is denied.
+///
+/// Wording is deliberately constrained to avoid every phrase in
+/// `ironclaw_llm::user_signals_execution_intent`'s `EXEC_PHRASES` list. If
+/// the deny-message text matches a phrase from that list the resume handler
+/// re-arms the `require_action_attempt` obligation and the LLM is nudged
+/// into another tool call — exactly the opposite of what a denial means.
+/// `deny_message_does_not_signal_execution_intent` in this module's test
+/// suite locks that contract in.
+fn format_deny_message(action_name: &str, reason: Option<&str>) -> String {
+    let trailer = reason.map(|r| format!(" Reason: {r}")).unwrap_or_default();
+    format!(
+        "User denied action '{action_name}'. Do not retry; choose a different approach.{trailer}"
+    )
+}
+
 async fn hinted_pending_gate_thread_id(
     user_id: &str,
     conversation_scope: Option<&str>,
@@ -2995,22 +3012,14 @@ pub async fn resolve_gate(
                 )
                 .await;
 
-            // Word the deny message carefully: the resume handler treats
-            // certain imperative verb phrases ("execute it", "run it", "send
-            // it", …) as fresh execution intent and re-arms the
-            // require_action_attempt obligation, which then nudges the LLM
-            // to issue another tool call — exactly the opposite of what a
-            // denial should produce. Avoid every phrase in
-            // `ironclaw_llm::user_signals_execution_intent`'s list (the
-            // helper is defined in `src/llm/reasoning.rs` and re-exported
-            // from `crate::llm`).
-            let deny_msg = ironclaw_engine::ThreadMessage::user(format!(
-                "User denied action '{}'. Do not retry; choose a different approach.{}",
-                pending.action_name,
-                reason
-                    .as_deref()
-                    .map(|r| format!(" Reason: {r}"))
-                    .unwrap_or_default()
+            // The deny-message wording is the single source of truth in
+            // `format_deny_message`; that helper is locked against the
+            // `ironclaw_llm::user_signals_execution_intent` phrase list by
+            // a test in this module's suite, so any future rephrasing
+            // fails at CI rather than in staging e2e.
+            let deny_msg = ironclaw_engine::ThreadMessage::user(format_deny_message(
+                &pending.action_name,
+                reason.as_deref(),
             ));
 
             state.effect_adapter.reset_call_count();
@@ -11564,6 +11573,49 @@ mod tests {
             callback_id: "cb-123".into(),
         };
         assert!(!super::clamp_always_to_resume_kind(true, &rk));
+    }
+
+    // ── deny-message contract test ──────────────────────────────
+    //
+    // The deny-message text recorded on the thread when an approval gate
+    // is denied must not match any phrase in
+    // `ironclaw_llm::user_signals_execution_intent`'s `EXEC_PHRASES`. If
+    // it does, the resume handler interprets the denial as fresh user
+    // execution intent, re-arms `require_action_attempt`, and the LLM
+    // issues another tool call — exactly the opposite of a denial. The
+    // pre-#2744 wording ("Do not execute it; choose an alternative
+    // approach.") had this bug; this test fences against re-introducing
+    // it on any future rephrasing of `format_deny_message`.
+
+    #[test]
+    fn deny_message_does_not_signal_execution_intent() {
+        // Empty-reason branch.
+        let no_reason = super::format_deny_message("send_email", None);
+        assert!(
+            !ironclaw_llm::user_signals_execution_intent(&no_reason),
+            "deny message (no reason) was classified as execution intent: {no_reason:?}",
+        );
+
+        // With-reason branch.
+        let with_reason = super::format_deny_message(
+            "send_email",
+            Some("recipient looks like a phishing target"),
+        );
+        assert!(
+            !ironclaw_llm::user_signals_execution_intent(&with_reason),
+            "deny message (with reason) was classified as execution intent: {with_reason:?}",
+        );
+
+        // Action names that themselves contain `EXEC_PHRASES` substrings
+        // (e.g. an `execute_query` or `run_the_pipeline` tool) must still
+        // not flip the classifier when interpolated into the template.
+        for action in ["execute_query", "run_the_pipeline", "send_the_message"] {
+            let msg = super::format_deny_message(action, None);
+            assert!(
+                !ironclaw_llm::user_signals_execution_intent(&msg),
+                "deny message for action {action:?} was classified as execution intent: {msg:?}",
+            );
+        }
     }
 
     // ── persist_v2_tool_calls unit tests ────────────────────────
