@@ -484,30 +484,14 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Default user ID for extension operations (single-user mode).
     let ext_user_id = config.owner_id.clone();
-    // Resolve startup-active channels: persisted state is authoritative when
-    // present; otherwise fall back to the setup wizard's `channels.wasm_channels`
-    // so headless installs (no DB, no web UI) still auto-activate channels
-    // listed in the config. Settings-store errors propagate — masking them
-    // would silently re-activate channels the user had deactivated.
-    let startup_active_channels: Vec<String> =
-        if let Some(ref ext_mgr) = components.extension_manager {
-            ext_mgr
-                .load_startup_active_channels(
-                    &ext_user_id,
-                    config.channels.configured_wasm_channels.clone(),
-                )
-                .await?
-        } else {
-            normalize_startup_wasm_channel_names(&config.channels.configured_wasm_channels)
-                .into_iter()
-                .collect()
-        };
-    let startup_active_wasm_channels: std::collections::HashSet<String> =
-        if let Some(ref ext_mgr) = components.extension_manager {
-            startup_active_wasm_channel_names(ext_mgr, &ext_user_id, &startup_active_channels).await
-        } else {
-            startup_active_channels.iter().cloned().collect()
-        };
+    // Startup-active WASM channels are resolved lazily inside the
+    // `enable_non_cli && wasm_channels_enabled` gate below. Defaulting to
+    // an empty set here keeps the later auto-activation block (gated on
+    // `wasm_channel_runtime_state`) compiling without computing — and
+    // potentially failing on — settings-store reads in `--cli-only` /
+    // `WASM_CHANNELS_ENABLED=false` runs.
+    let mut startup_active_wasm_channels: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     let channels = ChannelManager::new();
     let mut channel_names: Vec<String> = Vec::new();
@@ -691,6 +675,33 @@ async fn async_main() -> anyhow::Result<()> {
         && config.channels.wasm_channels_enabled
         && config.channels.wasm_channels_dir.exists()
     {
+        // Resolve startup-active channels: persisted state is authoritative
+        // when present; otherwise fall back to the setup wizard's
+        // `channels.wasm_channels` so headless installs (no DB, no web UI)
+        // still auto-activate channels listed in the config. Settings-store
+        // errors propagate — masking them would silently re-activate channels
+        // the user had deactivated. Resolved here (not at outer scope) so a
+        // corrupt `activated_channels` row only fails startup when channels
+        // are actually about to be restored.
+        let startup_active_channels: Vec<String> =
+            if let Some(ref ext_mgr) = components.extension_manager {
+                ext_mgr
+                    .load_startup_active_channels(
+                        &ext_user_id,
+                        config.channels.configured_wasm_channels.clone(),
+                    )
+                    .await?
+            } else {
+                ironclaw::extensions::naming::normalize_extension_names(
+                    config.channels.configured_wasm_channels.clone(),
+                )
+            };
+        startup_active_wasm_channels = if let Some(ref ext_mgr) = components.extension_manager {
+            startup_active_wasm_channel_names(ext_mgr, &ext_user_id, &startup_active_channels).await
+        } else {
+            startup_active_channels.iter().cloned().collect()
+        };
+
         let wasm_result = ironclaw::channels::wasm::setup_wasm_channels(
             &config,
             &components.secrets_store,
