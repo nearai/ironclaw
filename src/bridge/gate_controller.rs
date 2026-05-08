@@ -542,9 +542,15 @@ impl GateController for BridgeGateController {
         else {
             // No per-execution context registered. This shouldn't happen
             // when invoked through `handle_with_engine`, which always
-            // populates it before invoking the engine. If it does, the
-            // safe move is to cancel — we have no channel to surface a
-            // prompt on.
+            // populates it before invoking the engine. Mission /
+            // background threads also reach here today; they fall
+            // through to the legacy `ThreadOutcome::GatePaused` unwind
+            // path so `process_mission_outcome_and_notify` (#3133
+            // half-1) transitions the mission to Paused. The half-2
+            // mission auto-resume path (`resume_paused_for_credential`)
+            // resumes the mission after OAuth completes. Cancelling
+            // here is the right wire for that flow — it produces the
+            // legacy unwind that the mission state machine consumes.
             debug!(
                 user = %request.user_id,
                 thread = %request.thread_id,

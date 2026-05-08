@@ -392,6 +392,22 @@ impl near::agent::host::Host for StoreData {
             self.inject_host_credentials(&host, &mut headers, &mut url);
         }
 
+        // Apply IRONCLAW_TEST_HTTP_REWRITE_MAP for tests (parallel to
+        // the WASM-channel path in `src/channels/wasm/wrapper.rs`).
+        // Without this, a test fixture's rewrite of e.g.
+        // gmail.googleapis.com → mock_llm doesn't apply to WASM tools'
+        // HTTP calls, and the tool reaches the real upstream — the
+        // exact bug uncovered while debugging the #3133 live test.
+        #[cfg(any(test, debug_assertions))]
+        if let Some(rewritten) = rewrite_http_url_for_tool_testing(&url) {
+            tracing::debug!(
+                original = %url,
+                rewritten = %rewritten,
+                "WASM tool HTTP: applying TEST_HTTP_REWRITE_MAP"
+            );
+            url = rewritten;
+        }
+
         // Get the max response size from capabilities (default 10MB).
         let max_response_bytes = self
             .host_state
@@ -1554,6 +1570,53 @@ async fn resolve_host_credentials(
         resolved,
         missing_required,
     }
+}
+
+/// Apply `IRONCLAW_TEST_HTTP_REWRITE_MAP` to a WASM-tool HTTP request.
+///
+/// Mirrors the WASM-channel rewrite at
+/// `src/channels/wasm/wrapper.rs::rewrite_http_url_for_testing`. The
+/// env var is a JSON object `{ host: replacement_base }` (e.g.
+/// `{"gmail.googleapis.com":"http://127.0.0.1:8080"}`); a matching
+/// host substitutes the host's scheme/authority while preserving path
+/// and query. Replacement bases must be loopback URLs.
+///
+/// Without this, WASM tools' HTTP calls (e.g. `gmail` hitting
+/// gmail.googleapis.com) ignored the test rewrite and reached the
+/// real upstream — the bug uncovered while debugging the #3133 live
+/// test.
+#[cfg(any(test, debug_assertions))]
+pub(crate) fn rewrite_http_url_for_tool_testing(url: &str) -> Option<String> {
+    let raw = std::env::var("IRONCLAW_TEST_HTTP_REWRITE_MAP").ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let map: HashMap<String, String> = serde_json::from_str(trimmed).ok()?;
+    let parsed = url::Url::parse(url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = parsed.host_str()?.to_lowercase();
+    let base = map.get(&host)?.trim().trim_end_matches('/').to_string();
+    if !base.starts_with("http://127.0.0.1")
+        && !base.starts_with("http://localhost")
+        && !base.starts_with("http://[::1]")
+    {
+        tracing::warn!(
+            host = %host,
+            base = %base,
+            "IRONCLAW_TEST_HTTP_REWRITE_MAP: ignoring non-loopback target"
+        );
+        return None;
+    }
+    let path = parsed.path().trim_start_matches('/');
+    let mut rewritten = format!("{base}/{path}");
+    if let Some(query) = parsed.query() {
+        rewritten.push('?');
+        rewritten.push_str(query);
+    }
+    Some(rewritten)
 }
 
 /// Extract the hostname from a URL string.

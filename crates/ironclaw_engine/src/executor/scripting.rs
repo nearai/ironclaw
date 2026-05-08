@@ -40,6 +40,19 @@ tokio::task_local! {
         RefCell<Option<crate::runtime::messaging::ThreadOutcome>>;
 }
 
+/// Drain the per-execution `PENDING_GATE_STASH`. Called at every
+/// script-error exit in `execute_code_with_skills_inner` so that a
+/// `Cancelled+Authentication` gate raised during a Monty `call.resume`
+/// surfaces as `CodeExecutionResult::need_approval` regardless of which
+/// resume path the script error propagates through. Returns `None` when
+/// the task-local isn't in scope (only happens outside `execute_code`).
+fn take_pending_gate_stash() -> Option<crate::runtime::messaging::ThreadOutcome> {
+    PENDING_GATE_STASH
+        .try_with(|cell| cell.borrow_mut().take())
+        .ok()
+        .flatten()
+}
+
 use monty::{
     ExcType, ExtFunctionResult, LimitedTracker, MontyDate, MontyDateTime, MontyException,
     MontyObject, MontyRun, NameLookupResult, OsFunction, PrintWriter, ResourceLimits, RunProgress,
@@ -682,10 +695,7 @@ async fn execute_code_with_skills_inner(
             // `ThreadOutcome::GatePaused` and mission flows transition
             // to Paused. Without this, Tier 1 mission threads silently
             // swallow the gate (the original #3133 ghost-fire shape).
-            let pending_gate = PENDING_GATE_STASH
-                .try_with(|cell| cell.borrow_mut().take())
-                .ok()
-                .flatten();
+            let pending_gate = take_pending_gate_stash();
             let category = classify_runtime_error(&e.to_string());
             return Ok(CodeExecutionResult {
                 return_value: serde_json::Value::Null,
@@ -827,13 +837,16 @@ async fn execute_code_with_skills_inner(
                     })) {
                         Ok(Ok(p)) => progress = p,
                         Ok(Err(e)) => {
+                            // Read the inline-await stash before the
+                            // runtime-error exit. See `take_pending_gate_stash`.
+                            let pending_gate = take_pending_gate_stash();
                             stdout.push_str(&format!("\nError: {e}"));
                             return Ok(CodeExecutionResult {
                                 return_value: serde_json::Value::Null,
                                 stdout,
                                 action_results,
                                 events,
-                                need_approval: None,
+                                need_approval: pending_gate,
                                 recursive_tokens,
                                 final_answer,
                                 failure: Some(classify_runtime_error(&e.to_string())),
@@ -865,13 +878,14 @@ async fn execute_code_with_skills_inner(
                     })) {
                         Ok(Ok(p)) => progress = p,
                         Ok(Err(e)) => {
+                            let pending_gate = take_pending_gate_stash();
                             stdout.push_str(&format!("\nError: {e}"));
                             return Ok(CodeExecutionResult {
                                 return_value: serde_json::Value::Null,
                                 stdout,
                                 action_results,
                                 events,
-                                need_approval: None,
+                                need_approval: pending_gate,
                                 recursive_tokens,
                                 final_answer,
                                 failure: Some(classify_runtime_error(&e.to_string())),
@@ -1315,13 +1329,14 @@ async fn execute_code_with_skills_inner(
                 })) {
                     Ok(Ok(p)) => progress = p,
                     Ok(Err(e)) => {
+                        let pending_gate = take_pending_gate_stash();
                         stdout.push_str(&format!("\nError: {e}"));
                         return Ok(CodeExecutionResult {
                             return_value: serde_json::Value::Null,
                             stdout,
                             action_results,
                             events,
-                            need_approval: None,
+                            need_approval: pending_gate,
                             recursive_tokens,
                             final_answer,
                             failure: Some(classify_runtime_error(&e.to_string())),
