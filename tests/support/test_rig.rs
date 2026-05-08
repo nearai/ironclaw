@@ -1207,6 +1207,7 @@ impl TestRigBuilder {
                     components.tools.clone(),
                     components.safety.clone(),
                     ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
+                    None,
                 ));
                 components
                     .tools

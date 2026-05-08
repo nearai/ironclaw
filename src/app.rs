@@ -1493,18 +1493,11 @@ async fn migrate_session_credential(
     }
 }
 
-/// Seed tool permission defaults into the database for every registered tool
-/// that has no explicit user override yet.
-///
-/// This is called once at startup after the full tool registry is built.
-/// It is idempotent: existing entries in `tool_permissions.*` are never touched.
 async fn seed_tool_permissions(
     tools: &crate::tools::ToolRegistry,
     db: Option<&Arc<dyn Database>>,
     owner_id: &str,
 ) {
-    use crate::tools::permissions::{TOOL_RISK_DEFAULTS, effective_permission};
-
     let db = match db {
         Some(db) => db,
         None => {
@@ -1532,11 +1525,9 @@ async fn seed_tool_permissions(
             continue;
         }
 
-        // Only insert if the tool appears in the static defaults table.
-        // Unknown/dynamic tools stay absent (they will fall back to AskEachTime
-        // at runtime via effective_permission) to avoid polluting the DB.
-        if TOOL_RISK_DEFAULTS.contains_key(name.as_str()) {
-            let default_state = effective_permission(name, &existing);
+        // Only insert seed defaults for known built-ins. Unknown/dynamic tools
+        // stay absent and fall back to AskEachTime at runtime.
+        if let Some(default_state) = crate::tools::permissions::seeded_default_permission(name) {
             let json_value = match serde_json::to_value(default_state) {
                 Ok(v) => v,
                 Err(e) => {
@@ -1681,6 +1672,11 @@ mod tests {
         registry.register_builtin_tools();
 
         let owner = "test-user";
+        assert_eq!(
+            crate::tools::permissions::seeded_default_permission("tool_activate"),
+            Some(PermissionState::AlwaysAllow),
+            "tool_activate should seed AlwaysAllow so subgates control auth/setup"
+        );
 
         // 1. Initial seed: creates defaults for all registered tools.
         super::seed_tool_permissions(&registry, Some(&db), owner).await;

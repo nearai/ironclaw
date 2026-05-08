@@ -1031,6 +1031,7 @@ impl Agent {
                         self.tools().clone(),
                         self.safety().clone(),
                         self.deps.sandbox_readiness,
+                        self.deps.http_interceptor.clone(),
                     ));
 
                     // Register routine tools

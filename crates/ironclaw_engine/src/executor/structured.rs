@@ -1415,18 +1415,32 @@ mod tests {
                     .get("name")
                     .and_then(|value| value.as_str())
                     .unwrap_or_default();
-                let discovered = ctx
-                    .available_action_inventory_snapshot
-                    .as_ref()
-                    .and_then(|inventory| {
-                        inventory
-                            .discoverable
-                            .iter()
-                            .find(|action| action.matches_name(requested))
-                    })
-                    .map(|action| action.name.clone())
-                    .unwrap_or_else(|| format!("missing_discoverable:{requested}"));
-                serde_json::json!({ "resolved": discovered })
+                let action =
+                    ctx.available_action_inventory_snapshot
+                        .as_ref()
+                        .and_then(|inventory| {
+                            inventory
+                                .inline
+                                .iter()
+                                .chain(inventory.discoverable.iter())
+                                .find(|action| action.matches_name(requested))
+                        });
+                if params.get("detail").and_then(|value| value.as_str()) == Some("schema") {
+                    match action {
+                        Some(action) => serde_json::json!({
+                            "name": action.name.clone(),
+                            "schema": action.parameters_schema.clone()
+                        }),
+                        None => serde_json::json!({
+                            "error": format!("missing_action:{requested}")
+                        }),
+                    }
+                } else {
+                    let discovered = action
+                        .map(|action| action.name.clone())
+                        .unwrap_or_else(|| format!("missing_action:{requested}"));
+                    serde_json::json!({ "resolved": discovered })
+                }
             } else {
                 serde_json::json!({ "ok": true })
             };
@@ -1434,8 +1448,8 @@ mod tests {
             Ok(ActionResult {
                 call_id: String::new(),
                 action_name: name.replace('-', "_"),
+                is_error: output.get("error").is_some(),
                 output,
-                is_error: false,
                 duration: Duration::from_millis(1),
             })
         }
@@ -1454,7 +1468,26 @@ mod tests {
             _context: &ThreadExecutionContext,
         ) -> Result<crate::types::capability::ActionInventory, EngineError> {
             Ok(crate::types::capability::ActionInventory {
-                inline: vec![test_action("tool_info")],
+                inline: vec![
+                    test_action("tool_info"),
+                    ActionDef {
+                        name: "mission_create".to_string(),
+                        description: "Create a mission".to_string(),
+                        parameters_schema: serde_json::json!({
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "goal": {"type": "string"},
+                                "cadence": {"type": "string"}
+                            },
+                            "required": ["name", "goal", "cadence"]
+                        }),
+                        effects: vec![],
+                        requires_approval: false,
+                        model_tool_surface: ModelToolSurface::CompactToolInfo,
+                        discovery: None,
+                    },
+                ],
                 discoverable: vec![ActionDef {
                     name: "gmail_send".to_string(),
                     description: "Send an email".to_string(),
@@ -1517,6 +1550,100 @@ mod tests {
             serde_json::json!("gmail_send")
         );
         assert!(!result.results[0].is_error);
+    }
+
+    #[tokio::test]
+    async fn structured_execution_resolves_tool_info_schema_from_action_inventory() {
+        let thread = Thread::new(
+            "test",
+            ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            ThreadConfig::default(),
+        );
+        let effects: Arc<dyn EffectExecutor> = Arc::new(StructuredToolInfoEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+        let ctx = make_exec_context(&thread);
+
+        leases
+            .grant(
+                thread.id,
+                "tools",
+                GrantedActions::Specific(vec!["tool_info".into()]),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let calls = vec![ActionCall {
+            id: "call_tool_info_schema".into(),
+            action_name: "tool_info".into(),
+            parameters: serde_json::json!({"name": "mission-create", "detail": "schema"}),
+        }];
+
+        let result = execute_action_calls(&calls, &thread, &effects, &leases, &policy, &ctx, &[])
+            .await
+            .unwrap();
+
+        assert_eq!(result.results.len(), 1);
+        assert!(!result.results[0].is_error);
+        assert_eq!(
+            result.results[0].output["name"],
+            serde_json::json!("mission_create")
+        );
+        assert_eq!(
+            result.results[0].output["schema"]["required"],
+            serde_json::json!(["name", "goal", "cadence"])
+        );
+    }
+
+    #[tokio::test]
+    async fn structured_execution_marks_missing_tool_info_action_as_error() {
+        let thread = Thread::new(
+            "test",
+            ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            ThreadConfig::default(),
+        );
+        let effects: Arc<dyn EffectExecutor> = Arc::new(StructuredToolInfoEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+        let ctx = make_exec_context(&thread);
+
+        leases
+            .grant(
+                thread.id,
+                "tools",
+                GrantedActions::Specific(vec!["tool_info".into()]),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let calls = vec![ActionCall {
+            id: "call_tool_info_missing_action".into(),
+            action_name: "tool_info".into(),
+            parameters: serde_json::json!({"name": "missing-action", "detail": "schema"}),
+        }];
+
+        let result = execute_action_calls(&calls, &thread, &effects, &leases, &policy, &ctx, &[])
+            .await
+            .unwrap();
+
+        assert_eq!(result.results.len(), 1);
+        assert!(
+            result.results[0].is_error,
+            "tool_info missing-action output must be marked as an error: {:?}",
+            result.results[0].output
+        );
+        assert_eq!(
+            result.results[0].output["error"],
+            serde_json::json!("missing_action:missing-action")
+        );
     }
 
     struct DiscoverableOnlyEffects {

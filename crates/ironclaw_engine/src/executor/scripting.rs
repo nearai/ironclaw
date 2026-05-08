@@ -2198,12 +2198,23 @@ mod tests {
                             .iter()
                             .find(|action| action.matches_name(requested))
                     }) {
-                    Some(action) => serde_json::json!({
-                        "name": action.name,
-                        "summary": {
-                            "always_required": ["name", "goal", "cadence"]
+                    Some(action) => {
+                        if parameters.get("detail").and_then(|value| value.as_str())
+                            == Some("schema")
+                        {
+                            serde_json::json!({
+                                "name": action.name.clone(),
+                                "schema": action.parameters_schema.clone()
+                            })
+                        } else {
+                            serde_json::json!({
+                                "name": action.name.clone(),
+                                "summary": {
+                                    "always_required": ["name", "goal", "cadence"]
+                                }
+                            })
                         }
-                    }),
+                    }
                     None => serde_json::json!({"error": "missing inventory snapshot"}),
                 }
             } else {
@@ -3511,7 +3522,7 @@ except Exception as e:
     }
 
     #[tokio::test]
-    async fn execute_code_propagates_snapshot_to_tool_execution_context() {
+    async fn execute_code_resolves_tool_info_schema_from_action_inventory_snapshot() {
         let thread = make_test_thread();
         let effects: Arc<dyn EffectExecutor> = Arc::new(SnapshotAwareToolInfoEffects);
         let leases = LeaseManager::new();
@@ -3525,7 +3536,7 @@ except Exception as e:
 
         let result = execute_code(
             r#"
-result = await tool_info(name="mission-create", detail="summary")
+result = await tool_info(name="mission-create", detail="schema")
 "#,
             &thread,
             &(Arc::new(StubLlm) as Arc<dyn crate::traits::llm::LlmBackend>),
@@ -3549,6 +3560,10 @@ result = await tool_info(name="mission-create", detail="summary")
         assert_eq!(
             result.action_results[0].output["name"],
             serde_json::json!("mission_create")
+        );
+        assert_eq!(
+            result.action_results[0].output["schema"]["required"],
+            serde_json::json!(["name", "goal", "cadence"])
         );
     }
 
