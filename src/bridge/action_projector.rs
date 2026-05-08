@@ -799,11 +799,10 @@ mod tests {
         // declared credential is missing, the inline-await machinery
         // parks the VM, and the OAuth callback delivers `Approved`
         // to retry the action against the now-present secret. The
-        // model can call the tool directly without a preceding
-        // `tool_activate(name=...)` step. Pre-#3133 this was the
-        // opposite contract — the tool was hidden from the callable
-        // surface until auth completed and the LLM was expected to
-        // navigate via `tool_activate` first.
+        // model calls the tool directly — there is no separate
+        // enablement step. Pre-#3133 the contract was inverted: the
+        // tool was hidden until auth completed and the LLM had to
+        // navigate via the now-removed `tool_activate` first.
         let inventory = projected_inventory(
             "gmail_send",
             "Send a Gmail message",
@@ -950,7 +949,7 @@ mod tests {
             .await;
         tools
             .register(std::sync::Arc::new(BuiltinTool {
-                name: "tool_activate",
+                name: "tool_search",
             }))
             .await;
 
@@ -971,7 +970,8 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(!action_names.iter().any(|name| name == "tool_install"));
-        assert!(action_names.iter().any(|name| name == "tool_activate"));
+        // tool_search is NOT in the hidden list, so it remains callable.
+        assert!(action_names.iter().any(|name| name == "tool_search"));
     }
 
     #[tokio::test]

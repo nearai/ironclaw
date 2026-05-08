@@ -1473,7 +1473,7 @@ pub(super) fn restore_selected_auth_prompt(
     ))
 }
 
-/// Extract auth prompt fields from a tool_auth/tool_activate result JSON string.
+/// Extract auth prompt fields from a tool_auth/tool_install result JSON string.
 pub(super) fn parse_auth_result(result: &Result<String, Error>) -> ParsedAuthData {
     let parsed = result
         .as_ref()
@@ -1511,12 +1511,12 @@ pub(super) fn parse_auth_result(result: &Result<String, Error>) -> ParsedAuthDat
     }
 }
 
-/// Extract actionable auth prompt data from a tool_auth/tool_activate result.
+/// Extract actionable auth prompt data from a tool_auth/tool_install result.
 pub(super) fn extract_auth_prompt(
     tool_name: &str,
     result: &Result<String, Error>,
 ) -> Option<ParsedAuthData> {
-    if tool_name != "tool_auth" && tool_name != "tool_activate" {
+    if tool_name != "tool_auth" && tool_name != "tool_install" {
         return None;
     }
 
@@ -1968,7 +1968,7 @@ mod tests {
                 tool_calls: vec![
                     ToolCall {
                         id: crate::llm::generate_tool_call_id(0, 0),
-                        name: "tool_activate".to_string(),
+                        name: "tool_install".to_string(),
                         arguments: serde_json::json!({}),
                         reasoning: None,
                     },
@@ -1993,7 +1993,7 @@ mod tests {
     #[async_trait]
     impl Tool for OAuthPromptTool {
         fn name(&self) -> &str {
-            "tool_activate"
+            "tool_install"
         }
 
         fn description(&self) -> &str {
@@ -2550,7 +2550,7 @@ mod tests {
         })
         .to_string());
 
-        let auth_data = extract_auth_prompt("tool_activate", &result).expect("auth prompt");
+        let auth_data = extract_auth_prompt("tool_install", &result).expect("auth prompt");
         assert_eq!(
             auth_data.extension_name.as_ref().map(|e| e.as_str()),
             Some("gmail")
@@ -2560,7 +2560,7 @@ mod tests {
             Some("https://accounts.google.com/o/oauth2/v2/auth?client_id=test")
         );
         assert!(!auth_data.awaiting_token);
-        assert!(check_auth_required("tool_activate", &result).is_none());
+        assert!(check_auth_required("tool_install", &result).is_none());
     }
 
     #[test]
@@ -2573,7 +2573,7 @@ mod tests {
         })
         .to_string());
 
-        assert!(extract_auth_prompt("tool_activate", &result).is_none());
+        assert!(extract_auth_prompt("tool_install", &result).is_none());
     }
 
     // Helper-level sanitize_auth_url tests live alongside the helper itself
@@ -2637,7 +2637,7 @@ mod tests {
         .to_string());
 
         let mut selected = None;
-        capture_auth_prompt(&mut selected, "tool_activate", &first);
+        capture_auth_prompt(&mut selected, "tool_install", &first);
         capture_auth_prompt(&mut selected, "tool_auth", &second);
 
         let (ext_name, auth_data) = selected.expect("selected auth prompt");
@@ -2667,7 +2667,7 @@ mod tests {
 
         let mut selected = None;
         capture_auth_prompt(&mut selected, "tool_auth", &first);
-        capture_auth_prompt(&mut selected, "tool_activate", &second);
+        capture_auth_prompt(&mut selected, "tool_install", &second);
 
         let (ext_name, auth_data) = selected.expect("selected auth prompt");
         assert_eq!(ext_name, "notion");
@@ -2711,7 +2711,7 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_auth_awaiting_tool_activate() {
+    fn test_detect_auth_awaiting_tool_install() {
         let result: Result<String, Error> = Ok(serde_json::json!({
             "name": "slack",
             "kind": "McpServer",
@@ -2721,7 +2721,7 @@ mod tests {
         })
         .to_string());
 
-        let detected = check_auth_required("tool_activate", &result);
+        let detected = check_auth_required("tool_install", &result);
         assert!(detected.is_some());
         let (name, instructions) = detected.unwrap();
         assert_eq!(name, "slack");
@@ -2729,7 +2729,7 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_auth_awaiting_tool_activate_not_awaiting() {
+    fn test_detect_auth_awaiting_tool_install_not_awaiting() {
         let result: Result<String, Error> = Ok(serde_json::json!({
             "name": "slack",
             "tools_loaded": ["slack_post_message"],
@@ -2737,7 +2737,7 @@ mod tests {
         })
         .to_string());
 
-        assert!(check_auth_required("tool_activate", &result).is_none());
+        assert!(check_auth_required("tool_install", &result).is_none());
     }
 
     #[test]

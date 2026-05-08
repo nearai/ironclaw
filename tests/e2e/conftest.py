@@ -1586,9 +1586,9 @@ async def mission_gmail_live_server(
        and admin tools auto-approved so the chat-driven
        `routine_create` + `mission_fire` flow runs without a
        human in the loop. The *authentication* gate raised by
-       `tool_activate(gmail)` is still active even with auto-
-       approve — that's the gate the #3133 auto-resume path
-       exercises.
+       the auth preflight on a direct `gmail` call is still active
+       even with auto-approve — that's the gate the #3133
+       auto-resume path exercises.
     """
     from live_harness import start_live_proxy
 

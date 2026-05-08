@@ -479,8 +479,8 @@ pub trait Tool: Send + Sync {
     /// The engine's auth preflight (`AuthManager::check_action_auth`)
     /// consults this list and raises an `Authentication` gate if any
     /// declared credential is missing from the secrets store, so the
-    /// model can call the tool directly without needing a preceding
-    /// `tool_activate(name=...)` step.
+    /// model can call the tool directly — no separate enablement step
+    /// is required.
     ///
     /// Default returns empty — built-in tools that don't need a
     /// credential, or that handle missing credentials internally,

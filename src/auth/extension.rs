@@ -107,7 +107,7 @@ pub struct AuthManager {
 /// Branches (in precedence order):
 ///
 /// 1. **User-influenced** `name` parameter on
-///    `tool_install` / `tool_activate` / `tool_auth` actions. This string
+///    `tool_install` / `tool_auth` actions. This string
 ///    comes from the model's tool arguments, so it must pass
 ///    `ExtensionName::new` — invalid values (path traversal, uppercase,
 ///    etc.) fall through to the next branch instead of tainting the
@@ -138,17 +138,12 @@ pub(crate) async fn resolve_auth_flow_extension_name(
     extension_manager: Option<&crate::extensions::ExtensionManager>,
 ) -> CommonExtensionName {
     // 1. User-influenced: validate via ExtensionName::new, fall through on failure.
-    //    Match both underscore and hyphen variants for every install/activate/auth
+    //    Match both underscore and hyphen variants for every install/auth
     //    action so the hyphenated tool names dispatched from Python land the
     //    same as the canonical underscore form.
     if matches!(
         action_name,
-        "tool_install"
-            | "tool-install"
-            | "tool_activate"
-            | "tool-activate"
-            | "tool_auth"
-            | "tool-auth"
+        "tool_install" | "tool-install" | "tool_auth" | "tool-auth"
     ) && let Some(raw) = parameters.get("name").and_then(|v| v.as_str())
         && let Ok(name) = CommonExtensionName::new(raw)
     {
@@ -262,10 +257,10 @@ impl AuthManager {
         // `capabilities.http.credentials` block. Built-in tools default
         // to empty, so this branch is a no-op for them. When a tool
         // declares a credential and it's missing, raise an
-        // Authentication gate so the model doesn't need to call
-        // `tool_activate(name=...)` first — the call paths flow into
-        // the inline-await machinery (#3133/#3166) and resume after
-        // the user completes OAuth.
+        // Authentication gate when the tool's declared credentials
+        // are missing — the call paths flow into the inline-await
+        // machinery (#3133/#3166) and resume after the user completes
+        // OAuth, with no separate enablement step required.
         let Some(tools) = self.tools.as_ref() else {
             return AuthCheckResult::NoAuthRequired;
         };

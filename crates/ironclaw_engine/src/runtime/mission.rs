@@ -4329,8 +4329,8 @@ mod tests {
     }
 
     /// Regression for #3133. When a mission's child thread emits
-    /// `ThreadOutcome::GatePaused` (e.g. the inner `tool_activate(gmail)`
-    /// triggered an OAuth gate), the previous `_ => {}` arm in
+    /// `ThreadOutcome::GatePaused` (e.g. a direct `gmail` call triggered
+    /// the engine's auth preflight gate), the previous `_ => {}` arm in
     /// `process_mission_outcome_and_notify` swallowed it: the mission
     /// stayed `Active` and the cron scheduler kept re-firing the same
     /// broken mission every tick without surfacing anything to the user.
@@ -4378,7 +4378,7 @@ mod tests {
 
         let outcome = ThreadOutcome::GatePaused {
             gate_name: "auth_required".into(),
-            action_name: "tool_activate".into(),
+            action_name: "gmail".into(),
             call_id: "call-gmail-1".into(),
             parameters: serde_json::json!({"name": "gmail"}),
             resume_kind: ResumeKind::Authentication {
@@ -4419,7 +4419,7 @@ mod tests {
             .gate
             .as_ref()
             .expect("notification must carry MissionGateInfo for GatePaused");
-        assert_eq!(gate.action_name, "tool_activate");
+        assert_eq!(gate.action_name, "gmail");
         // call_id round-trips the engine's LLM tool-call id verbatim —
         // the bridge keeps it for half-2 auto-resume but does NOT
         // surface it to the channel.
@@ -4537,7 +4537,7 @@ mod tests {
         let (notification_tx, _rx) = tokio::sync::broadcast::channel::<MissionNotification>(8);
         let outcome = ThreadOutcome::GatePaused {
             gate_name: "auth_required".into(),
-            action_name: "tool_activate".into(),
+            action_name: "gmail".into(),
             call_id: "call-gmail-1".into(),
             parameters: serde_json::json!({"name": "gmail"}),
             resume_kind: ResumeKind::Authentication {
@@ -4619,7 +4619,7 @@ mod tests {
         let (notification_tx, _rx) = tokio::sync::broadcast::channel::<MissionNotification>(8);
         let outcome = ThreadOutcome::GatePaused {
             gate_name: "auth_required".into(),
-            action_name: "tool_activate".into(),
+            action_name: "gmail".into(),
             call_id: "call-gmail-2".into(),
             parameters: serde_json::json!({"name": "gmail"}),
             resume_kind: ResumeKind::Authentication {

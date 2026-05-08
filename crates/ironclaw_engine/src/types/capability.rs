@@ -297,8 +297,10 @@ pub enum CapabilitySummaryKind {
 /// Ready callable actions stay in `ActionInventory`. `CapabilitySummary`
 /// covers:
 /// - runtime/contextual information that should stay in background prompt/UI
-/// - blocked managed integrations that are shown separately and enabled via
-///   `tool_activate(name=...)`
+/// - integrations that need user setup before becoming callable
+///   (`NeedsSetup`, `Inactive`, `Latent`, `AvailableNotInstalled`); these
+///   surface to the model under `Activatable Integrations` so it can tell
+///   the user what's available but cannot be enabled by the model itself
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilitySummary {
     /// Stable capability identifier (for example `telegram` or `slack`).

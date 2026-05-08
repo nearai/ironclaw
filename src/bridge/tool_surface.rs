@@ -103,8 +103,8 @@ const fn is_direct_ready(status: CapabilityStatus) -> bool {
     // credential is missing, the inline-await machinery parks the VM,
     // and the OAuth-callback hook delivers `Approved` to retry the
     // action against the now-present secret. The model can therefore
-    // call the tool directly without a preceding `tool_activate(name=...)`
-    // step. `NeedsSetup` / `Inactive` / `Latent` still fall through to
+    // call the tool directly without a separate enablement step.
+    // `NeedsSetup` / `Inactive` / `Latent` still fall through to
     // the capabilities surface — those need real onboarding work that
     // a credential-write hook can't supply.
     matches!(

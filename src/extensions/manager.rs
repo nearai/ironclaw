@@ -3405,9 +3405,9 @@ impl ExtensionManager {
         self.invalidate_latent_wasm_provider_actions_cache().await;
 
         // Register the WASM tool with the engine's tool registry
-        // immediately so the model can call it without a preceding
-        // `tool_activate(name=...)` step. Auth is checked at execute
-        // time by `AuthManager::check_action_auth`, which raises an
+        // immediately so the model can call it without a separate
+        // enablement step. Auth is checked at execute time by
+        // `AuthManager::check_action_auth`, which raises an
         // `Authentication` gate when the declared credential is
         // missing — the inline-await machinery (#3133/#3166) parks
         // the caller until OAuth completes, then retries the action.

@@ -3,7 +3,7 @@
   "schema_version": 1,
   "entries": [
     {
-      "request_hash": "c49e15cee2ab415924300f8ca01a40329d2ca9b47906538437ea2bee73b40205",
+      "request_hash": "8b0594268d8163bcd1adf3f5268990be03bbde10e953aff35a6f58a709737b43",
       "request_summary": {
         "model": "mock-model",
         "n_messages": 2,
@@ -35,7 +35,6 @@
           "skill_list",
           "skill_search",
           "time",
-          "tool_activate",
           "tool_info",
           "tool_list",
           "tool_search",
@@ -84,7 +83,7 @@
       }
     },
     {
-      "request_hash": "806085695b41459d29d44cfb951167ac13b5685b48772feee833e413a010b198",
+      "request_hash": "17d5a286b3e7533ecdd4209841290909381960a576304ad294d6bc8a596a4bd2",
       "request_summary": {
         "model": "mock-model",
         "n_messages": 5,
@@ -149,7 +148,6 @@
           "skill_list",
           "skill_search",
           "time",
-          "tool_activate",
           "tool_info",
           "tool_list",
           "tool_search",
@@ -193,7 +191,7 @@
       }
     },
     {
-      "request_hash": "ed3f95b582c5fd417acafbfc5d15f020e468eac91f1162f0acfb7af5b7cd0d8e",
+      "request_hash": "dc61373fb9af3b80914e85077785cd49e9de6c5dd150721ec4d00401e1e672e1",
       "request_summary": {
         "model": "mock-model",
         "n_messages": 7,
@@ -280,7 +278,6 @@
           "skill_list",
           "skill_search",
           "time",
-          "tool_activate",
           "tool_info",
           "tool_list",
           "tool_search",
@@ -311,7 +308,7 @@
       }
     },
     {
-      "request_hash": "924672bd6dacafc6b1693c68689eb4bfa8de032dd10e3b33cc2c851adb25f32c",
+      "request_hash": "9bd54aee4f8ff02b0e33fe5a818197126723960e05667ff742506ddd676a81a4",
       "request_summary": {
         "model": "mock-model",
         "n_messages": 2,
@@ -343,7 +340,6 @@
           "skill_list",
           "skill_search",
           "time",
-          "tool_activate",
           "tool_info",
           "tool_list",
           "tool_search",
@@ -387,7 +383,7 @@
       }
     },
     {
-      "request_hash": "1d53e09c41aec80b555bb48a4a54a2e7dc750364a68c5412d892dd631205496e",
+      "request_hash": "c60635dffe9950e95fdc7b7e7d9f446954a0a804b0a2a65d0edda2d41235b27f",
       "request_summary": {
         "model": "mock-model",
         "n_messages": 4,
@@ -441,7 +437,6 @@
           "skill_list",
           "skill_search",
           "time",
-          "tool_activate",
           "tool_info",
           "tool_list",
           "tool_search",
@@ -485,7 +480,7 @@
       }
     },
     {
-      "request_hash": "7505998d4a84d8c193b754fa77af76c82a95170f6381bee4e64c9c22681c265b",
+      "request_hash": "96f7b9aeb1e15f3d3d61f58782be9030c7470b2c727bd76f2e16b3f7250c0d8d",
       "request_summary": {
         "model": "mock-model",
         "n_messages": 2,
@@ -517,7 +512,6 @@
           "skill_list",
           "skill_search",
           "time",
-          "tool_activate",
           "tool_info",
           "tool_list",
           "tool_search",

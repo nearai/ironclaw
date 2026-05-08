@@ -2670,13 +2670,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_gate_extension_name_uses_install_parameters_for_hyphenated_activate_tool() {
+    async fn pending_gate_extension_name_uses_install_parameters_for_hyphenated_install_tool() {
         let state = test_gateway_state(None);
 
         let extension_name = pending_gate_extension_name(
             &state,
             "test-user",
-            "tool-activate",
+            "tool-install",
             r#"{"name":"telegram"}"#,
             &ironclaw_engine::ResumeKind::Authentication {
                 credential_name: ironclaw_common::CredentialName::from_trusted(

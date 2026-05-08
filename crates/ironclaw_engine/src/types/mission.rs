@@ -118,7 +118,7 @@ pub enum MissionCadence {
 pub struct MissionGateInfo {
     /// Engine-side gate name (e.g., `auth_required`, `approval_required`).
     pub gate_name: String,
-    /// Action that paused (e.g., `tool_activate`, `gmail`, `http`).
+    /// Action that paused (e.g., `gmail`, `http`, `slack_send`).
     pub action_name: String,
     /// Original action parameters at the time of the pause.
     pub parameters: serde_json::Value,

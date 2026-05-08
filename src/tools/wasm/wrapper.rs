@@ -1250,8 +1250,7 @@ impl Tool for WasmToolWrapper {
     /// (`AuthManager::check_action_auth`) uses this to raise an
     /// `Authentication` gate when the tool is called and any required
     /// credential is missing from the secrets store — so the model can
-    /// call e.g. `gmail` directly without needing a preceding
-    /// `tool_activate(name="gmail")` step.
+    /// call e.g. `gmail` directly with no separate enablement step.
     fn required_credentials(&self) -> Vec<String> {
         let mut out = Vec::new();
         if let Some(http) = &self.capabilities.http {

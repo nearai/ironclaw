@@ -1455,18 +1455,14 @@ async def test_wasm_tool_oauth_roundtrip(auth_matrix_server):
 @pytest.mark.xfail(
     strict=False,
     reason=(
-        "Obsolete under the engine-v2 callable-only contract from #2868. "
-        "When the LLM emits a direct call to a not-yet-authed extension, "
-        "the engine now returns 'action <name> is not callable in this "
-        "execution context' instead of surfacing a gate_required "
-        "Authentication event with an auth URL. The new model-facing "
-        "enablement path is `tool_activate(name=...)`, exercised in "
-        "test_v2_tool_activate_surface.py. The mock LLM is canned to emit "
-        "tool calls directly, so it can't drive the new contract; until "
-        "the canned response is updated (or the engine restores a bridge-"
-        "level fallback) this scenario can't be reproduced from a "
-        "scripted LLM. test_settings_first_gmail_auth_then_chat_runs "
-        "covers the same auth flow through the settings UI path."
+        "Obsolete under the engine-v2 callable-only contract from #2868 "
+        "and the post-#3133 direct-callable contract. When the LLM emits "
+        "a direct call to a not-yet-authed extension, the engine raises "
+        "an Authentication gate via the auth preflight rather than the "
+        "older `gate_required` Authentication event with an auth URL. "
+        "The mock LLM's canned response shape doesn't match the new "
+        "contract; test_settings_first_gmail_auth_then_chat_runs covers "
+        "the same auth flow through the settings UI path."
     ),
 )
 async def test_wasm_tool_first_chat_auth_attempt_emits_auth_url(auth_matrix_server):

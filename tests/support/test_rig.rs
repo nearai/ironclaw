@@ -896,7 +896,7 @@ impl TestRigBuilder {
     /// Unlike `with_extra_tools`, these overrides are applied at the end of
     /// `build()` via `ToolRegistry::register_sync`, so a probe stub can
     /// intentionally replace an earlier built-in registration (e.g.
-    /// `tool_activate`, `tool_auth`) for gate testing.
+    /// `tool_install`, `tool_auth`) for gate testing.
     pub fn with_test_tool_override(mut self, tool: Arc<dyn Tool>) -> Self {
         self.test_tool_overrides.push(tool);
         self

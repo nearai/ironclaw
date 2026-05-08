@@ -1,34 +1,5 @@
 """Live-LLM Playwright regression for issue #3133 + half-2 (#3166).
 
-Known limitation (FIXME / follow-up):
-
-  When the mission's child thread runs in Tier 1 (CodeAct / Python via
-  Monty), `tool_activate` is NOT exposed as a callable Python
-  function — only Tier 0 structured tool calls expose it. With recent
-  Claude (Sonnet 4.5+) the model picks Tier 1 by default, so the
-  auth-gate path that half-1 of #3133 added never fires from a child
-  thread. Instead the gmail tool's WASM-side
-  "Google OAuth token not configured" error surfaces as a tool
-  failure, the LLM narrates it, the mission stays Active, and the
-  cron keeps re-firing — i.e. the original #3133 ghost-fire shape
-  still reproduces under Tier 1.
-
-  Half-2 (this PR) is verified end-to-end *for Tier 0* by the unit
-  tests in `crates/ironclaw_engine/src/runtime/mission.rs`. A fully
-  Tier-1-resilient fix needs the engine to auto-promote
-  "credential missing" tool errors to a `GatePaused` outcome (so the
-  Tier 1 path also writes `paused_gate`) — tracked separately under
-  the same issue thread.
-
-  This test stays in the tree as the recording infrastructure for
-  whichever resolution lands first: a Tier-0 prompt that drives
-  `tool_activate`, or an engine change that promotes Tier-1 tool
-  errors to gates. In replay mode the committed fixture proves the
-  full path; in record mode the test will skip with a clear message
-  if the LLM's behaviour doesn't reach a Paused mission.
-
-
-
 Issue #3133: a Gmail-sending mission firing every 3 minutes whose
 child thread bailed with the LLM-rendered "Failed to send email.
 Status: None Error: None" pattern. Half-1 (PR #3155) added a typed
@@ -36,6 +7,14 @@ Status: None Error: None" pattern. Half-1 (PR #3155) added a typed
 `AuthRequired` status update on the user's auth tray. Half-2 (this
 PR) auto-resumes the mission once the user completes OAuth on the
 matching credential.
+
+Post-#3133, installed-but-unauthed provider tools are direct-callable;
+the engine's auth preflight raises an `Authentication` gate at
+execute time and the inline-await machinery parks the mission until
+OAuth completes. The previous `tool_activate` enablement step has
+been removed — the model calls the tool directly in both Tier 0 and
+Tier 1 (CodeAct / Python via Monty), and the gate path fires from
+either tier.
 
 This test drives the full chat-driven mission lifecycle through a
 real LLM (or a recorded trace from one) and asserts the auto-resume
@@ -49,11 +28,11 @@ mechanism end-to-end:
      in engine v2.
   4. The LLM's next response emits `mission_fire` (or the test calls
      `/api/engine/missions/{id}/fire` directly when the LLM fails to
-     fire it) and the child thread's first turn emits
-     `tool_activate(name="gmail")`.
-  5. Gmail is installed but not authenticated, so the engine's gate
-     pipeline raises an Authentication gate and the mission
-     transitions to **Paused** with `paused_gate.resume_kind =
+     fire it) and the child thread's first turn emits a direct
+     `gmail(action="create_draft", ...)` call.
+  5. Gmail is installed but not authenticated, so the auth preflight
+     raises an Authentication gate and the mission transitions to
+     **Paused** with `paused_gate.resume_kind =
      Authentication { credential = google_oauth_token }`.
   6. The test polls `/api/engine/missions` until the mission flips
      to `Paused`.
@@ -61,9 +40,8 @@ mechanism end-to-end:
      The credential write fires `bridge::resume_paused_missions_for_credential`,
      which transitions the mission Paused → Active and immediately
      re-fires it.
-  8. The re-fired child thread sees gmail authenticated, so
-     `tool_activate` returns success, and the LLM emits
-     `gmail.create_draft`. The HTTP rewrite map routes
+  8. The re-fired child thread sees gmail authenticated, so the
+     `gmail` tool succeeds. The HTTP rewrite map routes
      `gmail.googleapis.com` at mock_llm.py, whose
      `/gmail/v1/users/me/drafts` endpoint returns a deterministic
      draft id so the next turn can quote it.
@@ -337,19 +315,18 @@ async def test_mission_gmail_draft_3133(
             st = await proxy_state(mission_gmail_live_server["live_proxy_url"])
             pytest.skip(
                 f"record mode: mission never reached Paused. The live "
-                f"LLM's child thread did not emit a `tool_activate` Tier-0 "
-                f"call (likely Tier-1/CodeAct) so the auth gate never "
-                f"fired. See the module docstring's known limitation. "
-                f"Trace recorded {st['record_count']} entries to "
+                f"LLM's child thread did not call gmail (or the auth "
+                f"preflight didn't fire). Trace recorded "
+                f"{st['record_count']} entries to "
                 f"{mission_gmail_live_server['fixture']}. Inspect that "
                 f"file to see what the LLM did. Original error: {e}"
             )
         raise
     print(f"[#3133] mission paused: {paused.get('status')}")
 
-    # 5. Mission must NOT have created any drafts yet — the gate
-    #    paused execution before tool_activate could even register
-    #    gmail's tools, let alone call create_draft.
+    # 5. Mission must NOT have created any drafts yet — the auth
+    #    preflight gate paused execution before the gmail tool's
+    #    HTTP call could complete.
     pre_oauth = await _gmail_mock_state(mock_llm)
     assert pre_oauth["drafts_created"] == 0, (
         f"no draft should be created before OAuth: {pre_oauth}"
