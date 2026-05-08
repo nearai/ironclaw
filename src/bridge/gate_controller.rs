@@ -150,10 +150,7 @@ impl GateResolutions {
         let mut delivered = 0;
         for request_id in request_ids {
             if self
-                .try_deliver(
-                    request_id,
-                    GateResolution::Approved { always: false },
-                )
+                .try_deliver(request_id, GateResolution::Approved { always: false })
                 .await
             {
                 delivered += 1;

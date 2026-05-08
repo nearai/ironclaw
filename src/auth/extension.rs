@@ -288,7 +288,10 @@ impl AuthManager {
             {
                 Ok(_) => {}
                 Err(error) if error.requires_authentication() => {
-                    missing.push(self.describe_missing_credential(&secret_name, user_id).await);
+                    missing.push(
+                        self.describe_missing_credential(&secret_name, user_id)
+                            .await,
+                    );
                 }
                 Err(error) => {
                     tracing::debug!(

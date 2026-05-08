@@ -1523,7 +1523,11 @@ async fn approval_chains_directly_into_auth_for_install_flow() {
     // second is the Authentication (Cancelled by AutoApprover so the
     // engine falls through to legacy `ThreadOutcome::GatePaused`).
     let pauses = controller.pauses_seen().await;
-    assert_eq!(pauses.len(), 2, "expected approval + auth pauses, got {pauses:?}");
+    assert_eq!(
+        pauses.len(),
+        2,
+        "expected approval + auth pauses, got {pauses:?}"
+    );
     assert_eq!(pauses[0].action_name, "tool_install");
     assert!(matches!(pauses[0].resume_kind, ResumeKind::Approval { .. }));
     assert_eq!(pauses[1].action_name, "tool_install");

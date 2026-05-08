@@ -2100,17 +2100,10 @@ async fn execute_single_action_with_inline_retry(
             // already-accumulated `ApprovalRequested` event was
             // pushed before the pause; we re-emit it on the new
             // result_json carrying the original gate metadata.
-            if matches!(
-                resolution,
-                crate::gate::GateResolution::Cancelled
-            ) && matches!(resume_kind, crate::gate::ResumeKind::Authentication { .. })
+            if matches!(resolution, crate::gate::GateResolution::Cancelled)
+                && matches!(resume_kind, crate::gate::ResumeKind::Authentication { .. })
             {
-                return (
-                    result_json,
-                    accumulated_events,
-                    output,
-                    current_lease.id,
-                );
+                return (result_json, accumulated_events, output, current_lease.id);
             }
             let error_msg = outcome.event_error();
             let denial = serde_json::json!({"error": &error_msg});

@@ -1085,7 +1085,10 @@ async fn skill_prompt_context_survives_compaction_and_resume() {
     assert!(post_compaction_system_prompt.contains("Active Skills"));
     assert!(post_compaction_system_prompt.contains("/missing"));
     assert!(post_compaction_system_prompt.contains("`slack` [provider]"));
-    assert!(post_compaction_system_prompt.contains("need user setup before their tools become callable"));
+    assert!(
+        post_compaction_system_prompt
+            .contains("need user setup before their tools become callable")
+    );
     assert_eq!(
         post_compaction_system_prompt
             .matches("## Activatable Integrations")

@@ -744,10 +744,8 @@ async fn execute_with_inline_gate_retry(
             // semantically "no inline path exists" and the legacy
             // unwind is the right fallback. Denied / explicit
             // Cancelled-by-user remain failures.
-            if matches!(
-                resolution,
-                crate::gate::GateResolution::Cancelled
-            ) && matches!(resume_kind, crate::gate::ResumeKind::Authentication { .. })
+            if matches!(resolution, crate::gate::GateResolution::Cancelled)
+                && matches!(resume_kind, crate::gate::ResumeKind::Authentication { .. })
                 && let Some(err) = original_err
             {
                 return (Err(err), emitted_events);

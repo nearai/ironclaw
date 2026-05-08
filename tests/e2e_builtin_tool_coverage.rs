@@ -1222,8 +1222,7 @@ mod tests {
             .expect("tool_search description should be a string");
         assert!(
             tool_search_description.contains("`tool_install`")
-                && tool_search_description
-                    .contains("its tools become directly callable"),
+                && tool_search_description.contains("its tools become directly callable"),
             "tool_search description should describe install + direct-callable post-#3133 \
              contract: {tool_search_description}"
         );

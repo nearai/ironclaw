@@ -2175,10 +2175,11 @@ async fn drive_inline_gate(
             // means the controller can't resolve the auth inline (no
             // OAuth wiring) — the legacy unwind path is the right
             // fallback. Denied / explicit user-cancel remain failures.
-            if matches!(
-                resolution,
-                crate::gate::GateResolution::Cancelled
-            ) && matches!(gate.resume_kind, crate::gate::ResumeKind::Authentication { .. })
+            if matches!(resolution, crate::gate::GateResolution::Cancelled)
+                && matches!(
+                    gate.resume_kind,
+                    crate::gate::ResumeKind::Authentication { .. }
+                )
             {
                 // Stash the original gate so `execute_code`'s exit can
                 // surface it as `need_approval`. Without this, Tier 1

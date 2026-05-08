@@ -92,8 +92,8 @@ pub use runtime::mission::{
     BudgetGate, FireRateLimit, GateResolutionOutcome, MissionManager, MissionNotification,
     MissionUpdate,
 };
-pub use types::mission::MissionGateInfo;
 pub use runtime::tree::ThreadTree;
+pub use types::mission::MissionGateInfo;
 
 pub use types::conversation::{
     ConversationEntry, ConversationId, ConversationSurface, EntrySender,

@@ -4720,11 +4720,7 @@ mod tests {
         let request_id = notif.gate.unwrap().gate_request_id;
 
         let resumed = mgr
-            .resume_paused_for_request_id(
-                request_id,
-                GateResolutionOutcome::Approved,
-                "test-user",
-            )
+            .resume_paused_for_request_id(request_id, GateResolutionOutcome::Approved, "test-user")
             .await
             .unwrap();
         assert_eq!(resumed, Some(id));
@@ -4769,7 +4765,9 @@ mod tests {
             action_name: "gmail".into(),
             call_id: "call-send-2".into(),
             parameters: serde_json::json!({}),
-            resume_kind: ResumeKind::Approval { allow_always: false },
+            resume_kind: ResumeKind::Approval {
+                allow_always: false,
+            },
             resume_output: None,
             paused_lease: None,
         };
