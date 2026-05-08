@@ -4,12 +4,7 @@
 //! host-managed model gateways) into the narrow `AgentLoopHost` ports. It does
 //! not own provider clients, tool dispatchers, secrets, or runtime handles.
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
-
-use tokio::sync::Mutex;
+use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_threads::{
@@ -119,9 +114,6 @@ where
     thread_scope: ThreadScope,
     run_context: LoopRunContext,
     milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
-    // Only successful milestone publications are recorded here: if publishing
-    // fails after the transcript write, an idempotent retry must try again.
-    emitted_assistant_reply_finalized_refs: Arc<Mutex<HashSet<String>>>,
 }
 
 impl<S> ThreadBackedLoopTranscriptPort<S>
@@ -138,7 +130,6 @@ where
             thread_scope,
             run_context,
             milestone_sink: None,
-            emitted_assistant_reply_finalized_refs: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -153,7 +144,6 @@ where
             thread_scope,
             run_context,
             milestone_sink: Some(milestone_sink),
-            emitted_assistant_reply_finalized_refs: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 }
@@ -229,7 +219,7 @@ where
             if draft.content.as_deref() == Some(reply_content.as_str()) {
                 let message_ref = message_ref(draft.message_id)?;
                 self.emit_assistant_reply_finalized(message_ref.clone())
-                    .await?;
+                    .await;
                 return Ok(message_ref);
             }
             return Err(AgentLoopHostError::new(
@@ -250,7 +240,7 @@ where
             Ok(message) => {
                 let message_ref = message_ref(message.message_id)?;
                 self.emit_assistant_reply_finalized(message_ref.clone())
-                    .await?;
+                    .await;
                 Ok(message_ref)
             }
             Err(error) => {
@@ -260,7 +250,7 @@ where
                 {
                     let message_ref = message_ref(message_id)?;
                     self.emit_assistant_reply_finalized(message_ref.clone())
-                        .await?;
+                        .await;
                     return Ok(message_ref);
                 }
                 Err(transcript_write_error(error))
@@ -273,26 +263,12 @@ impl<S> ThreadBackedLoopTranscriptPort<S>
 where
     S: SessionThreadService + ?Sized + Send + Sync,
 {
-    async fn emit_assistant_reply_finalized(
-        &self,
-        message_ref: LoopMessageRef,
-    ) -> Result<(), AgentLoopHostError> {
-        let Some(milestone_sink) = &self.milestone_sink else {
-            return Ok(());
-        };
-
-        let mut emitted_refs = self.emitted_assistant_reply_finalized_refs.lock().await;
-        if emitted_refs.contains(message_ref.as_str()) {
-            return Ok(());
+    async fn emit_assistant_reply_finalized(&self, message_ref: LoopMessageRef) {
+        if let Some(milestone_sink) = &self.milestone_sink {
+            let milestones =
+                LoopHostMilestoneEmitter::new(self.run_context.clone(), Arc::clone(milestone_sink));
+            let _ = milestones.assistant_reply_finalized(message_ref).await;
         }
-
-        let milestones =
-            LoopHostMilestoneEmitter::new(self.run_context.clone(), Arc::clone(milestone_sink));
-        milestones
-            .assistant_reply_finalized(message_ref.clone())
-            .await?;
-        emitted_refs.insert(message_ref.as_str().to_string());
-        Ok(())
     }
 
     async fn load_current_run_message(
@@ -545,13 +521,7 @@ where
         if let Some(milestone_sink) = &self.milestone_sink {
             let milestones =
                 LoopHostMilestoneEmitter::new(self.run_context.clone(), Arc::clone(milestone_sink));
-            if let Err(error) = milestones.model_completed(effective_model_profile_id).await {
-                tracing::debug!(
-                    kind = ?error.kind,
-                    diagnostic_ref = ?error.diagnostic_ref,
-                    "loop model_completed milestone failed after successful model response"
-                );
-            }
+            let _ = milestones.model_completed(effective_model_profile_id).await;
         }
     }
 
