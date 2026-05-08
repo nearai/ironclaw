@@ -468,11 +468,17 @@ async def _record(
     return web.json_response(response_body)
 
 
-async def _emit_streamed_response(body: dict[str, Any]) -> web.StreamResponse:
+async def _emit_streamed_response(body: dict[str, Any]) -> web.Response:
     """Re-emit a non-streaming chat-completions JSON body as a single
     SSE chunk plus the [DONE] sentinel. Good enough for ironclaw's
     streaming consumer — every test we run here uses the chunk-or-text
     accumulator, not delta-by-delta token rendering.
+
+    Returns a one-shot `web.Response` with `text/event-stream` content
+    type rather than a true `web.StreamResponse`; the underlying
+    `_send_sse` helper buffers the payload and returns a
+    `web.Response` because we don't have a request-scoped `prepare()`
+    handle here.
     """
     response = web.StreamResponse(
         status=200,
@@ -501,32 +507,26 @@ async def _emit_streamed_response(body: dict[str, Any]) -> web.StreamResponse:
     return await _send_sse_payload(response, delta)
 
 
-async def _send_sse_payload(response: web.StreamResponse, delta: dict[str, Any]) -> web.StreamResponse:
+async def _send_sse_payload(
+    response: web.StreamResponse, delta: dict[str, Any]
+) -> web.Response:
     return await _send_sse_lines(response, [json.dumps(delta), "[DONE]"])
 
 
 async def _send_sse_lines(
     response: web.StreamResponse, payloads: list[str]
-) -> web.StreamResponse:
+) -> web.Response:
     return await _send_sse(response, payloads)
 
 
-async def _send_sse(
-    response: web.StreamResponse, payloads: list[str]
-) -> web.StreamResponse:
-    started = False
-
-    async def _start(req: web.Request) -> None:
-        nonlocal started
-        if not started:
-            await response.prepare(req)
-            started = True
-
+async def _send_sse(_response: web.StreamResponse, payloads: list[str]) -> web.Response:
     # aiohttp StreamResponse needs a request-scoped prepare. We don't
     # have direct access to the original request here; instead, use a
     # trick: build the payload as a single bytes blob and return it as
     # a regular Response with text/event-stream content type. SSE
-    # consumers tolerate a complete-on-arrival event stream.
+    # consumers tolerate a complete-on-arrival event stream. The
+    # `_response` argument is kept for signature symmetry with the
+    # streaming variant we may swap in later.
     body_bytes = b""
     for payload in payloads:
         body_bytes += b"data: " + payload.encode("utf-8") + b"\n\n"
