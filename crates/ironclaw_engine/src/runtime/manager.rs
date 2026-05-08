@@ -677,7 +677,9 @@ fn is_resolved_action_result_message(message: &ThreadMessage, call_id: &str) -> 
 mod tests {
     use super::*;
     use crate::traits::llm::{LlmCallConfig, LlmOutput};
-    use crate::types::capability::{ActionDef, Capability, CapabilityLease, EffectType};
+    use crate::types::capability::{
+        ActionDef, Capability, CapabilityLease, EffectType, ModelToolSurface,
+    };
     use crate::types::event::ThreadEvent;
     use crate::types::memory::{DocId, MemoryDoc};
     use crate::types::project::Project;
@@ -1005,6 +1007,8 @@ mod tests {
                 parameters_schema: serde_json::json!({}),
                 effects: vec![EffectType::ReadLocal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
             }],
             knowledge: vec![],
             policies: vec![],
@@ -1031,6 +1035,8 @@ mod tests {
                 parameters_schema: serde_json::json!({}),
                 effects: vec![EffectType::ReadLocal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
             }],
             knowledge: vec![],
             policies: vec![],
@@ -1061,6 +1067,8 @@ mod tests {
                 parameters_schema: serde_json::json!({}),
                 effects: vec![EffectType::WriteLocal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
             }],
             knowledge: vec![],
             policies: vec![],
@@ -1185,6 +1193,8 @@ mod tests {
             parameters_schema: serde_json::json!({}),
             effects: vec![EffectType::WriteLocal],
             requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
+            discovery: None,
         }]);
         let mgr = make_manager_with_effects(MockLlm::text("done"), store, effects.clone());
 
@@ -1221,6 +1231,8 @@ mod tests {
                     parameters_schema: serde_json::json!({}),
                     effects: vec![EffectType::WriteLocal],
                     requires_approval: false,
+                    model_tool_surface: ModelToolSurface::FullSchema,
+                    discovery: None,
                 },
                 ActionDef {
                     name: "notion_search".into(),
@@ -1228,6 +1240,8 @@ mod tests {
                     parameters_schema: serde_json::json!({}),
                     effects: vec![EffectType::ReadExternal],
                     requires_approval: false,
+                    model_tool_surface: ModelToolSurface::CompactToolInfo,
+                    discovery: None,
                 },
             ])
             .await;
@@ -1257,6 +1271,8 @@ mod tests {
                 parameters_schema: serde_json::json!({}),
                 effects: vec![EffectType::WriteLocal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
             },
             ActionDef {
                 name: "notion_search".into(),
@@ -1264,6 +1280,8 @@ mod tests {
                 parameters_schema: serde_json::json!({}),
                 effects: vec![EffectType::ReadExternal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::CompactToolInfo,
+                discovery: None,
             },
         ]);
         let mgr = make_manager_with_effects(MockLlm::text("done"), store, effects);
@@ -1296,6 +1314,8 @@ mod tests {
             parameters_schema: serde_json::json!({}),
             effects: vec![EffectType::WriteLocal],
             requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
+            discovery: None,
         }];
         let revealed_actions = vec![
             ActionDef {
@@ -1304,6 +1324,8 @@ mod tests {
                 parameters_schema: serde_json::json!({}),
                 effects: vec![EffectType::WriteLocal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
             },
             ActionDef {
                 name: "notion_search".into(),
@@ -1311,6 +1333,8 @@ mod tests {
                 parameters_schema: serde_json::json!({}),
                 effects: vec![EffectType::ReadExternal],
                 requires_approval: false,
+                model_tool_surface: ModelToolSurface::CompactToolInfo,
+                discovery: None,
             },
         ];
         let effects = DynamicEffects::new(initial_actions);

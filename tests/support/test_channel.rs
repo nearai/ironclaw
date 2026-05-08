@@ -110,6 +110,16 @@ impl TestChannel {
         self.tx.send(msg).await.expect("TestChannel tx closed");
     }
 
+    /// Channel name used for injected messages.
+    pub fn channel_name(&self) -> &str {
+        &self.channel_name
+    }
+
+    /// Default user ID used for injected messages.
+    pub fn user_id(&self) -> &str {
+        &self.user_id
+    }
+
     /// Inject a raw `IncomingMessage` (for tests that need attachments, etc.).
     pub async fn send_incoming(&self, msg: IncomingMessage) {
         self.tx.send(msg).await.expect("TestChannel tx closed");

@@ -1,0 +1,24 @@
+{
+  "model_name": "coverage-approval-bare-yes-no-pending",
+  "expects": {
+    "tools_not_used": ["needs_approval_probe"],
+    "min_responses": 1,
+    "response_contains": ["acknowledged"]
+  },
+  "turns": [
+    {
+      "user_input": "yes",
+      "steps": [
+        {
+          "request_hint": { "last_user_message_contains": "yes" },
+          "response": {
+            "type": "text",
+            "content": "Acknowledged. There was nothing pending — what would you like next?",
+            "input_tokens": 60,
+            "output_tokens": 15
+          }
+        }
+      ]
+    }
+  ]
+}

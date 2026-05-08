@@ -55,6 +55,7 @@ HEADED=1 pytest scenarios/
 | `test_tool_approval.py` | Approval card appears, buttons disable on approve/deny, parameters toggle via `page.evaluate("showApproval(...)")`; the waiting-approval regression uses a real HTTP tool call |
 | `test_extension_uninstall_cleanup.py` | Real install/setup/remove coverage for WASM tools, WASM channels, OAuth-backed shared Google tools, and MCP servers; verifies uninstall deletes stored secrets from the libSQL `secrets` table while preserving shared credentials until the last referencing extension is removed |
 | `test_oauth_refresh.py` | Hosted Gmail OAuth regression: complete setup via `/oauth/callback`, expire the stored access token in libSQL, trigger a real `gmail` tool call through `/api/chat/send`, and verify refresh goes through the mock `/oauth/refresh` proxy without forwarding `client_secret` |
+| `test_v2_tool_activate_surface.py` | Engine-v2 prompt contract: `tool_activate` is the visible enablement tool, `tool_auth`/`tool_install` stay off the normal surfaced prompt, and blocked integrations appear under `Activatable Integrations` |
 | `test_dom_resource_limits.py` | DOM pruning at MAX_DOM_MESSAGES cap, no setInterval timer leaks across SSE reconnect cycles, streaming message preservation during pruning |
 
 ## `helpers.py`
@@ -100,7 +101,7 @@ The `ironclaw_server` fixture injects a minimal, deterministic environment:
 GATEWAY_ENABLED=true, GATEWAY_HOST=127.0.0.1, GATEWAY_PORT=<dynamic>
 GATEWAY_AUTH_TOKEN=e2e-test-token, GATEWAY_USER_ID=e2e-tester
 CLI_ENABLED=false
-LLM_BACKEND=openai_compatible, LLM_BASE_URL=<mock_llm_url>, LLM_MODEL=mock-model
+LLM_BACKEND=openai_compatible, LLM_BASE_URL=<mock_llm_url>, LLM_API_KEY=mock-api-key, LLM_MODEL=mock-model
 DATABASE_BACKEND=libsql, LIBSQL_PATH=<tmpdir>/e2e.db
 SANDBOX_ENABLED=false, ROUTINES_ENABLED=false, HEARTBEAT_ENABLED=false
 EMBEDDING_ENABLED=false, SKILLS_ENABLED=true
@@ -108,6 +109,12 @@ ONBOARD_COMPLETED=true   # prevents setup wizard
 ```
 
 The `hosted_oauth_refresh_server` fixture uses the same baseline, but with its own DB/home tempdirs and `GOOGLE_OAUTH_CLIENT_ID=hosted-google-client-id` so hosted OAuth flows exercise proxy credential injection instead of the baked-in desktop Google app.
+
+For isolated v2 auth/prompt fixtures, do not rely on env-vs-DB precedence to
+keep the mock LLM active. Pin the provider explicitly (typically by writing
+`llm_backend=openai_compatible`, `openai_compatible_base_url=<mock_llm_url>`,
+and `selected_model=mock-model` through `/api/settings/...`) so browser tests
+exercise auth/activation behavior instead of silently falling back to NearAI.
 
 The binary is also started with `--no-onboard`. Coverage env vars (`CARGO_LLVM_COV*`, `LLVM_*`, `CARGO_ENCODED_RUSTFLAGS`, `CARGO_INCREMENTAL`) are forwarded from the outer environment when present.
 

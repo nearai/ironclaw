@@ -1,0 +1,37 @@
+{
+  "model_name": "coverage-auth-external-callback",
+  "expects": {
+    "min_responses": 1,
+    "response_contains": ["connected"]
+  },
+  "turns": [
+    {
+      "user_input": "Connect the OAuth service",
+      "steps": [
+        {
+          "request_hint": { "last_user_message_contains": "OAuth" },
+          "response": {
+            "type": "tool_calls",
+            "tool_calls": [
+              {
+                "id": "call_oauth_callback",
+                "name": "tool_activate",
+                "arguments": { "name": "oauth_service" }
+              }
+            ],
+            "input_tokens": 60,
+            "output_tokens": 20
+          }
+        },
+        {
+          "response": {
+            "type": "text",
+            "content": "OAuth service is now connected.",
+            "input_tokens": 90,
+            "output_tokens": 15
+          }
+        }
+      ]
+    }
+  ]
+}

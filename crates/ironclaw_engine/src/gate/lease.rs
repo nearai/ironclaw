@@ -77,7 +77,7 @@ impl ExecutionGate for LeaseGate {
 mod tests {
     use super::*;
     use crate::gate::ExecutionMode;
-    use crate::types::capability::{ActionDef, EffectType, GrantedActions};
+    use crate::types::capability::{ActionDef, EffectType, GrantedActions, ModelToolSurface};
     use crate::types::thread::ThreadId;
     use std::collections::HashSet;
 
@@ -88,6 +88,8 @@ mod tests {
             parameters_schema: serde_json::json!({}),
             effects: vec![EffectType::ReadLocal],
             requires_approval: false,
+            model_tool_surface: ModelToolSurface::FullSchema,
+            discovery: None,
         }
     }
 

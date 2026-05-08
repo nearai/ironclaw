@@ -7950,8 +7950,10 @@ mod tests {
     };
     use crate::pairing::PairingStore;
     use crate::secrets::CreateSecretParams;
-    use crate::tools::mcp::McpServerConfig;
+    use crate::tools::ToolError;
     use crate::tools::mcp::config::NEARAI_MCP_SERVER_NAME;
+    use crate::tools::mcp::{McpClient, McpRequest, McpResponse, McpServerConfig, McpTransport};
+    use async_trait::async_trait;
 
     fn require(condition: bool, message: impl Into<String>) -> Result<(), String> {
         if condition {
@@ -8242,6 +8244,76 @@ mod tests {
         make_test_manager_with_dirs(wasm_runtime, tools_dir.clone(), tools_dir, None)
     }
 
+    struct StaticMcpTransport {
+        responses: std::sync::Mutex<std::collections::VecDeque<McpResponse>>,
+    }
+
+    impl StaticMcpTransport {
+        fn with_single_tool(tool_name: &str, description: &str) -> Self {
+            let init_response = McpResponse {
+                jsonrpc: "2.0".to_string(),
+                id: Some(1),
+                result: Some(serde_json::json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "serverInfo": {"name": "test", "version": "1.0"}
+                })),
+                error: None,
+            };
+            let notification_ack = McpResponse {
+                jsonrpc: "2.0".to_string(),
+                id: None,
+                result: None,
+                error: None,
+            };
+            let list_response = McpResponse {
+                jsonrpc: "2.0".to_string(),
+                id: Some(2),
+                result: Some(serde_json::json!({
+                    "tools": [
+                        {
+                            "name": tool_name,
+                            "description": description,
+                            "inputSchema": {"type": "object"}
+                        }
+                    ]
+                })),
+                error: None,
+            };
+
+            Self {
+                responses: std::sync::Mutex::new(std::collections::VecDeque::from(vec![
+                    init_response,
+                    notification_ack,
+                    list_response,
+                ])),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl McpTransport for StaticMcpTransport {
+        async fn send(
+            &self,
+            _request: &McpRequest,
+            _headers: &std::collections::HashMap<String, String>,
+        ) -> Result<McpResponse, ToolError> {
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| ToolError::ExternalService("No more mock responses".to_string()))
+        }
+
+        async fn shutdown(&self) -> Result<(), ToolError> {
+            Ok(())
+        }
+
+        fn supports_http_features(&self) -> bool {
+            false
+        }
+    }
+
     #[tokio::test]
     async fn inject_mcp_client_partitions_cache_by_user() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -8252,13 +8324,27 @@ mod tests {
             None,
         );
 
-        let client_a = Arc::new(crate::tools::mcp::McpClient::new_with_name(
+        let client_a = Arc::new(McpClient::new_with_transport(
             "notion",
-            "http://localhost:3001",
+            Arc::new(StaticMcpTransport::with_single_tool(
+                "search",
+                "Search Notion",
+            )),
+            None,
+            None,
+            "default",
+            None,
         ));
-        let client_b = Arc::new(crate::tools::mcp::McpClient::new_with_name(
+        let client_b = Arc::new(McpClient::new_with_transport(
             "notion",
-            "http://localhost:3002",
+            Arc::new(StaticMcpTransport::with_single_tool(
+                "search",
+                "Search Notion",
+            )),
+            None,
+            None,
+            "default",
+            None,
         ));
 
         manager

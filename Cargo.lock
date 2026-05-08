@@ -3867,7 +3867,7 @@ dependencies = [
 
 [[package]]
 name = "ironclaw"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "aes-gcm",
  "agent-client-protocol",
@@ -3977,7 +3977,7 @@ dependencies = [
 
 [[package]]
 name = "ironclaw_common"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono-tz",
  "serde",
@@ -4033,7 +4033,7 @@ dependencies = [
 
 [[package]]
 name = "ironclaw_skills"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "futures",

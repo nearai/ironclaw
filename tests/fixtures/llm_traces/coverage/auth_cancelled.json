@@ -1,0 +1,29 @@
+{
+  "model_name": "coverage-auth-cancelled",
+  "expects": {
+    "min_responses": 1,
+    "response_contains": ["Cancelled"]
+  },
+  "turns": [
+    {
+      "user_input": "Set up the credential I'll cancel",
+      "steps": [
+        {
+          "request_hint": { "last_user_message_contains": "cancel" },
+          "response": {
+            "type": "tool_calls",
+            "tool_calls": [
+              {
+                "id": "call_auth_cancel",
+                "name": "tool_activate",
+                "arguments": { "name": "test_credential" }
+              }
+            ],
+            "input_tokens": 60,
+            "output_tokens": 20
+          }
+        }
+      ]
+    }
+  ]
+}

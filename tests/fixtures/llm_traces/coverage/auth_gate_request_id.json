@@ -1,0 +1,29 @@
+{
+  "model_name": "coverage-auth-gate-request-id",
+  "expects": {
+    "tools_used": ["tool_activate"],
+    "min_responses": 0
+  },
+  "turns": [
+    {
+      "user_input": "Trigger the auth gate",
+      "steps": [
+        {
+          "request_hint": { "last_user_message_contains": "auth gate" },
+          "response": {
+            "type": "tool_calls",
+            "tool_calls": [
+              {
+                "id": "call_auth_requestid",
+                "name": "tool_activate",
+                "arguments": { "name": "probe_credential" }
+              }
+            ],
+            "input_tokens": 60,
+            "output_tokens": 20
+          }
+        }
+      ]
+    }
+  ]
+}

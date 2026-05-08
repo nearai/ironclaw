@@ -1,0 +1,39 @@
+{
+  "model_name": "coverage-approval-slash",
+  "expects": {
+    "tools_used": ["needs_approval_probe"],
+    "all_tools_succeeded": true,
+    "min_responses": 1,
+    "response_contains": ["approved"]
+  },
+  "turns": [
+    {
+      "user_input": "Run the gated probe",
+      "steps": [
+        {
+          "request_hint": { "last_user_message_contains": "gated probe" },
+          "response": {
+            "type": "tool_calls",
+            "tool_calls": [
+              {
+                "id": "call_probe_slash",
+                "name": "needs_approval_probe",
+                "arguments": { "value": "go" }
+              }
+            ],
+            "input_tokens": 60,
+            "output_tokens": 20
+          }
+        },
+        {
+          "response": {
+            "type": "text",
+            "content": "The probe ran after you approved it via slash.",
+            "input_tokens": 90,
+            "output_tokens": 15
+          }
+        }
+      ]
+    }
+  ]
+}

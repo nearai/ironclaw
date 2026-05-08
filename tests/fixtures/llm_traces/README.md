@@ -340,6 +340,17 @@ llm_traces/
     injection_in_echo.json  # Prompt injection in tool output
     memory_full_cycle.json  # Full memory write/search/read cycle
     status_events_tool_chain.json
+    approval_yes.json              # Approval round-trip: user approves -> tool runs
+    approval_no.json               # Approval round-trip: user denies -> tool skipped
+    approval_always.json           # Approval round-trip: allow-always persists across calls
+    approval_always_floor.json     # ApprovalRequirement::Always is unbypassable (allow-always does NOT skip subsequent pauses)
+    approval_slash.json            # /approve slash form routes as ApprovalResponse
+    approval_bare_yes_no_pending.json # Bare "yes" with no pending approval is treated as user input
+    auth_credential_provided.json       # Engine v2 auth gate: CredentialProvided resumes the paused tool
+    auth_cancelled.json                 # Engine v2 auth gate: Cancelled stops the thread (no re-run)
+    auth_retry_invalid_then_valid.json  # Engine v2 auth gate: second pause emits a fresh request_id
+    auth_external_callback.json         # Engine v2 auth gate: ExternalCallback resumes after OAuth redirect
+    auth_gate_request_id.json           # Engine v2 invariant: AuthRequired carries a real Uuid request_id
   advanced/                 # Multi-step and edge-case scenarios
     long_tool_chain.json    # Many sequential tool calls
     tool_error_recovery.json # Failed tool call -> retry with valid path

@@ -269,9 +269,37 @@ main() {
     auth-browser-consent)
       run_python_lane scripts/auth_live_canary/run_live_canary.py --mode browser --playwright-install "${PLAYWRIGHT_INSTALL}"
       ;;
+    workflow-canary)
+      # Translate SCENARIO into one or more --scenario flags so targeted
+      # reruns (LANE=workflow-canary SCENARIO=telegram_round_trip) hit
+      # only that probe instead of the full 21-probe suite. Comma-list
+      # is supported so multiple probes can be chained:
+      # SCENARIO=bug_logger,telegram_round_trip.
+      workflow_canary_scenario_args=()
+      if [[ -n "${SCENARIO:-}" && "${SCENARIO}" != "auto" ]]; then
+        IFS=',' read -ra raw_scenarios <<< "${SCENARIO}"
+        for scenario_name in "${raw_scenarios[@]}"; do
+          trimmed="$(echo "$scenario_name" | xargs)"
+          if [[ -n "${trimmed}" ]]; then
+            workflow_canary_scenario_args+=(--scenario "${trimmed}")
+          fi
+        done
+      fi
+      # Empty-array expansion under `set -u` is fine on bash 4.4+ but
+      # historically explodes on macOS bash 3.2 — guard the splat the
+      # same way `run_python_lane` guards `case_args` / `passthrough_args`.
+      if [[ ${#workflow_canary_scenario_args[@]} -gt 0 ]]; then
+        run_python_lane scripts/workflow_canary/run_workflow_canary.py \
+          --playwright-install "${PLAYWRIGHT_INSTALL}" \
+          "${workflow_canary_scenario_args[@]}"
+      else
+        run_python_lane scripts/workflow_canary/run_workflow_canary.py \
+          --playwright-install "${PLAYWRIGHT_INSTALL}"
+      fi
+      ;;
     *)
       echo "Unknown live canary lane: ${LANE}" >&2
-      echo "Known lanes: deterministic-replay, public-smoke, persona-rotating, private-oauth, provider-matrix, release-public-full, upgrade-canary, auth-smoke, auth-full, auth-channels, auth-live-seeded, auth-browser-consent" >&2
+      echo "Known lanes: deterministic-replay, public-smoke, persona-rotating, private-oauth, provider-matrix, release-public-full, upgrade-canary, auth-smoke, auth-full, auth-channels, auth-live-seeded, auth-browser-consent, workflow-canary" >&2
       return 2
       ;;
   esac

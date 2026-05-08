@@ -1,0 +1,28 @@
+{
+  "name": "assertion_mix",
+  "operations": [
+    {
+      "tool_name": "echo",
+      "params": { "message": "first" },
+      "expected": {
+        "kind": "success",
+        "assertions": { "contains_text": "first" }
+      }
+    },
+    {
+      "tool_name": "echo",
+      "params": { "message": "second" },
+      "expected": {
+        "kind": "success"
+      }
+    },
+    {
+      "tool_name": "unknown_tool_for_mix",
+      "params": {},
+      "expected": {
+        "kind": "failure",
+        "error_contains": "not registered"
+      }
+    }
+  ]
+}

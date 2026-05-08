@@ -18,6 +18,19 @@ resolution — they call through these adapters.
 | `skill_migration.rs` | One-shot migration of legacy skill metadata into the engine's capability registry. |
 | `workspace_reader.rs` | Read-side adapter between the engine memory store and the workspace. |
 
+## Engine-v2 enablement contract
+
+For engine v2, blocked managed integrations are not part of the normal
+model-facing callable action list. They surface in capability background
+under `Activatable Integrations`, and the single model-facing enablement
+path is `tool_activate(name=...)`.
+
+`tool_activate` may internally install, authenticate, or activate the
+integration as needed. `tool_install` and `tool_auth` still exist as
+runtime/compatibility surfaces, but they are not the normal v2 prompt
+contract. After `tool_activate` succeeds, the newly ready tools appear on
+the next top-level turn rather than mid-CodeAct step.
+
 ## Auth-flow extension resolution: one place, no re-derivation
 
 The single authority that maps an auth gate or tool-call context to the installed extension identity is the free function:
@@ -26,7 +39,7 @@ The single authority that maps an auth gate or tool-call context to the installe
 
 Its precedence order:
 
-1. **User-influenced** — explicit `name` param on `tool_install` / `tool_activate` / `tool_auth` invocations (comes from the model's tool arguments, so it's validated via `ExtensionName::new`; invalid values fall through).
+1. **User-influenced** — explicit `name` param on enablement/auth tool invocations such as `tool_activate` (and internal/compat paths like `tool_install` / `tool_auth`). This comes from the model or caller arguments, so it's validated via `ExtensionName::new`; invalid values fall through.
 2. The action's provider extension, via `ToolRegistry::provider_extension_for_tool`.
 3. Canonicalized `action_name` if the extension manager has an installed extension by that name.
 4. The caller-supplied `credential_fallback` — last-resort, used only when no extension owns the action.

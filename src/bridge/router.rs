@@ -7,8 +7,8 @@ use tokio::sync::RwLock;
 use tracing::debug;
 
 use ironclaw_engine::{
-    Capability, CapabilityRegistry, ConversationManager, LeaseManager, MissionManager,
-    PolicyEngine, Project, Store, ThreadConfig, ThreadManager, ThreadOutcome,
+    Capability, CapabilityRegistry, ConversationManager, EffectExecutor, LeaseManager,
+    MissionManager, PolicyEngine, Project, Store, ThreadConfig, ThreadManager, ThreadOutcome,
 };
 
 use ironclaw_common::AppEvent;
@@ -17,6 +17,7 @@ use ironclaw_engine::types::{is_shared_owner, shared_owner_id};
 use crate::agent::Agent;
 use crate::auth::extension::AuthManager;
 use crate::bridge::effect_adapter::EffectBridgeAdapter;
+use crate::bridge::engine_actions::mission_capability_actions;
 use crate::bridge::llm_adapter::LlmBridgeAdapter;
 use crate::bridge::store_adapter::HybridStore;
 use crate::channels::web::GATEWAY_CHANNEL_NAME;
@@ -1070,7 +1071,7 @@ async fn execute_pending_gate_action(
             )
         })?;
 
-    let exec_ctx = ironclaw_engine::ThreadExecutionContext {
+    let mut exec_ctx = ironclaw_engine::ThreadExecutionContext {
         thread_id: pending.thread_id,
         thread_type: thread.thread_type,
         project_id: thread.project_id,
@@ -1084,7 +1085,34 @@ async fn execute_pending_gate_action(
             .and_then(|v| v.as_str())
             .and_then(ironclaw_engine::ValidTimezone::parse),
         thread_goal: Some(thread.goal.clone()),
+        available_actions_snapshot: None,
+        available_action_inventory_snapshot: None,
     };
+    let active_leases = state
+        .thread_manager
+        .leases
+        .active_for_thread(thread.id)
+        .await;
+    match state
+        .effect_adapter
+        .available_action_inventory(&active_leases, &exec_ctx)
+        .await
+    {
+        Ok(inventory) => {
+            let inventory = Arc::new(inventory);
+            let available_actions: Arc<[ironclaw_engine::ActionDef]> =
+                inventory.inline.clone().into();
+            exec_ctx.available_actions_snapshot = Some(available_actions);
+            exec_ctx.available_action_inventory_snapshot = Some(inventory);
+        }
+        Err(error) => {
+            debug!(
+                thread_id = %thread.id,
+                action = %pending.action_name,
+                "failed to load action inventory for pending gate resume: {error}"
+            );
+        }
+    }
 
     state.effect_adapter.reset_call_count();
     match state
@@ -1601,126 +1629,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
     capabilities.register(Capability {
         name: "missions".into(),
         description: "Mission and routine lifecycle management".into(),
-        actions: vec![
-            ironclaw_engine::ActionDef {
-                name: "mission_create".into(),
-                description: "Create a new mission (routine). Use only when the user explicitly wants to set up a recurring task, scheduled check, automation, monitor, or persistent manual mission. Do not use for immediate one-shot requests like 'do it now', 'right now', or 'immediately'; complete those in the current thread. Results are delivered to the current channel by default.".into(),
-                parameters_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string", "description": "Short name for the mission/routine"},
-                        "goal": {"type": "string", "description": "What this mission should accomplish each run"},
-                        "cadence": {"type": "string", "description": "Required. How to trigger: 'manual', a cron expression (e.g. '0 9 * * *'), 'event:<channel>:<regex_pattern>' (e.g. 'event:telegram:.*', use 'event:*:<pattern>' for any channel), or 'webhook:<path>'"},
-                        "timezone": {"type": "string", "description": "IANA timezone for cron scheduling (e.g. 'America/New_York'). Defaults to the user's channel timezone."},
-                        "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Channels to deliver results to (e.g. ['gateway', 'repl']). Defaults to current channel."},
-                        "project_id": {"type": "string", "description": "Project ID to scope this mission to. If omitted, uses the current thread's project."},
-                        "cooldown_secs": {"type": "integer", "minimum": 0, "description": "Minimum seconds between triggers (default: 300 for event/webhook, 0 for cron/manual)"},
-                        "max_concurrent": {"type": "integer", "minimum": 0, "description": "Max simultaneous running threads (default: 1 for event/webhook, unlimited for cron/manual)"},
-                        "dedup_window_secs": {"type": "integer", "minimum": 0, "description": "Suppress duplicate event triggers within this window in seconds (default: 0)"},
-                        "max_threads_per_day": {"type": "integer", "minimum": 0, "description": "Daily thread budget (default: 24 for event/webhook, 10 for cron/manual)"},
-                        "success_criteria": {"type": "string", "description": "Criteria for declaring mission complete"}
-                    },
-                    "required": ["name", "goal", "cadence"]
-                }),
-                effects: vec![],
-                requires_approval: false,
-            },
-            ironclaw_engine::ActionDef {
-                name: "mission_list".into(),
-                description: "List all missions and routines in the current project.".into(),
-                parameters_schema: serde_json::json!({"type": "object"}),
-                effects: vec![],
-                requires_approval: false,
-            },
-            ironclaw_engine::ActionDef {
-                name: "mission_get".into(),
-                description: "Get detailed status and results of a specific mission or routine. Returns the mission state, approach history, and recent thread outputs. Use when the user asks about mission results, outcome, or progress.".into(),
-                parameters_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "string", "description": "Mission/routine ID to retrieve"}
-                    },
-                    "required": ["id"]
-                }),
-                effects: vec![],
-                requires_approval: false,
-            },
-            ironclaw_engine::ActionDef {
-                name: "mission_fire".into(),
-                description: "Manually trigger a mission or routine to run immediately.".into(),
-                parameters_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "string", "description": "Mission/routine ID to trigger"}
-                    },
-                    "required": ["id"]
-                }),
-                effects: vec![],
-                requires_approval: false,
-            },
-            ironclaw_engine::ActionDef {
-                name: "mission_pause".into(),
-                description: "Pause a running mission or routine.".into(),
-                parameters_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "string", "description": "Mission/routine ID to pause"}
-                    },
-                    "required": ["id"]
-                }),
-                effects: vec![],
-                requires_approval: false,
-            },
-            ironclaw_engine::ActionDef {
-                name: "mission_resume".into(),
-                description: "Resume a paused mission or routine.".into(),
-                parameters_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "string", "description": "Mission/routine ID to resume"}
-                    },
-                    "required": ["id"]
-                }),
-                effects: vec![],
-                requires_approval: false,
-            },
-            ironclaw_engine::ActionDef {
-                name: "mission_update".into(),
-                description: "Update a mission/routine. Change name, goal, cadence, guardrails, notification channels, daily budget, or success criteria. Only provided fields are changed.".into(),
-                parameters_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "string", "description": "Mission/routine ID to update"},
-                        "name": {"type": "string", "description": "New name"},
-                        "goal": {"type": "string", "description": "New goal"},
-                        "cadence": {"type": "string", "description": "New cadence: 'manual', cron expression (e.g. '0 9 * * *'), 'event:<channel>:<regex_pattern>' (e.g. 'event:telegram:.*', use 'event:*:<pattern>' for any channel), or 'webhook:<path>'"},
-                        "timezone": {"type": "string", "description": "IANA timezone for cron scheduling (e.g. 'America/New_York'). Defaults to the user's channel timezone."},
-                        "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Channels to deliver results to (e.g. ['gateway', 'repl'])"},
-                        "max_threads_per_day": {"type": "integer", "minimum": 0, "description": "Max threads per day (0 = unlimited)"},
-                        "cooldown_secs": {"type": "integer", "minimum": 0, "description": "Minimum seconds between triggers"},
-                        "max_concurrent": {"type": "integer", "minimum": 0, "description": "Max simultaneous running threads"},
-                        "dedup_window_secs": {"type": "integer", "minimum": 0, "description": "Suppress duplicate event triggers within this window in seconds"},
-                        "success_criteria": {"type": "string", "description": "Criteria for declaring mission complete"}
-                    },
-                    "required": ["id"]
-                }),
-                effects: vec![],
-                requires_approval: false,
-            },
-            ironclaw_engine::ActionDef {
-                name: "mission_complete".into(),
-                description: "Mark a mission or routine as completed (sets status to completed).".into(),
-                parameters_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "string", "description": "Mission/routine ID to mark completed"}
-                    },
-                    "required": ["id"]
-                }),
-                effects: vec![],
-                requires_approval: false,
-            },
-        ],
+        actions: mission_capability_actions(),
         knowledge: vec![],
         policies: vec![],
     });
@@ -6307,7 +6216,7 @@ mod tests {
     use crate::hooks::HookRegistry;
     use crate::testing::{StubChannel, StubLlm};
     use crate::tools::ToolRegistry;
-    use futures::{StreamExt, stream};
+    use futures::{FutureExt, StreamExt, stream};
     use ironclaw_safety::SafetyLayer;
     use rust_decimal::Decimal;
 
@@ -8713,6 +8622,142 @@ mod tests {
         outcome.expect("router auth resume_output call-id repair test");
     }
 
+    #[tokio::test]
+    async fn execute_pending_gate_action_populates_snapshots_for_tool_info_resume() {
+        struct SnapshotInspectingLlm {
+            expected_call_id: String,
+        }
+
+        #[async_trait::async_trait]
+        impl ironclaw_engine::LlmBackend for SnapshotInspectingLlm {
+            async fn complete(
+                &self,
+                messages: &[ironclaw_engine::ThreadMessage],
+                _: &[ironclaw_engine::ActionDef],
+                _: &ironclaw_engine::LlmCallConfig,
+            ) -> Result<ironclaw_engine::LlmOutput, ironclaw_engine::EngineError> {
+                let matched = messages.iter().any(|message| {
+                    message.role == ironclaw_engine::MessageRole::ActionResult
+                        && message.action_name.as_deref() == Some("tool_info")
+                        && message.action_call_id.as_deref() == Some(self.expected_call_id.as_str())
+                        && message.content.contains("mission_create")
+                });
+
+                Ok(ironclaw_engine::LlmOutput {
+                    response: ironclaw_engine::LlmResponse::Text(if matched {
+                        "snapshot-used".into()
+                    } else {
+                        "snapshot-missing".into()
+                    }),
+                    usage: ironclaw_engine::TokenUsage::default(),
+                })
+            }
+
+            fn model_name(&self) -> &str {
+                "inspect-snapshot"
+            }
+        }
+
+        let store = Arc::new(TestStore::new());
+        let llm: Arc<dyn ironclaw_engine::LlmBackend> = Arc::new(SnapshotInspectingLlm {
+            expected_call_id: "call-tool-info".to_string(),
+        });
+
+        let mut thread = ironclaw_engine::Thread::new(
+            "goal",
+            ironclaw_engine::ThreadType::Foreground,
+            ironclaw_engine::ProjectId::new(),
+            "alice",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread.add_message(ironclaw_engine::ThreadMessage::assistant_with_actions(
+            Some("inspect tool_info".to_string()),
+            vec![ironclaw_engine::ActionCall {
+                id: "call-tool-info".to_string(),
+                action_name: "tool_info".to_string(),
+                parameters: serde_json::json!({
+                    "name": "mission_create",
+                    "detail": "summary"
+                }),
+            }],
+        ));
+        thread.state = ironclaw_engine::ThreadState::Waiting;
+        store
+            .save_thread(&thread)
+            .await
+            .expect("save waiting thread");
+
+        let mut conversation = ironclaw_engine::ConversationSurface::new("web", "alice");
+        conversation.track_thread(thread.id);
+        let conversation_id = conversation.id;
+        store
+            .save_conversation(&conversation)
+            .await
+            .expect("save conversation");
+
+        let state = make_expected_test_state_with_llm(store.clone(), llm);
+        state
+            .conversation_manager
+            .bootstrap_user("alice")
+            .await
+            .expect("bootstrap conversations");
+        state.effect_adapter.tools().register_tool_info();
+        let mut capabilities = CapabilityRegistry::new();
+        capabilities.register(Capability {
+            name: "missions".into(),
+            description: "Mission and routine lifecycle management".into(),
+            actions: mission_capability_actions(),
+            knowledge: vec![],
+            policies: vec![],
+        });
+        state
+            .effect_adapter
+            .set_capability_registry(Arc::new(capabilities))
+            .await;
+        state
+            .thread_manager
+            .leases
+            .grant(
+                thread.id,
+                "tools",
+                ironclaw_engine::GrantedActions::All,
+                None,
+                None,
+            )
+            .await
+            .expect("grant lease");
+
+        let pending = PendingGate {
+            conversation_id,
+            action_name: "tool_info".into(),
+            parameters: serde_json::json!({
+                "name": "mission_create",
+                "detail": "summary"
+            }),
+            call_id: String::new(),
+            ..sample_pending_gate(
+                "alice",
+                thread.id,
+                ironclaw_engine::ResumeKind::Approval {
+                    allow_always: false,
+                },
+            )
+        };
+
+        let (agent, _statuses) = make_router_test_agent(None).await;
+        let message =
+            IncomingMessage::new("web", "alice", "approve").with_thread(thread.id.to_string());
+
+        let result = execute_pending_gate_action(&agent, &state, &message, &pending, true, None)
+            .await
+            .expect("execute pending gate action");
+
+        assert!(
+            matches!(result, BridgeOutcome::Respond(ref text) if text == "snapshot-used"),
+            "unexpected result: {result:?}"
+        );
+    }
+
     /// Hosted instance path: no `AuthManager`, but the `ExtensionManager`
     /// can still configure the token on a WASM channel. After
     /// `resolve_gate` on `CredentialProvided`, the auth gate should be
@@ -9261,6 +9306,203 @@ mod tests {
         let result = find_most_recent_thread(&state, &Some(conv), "alice").await;
         assert!(result.is_some(), "should find thread via entry fallback");
         assert_eq!(result.unwrap().id, tid);
+    }
+
+    struct CompletedTextLlm {
+        text: String,
+    }
+
+    #[async_trait::async_trait]
+    impl ironclaw_engine::LlmBackend for CompletedTextLlm {
+        async fn complete(
+            &self,
+            _messages: &[ironclaw_engine::ThreadMessage],
+            _actions: &[ironclaw_engine::ActionDef],
+            _config: &ironclaw_engine::LlmCallConfig,
+        ) -> Result<ironclaw_engine::LlmOutput, ironclaw_engine::EngineError> {
+            Ok(ironclaw_engine::LlmOutput {
+                response: ironclaw_engine::LlmResponse::Text(self.text.clone()),
+                usage: ironclaw_engine::TokenUsage::default(),
+            })
+        }
+
+        fn model_name(&self) -> &str {
+            "completed-text-llm"
+        }
+    }
+
+    async fn with_installed_engine_state<T, F>(state: EngineState, future: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        let lock = ENGINE_STATE.get_or_init(|| TokioRwLock::new(None));
+        *lock.write().await = Some(state);
+
+        let outcome = std::panic::AssertUnwindSafe(future).catch_unwind().await;
+
+        *lock.write().await = None;
+        match outcome {
+            Ok(value) => value,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    /// Caller-level regression: the text-based auth fallback inside
+    /// `handle_with_engine_inner()` must convert a completed thread
+    /// response containing `authentication_required` into a pending auth
+    /// gate **only when** the parsed credential name survives both the
+    /// helper parse and the credential-registry trust check.
+    #[tokio::test]
+    async fn handle_with_engine_text_auth_fallback_emits_pending_gate_for_registered_credential() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+
+        let store = Arc::new(TestStore::new());
+        let llm: Arc<dyn ironclaw_engine::LlmBackend> = Arc::new(CompletedTextLlm {
+            text: r#"{"error":"authentication_required","credential_name":"github_pat"}"#
+                .to_string(),
+        });
+        let state = make_expected_test_state_with_llm(store, llm);
+        let pending_gates = Arc::clone(&state.pending_gates);
+
+        let outcome = with_installed_engine_state(state, async move {
+            let (mut agent, statuses) = make_test_agent_with_status_channel("web").await;
+
+            let credential_registry = Arc::new(crate::tools::wasm::SharedCredentialRegistry::new());
+            credential_registry.add_mappings([crate::secrets::CredentialMapping::bearer(
+                "github_pat",
+                "api.github.com",
+            )]);
+            let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+                Arc::new(crate::testing::credentials::test_secrets_store());
+            agent.deps.tools = Arc::new(
+                crate::tools::ToolRegistry::new().with_credentials(credential_registry, secrets),
+            );
+
+            let message = IncomingMessage::new("web", "alice", "call the github api");
+            let result = handle_with_engine_inner(&agent, &message, &message.content, 0)
+                .await
+                .expect("handle_with_engine_inner");
+
+            assert!(matches!(result, BridgeOutcome::Pending));
+
+            let statuses = statuses.lock().expect("poisoned").clone();
+            assert!(
+                statuses.iter().any(|status| matches!(
+                    status,
+                    StatusUpdate::AuthRequired {
+                        extension_name,
+                        request_id: Some(_),
+                        ..
+                    } if extension_name.as_str() == "github_pat"
+                )),
+                "expected AuthRequired with request_id, got: {statuses:?}"
+            );
+
+            let pending = pending_gates.list_for_user("alice").await;
+            assert_eq!(pending.len(), 1, "expected one pending auth gate");
+            assert_eq!(pending[0].action_name, "authentication_fallback");
+            assert_eq!(pending[0].parameters["credential_name"], "github_pat");
+
+            Ok::<(), crate::error::Error>(())
+        })
+        .await;
+
+        outcome.expect("registered auth fallback should create pending gate");
+    }
+
+    /// Negative caller-level branch: if the parsed credential name is not
+    /// registered, `handle_with_engine_inner()` must NOT surface an auth
+    /// card. It must hand the original response text back to the caller.
+    #[tokio::test]
+    async fn handle_with_engine_text_auth_fallback_passthrough_for_unregistered_credential() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+
+        let store = Arc::new(TestStore::new());
+        let raw = r#"{"error":"authentication_required","credential_name":"github_pat"}"#;
+        let llm: Arc<dyn ironclaw_engine::LlmBackend> = Arc::new(CompletedTextLlm {
+            text: raw.to_string(),
+        });
+        let state = make_expected_test_state_with_llm(store, llm);
+        let pending_gates = Arc::clone(&state.pending_gates);
+
+        let outcome = with_installed_engine_state(state, async move {
+            let (agent, statuses) = make_test_agent_with_status_channel("web").await;
+            let message = IncomingMessage::new("web", "alice", "call the github api");
+            let result = handle_with_engine_inner(&agent, &message, &message.content, 0)
+                .await
+                .expect("handle_with_engine_inner");
+
+            let BridgeOutcome::Respond(text) = result else {
+                panic!("expected Respond passthrough, got {result:?}");
+            };
+            assert_eq!(text, raw);
+            let seen_auth_required = statuses
+                .lock()
+                .expect("poisoned")
+                .iter()
+                .any(|status| matches!(status, StatusUpdate::AuthRequired { .. }));
+            assert!(
+                !seen_auth_required,
+                "no AuthRequired should be emitted when credential is unregistered"
+            );
+            assert!(
+                pending_gates.list_for_user("alice").await.is_empty(),
+                "no pending gate should be inserted for unregistered credentials"
+            );
+
+            Ok::<(), crate::error::Error>(())
+        })
+        .await;
+
+        outcome.expect("unregistered auth fallback should pass through raw text");
+    }
+
+    /// Security-focused negative branch: invalid credential names must be
+    /// rejected by the helper parse and therefore never become a real auth
+    /// gate, even when the surrounding response otherwise matches the
+    /// `authentication_required` shape.
+    #[tokio::test]
+    async fn handle_with_engine_text_auth_fallback_rejects_invalid_credential_name() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+
+        let store = Arc::new(TestStore::new());
+        let raw = r#"{"error":"authentication_required","credential_name":"github-pat"}"#;
+        let llm: Arc<dyn ironclaw_engine::LlmBackend> = Arc::new(CompletedTextLlm {
+            text: raw.to_string(),
+        });
+        let state = make_expected_test_state_with_llm(store, llm);
+        let pending_gates = Arc::clone(&state.pending_gates);
+
+        let outcome = with_installed_engine_state(state, async move {
+            let (agent, statuses) = make_test_agent_with_status_channel("web").await;
+            let message = IncomingMessage::new("web", "alice", "call the github api");
+            let result = handle_with_engine_inner(&agent, &message, &message.content, 0)
+                .await
+                .expect("handle_with_engine_inner");
+
+            let BridgeOutcome::Respond(text) = result else {
+                panic!("expected Respond passthrough, got {result:?}");
+            };
+            assert_eq!(text, raw);
+            let seen_auth_required = statuses
+                .lock()
+                .expect("poisoned")
+                .iter()
+                .any(|status| matches!(status, StatusUpdate::AuthRequired { .. }));
+            assert!(
+                !seen_auth_required,
+                "invalid credential names must not emit AuthRequired"
+            );
+            assert!(
+                pending_gates.list_for_user("alice").await.is_empty(),
+                "invalid credential names must not create pending gates"
+            );
+
+            Ok::<(), crate::error::Error>(())
+        })
+        .await;
+
+        outcome.expect("invalid credential names should be rejected by caller path");
     }
 
     #[test]

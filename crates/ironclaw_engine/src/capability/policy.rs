@@ -204,7 +204,7 @@ fn merge_decision(current: PolicyDecision, effect: PolicyEffect, source: &str) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::capability::{GrantedActions, LeaseId};
+    use crate::types::capability::{GrantedActions, LeaseId, ModelToolSurface};
     use crate::types::thread::ThreadId;
     use chrono::Utc;
 
@@ -215,6 +215,8 @@ mod tests {
             parameters_schema: serde_json::json!({}),
             effects,
             requires_approval,
+            model_tool_surface: ModelToolSurface::FullSchema,
+            discovery: None,
         }
     }
 

@@ -27,5 +27,7 @@ pub(crate) fn thread_execution_context(
             .and_then(|v| v.as_str())
             .and_then(ValidTimezone::parse),
         thread_goal: Some(thread.goal.clone()),
+        available_actions_snapshot: None,
+        available_action_inventory_snapshot: None,
     }
 }

@@ -559,7 +559,8 @@ impl EnsureReadyOutcome {
     }
 }
 
-/// Synthetic action advertised for an installed provider that is not yet ready.
+/// Synthetic provider-entry action used when a provider is present in discovery
+/// but not currently on the installed-ready callable surface.
 #[derive(Debug, Clone)]
 pub struct LatentProviderAction {
     pub action_name: String,

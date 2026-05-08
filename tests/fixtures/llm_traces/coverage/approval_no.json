@@ -1,0 +1,30 @@
+{
+  "model_name": "coverage-approval-no",
+  "expects": {
+    "tools_not_used": ["needs_approval_probe"],
+    "min_responses": 1,
+    "response_contains": ["rejected"]
+  },
+  "turns": [
+    {
+      "user_input": "Run the gated probe",
+      "steps": [
+        {
+          "request_hint": { "last_user_message_contains": "gated probe" },
+          "response": {
+            "type": "tool_calls",
+            "tool_calls": [
+              {
+                "id": "call_probe_no",
+                "name": "needs_approval_probe",
+                "arguments": { "value": "go" }
+              }
+            ],
+            "input_tokens": 60,
+            "output_tokens": 20
+          }
+        }
+      ]
+    }
+  ]
+}

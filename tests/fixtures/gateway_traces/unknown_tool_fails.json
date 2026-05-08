@@ -1,0 +1,13 @@
+{
+  "name": "unknown_tool_fails",
+  "operations": [
+    {
+      "tool_name": "this_tool_does_not_exist",
+      "params": {},
+      "expected": {
+        "kind": "failure",
+        "error_contains": "tool not registered"
+      }
+    }
+  ]
+}

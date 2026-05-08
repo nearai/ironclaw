@@ -92,7 +92,7 @@ ID, migrate to it immediately. Advanced users can override headers via
 
 **Tool message flattening:** NEAR AI's API doesn't support `role: "tool"` messages in the standard format. `nearai_chat.rs` defaults `flatten_tool_messages = true`, converting tool results to user messages with `[Tool result from <name>]: <content>` format. Use `NearAiChatProvider::new_with_flatten(..., false)` to disable for compliant endpoints.
 
-**Tool schema normalization:** `nearai_chat.rs` applies the same `normalize_schema_strict()` boundary normalization as `RigAdapter::convert_tools` and `openai_codex_provider.rs` before sending tool definitions. Top-level `oneOf`/`anyOf`/`allOf`/`enum`/`not` schemas are flattened into a permissive object envelope so providers that reject those shapes do not fail with HTTP 400.
+**Tool schema normalization:** `nearai_chat.rs` uses the provider-safe `FlattenOnly` policy from `tool_schema.rs`: it still flattens top-level `oneOf`/`anyOf`/`allOf`/`enum`/`not` schemas that OpenAI-compatible tool APIs reject, but it does not rewrite optional object fields into required-nullable strict mode. `RigAdapter::convert_tools` and `openai_codex_provider.rs` continue to use the stricter OpenAI policy.
 
 **Pricing auto-fetch:** On startup, `NearAiChatProvider` fires a background task to fetch per-model pricing from `/v1/model/list`. If the fetch fails, it silently falls back to `costs::model_cost()` / `costs::default_cost()`. Pricing is stored in-memory only.
 
@@ -187,7 +187,7 @@ Uses the Responses API at `chatgpt.com/backend-api/codex/responses` with ChatGPT
 **Key differences from other providers:**
 - Uses Responses API (not Chat Completions) — SSE streaming with different event types
 - System messages are sent as `instructions` field, not in `input` array
-- Tool schemas are normalized via `normalize_schema_strict()` (shared with `RigAdapter::convert_tools`) which both strict-normalizes nested objects AND flattens any top-level `oneOf`/`anyOf`/`allOf`/`enum`/`not` into a permissive object envelope; some MCP servers (e.g. GitHub Copilot's) advertise top-level dispatcher unions that the OpenAI tool API rejects with HTTP 400
+- Tool schemas are shaped by `tool_schema.rs`: `NearAiChatProvider` uses `FlattenOnly` so top-level combinators still get flattened for OpenAI-compatible chat-completions requests, while `RigAdapter::convert_tools` and `OpenAiCodexProvider` use the strict OpenAI policy that also rewrites optional object fields into required-nullable strict mode
 - `cost_per_token()` returns `(0, 0)` — subscription-based billing
 - `set_model()` returns error — model is fixed at construction time
 - Image attachments are silently dropped with a warning log

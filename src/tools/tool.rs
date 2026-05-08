@@ -479,7 +479,7 @@ pub trait Tool: Send + Sync {
             self.discovery_summary().is_some() || self.discovery_schema() != parameters;
         let description = if has_discovery_hint {
             format!(
-                "{} (call tool_info(name: \"{}\", detail: \"summary\") for rules/examples or detail: \"schema\" for the full discovery schema)",
+                "{} (call tool_info(name=\"{}\", detail=\"summary\") for rules/examples or detail=\"schema\" for the full discovery schema)",
                 self.description(),
                 self.name()
             )
