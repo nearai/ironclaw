@@ -27,6 +27,21 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | `smart_routing.rs` | `SmartRoutingProvider` — 13-dimension complexity scorer routes cheap vs primary model |
 | `recording.rs` | `RecordingLlm` — trace capture for E2E replay testing (`IRONCLAW_RECORD_TRACE`) |
 | `bedrock.rs` | AWS Bedrock provider via native Converse API (feature-gated: `--features bedrock`) |
+| `anthropic_oauth.rs` | Anthropic OAuth provider (Claude.ai subscription / OAuth tokens, fallback when no API key) |
+| `gemini_oauth.rs` | Gemini OAuth provider (Cloud OAuth credentials → `generativelanguage.googleapis.com`) |
+| `github_copilot.rs` | GitHub Copilot Chat provider (uses dedicated reqwest client, not `RigAdapter`) |
+| `github_copilot_auth.rs` | Copilot session-token exchange and refresh (`CopilotTokenManager`) |
+| `oauth_helpers.rs` | Shared OAuth utilities (PKCE, device-code, browser-launch helpers) |
+| `host.rs` | Host-side trait surface: `SessionDb`, `SessionSecrets`, `SessionRenewer`, `SessionKeyPersistor` (binary supplies adapters in `src/llm_host.rs`) |
+| `runtime.rs` | `SwappableLlmProvider` + `LlmReloadHandle` for hot-reloading the provider chain on settings change |
+| `registry.rs` | Provider registry (`ProviderDefinition`, `ProviderProtocol`); resolves backend strings to clients |
+| `tool_schema.rs` | Tool schema normalization policies (`FlattenOnly` for NearAI, strict OpenAI for `RigAdapter` / Codex) |
+| `transcription/{mod,openai,chat_completions}.rs` | Audio transcription pipeline (Whisper / chat-completions back-ends) |
+| `image_models.rs` | Image-generation model metadata table |
+| `vision_models.rs` | Vision-capable model registry for attachment routing |
+| `reasoning_models.rs` | Reasoning-capable model registry (Codex, R1, o-series, etc.) used for thinking-mode dispatch |
+| `models.rs` | Top-level model-name catalog and helpers |
+| `testing/` | `StubLlm`, `StubErrorKind`, `fault_injection` — gated behind the `testing` cargo feature for downstream test harnesses |
 
 ## Provider Selection
 
@@ -165,6 +180,20 @@ To add a new provider:
 2. Add a `ProviderProtocol` variant in `registry.rs` (or wire a backend-string match in `lib.rs` for non-registry providers like `nearai`/`bedrock`/`openai_codex`)
 3. Wire into the factory dispatch in `lib.rs` (`create_registry_provider` for registry-backed protocols, top-level `create_llm_provider` for backend-string-keyed providers)
 4. Add env vars to `src/config/llm.rs` (main crate) and `.env.example`
+5. If the provider needs persistent state (session tokens, refresh tokens, etc.), use the host traits in `host.rs` — never reach for `crate::db`, `crate::secrets`, or `crate::bootstrap`. The crate must stay independent of the binary; the binary supplies adapter impls in `src/llm_host.rs`.
+
+## Host Trait Surface
+
+`host.rs` defines four traits that decouple `ironclaw_llm` from the binary:
+
+| Trait | Purpose | Binary adapter |
+|-------|---------|----------------|
+| `SessionDb` | JSON settings persistence | `DatabaseSessionDb` in `src/llm_host.rs` |
+| `SessionSecrets` | Encrypted secrets store | `SecretsStoreSessionSecrets` in `src/llm_host.rs` |
+| `SessionRenewer` | Interactive NEAR-AI re-auth flow | CLI/wizard impl wired in `src/setup/` |
+| `SessionKeyPersistor` | Runtime env overlay + `.env` upsert | `BootstrapKeyPersistor` in `src/llm_host.rs` |
+
+`NoopSessionRenewer` and `NoopKeyPersistor` are provided for headless / hosted contexts (return errors / no-ops). The binary plugs concrete impls into `SessionManager` at startup.
 
 ## Response Cache
 
