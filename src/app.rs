@@ -995,15 +995,23 @@ impl AppBuilder {
             if let Some(ref ss) = settings_store_override {
                 em = em.with_settings_store(Arc::clone(ss));
             }
-            if let Some(ref db) = self.db {
+            let pairing_store = if let Some(ref db) = self.db {
                 let ps = Arc::new(crate::pairing::PairingStore::new(
                     Arc::clone(db),
                     Arc::clone(&ownership_cache),
                 ));
-                em = em.with_pairing_store(ps);
-            }
+                em = em.with_pairing_store(Arc::clone(&ps));
+                Some(ps)
+            } else {
+                None
+            };
             let manager = Arc::new(em);
             tools.register_extension_tools(Arc::clone(&manager));
+            if let Some(ps) = pairing_store {
+                tools.register_sync(Arc::new(
+                    crate::tools::builtin::PairingApproveTool::new(ps),
+                ));
+            }
 
             // Register permission management tool and upgrade tool_list with
             // builtin registry support. Prefer the workspace-backed adapter
