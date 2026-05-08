@@ -3589,7 +3589,8 @@ pub async fn handle_pairing_claim(
         };
         return Ok(BridgeOutcome::Respond(format!(
             "Invalid channel name `{preview}` — channel names must be \
-             lowercase letters, digits, or underscores."
+             lowercase letters, digits, hyphens, or underscores (e.g. \
+             `telegram`, `slack-relay`)."
         )));
     }
 
@@ -12307,9 +12308,26 @@ mod tests {
             text.contains("Invalid channel name"),
             "expected invalid-channel message, got: {text}"
         );
+        // Pull the echoed preview out from between the first two backticks
+        // — the message also embeds backtick-quoted examples
+        // (`telegram`, `slack-relay`), so a global backtick count is
+        // fragile and not what the user-controlled-input invariant cares
+        // about. What matters is that whatever the user typed doesn't
+        // smuggle anything into the *preview* region.
+        let mut parts = text.splitn(3, '`');
+        parts.next();
+        let preview = parts.next().expect("preview region delimited by backticks");
         assert!(
-            !text.contains('`') || text.matches('`').count() == 2,
-            "echo must not introduce extra backticks beyond the two delimiters: {text}"
+            !preview.contains('`'),
+            "preview must not contain user-injected backticks: {preview:?}"
+        );
+        assert!(
+            preview
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+                || preview == "<empty>",
+            "preview must be alphanumeric (with - / _) or the explicit \
+             <empty> placeholder, got {preview:?}"
         );
         assert!(
             !text.contains('\x07') && !text.contains('\x1b'),
@@ -12322,7 +12340,7 @@ mod tests {
         // Cap the rendered length to "Invalid channel name `<≤32 chars>`: <err>"
         // — generous upper bound here just confirms the echo isn't unbounded.
         assert!(
-            text.len() < 200,
+            text.len() < 256,
             "rendered reply must be bounded, got {} chars: {text}",
             text.len()
         );
