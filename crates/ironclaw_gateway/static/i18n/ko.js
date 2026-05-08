@@ -29,6 +29,9 @@ I18n.register('ko', {
   'restart.progressSubtitle': '프로세스가 재시작될 때까지 기다려 주세요...',
   'restart.checkLogs': '재시작이 완료된 후 자세한 내용은 로그 탭을 확인하세요.',
   'restart.closeTooltip': '닫기',
+  'restart.timedOut': '재시작이 예상보다 오래 걸리고 있습니다. 서버가 아직 복구되지 않았을 수 있습니다 — 연결 표시등이 녹색으로 바뀐 뒤 페이지를 새로 고쳐 주세요.',
+  'restart.refreshPage': '페이지 새로 고침',
+  'restart.dismiss': '닫기',
 
   // 테마
   'theme.tooltipDark': '테마: 다크 (클릭하여 라이트로 변경)',
@@ -322,16 +325,16 @@ I18n.register('ko', {
   'time.daysFromNow': '{n}일 후',
 
   // 도구 승인
-  'approval.title': '도구 승인 필요',
-  'approval.description': '도구가 실행 권한을 요청하고 있습니다.',
+  'approval.title': '도구 호출 승인',
+  'approval.description': '에이전트가 이 도구를 실행하려고 합니다. 계속하려면 승인, 여기서 중단하려면 거부를 선택하세요.',
   'approval.approve': '승인',
   'approval.deny': '거부',
-  'approval.always': '항상',
+  'approval.always': '항상 허용',
   'approval.approved': '승인됨',
   'approval.alwaysApproved': '항상 승인',
   'approval.denied': '거부됨',
-  'approval.showParams': '매개변수 표시',
-  'approval.hideParams': '매개변수 숨기기',
+  'approval.showParams': '전체 매개변수 표시',
+  'approval.hideParams': '전체 매개변수 숨기기',
 
   // 인증 필요
   'authRequired.title': '{name}에 인증 필요',

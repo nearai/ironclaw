@@ -29,7 +29,10 @@ I18n.register('zh-CN', {
   'restart.progressSubtitle': '请等待进程重启...',
   'restart.checkLogs': '重启完成后，请查看日志标签页了解详情。',
   'restart.closeTooltip': '关闭',
-  
+  'restart.timedOut': '重启耗时比预期更长。服务可能尚未恢复——请待连接指示灯变绿后刷新页面。',
+  'restart.refreshPage': '刷新页面',
+  'restart.dismiss': '关闭',
+
   // 主题
   'theme.tooltipDark': '主题：深色（点击切换浅色）',
   'theme.tooltipLight': '主题：浅色（点击切换跟随系统）',
@@ -324,16 +327,16 @@ I18n.register('zh-CN', {
   'time.daysFromNow': '{n}天后',
   
   // 工具审批
-  'approval.title': '工具需要审批',
-  'approval.description': '一个工具请求运行权限。',
+  'approval.title': '批准工具调用',
+  'approval.description': '智能体想要运行此工具。批准以继续，或拒绝以在此停止。',
   'approval.approve': '批准',
   'approval.deny': '拒绝',
   'approval.always': '始终允许',
   'approval.approved': '已批准',
   'approval.alwaysApproved': '始终批准',
   'approval.denied': '已拒绝',
-  'approval.showParams': '显示参数',
-  'approval.hideParams': '隐藏参数',
+  'approval.showParams': '显示完整参数',
+  'approval.hideParams': '隐藏完整参数',
   
   // 认证
   'authRequired.title': '{name} 需要认证',

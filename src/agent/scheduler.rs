@@ -14,13 +14,13 @@ use crate::context::{ContextManager, JobContext, JobState};
 use crate::error::{Error, JobError};
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
-use crate::llm::LlmProvider;
 use crate::tenant::SystemScope;
 use crate::tools::{
     ApprovalContext, ToolRegistry, autonomous_allowed_tool_names, autonomous_unavailable_error,
     prepare_tool_params,
 };
 use crate::worker::job::{Worker, WorkerDeps};
+use ironclaw_llm::LlmProvider;
 use ironclaw_safety::SafetyLayer;
 
 /// Message to send to a worker.
@@ -69,7 +69,7 @@ pub struct Scheduler {
     /// SSE manager for live job event streaming.
     sse_tx: Option<Arc<crate::channels::web::sse::SseManager>>,
     /// HTTP interceptor for trace recording/replay (propagated to workers).
-    http_interceptor: Option<Arc<dyn crate::llm::recording::HttpInterceptor>>,
+    http_interceptor: Option<Arc<dyn ironclaw_llm::recording::HttpInterceptor>>,
     /// Running jobs (main LLM-driven jobs).
     jobs: Arc<RwLock<HashMap<Uuid, ScheduledJob>>>,
     /// Running sub-tasks (tool executions, background tasks).
@@ -109,7 +109,7 @@ impl Scheduler {
     /// Set the HTTP interceptor for trace recording/replay.
     pub fn set_http_interceptor(
         &mut self,
-        interceptor: Arc<dyn crate::llm::recording::HttpInterceptor>,
+        interceptor: Arc<dyn ironclaw_llm::recording::HttpInterceptor>,
     ) {
         self.http_interceptor = Some(interceptor);
     }
@@ -744,11 +744,11 @@ impl Scheduler {
 mod tests {
     use super::*;
     use crate::config::SafetyConfig;
-    use crate::llm::{
+    use crate::tools::{ApprovalRequirement, Tool, ToolError, ToolOutput};
+    use ironclaw_llm::{
         CompletionRequest, CompletionResponse, LlmError, LlmProvider, ToolCompletionRequest,
         ToolCompletionResponse,
     };
-    use crate::tools::{ApprovalRequirement, Tool, ToolError, ToolOutput};
     use ironclaw_safety::SafetyLayer;
     use rust_decimal_macros::dec;
 

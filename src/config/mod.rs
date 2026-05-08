@@ -75,11 +75,14 @@ pub use self::transcription::TranscriptionConfig;
 pub use self::tunnel::TunnelConfig;
 pub use self::wasm::WasmConfig;
 pub use self::workspace::WorkspaceConfig;
-pub use crate::llm::config::{
+// LLM config / session types live in `ironclaw_llm`. Re-exported here so
+// existing `crate::config::*Config` callers (notably `LlmConfig::resolve`
+// in `src/config/llm.rs`, plus the wizard / doctor) keep compiling without
+// being touched in this PR.
+pub use ironclaw_llm::{
     BedrockConfig, CacheRetention, GeminiOauthConfig, LlmConfig, NearAiConfig, OAUTH_PLACEHOLDER,
-    OpenAiCodexConfig, RegistryProviderConfig,
+    OpenAiCodexConfig, RegistryProviderConfig, SessionConfig,
 };
-pub use crate::llm::session::SessionConfig;
 
 // Thread-safe env var override helpers (replaces unsafe `std::env::set_var`
 // for mid-process env mutations in multi-threaded contexts).
@@ -187,7 +190,7 @@ impl Config {
                 libsql_url: None,
                 libsql_auth_token: None,
             },
-            llm: LlmConfig::for_testing(),
+            llm: crate::config::llm::for_testing(),
             embeddings: EmbeddingsConfig::default(),
             tunnel: TunnelConfig::default(),
             channels: ChannelsConfig {
@@ -494,10 +497,10 @@ impl Config {
         // saved "openrouter", runtime would switch to NearAI, the UI would
         // show NearAI, and the user would wonder where their selection went.
         if strict_db_reads {
-            return LlmConfig::resolve(&settings);
+            return crate::config::llm::resolve(&settings);
         }
 
-        LlmConfig::resolve_with_fallback(&settings)
+        crate::config::llm::resolve_with_fallback(&settings)
     }
 
     /// Resolve only the LLM configuration from the current source stack.
@@ -550,7 +553,7 @@ impl Config {
         Ok(Self {
             owner_id: owner_id.clone(),
             database: DatabaseConfig::resolve()?,
-            llm: LlmConfig::resolve(settings)?,
+            llm: crate::config::llm::resolve(settings)?,
             embeddings: EmbeddingsConfig::resolve(settings)?,
             tunnel,
             channels,
@@ -620,7 +623,7 @@ pub(crate) fn resolve_owner_id(settings: &Settings) -> Result<String, ConfigErro
 /// Load API keys from the encrypted secrets store into a thread-safe overlay.
 ///
 /// This bridges the gap between secrets stored during onboarding and the
-/// env-var-first resolution in `LlmConfig::resolve()`. Keys in the overlay
+/// env-var-first resolution in `crate::config::llm::resolve()`. Keys in the overlay
 /// are read by `optional_env()` before falling back to `std::env::var()`,
 /// so explicit env vars always win.
 ///
@@ -640,7 +643,7 @@ pub async fn inject_llm_keys_from_secrets(
 
     // Dynamically discover secret->env mappings from the provider registry.
     // Uses selectable() which deduplicates user overrides correctly.
-    let registry = crate::llm::ProviderRegistry::load();
+    let registry = ironclaw_llm::ProviderRegistry::load();
     let dynamic_mappings: Vec<(String, String)> = registry
         .selectable()
         .iter()
@@ -700,6 +703,7 @@ fn merge_injected_vars(new_entries: HashMap<String, String>) {
     if new_entries.is_empty() {
         return;
     }
+    register_injected_vars_fallback();
     match INJECTED_VARS.lock() {
         Ok(mut map) => map.extend(new_entries),
         Err(poisoned) => poisoned.into_inner().extend(new_entries),
@@ -711,6 +715,7 @@ fn merge_injected_vars(new_entries: HashMap<String, String>) {
 /// Used by the setup wizard to make credentials available to `optional_env()`
 /// without calling `unsafe { std::env::set_var }`.
 pub fn inject_single_var(key: &str, value: &str) {
+    register_injected_vars_fallback();
     match INJECTED_VARS.lock() {
         Ok(mut map) => {
             map.insert(key.to_string(), value.to_string());
@@ -721,6 +726,23 @@ pub fn inject_single_var(key: &str, value: &str) {
                 .insert(key.to_string(), value.to_string());
         }
     }
+}
+
+/// Register a one-time secondary env-lookup fallback with `ironclaw_common`
+/// so the workspace-wide `env_or_override` (used from `ironclaw_llm`) can
+/// see values populated via `inject_single_var` / the secrets injection
+/// pipeline. Idempotent thanks to the underlying `OnceLock`.
+fn register_injected_vars_fallback() {
+    static REGISTERED: std::sync::Once = std::sync::Once::new();
+    REGISTERED.call_once(|| {
+        ironclaw_common::env_helpers::register_secondary_fallback(|key| {
+            INJECTED_VARS
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get(key)
+                .cloned()
+        });
+    });
 }
 
 /// Remove a single key from the injected-vars overlay.
@@ -755,7 +777,7 @@ fn inject_os_credential_store_tokens(injected: &mut HashMap<String, String>) {
 
 /// Hydrate LLM API keys from the secrets store into the settings struct.
 ///
-/// Called after loading settings from DB but before `LlmConfig::resolve()`.
+/// Called after loading settings from DB but before `crate::config::llm::resolve()`.
 /// Populates `api_key` fields that were stripped from settings during the
 /// write path and stored encrypted in the secrets store instead.
 pub async fn hydrate_llm_keys_from_secrets(

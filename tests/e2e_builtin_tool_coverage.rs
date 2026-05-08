@@ -105,7 +105,7 @@ mod tests {
         }
     }
 
-    fn requests_contain(requests: &[Vec<ironclaw::llm::ChatMessage>], needle: &str) -> bool {
+    fn requests_contain(requests: &[Vec<ironclaw_llm::ChatMessage>], needle: &str) -> bool {
         requests
             .iter()
             .flatten()

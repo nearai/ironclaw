@@ -25,9 +25,9 @@ use crate::secrets::{CreateSecretParams, SecretsStore};
 
 // ── Shared callback server ──────────────────────────────────────────────
 
-// Core OAuth callback infrastructure is defined in `crate::llm::oauth_helpers`
+// Core OAuth callback infrastructure is defined in `ironclaw_llm::oauth_helpers`
 // and re-exported here for backward compatibility.
-pub use crate::llm::oauth_helpers::{
+pub use ironclaw_llm::oauth_helpers::{
     OAUTH_CALLBACK_PORT, OAuthCallbackError, bind_callback_listener, callback_host, callback_url,
     is_loopback_host, landing_html, wait_for_callback,
 };

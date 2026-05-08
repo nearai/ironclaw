@@ -187,6 +187,74 @@ pub(crate) async fn chat_approval_handler(
         )
     })?;
 
+    // Inline fast-path: when an Approval gate parks the live engine VM
+    // via `BridgeGateController::pause`, the per-user agent loop is
+    // blocked at `handle_message` awaiting the bridge call, so an
+    // ExecApproval submission posted to msg_tx would queue indefinitely
+    // behind the parked execution. Bypass the mpsc and call into the
+    // gate controller's in-memory delivery channel directly. On
+    // `NoLiveVm` we fall through to the legacy mpsc path so engine v1
+    // approvals (and any post-restart Approval gates without a parked
+    // future) still resolve correctly.
+    //
+    // The fast path looks the gate up by `request_id` rather than by
+    // the wire `thread_id`: web's `req.thread_id` is the channel-visible
+    // identifier (the per-conversation UUID returned by
+    // `/api/chat/thread/new`) and is recorded on the pending gate as
+    // `scope_thread_id`, not as the internal engine `ThreadId` that
+    // keys `PendingGateStore`. Mixing them up would miss every gate
+    // whose channel scope differs from its engine thread.
+    let resolution = if approved {
+        ironclaw_engine::GateResolution::Approved { always }
+    } else {
+        ironclaw_engine::GateResolution::Denied { reason: None }
+    };
+    // Match the legacy mpsc path's settings precedence (cache → raw DB)
+    // so an `action="always"` approval still persists
+    // `tool_permissions.<tool>=always_allow` whenever any DB-backed
+    // SettingsStore is configured. Falling back to the raw `state.store`
+    // covers gateways that wire a database without the cache layer.
+    let settings_store =
+        crate::channels::web::features::settings::resolve_settings_store(&state).ok();
+    match crate::bridge::try_resolve_inline_approval_gate(
+        &user.user_id,
+        "gateway",
+        request_id,
+        resolution,
+        settings_store,
+    )
+    .await
+    {
+        Ok(crate::bridge::InlineGateOutcome::Delivered) => {
+            return Ok((
+                StatusCode::ACCEPTED,
+                Json(SendMessageResponse {
+                    message_id: Uuid::new_v4(),
+                    status: "accepted",
+                }),
+            ));
+        }
+        Ok(crate::bridge::InlineGateOutcome::NoLiveVm) => {
+            // Fall through to the legacy mpsc dispatch below.
+        }
+        Err(e) => {
+            // Map typed verification failures to specific 4xx /
+            // 5xx codes. Matching on the variant — not a substring
+            // of the rendered message — keeps the HTTP contract
+            // tied to the typed surface so a future change to the
+            // error message can't silently flip a 403 → 500.
+            use crate::bridge::InlineGateError;
+            let status = match &e {
+                InlineGateError::ChannelMismatch { .. } | InlineGateError::Unauthorized => {
+                    StatusCode::FORBIDDEN
+                }
+                InlineGateError::Stale | InlineGateError::Expired => StatusCode::CONFLICT,
+                InlineGateError::Other(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            return Err((status, e.to_string()));
+        }
+    }
+
     // Build a structured ExecApproval submission as JSON, sent through the
     // existing message pipeline so the agent loop picks it up.
     let approval = crate::agent::submission::Submission::ExecApproval {

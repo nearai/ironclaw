@@ -322,12 +322,12 @@ pub async fn load_cached_admin_tool_policy<'a>(
 /// When the policy failed to load or parse, returns an empty tool list
 /// (fail-closed) to preserve admin restrictions.
 pub fn filter_admin_disabled_tools(
-    tool_defs: Vec<crate::llm::ToolDefinition>,
+    tool_defs: Vec<ironclaw_llm::ToolDefinition>,
     multi_tenant: bool,
     is_admin: bool,
     user_id: &str,
     policy_state: &AdminToolPolicyState,
-) -> Vec<crate::llm::ToolDefinition> {
+) -> Vec<ironclaw_llm::ToolDefinition> {
     if !multi_tenant || is_admin {
         return tool_defs;
     }

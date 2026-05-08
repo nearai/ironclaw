@@ -29,6 +29,9 @@ I18n.register('en', {
   'restart.progressSubtitle': 'Please wait for the process to restart...',
   'restart.checkLogs': 'Check the Logs tab for details after restart completes.',
   'restart.closeTooltip': 'Close',
+  'restart.timedOut': 'Restart is taking longer than expected. The server may not have come back online yet — refresh the page once the connection indicator turns green.',
+  'restart.refreshPage': 'Refresh page',
+  'restart.dismiss': 'Dismiss',
   
   // Theme
   'theme.tooltipDark': 'Theme: Dark (click for Light)',
@@ -324,16 +327,16 @@ I18n.register('en', {
   'time.daysFromNow': 'in {n}d',
   
   // Tool Approval
-  'approval.title': 'Tool requires approval',
-  'approval.description': 'A tool is requesting permission to run.',
+  'approval.title': 'Approve tool call',
+  'approval.description': 'The agent wants to run this tool. Approve to continue, or deny to stop here.',
   'approval.approve': 'Approve',
   'approval.deny': 'Deny',
-  'approval.always': 'Always',
+  'approval.always': 'Always allow',
   'approval.approved': 'Approved',
   'approval.alwaysApproved': 'Always approved',
   'approval.denied': 'Denied',
-  'approval.showParams': 'Show parameters',
-  'approval.hideParams': 'Hide parameters',
+  'approval.showParams': 'Show full parameters',
+  'approval.hideParams': 'Hide full parameters',
   
   // Authentication Required
   'authRequired.title': 'Authentication required for {name}',

@@ -97,7 +97,7 @@ is selected.
     /// Each selected skill injects its body into the system prompt,
     /// so presence of the marker string means "the skill was
     /// selected for at least one turn".
-    fn marker_occurrences(requests: &[Vec<ironclaw::llm::ChatMessage>]) -> usize {
+    fn marker_occurrences(requests: &[Vec<ironclaw_llm::ChatMessage>]) -> usize {
         let mut count = 0;
         for request in requests {
             for msg in request {
