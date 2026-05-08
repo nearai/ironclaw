@@ -31,9 +31,6 @@ use crate::config::RoutineConfig;
 use crate::context::{JobContext, JobState};
 use crate::error::RoutineError;
 use crate::extensions::ExtensionManager;
-use crate::llm::{
-    ChatMessage, CompletionRequest, FinishReason, LlmProvider, ToolCall, ToolCompletionRequest,
-};
 use crate::ownership::Owned;
 use crate::tenant::SystemScope;
 use crate::tools::{
@@ -41,6 +38,9 @@ use crate::tools::{
     prepare_tool_params,
 };
 use crate::workspace::Workspace;
+use ironclaw_llm::{
+    ChatMessage, CompletionRequest, FinishReason, LlmProvider, ToolCall, ToolCompletionRequest,
+};
 use ironclaw_safety::SafetyLayer;
 
 enum EventMatcher {
@@ -130,7 +130,7 @@ pub struct RoutineEngine {
     /// `EngineContext` and on into the `JobContext` that drives
     /// Lightweight tool dispatches, so routine-fired tools see the
     /// same interceptor the chat path does.
-    http_interceptor: Option<Arc<dyn crate::llm::recording::HttpInterceptor>>,
+    http_interceptor: Option<Arc<dyn ironclaw_llm::recording::HttpInterceptor>>,
     /// Timestamp when this engine instance was created. Used by
     /// `sync_dispatched_runs` to distinguish orphaned runs (from a previous
     /// process) from actively-watched runs (from this process).
@@ -150,7 +150,7 @@ impl RoutineEngine {
         tools: Arc<ToolRegistry>,
         safety: Arc<SafetyLayer>,
         sandbox_readiness: SandboxReadiness,
-        http_interceptor: Option<Arc<dyn crate::llm::recording::HttpInterceptor>>,
+        http_interceptor: Option<Arc<dyn ironclaw_llm::recording::HttpInterceptor>>,
     ) -> Self {
         Self {
             config,
@@ -1126,7 +1126,7 @@ struct EngineContext {
     /// tools called from a Lightweight routine action reach the real
     /// network even when the rest of the system is configured to
     /// route through mocks.
-    http_interceptor: Option<Arc<dyn crate::llm::recording::HttpInterceptor>>,
+    http_interceptor: Option<Arc<dyn ironclaw_llm::recording::HttpInterceptor>>,
 }
 
 /// Execute a routine run. Handles both lightweight and full_job modes.
@@ -1704,7 +1704,7 @@ async fn execute_lightweight_no_tools(
         .with_temperature(0.3);
 
     let response = ctx.llm.complete(request).await.map_err(|e| {
-        let retryable = crate::llm::retry::is_retryable(&e);
+        let retryable = ironclaw_llm::retry::is_retryable(&e);
         RoutineError::LlmFailed {
             reason: e.to_string(),
             // No partial tokens: the LLM call itself failed, so the response
@@ -1882,7 +1882,7 @@ async fn execute_lightweight_with_tools(
                 .with_temperature(0.3);
 
             let response = ctx.llm.complete(request).await.map_err(|e| {
-                let retryable = crate::llm::retry::is_retryable(&e);
+                let retryable = ironclaw_llm::retry::is_retryable(&e);
                 RoutineError::LlmFailed {
                     reason: e.to_string(),
                     partial_tokens: tokens_to_option(total_input_tokens, total_output_tokens),
@@ -1915,7 +1915,7 @@ async fn execute_lightweight_with_tools(
                 .with_temperature(0.3);
 
             let response = ctx.llm.complete_with_tools(request).await.map_err(|e| {
-                let retryable = crate::llm::retry::is_retryable(&e);
+                let retryable = ironclaw_llm::retry::is_retryable(&e);
                 RoutineError::LlmFailed {
                     reason: e.to_string(),
                     partial_tokens: tokens_to_option(total_input_tokens, total_output_tokens),
@@ -1998,7 +1998,7 @@ fn snapshot_messages_for_tool_iteration(messages: &[ChatMessage]) -> Vec<ChatMes
     let mut snapshot = Vec::with_capacity(MAX_TOOL_LOOP_MESSAGES);
 
     if let Some(first) = messages.first()
-        && first.role == crate::llm::Role::System
+        && first.role == ironclaw_llm::Role::System
     {
         snapshot.push(first.clone());
         let tail_len = MAX_TOOL_LOOP_MESSAGES - 1;
@@ -2610,22 +2610,22 @@ mod tests {
     fn test_empty_response_handling() {
         // Simulate the empty content guard logic
         let empty_content = "";
-        let finish_reason_length = crate::llm::FinishReason::Length;
-        let finish_reason_stop = crate::llm::FinishReason::Stop;
+        let finish_reason_length = ironclaw_llm::FinishReason::Length;
+        let finish_reason_stop = ironclaw_llm::FinishReason::Stop;
 
         assert!(
             empty_content.trim().is_empty(),
             "Should detect empty content"
         );
-        assert_eq!(finish_reason_length, crate::llm::FinishReason::Length);
-        assert_eq!(finish_reason_stop, crate::llm::FinishReason::Stop);
+        assert_eq!(finish_reason_length, ironclaw_llm::FinishReason::Length);
+        assert_eq!(finish_reason_stop, ironclaw_llm::FinishReason::Stop);
     }
 
     #[test]
     fn test_handle_text_response_strips_internal_tool_markers() {
         let result = super::handle_text_response(
             "Here is the report.\n[Called tool `http` with arguments: {\"url\":\"https://example.com\"}]",
-            crate::llm::FinishReason::Stop,
+            ironclaw_llm::FinishReason::Stop,
             10,
             5,
         )
@@ -2640,7 +2640,7 @@ mod tests {
     fn test_handle_text_response_replaces_marker_only_text() {
         let result = super::handle_text_response(
             "[Called tool `http` with arguments: {\"url\":\"https://example.com\"}]",
-            crate::llm::FinishReason::Stop,
+            ironclaw_llm::FinishReason::Stop,
             4,
             3,
         )
@@ -2663,14 +2663,14 @@ mod tests {
 
     #[test]
     fn test_snapshot_messages_keeps_system_and_recent_tail() {
-        let mut messages = vec![crate::llm::ChatMessage::system("sys")];
+        let mut messages = vec![ironclaw_llm::ChatMessage::system("sys")];
         for i in 0..80 {
-            messages.push(crate::llm::ChatMessage::user(format!("u{i}")));
+            messages.push(ironclaw_llm::ChatMessage::user(format!("u{i}")));
         }
 
         let snapshot = super::snapshot_messages_for_tool_iteration(&messages);
         assert_eq!(snapshot.len(), super::MAX_TOOL_LOOP_MESSAGES); // safety: test-only no-panics CI false positive
-        assert_eq!(snapshot[0].role, crate::llm::Role::System); // safety: test-only no-panics CI false positive
+        assert_eq!(snapshot[0].role, ironclaw_llm::Role::System); // safety: test-only no-panics CI false positive
         assert_eq!(snapshot[0].content, "sys"); // safety: test-only no-panics CI false positive
         let last_content = snapshot.last().map(|m| m.content.as_str());
         assert_eq!(last_content, Some("u79")); // safety: test-only no-panics CI false positive
@@ -2679,13 +2679,13 @@ mod tests {
     #[test]
     fn test_snapshot_messages_unchanged_when_within_limit() {
         let messages = vec![
-            crate::llm::ChatMessage::system("sys"),
-            crate::llm::ChatMessage::user("a"),
-            crate::llm::ChatMessage::assistant("b"),
+            ironclaw_llm::ChatMessage::system("sys"),
+            ironclaw_llm::ChatMessage::user("a"),
+            ironclaw_llm::ChatMessage::assistant("b"),
         ];
         let snapshot = super::snapshot_messages_for_tool_iteration(&messages);
         assert_eq!(snapshot.len(), messages.len()); // safety: test-only no-panics CI false positive
-        assert_eq!(snapshot[0].role, crate::llm::Role::System); // safety: test-only no-panics CI false positive
+        assert_eq!(snapshot[0].role, ironclaw_llm::Role::System); // safety: test-only no-panics CI false positive
         assert_eq!(snapshot[1].content, "a"); // safety: test-only no-panics CI false positive
         assert_eq!(snapshot[2].content, "b"); // safety: test-only no-panics CI false positive
     }

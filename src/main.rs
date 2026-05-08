@@ -21,7 +21,6 @@ use ironclaw::{
     },
     config::Config,
     hooks::bootstrap_hooks,
-    llm::create_session_manager,
     orchestrator::{ReaperConfig, SandboxReaper},
     pairing::PairingStore,
     tracing_fmt::{init_cli_tracing, init_worker_tracing},
@@ -270,7 +269,7 @@ async fn async_main() -> anyhow::Result<()> {
                         .await
                         .map_err(|e| anyhow::anyhow!("{}", e))?;
                     config.llm.openai_codex.unwrap_or_else(|| {
-                        use ironclaw::llm::OpenAiCodexConfig;
+                        use ironclaw_llm::OpenAiCodexConfig;
                         let mut cfg = OpenAiCodexConfig::default();
                         if let Ok(v) = std::env::var("OPENAI_CODEX_AUTH_URL") {
                             cfg.auth_endpoint = v;
@@ -287,7 +286,7 @@ async fn async_main() -> anyhow::Result<()> {
                         cfg
                     })
                 };
-                let mgr = ironclaw::llm::OpenAiCodexSessionManager::new(codex_config)
+                let mgr = ironclaw_llm::OpenAiCodexSessionManager::new(codex_config)
                     .map_err(|e| anyhow::anyhow!("{}", e))?;
                 mgr.device_code_login()
                     .await
@@ -378,7 +377,7 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     // Load initial config from env + disk + optional TOML (before DB is available).
-    // Credentials may be missing at this point — that's fine. LlmConfig::resolve()
+    // Credentials may be missing at this point — that's fine. crate::config::llm::resolve()
     // defers gracefully, and AppBuilder::build_all() re-resolves after loading
     // secrets from the encrypted DB.
     let toml_path = cli.config.as_deref();
@@ -396,7 +395,7 @@ async fn async_main() -> anyhow::Result<()> {
     };
 
     // Initialize session manager before channel setup
-    let session = create_session_manager(config.llm.session.clone()).await;
+    let session = ironclaw_llm::create_session_manager(config.llm.session.clone()).await;
 
     // Create log broadcaster before tracing init so the WebLogLayer can capture all events.
     let log_broadcaster = Arc::new(LogBroadcaster::new());
@@ -1191,11 +1190,27 @@ async fn async_main() -> anyhow::Result<()> {
         components.tools.register_plan_tools(Some(Arc::clone(sse)));
     }
 
-    // Snapshot memory for trace recording before the agent starts
+    // Snapshot memory for trace recording before the agent starts.
+    // The recorder lives in `ironclaw_llm` and must not depend on the
+    // host's `Workspace` type, so we materialise entries here.
     if let Some(ref recorder) = components.recording_handle
         && let Some(ref ws) = components.workspace
     {
-        recorder.snapshot_memory(ws).await;
+        let mut entries = Vec::new();
+        if let Ok(paths) = ws.list_all().await {
+            for path in paths {
+                match ws.read(&path).await {
+                    Ok(doc) => entries.push(ironclaw_llm::MemorySnapshotEntry {
+                        path: doc.path,
+                        content: doc.content,
+                    }),
+                    Err(e) => {
+                        tracing::debug!(path = %path, error = %e, "Skipped memory doc in snapshot")
+                    }
+                }
+            }
+        }
+        recorder.snapshot_memory(entries).await;
     }
 
     let http_interceptor = ironclaw::http_intercept::chain(
@@ -1257,11 +1272,10 @@ async fn async_main() -> anyhow::Result<()> {
         cost_guard: components.cost_guard,
         sse_tx: sse_manager,
         http_interceptor,
-        transcription: config.transcription.create_provider().map(|p| {
-            Arc::new(ironclaw::llm::transcription::TranscriptionMiddleware::new(
-                p,
-            ))
-        }),
+        transcription: config
+            .transcription
+            .create_provider()
+            .map(|p| Arc::new(ironclaw_llm::transcription::TranscriptionMiddleware::new(p))),
         document_extraction: Some(Arc::new(
             ironclaw::document_extraction::DocumentExtractionMiddleware::new(),
         )),

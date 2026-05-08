@@ -45,7 +45,7 @@ use crate::tools::ToolRegistry;
 /// [`start`](Self::start) to also bind an Axum server on a random port.
 pub struct TestGatewayBuilder {
     msg_tx: Option<mpsc::Sender<IncomingMessage>>,
-    llm_provider: Option<Arc<dyn crate::llm::LlmProvider>>,
+    llm_provider: Option<Arc<dyn ironclaw_llm::LlmProvider>>,
     user_id: String,
 }
 
@@ -73,7 +73,7 @@ impl TestGatewayBuilder {
     }
 
     /// Set the LLM provider (needed for OpenAI-compatible API tests).
-    pub fn llm_provider(mut self, provider: Arc<dyn crate::llm::LlmProvider>) -> Self {
+    pub fn llm_provider(mut self, provider: Arc<dyn ironclaw_llm::LlmProvider>) -> Self {
         self.llm_provider = Some(provider);
         self
     }

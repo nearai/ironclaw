@@ -22,10 +22,6 @@ use crate::channels::web::types::ToolDecisionDto;
 use crate::context::{ContextManager, JobState};
 use crate::error::Error;
 use crate::hooks::HookRegistry;
-use crate::llm::{
-    ActionPlan, ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult,
-    ResponseMetadata, ToolCall, ToolSelection,
-};
 use crate::tenant::SystemScope;
 use crate::tools::execute::process_tool_result;
 use crate::tools::rate_limiter::RateLimitResult;
@@ -35,6 +31,10 @@ use crate::worker::autonomous_recovery::{
     EMPTY_TOOL_COMPLETION_NUDGE, FORCE_TEXT_RECOVERY_PROMPT,
 };
 use ironclaw_common::{AppEvent, JobResultStatus};
+use ironclaw_llm::{
+    ActionPlan, ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult,
+    ResponseMetadata, ToolCall, ToolSelection,
+};
 use ironclaw_safety::SafetyLayer;
 
 /// Shared dependencies for worker execution.
@@ -58,7 +58,7 @@ pub struct WorkerDeps {
     /// are pre-approved for autonomous execution.
     pub approval_context: Option<ApprovalContext>,
     /// HTTP interceptor for trace recording/replay (propagated to JobContext).
-    pub http_interceptor: Option<Arc<dyn crate::llm::recording::HttpInterceptor>>,
+    pub http_interceptor: Option<Arc<dyn ironclaw_llm::recording::HttpInterceptor>>,
     /// Whether the deployment is multi-tenant (used for admin tool policy filtering).
     pub multi_tenant: bool,
 }
@@ -1245,7 +1245,7 @@ impl<'a> JobDelegate<'a> {
         &self,
         retry_after: Option<Duration>,
         context: &str,
-    ) -> Result<crate::llm::RespondOutput, crate::error::Error> {
+    ) -> Result<ironclaw_llm::RespondOutput, crate::error::Error> {
         use std::sync::atomic::Ordering::Relaxed;
 
         let count = self.consecutive_rate_limits.fetch_add(1, Relaxed) + 1;
@@ -1280,10 +1280,10 @@ impl<'a> JobDelegate<'a> {
         );
         tokio::time::sleep(wait).await;
 
-        Ok(crate::llm::RespondOutput {
+        Ok(ironclaw_llm::RespondOutput {
             result: RespondResult::Text(String::new()),
-            usage: crate::llm::TokenUsage::default(),
-            finish_reason: crate::llm::FinishReason::Stop,
+            usage: ironclaw_llm::TokenUsage::default(),
+            finish_reason: ironclaw_llm::FinishReason::Stop,
             metadata: ResponseMetadata::default(),
         })
     }
@@ -1312,7 +1312,7 @@ impl<'a> JobDelegate<'a> {
         &self,
         context: &str,
         error: &crate::error::LlmError,
-    ) -> Option<crate::llm::RespondOutput> {
+    ) -> Option<ironclaw_llm::RespondOutput> {
         if !is_completion_eligible_error(error) {
             return None;
         }
@@ -1328,10 +1328,10 @@ impl<'a> JobDelegate<'a> {
             "{context} empty response after text output — treating as completion"
         );
         self.mark_completed_or_warn(context).await;
-        Some(crate::llm::RespondOutput {
+        Some(ironclaw_llm::RespondOutput {
             result: RespondResult::Text(String::new()),
-            usage: crate::llm::TokenUsage::default(),
-            finish_reason: crate::llm::FinishReason::Stop,
+            usage: ironclaw_llm::TokenUsage::default(),
+            finish_reason: ironclaw_llm::FinishReason::Stop,
             metadata: ResponseMetadata::default(),
         })
     }
@@ -1487,7 +1487,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
         reasoning: &Reasoning,
         reason_ctx: &mut ReasoningContext,
         _iteration: usize,
-    ) -> Result<crate::llm::RespondOutput, crate::error::Error> {
+    ) -> Result<ironclaw_llm::RespondOutput, crate::error::Error> {
         // Try select_tools first, fall back to respond_with_tools
         match reasoning.select_tools(reason_ctx).await {
             Ok(s) if !s.is_empty() => {
@@ -1500,14 +1500,14 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
                     .iter()
                     .find_map(|sel| (!sel.reasoning.is_empty()).then_some(sel.reasoning.clone()));
                 let tool_calls: Vec<ToolCall> = selections_to_tool_calls(&s);
-                return Ok(crate::llm::RespondOutput {
+                return Ok(ironclaw_llm::RespondOutput {
                     result: RespondResult::ToolCalls {
                         tool_calls,
                         content: reasoning_text,
                         reasoning: None,
                     },
-                    usage: crate::llm::TokenUsage::default(),
-                    finish_reason: crate::llm::FinishReason::ToolUse,
+                    usage: ironclaw_llm::TokenUsage::default(),
+                    finish_reason: ironclaw_llm::FinishReason::ToolUse,
                     metadata: ResponseMetadata::default(),
                 });
             }
@@ -1670,7 +1670,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
 
     async fn execute_tool_calls(
         &self,
-        tool_calls: Vec<crate::llm::ToolCall>,
+        tool_calls: Vec<ironclaw_llm::ToolCall>,
         content: Option<String>,
         reason_ctx: &mut ReasoningContext,
         reasoning: Option<String>,
@@ -1842,18 +1842,18 @@ mod tests {
     use std::sync::Arc;
 
     use crate::channels::ChannelManager;
-    use crate::llm::ToolSelection;
+    use ironclaw_llm::ToolSelection;
 
     use super::*;
     use crate::config::SafetyConfig;
     use crate::context::JobContext;
-    use crate::llm::{
-        CompletionRequest, CompletionResponse, LlmProvider, ToolCompletionRequest,
-        ToolCompletionResponse,
-    };
     use crate::testing::{BroadcastCapture, RecordingBroadcastChannel};
     use crate::tools::builtin::MessageTool;
     use crate::tools::{Tool, ToolError as ToolExecError, ToolOutput};
+    use ironclaw_llm::{
+        CompletionRequest, CompletionResponse, LlmProvider, ToolCompletionRequest,
+        ToolCompletionResponse,
+    };
     use ironclaw_safety::SafetyLayer;
 
     /// A test tool that sleeps for a configurable duration before returning.

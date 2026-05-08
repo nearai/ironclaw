@@ -1602,7 +1602,7 @@ mod tests {
         // What actually prevents such a config from being used at runtime:
         //   1. Frontend activation guard (isProviderConfigured in
         //      static/js/surfaces/config.js blocks the "Use" button).
-        //   2. Startup fallback in `LlmConfig::resolve_with_fallback`
+        //   2. Startup fallback in `crate::config::llm::resolve_with_fallback`
         //      (invoked from `Config::re_resolve_llm_with_secrets`) —
         //      demotes unusable custom providers to NearAI rather than
         //      crash-looping the instance (#2514).
@@ -1681,7 +1681,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // env guard must span async hot-reload flow
     async fn settings_set_handler_triggers_llm_provider_hot_reload() {
-        use crate::llm::{LlmConfig, SessionConfig, SessionManager, build_provider_chain};
+        use ironclaw_llm::{LlmConfig, SessionConfig, SessionManager, build_provider_chain};
 
         let _env_guard = lock_env();
         let secrets = test_secrets_store();
@@ -1691,7 +1691,7 @@ mod tests {
         let mut initial = LlmConfig {
             backend: "nearai".to_string(),
             session: SessionConfig::default(),
-            nearai: crate::llm::config::NearAiConfig {
+            nearai: ironclaw_llm::config::NearAiConfig {
                 model: "model-start".to_string(),
                 cheap_model: None,
                 base_url: "https://api.near.ai".to_string(),
@@ -1831,10 +1831,10 @@ mod tests {
     /// wrapper so tests can observe swap side effects.
     async fn hot_reload_harness() -> (
         Arc<GatewayState>,
-        Arc<dyn crate::llm::LlmProvider>,
+        Arc<dyn ironclaw_llm::LlmProvider>,
         tempfile::TempDir,
     ) {
-        use crate::llm::{LlmConfig, SessionConfig, SessionManager, build_provider_chain};
+        use ironclaw_llm::{LlmConfig, SessionConfig, SessionManager, build_provider_chain};
 
         let secrets = test_secrets_store();
         let (db, tmp) = crate::testing::test_db().await;
@@ -1842,7 +1842,7 @@ mod tests {
         let initial = LlmConfig {
             backend: "nearai".to_string(),
             session: SessionConfig::default(),
-            nearai: crate::llm::config::NearAiConfig {
+            nearai: ironclaw_llm::config::NearAiConfig {
                 model: "model-start".to_string(),
                 cheap_model: None,
                 base_url: "https://api.near.ai".to_string(),

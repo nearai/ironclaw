@@ -19,7 +19,6 @@ use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiVie
 use crate::auth::resolve_secret_for_runtime;
 use crate::context::JobContext;
 use crate::db::UserStore;
-use crate::llm::recording::{HttpExchangeRequest, HttpExchangeResponse, HttpInterceptor};
 use crate::secrets::SecretsStore;
 use crate::secrets::host_matches_pattern;
 use crate::tools::tool::{Tool, ToolDiscoverySummary, ToolError, ToolOutput};
@@ -30,6 +29,7 @@ use crate::tools::wasm::host::{HostState, LogLevel};
 use crate::tools::wasm::limits::{ResourceLimits, WasmResourceLimiter};
 use crate::tools::wasm::runtime::{EPOCH_TICK_INTERVAL, PreparedModule, WasmToolRuntime};
 use crate::tools::wasm::{ssrf_safe_client_builder_for_target, validate_and_resolve_http_target};
+use ironclaw_llm::recording::{HttpExchangeRequest, HttpExchangeResponse, HttpInterceptor};
 use ironclaw_safety::LeakDetector;
 
 // Generate component model bindings from the WIT file.

@@ -3912,6 +3912,7 @@ dependencies = [
  "ironclaw_common",
  "ironclaw_engine",
  "ironclaw_gateway",
+ "ironclaw_llm",
  "ironclaw_safety",
  "ironclaw_skills",
  "ironclaw_tui",
@@ -4044,6 +4045,7 @@ name = "ironclaw_common"
 version = "0.4.1"
 dependencies = [
  "chrono-tz",
+ "dirs",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -4195,6 +4197,45 @@ dependencies = [
  "wat",
  "wit-component 0.245.1",
  "wit-parser 0.245.1",
+]
+
+[[package]]
+name = "ironclaw_llm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "aws-config",
+ "aws-sdk-bedrockruntime",
+ "aws-smithy-types",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "dirs",
+ "eventsource-stream",
+ "futures",
+ "insta",
+ "ironclaw_common",
+ "ironclaw_safety",
+ "open",
+ "rand 0.8.5",
+ "regex",
+ "reqwest",
+ "rig-core",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-test",
+ "url",
+ "urlencoding",
+ "uuid",
 ]
 
 [[package]]

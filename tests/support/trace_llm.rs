@@ -13,7 +13,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use ironclaw::error::LlmError;
-use ironclaw::llm::{
+use ironclaw_llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role, ToolCall,
     ToolCompletionRequest, ToolCompletionResponse,
 };
@@ -22,7 +22,7 @@ use ironclaw::llm::{
 // still import them from here.
 // Re-export all shared types so downstream test files can import from here.
 #[allow(unused_imports)]
-pub use ironclaw::llm::recording::{
+pub use ironclaw_llm::recording::{
     ExpectedToolResult, HttpExchange, HttpExchangeRequest, HttpExchangeResponse,
     MemorySnapshotEntry, RequestHint, TraceResponse, TraceStep, TraceToolCall,
 };

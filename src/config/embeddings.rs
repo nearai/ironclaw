@@ -7,9 +7,9 @@ use crate::config::helpers::{
     validate_operator_base_url,
 };
 use crate::error::ConfigError;
-use crate::llm::{BedrockConfig, SessionManager};
 use crate::settings::Settings;
 use crate::workspace::EmbeddingProvider;
+use ironclaw_llm::{BedrockConfig, SessionManager};
 
 /// Default maximum number of cached embeddings.
 pub const DEFAULT_EMBEDDING_CACHE_SIZE: usize = 10_000;

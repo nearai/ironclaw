@@ -383,15 +383,15 @@ pub struct GatewayState {
     /// WebSocket connection tracker.
     pub ws_tracker: Option<Arc<crate::channels::web::ws::WsConnectionTracker>>,
     /// LLM provider for OpenAI-compatible API proxy.
-    pub llm_provider: Option<Arc<dyn crate::llm::LlmProvider>>,
+    pub llm_provider: Option<Arc<dyn ironclaw_llm::LlmProvider>>,
     /// Hot-reload controller for the LLM provider chain. Populated at
     /// startup when the chain is built from config (not in test harnesses
     /// that inject a provider directly).
-    pub llm_reload: Option<Arc<crate::llm::LlmReloadHandle>>,
+    pub llm_reload: Option<Arc<ironclaw_llm::LlmReloadHandle>>,
     /// LLM session manager handed through to `LlmReloadHandle::reload` so
     /// the rebuilt chain keeps using the same (potentially authenticated)
     /// NEAR AI / OAuth session without forcing a re-login.
-    pub llm_session_manager: Option<Arc<crate::llm::SessionManager>>,
+    pub llm_session_manager: Option<Arc<ironclaw_llm::SessionManager>>,
     /// Optional TOML config path that produced the current `LlmConfig`.
     /// Needed so a hot-reload reads the same precedence layers
     /// (TOML → DB overlay) as startup.

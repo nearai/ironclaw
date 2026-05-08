@@ -226,7 +226,7 @@ impl EmbeddingProvider for OpenAiEmbeddings {
         }
 
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = Some(crate::llm::retry::parse_retry_after(
+            let retry_after = Some(ironclaw_llm::retry::parse_retry_after(
                 response.headers().get("retry-after"),
             ));
             return Err(EmbeddingError::RateLimited { retry_after });
@@ -254,7 +254,7 @@ impl EmbeddingProvider for OpenAiEmbeddings {
 pub struct NearAiEmbeddings {
     client: reqwest::Client,
     base_url: String,
-    session: std::sync::Arc<crate::llm::SessionManager>,
+    session: std::sync::Arc<ironclaw_llm::SessionManager>,
     model: String,
     dimension: usize,
 }
@@ -265,7 +265,7 @@ impl NearAiEmbeddings {
     /// Uses the same session manager as the LLM provider for auth.
     pub fn new(
         base_url: impl Into<String>,
-        session: std::sync::Arc<crate::llm::SessionManager>,
+        session: std::sync::Arc<ironclaw_llm::SessionManager>,
     ) -> Self {
         Self {
             client: reqwest::Client::new(),
@@ -364,7 +364,7 @@ impl EmbeddingProvider for NearAiEmbeddings {
         }
 
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = Some(crate::llm::retry::parse_retry_after(
+            let retry_after = Some(ironclaw_llm::retry::parse_retry_after(
                 response.headers().get("retry-after"),
             ));
             return Err(EmbeddingError::RateLimited { retry_after });
@@ -398,7 +398,7 @@ pub struct BedrockEmbeddings {
 impl BedrockEmbeddings {
     /// Create a new Bedrock embedding provider.
     pub async fn new(
-        config: &crate::llm::BedrockConfig,
+        config: &ironclaw_llm::BedrockConfig,
         model: impl Into<String>,
         dimension: usize,
     ) -> Result<Self, EmbeddingError> {

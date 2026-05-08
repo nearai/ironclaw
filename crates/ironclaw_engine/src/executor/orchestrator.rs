@@ -3396,7 +3396,7 @@ mod tests {
     //
     // Extracts the helper functions from the default orchestrator and
     // evaluates `signals_tool_intent(text)` directly, mirroring the V1
-    // Rust unit test suite in src/llm/reasoning.rs.
+    // Rust unit test suite in crates/ironclaw_llm/src/reasoning.rs.
 
     /// Run a Python expression that returns a bool by prepending the
     /// orchestrator helper definitions and wrapping in `FINAL(expr)`.

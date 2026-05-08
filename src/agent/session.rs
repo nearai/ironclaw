@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::generated_images::GeneratedImageSentinel;
-use crate::llm::{ChatMessage, ToolCall, generate_tool_call_id};
 use ironclaw_common::{ExtensionName, truncate_preview};
+use ironclaw_llm::{ChatMessage, ToolCall, generate_tool_call_id};
 
 /// A session containing one or more threads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -617,14 +617,14 @@ impl Thread {
         let mut turn_number = 0;
 
         while let Some(msg) = iter.next() {
-            if msg.role == crate::llm::Role::User {
+            if msg.role == ironclaw_llm::Role::User {
                 let mut turn = Turn::new(turn_number, &msg.content);
 
                 // Consume tool call sequences (assistant_with_tool_calls + tool_results).
                 // A single turn may contain multiple rounds of tool calls, so we
                 // track the cumulative base index into turn.tool_calls.
                 while let Some(next) = iter.peek() {
-                    if next.role == crate::llm::Role::Assistant && next.tool_calls.is_some() {
+                    if next.role == ironclaw_llm::Role::Assistant && next.tool_calls.is_some() {
                         let call_base_idx = turn.tool_calls.len();
 
                         if let Some(assistant_msg) = iter.next()
@@ -644,7 +644,7 @@ impl Thread {
                         // indexing relative to this batch's base offset.
                         let mut pos = 0;
                         while let Some(tr) = iter.peek() {
-                            if tr.role != crate::llm::Role::Tool {
+                            if tr.role != ironclaw_llm::Role::Tool {
                                 break;
                             }
                             if let Some(tool_msg) = iter.next() {
@@ -666,7 +666,7 @@ impl Thread {
 
                 // Check if next is the final assistant response for this turn
                 let is_final_assistant = iter.peek().is_some_and(|n| {
-                    n.role == crate::llm::Role::Assistant && n.tool_calls.is_none()
+                    n.role == ironclaw_llm::Role::Assistant && n.tool_calls.is_none()
                 });
                 if is_final_assistant && let Some(response) = iter.next() {
                     turn.conclude(TurnOutcome::Completed(response.content.clone()));
@@ -740,7 +740,7 @@ pub struct Turn {
     /// Not serialized — images are only needed for the current LLM call.
     /// The text description in `user_input` persists for compaction/context.
     #[serde(skip)]
-    pub image_content_parts: Vec<crate::llm::ContentPart>,
+    pub image_content_parts: Vec<ironclaw_llm::ContentPart>,
 }
 
 impl Turn {
@@ -1473,19 +1473,19 @@ mod tests {
         // user + assistant_with_tool_calls + tool_result + assistant = 4
         assert_eq!(messages.len(), 4);
 
-        assert_eq!(messages[0].role, crate::llm::Role::User);
+        assert_eq!(messages[0].role, ironclaw_llm::Role::User);
         assert_eq!(messages[0].content, "Search for X");
 
-        assert_eq!(messages[1].role, crate::llm::Role::Assistant);
+        assert_eq!(messages[1].role, ironclaw_llm::Role::Assistant);
         assert!(messages[1].tool_calls.is_some());
         let tcs = messages[1].tool_calls.as_ref().unwrap();
         assert_eq!(tcs.len(), 1);
         assert_eq!(tcs[0].name, "memory_search");
 
-        assert_eq!(messages[2].role, crate::llm::Role::Tool);
+        assert_eq!(messages[2].role, ironclaw_llm::Role::Tool);
         assert!(messages[2].content.contains("Found X"));
 
-        assert_eq!(messages[3].role, crate::llm::Role::Assistant);
+        assert_eq!(messages[3].role, ironclaw_llm::Role::Assistant);
         assert_eq!(messages[3].content, "I found X in doc.md.");
     }
 

@@ -1,11 +1,11 @@
 //! Skills system for IronClaw.
 //!
 //! This module contains main-crate skill logic that depends on types from
-//! other `src/` modules (e.g. `crate::llm::ToolDefinition`, `crate::secrets`).
+//! other `src/` modules (e.g. `ironclaw_llm::ToolDefinition`, `crate::secrets`).
 //! For core skill types, parsing, and registry, import from `ironclaw_skills` directly.
 //!
 //! The `attenuation` submodule remains here because it depends on
-//! `crate::llm::ToolDefinition` which is a main-crate type.
+//! `ironclaw_llm::ToolDefinition` which is a main-crate type.
 //!
 //! # V1 migration notes
 //!

@@ -141,8 +141,10 @@ pub enum ChannelError {
     HealthCheckFailed { name: String },
 }
 
-// LlmError lives in src/llm/error.rs; re-exported here for backward compatibility.
-pub use crate::llm::error::LlmError;
+// LlmError lives in `ironclaw_llm`; re-exported here so existing
+// `crate::error::LlmError` callers and the `Error::Llm(#[from] LlmError)`
+// variant keep working without churn.
+pub use ironclaw_llm::LlmError;
 
 /// Tool execution errors.
 #[derive(Debug, thiserror::Error)]
@@ -425,7 +427,7 @@ pub enum RoutineError {
         partial_tokens: Option<i32>,
         /// Whether the underlying LLM error was classified as retryable.
         /// Set at the `LlmError` → `RoutineError` conversion site using
-        /// `crate::llm::retry::is_retryable()`, avoiding fragile substring
+        /// `ironclaw_llm::retry::is_retryable()`, avoiding fragile substring
         /// matching on the stringified reason.
         retryable: bool,
     },
@@ -450,7 +452,7 @@ impl RoutineError {
     /// Whether this error is transient and worth retrying with backoff.
     ///
     /// Retryable: LLM failures where the underlying `LlmError` was classified
-    /// as retryable by `crate::llm::retry::is_retryable()`, empty responses,
+    /// as retryable by `ironclaw_llm::retry::is_retryable()`, empty responses,
     /// and truncated responses.
     /// Non-retryable: configuration errors, authorization, resource limits,
     /// DB errors, and LLM failures caused by auth/content-policy/context-length.

@@ -32,9 +32,9 @@ use crate::error::{ChannelError, Error};
 use crate::extensions::ExtensionManager;
 use crate::generated_images::GeneratedImageSentinel;
 use crate::hooks::HookRegistry;
-use crate::llm::LlmProvider;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
+use ironclaw_llm::LlmProvider;
 use ironclaw_safety::SafetyLayer;
 use ironclaw_skills::SkillRegistry;
 
@@ -343,9 +343,9 @@ pub struct AgentDeps {
     /// SSE manager for live job event streaming to the web gateway.
     pub sse_tx: Option<Arc<crate::channels::web::sse::SseManager>>,
     /// HTTP interceptor for trace recording/replay.
-    pub http_interceptor: Option<Arc<dyn crate::llm::recording::HttpInterceptor>>,
+    pub http_interceptor: Option<Arc<dyn ironclaw_llm::recording::HttpInterceptor>>,
     /// Audio transcription middleware for voice messages.
-    pub transcription: Option<Arc<crate::llm::transcription::TranscriptionMiddleware>>,
+    pub transcription: Option<Arc<ironclaw_llm::transcription::TranscriptionMiddleware>>,
     /// Document text extraction middleware for PDF, DOCX, PPTX, etc.
     pub document_extraction: Option<Arc<crate::document_extraction::DocumentExtractionMiddleware>>,
     /// Sandbox readiness state for full-job routine dispatch.
@@ -1278,7 +1278,9 @@ impl Agent {
             // Apply transcription middleware to audio attachments
             let mut message = message;
             if let Some(ref transcription) = self.deps.transcription {
-                transcription.process(&mut message).await;
+                transcription
+                    .process(&mut message.attachments, &mut message.content)
+                    .await;
             }
 
             // Apply document extraction middleware to document attachments
@@ -2236,7 +2238,7 @@ impl Agent {
             SubmissionResult::Response { content } => {
                 // Suppress silent replies (e.g. from group chat "nothing to say" responses).
                 // Silent replies exit single-message REPL invocations.
-                if crate::llm::is_silent_reply(&content) {
+                if ironclaw_llm::is_silent_reply(&content) {
                     tracing::debug!("Suppressing silent reply token");
                     Ok(HandleOutcome::Shutdown)
                 } else if content.is_empty() {
@@ -2300,15 +2302,13 @@ mod tests {
     use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
     use crate::agent::submission::{AuthGateResolution, Submission};
     use crate::channels::IncomingMessage;
+    use crate::config::{AgentConfig, SafetyConfig, SkillsConfig};
     use crate::error::ChannelError;
     use crate::hooks::HookRegistry;
     use crate::tools::ToolRegistry;
-    use crate::{
-        config::{AgentConfig, SafetyConfig, SkillsConfig},
-        llm::{
-            CompletionRequest, CompletionResponse, FinishReason, LlmProvider,
-            ToolCompletionRequest, ToolCompletionResponse,
-        },
+    use ironclaw_llm::{
+        CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ToolCompletionRequest,
+        ToolCompletionResponse,
     };
     use ironclaw_safety::SafetyLayer;
     use rust_decimal::Decimal;
