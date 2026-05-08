@@ -122,7 +122,7 @@ Repair results: `Success`, `Retry`, `Failed`, `ManualRequired`. `Retry` does NOT
 - Never call `.unwrap()` or `.expect()` — use `?` with proper error mapping.
 - All state mutations on `Session`/`Thread` happen under `Arc<Mutex<Session>>` lock.
 - The agent loop is single-threaded per thread; parallel execution happens at the job/scheduler level.
-- Skills are selected **deterministically** (no LLM call) — see `skills/selector.rs`.
+- Skills use explicit `/skill-name` mentions and deterministic prefiltering as the primary path — see `skills/selector.rs`. An LLM selector is only a best-effort fallback when the primary path selects no skills.
 - Tool results pass through `SafetyLayer` before returning to LLM (sanitizer → validator → policy → leak detector).
 - `SessionManager` uses double-checked locking for session creation. Read lock first (fast path), then write lock with re-check to prevent duplicate sessions.
 - `Scheduler.schedule()` holds the write lock for the entire check-insert sequence — don't hold any other locks when calling it.
