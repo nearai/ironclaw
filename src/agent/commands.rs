@@ -1168,11 +1168,11 @@ mod tests {
     use crate::agent::submission::SubmissionResult;
     use crate::config::{AgentConfig, SafetyConfig, SkillsConfig};
     use crate::hooks::HookRegistry;
-    use crate::llm::{
+    use crate::tools::ToolRegistry;
+    use ironclaw_llm::{
         CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ToolCompletionRequest,
         ToolCompletionResponse,
     };
-    use crate::tools::ToolRegistry;
     use ironclaw_safety::SafetyLayer;
     use rust_decimal::Decimal;
     use std::sync::Arc;
