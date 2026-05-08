@@ -1937,11 +1937,17 @@ async fn execute_lightweight_with_tools(
                 );
             }
 
-            // LLM returned tool calls: add assistant message and execute tools
-            messages.push(ChatMessage::assistant_with_tool_calls(
-                response.content.clone(),
-                response.tool_calls.clone(),
-            ));
+            // LLM returned tool calls: add assistant message and execute tools.
+            // Carry reasoning so the next request can echo it — required for
+            // DeepSeek thinking-mode and Gemini 2.5+ to validate the chain
+            // (#3201, #3225).
+            messages.push(
+                ChatMessage::assistant_with_tool_calls(
+                    response.content.clone(),
+                    response.tool_calls.clone(),
+                )
+                .with_reasoning(response.reasoning.clone()),
+            );
 
             // Execute tools sequentially
             for tc in response.tool_calls {

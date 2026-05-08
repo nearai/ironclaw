@@ -39,6 +39,21 @@ pub enum ProviderProtocol {
     Ollama,
     /// GitHub Copilot API (OpenAI-compatible with token exchange).
     GithubCopilot,
+    /// DeepSeek API. Routes through rig-core's dedicated DeepSeek client,
+    /// which round-trips `reasoning_content` for thinking-mode models —
+    /// the generic OpenAI client strips it. (#3201)
+    DeepSeek,
+    /// Google Gemini native API. Routes through rig-core's dedicated Gemini
+    /// client, which round-trips `thought_signature` on tool calls —
+    /// the OpenAI-compat shim strips it. (#3225)
+    Gemini,
+    /// OpenRouter (multi-model gateway). Routes through rig-core's dedicated
+    /// OpenRouter client, which round-trips `reasoning`, `reasoning_details`
+    /// (Summary / Encrypted / Text), and per-tool-call signatures —
+    /// the generic OpenAI client strips all of them, breaking thinking-mode
+    /// tool calling on every reasoning model OpenRouter exposes (Claude with
+    /// thinking, OpenAI o-series, DeepSeek-R1, Gemini 2.5+, Qwen QwQ, …).
+    OpenRouter,
 }
 
 /// How the setup wizard should collect credentials for this provider.
@@ -476,6 +491,48 @@ mod tests {
                 def.id
             );
         }
+    }
+
+    /// Regression for #3201 / #3225 and the OpenRouter generalisation:
+    /// providers whose APIs return reasoning artifacts (DeepSeek's
+    /// `reasoning_content`, Gemini's `thought_signature`, OpenRouter's
+    /// `reasoning_details` + signatures) must NOT use the generic
+    /// `OpenAiCompletions` protocol. The OpenAI-compat path goes through
+    /// rig-core's OpenAI client, which strips those fields, breaking
+    /// multi-turn tool calling for every thinking-mode model these
+    /// providers expose. They must route through the dedicated rig-core
+    /// clients which round-trip the artifacts on the next request.
+    #[test]
+    fn reasoning_aware_providers_use_dedicated_protocol_not_openai_compat() {
+        let providers: Vec<ProviderDefinition> =
+            serde_json::from_str(include_str!("../../providers.json")).unwrap();
+        let by_id = |id: &str| providers.iter().find(|p| p.id == id).cloned();
+
+        let deepseek = by_id("deepseek").expect("deepseek entry must exist");
+        assert_eq!(
+            deepseek.protocol,
+            ProviderProtocol::DeepSeek,
+            "deepseek must use DeepSeek protocol — OpenAiCompletions strips \
+             reasoning_content and breaks thinking-mode tool calling (#3201)",
+        );
+
+        let gemini = by_id("gemini").expect("gemini entry must exist");
+        assert_eq!(
+            gemini.protocol,
+            ProviderProtocol::Gemini,
+            "gemini must use Gemini protocol — OpenAiCompletions strips \
+             thought_signature and breaks tool calling on thinking models (#3225)",
+        );
+
+        let openrouter = by_id("openrouter").expect("openrouter entry must exist");
+        assert_eq!(
+            openrouter.protocol,
+            ProviderProtocol::OpenRouter,
+            "openrouter must use OpenRouter protocol — OpenAiCompletions \
+             strips reasoning_details and tool-call signatures, breaking \
+             every thinking-mode model OpenRouter exposes (Claude with \
+             thinking, OpenAI o-series, DeepSeek-R1, Gemini 2.5+, Qwen QwQ)",
+        );
     }
 
     #[test]

@@ -2649,6 +2649,7 @@ fn rebuild_chat_messages_from_db(
                                     .get("rationale")
                                     .and_then(|v| v.as_str())
                                     .map(String::from),
+                                signature: None,
                             })
                             .collect();
 
@@ -2792,6 +2793,7 @@ mod tests {
                     finish_reason: crate::llm::FinishReason::Stop,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
+                    reasoning: None,
                 })
             }
         }

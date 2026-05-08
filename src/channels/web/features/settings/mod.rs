@@ -2430,4 +2430,66 @@ mod tests {
         assert!(locked_entry.locked);
         assert!(locked_entry.locked_reason.is_some());
     }
+
+    /// Regression for #3034: a new user with no persisted tool-permission
+    /// override must see the `http` tool as `always_allow` via the
+    /// `/api/settings/tools` listing — the same code path the web settings
+    /// UI consumes. The seeded baseline drives this; if it ever flips to
+    /// `disabled` or `ask_each_time`, every HTTP-dependent workflow stops
+    /// working out of the box.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_http_tool_default_is_always_allow_for_new_user() {
+        use std::sync::Arc;
+
+        use crate::db::Database;
+        use crate::tools::ToolRegistry;
+        use crate::tools::builtin::HttpTool;
+        use axum::extract::State;
+
+        let registry = Arc::new(ToolRegistry::new());
+        registry.register(Arc::new(HttpTool::new())).await;
+
+        let tmp_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp_dir.path().join("test.db");
+        let db = crate::db::libsql::LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("temp db");
+        db.run_migrations().await.expect("migrations");
+        let db: Arc<dyn Database> = Arc::new(db);
+
+        let state = Arc::new(GatewayState {
+            tool_registry: Some(registry),
+            store: Some(db),
+            ..test_gateway_state(test_secrets_store())
+        });
+
+        let result = settings_tools_list_handler(
+            State(state),
+            crate::channels::web::auth::AuthenticatedUser(
+                crate::channels::web::auth::UserIdentity {
+                    user_id: "fresh-user".to_string(),
+                    role: "regular".to_string(),
+                    workspace_read_scopes: vec![],
+                },
+            ),
+        )
+        .await;
+
+        let axum::Json(response) = result.expect("handler should succeed");
+        let http_entry = response
+            .tools
+            .iter()
+            .find(|t| t.name == "http")
+            .expect("http tool should be in the listing");
+
+        assert_eq!(
+            http_entry.current_state, "always_allow",
+            "http must default to always_allow for a user with no override (issue #3034)"
+        );
+        assert_eq!(
+            http_entry.default_state, "always_allow",
+            "http's surfaced default must be always_allow (issue #3034)"
+        );
+    }
 }

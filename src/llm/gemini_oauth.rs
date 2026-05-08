@@ -1939,6 +1939,7 @@ impl GeminiOauthProvider {
                         name,
                         arguments: args,
                         reasoning: None,
+                        signature: None,
                     });
                 }
             }
@@ -2162,6 +2163,7 @@ impl LlmProvider for GeminiOauthProvider {
             tool_calls,
             cache_read_input_tokens: response.cache_read_input_tokens,
             cache_creation_input_tokens: response.cache_creation_input_tokens,
+            reasoning: None,
         })
     }
 }
@@ -2763,6 +2765,7 @@ mod tests {
                     name: "read_file".to_string(),
                     arguments: serde_json::json!({"path": "/tmp/x"}),
                     reasoning: None,
+                    signature: None,
                 }],
             ),
             ChatMessage::tool_result("call_1", "read_file", r#"{"output":"hello"}"#),
@@ -2802,6 +2805,7 @@ mod tests {
                     name: "echo".to_string(),
                     arguments: serde_json::json!({}),
                     reasoning: None,
+                    signature: None,
                 }],
             ),
             ChatMessage::tool_result("call_1", "echo", r#"{"output":"ok"}"#),

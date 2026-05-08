@@ -211,16 +211,38 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
                     if !msg.content.is_empty() {
                         contents.push(AssistantContent::text(&msg.content));
                     }
+                    // Round-trip provider-emitted reasoning artifacts. rig-core's
+                    // dedicated DeepSeek/Gemini/OpenRouter clients consume
+                    // `AssistantContent::Reasoning` on the message and re-emit
+                    // it as the wire-format reasoning field on the next request.
+                    // Without this, DeepSeek/Gemini reject the follow-up turn
+                    // with HTTP 400. See #3201, #3225.
+                    if let Some(ref reasoning) = msg.reasoning
+                        && !reasoning.is_empty()
+                    {
+                        contents.push(AssistantContent::Reasoning(rig::message::Reasoning::new(
+                            reasoning,
+                        )));
+                    }
                     for (idx, tc) in tool_calls.iter().enumerate() {
                         let tool_call_id =
                             normalized_tool_call_id(Some(tc.id.as_str()), history.len() + idx);
-                        contents.push(AssistantContent::ToolCall(
-                            rig::message::ToolCall::new(
-                                tool_call_id.clone(),
-                                ToolFunction::new(tc.name.clone(), tc.arguments.clone()),
-                            )
-                            .with_call_id(tool_call_id),
-                        ));
+                        let mut rig_tc = rig::message::ToolCall::new(
+                            tool_call_id.clone(),
+                            ToolFunction::new(tc.name.clone(), tc.arguments.clone()),
+                        )
+                        .with_call_id(tool_call_id);
+                        // Echo provider-emitted per-tool-call signatures back
+                        // (Gemini's `thought_signature`). The reviewer's
+                        // motivating example: a signed Gemini `functionCall`
+                        // returned in turn N must carry the same signature
+                        // when sent back in turn N+1, otherwise the API
+                        // rejects with "Function call is missing a
+                        // thought_signature in functionCall parts" (#3225).
+                        if tc.signature.is_some() {
+                            rig_tc = rig_tc.with_signature(tc.signature.clone());
+                        }
+                        contents.push(AssistantContent::ToolCall(rig_tc));
                     }
                     if let Ok(many) = OneOrMany::many(contents) {
                         history.push(RigMessage::Assistant {
@@ -230,6 +252,27 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
                     } else {
                         // Shouldn't happen but fall back to text
                         history.push(RigMessage::assistant(&msg.content));
+                    }
+                } else if let Some(ref reasoning) = msg.reasoning
+                    && !reasoning.is_empty()
+                {
+                    // Assistant message with reasoning but no tool calls
+                    // (e.g., a "thinking" turn followed by a final answer).
+                    // The next request still needs the reasoning echoed so the
+                    // provider validates the chain, even when the message has
+                    // no tool calls of its own.
+                    let mut contents: Vec<AssistantContent> = Vec::new();
+                    if !msg.content.is_empty() {
+                        contents.push(AssistantContent::text(&msg.content));
+                    }
+                    contents.push(AssistantContent::Reasoning(rig::message::Reasoning::new(
+                        reasoning,
+                    )));
+                    if let Ok(many) = OneOrMany::many(contents) {
+                        history.push(RigMessage::Assistant {
+                            id: None,
+                            content: many,
+                        });
                     }
                 } else {
                     // Skip empty assistant messages — these occur when thinking-tag stripping
@@ -356,13 +399,29 @@ fn convert_tool_choice(choice: Option<&str>) -> Option<RigToolChoice> {
     }
 }
 
-/// Extract text and tool calls from a rig-core completion response.
+/// Extract text, tool calls, and provider-emitted reasoning artifacts from a
+/// rig-core completion response.
+///
+/// The returned `reasoning` is the concatenation of every
+/// `AssistantContent::Reasoning` chunk in the response. Callers MUST attach it
+/// to the assistant `ChatMessage` they store for the next turn — DeepSeek's
+/// thinking mode and Gemini 2.5+ both reject the next request with HTTP 400
+/// when the prior message had reasoning that wasn't echoed back. See #3201,
+/// #3225, and the rig-core deepseek client source where
+/// `last_reasoning_content` is round-tripped onto the last assistant message
+/// of the next request.
 fn extract_response(
     choice: &OneOrMany<AssistantContent>,
     _usage: &RigUsage,
-) -> (Option<String>, Vec<IronToolCall>, FinishReason) {
+) -> (
+    Option<String>,
+    Vec<IronToolCall>,
+    FinishReason,
+    Option<String>,
+) {
     let mut text_parts: Vec<String> = Vec::new();
     let mut tool_calls: Vec<IronToolCall> = Vec::new();
+    let mut reasoning_parts: Vec<String> = Vec::new();
 
     for content in choice.iter() {
         match content {
@@ -376,9 +435,17 @@ fn extract_response(
                     name: tc.function.name.clone(),
                     arguments: tc.function.arguments.clone(),
                     reasoning: None,
+                    // Capture Gemini `thought_signature` (and any other
+                    // per-tool-call signatures) so the next turn can echo
+                    // them. Without this, Gemini 2.5+ rejects the next
+                    // request with HTTP 400. See #3225.
+                    signature: tc.signature.clone(),
                 });
             }
-            // Reasoning and Image variants are not mapped to IronClaw types
+            AssistantContent::Reasoning(r) if !r.reasoning.is_empty() => {
+                reasoning_parts.push(r.reasoning.join("\n"));
+            }
+            // Image variants are not mapped to IronClaw types
             _ => {}
         }
     }
@@ -389,13 +456,19 @@ fn extract_response(
         Some(text_parts.join(""))
     };
 
+    let reasoning = if reasoning_parts.is_empty() {
+        None
+    } else {
+        Some(reasoning_parts.join("\n"))
+    };
+
     let finish = if !tool_calls.is_empty() {
         FinishReason::ToolUse
     } else {
         FinishReason::Stop
     };
 
-    (text, tool_calls, finish)
+    (text, tool_calls, finish, reasoning)
 }
 
 /// Saturate u64 to u32 for token counts.
@@ -595,7 +668,8 @@ where
             .await
             .map_err(|e| map_rig_error(&self.model_name, e))?;
 
-        let (text, _tool_calls, finish) = extract_response(&response.choice, &response.usage);
+        let (text, _tool_calls, finish, _reasoning) =
+            extract_response(&response.choice, &response.usage);
 
         let resp = CompletionResponse {
             content: text.unwrap_or_default(),
@@ -655,7 +729,8 @@ where
             .await
             .map_err(|e| map_rig_error(&self.model_name, e))?;
 
-        let (text, mut tool_calls, finish) = extract_response(&response.choice, &response.usage);
+        let (text, mut tool_calls, finish, reasoning) =
+            extract_response(&response.choice, &response.usage);
 
         // Normalize tool call names: some proxies prepend "proxy_" prefixes.
         for tc in &mut tool_calls {
@@ -678,6 +753,7 @@ where
             finish_reason: finish,
             cache_read_input_tokens: saturate_u32(response.usage.cached_input_tokens),
             cache_creation_input_tokens: extract_cache_creation(&response.raw_response),
+            reasoning,
         };
 
         if resp.cache_read_input_tokens > 0 {
@@ -1540,6 +1616,7 @@ mod tests {
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "test"}),
             reasoning: None,
+            signature: None,
         };
         let msg = ChatMessage::assistant_with_tool_calls(Some("thinking".to_string()), vec![tc]);
         let messages = vec![msg];
@@ -1568,6 +1645,7 @@ mod tests {
             tool_call_id: None,
             name: Some("search".to_string()),
             tool_calls: None,
+            reasoning: None,
         }];
         let (_preamble, history) = convert_messages(&messages);
         match &history[0] {
@@ -1705,7 +1783,7 @@ mod tests {
     fn test_extract_response_text_only() {
         let content = OneOrMany::one(AssistantContent::text("Hello world"));
         let usage = RigUsage::new();
-        let (text, calls, finish) = extract_response(&content, &usage);
+        let (text, calls, finish, _reasoning) = extract_response(&content, &usage);
         assert_eq!(text, Some("Hello world".to_string()));
         assert!(calls.is_empty());
         assert_eq!(finish, FinishReason::Stop);
@@ -1716,7 +1794,7 @@ mod tests {
         let tc = AssistantContent::tool_call("call_1", "search", serde_json::json!({"q": "test"}));
         let content = OneOrMany::one(tc);
         let usage = RigUsage::new();
-        let (text, calls, finish) = extract_response(&content, &usage);
+        let (text, calls, finish, _reasoning) = extract_response(&content, &usage);
         assert!(text.is_none());
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "search");
@@ -1730,6 +1808,7 @@ mod tests {
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "test"}),
             reasoning: None,
+            signature: None,
         };
         let messages = vec![ChatMessage::assistant_with_tool_calls(None, vec![tc])];
         let (_preamble, history) = convert_messages(&messages);
@@ -1762,6 +1841,7 @@ mod tests {
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "test"}),
             reasoning: None,
+            signature: None,
         };
         let messages = vec![ChatMessage::assistant_with_tool_calls(None, vec![tc])];
         let (_preamble, history) = convert_messages(&messages);
@@ -1796,6 +1876,7 @@ mod tests {
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "test"}),
             reasoning: None,
+            signature: None,
         };
         let assistant_msg = ChatMessage::assistant_with_tool_calls(None, vec![tc]);
         let tool_result_msg = ChatMessage {
@@ -1805,6 +1886,7 @@ mod tests {
             tool_call_id: None,
             name: Some("search".to_string()),
             tool_calls: None,
+            reasoning: None,
         };
         let messages = vec![assistant_msg, tool_result_msg];
         let (_preamble, history) = convert_messages(&messages);
@@ -2116,12 +2198,14 @@ mod tests {
             name: "search".to_string(),
             arguments: serde_json::json!({"q": "rust"}),
             reasoning: None,
+            signature: None,
         };
         let tc2 = IronToolCall {
             id: "call_b".to_string(),
             name: "fetch".to_string(),
             arguments: serde_json::json!({"url": "https://example.com"}),
             reasoning: None,
+            signature: None,
         };
         let assistant = ChatMessage::assistant_with_tool_calls(None, vec![tc1, tc2]);
         let result_a = ChatMessage::tool_result("call_a", "search", "search results");
@@ -2201,6 +2285,7 @@ mod tests {
             role: crate::llm::Role::Assistant,
             content: String::new(),
             tool_calls: None,
+            reasoning: None,
             tool_call_id: None,
             name: None,
             content_parts: vec![],
@@ -2221,6 +2306,7 @@ mod tests {
             role: crate::llm::Role::Assistant,
             content: String::new(),
             tool_calls: None,
+            reasoning: None,
             tool_call_id: None,
             name: None,
             content_parts: vec![],
@@ -2480,5 +2566,134 @@ mod tests {
             }
             other => panic!("Expected ContextLengthExceeded, got: {other:?}"),
         }
+    }
+
+    /// Regression for #3201 / #3225 (the high-severity gap in PR #3326):
+    /// the dedicated rig-core DeepSeek/Gemini/OpenRouter clients only fix the
+    /// reasoning round-trip *inside* rig-core. IronClaw's RigAdapter sits
+    /// between the agent loop and rig-core, and previously dropped both
+    /// `AssistantContent::Reasoning` (DeepSeek `reasoning_content`) and
+    /// per-tool-call `signature` (Gemini `thought_signature`) on the response →
+    /// IronClaw conversion. On the next request it rebuilt rig messages
+    /// without either field, so the provider rejected the follow-up turn.
+    ///
+    /// This test simulates a 2-turn tool loop:
+    ///   1. extract a rig response carrying both reasoning and a signed tool call
+    ///   2. round-trip those onto an IronClaw `ChatMessage`
+    ///   3. convert that message back into rig format
+    ///   4. assert both reasoning and signature appear on the rebuilt rig message
+    ///
+    /// If any layer drops a field, the next turn would fail with HTTP 400.
+    #[test]
+    fn reasoning_and_signature_round_trip_through_chat_message() {
+        // --- Turn 1: provider returned reasoning + signed tool call ---
+        let rig_response = OneOrMany::many(vec![
+            AssistantContent::Reasoning(rig::message::Reasoning::new(
+                "Let me check the weather first.",
+            )),
+            AssistantContent::ToolCall(
+                rig::message::ToolCall::new(
+                    "call_abc123".to_string(),
+                    ToolFunction::new(
+                        "get_weather".to_string(),
+                        serde_json::json!({"city": "London"}),
+                    ),
+                )
+                .with_signature(Some("thought-sig-deadbeef".to_string())),
+            ),
+        ])
+        .unwrap();
+        let usage = RigUsage::new();
+        let (text, tool_calls, finish, reasoning) = extract_response(&rig_response, &usage);
+
+        assert_eq!(finish, FinishReason::ToolUse);
+        assert_eq!(text, None);
+        assert_eq!(
+            reasoning.as_deref(),
+            Some("Let me check the weather first."),
+            "extract_response must capture AssistantContent::Reasoning so the \
+             next request can echo DeepSeek's reasoning_content (#3201)",
+        );
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(
+            tool_calls[0].signature.as_deref(),
+            Some("thought-sig-deadbeef"),
+            "extract_response must capture ToolCall.signature so the next \
+             request can echo Gemini's thought_signature (#3225)",
+        );
+
+        // --- IronClaw stores the assistant message + tool result ---
+        let assistant = ChatMessage::assistant_with_tool_calls(text, tool_calls)
+            .with_reasoning(reasoning.clone());
+        let tool_result =
+            ChatMessage::tool_result("call_abc123", "get_weather", "{\"temp_c\": 14}");
+
+        // --- Turn 2: IronClaw rebuilds the rig request from stored messages ---
+        let messages = vec![
+            ChatMessage::user("What's the weather?"),
+            assistant,
+            tool_result,
+        ];
+        let (_preamble, history) = convert_messages(&messages);
+
+        // The rebuilt rig assistant message must carry both reasoning and
+        // signature; otherwise the dedicated DeepSeek/Gemini/OpenRouter rig
+        // clients would emit an empty `reasoning_content` / unsigned
+        // `functionCall` and the API would reject with HTTP 400.
+        let assistant_msg = history
+            .iter()
+            .find(|m| matches!(m, RigMessage::Assistant { .. }))
+            .expect("rebuilt rig history should contain the assistant message");
+        let RigMessage::Assistant { content, .. } = assistant_msg else {
+            unreachable!()
+        };
+
+        let mut found_reasoning = false;
+        let mut found_signed_tool_call = false;
+        for c in content.iter() {
+            match c {
+                AssistantContent::Reasoning(r) => {
+                    assert_eq!(r.reasoning, vec!["Let me check the weather first."]);
+                    found_reasoning = true;
+                }
+                AssistantContent::ToolCall(tc) => {
+                    assert_eq!(
+                        tc.signature.as_deref(),
+                        Some("thought-sig-deadbeef"),
+                        "rebuilt rig tool call must carry the original \
+                         thought_signature (#3225)",
+                    );
+                    found_signed_tool_call = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            found_reasoning,
+            "convert_messages must emit AssistantContent::Reasoning when \
+             ChatMessage carries reasoning — without this, DeepSeek thinking \
+             mode rejects the next turn (#3201)",
+        );
+        assert!(
+            found_signed_tool_call,
+            "convert_messages must propagate ToolCall.signature when \
+             rebuilding rig tool calls — without this, Gemini 2.5+ rejects \
+             the next turn (#3225)",
+        );
+    }
+
+    /// `with_reasoning` must drop empty/whitespace-only strings rather than
+    /// echoing `reasoning_content: ""` (some strict-mode providers reject
+    /// empty reasoning fields, and an empty echo carries no signal anyway).
+    #[test]
+    fn chat_message_with_reasoning_drops_empty_input() {
+        let msg = ChatMessage::assistant("hi").with_reasoning(Some(String::new()));
+        assert!(msg.reasoning.is_none());
+        let msg = ChatMessage::assistant("hi").with_reasoning(Some("   ".to_string()));
+        assert!(msg.reasoning.is_none());
+        let msg = ChatMessage::assistant("hi").with_reasoning(None);
+        assert!(msg.reasoning.is_none());
+        let msg = ChatMessage::assistant("hi").with_reasoning(Some("real".to_string()));
+        assert_eq!(msg.reasoning.as_deref(), Some("real"));
     }
 }

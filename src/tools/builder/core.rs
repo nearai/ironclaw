@@ -770,6 +770,7 @@ Create alongside the .wasm file to grant capabilities:
                 RespondResult::ToolCalls {
                     tool_calls,
                     content,
+                    reasoning: _,
                 } => {
                     tools_executed = true;
 

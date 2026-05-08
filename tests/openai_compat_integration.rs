@@ -97,12 +97,14 @@ impl LlmProvider for MockLlmProvider {
                     name: tool.name.clone(),
                     arguments: serde_json::json!({"test": true}),
                     reasoning: None,
+                    signature: None,
                 }],
                 input_tokens: 15,
                 output_tokens: 8,
                 finish_reason: FinishReason::ToolUse,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         } else {
             Ok(ToolCompletionResponse {
@@ -113,6 +115,7 @@ impl LlmProvider for MockLlmProvider {
                 finish_reason: FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
     }
@@ -168,6 +171,7 @@ impl LlmProvider for FixedModelProvider {
             finish_reason: FinishReason::Stop,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            reasoning: None,
         })
     }
 

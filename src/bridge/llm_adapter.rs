@@ -403,6 +403,7 @@ fn thread_msg_to_chat(msg: &ThreadMessage) -> ChatMessage {
         tool_call_id: msg.action_call_id.clone(),
         name: msg.action_name.clone(),
         tool_calls: None,
+        reasoning: None,
     };
 
     // Convert action calls if present (assistant message with tool calls)
@@ -415,6 +416,7 @@ fn thread_msg_to_chat(msg: &ThreadMessage) -> ChatMessage {
                     name: c.action_name.clone(),
                     arguments: c.parameters.clone(),
                     reasoning: None,
+                    signature: None,
                 })
                 .collect(),
         );
@@ -685,6 +687,7 @@ mod tests {
                 finish_reason: crate::llm::FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
     }
@@ -851,6 +854,7 @@ mod tests {
                 finish_reason: crate::llm::FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
     }
@@ -1576,12 +1580,14 @@ And also check the token price:\n\
                         "project_id": "{{call-1.project_id}}"
                     }),
                     reasoning: None,
+                    signature: None,
                 }],
                 input_tokens: 10,
                 output_tokens: 10,
                 finish_reason: crate::llm::FinishReason::ToolUse,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
     }
@@ -1686,6 +1692,7 @@ And also check the token price:\n\
                 finish_reason: crate::llm::FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
     }

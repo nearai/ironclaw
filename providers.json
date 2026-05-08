@@ -124,13 +124,14 @@
     "aliases": [
       "open_router"
     ],
-    "protocol": "open_ai_completions",
-    "default_base_url": "https://openrouter.ai/api/v1",
+    "protocol": "open_router",
+    "default_base_url": "",
     "api_key_env": "OPENROUTER_API_KEY",
     "api_key_required": true,
     "model_env": "OPENROUTER_MODEL",
+    "extra_headers_env": "OPENROUTER_EXTRA_HEADERS",
     "default_model": "openai/gpt-4o",
-    "description": "OpenRouter multi-provider gateway (200+ models)",
+    "description": "OpenRouter multi-provider gateway (200+ models, preserves reasoning across turns)",
     "setup": {
       "kind": "api_key",
       "secret_name": "llm_openrouter_api_key",
@@ -246,13 +247,13 @@
     "aliases": [
       "deep_seek"
     ],
-    "protocol": "open_ai_completions",
-    "default_base_url": "https://api.deepseek.com/v1",
+    "protocol": "deep_seek",
+    "default_base_url": "",
     "api_key_env": "DEEPSEEK_API_KEY",
     "api_key_required": true,
     "model_env": "DEEPSEEK_MODEL",
     "default_model": "deepseek-chat",
-    "description": "DeepSeek inference API",
+    "description": "DeepSeek inference API (preserves reasoning_content for thinking-mode models)",
     "setup": {
       "kind": "api_key",
       "secret_name": "llm_deepseek_api_key",
@@ -325,19 +326,19 @@
       "google_gemini",
       "google"
     ],
-    "protocol": "open_ai_completions",
-    "default_base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "protocol": "gemini",
+    "default_base_url": "",
     "api_key_env": "GEMINI_API_KEY",
     "api_key_required": true,
     "model_env": "GEMINI_MODEL",
     "default_model": "gemini-2.5-flash",
-    "description": "Google Gemini (via OpenAI-compatible endpoint)",
+    "description": "Google Gemini native API (preserves thought_signature on tool calls)",
     "setup": {
       "kind": "api_key",
       "secret_name": "llm_gemini_api_key",
       "key_url": "https://aistudio.google.com/app/apikey",
       "display_name": "Google Gemini",
-      "can_list_models": true
+      "can_list_models": false
     }
   },
   {
