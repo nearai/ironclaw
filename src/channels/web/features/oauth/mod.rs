@@ -841,8 +841,10 @@ pub(crate) async fn slack_relay_oauth_callback_handler(
         }
     };
 
-    // Broadcast event to notify the web UI.
-    state.sse.broadcast(AppEvent::OnboardingState {
+    // Broadcast event to notify the web UI. Scope to the OAuth flow owner —
+    // a global broadcast would surface another tenant's "Slack connected"
+    // toast to every connected browser tab.
+    let onboarding_event = AppEvent::OnboardingState {
         extension_name: ironclaw_common::ExtensionName::from_trusted(relay_extension_name.clone()),
         state: if success {
             crate::channels::web::types::OnboardingStateDto::Ready
@@ -856,7 +858,8 @@ pub(crate) async fn slack_relay_oauth_callback_handler(
         setup_url: None,
         onboarding: None,
         thread_id: None,
-    });
+    };
+    state.sse.broadcast_for_user(&state.owner_id, onboarding_event); // projection-exempt: channel-lifecycle, slack relay onboarding state
 
     if success {
         axum::response::Html(

@@ -165,6 +165,59 @@ assert_flagged "CREDNAME: bare CredentialName reference is flagged" \
     "$CREDNAME_POS" \
     "$CREDNAME_NEG"
 
+# ── MULTITENANT ───────────────────────────────────────────────
+# A new unscoped `sse.broadcast(...)` must either be transport-only or
+# carry an explicit `// multi-tenant-safe: <reason>` annotation.
+# `broadcast_for_user(...)` is the safe path and must be exempt.
+MT_POS='(^|[^[:alnum:]_])sse\.broadcast[[:space:]]*\('
+MT_NEG='\.broadcast_for_user|// projection-exempt: transport-only,[[:space:]]*[^[:space:]]|//.*multi-tenant-safe: [^[:space:]]|// safety:|:\+\+\+ '
+
+assert_filtered "MULTITENANT: diff header line is filtered" \
+    "+++ b/src/extensions/manager.rs" \
+    "$MT_POS" \
+    "$MT_NEG"
+
+assert_filtered "MULTITENANT: broadcast_for_user is exempt" \
+    "+    sse.broadcast_for_user(&user, event);" \
+    "$MT_POS" \
+    "$MT_NEG"
+
+assert_filtered "MULTITENANT: heartbeat (transport-only) is exempt" \
+    "+    sse.broadcast(AppEvent::Heartbeat); // projection-exempt: transport-only, heartbeat" \
+    "$MT_POS" \
+    "$MT_NEG"
+
+assert_filtered "MULTITENANT: explicit multi-tenant-safe annotation is exempt" \
+    "+    sse.broadcast(event); // multi-tenant-safe: only reached when multi_tenant_mode=false" \
+    "$MT_POS" \
+    "$MT_NEG"
+
+# Compound annotation: a single `// ` comment can carry both
+# `projection-exempt:` and `multi-tenant-safe:` because Rust line
+# comments don't nest. The marker scanner must accept either marker
+# anywhere in the trailing comment, not only when the comment opens
+# with it. See `src/channels/web/mod.rs::dispatch_status_event` and
+# `src/main.rs` sandbox JobEvent dispatcher.
+assert_filtered "MULTITENANT: compound projection-exempt + multi-tenant-safe annotation is exempt" \
+    "+    sse.broadcast(event); // projection-exempt: bridge dispatcher, single-tenant unscoped status; multi-tenant-safe: only reached when multi_tenant_mode=false" \
+    "$MT_POS" \
+    "$MT_NEG"
+
+assert_flagged "MULTITENANT: bare unscoped sse.broadcast is flagged" \
+    "+    sse.broadcast(event);" \
+    "$MT_POS" \
+    "$MT_NEG"
+
+assert_flagged "MULTITENANT: unscoped broadcast with bridge-dispatcher projection-exempt is still flagged" \
+    "+    sse.broadcast(event); // projection-exempt: bridge dispatcher, status update" \
+    "$MT_POS" \
+    "$MT_NEG"
+
+assert_flagged "MULTITENANT: unscoped broadcast with empty multi-tenant-safe detail is still flagged" \
+    "+    sse.broadcast(event); // multi-tenant-safe: " \
+    "$MT_POS" \
+    "$MT_NEG"
+
 echo ""
 echo "Passed: $PASS, Failed: $FAIL"
 [ "$FAIL" -eq 0 ]

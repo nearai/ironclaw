@@ -130,6 +130,14 @@ pub struct IncomingMessage {
 
 impl IncomingMessage {
     /// Create a new incoming message.
+    ///
+    /// The default `metadata` carries `{"user_id": <user_id>}` so that any
+    /// downstream consumer that scopes by `metadata.user_id` (notably
+    /// `GatewayChannel::send_status` for SSE/WS event routing) has the
+    /// owning tenant identity even when the producer never calls
+    /// [`Self::with_metadata`]. Producers replacing metadata wholesale
+    /// should prefer [`Self::with_metadata`], which preserves the
+    /// `user_id` key on the supplied object.
     pub fn new(
         channel: impl Into<String>,
         user_id: impl Into<String>,
@@ -140,6 +148,7 @@ impl IncomingMessage {
             id: Uuid::new_v4(),
             channel: channel.into(),
             sender_id: user_id.clone(),
+            metadata: serde_json::json!({ "user_id": &user_id }),
             user_id,
             user_name: None,
             content: content.into(),
@@ -147,7 +156,6 @@ impl IncomingMessage {
             thread_id: None,
             conversation_scope_id: None,
             received_at: Utc::now(),
-            metadata: serde_json::Value::Null,
             timezone: None,
             attachments: Vec::new(),
             is_internal: false,
@@ -236,7 +244,24 @@ impl IncomingMessage {
     }
 
     /// Set metadata.
+    ///
+    /// Preserves `metadata.user_id` so the gateway's status routing can
+    /// scope SSE/WS events to the owning tenant. Callers passing a
+    /// non-object value (`Null`, array, scalar) get an object substituted
+    /// with `user_id` populated from `self.user_id`. Callers passing an
+    /// object that lacks `user_id` get it inserted; callers that want a
+    /// different `user_id` keep their explicit value (rare — typically a
+    /// proactive broadcast forwarding to a different tenant).
     pub fn with_metadata(mut self, metadata: serde_json::Value) -> Self {
+        let user_id = self.user_id.clone();
+        let mut metadata = match metadata {
+            serde_json::Value::Object(_) => metadata,
+            _ => serde_json::json!({}),
+        };
+        if let Some(obj) = metadata.as_object_mut() {
+            obj.entry("user_id".to_string())
+                .or_insert_with(|| serde_json::json!(user_id));
+        }
         self.metadata = metadata;
         self
     }

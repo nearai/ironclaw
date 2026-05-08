@@ -635,6 +635,39 @@ impl GatewayChannel {
 /// constant, so the value is compile-time-pinned in both places.
 pub const GATEWAY_CHANNEL_NAME: &str = "gateway";
 
+/// Route a status `AppEvent` to the SSE manager based on owner identity.
+///
+/// In multi-tenant deployments an unscoped global broadcast would deliver
+/// the status (Thinking / ToolStarted / ToolResult / ...) to every
+/// connected subscriber, leaking another tenant's tool calls and outputs.
+/// Drop the event in that mode and surface a WARN so the upstream
+/// producer gets fixed. Single-tenant deployments keep the unscoped
+/// fan-out because there is only one subscriber population.
+///
+/// Extracted from `Channel::send_status` so the routing rule can be
+/// asserted by unit tests without standing up a `GatewayChannel`. See
+/// `tests::status_event_isolation`.
+pub(crate) fn dispatch_status_event(
+    sse: &platform::sse::SseManager,
+    multi_tenant_mode: bool,
+    user_id: Option<&str>,
+    event: AppEvent,
+) {
+    match user_id {
+        Some(uid) => sse.broadcast_for_user(uid, event), // projection-exempt: bridge dispatcher, scoped status update
+        None if multi_tenant_mode => {
+            tracing::warn!(
+                ?event,
+                "dropped unscoped status event in multi-tenant mode — \
+                 producer must include user_id in metadata"
+            );
+        }
+        None => {
+            sse.broadcast(event); // projection-exempt: bridge dispatcher, single-tenant unscoped status; multi-tenant-safe: only reached when multi_tenant_mode=false
+        }
+    }
+}
+
 #[async_trait]
 impl Channel for GatewayChannel {
     fn name(&self) -> &str {
@@ -940,15 +973,12 @@ impl Channel for GatewayChannel {
             }
         };
 
-        // Scope events to the user when user_id is available in metadata.
-        // When user_id is missing (heartbeat, routines), events go to all
-        // subscribers. In multi-tenant mode this leaks status across users.
-        if let Some(uid) = metadata.get("user_id").and_then(|v| v.as_str()) {
-            self.state.sse.broadcast_for_user(uid, event);
-        } else {
-            tracing::debug!("Status event missing user_id in metadata; broadcasting globally");
-            self.state.sse.broadcast(event);
-        }
+        dispatch_status_event(
+            &self.state.sse,
+            self.state.multi_tenant_mode,
+            metadata.get("user_id").and_then(|v| v.as_str()),
+            event,
+        );
         Ok(())
     }
 
