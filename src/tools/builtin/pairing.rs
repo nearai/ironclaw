@@ -85,3 +85,22 @@ impl Tool for PairingApproveTool {
         ApprovalRequirement::UnlessAutoApproved
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_metadata() {
+        let store = Arc::new(PairingStore::new_noop());
+        let tool = PairingApproveTool::new(store);
+        assert_eq!(tool.name(), "pairing_approve");
+        assert!(tool.description().contains("pairing code"));
+        let schema = tool.parameters_schema();
+        assert!(schema["properties"]["code"].is_object());
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::UnlessAutoApproved
+        );
+    }
+}
