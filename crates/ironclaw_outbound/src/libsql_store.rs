@@ -7,9 +7,9 @@ use ironclaw_turns::TurnScope;
 use crate::db::{
     DeliveryRowColumns, LIBSQL_SCHEMA, SubscriptionRowColumns, db_error, delivery_identity_payload,
     failure_kind_key, from_json, projection_agent_db_value, require_one_affected,
-    scope_agent_db_value, scope_project_db_value, subscription_identity_payload, to_json,
-    validate_delivery_attempt_row, validate_delivery_row, validate_policy_row,
-    validate_subscription_row,
+    scope_agent_db_value, scope_project_db_value, subscription_identity_payload,
+    subscription_identity_payload_from_parts, to_json, validate_delivery_attempt_row,
+    validate_delivery_row, validate_policy_row, validate_subscription_row,
 };
 use crate::validation::{
     validate_advance_request, validate_delivery_attempt, validate_delivery_status_request,
@@ -110,17 +110,20 @@ impl OutboundStateStore for LibSqlOutboundStateStore {
     ) -> Result<(), OutboundError> {
         validate_subscription_record(&record)?;
         self.run_migrations().await?;
-        if let Some(existing) = self.load_subscription(&record.subscription_id).await? {
+        let identity_payload = subscription_identity_payload(&record)?;
+        if let Some(existing) = self
+            .load_subscription_by_identity(&record.subscription_id, &identity_payload)
+            .await?
+        {
             validate_subscription_identity(&existing, &record)?;
         }
         let conn = self.connect().await?;
-        let identity_payload = subscription_identity_payload(&record)?;
         let affected = conn
             .execute(
                 "INSERT INTO reborn_outbound_projection_subscriptions \
                  (subscription_id, tenant_id, user_id, agent_id, thread_id, cursor_runtime, identity_payload, payload) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
-                 ON CONFLICT(subscription_id) DO UPDATE SET \
+                 ON CONFLICT(subscription_id, identity_payload) DO UPDATE SET \
                  cursor_runtime = excluded.cursor_runtime, payload = excluded.payload \
                  WHERE reborn_outbound_projection_subscriptions.identity_payload = excluded.identity_payload \
                  AND (reborn_outbound_projection_subscriptions.cursor_runtime IS NULL \
@@ -147,7 +150,16 @@ impl OutboundStateStore for LibSqlOutboundStateStore {
         request: LoadSubscriptionCursorRequest,
     ) -> Result<Option<ProjectionCursor>, OutboundError> {
         self.run_migrations().await?;
-        let Some(record) = self.load_subscription(&request.subscription_id).await? else {
+        let identity_payload = subscription_identity_payload_from_parts(
+            &request.subscription_id,
+            &request.actor,
+            &request.scope,
+            &request.thread_id,
+        )?;
+        let Some(record) = self
+            .load_subscription_by_identity(&request.subscription_id, &identity_payload)
+            .await?
+        else {
             return Ok(None);
         };
         validate_subscription_request(&record, &request)?;
@@ -159,7 +171,16 @@ impl OutboundStateStore for LibSqlOutboundStateStore {
         request: AdvanceSubscriptionCursorRequest,
     ) -> Result<(), OutboundError> {
         self.run_migrations().await?;
-        let Some(mut record) = self.load_subscription(&request.subscription_id).await? else {
+        let identity_payload = subscription_identity_payload_from_parts(
+            &request.subscription_id,
+            &request.actor,
+            &request.cursor.scope,
+            &request.thread_id,
+        )?;
+        let Some(mut record) = self
+            .load_subscription_by_identity(&request.subscription_id, &identity_payload)
+            .await?
+        else {
             return Err(OutboundError::SubscriptionScopeMismatch);
         };
         validate_advance_request(&record, &request)?;
@@ -299,16 +320,17 @@ impl OutboundStateStore for LibSqlOutboundStateStore {
 
 #[cfg(feature = "libsql")]
 impl LibSqlOutboundStateStore {
-    async fn load_subscription(
+    async fn load_subscription_by_identity(
         &self,
         subscription_id: &ProjectionSubscriptionId,
+        identity_payload: &str,
     ) -> Result<Option<ProjectionSubscriptionRecord>, OutboundError> {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT tenant_id, user_id, agent_id, thread_id, cursor_runtime, identity_payload, payload \
-                 FROM reborn_outbound_projection_subscriptions WHERE subscription_id = ?1",
-                ::libsql::params![subscription_id.as_str()],
+                 FROM reborn_outbound_projection_subscriptions WHERE subscription_id = ?1 AND identity_payload = ?2",
+                ::libsql::params![subscription_id.as_str(), identity_payload],
             )
             .await
             .map_err(db_error)?;

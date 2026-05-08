@@ -2,8 +2,10 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use ironclaw_event_projections::ProjectionCursor;
-use ironclaw_turns::TurnScope;
+use ironclaw_event_projections::{ProjectionCursor, ProjectionScope};
+use ironclaw_host_api::ThreadId;
+use ironclaw_turns::{TurnActor, TurnScope};
+use serde::Serialize;
 
 use crate::validation::{
     validate_advance_request, validate_delivery_attempt, validate_delivery_identity,
@@ -24,7 +26,7 @@ pub struct InMemoryOutboundStateStore {
 #[derive(Default)]
 struct InMemoryOutboundState {
     policies: HashMap<ThreadScopeKey, ThreadNotificationPolicy>,
-    subscriptions: HashMap<ProjectionSubscriptionId, ProjectionSubscriptionRecord>,
+    subscriptions: HashMap<ProjectionSubscriptionKey, ProjectionSubscriptionRecord>,
     deliveries: HashMap<OutboundDeliveryId, OutboundDeliveryAttempt>,
 }
 
@@ -36,6 +38,9 @@ struct ThreadScopeKey {
     thread_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ProjectionSubscriptionKey(String);
+
 impl ThreadScopeKey {
     fn new(scope: &TurnScope) -> Self {
         Self {
@@ -44,6 +49,41 @@ impl ThreadScopeKey {
             project_id: scope.project_id.as_ref().map(ToString::to_string),
             thread_id: scope.thread_id.to_string(),
         }
+    }
+}
+
+impl ProjectionSubscriptionKey {
+    fn from_record(record: &ProjectionSubscriptionRecord) -> Result<Self, OutboundError> {
+        Self::from_request(
+            &record.subscription_id,
+            &record.actor,
+            &record.scope,
+            &record.thread_id,
+        )
+    }
+
+    fn from_request(
+        subscription_id: &ProjectionSubscriptionId,
+        actor: &TurnActor,
+        scope: &ProjectionScope,
+        thread_id: &ThreadId,
+    ) -> Result<Self, OutboundError> {
+        #[derive(Serialize)]
+        struct SubscriptionIdentity<'a> {
+            subscription_id: &'a ProjectionSubscriptionId,
+            actor: &'a TurnActor,
+            scope: &'a ProjectionScope,
+            thread_id: &'a ThreadId,
+        }
+
+        serde_json::to_string(&SubscriptionIdentity {
+            subscription_id,
+            actor,
+            scope,
+            thread_id,
+        })
+        .map(Self)
+        .map_err(|_| OutboundError::Serialization)
     }
 }
 
@@ -79,12 +119,11 @@ impl OutboundStateStore for InMemoryOutboundStateStore {
     ) -> Result<(), OutboundError> {
         validate_subscription_record(&record)?;
         let mut state = self.lock_state()?;
-        if let Some(existing) = state.subscriptions.get(&record.subscription_id) {
+        let key = ProjectionSubscriptionKey::from_record(&record)?;
+        if let Some(existing) = state.subscriptions.get(&key) {
             validate_subscription_identity(existing, &record)?;
         }
-        state
-            .subscriptions
-            .insert(record.subscription_id.clone(), record);
+        state.subscriptions.insert(key, record);
         Ok(())
     }
 
@@ -93,7 +132,13 @@ impl OutboundStateStore for InMemoryOutboundStateStore {
         request: LoadSubscriptionCursorRequest,
     ) -> Result<Option<ProjectionCursor>, OutboundError> {
         let state = self.lock_state()?;
-        let Some(record) = state.subscriptions.get(&request.subscription_id) else {
+        let key = ProjectionSubscriptionKey::from_request(
+            &request.subscription_id,
+            &request.actor,
+            &request.scope,
+            &request.thread_id,
+        )?;
+        let Some(record) = state.subscriptions.get(&key) else {
             return Ok(None);
         };
         validate_subscription_request(record, &request)?;
@@ -105,7 +150,13 @@ impl OutboundStateStore for InMemoryOutboundStateStore {
         request: AdvanceSubscriptionCursorRequest,
     ) -> Result<(), OutboundError> {
         let mut state = self.lock_state()?;
-        let Some(record) = state.subscriptions.get_mut(&request.subscription_id) else {
+        let key = ProjectionSubscriptionKey::from_request(
+            &request.subscription_id,
+            &request.actor,
+            &request.cursor.scope,
+            &request.thread_id,
+        )?;
+        let Some(record) = state.subscriptions.get_mut(&key) else {
             return Err(OutboundError::SubscriptionScopeMismatch);
         };
         validate_advance_request(record, &request)?;

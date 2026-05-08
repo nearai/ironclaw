@@ -69,6 +69,21 @@ pub(crate) fn projection_agent_db_value(scope: &ProjectionScope) -> &str {
 pub(crate) fn subscription_identity_payload(
     record: &ProjectionSubscriptionRecord,
 ) -> Result<String, OutboundError> {
+    subscription_identity_payload_from_parts(
+        &record.subscription_id,
+        &record.actor,
+        &record.scope,
+        &record.thread_id,
+    )
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub(crate) fn subscription_identity_payload_from_parts(
+    subscription_id: &ProjectionSubscriptionId,
+    actor: &TurnActor,
+    scope: &ProjectionScope,
+    thread_id: &ThreadId,
+) -> Result<String, OutboundError> {
     #[derive(Serialize)]
     struct SubscriptionIdentity<'a> {
         subscription_id: &'a ProjectionSubscriptionId,
@@ -78,10 +93,10 @@ pub(crate) fn subscription_identity_payload(
     }
 
     to_json(&SubscriptionIdentity {
-        subscription_id: &record.subscription_id,
-        actor: &record.actor,
-        scope: &record.scope,
-        thread_id: &record.thread_id,
+        subscription_id,
+        actor,
+        scope,
+        thread_id,
     })
 }
 
@@ -109,14 +124,15 @@ CREATE TABLE IF NOT EXISTS reborn_outbound_notification_policies (
 );
 
 CREATE TABLE IF NOT EXISTS reborn_outbound_projection_subscriptions (
-    subscription_id TEXT PRIMARY KEY,
+    subscription_id TEXT NOT NULL,
     tenant_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
     agent_id TEXT NOT NULL,
     thread_id TEXT NOT NULL,
     cursor_runtime INTEGER,
     identity_payload TEXT NOT NULL,
-    payload TEXT NOT NULL
+    payload TEXT NOT NULL,
+    PRIMARY KEY (subscription_id, identity_payload)
 );
 CREATE INDEX IF NOT EXISTS idx_reborn_outbound_projection_subscriptions_thread
     ON reborn_outbound_projection_subscriptions(tenant_id, thread_id, user_id, agent_id);
@@ -152,14 +168,15 @@ CREATE TABLE IF NOT EXISTS reborn_outbound_notification_policies (
 );
 
 CREATE TABLE IF NOT EXISTS reborn_outbound_projection_subscriptions (
-    subscription_id TEXT PRIMARY KEY,
+    subscription_id TEXT NOT NULL,
     tenant_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
     agent_id TEXT NOT NULL,
     thread_id TEXT NOT NULL,
     cursor_runtime BIGINT,
     identity_payload TEXT NOT NULL,
-    payload TEXT NOT NULL
+    payload TEXT NOT NULL,
+    PRIMARY KEY (subscription_id, identity_payload)
 );
 CREATE INDEX IF NOT EXISTS idx_reborn_outbound_projection_subscriptions_thread
     ON reborn_outbound_projection_subscriptions(tenant_id, thread_id, user_id, agent_id);

@@ -12,6 +12,7 @@ async fn in_memory_defaults_policy_progress_opt_in_and_subscription_scope() {
     let store = InMemoryOutboundStateStore::default();
     durable_policy_subscription_delivery_flow(&store).await;
     subscription_cursor_rejects_mismatched_scope(&store).await;
+    subscription_ids_are_scoped_not_global(&store).await;
     subscription_cursor_rejects_backward_advancement(&store).await;
     delivery_status_rejects_inconsistent_failure_kind(&store).await;
     notification_policy_rejects_excessive_targets(&store).await;
@@ -28,6 +29,7 @@ async fn libsql_persists_outbound_state_across_reopen() {
 
     let reopened = LibSqlOutboundStateStore::new(db);
     assert_reopened_state(&reopened).await;
+    subscription_ids_are_scoped_not_global(&reopened).await;
     subscription_cursor_rejects_backward_advancement(&reopened).await;
     delivery_status_rejects_inconsistent_failure_kind(&reopened).await;
     notification_policy_rejects_excessive_targets(&reopened).await;
@@ -44,6 +46,7 @@ async fn libsql_rejects_mismatched_subscription_scope_after_reopen() {
 
     let reopened = LibSqlOutboundStateStore::new(db);
     subscription_cursor_rejects_mismatched_scope(&reopened).await;
+    subscription_ids_are_scoped_not_global(&reopened).await;
 }
 
 #[cfg(feature = "postgres")]
@@ -58,6 +61,7 @@ async fn postgres_persists_outbound_state_across_reopen_when_configured() {
 
     let reopened = PostgresOutboundStateStore::new(pool);
     assert_reopened_state(&reopened).await;
+    subscription_ids_are_scoped_not_global(&reopened).await;
     subscription_cursor_rejects_backward_advancement(&reopened).await;
     delivery_status_rejects_inconsistent_failure_kind(&reopened).await;
     notification_policy_rejects_excessive_targets(&reopened).await;
@@ -75,6 +79,7 @@ async fn postgres_rejects_mismatched_subscription_scope_after_reopen_when_config
 
     let reopened = PostgresOutboundStateStore::new(pool);
     subscription_cursor_rejects_mismatched_scope(&reopened).await;
+    subscription_ids_are_scoped_not_global(&reopened).await;
 }
 
 async fn durable_policy_subscription_delivery_flow(store: &impl OutboundStateStore) {
@@ -335,10 +340,7 @@ async fn subscription_cursor_rejects_mismatched_scope(store: &impl OutboundState
             thread_id: thread_id(),
         })
         .await;
-    assert!(matches!(
-        result,
-        Err(OutboundError::SubscriptionScopeMismatch)
-    ));
+    assert!(matches!(result, Ok(None)));
 
     let mut wrong_scope = projection_scope();
     wrong_scope.read_scope.thread_id = Some(ThreadId::new("thread-other").unwrap());
@@ -371,6 +373,73 @@ async fn subscription_cursor_rejects_mismatched_scope(store: &impl OutboundState
         rebind,
         Err(OutboundError::SubscriptionScopeMismatch)
     ));
+}
+
+async fn subscription_ids_are_scoped_not_global(store: &impl OutboundStateStore) {
+    let shared_subscription_id =
+        ProjectionSubscriptionId::new(format!("webui-scoped-subscription-{}", TurnRunId::new()))
+            .unwrap();
+    let base_cursor = ProjectionCursor::for_scope(projection_scope(), EventCursor::new(10));
+    store
+        .upsert_subscription(ProjectionSubscriptionRecord {
+            subscription_id: shared_subscription_id.clone(),
+            actor: actor(),
+            scope: projection_scope(),
+            thread_id: thread_id(),
+            cursor: Some(base_cursor.clone()),
+        })
+        .await
+        .unwrap();
+
+    let sibling_actor = TurnActor::new(UserId::new("user-outbound-sibling").unwrap());
+    let sibling_scope = projection_scope_for_user("user-outbound-sibling");
+    let sibling_cursor = ProjectionCursor::for_scope(sibling_scope.clone(), EventCursor::new(3));
+    store
+        .upsert_subscription(ProjectionSubscriptionRecord {
+            subscription_id: shared_subscription_id.clone(),
+            actor: sibling_actor.clone(),
+            scope: sibling_scope.clone(),
+            thread_id: thread_id(),
+            cursor: Some(sibling_cursor.clone()),
+        })
+        .await
+        .unwrap();
+
+    let base_loaded = store
+        .load_subscription_cursor(LoadSubscriptionCursorRequest {
+            subscription_id: shared_subscription_id.clone(),
+            actor: actor(),
+            scope: projection_scope(),
+            thread_id: thread_id(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(base_loaded, base_cursor);
+
+    let sibling_loaded = store
+        .load_subscription_cursor(LoadSubscriptionCursorRequest {
+            subscription_id: shared_subscription_id.clone(),
+            actor: sibling_actor.clone(),
+            scope: sibling_scope.clone(),
+            thread_id: thread_id(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(sibling_loaded, sibling_cursor);
+
+    let unrelated_actor = TurnActor::new(UserId::new("user-outbound-unrelated").unwrap());
+    let unrelated_scope = projection_scope_for_user("user-outbound-unrelated");
+    let unrelated_lookup = store
+        .load_subscription_cursor(LoadSubscriptionCursorRequest {
+            subscription_id: shared_subscription_id.clone(),
+            actor: unrelated_actor,
+            scope: unrelated_scope,
+            thread_id: thread_id(),
+        })
+        .await;
+    assert!(matches!(unrelated_lookup, Ok(None)));
 }
 
 async fn subscription_cursor_rejects_backward_advancement(store: &impl OutboundStateStore) {
@@ -607,10 +676,14 @@ fn sibling_turn_scope() -> TurnScope {
 }
 
 fn projection_scope() -> ProjectionScope {
+    projection_scope_for_user("user-outbound")
+}
+
+fn projection_scope_for_user(user_id: &str) -> ProjectionScope {
     ProjectionScope {
         stream: EventStreamKey::new(
             TenantId::new("tenant-outbound").unwrap(),
-            UserId::new("user-outbound").unwrap(),
+            UserId::new(user_id).unwrap(),
             Some(AgentId::new("agent-outbound").unwrap()),
         ),
         read_scope: ReadScope {
