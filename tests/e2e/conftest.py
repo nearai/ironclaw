@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -1642,11 +1643,18 @@ async def mission_gmail_live_server(
             },
         )
 
+        # Tee ironclaw stderr to a debug log so live-test failures are
+        # diagnosable without re-running. Only used during /tests/e2e
+        # live recordings — production paths don't see this.
+        stderr_log_path = os.environ.get("IRONCLAW_E2E_STDERR_LOG")
+        stderr_dest: Any = asyncio.subprocess.PIPE
+        if stderr_log_path:
+            stderr_dest = open(stderr_log_path, "w")  # noqa: SIM115
         proc = await asyncio.create_subprocess_exec(
             ironclaw_binary, "--no-onboard",
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=stderr_dest,
             env=env,
         )
         startup_kill_attempted = False

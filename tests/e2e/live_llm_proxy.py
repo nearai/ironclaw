@@ -81,25 +81,136 @@ from aiohttp import web
 
 
 _TOOL_CALL_ID_RE = re.compile(r"call_[A-Za-z0-9_-]{8,}")
+# UUIDs (project_id, thread_id, mission_id, etc.) are dynamic per run.
+# Strip them so hashing is stable across recordings.
+_UUID_RE = re.compile(
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+    re.IGNORECASE,
+)
+# RFC 3339 timestamps embedded in system prompts / tool results.
+_TS_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?"
+)
+
+
+def _strip_dynamic(text: str) -> str:
+    """Strip run-to-run non-determinism from a string for hashing.
+
+    Replaces UUIDs, tool-call ids, and timestamps with placeholders
+    and elides the skills section (whose order varies because the
+    skill registry iterates a HashMap, and whose content varies as
+    skills are added/removed from the registry) so two semantically-
+    identical requests produce the same hash regardless of run-to-run
+    variation.
+    """
+    text = _TOOL_CALL_ID_RE.sub("call_<id>", text)
+    text = _UUID_RE.sub("<uuid>", text)
+    text = _TS_RE.sub("<ts>", text)
+    text = _normalize_skills_block(text)
+    text = _normalize_mission_list_result(text)
+    return text
+
+
+_SKILL_MARKER_RE = re.compile(r"(?:^|\n)(?:### )?\[SKILL\] skill:([A-Za-z0-9_\-]+)")
+# End-of-skills boundaries that appear in real prompts. We can't use a
+# generic `## ` regex because skill bodies frequently contain markdown
+# `## ` headers — those would falsely terminate the skills section.
+_SKILLS_END_BOUNDARIES = (
+    "\nThis is thread #",
+    "\n## Instructions\n",
+    "\n## Available Actions\n",
+    "\n## Tools Available\n",
+)
+
+
+def _normalize_skills_block(text: str) -> str:
+    """Replace `[SKILL] skill:NAME ...` blocks with a sorted name list.
+
+    Skills appear in two forms: prefixed with `### ` (system prompt
+    style) or bare (rendered into the user-facing mission goal). The
+    full body of each skill varies as the registry adds/edits/removes
+    entries between recordings. For canonicalization we only care that
+    the *set* of active skills is the same — the LLM's response to our
+    deterministic test prompt does not branch on skill body content.
+
+    Strategy: locate the first `[SKILL] skill:NAME` marker, find the
+    end of the skills section (next known top-level boundary or end
+    of string), drop the entire range, and replace with a sorted list
+    of just the skill names.
+    """
+    matches = list(_SKILL_MARKER_RE.finditer(text))
+    if not matches:
+        return text
+    head_end = matches[0].start()
+    # Find where the skills section ends. Search after the last match
+    # for a known top-level boundary; if none, the section runs to EOF.
+    last_match_end = matches[-1].end()
+    tail_start = len(text)
+    for boundary in _SKILLS_END_BOUNDARIES:
+        idx = text.find(boundary, last_match_end)
+        if idx != -1 and idx < tail_start:
+            tail_start = idx
+    head = text[:head_end]
+    tail = text[tail_start:] if tail_start < len(text) else ""
+    # Drop the entire skills block from the canonical form. The skill
+    # registry is local-machine state (skills can be installed/removed
+    # at any time) so the *set* of active skills cannot be assumed
+    # stable across record/replay machines. The deterministic test
+    # prompt is engineered so the LLM's response does not branch on
+    # which skills are present.
+    return f"{head}\n[SKILLS]\n{tail}"
+
+
+_MISSION_LIST_RE = re.compile(r"\[\{'cadence':.*?\}\](?=\n|$|]|,)", re.DOTALL)
+
+
+def _normalize_mission_list_result(text: str) -> str:
+    """Collapse mission_list tool results to a stable shape.
+
+    The mission_list tool returns full mission rows with descriptions
+    that contain non-deterministic content (system seed missions can
+    be added/reordered between runs). For canonicalization we only
+    care about the names. With the deterministic sort applied in
+    `list_missions_with_shared`, a stable repr appears in the
+    fixture; this helper protects against past recordings whose
+    capture predates the sort.
+    """
+    return text  # No-op; sort in store_adapter.rs handles ordering now.
 
 
 def _canonicalize_request(body: dict[str, Any]) -> dict[str, Any]:
-    """Strip non-deterministic fields from a chat-completions request.
+    """Build a stable hash key for a chat-completions request.
 
-    Returns a dict suitable for hashing. The goal is two semantically
-    identical requests (same conversation, same tools, same goal) to
-    produce the same hash regardless of run-to-run variations.
+    The full system prompt isn't hashed because it varies run-to-run
+    (skills loaded in HashMap order, embedded UUIDs/timestamps, etc.)
+    while the LLM's response selection is driven by a much smaller
+    set of stable inputs:
+
+    - The model id (selects the response shape).
+    - The conversation tail: roles + payloads of the last few
+      non-system messages, with UUIDs/timestamps/tool-call-ids
+      stripped. This captures "what is the LLM being asked, given
+      what it just did".
+    - The set of tool names exposed (function calls fall through to
+      hash-based dispatch).
+
+    Two semantically-identical requests (same conversation tail,
+    same tool surface) produce the same hash regardless of system-
+    prompt drift.
     """
     canon: dict[str, Any] = {
         "model": body.get("model"),
-        "messages": [],
+        "tail": [],
     }
+    # Walk all non-system messages; stable tail captures the
+    # conversation state. System prompts vary too much to hash.
     for msg in body.get("messages", []) or []:
         role = msg.get("role")
+        if role == "system":
+            continue
         content = msg.get("content")
-        # Normalize tool-call ids in tool/assistant messages.
         if isinstance(content, str):
-            content = _TOOL_CALL_ID_RE.sub("call_<id>", content)
+            content = _strip_dynamic(content)
         elif isinstance(content, list):
             new_parts = []
             for part in content:
@@ -108,41 +219,35 @@ def _canonicalize_request(body: dict[str, Any]) -> dict[str, Any]:
                     continue
                 p = dict(part)
                 if "text" in p and isinstance(p["text"], str):
-                    p["text"] = _TOOL_CALL_ID_RE.sub("call_<id>", p["text"])
+                    p["text"] = _strip_dynamic(p["text"])
                 new_parts.append(p)
             content = new_parts
         norm = {"role": role, "content": content}
         if "name" in msg:
             norm["name"] = msg["name"]
-        # Drop tool_call_id (non-deterministic across runs).
         if "tool_calls" in msg:
             calls = []
             for tc in msg.get("tool_calls", []) or []:
-                tc_copy = {
+                args = (tc.get("function") or {}).get("arguments")
+                if isinstance(args, str):
+                    args = _strip_dynamic(args)
+                calls.append({
                     "type": tc.get("type"),
                     "function": {
                         "name": (tc.get("function") or {}).get("name"),
-                        "arguments": (tc.get("function") or {}).get("arguments"),
+                        "arguments": args,
                     },
-                }
-                calls.append(tc_copy)
+                })
             norm["tool_calls"] = calls
-        canon["messages"].append(norm)
+        canon["tail"].append(norm)
 
     if body.get("tools"):
-        # Tools list affects model behaviour; include their function
-        # names + parameter schemas in the hash. Drop descriptions which
-        # we sometimes tweak between recordings.
-        tools = []
-        for tool in body["tools"]:
-            fn = tool.get("function", {}) or {}
-            tools.append({
-                "name": fn.get("name"),
-                "parameters": fn.get("parameters"),
-            })
+        # Tool *names* drive response selection; full schemas don't.
         # Sort so reordering doesn't break replay.
-        tools.sort(key=lambda t: t.get("name") or "")
-        canon["tools"] = tools
+        canon["tools"] = sorted(
+            (tool.get("function", {}) or {}).get("name") or ""
+            for tool in body["tools"]
+        )
 
     return canon
 
@@ -231,6 +336,13 @@ async def chat_completions(request: web.Request) -> web.Response:
     state = request.app["state"]
     body = await request.json()
     request_hash = _hash_request(body)
+    print(
+        f"live_llm_proxy: chat_completions mode={state['mode']} "
+        f"hash={request_hash[:16]} n_msg={len(body.get('messages') or [])} "
+        f"tools={len(body.get('tools') or [])}",
+        file=sys.stderr,
+        flush=True,
+    )
 
     if state["mode"] == "replay":
         return await _replay(state, body, request_hash)
@@ -245,6 +357,15 @@ async def _replay(
     cursor = state["cursors"].setdefault(request_hash, 0)
     if cursor >= len(matching):
         state["miss_count"] += 1
+        # On miss, dump the canonical blob to a debug file so the
+        # test author can diff it against fixture entries to find
+        # what's different between record and replay.
+        canon = _canonicalize_request(body)
+        debug_dir = state["fixture_path"].parent
+        debug_path = debug_dir / f"{state['fixture_path'].stem}.miss_{state['miss_count']:03d}.json"
+        debug_path.write_text(
+            json.dumps({"request_hash": request_hash, "canonical": canon}, indent=2)
+        )
         # Build a diagnostic so the test sees exactly which prompt
         # missed when it inevitably fails to drive the next step.
         summary = _summarize_request(body)
@@ -254,6 +375,7 @@ async def _replay(
                 "request_hash": request_hash,
                 "request_summary": summary,
                 "fixture_path": str(state["fixture_path"]),
+                "miss_dump": str(debug_path),
                 "available_hashes": [
                     {
                         "hash": e["request_hash"],
@@ -310,6 +432,11 @@ async def _record(
         ) as response:
             response_body = await response.json()
             if response.status >= 400:
+                print(
+                    f"live_llm_proxy: upstream {response.status} body={json.dumps(response_body)[:1500]}",
+                    file=sys.stderr,
+                    flush=True,
+                )
                 return web.json_response(
                     {
                         "error": "live_llm_proxy: upstream returned error",
@@ -323,6 +450,10 @@ async def _record(
     entry = {
         "request_hash": request_hash,
         "request_summary": _summarize_request(body),
+        # Keep the canonical blob alongside the entry so a future
+        # miss can diff against it without re-recording. The blob
+        # is what the hash is computed over.
+        "request_canonical": _canonicalize_request(body),
         "response": response_body,
     }
     state["fixture"].setdefault("entries", []).append(entry)

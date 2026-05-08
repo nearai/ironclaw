@@ -124,6 +124,10 @@ async def start_live_proxy(
                 "(and usually IRONCLAW_LIVE_LLM_API_KEY / IRONCLAW_LIVE_LLM_MODEL)"
             )
 
+    proxy_stderr_log = os.environ.get("IRONCLAW_LIVE_PROXY_STDERR_LOG")
+    proxy_stderr: Any = asyncio.subprocess.PIPE
+    if proxy_stderr_log:
+        proxy_stderr = open(proxy_stderr_log, "w")  # noqa: SIM115
     proc = await asyncio.create_subprocess_exec(
         sys.executable,
         str(PROXY_SCRIPT),
@@ -134,7 +138,7 @@ async def start_live_proxy(
         "--mode",
         mode,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+        stderr=proxy_stderr,
         env={**os.environ},
     )
     try:
