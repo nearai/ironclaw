@@ -859,7 +859,9 @@ pub(crate) async fn slack_relay_oauth_callback_handler(
         onboarding: None,
         thread_id: None,
     };
-    state.sse.broadcast_for_user(&state.owner_id, onboarding_event); // projection-exempt: channel-lifecycle, slack relay onboarding state
+    state
+        .sse
+        .broadcast_for_user(&state.owner_id, onboarding_event); // projection-exempt: channel-lifecycle, slack relay onboarding state
 
     if success {
         axum::response::Html(
