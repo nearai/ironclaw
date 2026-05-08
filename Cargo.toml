@@ -121,7 +121,7 @@ ironclaw_common = { path = "crates/ironclaw_common", version = "0.4.1" }
 # Safety/sanitization
 ironclaw_engine = { path = "crates/ironclaw_engine", version = "0.1.0" }
 ironclaw_gateway = { path = "crates/ironclaw_gateway", version = "0.1.0" }
-ironclaw_llm = { path = "crates/ironclaw_llm", version = "0.1.0", features = ["testing"] }
+ironclaw_llm = { path = "crates/ironclaw_llm", version = "0.1.0" }
 ironclaw_safety = { path = "crates/ironclaw_safety", version = "0.2.2" }
 ironclaw_skills = { path = "crates/ironclaw_skills", version = "0.3.0" }
 ironclaw_tui = { path = "crates/ironclaw_tui", optional = true, version = "0.1.0" }
@@ -233,6 +233,9 @@ testcontainers-modules = { version = "0.11", features = ["postgres"] }
 pretty_assertions = "1"
 tempfile = "3"
 insta = { version = "1.46.3", features = ["yaml"] }
+# Pull the LLM crate's `testing` feature in only for tests so `StubLlm` and
+# fault-injection helpers don't ship in release binaries.
+ironclaw_llm = { path = "crates/ironclaw_llm", version = "0.1.0", features = ["testing"] }
 
 [features]
 default = ["postgres", "libsql", "html-to-markdown", "tui"]
