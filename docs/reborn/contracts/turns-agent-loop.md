@@ -2,7 +2,7 @@
 
 **Status:** Contract-freeze draft
 **Date:** 2026-04-25
-**Depends on:** [`host-api.md`](host-api.md), [`capabilities.md`](capabilities.md), [`memory.md`](memory.md), [`events-projections.md`](events-projections.md), [`processes.md`](processes.md)
+**Depends on:** [`host-api.md`](host-api.md), [`capabilities.md`](capabilities.md), [`memory.md`](memory.md), [`events-projections.md`](events-projections.md), [`processes.md`](processes.md), [`turn-persistence.md`](turn-persistence.md), [`loop-exit.md`](loop-exit.md)
 
 ---
 
@@ -91,6 +91,8 @@ Rules:
 - memory prompt context uses the same tenant/user/project/agent scope;
 - channel metadata does not grant authority by itself.
 
+Adapter-facing `TurnCoordinator` requests carry canonical scope plus durable references only: accepted-message ref, source/reply binding refs, actor metadata, requested run-profile hint, scoped idempotency key, and `received_at`. Submit responses expose redacted metadata including run status, event cursor, accepted-message ref, reply-target binding ref, and resolved run-profile id+version; scoped run-state reads additionally expose the source binding ref. Trusted runner transition APIs stay behind the explicit `ironclaw_turns::runner` surface rather than the adapter prelude.
+
 ---
 
 ## 4. Turn lifecycle
@@ -105,6 +107,7 @@ blocked_approval
 blocked_auth
 waiting_tool
 waiting_process
+recovery_required
 completed
 failed
 cancelled
@@ -117,11 +120,16 @@ accepted -> queued -> running
 running -> blocked_approval -> running
 running -> waiting_tool -> running
 running -> waiting_process -> running
+running -> recovery_required
+recovery_required -> cancelled
 running -> completed|failed|cancelled
 ```
 
 Rules:
 
+- agent-loop drivers report how an attempt stopped with `LoopExit`; validation and trusted outcome mapping follow [`loop-exit.md`](loop-exit.md);
+- runner claim, lease, heartbeat, and expired-lease recovery rules follow [`turn-runner.md`](turn-runner.md);
+- persistence records, active-lock ownership, runner lease fields, checkpoints, and idempotency outcomes follow [`turn-persistence.md`](turn-persistence.md);
 - state transitions are persisted before externally visible side effects where needed for recovery;
 - approval-blocked turns persist enough fingerprint metadata to resume without raw input leakage;
 - cancellation requests propagate to running process/capability work when possible;

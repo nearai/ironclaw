@@ -46,6 +46,7 @@ use std::{fmt, sync::Arc};
 use thiserror::Error;
 
 mod obligations;
+mod planner;
 mod production;
 mod services;
 
@@ -53,8 +54,12 @@ pub use obligations::{
     BuiltinObligationHandler, BuiltinObligationServices, NetworkObligationPolicyStore,
     ProcessObligationLifecycleStore, RuntimeSecretInjectionStore, RuntimeSecretInjectionStoreError,
 };
+pub use planner::{ExecutionPlan, PlannerError, plan_capability};
 pub use production::DefaultHostRuntime;
-pub use services::{HostRuntimeServices, RegisteredRuntimeHealth};
+pub use services::{
+    HostRuntimeServices, ProductionWiringComponent, ProductionWiringConfig, ProductionWiringIssue,
+    ProductionWiringIssueKind, ProductionWiringReport, RegisteredRuntimeHealth,
+};
 
 /// Stable, validated idempotency key supplied by upper turn/loop services.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -706,6 +711,24 @@ impl<N, S> HostHttpEgressService<N, S> {
         self
     }
 
+    pub(crate) fn is_production_wired_with(
+        &self,
+        network_policy_store: &Arc<NetworkObligationPolicyStore>,
+        secret_injections: &Arc<RuntimeSecretInjectionStore>,
+    ) -> bool {
+        matches!(
+            self.network_policy_source,
+            NetworkPolicySource::StagedObligation
+        ) && self
+            .network_policy_store
+            .as_ref()
+            .is_some_and(|store| Arc::ptr_eq(store, network_policy_store))
+            && self
+                .secret_injections
+                .as_ref()
+                .is_some_and(|store| Arc::ptr_eq(store, secret_injections))
+    }
+
     pub fn network(&self) -> &N {
         &self.network
     }
@@ -976,6 +999,12 @@ fn sanitized_secret_error(error: &SecretStoreError) -> String {
         SecretStoreError::UnknownLease { .. } => "credential lease is unavailable".to_string(),
         SecretStoreError::LeaseConsumed { .. } => "credential lease was already used".to_string(),
         SecretStoreError::LeaseRevoked { .. } => "credential lease was revoked".to_string(),
+        SecretStoreError::LeaseExpired { .. } | SecretStoreError::SecretExpired => {
+            "credential expired".to_string()
+        }
+        SecretStoreError::BackendMisconfigured { .. } => {
+            "credential store is misconfigured".to_string()
+        }
         SecretStoreError::StoreUnavailable { .. } => "credential store unavailable".to_string(),
     }
 }

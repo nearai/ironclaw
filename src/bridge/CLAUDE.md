@@ -20,16 +20,26 @@ resolution — they call through these adapters.
 
 ## Engine-v2 enablement contract
 
-For engine v2, blocked managed integrations are not part of the normal
-model-facing callable action list. They surface in capability background
-under `Activatable Integrations`, and the single model-facing enablement
-path is `tool_activate(name=...)`.
+For engine v2, installed-but-unauthed provider tools are direct-callable.
+The model calls them like any ready action; the engine's auth preflight
+raises an `Authentication` gate at execute time, the inline-await machinery
+parks the VM, and the OAuth callback delivers the resolved credential to
+retry the action. `tool_activate` was removed in favor of this contract;
+its install + auto-activation behavior is covered by:
 
-`tool_activate` may internally install, authenticate, or activate the
-integration as needed. `tool_install` and `tool_auth` still exist as
-runtime/compatibility surfaces, but they are not the normal v2 prompt
-contract. After `tool_activate` succeeds, the newly ready tools appear on
-the next top-level turn rather than mid-CodeAct step.
+- `tool_install` (callable; non-agent surface) — installs an extension and
+  registers its tools with the engine registry. After install, the new
+  tools appear on the next top-level turn (CodeAct does not hot-refresh
+  callable tools mid-step).
+- `tool_auth` (callable; v1-only) — manual auth flow surface for non-OAuth
+  credential types.
+- The auth-preflight + inline-await pipeline (see #3133 / PR #3157) for
+  the OAuth gate path.
+
+Integrations that need user setup (`NeedsSetup`, `Inactive`,
+`AvailableNotInstalled`) surface in the prompt under `Activatable
+Integrations`, but the model cannot enable them itself — it tells the user
+to install/activate them through the IronClaw UI.
 
 ## Auth-flow extension resolution: one place, no re-derivation
 
@@ -39,7 +49,7 @@ The single authority that maps an auth gate or tool-call context to the installe
 
 Its precedence order:
 
-1. **User-influenced** — explicit `name` param on enablement/auth tool invocations such as `tool_activate` (and internal/compat paths like `tool_install` / `tool_auth`). This comes from the model or caller arguments, so it's validated via `ExtensionName::new`; invalid values fall through.
+1. **User-influenced** — explicit `name` param on enablement/auth tool invocations like `tool_install` / `tool_auth`. This comes from the model or caller arguments, so it's validated via `ExtensionName::new`; invalid values fall through.
 2. The action's provider extension, via `ToolRegistry::provider_extension_for_tool`.
 3. Canonicalized `action_name` if the extension manager has an installed extension by that name.
 4. The caller-supplied `credential_fallback` — last-resort, used only when no extension owns the action.

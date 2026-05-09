@@ -3,7 +3,7 @@
 //! Issue: <https://github.com/nearai/ironclaw/issues/1652>
 //!
 //! `scoped_to_user()` rebinds a workspace to a different primary user while
-//! preserving shared read scopes. These 7 tests verify the rebinding contracts
+//! preserving shared read scopes. This suite verifies the rebinding contracts
 //! directly, rather than relying on high-level system prompt tests.
 //!
 //! Related indirect coverage:
@@ -120,6 +120,74 @@ async fn rebind_rescopes_private_layers_without_mutating_shared_layers() {
     assert!(ids.contains(&"bob".to_string()));
     assert!(ids.contains(&"team".to_string()));
     assert_no_duplicates(ids);
+}
+
+#[tokio::test]
+async fn rebind_preserves_non_private_layer_when_scope_matches_private_source() {
+    let (db, _dir) = setup().await;
+
+    let colliding_scope = "resolved-owner-scope";
+    let ws = Workspace::new_with_db("startup-owner", db).with_memory_layers(vec![
+        MemoryLayer {
+            name: "private".to_string(),
+            scope: colliding_scope.to_string(),
+            writable: true,
+            sensitivity: LayerSensitivity::Private,
+        },
+        MemoryLayer {
+            name: "team".to_string(),
+            scope: colliding_scope.to_string(),
+            writable: false,
+            sensitivity: LayerSensitivity::Shared,
+        },
+    ]);
+
+    let rebound = ws.scoped_to_user("alice");
+
+    let private =
+        MemoryLayer::find(rebound.memory_layers(), "private").expect("private layer must exist");
+    assert_eq!(private.scope, "alice");
+
+    let team = MemoryLayer::find(rebound.memory_layers(), "team").expect("team layer must exist");
+    assert_eq!(team.scope, colliding_scope);
+
+    let ids = rebound.read_user_ids();
+    assert_eq!(ids[0], "alice", "new primary must be first");
+    assert!(
+        !ids.contains(&"startup-owner".to_string()),
+        "old primary must not remain in read_user_ids"
+    );
+    assert!(
+        ids.contains(&colliding_scope.to_string()),
+        "shared colliding scope must remain readable"
+    );
+    assert_no_duplicates(ids);
+}
+
+#[tokio::test]
+async fn rebind_rescopes_private_layers_even_when_source_scope_differs_from_primary() {
+    let (db, _dir) = setup().await;
+
+    let ws = Workspace::new_with_db("startup-owner", db).with_memory_layers(vec![MemoryLayer {
+        name: "private".to_string(),
+        scope: "resolved-owner-scope".to_string(),
+        writable: true,
+        sensitivity: LayerSensitivity::Private,
+    }]);
+
+    let rebound = ws.scoped_to_user("alice");
+
+    let private =
+        MemoryLayer::find(rebound.memory_layers(), "private").expect("private layer must exist");
+    assert_eq!(private.scope, "alice");
+    assert_eq!(rebound.read_user_ids(), &["alice".to_string()]);
+    assert!(
+        !rebound
+            .read_user_ids()
+            .contains(&"resolved-owner-scope".to_string()),
+        "private source scope must not remain readable after rebinding: {:?}",
+        rebound.read_user_ids()
+    );
 }
 
 // ─── Test 3: Secondary read scopes preserved, old primary removed ────────

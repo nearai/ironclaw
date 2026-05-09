@@ -22,63 +22,9 @@ use crate::types::capability::{
 use crate::types::message::{MessageRole, ThreadMessage};
 use crate::types::project::ProjectId;
 
-/// Runtime platform metadata injected into system prompts for self-awareness.
-///
-/// Provides the agent with knowledge about its own identity and environment
-/// so it can answer questions about itself, its capabilities, and its
-/// configuration without relying on training data.
-#[derive(Debug, Clone, Default)]
-pub struct PlatformInfo {
-    /// Software version (from CARGO_PKG_VERSION).
-    pub version: Option<String>,
-    /// LLM backend name (e.g. "nearai", "openai", "anthropic").
-    pub llm_backend: Option<String>,
-    /// Active model name.
-    pub model_name: Option<String>,
-    /// Database backend (e.g. "libsql", "postgres").
-    pub database_backend: Option<String>,
-    /// Active channel names (e.g. ["telegram", "cli"]).
-    pub active_channels: Vec<String>,
-    /// Owner identifier.
-    pub owner_id: Option<String>,
-    /// Project repository URL.
-    pub repo_url: Option<String>,
-}
-
-impl PlatformInfo {
-    /// Format as a prompt section. Returns empty string if no info is set.
-    pub fn to_prompt_section(&self) -> String {
-        let mut lines = Vec::new();
-
-        lines.push("You are **IronClaw**, a secure autonomous AI assistant platform.".into());
-        if let Some(ref v) = self.version {
-            lines.push(format!("- Version: {v}"));
-        }
-        if let Some(ref repo) = self.repo_url {
-            lines.push(format!("- Repository: {repo}"));
-        }
-        if let Some(ref owner) = self.owner_id {
-            lines.push(format!("- Owner: {owner}"));
-        }
-        if let Some(ref backend) = self.llm_backend {
-            let model = self.model_name.as_deref().unwrap_or("default");
-            lines.push(format!("- LLM: {backend} ({model})"));
-        }
-        if let Some(ref db) = self.database_backend {
-            lines.push(format!("- Database: {db}"));
-        }
-        if !self.active_channels.is_empty() {
-            lines.push(format!("- Channels: {}", self.active_channels.join(", ")));
-        }
-
-        if lines.len() <= 1 {
-            // Only the identity line, no runtime details — still include it
-            return format!("\n\n## Platform\n\n{}\n", lines[0]);
-        }
-
-        format!("\n\n## Platform\n\n{}\n", lines.join("\n"))
-    }
-}
+// Runtime platform metadata lives in `ironclaw_common::platform`. Re-exported
+// from this module's path for back-compat with prior call sites.
+pub use ironclaw_common::platform::PlatformInfo;
 
 /// The main instruction block (before tool listing).
 const CODEACT_PREAMBLE: &str = include_str!("../../prompts/codeact_preamble.md");
@@ -204,7 +150,11 @@ fn build_codeact_system_prompt_inner(
         prompt.push_str(CODEACT_ACTIVATABLE_INTEGRATIONS_HEADING);
         prompt.push('\n');
         prompt.push_str(
-            "If you need one of these integrations, call `tool_activate(name=\"<integration>\")` first. After it succeeds, its tools will be available on the next turn. If you need parameter details before enabling one, call `tool_info(name=\"<tool>\", detail=\"summary\")` on one of the previewed tools.\n\n",
+            "These integrations need user setup before their tools become callable. \
+             You cannot enable them yourself — tell the user to install or activate them \
+             through the IronClaw UI (or wait for them to do so). \
+             If you need parameter details before suggesting one, call \
+             `tool_info(name=\"<tool>\", detail=\"summary\")` on a preview tool.\n\n",
         );
         for capability in activatable_integrations {
             prompt.push_str(&render_activatable_integration(capability));
@@ -310,13 +260,16 @@ const fn capability_kind_label(kind: CapabilitySummaryKind) -> &'static str {
 }
 
 fn is_activatable_integration(capability: &CapabilitySummary) -> bool {
+    // NeedsAuth is intentionally NOT here: post-#3133, installed-but-unauthed
+    // provider tools are direct-callable (the engine's auth preflight raises
+    // an Authentication gate at execute time) so they live in the regular
+    // action inventory, not in the separate setup-required section.
     matches!(
         capability.kind,
         CapabilitySummaryKind::Provider | CapabilitySummaryKind::Channel
     ) && matches!(
         capability.status,
-        CapabilityStatus::NeedsAuth
-            | CapabilityStatus::NeedsSetup
+        CapabilityStatus::NeedsSetup
             | CapabilityStatus::Inactive
             | CapabilityStatus::Latent
             | CapabilityStatus::AvailableNotInstalled
@@ -576,7 +529,11 @@ mod tests {
                     name: "slack".into(),
                     display_name: None,
                     kind: crate::types::capability::CapabilitySummaryKind::Provider,
-                    status: CapabilityStatus::NeedsAuth,
+                    // NeedsSetup (not NeedsAuth) lands in "Activatable
+                    // Integrations". NeedsAuth tools are direct-callable
+                    // post-#3133, so they live in the regular action
+                    // inventory rather than the setup-required section.
+                    status: CapabilityStatus::NeedsSetup,
                     description: Some("Slack workspace integration".into()),
                     action_preview: vec!["slack_send".into(), "slack_history".into()],
                     routing_hint: None,
@@ -593,7 +550,7 @@ mod tests {
         assert!(prompt.contains("Usable through message"));
         assert!(prompt.contains("## Activatable Integrations"));
         assert!(prompt.contains("`slack` [provider]"));
-        assert!(prompt.contains("tool_activate(name=\"<integration>\")"));
+        assert!(prompt.contains("need user setup before their tools become callable"));
         assert!(prompt.contains("tool_info(name=\"<tool>\", detail=\"summary\")"));
         assert!(prompt.contains("Unlocks: `slack_send`, `slack_history`"));
     }
@@ -605,7 +562,10 @@ mod tests {
                 name: "gmail".into(),
                 display_name: Some("Gmail".into()),
                 kind: CapabilitySummaryKind::Provider,
-                status: CapabilityStatus::NeedsAuth,
+                // NeedsSetup keeps gmail in Activatable Integrations.
+                // NeedsAuth gmail would render in the regular action
+                // inventory instead (post-#3133 direct-callable path).
+                status: CapabilityStatus::NeedsSetup,
                 description: Some("Gmail integration".into()),
                 action_preview: vec!["gmail_send".into()],
                 routing_hint: None,
@@ -644,6 +604,29 @@ mod tests {
         assert!(!prompt.contains("- `http`"));
         assert!(prompt.contains("## Activatable Integrations"));
         assert_eq!(prompt.matches("`gmail` [provider]").count(), 1);
+    }
+
+    #[test]
+    fn needs_auth_capability_is_not_activatable_integration() {
+        // Post-#3133: gmail with NeedsAuth status (installed but missing
+        // OAuth) is direct-callable. The auth gate raises at execute
+        // time, so the capability does NOT belong in the Activatable
+        // Integrations section.
+        let prompt = build_codeact_system_prompt_with_docs(
+            &[CapabilitySummary {
+                name: "gmail".into(),
+                display_name: Some("Gmail".into()),
+                kind: CapabilitySummaryKind::Provider,
+                status: CapabilityStatus::NeedsAuth,
+                description: Some("Gmail integration".into()),
+                action_preview: vec!["gmail_send".into()],
+                routing_hint: None,
+            }],
+            &[],
+            &[],
+            None,
+        );
+        assert!(!prompt.contains("## Activatable Integrations"));
     }
 
     #[test]

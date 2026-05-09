@@ -367,6 +367,7 @@ mod tests {
             tools: vec![format!("{name}_search")],
             needs_setup: false,
             has_auth: true,
+            requires_binding: false,
             installed: true,
             activation_error: None,
             version: None,
@@ -654,6 +655,9 @@ mod tests {
             thread_goal: None,
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            gate_controller: ironclaw_engine::CancellingGateController::arc(),
+            call_approval_granted: false,
+            conversation_id: None,
         }
     }
 
@@ -787,7 +791,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn needs_auth_provider_tools_omitted_from_available_actions() {
+    async fn needs_auth_provider_tools_stay_in_available_actions() {
+        // Post-#3133/#3166: a NeedsAuth provider tool (e.g. installed-
+        // but-unauthed gmail) stays on the callable surface. The
+        // engine's auth preflight (`AuthManager::check_action_auth`)
+        // raises an `Authentication` gate at execute time when a
+        // declared credential is missing, the inline-await machinery
+        // parks the VM, and the OAuth callback delivers `Approved`
+        // to retry the action against the now-present secret. The
+        // model calls the tool directly — there is no separate
+        // enablement step. Pre-#3133 the contract was inverted: the
+        // tool was hidden until auth completed and the LLM had to
+        // navigate via the now-removed `tool_activate` first.
         let inventory = projected_inventory(
             "gmail_send",
             "Send a Gmail message",
@@ -797,20 +812,13 @@ mod tests {
         .await;
 
         assert!(
-            !inventory
+            inventory
                 .inline
                 .iter()
                 .any(|action| action.name == "gmail_send"),
-            "NeedsAuth provider tool should be omitted from available_actions, got: {:?}",
+            "NeedsAuth provider tool should be callable; auth resolves at \
+             execute time via inline-await. inline={:?}",
             inventory.inline
-        );
-        assert!(
-            inventory
-                .discoverable
-                .iter()
-                .any(|action| action.name == "gmail_send"),
-            "NeedsAuth provider tool should remain discoverable, got: {:?}",
-            inventory.discoverable
         );
     }
 
@@ -941,7 +949,7 @@ mod tests {
             .await;
         tools
             .register(std::sync::Arc::new(BuiltinTool {
-                name: "tool_activate",
+                name: "tool_search",
             }))
             .await;
 
@@ -962,7 +970,8 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(!action_names.iter().any(|name| name == "tool_install"));
-        assert!(action_names.iter().any(|name| name == "tool_activate"));
+        // tool_search is NOT in the hidden list, so it remains callable.
+        assert!(action_names.iter().any(|name| name == "tool_search"));
     }
 
     #[tokio::test]

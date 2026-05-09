@@ -316,6 +316,47 @@ pub struct ToolDiscoverySummary {
     pub examples: Vec<serde_json::Value>,
 }
 
+/// What runtime authority a tool needs to be exposed under a given
+/// [`ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy`].
+///
+/// This is the **visibility** filter — it only governs whether a tool
+/// shows up in the model-facing tool list. Action-time authorization
+/// (capability grants, approvals, resource checks) still runs on every
+/// invocation regardless of visibility.
+///
+/// Default is [`ToolRuntimeAffordance::None`] — tools that don't depend
+/// on any specific runtime authority show up under every policy. Tools
+/// that require provider-host shell, host workspace filesystem, or
+/// direct (non-brokered) network egress must declare it so they're
+/// hidden when the resolved policy can't grant the underlying authority.
+///
+/// See `ironclaw_runtime_policy::EffectiveRuntimePolicy` and
+/// `crate::tools::runtime_filter::is_visible_under` for the matching
+/// filter logic.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ToolRuntimeAffordance {
+    /// Visible under any runtime policy. Default.
+    #[default]
+    None,
+    /// Requires a process backend other than `None` — any of `Docker`,
+    /// `Srt`, `SmolVm`, `LocalHost`, `TenantSandbox`, `OrgDedicatedRunner`
+    /// satisfies this. A pure-virtual `process_backend == None` profile
+    /// hides shell-style tools from the model.
+    AnyProcess,
+    /// Requires the provider-host shell specifically. Visible only under
+    /// `process_backend == LocalHost`. Hosted multi-tenant and enterprise
+    /// dedicated profiles never select `LocalHost`, so this affordance is
+    /// effectively local-single-user-only.
+    LocalShell,
+    /// Requires the host workspace filesystem. Visible only under
+    /// `filesystem_backend == HostWorkspace`. Same locality semantics as
+    /// `LocalShell`.
+    HostFilesystem,
+    /// Requires direct (non-brokered) network egress. Visible under
+    /// `network_mode in {Direct, DirectLogged}` only.
+    DirectNetwork,
+}
+
 /// Trait for tools that the agent can use.
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -402,6 +443,20 @@ pub trait Tool: Send + Sync {
         EngineCompatibility::Both
     }
 
+    /// What runtime authority this tool needs to be visible under a given
+    /// [`ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy`].
+    ///
+    /// Defaults to [`ToolRuntimeAffordance::None`] — visible under every
+    /// policy. Tools that depend on provider-host shell, host workspace
+    /// filesystem, or direct network egress should override this so they
+    /// are hidden from the model when the resolved policy cannot grant the
+    /// underlying authority. Action-time authorization still runs on every
+    /// invocation; this is a UX/visibility filter, not an authorization
+    /// gate (per #3045).
+    fn runtime_affordance(&self) -> ToolRuntimeAffordance {
+        ToolRuntimeAffordance::None
+    }
+
     /// Parameter names whose values must be redacted before logging, hooks, and approvals.
     ///
     /// The agent framework replaces these parameter values with `"[REDACTED]"` before:
@@ -470,6 +525,23 @@ pub trait Tool: Send + Sync {
     /// their extension id.
     fn provider_extension(&self) -> Option<&str> {
         None
+    }
+
+    /// Names of the secrets store credentials this tool needs to function.
+    ///
+    /// Returns the `secret_name` for every non-optional credential the
+    /// tool declares (e.g. WASM tools' `capabilities.http.credentials`).
+    /// The engine's auth preflight (`AuthManager::check_action_auth`)
+    /// consults this list and raises an `Authentication` gate if any
+    /// declared credential is missing from the secrets store, so the
+    /// model can call the tool directly — no separate enablement step
+    /// is required.
+    ///
+    /// Default returns empty — built-in tools that don't need a
+    /// credential, or that handle missing credentials internally,
+    /// override only when relevant.
+    fn required_credentials(&self) -> Vec<String> {
+        Vec::new()
     }
 
     /// Get the tool schema for LLM function calling.

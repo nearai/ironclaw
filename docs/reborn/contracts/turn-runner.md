@@ -1,0 +1,59 @@
+# Reborn Contract — TurnRunner Execution Model
+
+**Status:** Contract-freeze draft  
+**Date:** 2026-05-06  
+**Depends on:** [`turn-persistence.md`](turn-persistence.md), [`turns-agent-loop.md`](turns-agent-loop.md), [`loop-exit.md`](loop-exit.md), [`runtime-profiles.md`](runtime-profiles.md)
+
+---
+
+## 1. Purpose
+
+`TurnRunner` is the trusted worker-side control plane for executable turn runs. It claims queued runs, maintains leases while model/tool work is active, records safe checkpoint/block/terminal transitions, and moves abandoned work to explicit recovery instead of blindly retrying side effects.
+
+Product adapters must continue to use `TurnCoordinator`. Runner transition APIs are trusted-worker APIs and remain under `ironclaw_turns::runner`. Driver-facing loop exits remain distinct from trusted runner outcomes; see [`loop-exit.md`](loop-exit.md).
+
+---
+
+## 2. Claim and lease rules
+
+- `submit_turn` creates a queued `TurnRunId` and active-thread lock, but no model/tool side effects may run before a runner claim succeeds.
+- `claim_next_run` atomically moves one matching `Queued` run to `Running`.
+- A successful claim stores `runner_id`, `lease_token`, `last_heartbeat_at`, `lease_expires_at`, increments `claim_count`, updates the active lock, and emits `RunnerClaimed`.
+- `heartbeat` requires the matching `runner_id` and `lease_token` and rejects leases whose `lease_expires_at` has already passed; on success it refreshes `last_heartbeat_at`, extends `lease_expires_at`, touches the active lock, and emits `RunnerHeartbeat`.
+- Pull-based claims are authoritative. Wake notifications are optimization hints only.
+- After `TurnCoordinator` durably accepts a submitted run or requeues a resumed run, it may emit a redacted queued-run wake hint containing only the canonical scope, `TurnRunId`, queued status, and event cursor. Wake delivery is best-effort, is not a source of truth, must not fail the durable adapter call, and duplicate hints must be harmless.
+
+---
+
+## 3. Expired lease recovery
+
+- A reconciler scans runner-owned `Running` and `CancelRequested` leases using durable `lease_expires_at` metadata.
+- Expired `Running` or `CancelRequested` leases transition to `RecoveryRequired`, clear current runner ownership, emit a redacted `RecoveryRequired` event with reason `lease_expired`, and keep the same canonical-thread active lock.
+- `RecoveryRequired` runs are not returned by the normal `claim_next_run` path. The system must not auto-retry uncertain side-effecting work.
+- A duplicate/new submit for the same canonical thread remains `ThreadBusy` while recovery is required.
+- Explicit cancellation of `RecoveryRequired` is terminal `Cancelled` and releases the active lock so a new turn can be submitted.
+
+---
+
+## 4. Existing checkpoint and terminal rules
+
+- `block_run` requires the current, unexpired lease, persists a checkpoint/gate ref, clears runner ownership, keeps the active lock, and emits `Blocked`.
+- `complete_run`, runner-side `cancel_run`, and `fail_run` require the matching, unexpired lease and release the active lock exactly once at terminal state.
+- Failure and recovery/cancel reasons are stable sanitized categories only; raw prompts, tool input, host paths, backend errors, and secrets stay out of turn state and lifecycle events.
+
+---
+
+## 5. Loop exit validation
+
+Agent-loop drivers return `LoopExit` claims. `TurnRunner` validates those claims before applying a trusted outcome:
+
+- valid completed exits require host-verified durable reply/result refs and map to `TurnRunnerOutcome::Completed`;
+- valid blocked exits require host-verified checkpoint + gate refs and map to `TurnRunnerOutcome::Blocked`;
+- valid cancelled exits require observed host cancellation/interrupt and map to `TurnRunnerOutcome::Cancelled`; runner-side application then consults durable run state in one transition-port operation, terminalizing only recorded `CancelRequested` runs and mapping observed interrupts that race ahead of recorded cancellation to recovery instead of terminal cancellation;
+- valid failed exits require host-verified evidence that the failure is safe to terminalize, then map stable sanitized failure kinds to `TurnRunnerOutcome::Failed`;
+- invalid exits map either to sanitized terminal failure or runner/system-derived `RecoveryRequired` depending on side-effect safety evidence;
+- runner-side loop-exit application must call trusted transition-port methods, not mutate durable run state directly.
+
+## 6. Deferred work
+
+The current `ironclaw_turns` slices define the core lease/recovery state machine, initial PostgreSQL/libSQL persistence adapters, pure `LoopExit` validation/mapping types, and runner-side `apply_loop_exit` transition application. AgentLoopHost/AgentLoopDriver integration, durable exit-id replay storage, transcript draft validation, side-effect boundary checkpoint cadence inside the loop, production service-graph wiring, and safe explicit retry/fork UX remain follow-up slices.

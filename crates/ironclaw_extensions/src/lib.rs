@@ -5,16 +5,15 @@
 //! execute WASM modules, start Docker containers, connect to MCP servers, resolve
 //! secrets, or reserve resources.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
-
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, HostApiError, PackageId,
-    PackageIdentity, PackageSource, PermissionMode, RequestedTrustClass, ResourceProfile,
-    RuntimeKind, TrustClass, VirtualPath,
+    CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, ExtensionLifecycleOperation,
+    HostApiError, PackageId, PackageIdentity, PackageSource, PermissionMode, RequestedTrustClass,
+    ResourceProfile, RuntimeKind, TrustClass, VirtualPath,
 };
 use ironclaw_trust::TrustPolicyInput;
 use serde::{Deserialize, Deserializer};
+use std::collections::{BTreeSet, HashSet};
 use thiserror::Error;
 
 /// Extension manifest and registry failures.
@@ -36,8 +35,15 @@ pub enum ExtensionError {
     },
     #[error("duplicate extension id {id}")]
     DuplicateExtension { id: ExtensionId },
+    #[error("extension id {id} was not found")]
+    ExtensionNotFound { id: ExtensionId },
     #[error("duplicate capability id {id}")]
     DuplicateCapability { id: CapabilityId },
+    #[error("extension lifecycle event sink failed during {operation} for {extension_id}")]
+    LifecycleEventSink {
+        extension_id: ExtensionId,
+        operation: ExtensionLifecycleOperation,
+    },
     #[error(transparent)]
     Filesystem(#[from] FilesystemError),
 }
@@ -273,7 +279,7 @@ impl ExtensionPackage {
         digest: Option<String>,
         signer: Option<String>,
     ) -> Result<PackageIdentity, ExtensionError> {
-        validate_package_consistency(self)?;
+        registry::validate_package_consistency(self)?;
         Ok(PackageIdentity::new(
             PackageId::new(self.manifest.id.as_str().to_string())?,
             source,
@@ -306,94 +312,13 @@ impl ExtensionPackage {
     }
 }
 
-/// Registry of validated extension packages and declared capabilities.
-#[derive(Debug, Default)]
-pub struct ExtensionRegistry {
-    packages: HashMap<ExtensionId, ExtensionPackage>,
-    capabilities: HashMap<CapabilityId, CapabilityDescriptor>,
-    extension_order: Vec<ExtensionId>,
-    capability_order: Vec<CapabilityId>,
-}
+mod lifecycle;
+mod registry;
 
-impl ExtensionRegistry {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn insert(&mut self, package: ExtensionPackage) -> Result<(), ExtensionError> {
-        validate_package_consistency(&package)?;
-
-        if self.packages.contains_key(&package.id) {
-            return Err(ExtensionError::DuplicateExtension { id: package.id });
-        }
-
-        let mut seen_capabilities = HashSet::new();
-        for descriptor in &package.capabilities {
-            if !seen_capabilities.insert(descriptor.id.clone())
-                || self.capabilities.contains_key(&descriptor.id)
-            {
-                return Err(ExtensionError::DuplicateCapability {
-                    id: descriptor.id.clone(),
-                });
-            }
-            if descriptor.provider != package.id {
-                return Err(ExtensionError::InvalidManifest {
-                    reason: format!(
-                        "descriptor {} provider {} does not match package {}",
-                        descriptor.id, descriptor.provider, package.id
-                    ),
-                });
-            }
-        }
-
-        for descriptor in &package.capabilities {
-            self.capability_order.push(descriptor.id.clone());
-            self.capabilities
-                .insert(descriptor.id.clone(), descriptor.clone());
-        }
-        self.extension_order.push(package.id.clone());
-        self.packages.insert(package.id.clone(), package);
-        Ok(())
-    }
-
-    pub fn get_extension(&self, id: &ExtensionId) -> Option<&ExtensionPackage> {
-        self.packages.get(id)
-    }
-
-    pub fn get_capability(&self, id: &CapabilityId) -> Option<&CapabilityDescriptor> {
-        self.capabilities.get(id)
-    }
-
-    pub fn extensions(&self) -> impl Iterator<Item = &ExtensionPackage> {
-        self.extension_order
-            .iter()
-            .filter_map(|id| self.packages.get(id))
-    }
-
-    pub fn capabilities(&self) -> impl Iterator<Item = &CapabilityDescriptor> {
-        self.capability_order
-            .iter()
-            .filter_map(|id| self.capabilities.get(id))
-    }
-}
-
-fn validate_package_consistency(package: &ExtensionPackage) -> Result<(), ExtensionError> {
-    let expected = ExtensionPackage::from_manifest(package.manifest.clone(), package.root.clone())?;
-    if package.id != expected.id {
-        return Err(ExtensionError::InvalidManifest {
-            reason: format!(
-                "package id {} does not match manifest/root id {}",
-                package.id, expected.id
-            ),
-        });
-    }
-    if package.capabilities != expected.capabilities {
-        return Err(ExtensionError::InvalidManifest {
-            reason: "package capability descriptors do not match manifest declarations".to_string(),
-        });
-    }
-    Ok(())
-}
+pub use lifecycle::{
+    ExtensionLifecycleEvent, ExtensionLifecycleEventSink, ExtensionLifecycleService,
+};
+pub use registry::ExtensionRegistry;
 
 /// Filesystem-backed extension discovery.
 pub struct ExtensionDiscovery;

@@ -138,7 +138,7 @@ mod libsql_phase5 {
         );
         assert_eq!(
             version.get::<Option<String>>(2).unwrap().as_deref(),
-            Some("tenant:tenant-a:user:alice:project:project-1")
+            Some("tenant:tenant-a:user:alice:agent:agent-a:project:project-1")
         );
 
         let indexed_chunks = chunks_for_path(&db, "notes/versioned.md").await;

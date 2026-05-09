@@ -3,6 +3,17 @@
 //! `ironclaw_run_state` stores the current lifecycle state for host-managed
 //! invocations. It is separate from runtime events: events are append-only
 //! history, while run state answers "what is this invocation waiting on now?".
+//! Feature-gated PostgreSQL and libSQL stores provide transactional durable
+//! backends for production composition; in-memory and filesystem stores remain
+//! useful for tests, local demos, and single-process profiles.
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+mod db;
+
+#[cfg(feature = "libsql")]
+pub use db::{LibSqlApprovalRequestStore, LibSqlRunStateApprovalStore, LibSqlRunStateStore};
+#[cfg(feature = "postgres")]
+pub use db::{PostgresApprovalRequestStore, PostgresRunStateApprovalStore, PostgresRunStateStore};
 
 use std::{
     collections::HashMap,
@@ -140,6 +151,8 @@ pub enum RunStateError {
     Serialization(String),
     #[error("deserialization error: {0}")]
     Deserialization(String),
+    #[error("run-state backend error: {0}")]
+    Backend(String),
 }
 
 impl From<FilesystemError> for RunStateError {
@@ -248,6 +261,22 @@ pub trait ApprovalRequestStore: Send + Sync {
         &self,
         scope: &ResourceScope,
     ) -> Result<Vec<ApprovalRecord>, RunStateError>;
+}
+
+/// Combined run-state + approval request store with an atomic approval-block transition.
+///
+/// Production composition should prefer this interface when the same durable backend
+/// owns both invocation state and approval records. It prevents a crash between
+/// `ApprovalRequestStore::save_pending` and `RunStateStore::block_approval` from
+/// leaving a user-actionable approval disconnected from a blocked run.
+#[async_trait]
+pub trait RunStateApprovalStore: RunStateStore + ApprovalRequestStore {
+    async fn save_pending_and_block_approval(
+        &self,
+        scope: ResourceScope,
+        invocation_id: InvocationId,
+        approval: ApprovalRequest,
+    ) -> Result<RunRecord, RunStateError>;
 }
 
 /// In-memory run-state store for tests and early host wiring.

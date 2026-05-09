@@ -3,6 +3,41 @@ use std::{collections::HashMap, path::PathBuf, process::Command};
 use serde_json::Value;
 
 #[test]
+fn reborn_boundary_rules_active_crates_are_workspace_members() {
+    // Regression for PR #3212 review: a boundary rule whose crate has a
+    // `Cargo.toml` on disk but is missing from `cargo metadata` would
+    // previously fail open in `assert_no_normal_workspace_deps`, masking
+    // forbidden edges in the unregistered crate. Each active rule must
+    // either name a crate that has no directory yet (future-only,
+    // tolerated) or a crate that is in the workspace metadata.
+    let metadata = cargo_metadata();
+    let packages = metadata["packages"]
+        .as_array()
+        .expect("cargo metadata must include packages");
+    let registered = packages
+        .iter()
+        .filter_map(|package| package["name"].as_str().map(ToString::to_string))
+        .collect::<std::collections::HashSet<_>>();
+
+    let root = workspace_root();
+    for rule in boundary_rules() {
+        let crate_dir = root.join("crates").join(rule.crate_name);
+        let manifest = crate_dir.join("Cargo.toml");
+        if !manifest.exists() {
+            continue;
+        }
+        assert!(
+            registered.contains(rule.crate_name),
+            "{} has a Cargo.toml at {} but is not registered as a workspace member; \
+             add it to the root `Cargo.toml` `workspace.members` so its boundary rule \
+             is actually checked",
+            rule.crate_name,
+            manifest.display()
+        );
+    }
+}
+
+#[test]
 fn reborn_crate_dependency_boundaries_hold() {
     let metadata = cargo_metadata();
     let packages = metadata["packages"]
@@ -74,6 +109,76 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
 }
 
 #[test]
+fn reborn_turns_public_surface_keeps_runner_api_explicit() {
+    let root = workspace_root();
+    let lib = std::fs::read_to_string(root.join("crates/ironclaw_turns/src/lib.rs"))
+        .expect("turns lib.rs must be readable");
+
+    let forbidden_public_exports = [
+        "pub use runner::",
+        "pub use crate::runner::",
+        "pub use self::runner::",
+    ];
+    for pattern in forbidden_public_exports {
+        assert!(
+            !lib.contains(pattern),
+            "ironclaw_turns public prelude must not re-export trusted runner transition API `{pattern}`; adapters must import ironclaw_turns::runner explicitly"
+        );
+    }
+}
+
+#[test]
+fn reborn_loop_support_llm_wiring_stays_out_of_root_src() {
+    let root = workspace_root();
+    let root_lib =
+        std::fs::read_to_string(root.join("src/lib.rs")).expect("root src/lib.rs must be readable");
+    assert!(
+        !root_lib.contains("pub mod reborn_loop_support;"),
+        "Reborn loop LLM wiring must live under crates/ironclaw_reborn, not root src/lib.rs"
+    );
+    assert!(
+        !root.join("src/reborn_loop_support.rs").exists(),
+        "Reborn loop LLM wiring must not live under root src/"
+    );
+
+    let reborn_gateway = root.join("crates/ironclaw_reborn/src/model_gateway.rs");
+    assert!(
+        reborn_gateway.exists(),
+        "expected Reborn LLM gateway wiring at {}",
+        reborn_gateway.display()
+    );
+    let reborn_gateway_source = std::fs::read_to_string(&reborn_gateway)
+        .expect("Reborn model gateway source must be readable");
+    assert!(
+        reborn_gateway_source.contains("LlmProviderModelGateway"),
+        "Reborn LLM gateway wiring should expose LlmProviderModelGateway from crates/ironclaw_reborn"
+    );
+
+    let reborn_manifest = std::fs::read_to_string(root.join("crates/ironclaw_reborn/Cargo.toml"))
+        .expect("Reborn manifest must be readable");
+    assert!(
+        reborn_manifest.contains("optional = true")
+            && reborn_manifest.contains("default-features = false")
+            && reborn_manifest.contains("root-llm-provider"),
+        "ironclaw_reborn may reuse root LLM code only behind an explicit feature, without enabling the root app's default postgres/libsql/tui feature set"
+    );
+}
+
+#[test]
+fn reborn_turns_public_surface_uses_turn_ids_not_runtime_or_process_ids() {
+    let root = workspace_root();
+    let turns_src = root.join("crates/ironclaw_turns/src");
+    let mut violations = Vec::new();
+    collect_forbidden_turns_identifier_uses(&turns_src, &root, &mut violations);
+
+    assert!(
+        violations.is_empty(),
+        "ironclaw_turns public API must use TurnId/TurnRunId instead of lower runtime/process identifiers:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
 fn reborn_runtime_http_egress_has_single_network_boundary() {
     let forbidden = [
         ForbiddenRuntimeNetworkUse {
@@ -141,6 +246,36 @@ fn reborn_runtime_http_egress_has_single_network_boundary() {
 struct ForbiddenRuntimeNetworkUse {
     pattern: &'static str,
     reason: &'static str,
+}
+
+fn collect_forbidden_turns_identifier_uses(
+    dir: &std::path::Path,
+    root: &std::path::Path,
+    violations: &mut Vec<String>,
+) {
+    let entries = std::fs::read_dir(dir)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", dir.display()));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|err| panic!("failed to read dir entry: {err}"));
+        let path = entry.path();
+        if path.is_dir() {
+            collect_forbidden_turns_identifier_uses(&path, root, violations);
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        let contents = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+        for pattern in ["InvocationId", "ProcessId"] {
+            if contents.contains(pattern) {
+                violations.push(format!(
+                    "{} contains forbidden lower identifier `{pattern}`",
+                    path.strip_prefix(root).unwrap_or(&path).display()
+                ));
+            }
+        }
+    }
 }
 
 struct BoundaryRule {
@@ -270,6 +405,76 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
+            crate_name: "ironclaw_event_projections",
+            forbidden: vec![
+                "ironclaw",
+                "ironclaw_authorization",
+                "ironclaw_approvals",
+                "ironclaw_capabilities",
+                "ironclaw_dispatcher",
+                "ironclaw_extensions",
+                "ironclaw_filesystem",
+                "ironclaw_host_runtime",
+                "ironclaw_reborn_event_store",
+                "ironclaw_secrets",
+                "ironclaw_network",
+                "ironclaw_mcp",
+                "ironclaw_processes",
+                "ironclaw_resources",
+                "ironclaw_run_state",
+                "ironclaw_scripts",
+                "ironclaw_wasm",
+            ],
+        },
+        BoundaryRule {
+            crate_name: "ironclaw_outbound",
+            forbidden: vec![
+                "ironclaw",
+                "ironclaw_authorization",
+                "ironclaw_approvals",
+                "ironclaw_capabilities",
+                "ironclaw_conversations",
+                "ironclaw_dispatcher",
+                "ironclaw_extensions",
+                "ironclaw_filesystem",
+                "ironclaw_gateway",
+                "ironclaw_host_runtime",
+                "ironclaw_mcp",
+                "ironclaw_memory",
+                "ironclaw_network",
+                "ironclaw_processes",
+                "ironclaw_reborn_event_store",
+                "ironclaw_resources",
+                "ironclaw_run_state",
+                "ironclaw_safety",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
+                "ironclaw_skills",
+                "ironclaw_tui",
+                "ironclaw_wasm",
+            ],
+        },
+        BoundaryRule {
+            crate_name: "ironclaw_reborn_event_store",
+            forbidden: vec![
+                "ironclaw_authorization",
+                "ironclaw_approvals",
+                "ironclaw_capabilities",
+                "ironclaw_dispatcher",
+                "ironclaw_extensions",
+                "ironclaw_filesystem",
+                "ironclaw_host_runtime",
+                "ironclaw_secrets",
+                "ironclaw_network",
+                "ironclaw_mcp",
+                "ironclaw_processes",
+                "ironclaw_resources",
+                "ironclaw_run_state",
+                "ironclaw_scripts",
+                "ironclaw_wasm",
+            ],
+        },
+        BoundaryRule {
             crate_name: "ironclaw_secrets",
             forbidden: vec![
                 "ironclaw_authorization",
@@ -345,6 +550,34 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
+            crate_name: "ironclaw_threads",
+            forbidden: vec![
+                "ironclaw",
+                "ironclaw_authorization",
+                "ironclaw_approvals",
+                "ironclaw_capabilities",
+                "ironclaw_dispatcher",
+                "ironclaw_engine",
+                "ironclaw_events",
+                "ironclaw_extensions",
+                "ironclaw_filesystem",
+                "ironclaw_gateway",
+                "ironclaw_host_runtime",
+                "ironclaw_mcp",
+                "ironclaw_memory",
+                "ironclaw_network",
+                "ironclaw_processes",
+                "ironclaw_resources",
+                "ironclaw_run_state",
+                "ironclaw_safety",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
+                "ironclaw_skills",
+                "ironclaw_tui",
+                "ironclaw_wasm",
+            ],
+        },
+        BoundaryRule {
             crate_name: "ironclaw_approvals",
             forbidden: vec![
                 "ironclaw_capabilities",
@@ -374,6 +607,26 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_mcp",
                 "ironclaw_run_state",
                 "ironclaw_scripts",
+                "ironclaw_wasm",
+            ],
+        },
+        BoundaryRule {
+            crate_name: "ironclaw_turns",
+            forbidden: vec![
+                "ironclaw_approvals",
+                "ironclaw_authorization",
+                "ironclaw_capabilities",
+                "ironclaw_dispatcher",
+                "ironclaw_extensions",
+                "ironclaw_filesystem",
+                "ironclaw_host_runtime",
+                "ironclaw_mcp",
+                "ironclaw_memory",
+                "ironclaw_network",
+                "ironclaw_processes",
+                "ironclaw_run_state",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
                 "ironclaw_wasm",
             ],
         },
@@ -446,7 +699,7 @@ fn package_dependencies(package: &Value) -> Option<(String, Vec<String>)> {
         .flatten()
         .filter(|dependency| is_normal_dependency(dependency))
         .filter_map(|dependency| dependency["name"].as_str())
-        .filter(|name| name.starts_with("ironclaw_"))
+        .filter(|name| *name == "ironclaw" || name.starts_with("ironclaw_"))
         .map(ToString::to_string)
         .collect::<Vec<_>>();
     Some((name, dependencies))
@@ -462,7 +715,9 @@ fn is_normal_dependency(dependency: &Value) -> bool {
 fn workspace_ironclaw_crates(dependencies: &HashMap<String, Vec<String>>) -> Vec<&str> {
     dependencies
         .keys()
-        .filter_map(|name| name.starts_with("ironclaw_").then_some(name.as_str()))
+        .filter_map(|name| {
+            (name == "ironclaw" || name.starts_with("ironclaw_")).then_some(name.as_str())
+        })
         .collect()
 }
 
@@ -475,6 +730,22 @@ fn assert_no_normal_workspace_deps<'a>(
         // The landing plan introduces Reborn crates in grouped PRs. Boundary
         // rules become active as soon as their crate is present in the
         // workspace, while absent future crates are ignored in earlier slices.
+        //
+        // Fail closed when the crate directory is on disk but missing from
+        // `cargo metadata` — that combination means the crate exists but
+        // was never registered as a workspace member, so its forbidden
+        // edges would otherwise silently pass without ever being checked.
+        let crate_manifest = workspace_root()
+            .join("crates")
+            .join(crate_name)
+            .join("Cargo.toml");
+        assert!(
+            !crate_manifest.exists(),
+            "{crate_name} has a Cargo.toml at {} but is not in `cargo metadata` output; \
+             add it to the root `Cargo.toml` `workspace.members` so the boundary rule \
+             actually runs against its dependencies",
+            crate_manifest.display()
+        );
         return;
     };
     for forbidden in forbidden {

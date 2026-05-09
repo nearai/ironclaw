@@ -21,7 +21,6 @@ use ironclaw::{
     },
     config::Config,
     hooks::bootstrap_hooks,
-    llm::create_session_manager,
     orchestrator::{ReaperConfig, SandboxReaper},
     pairing::PairingStore,
     tracing_fmt::{init_cli_tracing, init_worker_tracing},
@@ -91,7 +90,7 @@ fn non_cli_channels_enabled(cli_only: bool) -> bool {
     !cli_only
 }
 
-fn normalize_persisted_wasm_channel_names<I, S>(names: I) -> std::collections::HashSet<String>
+fn normalize_startup_wasm_channel_names<I, S>(names: I) -> std::collections::HashSet<String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -106,7 +105,7 @@ where
                 tracing::warn!(
                     channel = name.as_ref(),
                     error = %e,
-                    "Ignoring invalid persisted WASM channel name"
+                    "Ignoring invalid startup WASM channel name"
                 );
             }
         }
@@ -114,28 +113,28 @@ where
     normalized
 }
 
-async fn persisted_active_wasm_channel_names(
+async fn startup_active_wasm_channel_names(
     ext_mgr: &ironclaw::extensions::ExtensionManager,
     user_id: &str,
-    persisted_active_channels: &[String],
+    startup_active_channels: &[String],
 ) -> std::collections::HashSet<String> {
     let mut relay_channels = std::collections::HashSet::new();
-    for name in persisted_active_channels {
+    for name in startup_active_channels {
         if ext_mgr.is_relay_channel(name, user_id).await {
             relay_channels.insert(name.clone());
         }
     }
-    persisted_non_relay_wasm_channel_names(persisted_active_channels, &relay_channels)
+    startup_non_relay_wasm_channel_names(startup_active_channels, &relay_channels)
 }
 
-fn persisted_non_relay_wasm_channel_names(
-    persisted_active_channels: &[String],
-    persisted_active_relay_channels: &std::collections::HashSet<String>,
+fn startup_non_relay_wasm_channel_names(
+    startup_active_channels: &[String],
+    startup_active_relay_channels: &std::collections::HashSet<String>,
 ) -> std::collections::HashSet<String> {
-    normalize_persisted_wasm_channel_names(
-        persisted_active_channels
+    normalize_startup_wasm_channel_names(
+        startup_active_channels
             .iter()
-            .filter(|name| !persisted_active_relay_channels.contains(*name)),
+            .filter(|name| !startup_active_relay_channels.contains(*name)),
     )
 }
 
@@ -270,7 +269,7 @@ async fn async_main() -> anyhow::Result<()> {
                         .await
                         .map_err(|e| anyhow::anyhow!("{}", e))?;
                     config.llm.openai_codex.unwrap_or_else(|| {
-                        use ironclaw::llm::OpenAiCodexConfig;
+                        use ironclaw_llm::OpenAiCodexConfig;
                         let mut cfg = OpenAiCodexConfig::default();
                         if let Ok(v) = std::env::var("OPENAI_CODEX_AUTH_URL") {
                             cfg.auth_endpoint = v;
@@ -287,7 +286,7 @@ async fn async_main() -> anyhow::Result<()> {
                         cfg
                     })
                 };
-                let mgr = ironclaw::llm::OpenAiCodexSessionManager::new(codex_config)
+                let mgr = ironclaw_llm::OpenAiCodexSessionManager::new(codex_config)
                     .map_err(|e| anyhow::anyhow!("{}", e))?;
                 mgr.device_code_login()
                     .await
@@ -378,11 +377,25 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     // Load initial config from env + disk + optional TOML (before DB is available).
-    // Credentials may be missing at this point — that's fine. LlmConfig::resolve()
+    // Credentials may be missing at this point — that's fine. crate::config::llm::resolve()
     // defers gracefully, and AppBuilder::build_all() re-resolves after loading
     // secrets from the encrypted DB.
     let toml_path = cli.config.as_deref();
-    let config = match Config::from_env_with_toml(toml_path).await {
+    let runtime_overrides = ironclaw::config::RuntimeConfigOverrides {
+        deployment: cli.deployment_mode,
+        profile: cli.runtime_profile,
+        // The CLI flag is a bare boolean: `--yolo-disclosure` sets it to
+        // true, absence leaves it None so env-var fallback applies.
+        yolo_disclosure_acknowledged: if cli.yolo_disclosure {
+            Some(true)
+        } else {
+            None
+        },
+    };
+    let config = match Config::from_env_with_toml(toml_path)
+        .await
+        .and_then(|c| c.with_runtime_overrides(&runtime_overrides))
+    {
         Ok(c) => c,
         Err(ironclaw::error::ConfigError::MissingRequired { key, hint }) => {
             anyhow::bail!(
@@ -396,7 +409,7 @@ async fn async_main() -> anyhow::Result<()> {
     };
 
     // Initialize session manager before channel setup
-    let session = create_session_manager(config.llm.session.clone()).await;
+    let session = ironclaw_llm::create_session_manager(config.llm.session.clone()).await;
 
     // Create log broadcaster before tracing init so the WebLogLayer can capture all events.
     let log_broadcaster = Arc::new(LogBroadcaster::new());
@@ -484,20 +497,14 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Default user ID for extension operations (single-user mode).
     let ext_user_id = config.owner_id.clone();
-    let settings_persistence_available = components.db.is_some();
-    let persisted_active_channels: Vec<String> =
-        if settings_persistence_available && let Some(ref ext_mgr) = components.extension_manager {
-            ext_mgr.load_persisted_active_channels(&ext_user_id).await
-        } else {
-            Vec::new()
-        };
-    let persisted_active_wasm_channels: std::collections::HashSet<String> =
-        if settings_persistence_available && let Some(ref ext_mgr) = components.extension_manager {
-            persisted_active_wasm_channel_names(ext_mgr, &ext_user_id, &persisted_active_channels)
-                .await
-        } else {
-            std::collections::HashSet::new()
-        };
+    // Startup-active WASM channels are resolved lazily inside the
+    // `enable_non_cli && wasm_channels_enabled` gate below. Defaulting to
+    // an empty set here keeps the later auto-activation block (gated on
+    // `wasm_channel_runtime_state`) compiling without computing — and
+    // potentially failing on — settings-store reads in `--cli-only` /
+    // `WASM_CHANNELS_ENABLED=false` runs.
+    let mut startup_active_wasm_channels: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     let channels = ChannelManager::new();
     let mut channel_names: Vec<String> = Vec::new();
@@ -681,13 +688,40 @@ async fn async_main() -> anyhow::Result<()> {
         && config.channels.wasm_channels_enabled
         && config.channels.wasm_channels_dir.exists()
     {
+        // Resolve startup-active channels: persisted state is authoritative
+        // when present; otherwise fall back to the setup wizard's
+        // `channels.wasm_channels` so headless installs (no DB, no web UI)
+        // still auto-activate channels listed in the config. Settings-store
+        // errors propagate — masking them would silently re-activate channels
+        // the user had deactivated. Resolved here (not at outer scope) so a
+        // corrupt `activated_channels` row only fails startup when channels
+        // are actually about to be restored.
+        let startup_active_channels: Vec<String> =
+            if let Some(ref ext_mgr) = components.extension_manager {
+                ext_mgr
+                    .load_startup_active_channels(
+                        &ext_user_id,
+                        config.channels.configured_wasm_channels.clone(),
+                    )
+                    .await?
+            } else {
+                ironclaw::extensions::naming::normalize_extension_names(
+                    config.channels.configured_wasm_channels.clone(),
+                )
+            };
+        startup_active_wasm_channels = if let Some(ref ext_mgr) = components.extension_manager {
+            startup_active_wasm_channel_names(ext_mgr, &ext_user_id, &startup_active_channels).await
+        } else {
+            startup_active_channels.iter().cloned().collect()
+        };
+
         let wasm_result = ironclaw::channels::wasm::setup_wasm_channels(
             &config,
             &components.secrets_store,
             components.extension_manager.as_ref(),
             components.db.as_ref(),
             &channel_names,
-            settings_persistence_available.then_some(&persisted_active_wasm_channels),
+            &startup_active_wasm_channels,
             Arc::clone(&components.ownership_cache),
         )
         .await;
@@ -1117,9 +1151,11 @@ async fn async_main() -> anyhow::Result<()> {
             .await;
         tracing::debug!("Channel runtime wired into extension manager for hot-activation");
 
-        // Auto-activate WASM channels that were active in a previous session.
+        // Auto-activate WASM channels resolved at startup — either persisted
+        // from a prior session or supplied by the setup wizard's
+        // `channels.wasm_channels` config when no settings store is available.
         // Relay channels are handled separately below via restore_relay_channels().
-        for name in &persisted_active_wasm_channels {
+        for name in &startup_active_wasm_channels {
             if active_at_startup.contains(name)
                 || ext_mgr.is_relay_channel(name, &ext_user_id).await
             {
@@ -1140,14 +1176,14 @@ async fn async_main() -> anyhow::Result<()> {
                     tracing::debug!(
                         channel = %name,
                         message = %message,
-                        "Auto-activated persisted WASM channel"
+                        "Auto-activated startup WASM channel"
                     );
                 }
                 Ok(ironclaw::extensions::EnsureReadyOutcome::NeedsAuth { auth, .. }) => {
                     tracing::warn!(
                         channel = %name,
                         instructions = ?auth.instructions(),
-                        "Persisted WASM channel still needs authentication"
+                        "Startup WASM channel still needs authentication"
                     );
                 }
                 Ok(ironclaw::extensions::EnsureReadyOutcome::NeedsSetup {
@@ -1156,14 +1192,14 @@ async fn async_main() -> anyhow::Result<()> {
                     tracing::warn!(
                         channel = %name,
                         instructions = %instructions,
-                        "Persisted WASM channel still needs setup"
+                        "Startup WASM channel still needs setup"
                     );
                 }
                 Err(e) => {
                     tracing::warn!(
                         channel = %name,
                         error = %e,
-                        "Failed to auto-activate persisted WASM channel"
+                        "Failed to auto-activate startup WASM channel"
                     );
                 }
             }
@@ -1191,11 +1227,32 @@ async fn async_main() -> anyhow::Result<()> {
         components.tools.register_plan_tools(Some(Arc::clone(sse)));
     }
 
-    // Snapshot memory for trace recording before the agent starts
+    // Snapshot memory for trace recording before the agent starts.
+    // The recorder lives in `ironclaw_llm` and must not depend on the
+    // host's `Workspace` type, so we materialise entries here.
     if let Some(ref recorder) = components.recording_handle
         && let Some(ref ws) = components.workspace
     {
-        recorder.snapshot_memory(ws).await;
+        let mut entries = Vec::new();
+        match ws.list_all().await {
+            Ok(paths) => {
+                for path in paths {
+                    match ws.read(&path).await {
+                        Ok(doc) => entries.push(ironclaw_llm::MemorySnapshotEntry {
+                            path: doc.path,
+                            content: doc.content,
+                        }),
+                        Err(e) => {
+                            tracing::debug!(path = %path, error = %e, "Skipped memory doc in snapshot")
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to list memory documents; trace will have empty memory snapshot");
+            }
+        }
+        recorder.snapshot_memory(entries).await;
     }
 
     let http_interceptor = ironclaw::http_intercept::chain(
@@ -1257,11 +1314,10 @@ async fn async_main() -> anyhow::Result<()> {
         cost_guard: components.cost_guard,
         sse_tx: sse_manager,
         http_interceptor,
-        transcription: config.transcription.create_provider().map(|p| {
-            Arc::new(ironclaw::llm::transcription::TranscriptionMiddleware::new(
-                p,
-            ))
-        }),
+        transcription: config
+            .transcription
+            .create_provider()
+            .map(|p| Arc::new(ironclaw_llm::transcription::TranscriptionMiddleware::new(p))),
         document_extraction: Some(Arc::new(
             ironclaw::document_extraction::DocumentExtractionMiddleware::new(),
         )),
@@ -1280,6 +1336,12 @@ async fn async_main() -> anyhow::Result<()> {
             config.agent.max_llm_concurrent_per_user.unwrap_or(4),
             config.agent.max_jobs_concurrent_per_user.unwrap_or(3),
         )),
+        // Resolved at config load time by `Config::with_runtime_overrides`.
+        // The dispatcher routes the model-facing tool list through
+        // `tool_definitions_visible_under(policy)` so profile-impossible
+        // capabilities (e.g. provider-host shell under hosted multi-tenant)
+        // are hidden before the model call. (#3045 PR 4 + PR 5).
+        runtime_policy: Some(config.runtime.effective_policy.clone()),
     };
 
     let channels_for_warnings = Arc::clone(&channels);
@@ -1507,6 +1569,7 @@ async fn async_main() -> anyhow::Result<()> {
                 content: format!("Warning: {warning}"),
                 thread_id: None,
                 attachments: Vec::new(),
+                inline_attachments: Vec::new(),
                 metadata: serde_json::json!({
                     "source": "system",
                     "type": "warning",
@@ -1730,9 +1793,9 @@ mod tests {
     }
 
     #[test]
-    fn normalize_persisted_wasm_channel_names_canonicalizes_and_dedupes() {
+    fn normalize_startup_wasm_channel_names_canonicalizes_and_dedupes() {
         let normalized =
-            normalize_persisted_wasm_channel_names(["slack-relay", "slack_relay", "telegram"]);
+            normalize_startup_wasm_channel_names(["slack-relay", "slack_relay", "telegram"]);
 
         assert_eq!(normalized.len(), 2);
         assert!(normalized.contains("slack_relay"));
@@ -1740,8 +1803,8 @@ mod tests {
     }
 
     #[test]
-    fn normalize_persisted_wasm_channel_names_skips_invalid_entries() {
-        let normalized = normalize_persisted_wasm_channel_names(["../bad", "telegram"]);
+    fn normalize_startup_wasm_channel_names_skips_invalid_entries() {
+        let normalized = normalize_startup_wasm_channel_names(["../bad", "telegram"]);
 
         assert_eq!(
             normalized,
@@ -1750,9 +1813,9 @@ mod tests {
     }
 
     #[test]
-    fn persisted_non_relay_wasm_channel_names_preserves_legacy_relay_entries() {
+    fn startup_non_relay_wasm_channel_names_preserves_legacy_relay_entries() {
         let relay_names = std::collections::HashSet::from(["slack-relay".to_string()]);
-        let names = persisted_non_relay_wasm_channel_names(
+        let names = startup_non_relay_wasm_channel_names(
             &["slack-relay".to_string(), "telegram".to_string()],
             &relay_names,
         );
@@ -1764,10 +1827,10 @@ mod tests {
     }
 
     #[test]
-    fn normalize_persisted_wasm_channel_names_rejects_invalid_extension_names() {
+    fn normalize_startup_wasm_channel_names_rejects_invalid_extension_names() {
         // ExtensionName rejects uppercase, dots, consecutive underscores
         let normalized =
-            normalize_persisted_wasm_channel_names(["My.Channel", "bad__name", "already_ok"]);
+            normalize_startup_wasm_channel_names(["My.Channel", "bad__name", "already_ok"]);
 
         assert_eq!(
             normalized,

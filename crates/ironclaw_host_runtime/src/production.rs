@@ -30,7 +30,9 @@ use ironclaw_processes::{
     ProcessCancellationRegistry, ProcessError, ProcessHost, ProcessManager, ProcessResultStore,
     ProcessStatus, ProcessStore,
 };
-use ironclaw_run_state::{ApprovalRequestStore, RunStateError, RunStateStore, RunStatus};
+use ironclaw_run_state::{
+    ApprovalRequestStore, RunStateApprovalStore, RunStateError, RunStateStore, RunStatus,
+};
 use ironclaw_trust::{HostTrustPolicy, TrustDecision, TrustError, TrustPolicy, TrustProvenance};
 
 use crate::{
@@ -51,6 +53,7 @@ pub struct DefaultHostRuntime {
     trust_policy: Arc<dyn TrustPolicy>,
     run_state: Option<Arc<dyn RunStateStore>>,
     approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
+    run_state_approval_store: Option<Arc<dyn RunStateApprovalStore>>,
     capability_leases: Option<Arc<dyn CapabilityLeaseStore>>,
     process_manager: Option<Arc<dyn ProcessManager>>,
     process_store: Option<Arc<dyn ProcessStore>>,
@@ -68,9 +71,11 @@ impl DefaultHostRuntime {
     /// dispatch fails closed until composition attaches a concrete policy with
     /// [`Self::with_trust_policy`] or [`Self::with_trust_policy_dyn`].
     ///
-    /// Callers must additionally attach a run-state store and approval-
-    /// request store via [`with_run_state`](Self::with_run_state) and
-    /// [`with_approval_requests`](Self::with_approval_requests) before
+    /// Callers must additionally attach either a combined
+    /// [`RunStateApprovalStore`] via
+    /// [`with_run_state_approval_store`](Self::with_run_state_approval_store),
+    /// or separate stores via [`with_run_state`](Self::with_run_state) and
+    /// [`with_approval_requests`](Self::with_approval_requests), before
     /// invoking any capability whose authorizer may return
     /// `RequireApproval`. Without those stores the capability host fails
     /// closed with `ApprovalStoreMissing`, which surfaces here as a
@@ -89,6 +94,7 @@ impl DefaultHostRuntime {
             trust_policy: Arc::new(HostTrustPolicy::empty()),
             run_state: None,
             approval_requests: None,
+            run_state_approval_store: None,
             capability_leases: None,
             process_manager: None,
             process_store: None,
@@ -119,6 +125,7 @@ impl DefaultHostRuntime {
     /// Attaches the run-state store used to record invocation lifecycle.
     pub fn with_run_state(mut self, run_state: Arc<dyn RunStateStore>) -> Self {
         self.run_state = Some(run_state);
+        self.run_state_approval_store = None;
         self
     }
 
@@ -128,6 +135,16 @@ impl DefaultHostRuntime {
         approval_requests: Arc<dyn ApprovalRequestStore>,
     ) -> Self {
         self.approval_requests = Some(approval_requests);
+        self.run_state_approval_store = None;
+        self
+    }
+
+    /// Attaches a combined durable run-state/approval-request store with an
+    /// atomic approval-block transition.
+    pub fn with_run_state_approval_store(mut self, store: Arc<dyn RunStateApprovalStore>) -> Self {
+        self.run_state = Some(store.clone());
+        self.approval_requests = Some(store.clone());
+        self.run_state_approval_store = Some(store);
         self
     }
 
@@ -537,11 +554,15 @@ impl DefaultHostRuntime {
             self.dispatcher.as_ref(),
             self.authorizer.as_ref(),
         );
-        if let Some(run_state) = &self.run_state {
-            host = host.with_run_state(run_state.as_ref());
-        }
-        if let Some(approval_requests) = &self.approval_requests {
-            host = host.with_approval_requests(approval_requests.as_ref());
+        if let Some(run_state_approval_store) = &self.run_state_approval_store {
+            host = host.with_run_state_approval_store(run_state_approval_store.as_ref());
+        } else {
+            if let Some(run_state) = &self.run_state {
+                host = host.with_run_state(run_state.as_ref());
+            }
+            if let Some(approval_requests) = &self.approval_requests {
+                host = host.with_approval_requests(approval_requests.as_ref());
+            }
         }
         if let Some(capability_leases) = &self.capability_leases {
             host = host.with_capability_leases(capability_leases.as_ref());
@@ -823,6 +844,7 @@ fn unavailable_from_run_state(error: RunStateError) -> HostRuntimeError {
         RunStateError::Filesystem(_) => "run-state filesystem unavailable",
         RunStateError::Serialization(_) => "run-state serialization failed",
         RunStateError::Deserialization(_) => "run-state deserialization failed",
+        RunStateError::Backend(_) => "run-state backend unavailable",
     };
     HostRuntimeError::unavailable(reason)
 }

@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -17,8 +20,8 @@ use ironclaw_processes::{
     ProcessResultStore, ProcessStart, ProcessStatus, ProcessStore,
 };
 use ironclaw_run_state::{
-    InMemoryApprovalRequestStore, InMemoryRunStateStore, RunRecord, RunStart, RunStateError,
-    RunStateStore,
+    ApprovalRecord, ApprovalRequestStore, InMemoryApprovalRequestStore, InMemoryRunStateStore,
+    RunRecord, RunStart, RunStateApprovalStore, RunStateError, RunStateStore,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -125,6 +128,64 @@ async fn default_runtime_surfaces_approval_required_with_persisted_request_id() 
                 .unwrap()
                 .expect("run record persisted");
             assert_eq!(record.approval_request_id, Some(gate.approval_request_id));
+        }
+        other => panic!("expected ApprovalRequired outcome, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn default_runtime_uses_combined_store_for_atomic_approval_block() {
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(ApprovalAuthorizer);
+    let combined_store = Arc::new(RecordingCombinedRunStateApprovalStore::new());
+    let leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStore> =
+        Arc::new(InMemoryCapabilityLeaseStore::new());
+
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher,
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_run_state_approval_store(combined_store.clone())
+    .with_capability_leases(leases);
+
+    let context = execution_context_with_dispatch_grant();
+    let request = RuntimeCapabilityRequest::new(
+        context.clone(),
+        capability_id(),
+        ResourceEstimate::default(),
+        json!({"message": "hello"}),
+        trust_decision_with_dispatch_authority(),
+    );
+
+    let outcome = runtime.invoke_capability(request).await.unwrap();
+
+    match outcome {
+        ironclaw_host_runtime::RuntimeCapabilityOutcome::ApprovalRequired(gate) => {
+            assert_eq!(gate.capability_id, capability_id());
+            assert_eq!(combined_store.combined_calls(), 1);
+            assert_eq!(combined_store.separate_save_calls(), 0);
+            let record = RunStateStore::get(
+                combined_store.as_ref(),
+                &context.resource_scope,
+                context.invocation_id,
+            )
+            .await
+            .unwrap()
+            .expect("run record persisted");
+            assert_eq!(record.approval_request_id, Some(gate.approval_request_id));
+            assert!(
+                ApprovalRequestStore::get(
+                    combined_store.as_ref(),
+                    &context.resource_scope,
+                    gate.approval_request_id,
+                )
+                .await
+                .unwrap()
+                .is_some()
+            );
         }
         other => panic!("expected ApprovalRequired outcome, got {:?}", other),
     }
@@ -982,6 +1043,160 @@ impl RunStateStore for FailingGetRunStateStore {
         scope: &ResourceScope,
     ) -> Result<Vec<RunRecord>, RunStateError> {
         self.inner.records_for_scope(scope).await
+    }
+}
+
+struct RecordingCombinedRunStateApprovalStore {
+    runs: InMemoryRunStateStore,
+    approvals: InMemoryApprovalRequestStore,
+    combined_calls: AtomicUsize,
+    separate_save_calls: AtomicUsize,
+}
+
+impl RecordingCombinedRunStateApprovalStore {
+    fn new() -> Self {
+        Self {
+            runs: InMemoryRunStateStore::new(),
+            approvals: InMemoryApprovalRequestStore::new(),
+            combined_calls: AtomicUsize::new(0),
+            separate_save_calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn combined_calls(&self) -> usize {
+        self.combined_calls.load(Ordering::SeqCst)
+    }
+
+    fn separate_save_calls(&self) -> usize {
+        self.separate_save_calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl RunStateStore for RecordingCombinedRunStateApprovalStore {
+    async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError> {
+        self.runs.start(start).await
+    }
+
+    async fn block_approval(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        approval: ApprovalRequest,
+    ) -> Result<RunRecord, RunStateError> {
+        self.runs
+            .block_approval(scope, invocation_id, approval)
+            .await
+    }
+
+    async fn block_auth(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        error_kind: String,
+    ) -> Result<RunRecord, RunStateError> {
+        self.runs.block_auth(scope, invocation_id, error_kind).await
+    }
+
+    async fn complete(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<RunRecord, RunStateError> {
+        self.runs.complete(scope, invocation_id).await
+    }
+
+    async fn fail(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        error_kind: String,
+    ) -> Result<RunRecord, RunStateError> {
+        self.runs.fail(scope, invocation_id, error_kind).await
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<Option<RunRecord>, RunStateError> {
+        self.runs.get(scope, invocation_id).await
+    }
+
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<RunRecord>, RunStateError> {
+        self.runs.records_for_scope(scope).await
+    }
+}
+
+#[async_trait]
+impl ApprovalRequestStore for RecordingCombinedRunStateApprovalStore {
+    async fn save_pending(
+        &self,
+        scope: ResourceScope,
+        request: ApprovalRequest,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.separate_save_calls.fetch_add(1, Ordering::SeqCst);
+        self.approvals.save_pending(scope, request).await
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<Option<ApprovalRecord>, RunStateError> {
+        self.approvals.get(scope, request_id).await
+    }
+
+    async fn approve(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.approvals.approve(scope, request_id).await
+    }
+
+    async fn deny(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.approvals.deny(scope, request_id).await
+    }
+
+    async fn discard_pending(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.approvals.discard_pending(scope, request_id).await
+    }
+
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<ApprovalRecord>, RunStateError> {
+        self.approvals.records_for_scope(scope).await
+    }
+}
+
+#[async_trait]
+impl RunStateApprovalStore for RecordingCombinedRunStateApprovalStore {
+    async fn save_pending_and_block_approval(
+        &self,
+        scope: ResourceScope,
+        invocation_id: InvocationId,
+        approval: ApprovalRequest,
+    ) -> Result<RunRecord, RunStateError> {
+        self.combined_calls.fetch_add(1, Ordering::SeqCst);
+        self.approvals
+            .save_pending(scope.clone(), approval.clone())
+            .await?;
+        self.runs
+            .block_approval(&scope, invocation_id, approval)
+            .await
     }
 }
 

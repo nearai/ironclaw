@@ -1035,3 +1035,219 @@ effects = ["network", "dispatch_capability"]
 default_permission = "ask"
 parameters_schema = { type = "object" }
 "#;
+
+#[tokio::test]
+async fn lifecycle_service_installs_package_and_records_metadata_only_event() {
+    let events = std::sync::Arc::new(RecordingExtensionLifecycleEventSink::default());
+    let package = ExtensionPackage::from_manifest(
+        ExtensionManifest::parse(
+            &WASM_MANIFEST
+                .replace(
+                    "Echo demo extension",
+                    "extension_raw_description_sentinel_3022",
+                )
+                .replace(
+                    "wasm/echo.wasm",
+                    "wasm/extension_raw_asset_sentinel_3022.wasm",
+                )
+                .replace(
+                    "parameters_schema = { type = \"object\" }",
+                    "parameters_schema = { type = \"object\", description = \"extension_raw_schema_sentinel_3022\" }",
+                ),
+        )
+        .unwrap(),
+        VirtualPath::new("/system/extensions/echo").unwrap(),
+    )
+    .unwrap();
+    let mut service = ExtensionLifecycleService::new(ExtensionRegistry::new())
+        .with_event_sink(std::sync::Arc::clone(&events));
+
+    service.install(package).await.unwrap();
+
+    assert!(
+        service
+            .registry()
+            .get_extension(&ExtensionId::new("echo").unwrap())
+            .is_some()
+    );
+    assert!(
+        service
+            .registry()
+            .get_capability(&CapabilityId::new("echo.say").unwrap())
+            .is_some()
+    );
+    let recorded = events.events();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].operation, ExtensionLifecycleOperation::Install);
+    assert_eq!(recorded[0].extension_id.as_str(), "echo");
+    assert_eq!(recorded[0].version, "0.1.0");
+    assert_eq!(recorded[0].runtime, RuntimeKind::Wasm);
+    assert_eq!(recorded[0].capability_count, 1);
+    assert!(recorded[0].capability_surface_changed);
+    let serialized = format!("{recorded:?}");
+    assert!(!serialized.contains("extension_raw_description_sentinel_3022"));
+    assert!(!serialized.contains("extension_raw_asset_sentinel_3022"));
+    assert!(!serialized.contains("extension_raw_schema_sentinel_3022"));
+}
+
+#[tokio::test]
+async fn lifecycle_service_records_update_disable_enable_and_remove_events() {
+    let events = std::sync::Arc::new(RecordingExtensionLifecycleEventSink::default());
+    let installed = ExtensionPackage::from_manifest(
+        ExtensionManifest::parse(WASM_MANIFEST).unwrap(),
+        VirtualPath::new("/system/extensions/echo").unwrap(),
+    )
+    .unwrap();
+    let updated = ExtensionPackage::from_manifest(
+        ExtensionManifest::parse(
+            &WASM_MANIFEST
+                .replace("version = \"0.1.0\"", "version = \"0.2.0\"")
+                .replace("echo.say", "echo.reply"),
+        )
+        .unwrap(),
+        VirtualPath::new("/system/extensions/echo").unwrap(),
+    )
+    .unwrap();
+    let extension_id = ExtensionId::new("echo").unwrap();
+    let mut service = ExtensionLifecycleService::new(ExtensionRegistry::new())
+        .with_event_sink(std::sync::Arc::clone(&events));
+
+    service.install(installed).await.unwrap();
+    service.update(updated).await.unwrap();
+    service.disable(&extension_id).await.unwrap();
+    assert!(!service.is_enabled(&extension_id));
+    service.enable(&extension_id).await.unwrap();
+    assert!(service.is_enabled(&extension_id));
+    service.remove(&extension_id).await.unwrap();
+
+    assert!(service.registry().get_extension(&extension_id).is_none());
+    assert!(
+        service
+            .registry()
+            .get_capability(&CapabilityId::new("echo.say").unwrap())
+            .is_none()
+    );
+    assert!(
+        service
+            .registry()
+            .get_capability(&CapabilityId::new("echo.reply").unwrap())
+            .is_none()
+    );
+    let recorded = events.events();
+    assert_eq!(recorded.len(), 5);
+    assert_eq!(recorded[0].operation, ExtensionLifecycleOperation::Install);
+    assert_eq!(recorded[1].operation, ExtensionLifecycleOperation::Update);
+    assert_eq!(recorded[1].version, "0.2.0");
+    assert!(recorded[1].capability_surface_changed);
+    assert_eq!(recorded[2].operation, ExtensionLifecycleOperation::Disable);
+    assert!(recorded[2].capability_surface_changed);
+    assert_eq!(recorded[3].operation, ExtensionLifecycleOperation::Enable);
+    assert!(recorded[3].capability_surface_changed);
+    assert_eq!(recorded[4].operation, ExtensionLifecycleOperation::Remove);
+    assert_eq!(recorded[4].version, "0.2.0");
+    assert!(recorded[4].capability_surface_changed);
+}
+
+#[tokio::test]
+async fn lifecycle_update_preserves_registry_iteration_order() {
+    let alpha = lifecycle_package("alpha", "alpha.say", "0.1.0");
+    let beta = lifecycle_package("beta", "beta.say", "0.1.0");
+    let alpha_update = lifecycle_package("alpha", "alpha.reply", "0.2.0");
+    let mut service = ExtensionLifecycleService::new(ExtensionRegistry::new());
+
+    service.install(alpha).await.unwrap();
+    service.install(beta).await.unwrap();
+    service.update(alpha_update).await.unwrap();
+
+    let extension_ids = service
+        .registry()
+        .extensions()
+        .map(|package| package.id.as_str().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(extension_ids, vec!["alpha", "beta"]);
+    let capability_ids = service
+        .registry()
+        .capabilities()
+        .map(|descriptor| descriptor.id.as_str().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(capability_ids, vec!["alpha.reply", "beta.say"]);
+}
+
+#[tokio::test]
+async fn lifecycle_service_does_not_install_when_required_event_sink_fails() {
+    let package = ExtensionPackage::from_manifest(
+        ExtensionManifest::parse(WASM_MANIFEST).unwrap(),
+        VirtualPath::new("/system/extensions/echo").unwrap(),
+    )
+    .unwrap();
+    let mut service = ExtensionLifecycleService::new(ExtensionRegistry::new())
+        .with_event_sink(std::sync::Arc::new(FailingExtensionLifecycleEventSink));
+
+    let err = service.install(package).await.unwrap_err();
+
+    assert!(matches!(
+        err,
+        ExtensionError::LifecycleEventSink {
+            ref extension_id,
+            operation: ExtensionLifecycleOperation::Install,
+        } if extension_id.as_str() == "echo"
+    ));
+    assert!(!err.to_string().contains("raw_sink_failure_sentinel_3022"));
+    assert!(
+        service
+            .registry()
+            .get_extension(&ExtensionId::new("echo").unwrap())
+            .is_none()
+    );
+}
+
+fn lifecycle_package(id: &str, capability: &str, version: &str) -> ExtensionPackage {
+    ExtensionPackage::from_manifest(
+        ExtensionManifest::parse(
+            &WASM_MANIFEST
+                .replace("id = \"echo\"", &format!("id = \"{id}\""))
+                .replace("version = \"0.1.0\"", &format!("version = \"{version}\""))
+                .replace("echo.say", capability),
+        )
+        .unwrap(),
+        VirtualPath::new(format!("/system/extensions/{id}")).unwrap(),
+    )
+    .unwrap()
+}
+
+#[derive(Default)]
+struct RecordingExtensionLifecycleEventSink {
+    events: std::sync::Mutex<Vec<ExtensionLifecycleEvent>>,
+}
+
+impl RecordingExtensionLifecycleEventSink {
+    fn events(&self) -> Vec<ExtensionLifecycleEvent> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl ExtensionLifecycleEventSink for RecordingExtensionLifecycleEventSink {
+    async fn record_extension_lifecycle_event(
+        &self,
+        event: ExtensionLifecycleEvent,
+    ) -> Result<(), ExtensionError> {
+        self.events.lock().unwrap().push(event);
+        Ok(())
+    }
+}
+
+struct FailingExtensionLifecycleEventSink;
+
+#[async_trait::async_trait]
+impl ExtensionLifecycleEventSink for FailingExtensionLifecycleEventSink {
+    async fn record_extension_lifecycle_event(
+        &self,
+        event: ExtensionLifecycleEvent,
+    ) -> Result<(), ExtensionError> {
+        let _ = event;
+        Err(ExtensionError::InvalidManifest {
+            reason: "raw_sink_failure_sentinel_3022".to_string(),
+        })
+    }
+}

@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-25
 **Generated:** 2026-04-25T12:18:38Z
-**Last updated:** 2026-04-27 after contract-freeze review updates and PR1 landing-plan carve-out
+**Last updated:** 2026-05-06 after conversation-binding semantic slice
 **Status:** Current docs snapshot / implementation-alignment map
 **Scope:** Reborn host architecture, current implemented slices, and explicit gaps
 
@@ -31,6 +31,8 @@ docs/reborn/contracts/storage-placement.md
 docs/reborn/contracts/memory.md
 docs/reborn/contracts/settings-config.md
 docs/reborn/contracts/turns-agent-loop.md
+docs/reborn/contracts/turn-persistence.md
+docs/reborn/contracts/conversation-binding.md
 docs/reborn/contracts/migration-compatibility.md
 ```
 
@@ -255,6 +257,7 @@ The current Reborn stack includes these contract and implementation slices. Thes
 | Script lane | `[implemented slice]` `ScriptRuntimeAdapter` composition in `ironclaw_host_runtime` delegates to `ScriptExecutor` with semantic manifest runner profiles, in-process demo backend, and optional legacy Docker backend support |
 | MCP lane | `[implemented slice]` `McpRuntimeAdapter` composition in `ironclaw_host_runtime` delegates to `McpExecutor`; not a full MCP lifecycle product yet |
 | Process persistence | `[implemented slice]` process store/manager records, scoped process result records with inline JSON or filesystem output refs, `ProcessServices` wiring, host-facing `ProcessHost` status/kill/await/subscribe/result/output APIs, cooperative cancellation tokens, background completion/failure transition protection, lifecycle events, and resource reservation ownership/cleanup |
+| Conversation binding / inbound turns | `[implemented slice]` `ironclaw_conversations` defines adapter-safe `ConversationBindingService`, `SessionThreadService`, and `InboundTurnService` contracts with an in-memory semantic implementation for pairing-required binding creation, explicit linking, participant checks, source/reply binding refs, external-event idempotency, and canonical `TurnCoordinator` submission refs; durable transcript storage remains downstream of #3204 |
 | Live vertical slice | `[implemented slice]` runnable demos through discovery -> registry -> dispatcher adapters -> resources/events and through `CapabilityHost` -> authorization -> host-runtime-composed dispatcher adapters -> process services; host-runtime composition helper covers shared service wiring and has non-Docker in-memory and filesystem-backed live examples |
 
 ---

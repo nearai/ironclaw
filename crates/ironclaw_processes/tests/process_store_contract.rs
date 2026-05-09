@@ -235,6 +235,42 @@ async fn background_process_manager_stores_success_output_result() {
 }
 
 #[tokio::test]
+async fn process_stores_sanitize_failure_error_kind_before_persistence() {
+    let scope = sample_scope(InvocationId::new(), "tenant1", "user1");
+    let process_id = ProcessId::new();
+    let lifecycle_store = InMemoryProcessStore::new();
+    lifecycle_store
+        .start(process_start(
+            process_id,
+            scope.invocation_id,
+            scope.clone(),
+        ))
+        .await
+        .unwrap();
+
+    let failed = lifecycle_store
+        .fail(
+            &scope,
+            process_id,
+            "RAW_PROCESS_ERROR_SENTINEL_3022 /tmp/private-process sk_live".to_string(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(failed.error_kind.as_deref(), Some("Unclassified"));
+
+    let result_store = InMemoryProcessResultStore::new();
+    let result = result_store
+        .fail(
+            &scope,
+            process_id,
+            "RAW_PROCESS_RESULT_SENTINEL_3022 /tmp/private-result sk_live".to_string(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.error_kind.as_deref(), Some("Unclassified"));
+}
+
+#[tokio::test]
 async fn background_process_manager_stores_failure_error_result() {
     let store = Arc::new(InMemoryProcessStore::new());
     let result_store = Arc::new(InMemoryProcessResultStore::new());

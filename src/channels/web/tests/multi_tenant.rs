@@ -193,7 +193,7 @@ mod workspace_pool {
     use super::*;
     use crate::config::{WorkspaceConfig, WorkspaceSearchConfig};
     use crate::workspace::EmbeddingCacheConfig;
-    use crate::workspace::layer::MemoryLayer;
+    use crate::workspace::layer::{LayerSensitivity, MemoryLayer};
 
     #[tokio::test]
     async fn test_workspace_pool_applies_search_config() {
@@ -225,7 +225,7 @@ mod workspace_pool {
             name: "shared-layer".to_string(),
             scope: "shared".to_string(),
             writable: false,
-            sensitivity: Default::default(),
+            sensitivity: LayerSensitivity::Shared,
         }];
         let ws_config = WorkspaceConfig {
             memory_layers: layers,
@@ -249,6 +249,74 @@ mod workspace_pool {
             ws.read_user_ids().contains(&"shared".to_string()),
             "expected 'shared' in read_user_ids, got {:?}",
             ws.read_user_ids()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_workspace_pool_rebinds_default_private_layer_to_identity_user() {
+        let (db, _dir) = test_db().await;
+        let ws_config = WorkspaceConfig {
+            memory_layers: MemoryLayer::default_for_user("owner-scope"),
+            read_scopes: vec![],
+        };
+        let pool = WorkspacePool::new(
+            db,
+            None,
+            EmbeddingCacheConfig::default(),
+            WorkspaceSearchConfig::default(),
+            ws_config,
+        );
+        let identity = UserIdentity {
+            user_id: "alice".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: vec![],
+        };
+
+        let ws = pool.get_or_create(&identity).await;
+
+        assert_eq!(ws.user_id(), "alice");
+        let private = MemoryLayer::find(ws.memory_layers(), "private")
+            .expect("default private layer should exist");
+        assert_eq!(private.scope, "alice");
+        assert_eq!(ws.read_user_ids(), &["alice".to_string()]);
+        assert!(
+            !ws.read_user_ids().contains(&"owner-scope".to_string()),
+            "tenant workspace must not inherit the startup owner scope: {:?}",
+            ws.read_user_ids()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_workspace_pool_does_not_read_owner_private_memory_by_default() {
+        let (db, _dir) = test_db().await;
+        let owner_ws = crate::workspace::Workspace::new_with_db("owner-scope", Arc::clone(&db));
+        owner_ws
+            .write("daily/2099-01-01.md", "owner-only conversation archive")
+            .await
+            .expect("seed owner memory");
+        let ws_config = WorkspaceConfig {
+            memory_layers: MemoryLayer::default_for_user("owner-scope"),
+            read_scopes: vec![],
+        };
+        let pool = WorkspacePool::new(
+            db,
+            None,
+            EmbeddingCacheConfig::default(),
+            WorkspaceSearchConfig::default(),
+            ws_config,
+        );
+        let identity = UserIdentity {
+            user_id: "alice".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: vec![],
+        };
+
+        let ws = pool.get_or_create(&identity).await;
+        let result = ws.read("daily/2099-01-01.md").await;
+
+        assert!(
+            result.is_err(),
+            "tenant workspace unexpectedly read owner private memory: {result:?}"
         );
     }
 

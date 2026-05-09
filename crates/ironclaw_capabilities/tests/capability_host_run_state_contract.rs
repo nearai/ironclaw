@@ -62,6 +62,99 @@ async fn capability_host_blocks_for_approval_without_dispatch() {
 }
 
 #[tokio::test]
+async fn capability_host_uses_combined_store_for_atomic_approval_block() {
+    let registry = registry_with_echo_capability();
+    let dispatcher = RecordingDispatcher::default();
+    let store = RecordingCombinedRunStateApprovalStore::new();
+    let host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+        .with_run_state_approval_store(&store);
+    let context = execution_context(CapabilitySet::default());
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "needs atomic approval"});
+
+    let err = host
+        .invoke_json(CapabilityInvocationRequest {
+            context,
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityInvocationError::AuthorizationRequiresApproval { .. }
+    ));
+    assert_eq!(store.combined_calls(), 1);
+    assert_eq!(store.separate_save_calls(), 0);
+    let run = RunStateStore::get(&store, &scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.status, RunStatus::BlockedApproval);
+    let approval_id = run.approval_request_id.unwrap();
+    let approval = ApprovalRequestStore::get(&store, &scope, approval_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(approval.status, ApprovalStatus::Pending);
+    assert_eq!(
+        approval.request.invocation_fingerprint,
+        Some(
+            InvocationFingerprint::for_dispatch(&scope, &capability_id(), &estimate, &input)
+                .unwrap()
+        )
+    );
+}
+
+#[tokio::test]
+async fn capability_host_separate_store_setters_clear_combined_atomic_path() {
+    let registry = registry_with_echo_capability();
+    let dispatcher = RecordingDispatcher::default();
+    let combined = RecordingCombinedRunStateApprovalStore::new();
+    let separate_run_state = InMemoryRunStateStore::new();
+    let host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+        .with_run_state_approval_store(&combined)
+        .with_run_state(&separate_run_state);
+    let context = execution_context(CapabilitySet::default());
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "split stores by explicit setter order"});
+
+    let err = host
+        .invoke_json(CapabilityInvocationRequest {
+            context,
+            capability_id: capability_id(),
+            estimate,
+            input,
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityInvocationError::AuthorizationRequiresApproval { .. }
+    ));
+    assert_eq!(combined.combined_calls(), 0);
+    assert_eq!(combined.separate_save_calls(), 1);
+    assert_eq!(
+        separate_run_state
+            .get(&scope, invocation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        RunStatus::BlockedApproval
+    );
+}
+
+#[tokio::test]
 async fn capability_host_leaves_run_blocked_when_resume_is_attempted_before_approval_resolves() {
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
@@ -1281,6 +1374,160 @@ impl ApprovalRequestStore for HangingSaveApprovalRequestStore {
         scope: &ResourceScope,
     ) -> Result<Vec<ApprovalRecord>, RunStateError> {
         self.inner.records_for_scope(scope).await
+    }
+}
+
+struct RecordingCombinedRunStateApprovalStore {
+    runs: InMemoryRunStateStore,
+    approvals: InMemoryApprovalRequestStore,
+    combined_calls: AtomicUsize,
+    separate_save_calls: AtomicUsize,
+}
+
+impl RecordingCombinedRunStateApprovalStore {
+    fn new() -> Self {
+        Self {
+            runs: InMemoryRunStateStore::new(),
+            approvals: InMemoryApprovalRequestStore::new(),
+            combined_calls: AtomicUsize::new(0),
+            separate_save_calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn combined_calls(&self) -> usize {
+        self.combined_calls.load(Ordering::SeqCst)
+    }
+
+    fn separate_save_calls(&self) -> usize {
+        self.separate_save_calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl RunStateStore for RecordingCombinedRunStateApprovalStore {
+    async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError> {
+        self.runs.start(start).await
+    }
+
+    async fn block_approval(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        approval: ApprovalRequest,
+    ) -> Result<RunRecord, RunStateError> {
+        self.runs
+            .block_approval(scope, invocation_id, approval)
+            .await
+    }
+
+    async fn block_auth(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        error_kind: String,
+    ) -> Result<RunRecord, RunStateError> {
+        self.runs.block_auth(scope, invocation_id, error_kind).await
+    }
+
+    async fn complete(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<RunRecord, RunStateError> {
+        self.runs.complete(scope, invocation_id).await
+    }
+
+    async fn fail(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        error_kind: String,
+    ) -> Result<RunRecord, RunStateError> {
+        self.runs.fail(scope, invocation_id, error_kind).await
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<Option<RunRecord>, RunStateError> {
+        self.runs.get(scope, invocation_id).await
+    }
+
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<RunRecord>, RunStateError> {
+        self.runs.records_for_scope(scope).await
+    }
+}
+
+#[async_trait]
+impl ApprovalRequestStore for RecordingCombinedRunStateApprovalStore {
+    async fn save_pending(
+        &self,
+        scope: ResourceScope,
+        request: ApprovalRequest,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.separate_save_calls.fetch_add(1, Ordering::SeqCst);
+        self.approvals.save_pending(scope, request).await
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<Option<ApprovalRecord>, RunStateError> {
+        self.approvals.get(scope, request_id).await
+    }
+
+    async fn approve(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.approvals.approve(scope, request_id).await
+    }
+
+    async fn deny(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.approvals.deny(scope, request_id).await
+    }
+
+    async fn discard_pending(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.approvals.discard_pending(scope, request_id).await
+    }
+
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<ApprovalRecord>, RunStateError> {
+        self.approvals.records_for_scope(scope).await
+    }
+}
+
+#[async_trait]
+impl RunStateApprovalStore for RecordingCombinedRunStateApprovalStore {
+    async fn save_pending_and_block_approval(
+        &self,
+        scope: ResourceScope,
+        invocation_id: InvocationId,
+        approval: ApprovalRequest,
+    ) -> Result<RunRecord, RunStateError> {
+        self.combined_calls.fetch_add(1, Ordering::SeqCst);
+        self.approvals
+            .save_pending(scope.clone(), approval.clone())
+            .await?;
+        self.runs
+            .block_approval(&scope, invocation_id, approval)
+            .await
     }
 }
 

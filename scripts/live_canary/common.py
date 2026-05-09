@@ -485,7 +485,7 @@ async def start_gateway_stack(
         # defaults llm_backend to `nearai`, so the env config is ignored
         # and the agent attempts an interactive NearAI auth flow that
         # never completes in CI. Mirrors the pattern documented in
-        # tests/e2e/CLAUDE.md and used by test_v2_tool_activate_surface.py.
+        # tests/e2e/CLAUDE.md.
         await _pin_mock_llm_settings(base_url, gateway_token, mock_llm_url)
         return GatewayStack(
             base_url=base_url,

@@ -38,6 +38,11 @@ Rules:
 
 The durable append log plus scoped replay cursor envelope is the substrate. It must be usable by implementation agents and caller-level tests before product transports are complete. SSE/WebSocket delivery and UI-specific projections are downstream integrations over that substrate, not prerequisites for landing the substrate.
 
+Reborn runtime events and audit records have two owning crates:
+
+- `ironclaw_events` owns the redacted record vocabulary, cursor types, sink traits, and durable log traits.
+- `ironclaw_reborn_event_store` owns standalone Reborn backend selection and storage adapters for those traits.
+
 ---
 
 ## 3. Event identity and ordering
@@ -117,6 +122,15 @@ client reconnects with last_event_id
 -> transport resumes live tail
 ```
 
+`EventStreamManager` is the transport-agnostic facade over domain projection
+services. It routes scoped runtime and audit replay requests through their
+owning projection services and preserves their domain-specific DTOs/cursors;
+it must not flatten runtime, audit, transcript, or future memory facts into a
+single generic event payload. Resume helpers return domain-specific updates
+when a cursor is valid, or an explicit snapshot/rebase response when retention
+has made replay impossible. A cursor minted under a different scope remains an
+authority failure and must not be silently converted into a snapshot.
+
 Rules:
 
 - event ids are scoped; a user cannot replay another user's stream
@@ -165,12 +179,13 @@ When an event references sensitive data, use:
 - correlation ids
 - structured denial reasons
 
+Durable rows and JSONL files must not add raw secrets, host paths, request payloads, runtime output, approval reasons, or backend detail strings. Connection and migration failures are reported through redacted backend/operation errors. Event constructors and serialization enforce runtime `error_kind` sanitization; producer crates remain responsible for constructing metadata-only audit envelopes.
+
 ---
 
 ## 9. Non-goals
 
 This contract does not define the final event store backend, wire protocol, UI schema, or audit retention policy. It defines the ownership boundaries and minimum invariants needed before those implementation choices are made.
-
 
 ---
 
@@ -216,3 +231,43 @@ resource/network/security audit summaries
 ```
 
 Event delivery failures are best-effort for live transports; durable append failures are domain-specific and must be explicit where the event is required audit/history.
+
+---
+
+## Standalone durable backend addendum
+
+The current standalone durable backends are JSONL, PostgreSQL, and libSQL. Each stores runtime and audit streams separately, keyed by `(stream_kind, tenant_id, user_id, agent_id)`, and persists cursor envelopes so a process restart can replay from the last seen cursor.
+
+### Profile rules
+
+- `LocalDev` and `Test` may explicitly use in-memory stores.
+- `Production` rejects in-memory stores before returning a service graph.
+- `Production` may use JSONL only when the config explicitly accepts single-node durable storage.
+- PostgreSQL and libSQL adapters are available behind the crate's `postgres` and `libsql` features. Their schema files live in `crates/ironclaw_reborn_event_store/migrations/`, and the factory runs those migrations before returning the service graph.
+- If the crate is compiled without a requested SQL backend feature, the factory fails closed with a redacted backend-unavailable error.
+
+### Replay semantics
+
+Durable backends must match `InMemoryDurableEventLog` cursor behavior:
+
+- cursors are monotonic per `(stream_kind, tenant, user, agent)`;
+- `read_after_cursor(None)` starts at origin;
+- `limit == 0` is rejected;
+- cursors beyond the stream head return `ReplayGap`;
+- retained-history gaps return `ReplayGap` rather than silent loss;
+- `ReadScope` filtering is enforced by the backend;
+- records filtered out by `ReadScope` still advance the scanned cursor.
+
+### Projection boundary
+
+Product-facing timeline, status, approval, auth, tool-call, process, resource, and memory views should be projections over durable logs, not a second source of truth. Projection services must tolerate replay gaps with explicit snapshot/rebase behavior and must not mutate control-plane state while deriving read models.
+
+### Outbound egress and subscription state
+
+`ironclaw_outbound` owns the metadata-only state needed around projection delivery:
+
+- per-thread notification policy for explicit external fanout and progress opt-in;
+- durable projection subscription cursor checkpoints scoped to actor, thread, and `ProjectionScope`;
+- outbound delivery attempt/status rows for support-visible retry/dead-letter workflows.
+
+This state is not canonical transcript or projection content. Rows store refs, cursors, status enums, timestamps, and sanitized failure kinds only. Product adapters still revalidate reply-target binding authorization before every external push, and delivery failure must not mutate canonical transcript/projection state or mark turns/runs failed.

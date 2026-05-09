@@ -6,7 +6,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_processes::{ProcessManager, ProcessStart};
 use ironclaw_run_state::{
-    ApprovalRequestStore, ApprovalStatus, RunStart, RunStateError, RunStateStore, RunStatus,
+    ApprovalRequestStore, ApprovalStatus, RunStart, RunStateApprovalStore, RunStateError,
+    RunStateStore, RunStatus,
 };
 use tracing::warn;
 
@@ -34,6 +35,7 @@ where
     authorizer: &'a dyn TrustAwareCapabilityDispatchAuthorizer,
     run_state: Option<&'a dyn RunStateStore>,
     approval_requests: Option<&'a dyn ApprovalRequestStore>,
+    run_state_approval_store: Option<&'a dyn RunStateApprovalStore>,
     capability_leases: Option<&'a dyn CapabilityLeaseStore>,
     process_manager: Option<&'a dyn ProcessManager>,
     obligation_handler: Option<&'a dyn CapabilityObligationHandler>,
@@ -54,6 +56,7 @@ where
             authorizer,
             run_state: None,
             approval_requests: None,
+            run_state_approval_store: None,
             capability_leases: None,
             process_manager: None,
             obligation_handler: None,
@@ -69,6 +72,7 @@ where
     /// error but no run record is persisted.
     pub fn with_run_state(mut self, run_state: &'a dyn RunStateStore) -> Self {
         self.run_state = Some(run_state);
+        self.run_state_approval_store = None;
         self
     }
 
@@ -83,6 +87,18 @@ where
         approval_requests: &'a dyn ApprovalRequestStore,
     ) -> Self {
         self.approval_requests = Some(approval_requests);
+        self.run_state_approval_store = None;
+        self
+    }
+
+    /// Attaches a combined durable run-state/approval store that can persist a
+    /// pending approval and transition the invocation to `BlockedApproval` in one
+    /// transaction. Production composition should prefer this over separate
+    /// stores when both records live in the same backend.
+    pub fn with_run_state_approval_store(mut self, store: &'a dyn RunStateApprovalStore) -> Self {
+        self.run_state = Some(store);
+        self.approval_requests = Some(store);
+        self.run_state_approval_store = Some(store);
         self
     }
 
@@ -254,42 +270,62 @@ where
 
                 match (self.run_state, self.approval_requests) {
                     (Some(run_state), Some(approval_requests)) => {
-                        let approval_id = approval.id;
-                        if let Err(error) = approval_requests
-                            .save_pending(scope.clone(), approval.clone())
-                            .await
-                        {
-                            fail_run_if_configured(
-                                Some(run_state),
-                                &scope,
-                                invocation_id,
-                                "ApprovalStore",
-                            )
-                            .await;
-                            return Err(CapabilityInvocationError::from(error));
-                        }
-                        if let Err(error) = run_state
-                            .block_approval(&scope, invocation_id, approval)
-                            .await
-                        {
-                            if let Err(discard_error) =
-                                approval_requests.discard_pending(&scope, approval_id).await
+                        if let Some(combined_store) = self.run_state_approval_store {
+                            if let Err(error) = combined_store
+                                .save_pending_and_block_approval(
+                                    scope.clone(),
+                                    invocation_id,
+                                    approval,
+                                )
+                                .await
                             {
-                                warn!(
-                                    approval_request_id = %approval_id,
-                                    invocation_id = %invocation_id,
-                                    transition_error_kind = run_state_error_kind(&discard_error),
-                                    "approval rollback failed after run-state block transition failed",
-                                );
+                                fail_run_if_configured(
+                                    Some(run_state),
+                                    &scope,
+                                    invocation_id,
+                                    "ApprovalBlock",
+                                )
+                                .await;
+                                return Err(CapabilityInvocationError::from(error));
                             }
-                            fail_run_if_configured(
-                                Some(run_state),
-                                &scope,
-                                invocation_id,
-                                "ApprovalBlock",
-                            )
-                            .await;
-                            return Err(CapabilityInvocationError::from(error));
+                        } else {
+                            let approval_id = approval.id;
+                            if let Err(error) = approval_requests
+                                .save_pending(scope.clone(), approval.clone())
+                                .await
+                            {
+                                fail_run_if_configured(
+                                    Some(run_state),
+                                    &scope,
+                                    invocation_id,
+                                    "ApprovalStore",
+                                )
+                                .await;
+                                return Err(CapabilityInvocationError::from(error));
+                            }
+                            if let Err(error) = run_state
+                                .block_approval(&scope, invocation_id, approval)
+                                .await
+                            {
+                                if let Err(discard_error) =
+                                    approval_requests.discard_pending(&scope, approval_id).await
+                                {
+                                    warn!(
+                                        approval_request_id = %approval_id,
+                                        invocation_id = %invocation_id,
+                                        transition_error_kind = run_state_error_kind(&discard_error),
+                                        "approval rollback failed after run-state block transition failed",
+                                    );
+                                }
+                                fail_run_if_configured(
+                                    Some(run_state),
+                                    &scope,
+                                    invocation_id,
+                                    "ApprovalBlock",
+                                )
+                                .await;
+                                return Err(CapabilityInvocationError::from(error));
+                            }
                         }
                     }
                     (Some(run_state), None) => {
@@ -1245,42 +1281,62 @@ where
 
                 match (self.run_state, self.approval_requests) {
                     (Some(run_state), Some(approval_requests)) => {
-                        let approval_id = approval.id;
-                        if let Err(error) = approval_requests
-                            .save_pending(scope.clone(), approval.clone())
-                            .await
-                        {
-                            fail_run_if_configured(
-                                Some(run_state),
-                                &scope,
-                                invocation_id,
-                                "ApprovalStore",
-                            )
-                            .await;
-                            return Err(CapabilityInvocationError::from(error));
-                        }
-                        if let Err(error) = run_state
-                            .block_approval(&scope, invocation_id, approval)
-                            .await
-                        {
-                            if let Err(discard_error) =
-                                approval_requests.discard_pending(&scope, approval_id).await
+                        if let Some(combined_store) = self.run_state_approval_store {
+                            if let Err(error) = combined_store
+                                .save_pending_and_block_approval(
+                                    scope.clone(),
+                                    invocation_id,
+                                    approval,
+                                )
+                                .await
                             {
-                                warn!(
-                                    approval_request_id = %approval_id,
-                                    invocation_id = %invocation_id,
-                                    transition_error_kind = run_state_error_kind(&discard_error),
-                                    "approval rollback failed after spawn run-state block transition failed",
-                                );
+                                fail_run_if_configured(
+                                    Some(run_state),
+                                    &scope,
+                                    invocation_id,
+                                    "ApprovalBlock",
+                                )
+                                .await;
+                                return Err(CapabilityInvocationError::from(error));
                             }
-                            fail_run_if_configured(
-                                Some(run_state),
-                                &scope,
-                                invocation_id,
-                                "ApprovalBlock",
-                            )
-                            .await;
-                            return Err(CapabilityInvocationError::from(error));
+                        } else {
+                            let approval_id = approval.id;
+                            if let Err(error) = approval_requests
+                                .save_pending(scope.clone(), approval.clone())
+                                .await
+                            {
+                                fail_run_if_configured(
+                                    Some(run_state),
+                                    &scope,
+                                    invocation_id,
+                                    "ApprovalStore",
+                                )
+                                .await;
+                                return Err(CapabilityInvocationError::from(error));
+                            }
+                            if let Err(error) = run_state
+                                .block_approval(&scope, invocation_id, approval)
+                                .await
+                            {
+                                if let Err(discard_error) =
+                                    approval_requests.discard_pending(&scope, approval_id).await
+                                {
+                                    warn!(
+                                        approval_request_id = %approval_id,
+                                        invocation_id = %invocation_id,
+                                        transition_error_kind = run_state_error_kind(&discard_error),
+                                        "approval rollback failed after spawn run-state block transition failed",
+                                    );
+                                }
+                                fail_run_if_configured(
+                                    Some(run_state),
+                                    &scope,
+                                    invocation_id,
+                                    "ApprovalBlock",
+                                )
+                                .await;
+                                return Err(CapabilityInvocationError::from(error));
+                            }
                         }
                     }
                     (Some(run_state), None) => {

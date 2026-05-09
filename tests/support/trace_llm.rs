@@ -13,16 +13,16 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use ironclaw::error::LlmError;
-use ironclaw::llm::{
+use ironclaw_llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role, ToolCall,
-    ToolCompletionRequest, ToolCompletionResponse,
+    ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
 };
 
 // Re-export shared types from recording module so existing test code can
 // still import them from here.
 // Re-export all shared types so downstream test files can import from here.
 #[allow(unused_imports)]
-pub use ironclaw::llm::recording::{
+pub use ironclaw_llm::recording::{
     ExpectedToolResult, HttpExchange, HttpExchangeRequest, HttpExchangeResponse,
     MemorySnapshotEntry, RequestHint, TraceResponse, TraceStep, TraceToolCall,
 };
@@ -283,6 +283,12 @@ pub struct TraceLlm {
     calls_served: AtomicUsize,
     hint_mismatches: AtomicUsize,
     captured_requests: Mutex<Vec<Vec<ChatMessage>>>,
+    /// Captured `tools` argument from each `complete_with_tools` call. Lets
+    /// Tier B tests assert what tool surface the dispatcher / worker shipped
+    /// to the model on each iteration (used for runtime-policy filtering
+    /// caller-tier coverage). Captured in lock-step with `captured_requests`
+    /// — same index = same call.
+    captured_tool_definitions: Mutex<Vec<Vec<ToolDefinition>>>,
 }
 
 /// Return the `last_user_message_contains` substring of a step, if any.
@@ -429,6 +435,7 @@ impl TraceLlm {
             calls_served: AtomicUsize::new(0),
             hint_mismatches: AtomicUsize::new(0),
             captured_requests: Mutex::new(Vec::new()),
+            captured_tool_definitions: Mutex::new(Vec::new()),
         }
     }
 
@@ -453,6 +460,13 @@ impl TraceLlm {
         self.captured_requests.lock().unwrap().clone()
     }
 
+    /// Clone of every `tools` argument the dispatcher / worker shipped to the
+    /// model. Index `i` matches the `i`-th `captured_requests()` entry.
+    /// Empty for `complete()`-only calls (text-only paths).
+    pub fn captured_tool_definitions(&self) -> Vec<Vec<ToolDefinition>> {
+        self.captured_tool_definitions.lock().unwrap().clone()
+    }
+
     // -- internal helpers ---------------------------------------------------
 
     /// Pick the next step that satisfies the current request.
@@ -460,12 +474,21 @@ impl TraceLlm {
     /// See the [`TraceLlm`] doc comment for the matching policy. Removes the
     /// chosen step from the queue and applies template substitution on tool
     /// call arguments before returning.
-    fn next_step(&self, messages: &[ChatMessage]) -> Result<TraceStep, LlmError> {
+    fn next_step(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[ToolDefinition]>,
+    ) -> Result<TraceStep, LlmError> {
         // Capture the request messages for inspection-based assertions.
         self.captured_requests
             .lock()
             .unwrap()
             .push(messages.to_vec());
+        // Capture the `tools` argument in lock-step (empty for `complete()`).
+        self.captured_tool_definitions
+            .lock()
+            .unwrap()
+            .push(tools.map(|t| t.to_vec()).unwrap_or_default());
 
         let last_user_content: Option<String> = messages
             .iter()
@@ -688,7 +711,7 @@ impl LlmProvider for TraceLlm {
         // return the next Text step, since in real usage the LLM would
         // produce text when no tools are offered.
         loop {
-            let step = self.next_step(&request.messages)?;
+            let step = self.next_step(&request.messages, None)?;
             match step.response {
                 TraceResponse::Text {
                     content,
@@ -725,7 +748,7 @@ impl LlmProvider for TraceLlm {
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        let step = self.next_step(&request.messages)?;
+        let step = self.next_step(&request.messages, Some(&request.tools))?;
         match step.response {
             TraceResponse::Text {
                 content,
@@ -739,6 +762,7 @@ impl LlmProvider for TraceLlm {
                 finish_reason: FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             }),
             TraceResponse::ToolCalls {
                 tool_calls,
@@ -752,6 +776,7 @@ impl LlmProvider for TraceLlm {
                         name: tc.name,
                         arguments: tc.arguments,
                         reasoning: None,
+                        signature: None,
                     })
                     .collect();
                 Ok(ToolCompletionResponse {
@@ -762,6 +787,7 @@ impl LlmProvider for TraceLlm {
                     finish_reason: FinishReason::ToolUse,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
+                    reasoning: None,
                 })
             }
             TraceResponse::UserInput { .. } => Err(LlmError::RequestFailed {

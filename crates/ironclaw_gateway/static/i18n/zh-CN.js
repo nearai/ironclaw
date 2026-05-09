@@ -29,7 +29,10 @@ I18n.register('zh-CN', {
   'restart.progressSubtitle': '请等待进程重启...',
   'restart.checkLogs': '重启完成后，请查看日志标签页了解详情。',
   'restart.closeTooltip': '关闭',
-  
+  'restart.timedOut': '重启耗时比预期更长。服务可能尚未恢复——请待连接指示灯变绿后刷新页面。',
+  'restart.refreshPage': '刷新页面',
+  'restart.dismiss': '关闭',
+
   // 主题
   'theme.tooltipDark': '主题：深色（点击切换浅色）',
   'theme.tooltipLight': '主题：浅色（点击切换跟随系统）',
@@ -105,7 +108,9 @@ I18n.register('zh-CN', {
   'status.restartTooltip': '优雅地重启进程',
   'status.active': '已激活',
   'status.installed': '已安装',
+  'status.configured': '已配置',
   'status.awaitingPairing': '等待配对',
+  'status.pairingShort': '配对中',
   
   // 仪表盘
   'dashboard.connections': '连接数',
@@ -322,16 +327,16 @@ I18n.register('zh-CN', {
   'time.daysFromNow': '{n}天后',
   
   // 工具审批
-  'approval.title': '工具需要审批',
-  'approval.description': '一个工具请求运行权限。',
+  'approval.title': '批准工具调用',
+  'approval.description': '智能体想要运行此工具。批准以继续，或拒绝以在此停止。',
   'approval.approve': '批准',
   'approval.deny': '拒绝',
   'approval.always': '始终允许',
   'approval.approved': '已批准',
   'approval.alwaysApproved': '始终批准',
   'approval.denied': '已拒绝',
-  'approval.showParams': '显示参数',
-  'approval.hideParams': '隐藏参数',
+  'approval.showParams': '显示完整参数',
+  'approval.hideParams': '隐藏完整参数',
   
   // 认证
   'authRequired.title': '{name} 需要认证',
@@ -498,6 +503,30 @@ I18n.register('zh-CN', {
 
   // 配置
   'config.title': '配置 {name}',
+  'config.telegramOwnerHint': '保存后，IronClaw 会显示一次性验证码。将 `/start CODE` 发送给你的 Telegram 机器人，IronClaw 会自动完成设置。',
+  'config.telegramChallengeTitle': 'Telegram 所有者验证',
+  'config.telegramOwnerWaiting': '正在等待 Telegram 所有者验证...',
+  'config.telegramCommandLabel': '请在 Telegram 中发送：',
+  'config.telegramStartOver': '重新开始',
+  'config.telegramStartOverHint': 'Telegram 验证未完成。点击“重新开始”以生成新的验证码并重试。',
+  'config.telegramOpenBot': '在 Telegram 中打开机器人',
+  'config.wechatHint': '在新标签页打开微信扫码页，然后在微信里扫码并确认。',
+  'config.wechatConnect': '打开扫码页',
+  'config.wechatWaiting': '等待扫码中...',
+  'config.wechatPreparingQr': '正在准备微信扫码页...',
+  'config.wechatQrTitle': '打开微信扫码页',
+  'config.wechatQrOpen': '打开扫码页',
+  'config.wechatQrIntro': '扫码流程会在新标签页中打开。',
+  'config.wechatQrReady': '扫码页已就绪。请在新标签页打开后，用微信扫码并确认。',
+  'config.wechatQrWaiting': '正在准备微信扫码页...',
+  'config.wechatQrScanned': '已扫码，请在微信中确认登录。',
+  'config.wechatQrRefreshed': '扫码页已刷新。',
+  'config.wechatQrRefreshedHint': '之前的扫码页已过期，请打开新页面重新扫码。',
+  'config.wechatConnected': '微信已连接。',
+  'config.wechatQrFailed': '微信连接失败。',
+  'config.interactiveLoginStartFailed': '启动交互式登录失败',
+  'config.interactiveLoginFailed': '交互式登录失败',
+  'config.connectedSuccess': '{name} 连接成功',
   'config.optional': '（可选）',
   'config.alreadySet': '（已设置 — 留空以保持不变）',
   'config.alreadyConfigured': '已配置',

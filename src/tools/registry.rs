@@ -8,8 +8,6 @@ use tokio::sync::RwLock;
 use crate::context::ContextManager;
 use crate::db::{Database, UserStore};
 use crate::extensions::ExtensionManager;
-use crate::llm::recording::HttpInterceptor;
-use crate::llm::{LlmProvider, ToolDefinition};
 use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::secrets::SecretsStore;
 use crate::tools::builder::{
@@ -20,9 +18,9 @@ use crate::tools::builtin::{
     GlobTool, GrepTool, HttpTool, JobEventsTool, JobPromptTool, JobStatusTool, JsonTool,
     ListDirTool, ListJobsTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool,
     PlanUpdateTool, PromptQueue, ReadFileTool, ShellTool, SkillInstallTool, SkillListTool,
-    SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool,
-    ToolListTool, ToolPermissionSetTool, ToolRemoveTool, ToolSearchTool, ToolUpgradeTool,
-    WriteFileTool, shared_file_history, shared_read_file_state,
+    SkillRemoveTool, SkillSearchTool, TimeTool, ToolAuthTool, ToolInstallTool, ToolListTool,
+    ToolPermissionSetTool, ToolRemoveTool, ToolSearchTool, ToolUpgradeTool, WriteFileTool,
+    shared_file_history, shared_read_file_state,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{
@@ -33,6 +31,8 @@ use crate::tools::wasm::{
     WasmStorageError, WasmToolRuntime, WasmToolStore, WasmToolWrapper,
 };
 use crate::workspace::Workspace;
+use ironclaw_llm::recording::HttpInterceptor;
+use ironclaw_llm::{LlmProvider, ToolDefinition};
 use ironclaw_skills::catalog::SkillCatalog;
 use ironclaw_skills::registry::SkillRegistry;
 
@@ -79,7 +79,6 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "tool_search",
     "tool_install",
     "tool_auth",
-    "tool_activate",
     "tool_list",
     "tool_remove",
     "tool_upgrade",
@@ -408,6 +407,36 @@ impl ToolRegistry {
         self.tool_definitions_for_engine(self.engine_version).await
     }
 
+    /// Get tool definitions for LLM function calling, filtered by both engine
+    /// version *and* the resolved runtime policy (#3045 PR 4 + PR 5).
+    ///
+    /// This is the model-facing tool list path: tools whose
+    /// [`Tool::runtime_affordance`] cannot be granted by the resolved
+    /// `EffectiveRuntimePolicy` are hidden before the model call. The
+    /// hosted-multi-tenant security property ("no provider-host shell visible
+    /// to the model") is enforced here. Action-time authorization in
+    /// `ironclaw_authorization` / `CapabilityHost` still runs for every
+    /// invocation that reaches dispatch.
+    pub async fn tool_definitions_visible_under(
+        &self,
+        policy: &ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy,
+    ) -> Vec<ToolDefinition> {
+        let version = self.engine_version;
+        let mut defs: Vec<ToolDefinition> = self
+            .tools
+            .read()
+            .await
+            .values()
+            .filter(|tool| Self::is_engine_visible(tool.as_ref(), version))
+            .filter(|tool| {
+                crate::tools::runtime_filter::is_visible_under(policy, tool.runtime_affordance())
+            })
+            .map(Self::tool_definition)
+            .collect();
+        defs.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+        defs
+    }
+
     /// Get tool definitions filtered by engine version.
     ///
     /// Returns tools whose `engine_compatibility()` is `Both` or matches the
@@ -586,7 +615,7 @@ impl ToolRegistry {
     pub fn register_memory_tools_with_resolver(
         &self,
         resolver: Arc<dyn crate::tools::builtin::memory::WorkspaceResolver>,
-        reasoning_llm: Option<Arc<dyn crate::llm::LlmProvider>>,
+        reasoning_llm: Option<Arc<dyn ironclaw_llm::LlmProvider>>,
         reasoning_enabled: bool,
     ) {
         self.register_sync(Arc::new(MemorySearchTool::with_reasoning(
@@ -703,19 +732,18 @@ impl ToolRegistry {
         tracing::debug!("Registered 2 secret management tools (list, delete)");
     }
 
-    /// Register extension management tools (search, install, auth, activate, list, remove).
+    /// Register extension management tools (search, install, auth, list, remove).
     ///
     /// These allow the LLM to manage MCP servers and WASM tools through conversation.
     pub fn register_extension_tools(&self, manager: Arc<ExtensionManager>) {
         self.register_sync(Arc::new(ToolSearchTool::new(Arc::clone(&manager))));
         self.register_sync(Arc::new(ToolInstallTool::new(Arc::clone(&manager))));
         self.register_sync(Arc::new(ToolAuthTool::new(Arc::clone(&manager))));
-        self.register_sync(Arc::new(ToolActivateTool::new(Arc::clone(&manager))));
         self.register_sync(Arc::new(ToolListTool::new(Arc::clone(&manager))));
         self.register_sync(Arc::new(ToolRemoveTool::new(Arc::clone(&manager))));
         self.register_sync(Arc::new(ToolUpgradeTool::new(Arc::clone(&manager))));
         self.register_sync(Arc::new(ExtensionInfoTool::new(manager)));
-        tracing::debug!("Registered 8 extension management tools");
+        tracing::debug!("Registered 7 extension management tools");
     }
 
     /// Register the permission management tool (`tool_permission_set`).

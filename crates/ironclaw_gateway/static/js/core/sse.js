@@ -61,15 +61,10 @@ function connectSSE(lastEventIdOverride) {
       setTimeout(() => { lostBanner.remove(); }, 2000);
     }
 
-    // If we were restarting, close the modal and reset button now that server is back
+    // If we were restarting, close the modal and reset button now that server is back.
+    // dismissRestartLoader() also clears the watchdog timer (#3082).
     if (isRestarting) {
-      const loaderEl = document.getElementById('restart-loader');
-      if (loaderEl) loaderEl.style.display = 'none';
-      const restartBtn = document.getElementById('restart-btn');
-      const restartIcon = document.getElementById('restart-icon');
-      if (restartBtn) restartBtn.disabled = false;
-      if (restartIcon) restartIcon.classList.remove('spinning');
-      isRestarting = false;
+      dismissRestartLoader();
     }
 
     if (sseHasConnectedBefore && currentThreadId) {
@@ -88,6 +83,12 @@ function connectSSE(lastEventIdOverride) {
     // Refresh sidebar so stale spinners are removed immediately.
     processingThreads.clear();
     debouncedLoadThreads();
+    // Retry any first-load loader (chat history, threads, missions) that
+    // raced engine init and failed silently. SSE-accept implies the
+    // backend has stabilized — see init-auth.js for the rationale (#3274).
+    if (typeof runInitialHydrationRetry === 'function') {
+      runInitialHydrationRetry();
+    }
     sseHasConnectedBefore = true;
   };
 

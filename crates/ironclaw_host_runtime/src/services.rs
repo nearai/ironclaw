@@ -7,6 +7,7 @@
 //! lifecycle, and runtime execution semantics remain in their owning crates.
 
 use std::{
+    any::type_name,
     collections::HashMap,
     sync::{Arc, Mutex, MutexGuard},
 };
@@ -21,6 +22,10 @@ use ironclaw_events::{
     AuditSink, DurableAuditLog, DurableAuditSink, DurableEventLog, DurableEventSink, EventSink,
 };
 use ironclaw_extensions::{ExtensionRegistry, ExtensionRuntime};
+#[cfg(feature = "libsql")]
+use ironclaw_filesystem::LibSqlRootFilesystem;
+#[cfg(feature = "postgres")]
+use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     CapabilityDispatchRequest, CapabilityDispatcher, CapabilityId, DispatchError,
@@ -28,20 +33,38 @@ use ironclaw_host_api::{
     RuntimeHttpEgress, RuntimeKind,
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutor, McpInvocation};
+use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::{
     BackgroundFailureStage, ProcessExecutionError, ProcessExecutionRequest, ProcessExecutionResult,
     ProcessExecutor, ProcessManager, ProcessResultStore, ProcessServices, ProcessStore,
 };
+use ironclaw_reborn_event_store::{
+    RebornEventStoreConfig, RebornEventStoreError, RebornEventStores, RebornProfile,
+    build_reborn_event_stores,
+};
 use ironclaw_resources::ResourceGovernor;
-use ironclaw_run_state::{ApprovalRequestStore, RunStateStore};
+#[cfg(feature = "libsql")]
+use ironclaw_run_state::LibSqlRunStateApprovalStore;
+#[cfg(feature = "postgres")]
+use ironclaw_run_state::PostgresRunStateApprovalStore;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_run_state::RunStateError;
+use ironclaw_run_state::{ApprovalRequestStore, RunStateApprovalStore, RunStateStore};
 use ironclaw_scripts::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};
 use ironclaw_secrets::SecretStore;
 use ironclaw_trust::{HostTrustPolicy, TrustPolicy};
+#[cfg(feature = "libsql")]
+use ironclaw_turns::LibSqlTurnStateStore;
+#[cfg(feature = "postgres")]
+use ironclaw_turns::PostgresTurnStateStore;
+use ironclaw_turns::{DefaultTurnCoordinator, TurnRunWakeNotifier, TurnStateStore};
 use ironclaw_wasm::{
     DenyWasmHostHttp, PreparedWitTool, WasmError, WasmRuntimeCredentialProvider,
-    WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder, WitToolHost, WitToolRequest,
-    WitToolRuntime, WitToolRuntimeConfig,
+    WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder, WasmStagedRuntimeCredentials, WitToolHost,
+    WitToolRequest, WitToolRuntime, WitToolRuntimeConfig,
 };
+
+use thiserror::Error;
 
 use crate::{
     BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntimeError,
@@ -50,6 +73,196 @@ use crate::{
 };
 
 type SharedRuntimeHttpEgress = Arc<Mutex<Option<Arc<dyn RuntimeHttpEgress>>>>;
+
+#[derive(Debug, Error)]
+pub enum ProductionEventStoreWiringError {
+    #[error("failed to build Reborn event stores: {0}")]
+    EventStore(#[from] RebornEventStoreError),
+    #[error("host runtime production wiring failed")]
+    ProductionWiring(ProductionWiringReport),
+}
+
+impl From<ProductionWiringReport> for ProductionEventStoreWiringError {
+    fn from(report: ProductionWiringReport) -> Self {
+        Self::ProductionWiring(report)
+    }
+}
+
+/// Production wiring requirements used by composition roots before exposing a
+/// [`HostRuntimeServices`] graph as production-ready.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductionWiringConfig {
+    required_runtime_backends: Vec<RuntimeKind>,
+    require_runtime_http_egress: bool,
+    require_wasm_credentials: bool,
+}
+
+impl ProductionWiringConfig {
+    pub fn new<I>(required_runtime_backends: I) -> Self
+    where
+        I: IntoIterator<Item = RuntimeKind>,
+    {
+        Self {
+            required_runtime_backends: required_runtime_backends.into_iter().collect(),
+            require_runtime_http_egress: false,
+            require_wasm_credentials: false,
+        }
+    }
+
+    pub fn require_runtime_http_egress(mut self) -> Self {
+        self.require_runtime_http_egress = true;
+        self
+    }
+
+    pub fn require_wasm_credentials(mut self) -> Self {
+        self.require_wasm_credentials = true;
+        self
+    }
+
+    fn requires_runtime(&self, runtime: RuntimeKind) -> bool {
+        self.required_runtime_backends.contains(&runtime)
+    }
+}
+
+/// Production component tracked by the host-runtime production wiring guardrail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProductionWiringComponent {
+    RuntimeBackend,
+    TrustPolicy,
+    Filesystem,
+    ResourceGovernor,
+    ProcessStore,
+    ProcessResultStore,
+    RunState,
+    ApprovalRequests,
+    CapabilityLeases,
+    EventSink,
+    AuditSink,
+    SecretStore,
+    RuntimeHttpEgress,
+    WasmCredentialProvider,
+    ScriptRuntime,
+    McpRuntime,
+    WasmRuntime,
+    TurnState,
+    TurnRunWakeNotifier,
+}
+
+impl ProductionWiringComponent {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RuntimeBackend => "runtime_backend",
+            Self::TrustPolicy => "trust_policy",
+            Self::Filesystem => "filesystem",
+            Self::ResourceGovernor => "resource_governor",
+            Self::ProcessStore => "process_store",
+            Self::ProcessResultStore => "process_result_store",
+            Self::RunState => "run_state",
+            Self::ApprovalRequests => "approval_requests",
+            Self::CapabilityLeases => "capability_leases",
+            Self::EventSink => "event_sink",
+            Self::AuditSink => "audit_sink",
+            Self::SecretStore => "secret_store",
+            Self::RuntimeHttpEgress => "runtime_http_egress",
+            Self::WasmCredentialProvider => "wasm_credential_provider",
+            Self::ScriptRuntime => "script_runtime",
+            Self::McpRuntime => "mcp_runtime",
+            Self::WasmRuntime => "wasm_runtime",
+            Self::TurnState => "turn_state",
+            Self::TurnRunWakeNotifier => "turn_run_wake_notifier",
+        }
+    }
+}
+
+/// Category of production wiring issue found in a service graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProductionWiringIssueKind {
+    Missing,
+    UnsupportedRequirement,
+    LocalOnlyImplementation,
+    UnverifiedProductionImplementation,
+}
+
+/// One production wiring issue for a component in the host-runtime graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductionWiringIssue {
+    component: ProductionWiringComponent,
+    kind: ProductionWiringIssueKind,
+    implementation: Option<&'static str>,
+}
+
+impl ProductionWiringIssue {
+    pub fn component(&self) -> ProductionWiringComponent {
+        self.component
+    }
+
+    pub fn kind(&self) -> ProductionWiringIssueKind {
+        self.kind
+    }
+
+    pub fn implementation(&self) -> Option<&'static str> {
+        self.implementation
+    }
+}
+
+/// Report returned when a host-runtime graph is not production-ready.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductionWiringReport {
+    issues: Vec<ProductionWiringIssue>,
+}
+
+impl ProductionWiringReport {
+    pub fn issues(&self) -> &[ProductionWiringIssue] {
+        &self.issues
+    }
+
+    pub fn contains(
+        &self,
+        component: ProductionWiringComponent,
+        kind: ProductionWiringIssueKind,
+    ) -> bool {
+        self.issues
+            .iter()
+            .any(|issue| issue.component == component && issue.kind == kind)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ProductionComponentTypes {
+    trust_policy: Option<&'static str>,
+    trust_policy_verified: bool,
+    filesystem: &'static str,
+    resource_governor: &'static str,
+    process_store: &'static str,
+    process_result_store: &'static str,
+    run_state: Option<&'static str>,
+    approval_requests: Option<&'static str>,
+    capability_leases: Option<&'static str>,
+    event_sink: Option<&'static str>,
+    audit_sink: Option<&'static str>,
+    secret_store: Option<&'static str>,
+    runtime_http_egress: Option<&'static str>,
+    runtime_http_egress_verified: bool,
+    wasm_credential_provider: Option<&'static str>,
+    wasm_credential_provider_verified: bool,
+    wasm_runtime_credential_provider_captured: bool,
+    script_runtime: Option<&'static str>,
+    mcp_runtime: Option<&'static str>,
+    turn_state: Option<&'static str>,
+    turn_run_wake_notifier: Option<&'static str>,
+}
+
+fn is_local_only_component(type_name: &str) -> bool {
+    type_name.contains("InMemory")
+        || type_name.contains("Noop")
+        || type_name.contains("DenyWasm")
+        || type_name.contains("EmptyWasm")
+        || type_name.contains("LocalFilesystem")
+}
+
+fn is_erased_durable_sink_wrapper(type_name: &str) -> bool {
+    type_name.contains("DurableEventSink") || type_name.contains("DurableAuditSink")
+}
 
 /// Concrete composition bundle for one Reborn host-runtime vertical slice.
 ///
@@ -67,6 +280,7 @@ where
 {
     registry: Arc<ExtensionRegistry>,
     trust_policy: Arc<dyn TrustPolicy>,
+    trust_policy_configured: bool,
     filesystem: Arc<F>,
     governor: Arc<G>,
     authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer>,
@@ -74,6 +288,7 @@ where
     surface_version: CapabilitySurfaceVersion,
     run_state: Option<Arc<dyn RunStateStore>>,
     approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
+    run_state_approval_store: Option<Arc<dyn RunStateApprovalStore>>,
     capability_leases: Option<Arc<dyn CapabilityLeaseStore>>,
     event_sink: Option<Arc<dyn EventSink>>,
     audit_sink: Option<Arc<dyn AuditSink>>,
@@ -87,6 +302,9 @@ where
     script_runtime: Option<Arc<dyn ScriptExecutor>>,
     mcp_runtime: Option<Arc<dyn McpExecutor>>,
     wasm_runtime: Option<Arc<WasmRuntimeAdapter>>,
+    turn_state: Option<Arc<dyn TurnStateStore>>,
+    turn_run_wake_notifier: Option<Arc<dyn TurnRunWakeNotifier>>,
+    component_types: ProductionComponentTypes,
 }
 
 impl<F, G, S, R> HostRuntimeServices<F, G, S, R>
@@ -115,6 +333,7 @@ where
         Self {
             registry,
             trust_policy: Arc::new(HostTrustPolicy::empty()),
+            trust_policy_configured: false,
             filesystem,
             governor,
             authorizer,
@@ -122,6 +341,7 @@ where
             surface_version,
             run_state: None,
             approval_requests: None,
+            run_state_approval_store: None,
             capability_leases: None,
             event_sink: None,
             audit_sink: None,
@@ -135,7 +355,114 @@ where
             script_runtime: None,
             mcp_runtime: None,
             wasm_runtime: None,
+            turn_state: None,
+            turn_run_wake_notifier: None,
+            component_types: ProductionComponentTypes {
+                trust_policy: None,
+                trust_policy_verified: false,
+                filesystem: type_name::<F>(),
+                resource_governor: type_name::<G>(),
+                process_store: type_name::<S>(),
+                process_result_store: type_name::<R>(),
+                run_state: None,
+                approval_requests: None,
+                capability_leases: None,
+                event_sink: None,
+                audit_sink: None,
+                secret_store: None,
+                runtime_http_egress: None,
+                runtime_http_egress_verified: false,
+                wasm_credential_provider: None,
+                wasm_credential_provider_verified: false,
+                wasm_runtime_credential_provider_captured: false,
+                script_runtime: None,
+                mcp_runtime: None,
+                turn_state: None,
+                turn_run_wake_notifier: None,
+            },
         }
+    }
+
+    #[cfg(any(feature = "postgres", feature = "libsql"))]
+    fn with_root_filesystem<T>(self, filesystem: Arc<T>) -> HostRuntimeServices<T, G, S, R>
+    where
+        T: RootFilesystem + 'static,
+    {
+        let Self {
+            registry,
+            trust_policy,
+            trust_policy_configured,
+            filesystem: _,
+            governor,
+            authorizer,
+            process_services,
+            surface_version,
+            run_state,
+            approval_requests,
+            run_state_approval_store,
+            capability_leases,
+            event_sink,
+            audit_sink,
+            secret_store,
+            network_policy_store,
+            secret_injection_store,
+            process_lifecycle_store,
+            runtime_http_egress,
+            wasm_credential_provider,
+            runtime_health,
+            script_runtime,
+            mcp_runtime,
+            wasm_runtime,
+            turn_state,
+            turn_run_wake_notifier,
+            mut component_types,
+        } = self;
+        component_types.filesystem = type_name::<T>();
+        HostRuntimeServices {
+            registry,
+            trust_policy,
+            trust_policy_configured,
+            filesystem,
+            governor,
+            authorizer,
+            process_services,
+            surface_version,
+            run_state,
+            approval_requests,
+            run_state_approval_store,
+            capability_leases,
+            event_sink,
+            audit_sink,
+            secret_store,
+            network_policy_store,
+            secret_injection_store,
+            process_lifecycle_store,
+            runtime_http_egress,
+            wasm_credential_provider,
+            runtime_health,
+            script_runtime,
+            mcp_runtime,
+            wasm_runtime,
+            turn_state,
+            turn_run_wake_notifier,
+            component_types,
+        }
+    }
+
+    #[cfg(feature = "postgres")]
+    pub fn with_postgres_root_filesystem(
+        self,
+        filesystem: Arc<PostgresRootFilesystem>,
+    ) -> HostRuntimeServices<PostgresRootFilesystem, G, S, R> {
+        self.with_root_filesystem(filesystem)
+    }
+
+    #[cfg(feature = "libsql")]
+    pub fn with_libsql_root_filesystem(
+        self,
+        filesystem: Arc<LibSqlRootFilesystem>,
+    ) -> HostRuntimeServices<LibSqlRootFilesystem, G, S, R> {
+        self.with_root_filesystem(filesystem)
     }
 
     /// Attaches the host-owned trust policy used by the produced
@@ -145,12 +472,18 @@ where
     where
         T: TrustPolicy + 'static,
     {
+        self.component_types.trust_policy = Some(type_name::<T>());
+        self.component_types.trust_policy_verified = true;
         self.trust_policy = trust_policy;
+        self.trust_policy_configured = true;
         self
     }
 
     pub fn with_trust_policy_dyn(mut self, trust_policy: Arc<dyn TrustPolicy>) -> Self {
+        self.component_types.trust_policy = Some("dyn TrustPolicy");
+        self.component_types.trust_policy_verified = false;
         self.trust_policy = trust_policy;
+        self.trust_policy_configured = true;
         self
     }
 
@@ -158,7 +491,9 @@ where
     where
         T: RunStateStore + 'static,
     {
+        self.component_types.run_state = Some(type_name::<T>());
         self.run_state = Some(run_state);
+        self.run_state_approval_store = None;
         self
     }
 
@@ -166,15 +501,92 @@ where
     where
         T: ApprovalRequestStore + 'static,
     {
+        self.component_types.approval_requests = Some(type_name::<T>());
         self.approval_requests = Some(approval_requests);
+        self.run_state_approval_store = None;
         self
+    }
+
+    pub fn with_run_state_approval_store<T>(mut self, store: Arc<T>) -> Self
+    where
+        T: RunStateApprovalStore + 'static,
+    {
+        self.component_types.run_state = Some(type_name::<T>());
+        self.component_types.approval_requests = Some(type_name::<T>());
+        self.run_state = Some(store.clone());
+        self.approval_requests = Some(store.clone());
+        self.run_state_approval_store = Some(store);
+        self
+    }
+
+    /// Builds and attaches the libSQL transactional combined run-state and
+    /// approval-request store for production/shared callers.
+    #[cfg(feature = "libsql")]
+    pub async fn with_libsql_run_state_approval_store(
+        self,
+        db: Arc<libsql::Database>,
+    ) -> Result<Self, RunStateError> {
+        let store = Arc::new(LibSqlRunStateApprovalStore::new(db));
+        store.run_migrations().await?;
+        Ok(self.with_run_state_approval_store(store))
+    }
+
+    /// Builds and attaches the PostgreSQL transactional combined run-state and
+    /// approval-request store for production/shared callers.
+    #[cfg(feature = "postgres")]
+    pub async fn with_postgres_run_state_approval_store(
+        self,
+        pool: deadpool_postgres::Pool,
+    ) -> Result<Self, RunStateError> {
+        let store = Arc::new(PostgresRunStateApprovalStore::new(pool));
+        store.run_migrations().await?;
+        Ok(self.with_run_state_approval_store(store))
     }
 
     pub fn with_capability_leases<T>(mut self, capability_leases: Arc<T>) -> Self
     where
         T: CapabilityLeaseStore + 'static,
     {
+        self.component_types.capability_leases = Some(type_name::<T>());
         self.capability_leases = Some(capability_leases);
+        self
+    }
+
+    pub fn with_turn_state<T>(mut self, turn_state: Arc<T>) -> Self
+    where
+        T: TurnStateStore + 'static,
+    {
+        self.component_types.turn_state = Some(type_name::<T>());
+        self.turn_state = Some(turn_state);
+        self
+    }
+
+    #[cfg(feature = "libsql")]
+    pub async fn with_libsql_turn_state_store(
+        self,
+        db: Arc<libsql::Database>,
+    ) -> Result<Self, ironclaw_turns::TurnError> {
+        let store = Arc::new(LibSqlTurnStateStore::new(db));
+        store.run_migrations().await?;
+        Ok(self.with_turn_state(store))
+    }
+
+    #[cfg(feature = "postgres")]
+    pub async fn with_postgres_turn_state_store(
+        self,
+        pool: deadpool_postgres::Pool,
+    ) -> Result<Self, ironclaw_turns::TurnError> {
+        let store = Arc::new(PostgresTurnStateStore::new(pool));
+        store.run_migrations().await?;
+        Ok(self.with_turn_state(store))
+    }
+
+    pub fn with_turn_run_wake_notifier<T>(mut self, notifier: Arc<T>) -> Self
+    where
+        T: TurnRunWakeNotifier + 'static,
+    {
+        self.component_types.turn_run_wake_notifier = Some(type_name::<T>());
+        self.turn_run_wake_notifier = Some(notifier);
         self
     }
 
@@ -182,46 +594,121 @@ where
     where
         T: EventSink + 'static,
     {
+        self.component_types.event_sink = Some(type_name::<T>());
+        let event_sink: Arc<dyn EventSink> = event_sink;
+        self.process_lifecycle_store
+            .set_event_sink(Arc::clone(&event_sink));
         self.event_sink = Some(event_sink);
         self
     }
 
-    pub fn with_durable_event_log<T>(self, event_log: Arc<T>) -> Self
+    pub fn with_durable_event_log<T>(mut self, event_log: Arc<T>) -> Self
     where
         T: DurableEventLog + 'static,
     {
+        self.component_types.event_sink = Some(type_name::<T>());
         let event_log: Arc<dyn DurableEventLog> = event_log;
-        self.with_event_sink(Arc::new(DurableEventSink::new(event_log)))
+        let event_sink: Arc<dyn EventSink> = Arc::new(DurableEventSink::new(event_log));
+        self.process_lifecycle_store
+            .set_event_sink(Arc::clone(&event_sink));
+        self.event_sink = Some(event_sink);
+        self
     }
 
     pub fn with_audit_sink<T>(mut self, audit_sink: Arc<T>) -> Self
     where
         T: AuditSink + 'static,
     {
+        self.component_types.audit_sink = Some(type_name::<T>());
         self.audit_sink = Some(audit_sink);
         self
     }
 
-    pub fn with_durable_audit_log<T>(self, audit_log: Arc<T>) -> Self
+    pub fn with_durable_audit_log<T>(mut self, audit_log: Arc<T>) -> Self
     where
         T: DurableAuditLog + 'static,
     {
+        self.component_types.audit_sink = Some(type_name::<T>());
         let audit_log: Arc<dyn DurableAuditLog> = audit_log;
-        self.with_audit_sink(Arc::new(DurableAuditSink::new(audit_log)))
+        self.audit_sink = Some(Arc::new(DurableAuditSink::new(audit_log)));
+        self
+    }
+
+    /// Attaches a pre-built Reborn durable event/audit store pair to the host
+    /// runtime graph. This is the production composition seam for store
+    /// selection: callers choose Postgres/libSQL/accepted-JSONL through
+    /// `ironclaw_reborn_event_store`, then this method adapts the durable logs
+    /// into the live sink traits consumed by runtime services.
+    pub fn with_reborn_event_stores(self, stores: RebornEventStores) -> Self {
+        self.with_reborn_event_stores_verified(stores, false)
+    }
+
+    fn with_reborn_event_stores_verified(
+        mut self,
+        stores: RebornEventStores,
+        production_verified: bool,
+    ) -> Self {
+        if production_verified {
+            self.component_types.event_sink = Some(type_name::<RebornEventStores>());
+            self.component_types.audit_sink = Some(type_name::<RebornEventStores>());
+        } else {
+            // Prebuilt/LocalDev/Test stores are useful for tests and lower-level
+            // composition, but must not silently satisfy production guardrails.
+            self.component_types.event_sink = Some(type_name::<DurableEventSink>());
+            self.component_types.audit_sink = Some(type_name::<DurableAuditSink>());
+        }
+        self.event_sink = Some(Arc::new(DurableEventSink::new(stores.events)));
+        self.audit_sink = Some(Arc::new(DurableAuditSink::new(stores.audit)));
+        self
+    }
+
+    /// Builds Reborn event/audit stores from profile/config and attaches them
+    /// to this service graph. Production JSONL/in-memory restrictions are
+    /// enforced by `build_reborn_event_stores` before sinks are installed.
+    pub async fn with_reborn_event_store_config(
+        self,
+        profile: RebornProfile,
+        config: RebornEventStoreConfig,
+    ) -> Result<Self, RebornEventStoreError> {
+        let stores = build_reborn_event_stores(profile, config).await?;
+        Ok(self.with_reborn_event_stores_verified(stores, profile == RebornProfile::Production))
     }
 
     pub fn with_secret_store<T>(mut self, secret_store: Arc<T>) -> Self
     where
         T: SecretStore + 'static,
     {
+        self.component_types.secret_store = Some(type_name::<T>());
         self.secret_store = Some(secret_store);
         self
     }
 
-    pub fn with_runtime_http_egress<T>(self, runtime_http_egress: Arc<T>) -> Self
+    pub fn with_runtime_http_egress<T>(mut self, runtime_http_egress: Arc<T>) -> Self
     where
         T: RuntimeHttpEgress + 'static,
     {
+        self.component_types.runtime_http_egress = Some(type_name::<T>());
+        self.component_types.runtime_http_egress_verified = false;
+        let runtime_http_egress: Arc<dyn RuntimeHttpEgress> = runtime_http_egress;
+        set_runtime_http_egress(&self.runtime_http_egress, runtime_http_egress);
+        self
+    }
+
+    /// Attaches the host HTTP egress shape required for production runtime
+    /// adapters. The service must use staged network-policy handoffs and secret
+    /// injection handoffs, not request-local/test policy fallback.
+    pub fn with_host_http_egress_service<N, SecretBackend>(
+        mut self,
+        runtime_http_egress: Arc<crate::HostHttpEgressService<N, SecretBackend>>,
+    ) -> Self
+    where
+        N: NetworkHttpEgress + 'static,
+        SecretBackend: SecretStore + 'static,
+    {
+        self.component_types.runtime_http_egress =
+            Some(type_name::<crate::HostHttpEgressService<N, SecretBackend>>());
+        self.component_types.runtime_http_egress_verified = runtime_http_egress
+            .is_production_wired_with(&self.network_policy_store, &self.secret_injection_store);
         let runtime_http_egress: Arc<dyn RuntimeHttpEgress> = runtime_http_egress;
         set_runtime_http_egress(&self.runtime_http_egress, runtime_http_egress);
         self
@@ -239,8 +726,26 @@ where
     where
         T: WasmRuntimeCredentialProvider + 'static,
     {
+        self.component_types.wasm_credential_provider = Some(type_name::<T>());
+        self.component_types.wasm_credential_provider_verified = false;
         let provider: Arc<dyn WasmRuntimeCredentialProvider> = provider;
         self.wasm_credential_provider = Some(provider);
+        self.component_types
+            .wasm_runtime_credential_provider_captured = self.wasm_runtime.is_none();
+        self
+    }
+
+    pub fn with_verified_wasm_runtime_credentials(
+        mut self,
+        provider: Arc<WasmStagedRuntimeCredentials>,
+    ) -> Self {
+        self.component_types.wasm_credential_provider =
+            Some(type_name::<WasmStagedRuntimeCredentials>());
+        self.component_types.wasm_credential_provider_verified = !provider.credentials().is_empty();
+        let provider: Arc<dyn WasmRuntimeCredentialProvider> = provider;
+        self.wasm_credential_provider = Some(provider);
+        self.component_types
+            .wasm_runtime_credential_provider_captured = self.wasm_runtime.is_none();
         self
     }
 
@@ -248,10 +753,15 @@ where
         Arc::clone(&self.secret_injection_store)
     }
 
+    pub fn network_policy_store(&self) -> Arc<NetworkObligationPolicyStore> {
+        Arc::clone(&self.network_policy_store)
+    }
+
     pub fn with_script_runtime<T>(mut self, runtime: Arc<T>) -> Self
     where
         T: ScriptExecutor + 'static,
     {
+        self.component_types.script_runtime = Some(type_name::<T>());
         self.script_runtime = Some(runtime);
         self
     }
@@ -260,11 +770,14 @@ where
     where
         T: McpExecutor + 'static,
     {
+        self.component_types.mcp_runtime = Some(type_name::<T>());
         self.mcp_runtime = Some(runtime);
         self
     }
 
     fn with_wasm_runtime(mut self, runtime: Arc<WasmRuntimeAdapter>) -> Self {
+        self.component_types
+            .wasm_runtime_credential_provider_captured = self.wasm_credential_provider.is_some();
         self.wasm_runtime = Some(runtime);
         self
     }
@@ -282,6 +795,372 @@ where
             self.wasm_credential_provider.clone(),
         )?);
         Ok(self.with_wasm_runtime(adapter))
+    }
+
+    /// Validates that this service graph is explicitly wired for production
+    /// instead of relying on local/test defaults. This is a guardrail for
+    /// composition roots; it does not build or mutate the runtime graph.
+    pub fn validate_production_wiring(
+        &self,
+        config: &ProductionWiringConfig,
+    ) -> Result<(), ProductionWiringReport> {
+        let mut issues = Vec::new();
+
+        self.push_missing(
+            &mut issues,
+            ProductionWiringComponent::TrustPolicy,
+            self.trust_policy_configured,
+        );
+        self.push_missing(
+            &mut issues,
+            ProductionWiringComponent::RunState,
+            self.run_state.is_some(),
+        );
+        self.push_missing(
+            &mut issues,
+            ProductionWiringComponent::ApprovalRequests,
+            self.approval_requests.is_some(),
+        );
+        self.push_missing(
+            &mut issues,
+            ProductionWiringComponent::CapabilityLeases,
+            self.capability_leases.is_some(),
+        );
+        self.push_missing(
+            &mut issues,
+            ProductionWiringComponent::TurnState,
+            self.turn_state.is_some(),
+        );
+        self.push_missing(
+            &mut issues,
+            ProductionWiringComponent::TurnRunWakeNotifier,
+            self.turn_run_wake_notifier.is_some(),
+        );
+        self.push_missing(
+            &mut issues,
+            ProductionWiringComponent::EventSink,
+            self.event_sink.is_some(),
+        );
+        self.push_missing(
+            &mut issues,
+            ProductionWiringComponent::AuditSink,
+            self.audit_sink.is_some(),
+        );
+        self.push_missing(
+            &mut issues,
+            ProductionWiringComponent::SecretStore,
+            self.secret_store.is_some(),
+        );
+
+        if config.require_runtime_http_egress {
+            let runtime_http_configured =
+                runtime_http_egress_is_configured(&self.runtime_http_egress);
+            self.push_missing(
+                &mut issues,
+                ProductionWiringComponent::RuntimeHttpEgress,
+                runtime_http_configured,
+            );
+            if runtime_http_configured && !self.component_types.runtime_http_egress_verified {
+                self.push_issue(
+                    &mut issues,
+                    ProductionWiringComponent::RuntimeHttpEgress,
+                    ProductionWiringIssueKind::UnverifiedProductionImplementation,
+                    self.component_types.runtime_http_egress,
+                );
+            }
+        }
+        if config.require_wasm_credentials {
+            self.push_missing(
+                &mut issues,
+                ProductionWiringComponent::WasmCredentialProvider,
+                self.wasm_credential_provider.is_some(),
+            );
+            if self.wasm_credential_provider.is_some()
+                && !self.component_types.wasm_credential_provider_verified
+            {
+                self.push_issue(
+                    &mut issues,
+                    ProductionWiringComponent::WasmCredentialProvider,
+                    ProductionWiringIssueKind::UnverifiedProductionImplementation,
+                    self.component_types.wasm_credential_provider,
+                );
+            }
+            if self.wasm_runtime.is_some()
+                && self.wasm_credential_provider.is_some()
+                && !self
+                    .component_types
+                    .wasm_runtime_credential_provider_captured
+            {
+                self.push_issue(
+                    &mut issues,
+                    ProductionWiringComponent::WasmCredentialProvider,
+                    ProductionWiringIssueKind::UnverifiedProductionImplementation,
+                    self.component_types.wasm_credential_provider,
+                );
+            }
+        }
+        for runtime in &config.required_runtime_backends {
+            match runtime {
+                RuntimeKind::Script | RuntimeKind::Mcp | RuntimeKind::Wasm => {}
+                RuntimeKind::FirstParty | RuntimeKind::System => self.push_issue(
+                    &mut issues,
+                    ProductionWiringComponent::RuntimeBackend,
+                    ProductionWiringIssueKind::UnsupportedRequirement,
+                    None,
+                ),
+            }
+        }
+        if config.requires_runtime(RuntimeKind::Script) {
+            self.push_missing(
+                &mut issues,
+                ProductionWiringComponent::ScriptRuntime,
+                self.script_runtime.is_some(),
+            );
+        }
+        if config.requires_runtime(RuntimeKind::Mcp) {
+            self.push_missing(
+                &mut issues,
+                ProductionWiringComponent::McpRuntime,
+                self.mcp_runtime.is_some(),
+            );
+        }
+        if config.requires_runtime(RuntimeKind::Wasm) {
+            self.push_missing(
+                &mut issues,
+                ProductionWiringComponent::WasmRuntime,
+                self.wasm_runtime.is_some(),
+            );
+        }
+
+        self.push_local_only(
+            &mut issues,
+            ProductionWiringComponent::TrustPolicy,
+            self.component_types.trust_policy,
+        );
+        if self.trust_policy_configured && !self.component_types.trust_policy_verified {
+            self.push_issue(
+                &mut issues,
+                ProductionWiringComponent::TrustPolicy,
+                ProductionWiringIssueKind::UnverifiedProductionImplementation,
+                self.component_types.trust_policy,
+            );
+        }
+        self.push_local_only(
+            &mut issues,
+            ProductionWiringComponent::Filesystem,
+            Some(self.component_types.filesystem),
+        );
+        self.push_local_only(
+            &mut issues,
+            ProductionWiringComponent::ResourceGovernor,
+            Some(self.component_types.resource_governor),
+        );
+        self.push_local_only(
+            &mut issues,
+            ProductionWiringComponent::ProcessStore,
+            Some(self.component_types.process_store),
+        );
+        self.push_local_only(
+            &mut issues,
+            ProductionWiringComponent::ProcessResultStore,
+            Some(self.component_types.process_result_store),
+        );
+        self.push_local_only(
+            &mut issues,
+            ProductionWiringComponent::RunState,
+            self.component_types.run_state,
+        );
+        self.push_local_only(
+            &mut issues,
+            ProductionWiringComponent::ApprovalRequests,
+            self.component_types.approval_requests,
+        );
+        self.push_local_only(
+            &mut issues,
+            ProductionWiringComponent::CapabilityLeases,
+            self.component_types.capability_leases,
+        );
+        self.push_local_only(
+            &mut issues,
+            ProductionWiringComponent::TurnState,
+            self.component_types.turn_state,
+        );
+        self.push_local_only(
+            &mut issues,
+            ProductionWiringComponent::TurnRunWakeNotifier,
+            self.component_types.turn_run_wake_notifier,
+        );
+        self.push_local_only(
+            &mut issues,
+            ProductionWiringComponent::EventSink,
+            self.component_types.event_sink,
+        );
+        self.push_local_only(
+            &mut issues,
+            ProductionWiringComponent::AuditSink,
+            self.component_types.audit_sink,
+        );
+        self.push_local_only(
+            &mut issues,
+            ProductionWiringComponent::SecretStore,
+            self.component_types.secret_store,
+        );
+        self.push_local_only(
+            &mut issues,
+            ProductionWiringComponent::RuntimeHttpEgress,
+            self.component_types.runtime_http_egress,
+        );
+        self.push_local_only(
+            &mut issues,
+            ProductionWiringComponent::WasmCredentialProvider,
+            self.component_types.wasm_credential_provider,
+        );
+        self.push_local_only(
+            &mut issues,
+            ProductionWiringComponent::ScriptRuntime,
+            self.component_types.script_runtime,
+        );
+        self.push_local_only(
+            &mut issues,
+            ProductionWiringComponent::McpRuntime,
+            self.component_types.mcp_runtime,
+        );
+
+        if issues.is_empty() {
+            Ok(())
+        } else {
+            Err(ProductionWiringReport { issues })
+        }
+    }
+
+    fn push_missing(
+        &self,
+        issues: &mut Vec<ProductionWiringIssue>,
+        component: ProductionWiringComponent,
+        present: bool,
+    ) {
+        if !present {
+            self.push_issue(issues, component, ProductionWiringIssueKind::Missing, None);
+        }
+    }
+
+    fn push_local_only(
+        &self,
+        issues: &mut Vec<ProductionWiringIssue>,
+        component: ProductionWiringComponent,
+        implementation: Option<&'static str>,
+    ) {
+        if let Some(implementation) = implementation {
+            if is_local_only_component(implementation) {
+                self.push_issue(
+                    issues,
+                    component,
+                    ProductionWiringIssueKind::LocalOnlyImplementation,
+                    Some(implementation),
+                );
+            } else if is_erased_durable_sink_wrapper(implementation) {
+                self.push_issue(
+                    issues,
+                    component,
+                    ProductionWiringIssueKind::UnverifiedProductionImplementation,
+                    Some(implementation),
+                );
+            }
+        }
+    }
+
+    fn push_issue(
+        &self,
+        issues: &mut Vec<ProductionWiringIssue>,
+        component: ProductionWiringComponent,
+        kind: ProductionWiringIssueKind,
+        implementation: Option<&'static str>,
+    ) {
+        issues.push(ProductionWiringIssue {
+            component,
+            kind,
+            implementation,
+        });
+    }
+
+    /// Validates this graph and then builds the upper facade for production
+    /// callers. This consumes the service graph so callers cannot mutate shared
+    /// runtime-adapter handoff slots after validation.
+    pub fn host_runtime_for_production(
+        self,
+        config: &ProductionWiringConfig,
+    ) -> Result<DefaultHostRuntime, ProductionWiringReport> {
+        self.validate_production_wiring(config)?;
+        Ok(self.build_host_runtime())
+    }
+
+    /// Validates this graph and builds the production turn coordinator from
+    /// the configured durable turn-state store and wake notifier. This keeps
+    /// turn orchestration as an upper-layer artifact while still ensuring the
+    /// same production guardrail validates the actual handles returned to
+    /// callers.
+    pub fn turn_coordinator_for_production(
+        &self,
+    ) -> Result<DefaultTurnCoordinator<dyn TurnStateStore>, ProductionWiringReport> {
+        self.validate_production_turn_wiring()?;
+        let Some(turn_state) = self.turn_state.as_ref() else {
+            return Err(production_wiring_report(
+                ProductionWiringComponent::TurnState,
+                ProductionWiringIssueKind::Missing,
+                None,
+            ));
+        };
+        let Some(notifier) = self.turn_run_wake_notifier.as_ref() else {
+            return Err(production_wiring_report(
+                ProductionWiringComponent::TurnRunWakeNotifier,
+                ProductionWiringIssueKind::Missing,
+                None,
+            ));
+        };
+        Ok(DefaultTurnCoordinator::new(Arc::clone(turn_state))
+            .with_wake_notifier(Arc::clone(notifier)))
+    }
+
+    fn validate_production_turn_wiring(&self) -> Result<(), ProductionWiringReport> {
+        let mut issues = Vec::new();
+        self.push_missing(
+            &mut issues,
+            ProductionWiringComponent::TurnState,
+            self.turn_state.is_some(),
+        );
+        self.push_missing(
+            &mut issues,
+            ProductionWiringComponent::TurnRunWakeNotifier,
+            self.turn_run_wake_notifier.is_some(),
+        );
+        self.push_local_only(
+            &mut issues,
+            ProductionWiringComponent::TurnState,
+            self.component_types.turn_state,
+        );
+        self.push_local_only(
+            &mut issues,
+            ProductionWiringComponent::TurnRunWakeNotifier,
+            self.component_types.turn_run_wake_notifier,
+        );
+        if issues.is_empty() {
+            Ok(())
+        } else {
+            Err(ProductionWiringReport { issues })
+        }
+    }
+
+    /// Builds and attaches the configured Reborn durable event/audit stores,
+    /// validates production wiring, and returns the host runtime facade.
+    pub async fn host_runtime_for_production_with_event_store_config(
+        self,
+        event_store_config: RebornEventStoreConfig,
+        production_config: &ProductionWiringConfig,
+    ) -> Result<DefaultHostRuntime, ProductionEventStoreWiringError> {
+        let services = self
+            .with_reborn_event_store_config(RebornProfile::Production, event_store_config)
+            .await?;
+        Ok(services.host_runtime_for_production(production_config)?)
     }
 
     /// Builds a runtime dispatcher with every configured runtime adapter.
@@ -315,9 +1194,15 @@ where
         dispatcher
     }
 
+    /// Builds the upper facade without production validation.
+    #[doc(hidden)]
+    pub fn host_runtime_for_local_testing(&self) -> DefaultHostRuntime {
+        self.build_host_runtime()
+    }
+
     /// Builds the upper facade with the same dispatcher, process services,
     /// stores, cancellation registry, result store, and runtime health graph.
-    pub fn host_runtime(&self) -> DefaultHostRuntime {
+    fn build_host_runtime(&self) -> DefaultHostRuntime {
         let dispatcher: Arc<dyn CapabilityDispatcher> = Arc::new(self.runtime_dispatcher());
         let process_executor =
             Arc::new(RuntimeDispatchProcessExecutor::new(Arc::clone(&dispatcher)));
@@ -376,11 +1261,15 @@ where
         .with_process_cancellation_registry(self.process_services.cancellation_registry())
         .with_runtime_health(runtime_health);
 
-        if let Some(run_state) = &self.run_state {
-            runtime = runtime.with_run_state(Arc::clone(run_state));
-        }
-        if let Some(approval_requests) = &self.approval_requests {
-            runtime = runtime.with_approval_requests(Arc::clone(approval_requests));
+        if let Some(run_state_approval_store) = &self.run_state_approval_store {
+            runtime = runtime.with_run_state_approval_store(Arc::clone(run_state_approval_store));
+        } else {
+            if let Some(run_state) = &self.run_state {
+                runtime = runtime.with_run_state(Arc::clone(run_state));
+            }
+            if let Some(approval_requests) = &self.approval_requests {
+                runtime = runtime.with_approval_requests(Arc::clone(approval_requests));
+            }
         }
         if let Some(capability_leases) = &self.capability_leases {
             runtime = runtime.with_capability_leases(Arc::clone(capability_leases));
@@ -450,11 +1339,29 @@ fn set_runtime_http_egress(
     }
 }
 
+fn production_wiring_report(
+    component: ProductionWiringComponent,
+    kind: ProductionWiringIssueKind,
+    implementation: Option<&'static str>,
+) -> ProductionWiringReport {
+    ProductionWiringReport {
+        issues: vec![ProductionWiringIssue {
+            component,
+            kind,
+            implementation,
+        }],
+    }
+}
+
 fn runtime_http_egress(slot: &SharedRuntimeHttpEgress) -> Option<Arc<dyn RuntimeHttpEgress>> {
     match slot.lock() {
         Ok(guard) => guard.clone(),
         Err(poisoned) => poisoned.into_inner().clone(),
     }
+}
+
+fn runtime_http_egress_is_configured(slot: &SharedRuntimeHttpEgress) -> bool {
+    runtime_http_egress(slot).is_some()
 }
 
 #[derive(Debug, Clone)]

@@ -14,6 +14,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_events::sanitize_error_kind;
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{ProcessId, ResourceScope, VirtualPath};
 use serde::{Deserialize, Serialize};
@@ -163,8 +164,13 @@ where
         process_id: ProcessId,
         error_kind: String,
     ) -> Result<ProcessRecord, ProcessError> {
-        self.update_status(scope, process_id, ProcessStatus::Failed, Some(error_kind))
-            .await
+        self.update_status(
+            scope,
+            process_id,
+            ProcessStatus::Failed,
+            Some(sanitize_error_kind(error_kind)),
+        )
+        .await
     }
 
     async fn kill(
@@ -329,7 +335,7 @@ where
             ProcessStatus::Failed,
             None,
             None,
-            Some(error_kind),
+            Some(sanitize_error_kind(error_kind)),
         )
         .await
     }

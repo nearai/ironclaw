@@ -1,4 +1,11 @@
-use std::{sync::Arc, thread, time::Duration};
+use std::{
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    thread,
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
@@ -8,18 +15,27 @@ use ironclaw_authorization::{
     TrustAwareCapabilityDispatchAuthorizer,
 };
 use ironclaw_capabilities::{CapabilityHost, CapabilitySpawnRequest};
+use ironclaw_event_projections::{
+    AuditProjectionError, AuditProjectionRequest, AuditProjectionService, AuditProjectionStage,
+    EventProjectionService, ProjectionCursor, ProjectionError, ProjectionRequest, ProjectionScope,
+    ReplayAuditProjectionService, ReplayEventProjectionService, RunProjectionStatus,
+    TimelineEntryKind,
+};
 use ironclaw_events::{
-    DurableAuditLog, DurableEventLog, EventCursor, EventError, EventReplay, EventStreamKey,
-    InMemoryAuditSink, InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink,
-    ReadScope, RuntimeEventKind,
+    DurableAuditLog, DurableAuditSink, DurableEventLog, DurableEventSink, EventCursor, EventError,
+    EventReplay, EventStreamKey, InMemoryAuditSink, InMemoryDurableAuditLog,
+    InMemoryDurableEventLog, InMemoryEventSink, ReadScope, RuntimeEventKind,
 };
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry};
+#[cfg(feature = "libsql")]
+use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationHandler, CancelReason, CancelRuntimeWorkRequest, CapabilitySurfaceVersion,
     DefaultHostRuntime, HostHttpEgressService, HostRuntime, HostRuntimeServices,
-    NetworkObligationPolicyStore, ProcessObligationLifecycleStore, RuntimeCapabilityOutcome,
+    NetworkObligationPolicyStore, ProcessObligationLifecycleStore, ProductionWiringComponent,
+    ProductionWiringConfig, ProductionWiringIssueKind, RuntimeCapabilityOutcome,
     RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind,
     RuntimeSecretInjectionStore, RuntimeStatusRequest, RuntimeWorkId,
 };
@@ -30,14 +46,20 @@ use ironclaw_network::{
 use ironclaw_processes::{
     BackgroundFailureStage, BackgroundProcessManager, InMemoryProcessResultStore,
     InMemoryProcessStore, ProcessError, ProcessExecutionRequest, ProcessExecutionResult,
-    ProcessExecutor, ProcessHost, ProcessResultRecord, ProcessResultStore, ProcessServices,
-    ProcessStart, ProcessStatus, ProcessStore,
+    ProcessExecutor, ProcessHost, ProcessManager, ProcessResultRecord, ProcessResultStore,
+    ProcessServices, ProcessStart, ProcessStatus, ProcessStore,
+};
+use ironclaw_reborn_event_store::{
+    RebornEventStoreConfig, RebornEventStoreError, RebornProfile, build_reborn_event_stores,
 };
 use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits,
 };
+#[cfg(feature = "libsql")]
+use ironclaw_run_state::LibSqlRunStateApprovalStore;
 use ironclaw_run_state::{
-    InMemoryApprovalRequestStore, InMemoryRunStateStore, RunStateStore, RunStatus,
+    ApprovalRecord, ApprovalRequestStore, InMemoryApprovalRequestStore, InMemoryRunStateStore,
+    RunRecord, RunStart, RunStateApprovalStore, RunStateError, RunStateStore, RunStatus,
 };
 use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptExecutionRequest,
@@ -48,6 +70,14 @@ use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
     HostTrustPolicy, TrustDecision, TrustProvenance,
 };
+#[cfg(feature = "libsql")]
+use ironclaw_turns::LibSqlTurnStateStore;
+#[cfg(feature = "libsql")]
+use ironclaw_turns::{
+    AcceptedMessageRef, IdempotencyKey, ReplyTargetBindingRef, RunProfileRequest, SourceBindingRef,
+    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnScope, TurnStateStore,
+};
+use ironclaw_turns::{NoopTurnRunWakeNotifier, TurnRunWake, TurnRunWakeNotifier};
 use ironclaw_wasm::{
     RecordingWasmHostHttp, WasmHostError, WasmHostHttp, WasmHttpRequest, WasmHttpResponse,
     WasmStagedRuntimeCredential, WasmStagedRuntimeCredentials, WitToolHost, WitToolRuntimeConfig,
@@ -55,6 +85,923 @@ use ironclaw_wasm::{
 use serde_json::json;
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
 use wit_parser::Resolve;
+
+#[test]
+fn production_wiring_validation_rejects_missing_components_and_local_only_defaults() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    );
+
+    let report = match services.host_runtime_for_production(&ProductionWiringConfig::new([])) {
+        Ok(_) => panic!("bare local/test service graph must not pass production validation"),
+        Err(report) => report,
+    };
+
+    assert!(
+        report.contains(
+            ProductionWiringComponent::TrustPolicy,
+            ProductionWiringIssueKind::Missing
+        ),
+        "missing explicit trust policy should be reported: {report:?}"
+    );
+    assert!(
+        report.contains(
+            ProductionWiringComponent::RunState,
+            ProductionWiringIssueKind::Missing
+        ),
+        "missing run-state store should be reported: {report:?}"
+    );
+    assert!(
+        report.contains(
+            ProductionWiringComponent::ApprovalRequests,
+            ProductionWiringIssueKind::Missing
+        ),
+        "missing approval store should be reported: {report:?}"
+    );
+    assert!(
+        report.contains(
+            ProductionWiringComponent::CapabilityLeases,
+            ProductionWiringIssueKind::Missing
+        ),
+        "missing capability lease store should be reported: {report:?}"
+    );
+    assert!(
+        report.contains(
+            ProductionWiringComponent::TurnState,
+            ProductionWiringIssueKind::Missing
+        ),
+        "missing turn-state store should be reported: {report:?}"
+    );
+    assert!(
+        report.contains(
+            ProductionWiringComponent::TurnRunWakeNotifier,
+            ProductionWiringIssueKind::Missing
+        ),
+        "missing turn wake notifier should be reported: {report:?}"
+    );
+    assert!(
+        report.contains(
+            ProductionWiringComponent::EventSink,
+            ProductionWiringIssueKind::Missing
+        ),
+        "missing event sink should be reported: {report:?}"
+    );
+    assert!(
+        report.contains(
+            ProductionWiringComponent::AuditSink,
+            ProductionWiringIssueKind::Missing
+        ),
+        "missing audit sink should be reported: {report:?}"
+    );
+    assert!(
+        report.contains(
+            ProductionWiringComponent::SecretStore,
+            ProductionWiringIssueKind::Missing
+        ),
+        "missing secret store should be reported: {report:?}"
+    );
+    assert!(
+        report.contains(
+            ProductionWiringComponent::Filesystem,
+            ProductionWiringIssueKind::LocalOnlyImplementation
+        ),
+        "local filesystem should be reported as local-only: {report:?}"
+    );
+    assert!(
+        report.contains(
+            ProductionWiringComponent::ResourceGovernor,
+            ProductionWiringIssueKind::LocalOnlyImplementation
+        ),
+        "in-memory resource governor should be reported as local-only: {report:?}"
+    );
+    assert!(
+        report.contains(
+            ProductionWiringComponent::ProcessStore,
+            ProductionWiringIssueKind::LocalOnlyImplementation
+        ),
+        "in-memory process store should be reported as local-only: {report:?}"
+    );
+    assert!(
+        report.contains(
+            ProductionWiringComponent::ProcessResultStore,
+            ProductionWiringIssueKind::LocalOnlyImplementation
+        ),
+        "in-memory process result store should be reported as local-only: {report:?}"
+    );
+}
+
+#[test]
+fn production_wiring_validation_classifies_combined_store_as_run_state_and_approvals() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_run_state_approval_store(Arc::new(
+        InMemoryRecordingCombinedRunStateApprovalStore::new(),
+    ));
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]))
+        .expect_err("local/test combined store must not pass production validation");
+
+    assert!(
+        report.contains(
+            ProductionWiringComponent::RunState,
+            ProductionWiringIssueKind::LocalOnlyImplementation,
+        ),
+        "combined store should be classified for run-state guardrails: {report:?}"
+    );
+    assert!(
+        report.contains(
+            ProductionWiringComponent::ApprovalRequests,
+            ProductionWiringIssueKind::LocalOnlyImplementation,
+        ),
+        "combined store should be classified for approval guardrails: {report:?}"
+    );
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::RunState,
+            ProductionWiringIssueKind::Missing,
+        ),
+        "combined store should satisfy run-state presence: {report:?}"
+    );
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::ApprovalRequests,
+            ProductionWiringIssueKind::Missing,
+        ),
+        "combined store should satisfy approval-store presence: {report:?}"
+    );
+}
+
+#[test]
+fn production_wiring_validation_rejects_unsupported_runtime_requirements() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    );
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([RuntimeKind::FirstParty]))
+        .expect_err("first-party runtime requirements are not dispatcher backend requirements");
+
+    assert!(
+        report.contains(
+            ProductionWiringComponent::RuntimeBackend,
+            ProductionWiringIssueKind::UnsupportedRequirement
+        ),
+        "unsupported runtime backend requirement should be reported: {report:?}"
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_run_state_store_selection_satisfies_production_run_state_guardrails() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let db_path = db_dir.path().join("run-state-selection.db");
+    let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_libsql_run_state_approval_store(Arc::clone(&db))
+    .await
+    .unwrap();
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]))
+        .expect_err("other local services remain intentionally unready");
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::RunState,
+            ProductionWiringIssueKind::Missing
+        ),
+        "LibSqlRunStateApprovalStore must satisfy run-state presence: {report:?}"
+    );
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::ApprovalRequests,
+            ProductionWiringIssueKind::Missing
+        ),
+        "LibSqlRunStateApprovalStore must satisfy approval-store presence: {report:?}"
+    );
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::RunState,
+            ProductionWiringIssueKind::LocalOnlyImplementation
+        ),
+        "LibSqlRunStateApprovalStore must not be classified local-only: {report:?}"
+    );
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::ApprovalRequests,
+            ProductionWiringIssueKind::LocalOnlyImplementation
+        ),
+        "LibSqlRunStateApprovalStore must not be classified local-only: {report:?}"
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_run_state_store_selection_persists_runtime_approval_block() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let db_path = db_dir.path().join("run-state-runtime-approval.db");
+    let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenGrantAuthorizer),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_libsql_run_state_approval_store(Arc::clone(&db))
+    .await
+    .unwrap()
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability],
+    )))
+    .with_script_runtime(Arc::new(ScriptRuntime::new(
+        ScriptRuntimeConfig::for_testing(),
+        EchoScriptBackend,
+    )));
+
+    let runtime = services.host_runtime_for_local_testing();
+    let context = execution_context_without_grants();
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context.clone(),
+            script_capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "durable approval"}),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    let RuntimeCapabilityOutcome::ApprovalRequired(gate) = outcome else {
+        panic!("expected approval gate, got {outcome:?}");
+    };
+    let store = LibSqlRunStateApprovalStore::new(db);
+    let run_record = RunStateStore::get(&store, &context.resource_scope, context.invocation_id)
+        .await
+        .unwrap()
+        .expect("run record persisted");
+    assert_eq!(run_record.status, RunStatus::BlockedApproval);
+    assert_eq!(
+        run_record.approval_request_id,
+        Some(gate.approval_request_id)
+    );
+    let approval_record =
+        ApprovalRequestStore::get(&store, &context.resource_scope, gate.approval_request_id)
+            .await
+            .unwrap()
+            .expect("approval record persisted");
+    assert_eq!(
+        approval_record.status,
+        ironclaw_run_state::ApprovalStatus::Pending
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn production_root_filesystem_selection_accepts_libsql_root_filesystem() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let db_path = db_dir.path().join("root-filesystem.db");
+    let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+    let filesystem = Arc::new(LibSqlRootFilesystem::new(db));
+    filesystem.run_migrations().await.unwrap();
+
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_libsql_root_filesystem(Arc::clone(&filesystem));
+
+    let path = VirtualPath::new("/engine/tenants/t1/users/u1/root-selection.txt").unwrap();
+    filesystem.write_file(&path, b"selected").await.unwrap();
+    assert_eq!(filesystem.read_file(&path).await.unwrap(), b"selected");
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]))
+        .expect_err("other local services remain intentionally unready");
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::Filesystem,
+            ProductionWiringIssueKind::LocalOnlyImplementation
+        ),
+        "LibSqlRootFilesystem must satisfy production filesystem selection: {report:?}"
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn production_turn_state_selection_accepts_libsql_turn_state_store() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let db_path = db_dir.path().join("turn-state.db");
+    let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+    let turn_state = Arc::new(LibSqlTurnStateStore::new(Arc::clone(&db)));
+    turn_state.run_migrations().await.unwrap();
+
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_libsql_turn_state_store(Arc::clone(&db))
+    .await
+    .unwrap();
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]))
+        .expect_err("other local services remain intentionally unready");
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::TurnState,
+            ProductionWiringIssueKind::Missing
+        ),
+        "LibSqlTurnStateStore must satisfy production turn-state presence: {report:?}"
+    );
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::TurnState,
+            ProductionWiringIssueKind::LocalOnlyImplementation
+        ),
+        "LibSqlTurnStateStore must not be classified local-only: {report:?}"
+    );
+}
+
+#[derive(Debug, Default)]
+struct RecordingTurnRunWakeNotifier {
+    wakes: Mutex<Vec<TurnRunWake>>,
+}
+
+impl RecordingTurnRunWakeNotifier {
+    #[cfg(feature = "libsql")]
+    fn wakes(&self) -> Vec<TurnRunWake> {
+        self.wakes.lock().unwrap().clone()
+    }
+}
+
+impl TurnRunWakeNotifier for RecordingTurnRunWakeNotifier {
+    fn notify_queued_run(
+        &self,
+        wake: TurnRunWake,
+    ) -> Result<(), ironclaw_turns::TurnRunWakeNotifyError> {
+        self.wakes.lock().unwrap().push(wake);
+        Ok(())
+    }
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn production_turn_coordinator_uses_configured_store_and_notifier() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let db_path = db_dir.path().join("turn-coordinator.db");
+    let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+    let notifier = Arc::new(RecordingTurnRunWakeNotifier::default());
+
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_libsql_turn_state_store(Arc::clone(&db))
+    .await
+    .unwrap()
+    .with_turn_run_wake_notifier(Arc::clone(&notifier));
+
+    let coordinator = services
+        .turn_coordinator_for_production()
+        .expect("production-ready turn wiring should build coordinator");
+    let request = submit_turn_request("thread-production-turn-coordinator", "idem-production-turn");
+    let response = coordinator.submit_turn(request.clone()).await.unwrap();
+    let SubmitTurnResponse::Accepted { run_id, .. } = response;
+
+    let reopened = LibSqlTurnStateStore::new(Arc::clone(&db));
+    let state = reopened
+        .get_run_state(ironclaw_turns::GetRunStateRequest {
+            scope: request.scope,
+            run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(state.run_id, run_id);
+    assert_eq!(notifier.wakes().len(), 1);
+    assert_eq!(notifier.wakes()[0].run_id, run_id);
+}
+
+#[test]
+fn production_wiring_validation_rejects_noop_turn_wake_notifier() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_turn_run_wake_notifier(Arc::new(NoopTurnRunWakeNotifier));
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]))
+        .expect_err("other local services remain intentionally unready");
+    assert!(
+        report.contains(
+            ProductionWiringComponent::TurnRunWakeNotifier,
+            ProductionWiringIssueKind::LocalOnlyImplementation
+        ),
+        "NoopTurnRunWakeNotifier must not satisfy production turn wake wiring: {report:?}"
+    );
+}
+
+#[test]
+fn production_wiring_validation_accepts_configured_turn_wake_notifier() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_turn_run_wake_notifier(Arc::new(RecordingTurnRunWakeNotifier::default()));
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]))
+        .expect_err("other local services remain intentionally unready");
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::TurnRunWakeNotifier,
+            ProductionWiringIssueKind::Missing
+        ),
+        "configured turn wake notifier must satisfy production presence: {report:?}"
+    );
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::TurnRunWakeNotifier,
+            ProductionWiringIssueKind::LocalOnlyImplementation
+        ),
+        "configured turn wake notifier must not be classified local-only: {report:?}"
+    );
+}
+
+#[tokio::test]
+async fn production_event_store_config_rejects_jsonl_without_single_node_acceptance() {
+    let temp = tempfile::tempdir().unwrap();
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    );
+
+    let result = services
+        .with_reborn_event_store_config(
+            RebornProfile::Production,
+            RebornEventStoreConfig::Jsonl {
+                root: temp.path().join("reborn-event-store"),
+                accept_single_node_durable: false,
+            },
+        )
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(RebornEventStoreError::ProductionJsonlRequiresAcceptance)
+    ));
+}
+
+#[tokio::test]
+async fn local_reborn_event_store_config_does_not_satisfy_production_wiring() {
+    let temp = tempfile::tempdir().unwrap();
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_reborn_event_store_config(
+        RebornProfile::LocalDev,
+        RebornEventStoreConfig::Jsonl {
+            root: temp.path().join("local-reborn-event-store"),
+            accept_single_node_durable: false,
+        },
+    )
+    .await
+    .unwrap();
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]))
+        .expect_err("LocalDev stores are not production-verified event/audit sinks");
+
+    assert!(
+        report.contains(
+            ProductionWiringComponent::EventSink,
+            ProductionWiringIssueKind::UnverifiedProductionImplementation
+        ),
+        "LocalDev Reborn event store must not satisfy production event sink guardrail: {report:?}"
+    );
+    assert!(
+        report.contains(
+            ProductionWiringComponent::AuditSink,
+            ProductionWiringIssueKind::UnverifiedProductionImplementation
+        ),
+        "LocalDev Reborn audit store must not satisfy production audit sink guardrail: {report:?}"
+    );
+}
+
+#[tokio::test]
+async fn production_event_store_config_installs_verified_event_and_audit_sinks() {
+    let temp = tempfile::tempdir().unwrap();
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_reborn_event_store_config(
+        RebornProfile::Production,
+        RebornEventStoreConfig::Jsonl {
+            root: temp.path().join("accepted-reborn-event-store"),
+            accept_single_node_durable: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]))
+        .expect_err("other local test services are still not production-ready");
+
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::EventSink,
+            ProductionWiringIssueKind::Missing
+        ),
+        "event sink must be installed from Reborn event store config: {report:?}"
+    );
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::AuditSink,
+            ProductionWiringIssueKind::Missing
+        ),
+        "audit sink must be installed from Reborn event store config: {report:?}"
+    );
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::EventSink,
+            ProductionWiringIssueKind::UnverifiedProductionImplementation
+        ),
+        "Reborn durable event store adapter must not be treated as erased unverified sink: {report:?}"
+    );
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::AuditSink,
+            ProductionWiringIssueKind::UnverifiedProductionImplementation
+        ),
+        "Reborn durable audit store adapter must not be treated as erased unverified sink: {report:?}"
+    );
+}
+
+#[test]
+fn production_wiring_validation_uses_configured_runtime_requirements() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    );
+    let config = ProductionWiringConfig::new([RuntimeKind::Script, RuntimeKind::Wasm])
+        .require_runtime_http_egress()
+        .require_wasm_credentials();
+
+    let report = services
+        .validate_production_wiring(&config)
+        .expect_err("required runtime backends and egress must be reported when absent");
+
+    assert!(
+        report.contains(
+            ProductionWiringComponent::ScriptRuntime,
+            ProductionWiringIssueKind::Missing
+        ),
+        "missing script runtime should be reported: {report:?}"
+    );
+    assert!(
+        report.contains(
+            ProductionWiringComponent::WasmRuntime,
+            ProductionWiringIssueKind::Missing
+        ),
+        "missing wasm runtime should be reported: {report:?}"
+    );
+    assert!(
+        report.contains(
+            ProductionWiringComponent::RuntimeHttpEgress,
+            ProductionWiringIssueKind::Missing
+        ),
+        "missing runtime HTTP egress should be reported: {report:?}"
+    );
+    assert!(
+        report.contains(
+            ProductionWiringComponent::WasmCredentialProvider,
+            ProductionWiringIssueKind::Missing
+        ),
+        "missing WASM credential provider should be reported: {report:?}"
+    );
+}
+
+#[test]
+fn production_wiring_validation_sees_underlying_in_memory_durable_logs() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_durable_event_log(Arc::new(InMemoryDurableEventLog::new()))
+    .with_durable_audit_log(Arc::new(InMemoryDurableAuditLog::new()));
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]))
+        .expect_err("in-memory durable logs must not be hidden behind durable sink wrappers");
+
+    assert!(
+        report.contains(
+            ProductionWiringComponent::EventSink,
+            ProductionWiringIssueKind::LocalOnlyImplementation
+        ),
+        "in-memory durable event log should be reported through with_durable_event_log: {report:?}"
+    );
+    assert!(
+        report.contains(
+            ProductionWiringComponent::AuditSink,
+            ProductionWiringIssueKind::LocalOnlyImplementation
+        ),
+        "in-memory durable audit log should be reported through with_durable_audit_log: {report:?}"
+    );
+}
+
+#[test]
+fn production_wiring_validation_rejects_direct_durable_sink_wrappers_as_unverified() {
+    let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let audit_log: Arc<dyn DurableAuditLog> = Arc::new(InMemoryDurableAuditLog::new());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_event_sink(Arc::new(DurableEventSink::new(event_log)))
+    .with_audit_sink(Arc::new(DurableAuditSink::new(audit_log)));
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]))
+        .expect_err("direct durable sink wrappers must not hide erased underlying log types");
+
+    assert!(
+        report.contains(
+            ProductionWiringComponent::EventSink,
+            ProductionWiringIssueKind::UnverifiedProductionImplementation
+        ),
+        "direct durable event sink wrapper should require typed with_durable_event_log path: {report:?}"
+    );
+    assert!(
+        report.contains(
+            ProductionWiringComponent::AuditSink,
+            ProductionWiringIssueKind::UnverifiedProductionImplementation
+        ),
+        "direct durable audit sink wrapper should require typed with_durable_audit_log path: {report:?}"
+    );
+}
+
+#[test]
+fn production_wiring_validation_accepts_verified_host_http_egress_shape() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    );
+    let runtime_http = Arc::new(
+        HostHttpEgressService::new(
+            RecordingNetworkHttpEgress::new(),
+            InMemorySecretStore::new(),
+        )
+        .with_secret_injection_store(services.secret_injection_store())
+        .with_network_policy_store(services.network_policy_store()),
+    );
+    let services = services.with_host_http_egress_service(runtime_http);
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]).require_runtime_http_egress());
+
+    assert!(
+        report.as_ref().err().is_none_or(|report| !report.contains(
+            ProductionWiringComponent::RuntimeHttpEgress,
+            ProductionWiringIssueKind::UnverifiedProductionImplementation
+        )),
+        "verified host HTTP egress should satisfy the runtime egress guardrail: {report:?}"
+    );
+}
+
+#[test]
+fn production_wiring_validation_rejects_host_http_egress_with_unrelated_handoff_store() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    );
+    let runtime_http = Arc::new(
+        HostHttpEgressService::new(
+            RecordingNetworkHttpEgress::new(),
+            InMemorySecretStore::new(),
+        )
+        .with_secret_injection_store(services.secret_injection_store())
+        .with_network_policy_store(Arc::new(NetworkObligationPolicyStore::new())),
+    );
+    let services = services.with_host_http_egress_service(runtime_http);
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]).require_runtime_http_egress())
+        .expect_err("runtime HTTP egress must share the graph-owned network policy handoff store");
+
+    assert!(
+        report.contains(
+            ProductionWiringComponent::RuntimeHttpEgress,
+            ProductionWiringIssueKind::UnverifiedProductionImplementation
+        ),
+        "runtime HTTP egress with unrelated handoff stores should be unverified: {report:?}"
+    );
+}
+
+#[test]
+fn production_wiring_validation_rejects_unverified_runtime_http_egress() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_runtime_http_egress(Arc::new(
+        HostHttpEgressService::new_with_request_policy_for_tests(
+            RecordingNetworkHttpEgress::new(),
+            InMemorySecretStore::new(),
+        ),
+    ));
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]).require_runtime_http_egress())
+        .expect_err(
+            "generic/test runtime HTTP egress must not satisfy production egress guardrail",
+        );
+
+    assert!(
+        report.contains(
+            ProductionWiringComponent::RuntimeHttpEgress,
+            ProductionWiringIssueKind::UnverifiedProductionImplementation
+        ),
+        "runtime HTTP egress should require production verification: {report:?}"
+    );
+}
+
+#[test]
+fn production_wiring_validation_rejects_empty_verified_wasm_credentials() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(WASM_HTTP_SUCCESS_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_verified_wasm_runtime_credentials(Arc::new(WasmStagedRuntimeCredentials::new(vec![])))
+    .try_with_wasm_runtime(WitToolRuntimeConfig::for_testing(), WitToolHost::deny_all())
+    .unwrap();
+
+    let report = services
+        .validate_production_wiring(
+            &ProductionWiringConfig::new([RuntimeKind::Wasm]).require_wasm_credentials(),
+        )
+        .expect_err("empty verified credential provider must not satisfy credential requirement");
+
+    assert!(
+        report.contains(
+            ProductionWiringComponent::WasmCredentialProvider,
+            ProductionWiringIssueKind::UnverifiedProductionImplementation
+        ),
+        "empty WASM credentials should be reported as unverified: {report:?}"
+    );
+}
+
+#[test]
+fn production_wiring_validation_rejects_wasm_credentials_added_after_adapter() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(WASM_HTTP_SUCCESS_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .try_with_wasm_runtime(WitToolRuntimeConfig::for_testing(), WitToolHost::deny_all())
+    .unwrap()
+    .with_wasm_runtime_credential_provider(Arc::new(WasmStagedRuntimeCredentials::new(vec![])));
+
+    let report = services
+        .validate_production_wiring(
+            &ProductionWiringConfig::new([RuntimeKind::Wasm]).require_wasm_credentials(),
+        )
+        .expect_err(
+            "credentials added after WASM adapter construction are not captured by the adapter",
+        );
+
+    assert!(
+        report.contains(
+            ProductionWiringComponent::WasmCredentialProvider,
+            ProductionWiringIssueKind::UnverifiedProductionImplementation
+        ),
+        "WASM credentials must be configured before adapter construction: {report:?}"
+    );
+}
+
+#[test]
+fn production_wiring_validation_rejects_wasm_credentials_replaced_after_adapter() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(WASM_HTTP_SUCCESS_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_wasm_runtime_credential_provider(Arc::new(WasmStagedRuntimeCredentials::new(vec![])))
+    .try_with_wasm_runtime(WitToolRuntimeConfig::for_testing(), WitToolHost::deny_all())
+    .unwrap()
+    .with_wasm_runtime_credential_provider(Arc::new(WasmStagedRuntimeCredentials::new(vec![])));
+
+    let report = services
+        .validate_production_wiring(
+            &ProductionWiringConfig::new([RuntimeKind::Wasm]).require_wasm_credentials(),
+        )
+        .expect_err(
+            "replacing credentials after WASM adapter construction is not captured by the adapter",
+        );
+
+    assert!(
+        report.contains(
+            ProductionWiringComponent::WasmCredentialProvider,
+            ProductionWiringIssueKind::UnverifiedProductionImplementation
+        ),
+        "WASM credentials must not be replaced after adapter construction: {report:?}"
+    );
+}
 
 #[tokio::test]
 async fn host_runtime_services_builds_dispatcher_runtime_and_health_from_registered_adapters() {
@@ -91,7 +1038,7 @@ async fn host_runtime_services_builds_dispatcher_runtime_and_health_from_registe
     .with_script_runtime(script_runtime)
     .with_event_sink(Arc::new(events.clone()));
 
-    let runtime = services.host_runtime();
+    let runtime = services.host_runtime_for_local_testing();
     let context = execution_context_with_dispatch_grant(script_capability_id());
     let request = RuntimeCapabilityRequest::new(
         context,
@@ -132,6 +1079,117 @@ async fn host_runtime_services_builds_dispatcher_runtime_and_health_from_registe
 }
 
 #[tokio::test]
+async fn host_runtime_services_wires_combined_store_for_atomic_approval_block() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenGrantAuthorizer),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    );
+
+    assert_services_use_combined_store_for_atomic_approval_block(
+        services,
+        "approval from services",
+    )
+    .await;
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn host_runtime_services_preserves_combined_store_after_root_filesystem_selection() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let db_path = db_dir
+        .path()
+        .join("root-filesystem-preserves-combined-store.db");
+    let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+    let filesystem = Arc::new(LibSqlRootFilesystem::new(db));
+    filesystem.run_migrations().await.unwrap();
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenGrantAuthorizer),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_libsql_root_filesystem(filesystem);
+
+    assert_services_use_combined_store_for_atomic_approval_block(
+        services,
+        "approval after root filesystem selection",
+    )
+    .await;
+}
+
+async fn assert_services_use_combined_store_for_atomic_approval_block<
+    F: RootFilesystem + 'static,
+    G: ResourceGovernor + 'static,
+    S: ProcessStore + 'static,
+    R: ProcessResultStore + 'static,
+>(
+    services: HostRuntimeServices<F, G, S, R>,
+    message: &str,
+) {
+    let combined_store = Arc::new(InMemoryRecordingCombinedRunStateApprovalStore::new());
+    let services = services
+        .with_trust_policy(Arc::new(local_manifest_trust_policy(
+            "script",
+            vec![EffectKind::DispatchCapability],
+        )))
+        .with_run_state_approval_store(Arc::clone(&combined_store))
+        .with_script_runtime(Arc::new(ScriptRuntime::new(
+            ScriptRuntimeConfig::for_testing(),
+            EchoScriptBackend,
+        )));
+
+    let runtime = services.host_runtime_for_local_testing();
+    let context = execution_context_without_grants();
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context.clone(),
+            script_capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": message}),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::ApprovalRequired(gate) => {
+            assert_eq!(combined_store.combined_calls(), 1);
+            assert_eq!(combined_store.separate_save_calls(), 0);
+            let run_record = RunStateStore::get(
+                combined_store.as_ref(),
+                &context.resource_scope,
+                context.invocation_id,
+            )
+            .await
+            .unwrap()
+            .expect("run record persisted");
+            assert_eq!(run_record.status, RunStatus::BlockedApproval);
+            assert_eq!(
+                run_record.approval_request_id,
+                Some(gate.approval_request_id)
+            );
+            assert!(
+                ApprovalRequestStore::get(
+                    combined_store.as_ref(),
+                    &context.resource_scope,
+                    gate.approval_request_id,
+                )
+                .await
+                .unwrap()
+                .is_some()
+            );
+        }
+        other => panic!("expected approval gate, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn host_runtime_services_writes_runtime_events_to_durable_event_log_metadata_only() {
     let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
     let filesystem = Arc::new(LocalFilesystem::new());
@@ -165,7 +1223,7 @@ async fn host_runtime_services_writes_runtime_events_to_durable_event_log_metada
     });
 
     let outcome = services
-        .host_runtime()
+        .host_runtime_for_local_testing()
         .invoke_capability(RuntimeCapabilityRequest::new(
             execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
             script_capability_id(),
@@ -228,6 +1286,82 @@ async fn host_runtime_services_writes_runtime_events_to_durable_event_log_metada
 }
 
 #[tokio::test]
+async fn host_runtime_services_consumes_reborn_jsonl_event_store_without_v1_composition() {
+    let temp = tempfile::tempdir().unwrap();
+    let stores = build_reborn_event_stores(
+        RebornProfile::LocalDev,
+        RebornEventStoreConfig::Jsonl {
+            root: temp.path().join("reborn-event-store"),
+            accept_single_node_durable: false,
+        },
+    )
+    .await
+    .unwrap();
+    let event_log = Arc::clone(&stores.events);
+    let script_runtime = Arc::new(ScriptRuntime::new(
+        ScriptRuntimeConfig::for_testing(),
+        EchoScriptBackend,
+    ));
+
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability],
+    )))
+    .with_script_runtime(script_runtime)
+    .with_event_sink(Arc::new(DurableEventSink::new(Arc::clone(&event_log))));
+
+    let scope = sample_scope(InvocationId::new());
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
+            script_capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "from jsonl store"}),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        outcome,
+        RuntimeCapabilityOutcome::Completed(completed)
+            if completed.output == json!({"message": "from jsonl store"})
+    ));
+
+    let replay = event_log
+        .read_after_cursor(
+            &EventStreamKey::from_scope(&scope),
+            &ReadScope::any(),
+            None,
+            10,
+        )
+        .await
+        .unwrap();
+    let kinds = replay
+        .entries
+        .iter()
+        .map(|entry| entry.record.kind)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        vec![
+            RuntimeEventKind::DispatchRequested,
+            RuntimeEventKind::RuntimeSelected,
+            RuntimeEventKind::DispatchSucceeded,
+        ]
+    );
+}
+
+#[tokio::test]
 async fn host_runtime_services_durable_event_replay_cursor_and_gap_behavior() {
     let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
     let event_log = Arc::new(InMemoryDurableEventLog::new());
@@ -253,7 +1387,7 @@ async fn host_runtime_services_durable_event_replay_cursor_and_gap_behavior() {
     let stream = EventStreamKey::from_scope(&scope);
 
     let outcome = services
-        .host_runtime()
+        .host_runtime_for_local_testing()
         .invoke_capability(RuntimeCapabilityRequest::new(
             execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
             script_capability_id(),
@@ -319,9 +1453,709 @@ async fn host_runtime_services_durable_event_replay_cursor_and_gap_behavior() {
 }
 
 #[tokio::test]
+async fn host_runtime_services_runtime_events_project_through_replay_projection_metadata_only() {
+    let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    let services = HostRuntimeServices::new(
+        registry,
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability],
+    )))
+    .with_durable_event_log(Arc::clone(&event_log))
+    .with_script_runtime(Arc::new(ScriptRuntime::new(
+        ScriptRuntimeConfig::for_testing(),
+        EchoScriptBackend,
+    )));
+    let scope = sample_scope(InvocationId::new());
+    let payload = json!({
+        "message": "RAW_PROJECTION_INPUT_SENTINEL_3022 /tmp/private-projection-path",
+        "secret": "SECRET_PROJECTION_SENTINEL_3022_sk_live_secret",
+        "output": "RUNTIME_PROJECTION_OUTPUT_SENTINEL_3022",
+    });
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
+            script_capability_id(),
+            ResourceEstimate::default(),
+            payload.clone(),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(outcome, RuntimeCapabilityOutcome::Completed(completed) if completed.output == payload)
+    );
+
+    let projection = ReplayEventProjectionService::new(Arc::clone(&event_log));
+    let snapshot = projection
+        .snapshot(ProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&scope),
+            after: None,
+            limit: 10,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        snapshot
+            .timeline
+            .entries
+            .iter()
+            .map(|entry| entry.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            TimelineEntryKind::DispatchRequested,
+            TimelineEntryKind::RuntimeSelected,
+            TimelineEntryKind::DispatchSucceeded,
+        ]
+    );
+    assert_eq!(snapshot.runs.len(), 1);
+    assert_eq!(snapshot.runs[0].status, RunProjectionStatus::Completed);
+    assert_eq!(snapshot.runs[0].capability_id, script_capability_id());
+    assert_eq!(
+        snapshot.timeline.entries[2].output_bytes,
+        Some(serde_json::to_vec(&payload).unwrap().len() as u64)
+    );
+
+    let serialized = serde_json::to_string(&snapshot).unwrap();
+    for forbidden in [
+        "RAW_PROJECTION_INPUT_SENTINEL_3022",
+        "/tmp/private-projection-path",
+        "SECRET_PROJECTION_SENTINEL_3022",
+        "RUNTIME_PROJECTION_OUTPUT_SENTINEL_3022",
+    ] {
+        assert!(
+            !serialized.contains(forbidden),
+            "runtime projection leaked {forbidden}: {serialized}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn host_runtime_services_projection_rejects_foreign_cursor_and_surfaces_rebase_after_gap() {
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability],
+    )))
+    .with_durable_event_log(Arc::clone(&event_log))
+    .with_script_runtime(Arc::new(ScriptRuntime::new(
+        ScriptRuntimeConfig::for_testing(),
+        EchoScriptBackend,
+    )));
+    let scope_a = sample_scope(InvocationId::new());
+    let scope_b = ResourceScope {
+        thread_id: Some(ThreadId::new("thread-b").unwrap()),
+        invocation_id: InvocationId::new(),
+        ..scope_a.clone()
+    };
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            execution_context_with_dispatch_grant_for_scope(
+                script_capability_id(),
+                scope_a.clone(),
+            ),
+            script_capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "scope a"}),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(outcome, RuntimeCapabilityOutcome::Completed(_)));
+
+    let projection = ReplayEventProjectionService::new(Arc::clone(&event_log));
+    let scope_a_projection = ProjectionScope::from_resource_scope(&scope_a);
+    let scope_b_projection = ProjectionScope::from_resource_scope(&scope_b);
+    let snapshot_a = projection
+        .snapshot(ProjectionRequest {
+            scope: scope_a_projection.clone(),
+            after: None,
+            limit: 10,
+        })
+        .await
+        .unwrap();
+    let snapshot_b = projection
+        .snapshot(ProjectionRequest {
+            scope: scope_b_projection.clone(),
+            after: None,
+            limit: 10,
+        })
+        .await
+        .unwrap();
+    assert!(snapshot_b.timeline.entries.is_empty());
+
+    let foreign_cursor = projection
+        .updates(ProjectionRequest {
+            scope: scope_b_projection,
+            after: Some(snapshot_a.next_cursor.clone()),
+            limit: 10,
+        })
+        .await
+        .expect_err("foreign projection cursor must force rebase");
+    assert!(matches!(
+        foreign_cursor,
+        ProjectionError::RebaseRequired { .. }
+    ));
+
+    event_log
+        .truncate_before_or_at(
+            &EventStreamKey::from_scope(&scope_a),
+            snapshot_a.timeline.entries[0].cursor,
+        )
+        .unwrap();
+    let stale_cursor = projection
+        .updates(ProjectionRequest {
+            scope: scope_a_projection.clone(),
+            after: Some(ProjectionCursor::origin_for_scope(scope_a_projection)),
+            limit: 10,
+        })
+        .await
+        .expect_err("retained-history gap must force projection rebase");
+    assert!(matches!(
+        stale_cursor,
+        ProjectionError::RebaseRequired { .. }
+    ));
+}
+
+#[tokio::test]
+async fn host_runtime_services_jsonl_event_store_projects_same_runtime_sequence_without_sentinels()
+{
+    let temp = tempfile::tempdir().unwrap();
+    let store_root = temp.path().join("reborn-event-store");
+    let stores = build_reborn_event_stores(
+        RebornProfile::LocalDev,
+        RebornEventStoreConfig::Jsonl {
+            root: store_root.clone(),
+            accept_single_node_durable: false,
+        },
+    )
+    .await
+    .unwrap();
+    let event_log = Arc::clone(&stores.events);
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability],
+    )))
+    .with_event_sink(Arc::new(DurableEventSink::new(Arc::clone(&event_log))))
+    .with_script_runtime(Arc::new(ScriptRuntime::new(
+        ScriptRuntimeConfig::for_testing(),
+        EchoScriptBackend,
+    )));
+    let scope = sample_scope(InvocationId::new());
+    let payload = json!({
+        "message": "JSONL_RAW_INPUT_SENTINEL_3022 /tmp/jsonl-private-path",
+        "secret": "JSONL_SECRET_SENTINEL_3022_sk_live_secret",
+        "output": "JSONL_OUTPUT_SENTINEL_3022",
+    });
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
+            script_capability_id(),
+            ResourceEstimate::default(),
+            payload.clone(),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, RuntimeCapabilityOutcome::Completed(completed) if completed.output == payload)
+    );
+
+    let projection = ReplayEventProjectionService::from_runtime_log(Arc::clone(&event_log));
+    let snapshot = projection
+        .snapshot(ProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&scope),
+            after: None,
+            limit: 10,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot
+            .timeline
+            .entries
+            .iter()
+            .map(|entry| entry.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            TimelineEntryKind::DispatchRequested,
+            TimelineEntryKind::RuntimeSelected,
+            TimelineEntryKind::DispatchSucceeded,
+        ]
+    );
+    assert_eq!(snapshot.runs.len(), 1);
+    assert_eq!(snapshot.runs[0].status, RunProjectionStatus::Completed);
+
+    let projection_json = serde_json::to_string(&snapshot).unwrap();
+    let jsonl_bytes = read_directory_text(&store_root);
+    for forbidden in [
+        "JSONL_RAW_INPUT_SENTINEL_3022",
+        "/tmp/jsonl-private-path",
+        "JSONL_SECRET_SENTINEL_3022",
+        "JSONL_OUTPUT_SENTINEL_3022",
+    ] {
+        assert!(
+            !projection_json.contains(forbidden),
+            "JSONL-backed projection leaked {forbidden}: {projection_json}"
+        );
+        assert!(
+            !jsonl_bytes.contains(forbidden),
+            "JSONL durable event bytes leaked {forbidden}: {jsonl_bytes}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn host_runtime_services_approval_resolution_projects_durable_audit_metadata_only() {
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let audit_log = Arc::new(InMemoryDurableAuditLog::new());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(SentinelApprovalAuthorizer),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability],
+    )))
+    .with_run_state(Arc::clone(&run_state))
+    .with_approval_requests(Arc::clone(&approval_requests))
+    .with_capability_leases(Arc::clone(&capability_leases))
+    .with_durable_audit_log(Arc::clone(&audit_log))
+    .with_script_runtime(Arc::new(ScriptRuntime::new(
+        ScriptRuntimeConfig::for_testing(),
+        EchoScriptBackend,
+    )));
+    let runtime = services.host_runtime_for_local_testing();
+    let scope = sample_scope(InvocationId::new());
+    let context = execution_context_without_grants_for_scope(scope.clone());
+    let input = json!({
+        "message": "APPROVAL_RAW_INPUT_SENTINEL_3022 /tmp/private-approval-path",
+        "secret": "APPROVAL_SECRET_SENTINEL_3022_sk_live_secret",
+        "output": "APPROVAL_OUTPUT_SENTINEL_3022",
+    });
+
+    let gate = block_for_approval(
+        &runtime,
+        context.clone(),
+        ResourceEstimate::default(),
+        input.clone(),
+    )
+    .await;
+    approve_dispatch_for_services(&services, &scope, gate.approval_request_id, None).await;
+    let resumed = runtime
+        .resume_capability(RuntimeCapabilityResumeRequest::new(
+            context,
+            gate.approval_request_id,
+            script_capability_id(),
+            ResourceEstimate::default(),
+            input.clone(),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        matches!(resumed, RuntimeCapabilityOutcome::Completed(completed) if completed.output == input)
+    );
+
+    let projection = ReplayAuditProjectionService::new(Arc::clone(&audit_log));
+    let snapshot = projection
+        .snapshot(AuditProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&scope),
+            after: None,
+            limit: 10,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.entries.len(), 1);
+    let entry = &snapshot.entries[0];
+    assert_eq!(entry.stage, AuditProjectionStage::ApprovalResolved);
+    assert_eq!(entry.invocation_id, scope.invocation_id);
+    assert_eq!(entry.thread_id, scope.thread_id);
+    assert_eq!(entry.approval_request_id, Some(gate.approval_request_id));
+    assert_eq!(entry.action_kind, "dispatch");
+    assert_eq!(
+        entry.action_target.as_deref(),
+        Some(script_capability_id().as_str())
+    );
+    assert_eq!(entry.decision_kind, "approved");
+
+    let serialized = serde_json::to_string(&snapshot).unwrap();
+    for forbidden in [
+        "APPROVAL_REASON_SENTINEL_3022",
+        "APPROVAL_RAW_INPUT_SENTINEL_3022",
+        "/tmp/private-approval-path",
+        "APPROVAL_SECRET_SENTINEL_3022",
+        "APPROVAL_OUTPUT_SENTINEL_3022",
+    ] {
+        assert!(
+            !serialized.contains(forbidden),
+            "approval audit projection leaked {forbidden}: {serialized}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn host_runtime_services_jsonl_approval_audit_projection_rejects_foreign_cursor_without_leaks()
+ {
+    let temp = tempfile::tempdir().unwrap();
+    let store_root = temp.path().join("reborn-event-store");
+    let stores = build_reborn_event_stores(
+        RebornProfile::LocalDev,
+        RebornEventStoreConfig::Jsonl {
+            root: store_root.clone(),
+            accept_single_node_durable: false,
+        },
+    )
+    .await
+    .unwrap();
+    let audit_log = Arc::clone(&stores.audit);
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(SentinelApprovalAuthorizer),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability],
+    )))
+    .with_run_state(Arc::clone(&run_state))
+    .with_approval_requests(Arc::clone(&approval_requests))
+    .with_capability_leases(Arc::clone(&capability_leases))
+    .with_audit_sink(Arc::new(ironclaw_events::DurableAuditSink::new(
+        Arc::clone(&audit_log),
+    )))
+    .with_script_runtime(Arc::new(ScriptRuntime::new(
+        ScriptRuntimeConfig::for_testing(),
+        EchoScriptBackend,
+    )));
+    let runtime = services.host_runtime_for_local_testing();
+    let scope_a = sample_scope(InvocationId::new());
+    let scope_b = ResourceScope {
+        thread_id: Some(ThreadId::new("approval-thread-b").unwrap()),
+        invocation_id: InvocationId::new(),
+        ..scope_a.clone()
+    };
+    let context = execution_context_without_grants_for_scope(scope_a.clone());
+    let input = json!({"message": "JSONL_APPROVAL_INPUT_SENTINEL_3022"});
+
+    let gate = block_for_approval(
+        &runtime,
+        context.clone(),
+        ResourceEstimate::default(),
+        input.clone(),
+    )
+    .await;
+    approve_dispatch_for_services(&services, &scope_a, gate.approval_request_id, None).await;
+
+    let projection = ReplayAuditProjectionService::from_audit_log(Arc::clone(&audit_log));
+    let scope_a_projection = ProjectionScope::from_resource_scope(&scope_a);
+    let scope_b_projection = ProjectionScope::from_resource_scope(&scope_b);
+    let snapshot_a = projection
+        .snapshot(AuditProjectionRequest {
+            scope: scope_a_projection,
+            after: None,
+            limit: 10,
+        })
+        .await
+        .unwrap();
+    assert_eq!(snapshot_a.entries.len(), 1);
+    let snapshot_b = projection
+        .snapshot(AuditProjectionRequest {
+            scope: scope_b_projection.clone(),
+            after: None,
+            limit: 10,
+        })
+        .await
+        .unwrap();
+    assert!(snapshot_b.entries.is_empty());
+
+    let foreign_cursor = projection
+        .updates(AuditProjectionRequest {
+            scope: scope_b_projection,
+            after: Some(snapshot_a.next_cursor.clone()),
+            limit: 10,
+        })
+        .await
+        .expect_err("foreign audit projection cursor must force rebase");
+    assert!(matches!(
+        foreign_cursor,
+        AuditProjectionError::RebaseRequired { .. }
+    ));
+
+    let projection_json = serde_json::to_string(&snapshot_a).unwrap();
+    let jsonl_bytes = read_directory_text(&store_root);
+    for forbidden in [
+        "APPROVAL_REASON_SENTINEL_3022",
+        "JSONL_APPROVAL_INPUT_SENTINEL_3022",
+    ] {
+        assert!(
+            !projection_json.contains(forbidden),
+            "JSONL approval audit projection leaked {forbidden}: {projection_json}"
+        );
+        assert!(
+            !jsonl_bytes.contains(forbidden),
+            "JSONL durable audit bytes leaked {forbidden}: {jsonl_bytes}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn process_lifecycle_projects_through_durable_replay_without_output_leaks() {
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    let inner_process_store = Arc::new(InMemoryProcessStore::new());
+    let process_store = Arc::new(ProcessObligationLifecycleStore::new(
+        inner_process_store,
+        Arc::new(NetworkObligationPolicyStore::new()),
+        Arc::new(RuntimeSecretInjectionStore::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+    ));
+    let durable_event_log: Arc<dyn DurableEventLog> = event_log.clone();
+    process_store.set_event_sink(Arc::new(DurableEventSink::new(durable_event_log)));
+    let result_store = Arc::new(InMemoryProcessResultStore::new());
+    let manager = BackgroundProcessManager::new(
+        Arc::clone(&process_store),
+        Arc::new(BackgroundExecutor::success_with_output(json!({
+            "result": "PROCESS_OUTPUT_SENTINEL_3022 /tmp/process-output-private"
+        }))),
+    )
+    .with_result_store(Arc::clone(&result_store));
+    let process_id = ProcessId::new();
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id);
+
+    let process = manager
+        .spawn(process_start(process_id, invocation_id, scope.clone()))
+        .await
+        .unwrap();
+    wait_for_status(
+        process_store.as_ref(),
+        &scope,
+        process.process_id,
+        ProcessStatus::Completed,
+    )
+    .await;
+
+    let host =
+        ProcessHost::new(process_store.as_ref()).with_result_store(Arc::clone(&result_store));
+    let output = host
+        .output(&scope, process.process_id)
+        .await
+        .unwrap()
+        .expect("process output should be available through ProcessHost");
+    assert_eq!(
+        output,
+        json!({"result": "PROCESS_OUTPUT_SENTINEL_3022 /tmp/process-output-private"})
+    );
+
+    let projection = ReplayEventProjectionService::new(Arc::clone(&event_log));
+    let snapshot = projection
+        .snapshot(ProjectionRequest {
+            scope: ProjectionScope::for_process(&scope, process.process_id),
+            after: None,
+            limit: 10,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        snapshot
+            .timeline
+            .entries
+            .iter()
+            .map(|entry| entry.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            TimelineEntryKind::ProcessStarted,
+            TimelineEntryKind::ProcessCompleted,
+        ]
+    );
+    assert_eq!(snapshot.runs.len(), 1);
+    assert_eq!(snapshot.runs[0].status, RunProjectionStatus::Completed);
+    assert_eq!(snapshot.runs[0].process_id, Some(process.process_id));
+
+    let foreign_scope = ResourceScope {
+        project_id: Some(ProjectId::new("foreign-project").unwrap()),
+        ..scope.clone()
+    };
+    let foreign_snapshot = projection
+        .snapshot(ProjectionRequest {
+            scope: ProjectionScope::for_process(&foreign_scope, process.process_id),
+            after: None,
+            limit: 10,
+        })
+        .await
+        .unwrap();
+    assert!(foreign_snapshot.timeline.entries.is_empty());
+
+    let projection_json = serde_json::to_string(&snapshot).unwrap();
+    let replay_json = serde_json::to_string(
+        &event_log
+            .read_after_cursor(
+                &EventStreamKey::from_scope(&scope),
+                &ReadScope::any(),
+                None,
+                10,
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    for forbidden in [
+        "PROCESS_OUTPUT_SENTINEL_3022",
+        "/tmp/process-output-private",
+    ] {
+        assert!(
+            !projection_json.contains(forbidden),
+            "process projection leaked {forbidden}: {projection_json}"
+        );
+        assert!(
+            !replay_json.contains(forbidden),
+            "process durable replay leaked {forbidden}: {replay_json}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn host_runtime_services_cancel_projects_kill_event_from_configured_event_sink() {
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    let process_services = ProcessServices::new(
+        Arc::new(InMemoryProcessStore::new()),
+        Arc::new(InMemoryProcessResultStore::new()),
+    );
+    let process_store = process_services.process_store();
+    let result_store = process_services.result_store();
+    let runtime = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        process_services,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_durable_event_log(Arc::clone(&event_log))
+    .host_runtime_for_local_testing();
+    let process_id = ProcessId::new();
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id);
+    let mut start = process_start(process_id, invocation_id, scope.clone());
+    start.input = json!({
+        "message": "KILL_PROCESS_INPUT_SENTINEL_3022 /tmp/process-kill-private"
+    });
+    process_store.start(start).await.unwrap();
+
+    let outcome = runtime
+        .cancel_work(CancelRuntimeWorkRequest::new(
+            scope.clone(),
+            CorrelationId::new(),
+            CancelReason::UserRequested,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(outcome.cancelled, vec![RuntimeWorkId::Process(process_id)]);
+    assert_eq!(
+        result_store
+            .get(&scope, process_id)
+            .await
+            .unwrap()
+            .expect("cancel should persist killed process result")
+            .status,
+        ProcessStatus::Killed
+    );
+
+    let projection = ReplayEventProjectionService::new(Arc::clone(&event_log));
+    let snapshot = projection
+        .snapshot(ProjectionRequest {
+            scope: ProjectionScope::for_process(&scope, process_id),
+            after: None,
+            limit: 10,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.timeline.entries.len(), 1);
+    assert_eq!(
+        snapshot.timeline.entries[0].kind,
+        TimelineEntryKind::ProcessKilled
+    );
+    assert_eq!(snapshot.runs.len(), 1);
+    assert_eq!(snapshot.runs[0].status, RunProjectionStatus::Killed);
+
+    let projection_json = serde_json::to_string(&snapshot).unwrap();
+    let replay_json = serde_json::to_string(
+        &event_log
+            .read_after_cursor(
+                &EventStreamKey::from_scope(&scope),
+                &ReadScope::any(),
+                None,
+                10,
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    for forbidden in [
+        "KILL_PROCESS_INPUT_SENTINEL_3022",
+        "/tmp/process-kill-private",
+    ] {
+        assert!(
+            !projection_json.contains(forbidden),
+            "kill projection leaked {forbidden}: {projection_json}"
+        );
+        assert!(
+            !replay_json.contains(forbidden),
+            "kill durable replay leaked {forbidden}: {replay_json}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn host_runtime_services_resumes_approved_capability_and_consumes_lease_once() {
     let fixture = approval_resume_fixture();
-    let runtime = fixture.services.host_runtime();
+    let runtime = fixture.services.host_runtime_for_local_testing();
     let context = execution_context_without_grants();
     let scope = context.resource_scope.clone();
     let estimate = ResourceEstimate::default();
@@ -398,7 +2232,7 @@ async fn host_runtime_services_resumes_approved_capability_and_consumes_lease_on
 #[tokio::test]
 async fn host_runtime_services_resume_changed_input_fails_before_lease_claim_or_dispatch() {
     let fixture = approval_resume_fixture();
-    let runtime = fixture.services.host_runtime();
+    let runtime = fixture.services.host_runtime_for_local_testing();
     let context = execution_context_without_grants();
     let scope = context.resource_scope.clone();
     let estimate = ResourceEstimate::default();
@@ -441,7 +2275,7 @@ async fn host_runtime_services_resume_changed_input_fails_before_lease_claim_or_
 #[tokio::test]
 async fn host_runtime_services_resume_wrong_user_scope_is_hidden_before_dispatch() {
     let fixture = approval_resume_fixture();
-    let runtime = fixture.services.host_runtime();
+    let runtime = fixture.services.host_runtime_for_local_testing();
     let context = execution_context_without_grants();
     let scope = context.resource_scope.clone();
     let estimate = ResourceEstimate::default();
@@ -497,7 +2331,7 @@ async fn host_runtime_services_resume_wrong_user_scope_is_hidden_before_dispatch
 #[tokio::test]
 async fn host_runtime_services_resume_expired_lease_fails_before_dispatch() {
     let fixture = approval_resume_fixture();
-    let runtime = fixture.services.host_runtime();
+    let runtime = fixture.services.host_runtime_for_local_testing();
     let context = execution_context_without_grants();
     let scope = context.resource_scope.clone();
     let estimate = ResourceEstimate::default();
@@ -540,7 +2374,7 @@ async fn host_runtime_services_resume_expired_lease_fails_before_dispatch() {
 #[tokio::test]
 async fn host_runtime_services_resume_trust_preflight_failure_fails_only_matching_blocked_run() {
     let fixture = approval_resume_fixture();
-    let runtime = fixture.services.host_runtime();
+    let runtime = fixture.services.host_runtime_for_local_testing();
     let context = execution_context_without_grants();
     let scope = context.resource_scope.clone();
     let estimate = ResourceEstimate::default();
@@ -652,7 +2486,7 @@ async fn host_runtime_services_resume_without_backing_stores_fails_closed() {
         ScriptRuntimeConfig::for_testing(),
         EchoScriptBackend,
     )))
-    .host_runtime();
+    .host_runtime_for_local_testing();
 
     let outcome = runtime
         .resume_capability(RuntimeCapabilityResumeRequest::new(
@@ -691,7 +2525,7 @@ async fn host_runtime_services_registered_runtime_health_tracks_script_mcp_and_w
     .with_mcp_runtime(Arc::new(PanicMcpExecutor))
     .try_with_wasm_runtime(WitToolRuntimeConfig::for_testing(), WitToolHost::deny_all())
     .unwrap()
-    .host_runtime();
+    .host_runtime_for_local_testing();
 
     let health = runtime.health().await.unwrap();
 
@@ -709,7 +2543,7 @@ async fn host_runtime_services_health_fails_closed_for_unregistered_required_run
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .host_runtime();
+    .host_runtime_for_local_testing();
 
     let health = runtime.health().await.unwrap();
 
@@ -741,7 +2575,7 @@ async fn host_runtime_services_installs_builtin_obligation_handler_with_audit_si
     .with_script_runtime(script_runtime);
 
     let outcome = services
-        .host_runtime()
+        .host_runtime_for_local_testing()
         .invoke_capability(RuntimeCapabilityRequest::new(
             execution_context_with_dispatch_grant(script_capability_id()),
             script_capability_id(),
@@ -800,7 +2634,7 @@ async fn host_runtime_services_applies_scoped_mount_obligation_to_script_runtime
     .with_script_runtime(Arc::clone(&script_runtime));
 
     let outcome = services
-        .host_runtime()
+        .host_runtime_for_local_testing()
         .invoke_capability(RuntimeCapabilityRequest::new(
             context,
             script_capability_id(),
@@ -853,7 +2687,7 @@ async fn host_runtime_services_rejects_broader_scoped_mount_before_dispatch() {
     .with_script_runtime(Arc::clone(&script_runtime));
 
     let outcome = services
-        .host_runtime()
+        .host_runtime_for_local_testing()
         .invoke_capability(RuntimeCapabilityRequest::new(
             context,
             script_capability_id(),
@@ -904,7 +2738,7 @@ async fn host_runtime_services_writes_obligation_audit_records_to_durable_log_me
     });
 
     let outcome = services
-        .host_runtime()
+        .host_runtime_for_local_testing()
         .invoke_capability(RuntimeCapabilityRequest::new(
             execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
             script_capability_id(),
@@ -960,6 +2794,150 @@ async fn host_runtime_services_writes_obligation_audit_records_to_durable_log_me
 }
 
 #[tokio::test]
+async fn host_runtime_services_projects_resource_network_secret_obligation_audit_metadata_only() {
+    let temp = tempfile::tempdir().unwrap();
+    let store_root = temp.path().join("reborn-event-store");
+    let stores = build_reborn_event_stores(
+        RebornProfile::LocalDev,
+        RebornEventStoreConfig::Jsonl {
+            root: store_root.clone(),
+            accept_single_node_durable: false,
+        },
+    )
+    .await
+    .unwrap();
+    let audit_log = Arc::clone(&stores.audit);
+    let governor = Arc::new(governor_with_default_limit(sample_account()));
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_handle = SecretHandle::new("obligation-api-token").unwrap();
+    let reservation_id = ResourceReservationId::new();
+    let policy = NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: "NETWORK_POLICY_SENTINEL_3022.example.test".to_string(),
+            port: Some(443),
+        }],
+        deny_private_ip_ranges: true,
+        max_egress_bytes: Some(10_000),
+    };
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
+        Arc::new(ObligatingAuthorizer::new(vec![
+            Obligation::AuditBefore,
+            Obligation::ApplyNetworkPolicy { policy },
+            Obligation::InjectSecretOnce {
+                handle: secret_handle.clone(),
+            },
+            Obligation::ReserveResources { reservation_id },
+            Obligation::AuditAfter,
+        ]));
+    let services: InMemoryHostRuntimeServices = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::clone(&governor),
+        authorizer,
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability, EffectKind::Network],
+    )))
+    .with_secret_store(Arc::clone(&secret_store))
+    .with_audit_sink(Arc::new(DurableAuditSink::new(Arc::clone(&audit_log))))
+    .with_script_runtime(Arc::new(ScriptRuntime::new(
+        ScriptRuntimeConfig::for_testing(),
+        EchoScriptBackend,
+    )));
+    let scope = sample_scope(InvocationId::new());
+    secret_store
+        .put(
+            scope.clone(),
+            secret_handle,
+            SecretMaterial::from("SECRET_MATERIAL_SENTINEL_3022_sk_live_secret"),
+        )
+        .await
+        .unwrap();
+    let payload = json!({
+        "message": "OBLIGATION_INPUT_SENTINEL_3022 /tmp/private-obligation-path",
+        "output": "OBLIGATION_OUTPUT_SENTINEL_3022",
+    });
+
+    let runtime = services.host_runtime_for_local_testing();
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
+            script_capability_id(),
+            ResourceEstimate {
+                concurrency_slots: Some(1),
+                network_egress_bytes: Some(10),
+                output_bytes: Some(100),
+                ..ResourceEstimate::default()
+            },
+            payload.clone(),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, RuntimeCapabilityOutcome::Completed(completed) if completed.output == payload)
+    );
+
+    let projection = ReplayAuditProjectionService::from_audit_log(Arc::clone(&audit_log));
+    let snapshot = projection
+        .snapshot(AuditProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&scope),
+            after: None,
+            limit: 10,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.entries.len(), 2);
+    assert_eq!(snapshot.entries[0].stage, AuditProjectionStage::Before);
+    assert_eq!(snapshot.entries[1].stage, AuditProjectionStage::After);
+    let mut status_labels = snapshot.entries[0]
+        .result_status
+        .as_deref()
+        .unwrap()
+        .split(',')
+        .collect::<Vec<_>>();
+    status_labels.sort_unstable();
+    assert_eq!(
+        status_labels,
+        vec![
+            "apply_network_policy",
+            "audit_after",
+            "audit_before",
+            "inject_secret_once",
+            "reserve_resources",
+        ]
+    );
+    assert_eq!(
+        snapshot.entries[1].output_bytes,
+        Some(serde_json::to_vec(&payload).unwrap().len() as u64)
+    );
+
+    let projection_json = serde_json::to_string(&snapshot).unwrap();
+    let jsonl_bytes = read_directory_text(&store_root);
+    for forbidden in [
+        "NETWORK_POLICY_SENTINEL_3022",
+        "SECRET_MATERIAL_SENTINEL_3022",
+        "OBLIGATION_INPUT_SENTINEL_3022",
+        "/tmp/private-obligation-path",
+        "OBLIGATION_OUTPUT_SENTINEL_3022",
+    ] {
+        assert!(
+            !projection_json.contains(forbidden),
+            "obligation audit projection leaked {forbidden}: {projection_json}"
+        );
+        assert!(
+            !jsonl_bytes.contains(forbidden),
+            "durable obligation audit bytes leaked {forbidden}: {jsonl_bytes}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn host_runtime_services_enforces_output_limit_and_reconciles_resource_usage() {
     let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
     let governor = Arc::new(InMemoryResourceGovernor::new());
@@ -1001,7 +2979,7 @@ async fn host_runtime_services_enforces_output_limit_and_reconciles_resource_usa
     let input = json!({"message": "this output is deliberately too large"});
 
     let outcome = services
-        .host_runtime()
+        .host_runtime_for_local_testing()
         .invoke_capability(RuntimeCapabilityRequest::new(
             execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
             script_capability_id(),
@@ -1063,7 +3041,7 @@ async fn host_runtime_services_releases_reservation_when_dispatch_preflight_fail
     )));
 
     let outcome = services
-        .host_runtime()
+        .host_runtime_for_local_testing()
         .invoke_capability(RuntimeCapabilityRequest::new(
             execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
             script_capability_id(),
@@ -1118,7 +3096,7 @@ async fn host_runtime_services_fails_closed_when_durable_obligation_audit_append
     .with_script_runtime(script_runtime);
 
     let outcome = services
-        .host_runtime()
+        .host_runtime_for_local_testing()
         .invoke_capability(RuntimeCapabilityRequest::new(
             execution_context_with_dispatch_grant(script_capability_id()),
             script_capability_id(),
@@ -1179,7 +3157,7 @@ async fn host_runtime_services_routes_wasm_http_through_per_invocation_policy_ha
     let scope = sample_scope(InvocationId::new());
 
     let outcome = services
-        .host_runtime()
+        .host_runtime_for_local_testing()
         .invoke_capability(wasm_runtime_request_for_scope(
             capability_id.clone(),
             scope.clone(),
@@ -1237,7 +3215,7 @@ async fn host_runtime_services_routes_cached_wasm_http_through_per_invocation_po
     .with_runtime_http_egress(Arc::clone(&egress))
     .try_with_wasm_runtime(WitToolRuntimeConfig::for_testing(), WitToolHost::deny_all())
     .unwrap();
-    let runtime = services.host_runtime();
+    let runtime = services.host_runtime_for_local_testing();
     let capability_id = CapabilityId::new("wasm-http.success").unwrap();
     let first_scope = sample_scope(InvocationId::new());
     let second_scope = sample_scope(InvocationId::new());
@@ -1270,7 +3248,7 @@ async fn host_runtime_services_routes_cached_wasm_http_through_per_invocation_po
 }
 
 #[tokio::test]
-async fn host_runtime_services_routes_wasm_http_with_staged_network_and_secret_handoffs() {
+async fn host_runtime_services_wasm_http_uses_production_staged_network_and_secret_handoffs() {
     let parsed_manifest = ExtensionManifest::parse(WASM_HTTP_SUCCESS_MANIFEST).unwrap();
     let component = tool_component(HTTP_TOOL_WAT);
     let filesystem = Arc::new(
@@ -1316,11 +3294,9 @@ async fn host_runtime_services_routes_wasm_http_with_staged_network_and_secret_h
         ),
     ])));
     let runtime_http = Arc::new(
-        HostHttpEgressService::new_with_request_policy_for_tests(
-            network.clone(),
-            InMemorySecretStore::new(),
-        )
-        .with_secret_injection_store(services.secret_injection_store()),
+        HostHttpEgressService::new(network.clone(), InMemorySecretStore::new())
+            .with_network_policy_store(services.network_policy_store())
+            .with_secret_injection_store(services.secret_injection_store()),
     );
     let services = services
         .with_runtime_http_egress(runtime_http)
@@ -1331,14 +3307,14 @@ async fn host_runtime_services_routes_wasm_http_with_staged_network_and_secret_h
     secret_store
         .put(
             scope.clone(),
-            secret_handle,
+            secret_handle.clone(),
             SecretMaterial::from("sk-vertical-secret"),
         )
         .await
         .unwrap();
 
     let outcome = services
-        .host_runtime()
+        .host_runtime_for_local_testing()
         .invoke_capability(wasm_runtime_request_for_scope(
             capability_id.clone(),
             scope.clone(),
@@ -1361,6 +3337,21 @@ async fn host_runtime_services_routes_wasm_http_with_staged_network_and_secret_h
             "authorization".to_string(),
             "Bearer sk-vertical-secret".to_string(),
         ))
+    );
+    assert!(
+        services
+            .network_policy_store()
+            .take(&scope, &capability_id)
+            .is_none(),
+        "completed invoke must discard staged network policy after shared egress uses it"
+    );
+    assert!(
+        services
+            .secret_injection_store()
+            .take(&scope, &capability_id, &secret_handle)
+            .unwrap()
+            .is_none(),
+        "completed invoke must consume staged secret material once"
     );
 }
 
@@ -1417,7 +3408,7 @@ async fn host_runtime_services_wasm_http_missing_staged_secret_stays_before_tran
     let capability_id = CapabilityId::new("wasm-http.success").unwrap();
 
     let outcome = services
-        .host_runtime()
+        .host_runtime_for_local_testing()
         .invoke_capability(wasm_runtime_request(
             capability_id.clone(),
             json!({"call": "http-missing-staged-secret"}),
@@ -1474,7 +3465,7 @@ async fn host_runtime_services_denies_wasm_http_when_shared_egress_has_no_policy
     let capability_id = CapabilityId::new("wasm-http.success").unwrap();
 
     let outcome = services
-        .host_runtime()
+        .host_runtime_for_local_testing()
         .invoke_capability(wasm_runtime_request(
             capability_id,
             json!({"call": "http-without-policy"}),
@@ -1536,7 +3527,7 @@ async fn host_runtime_services_cancel_and_status_share_process_result_and_cancel
         process_services,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .host_runtime();
+    .host_runtime_for_local_testing();
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
     let scope = sample_scope(invocation_id);
@@ -1589,7 +3580,7 @@ async fn host_runtime_services_cancel_writes_killed_result_when_reservation_is_s
         process_services,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .host_runtime();
+    .host_runtime_for_local_testing();
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
     let stale_reservation_id = ResourceReservationId::new();
@@ -1638,7 +3629,7 @@ async fn host_runtime_services_cancel_records_kill_side_effects_when_cleanup_fai
         process_services,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .host_runtime();
+    .host_runtime_for_local_testing();
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
     let scope = sample_scope(invocation_id);
@@ -2452,6 +4443,160 @@ type InMemoryHostRuntimeServices = HostRuntimeServices<
     InMemoryProcessResultStore,
 >;
 
+struct InMemoryRecordingCombinedRunStateApprovalStore {
+    runs: InMemoryRunStateStore,
+    approvals: InMemoryApprovalRequestStore,
+    combined_calls: AtomicUsize,
+    separate_save_calls: AtomicUsize,
+}
+
+impl InMemoryRecordingCombinedRunStateApprovalStore {
+    fn new() -> Self {
+        Self {
+            runs: InMemoryRunStateStore::new(),
+            approvals: InMemoryApprovalRequestStore::new(),
+            combined_calls: AtomicUsize::new(0),
+            separate_save_calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn combined_calls(&self) -> usize {
+        self.combined_calls.load(Ordering::SeqCst)
+    }
+
+    fn separate_save_calls(&self) -> usize {
+        self.separate_save_calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl RunStateStore for InMemoryRecordingCombinedRunStateApprovalStore {
+    async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError> {
+        self.runs.start(start).await
+    }
+
+    async fn block_approval(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        approval: ApprovalRequest,
+    ) -> Result<RunRecord, RunStateError> {
+        self.runs
+            .block_approval(scope, invocation_id, approval)
+            .await
+    }
+
+    async fn block_auth(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        error_kind: String,
+    ) -> Result<RunRecord, RunStateError> {
+        self.runs.block_auth(scope, invocation_id, error_kind).await
+    }
+
+    async fn complete(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<RunRecord, RunStateError> {
+        self.runs.complete(scope, invocation_id).await
+    }
+
+    async fn fail(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        error_kind: String,
+    ) -> Result<RunRecord, RunStateError> {
+        self.runs.fail(scope, invocation_id, error_kind).await
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<Option<RunRecord>, RunStateError> {
+        self.runs.get(scope, invocation_id).await
+    }
+
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<RunRecord>, RunStateError> {
+        self.runs.records_for_scope(scope).await
+    }
+}
+
+#[async_trait]
+impl ApprovalRequestStore for InMemoryRecordingCombinedRunStateApprovalStore {
+    async fn save_pending(
+        &self,
+        scope: ResourceScope,
+        request: ApprovalRequest,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.separate_save_calls.fetch_add(1, Ordering::SeqCst);
+        self.approvals.save_pending(scope, request).await
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<Option<ApprovalRecord>, RunStateError> {
+        self.approvals.get(scope, request_id).await
+    }
+
+    async fn approve(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.approvals.approve(scope, request_id).await
+    }
+
+    async fn deny(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.approvals.deny(scope, request_id).await
+    }
+
+    async fn discard_pending(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.approvals.discard_pending(scope, request_id).await
+    }
+
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<ApprovalRecord>, RunStateError> {
+        self.approvals.records_for_scope(scope).await
+    }
+}
+
+#[async_trait]
+impl RunStateApprovalStore for InMemoryRecordingCombinedRunStateApprovalStore {
+    async fn save_pending_and_block_approval(
+        &self,
+        scope: ResourceScope,
+        invocation_id: InvocationId,
+        approval: ApprovalRequest,
+    ) -> Result<RunRecord, RunStateError> {
+        self.combined_calls.fetch_add(1, Ordering::SeqCst);
+        self.approvals
+            .save_pending(scope.clone(), approval.clone())
+            .await?;
+        self.runs
+            .block_approval(&scope, invocation_id, approval)
+            .await
+    }
+}
+
 struct ApprovalResumeFixture {
     services: InMemoryHostRuntimeServices,
     run_state: Arc<InMemoryRunStateStore>,
@@ -2515,7 +4660,7 @@ fn resume_runtime_with_empty_registry(fixture: &ApprovalResumeFixture) -> Defaul
         ScriptRuntimeConfig::for_testing(),
         EchoScriptBackend,
     )))
-    .host_runtime()
+    .host_runtime_for_local_testing()
 }
 
 async fn assert_blocked_approval_run(
@@ -2583,6 +4728,41 @@ async fn approve_dispatch_for_services(
         )
         .await
         .unwrap()
+}
+
+struct SentinelApprovalAuthorizer;
+
+#[async_trait]
+impl TrustAwareCapabilityDispatchAuthorizer for SentinelApprovalAuthorizer {
+    async fn authorize_dispatch_with_trust(
+        &self,
+        context: &ExecutionContext,
+        descriptor: &CapabilityDescriptor,
+        estimate: &ResourceEstimate,
+        trust_decision: &TrustDecision,
+    ) -> Decision {
+        if context.grants.grants.is_empty() {
+            Decision::RequireApproval {
+                request: ApprovalRequest {
+                    id: ApprovalRequestId::new(),
+                    correlation_id: context.correlation_id,
+                    requested_by: Principal::Extension(context.extension_id.clone()),
+                    action: Box::new(Action::Dispatch {
+                        capability: descriptor.id.clone(),
+                        estimated_resources: estimate.clone(),
+                    }),
+                    invocation_fingerprint: None,
+                    reason: "APPROVAL_REASON_SENTINEL_3022 /tmp/private-approval-reason"
+                        .to_string(),
+                    reusable_scope: None,
+                },
+            }
+        } else {
+            GrantAuthorizer::new()
+                .authorize_dispatch_with_trust(context, descriptor, estimate, trust_decision)
+                .await
+        }
+    }
 }
 
 struct ApprovalThenGrantAuthorizer;
@@ -3134,7 +5314,13 @@ struct BackgroundExecutor {
 impl BackgroundExecutor {
     fn success() -> Self {
         Self {
-            outcome: BackgroundExecutorOutcome::Success,
+            outcome: BackgroundExecutorOutcome::Success(json!({"ok": true})),
+        }
+    }
+
+    fn success_with_output(output: serde_json::Value) -> Self {
+        Self {
+            outcome: BackgroundExecutorOutcome::Success(output),
         }
     }
 
@@ -3152,7 +5338,7 @@ impl BackgroundExecutor {
 }
 
 enum BackgroundExecutorOutcome {
-    Success,
+    Success(serde_json::Value),
     Failure(String),
     DelayedSuccess(Duration),
 }
@@ -3164,8 +5350,8 @@ impl ProcessExecutor for BackgroundExecutor {
         _request: ProcessExecutionRequest,
     ) -> Result<ProcessExecutionResult, ironclaw_processes::ProcessExecutionError> {
         match &self.outcome {
-            BackgroundExecutorOutcome::Success => Ok(ProcessExecutionResult {
-                output: json!({"ok": true}),
+            BackgroundExecutorOutcome::Success(output) => Ok(ProcessExecutionResult {
+                output: output.clone(),
             }),
             BackgroundExecutorOutcome::Failure(kind) => {
                 Err(ironclaw_processes::ProcessExecutionError::new(kind.clone()))
@@ -3471,6 +5657,27 @@ fn trust_decision_with_dispatch_authority() -> TrustDecision {
     }
 }
 
+fn read_directory_text(root: &std::path::Path) -> String {
+    let mut output = String::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let entries = std::fs::read_dir(&path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+        for entry in entries {
+            let entry = entry.unwrap_or_else(|err| panic!("failed to read dir entry: {err}"));
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                output.push_str(&std::fs::read_to_string(&path).unwrap_or_else(|err| {
+                    panic!("failed to read {} as utf-8 text: {err}", path.display())
+                }));
+            }
+        }
+    }
+    output
+}
+
 fn sample_scope(invocation_id: InvocationId) -> ResourceScope {
     ResourceScope {
         tenant_id: TenantId::new("tenant-a").unwrap(),
@@ -3597,7 +5804,7 @@ async fn wasm_runtime_for_component(
     .unwrap();
 
     WasmRuntimeFixture {
-        runtime: services.host_runtime(),
+        runtime: services.host_runtime_for_local_testing(),
         governor,
         http,
         capability_id: CapabilityId::new(capability).unwrap(),
@@ -3634,7 +5841,7 @@ async fn wasm_runtime_for_component_with_slow_zero_body_http(
     .unwrap();
 
     WasmWallClockRuntimeFixture {
-        runtime: services.host_runtime(),
+        runtime: services.host_runtime_for_local_testing(),
         governor,
         http,
         capability_id: CapabilityId::new(capability).unwrap(),
@@ -3769,6 +5976,25 @@ fn http_without_body_then_guest_error_wat() -> String {
         "i32.const 1\n    i32.const 256\n    i32.const 5",
         "i32.const 0\n    i32.const 0\n    i32.const 0",
     )
+}
+
+#[cfg(feature = "libsql")]
+fn submit_turn_request(thread: &str, idempotency_key: &str) -> SubmitTurnRequest {
+    SubmitTurnRequest {
+        scope: TurnScope::new(
+            TenantId::new("tenant1").unwrap(),
+            Some(AgentId::new("agent1").unwrap()),
+            Some(ProjectId::new("project1").unwrap()),
+            ThreadId::new(thread).unwrap(),
+        ),
+        actor: TurnActor::new(UserId::new("user1").unwrap()),
+        accepted_message_ref: AcceptedMessageRef::new(format!("message-{thread}")).unwrap(),
+        source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
+        requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
+        idempotency_key: IdempotencyKey::new(idempotency_key).unwrap(),
+        received_at: Utc::now(),
+    }
 }
 
 const SCRIPT_MANIFEST: &str = r#"

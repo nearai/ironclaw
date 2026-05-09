@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::FutureExt;
+use ironclaw_events::sanitize_error_kind;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{ProcessId, ResourceReservation, ResourceScope};
 
@@ -315,7 +316,7 @@ impl ProcessManager for BackgroundProcessManager {
                         }
                     }
                     Ok(Err(error)) => {
-                        let error_kind = error.kind;
+                        let error_kind = sanitize_error_kind(error.kind);
                         let result_persisted = if let Some(result_store) = &result_store {
                             match result_store
                                 .fail(&scope, process_id, error_kind.clone())
