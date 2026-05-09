@@ -3,9 +3,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use super::host::{
-    AgentLoopHostError, AgentLoopHostErrorKind, LoopContextPort, LoopContextRequest,
-    LoopModelMessage, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest,
-    LoopPromptPort, LoopRunContext, PromptMode,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilitySurfaceVersion, LoopContextBundle,
+    LoopContextPort, LoopContextRequest, LoopModelMessage, LoopPromptBundle, LoopPromptBundleRef,
+    LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, PromptMode,
 };
 use super::milestones::{LoopHostMilestoneEmitter, LoopHostMilestoneSink};
 
@@ -22,6 +22,7 @@ where
     context_port: Arc<C>,
     milestones: LoopHostMilestoneEmitter<S>,
     default_message_limit: usize,
+    current_surface_version: Option<CapabilitySurfaceVersion>,
 }
 
 impl<C, S> HostManagedLoopPromptPort<C, S>
@@ -35,11 +36,20 @@ where
             context_port,
             milestones: LoopHostMilestoneEmitter::new(context, milestone_sink),
             default_message_limit: DEFAULT_TEXT_ONLY_MESSAGE_LIMIT,
+            current_surface_version: None,
         }
     }
 
     pub fn with_default_message_limit(mut self, default_message_limit: usize) -> Self {
         self.default_message_limit = default_message_limit.clamp(1, MAX_TEXT_ONLY_MESSAGE_LIMIT);
+        self
+    }
+
+    pub fn with_current_surface_version(
+        mut self,
+        current_surface_version: CapabilitySurfaceVersion,
+    ) -> Self {
+        self.current_surface_version = Some(current_surface_version);
         self
     }
 
@@ -65,6 +75,21 @@ where
             ));
         }
 
+        if let Some(surface_version) = request.surface_version.as_ref() {
+            let Some(current_surface_version) = self.current_surface_version.as_ref() else {
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "prompt surface version cannot be validated by this prompt port",
+                ));
+            };
+            if surface_version != current_surface_version {
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::StaleSurface,
+                    "prompt surface version is stale or unknown",
+                ));
+            }
+        }
+
         if let Some(state_ref) = request.checkpoint_state_ref.as_ref() {
             let run_prefix = format!("checkpoint:{}:", self.context.run_id);
             if !state_ref.as_str().starts_with(&run_prefix) {
@@ -79,12 +104,16 @@ where
                     "prompt checkpoint state ref is malformed",
                 ));
             }
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "checkpoint prompt state is not supported by the text-only prompt port",
+            ));
         }
 
-        if matches!(request.max_tokens, Some(0)) {
+        if matches!(request.max_messages, Some(0)) {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::BudgetExceeded,
-                "prompt token budget must be greater than zero",
+                "prompt message limit must be greater than zero",
             ));
         }
 
@@ -93,10 +122,22 @@ where
 
     fn message_limit(&self, request: &LoopPromptBundleRequest) -> usize {
         request
-            .max_tokens
-            .map(|tokens| tokens as usize)
+            .max_messages
+            .map(|messages| messages as usize)
             .unwrap_or(self.default_message_limit)
             .clamp(1, MAX_TEXT_ONLY_MESSAGE_LIMIT)
+    }
+
+    fn ensure_supported_context_shape(
+        context: &LoopContextBundle,
+    ) -> Result<(), AgentLoopHostError> {
+        if !context.instruction_snippets.is_empty() || !context.memory_snippets.is_empty() {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::PolicyDenied,
+                "text-only prompt port cannot materialize instruction or memory snippets",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -118,6 +159,7 @@ where
                 limit: self.message_limit(&request),
             })
             .await?;
+        Self::ensure_supported_context_shape(&context)?;
         let messages = context
             .messages
             .into_iter()

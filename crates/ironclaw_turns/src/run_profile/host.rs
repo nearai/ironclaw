@@ -63,6 +63,47 @@ fn validate_loop_opaque_token(
     Ok(value)
 }
 
+fn validate_loop_safe_identifier(
+    value: String,
+    label: &'static str,
+    max_bytes: usize,
+) -> Result<String, String> {
+    let value = validate_bounded_loop_string(value, label, max_bytes)?;
+    if !value.chars().all(|character| {
+        character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.' | ':')
+    }) {
+        return Err(format!(
+            "{label} must contain only ASCII letters, digits, _, -, ., or :"
+        ));
+    }
+
+    let lower = value.to_ascii_lowercase();
+    for forbidden in [
+        "access_token",
+        "access-token",
+        "api_key",
+        "apikey",
+        "authorization",
+        "bearer",
+        "password",
+        "passwd",
+        "secret",
+    ] {
+        if lower.contains(forbidden) {
+            return Err(format!(
+                "{label} must not contain sensitive marker `{forbidden}`"
+            ));
+        }
+    }
+    if lower
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
+        .any(|token| token.starts_with("sk-"))
+    {
+        return Err(format!("{label} must not contain API-key-like tokens"));
+    }
+    Ok(value)
+}
+
 fn validate_loop_safe_summary(value: String) -> Result<String, String> {
     let value = validate_bounded_loop_string(value, "loop safe summary", 512)?;
     if value.chars().any(|character| {
@@ -513,7 +554,7 @@ pub struct CapabilitySurfaceVersion(String);
 
 impl CapabilitySurfaceVersion {
     pub fn new(value: impl Into<String>) -> Result<Self, String> {
-        validate_bounded_loop_string(value.into(), "capability surface version", 128).map(Self)
+        validate_loop_safe_identifier(value.into(), "capability surface version", 128).map(Self)
     }
 
     pub fn as_str(&self) -> &str {
@@ -579,7 +620,7 @@ pub struct LoopPromptBundleRequest {
     pub context_cursor: Option<LoopInputCursor>,
     pub surface_version: Option<CapabilitySurfaceVersion>,
     pub checkpoint_state_ref: Option<LoopCheckpointStateRef>,
-    pub max_tokens: Option<u32>,
+    pub max_messages: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
