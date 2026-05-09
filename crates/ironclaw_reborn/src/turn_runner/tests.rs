@@ -21,6 +21,7 @@ use ironclaw_turns::{
 };
 
 use crate::driver_registry::{DriverKind, DriverRegistry, DriverRequirements};
+use crate::loop_exit_applier::{InMemoryLoopExitEvidencePort, LoopExitApplier};
 
 use super::*;
 
@@ -465,6 +466,11 @@ fn make_claimed_run(
     }
 }
 
+fn make_applier(port: Arc<dyn TurnRunTransitionPort>) -> Arc<LoopExitApplier> {
+    let evidence = Arc::new(InMemoryLoopExitEvidencePort::all_verified());
+    Arc::new(LoopExitApplier::new(port, evidence))
+}
+
 fn setup_registry(driver: Arc<dyn AgentLoopDriver>) -> DriverRegistry {
     let mut registry = DriverRegistry::new();
     registry
@@ -500,6 +506,7 @@ async fn worker_claims_and_completes_run() {
         registry,
         Arc::new(MockHostFactory),
         wake_receiver,
+        make_applier(port.clone()),
     );
 
     let cancel = CancellationToken::new();
@@ -541,6 +548,7 @@ async fn worker_records_recovery_on_driver_error() {
         registry,
         Arc::new(MockHostFactory),
         wake_receiver,
+        make_applier(port.clone()),
     );
 
     let cancel = CancellationToken::new();
@@ -579,6 +587,7 @@ async fn worker_records_recovery_on_host_factory_error() {
         registry,
         host_factory,
         wake_receiver,
+        make_applier(port.clone()),
     );
 
     let cancel = CancellationToken::new();
@@ -616,6 +625,7 @@ async fn worker_records_recovery_when_driver_not_found() {
         registry,
         Arc::new(MockHostFactory),
         wake_receiver,
+        make_applier(port.clone()),
     );
 
     let cancel = CancellationToken::new();
@@ -649,6 +659,7 @@ async fn worker_continues_when_no_runs_available() {
         registry,
         Arc::new(MockHostFactory),
         wake_receiver,
+        make_applier(port.clone()),
     );
 
     let cancel = CancellationToken::new();
@@ -687,6 +698,7 @@ async fn wake_signal_triggers_claim_attempt() {
         registry,
         Arc::new(MockHostFactory),
         wake_receiver,
+        make_applier(port.clone()),
     );
 
     let cancel = CancellationToken::new();
@@ -725,6 +737,7 @@ async fn heartbeat_runs_during_driver_execution() {
         registry,
         Arc::new(MockHostFactory),
         wake_receiver,
+        make_applier(port.clone()),
     );
 
     let cancel = CancellationToken::new();
@@ -754,12 +767,14 @@ async fn worker_generates_stable_runner_id() {
     let port = Arc::new(MockTransitionPort::new());
     let (_ws, wake_receiver) = TurnRunnerWakeReceiver::new();
 
+    let applier = make_applier(port.clone());
     let worker = TurnRunnerWorker::new(
         TurnRunnerWorkerConfig::default(),
         port,
         registry,
         Arc::new(MockHostFactory),
         wake_receiver,
+        applier,
     );
 
     let id1 = worker.runner_id();

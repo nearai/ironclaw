@@ -23,13 +23,15 @@ use tracing::{debug, error, info, warn};
 
 use ironclaw_turns::{
     AgentLoopDriverError, AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, LoopExit,
-    LoopExitValidationPolicy, SanitizedFailure, TurnError, TurnLeaseToken,
+    ResolvedRunProfile, SanitizedFailure, TurnError, TurnLeaseToken,
     TurnRunId, TurnRunnerId, TurnScope, TurnStatus,
     runner::{
-        ApplyLoopExitRequest, ClaimRunRequest, ClaimedTurnRun, HeartbeatRequest,
+        ClaimRunRequest, ClaimedTurnRun, HeartbeatRequest,
         RecordRecoveryRequiredRequest, TurnRunTransitionPort,
     },
 };
+
+use crate::loop_exit_applier::LoopExitApplier;
 
 use crate::driver_registry::{DriverRegistry, LoopDriverRegistryKey};
 
@@ -169,6 +171,7 @@ pub struct TurnRunnerWorker {
     driver_registry: Arc<DriverRegistry>,
     host_factory: Arc<dyn HostFactory>,
     wake_receiver: TurnRunnerWakeReceiver,
+    loop_exit_applier: Arc<LoopExitApplier>,
 }
 
 impl TurnRunnerWorker {
@@ -178,6 +181,7 @@ impl TurnRunnerWorker {
         driver_registry: Arc<DriverRegistry>,
         host_factory: Arc<dyn HostFactory>,
         wake_receiver: TurnRunnerWakeReceiver,
+        loop_exit_applier: Arc<LoopExitApplier>,
     ) -> Self {
         let runner_id = TurnRunnerId::new();
         info!(runner_id = ?runner_id, "turn runner worker created");
@@ -188,6 +192,7 @@ impl TurnRunnerWorker {
             driver_registry,
             host_factory,
             wake_receiver,
+            loop_exit_applier,
         }
     }
 
@@ -271,6 +276,8 @@ impl TurnRunnerWorker {
         let run_id = claimed.state.run_id;
         let runner_id = claimed.runner_id;
         let lease_token = claimed.lease_token;
+        let scope = claimed.state.scope.clone();
+        let profile = claimed.resolved_run_profile.clone();
 
         // Start heartbeat task
         let heartbeat_cancel = CancellationToken::new();
@@ -293,7 +300,8 @@ impl TurnRunnerWorker {
         // Apply the exit or record recovery
         match exit_result {
             Ok(exit) => {
-                self.apply_exit(run_id, runner_id, lease_token, exit).await;
+                self.apply_exit(&scope, run_id, runner_id, lease_token, exit, &profile)
+                    .await;
             }
             Err(err) => {
                 warn!(
@@ -387,23 +395,24 @@ impl TurnRunnerWorker {
         }
     }
 
-    /// Apply a `LoopExit` through the trusted transition port.
+    /// Apply a `LoopExit` through the trusted `LoopExitApplier`.
+    ///
+    /// The applier derives evidence from durable stores, computes
+    /// `LoopExitValidationPolicy`, and delegates to the existing
+    /// `LoopExit::validate()` + `apply_validated_loop_exit()` path.
     async fn apply_exit(
         &self,
+        scope: &TurnScope,
         run_id: TurnRunId,
         runner_id: TurnRunnerId,
         lease_token: TurnLeaseToken,
         exit: LoopExit,
+        profile: &ResolvedRunProfile,
     ) {
-        let request = ApplyLoopExitRequest {
-            run_id,
-            runner_id,
-            lease_token,
-            exit,
-            validation_policy: LoopExitValidationPolicy::default(),
-        };
-
-        match ironclaw_turns::runner::apply_loop_exit(self.transition_port.as_ref(), request).await
+        match self
+            .loop_exit_applier
+            .apply(scope, run_id, runner_id, lease_token, exit, profile)
+            .await
         {
             Ok(state) => {
                 info!(
