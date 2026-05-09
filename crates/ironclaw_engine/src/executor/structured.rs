@@ -605,11 +605,17 @@ fn interrupted_call_needs_refund(result: &Result<ActionResult, EngineError>) -> 
 /// the resolution, so well-behaved chains converge in 1–2 iterations
 /// and the cap is only ever hit on bugs.
 ///
-/// Authentication/External resume kinds keep the legacy re-entry
-/// path: their resolution installs new state (credentials, callback
-/// payloads) that only takes effect on the next thread run-through,
-/// not via direct hand-back to the suspended call. Those return
-/// `Err(GatePaused)` unmodified.
+/// Authentication resume kinds also flow through this loop now —
+/// `bridge::resolve_inline_gates_for_credential` (the OAuth-callback
+/// hook from #3133 half-2) delivers `GateResolution::Approved` to the
+/// parked controller as soon as the credential lands in the secrets
+/// store, so the retry sees the credential and the action succeeds.
+/// (`bridge::resume_paused_missions_for_credential` is the parallel
+/// path for missions whose child threads were paused — separate from
+/// the inline-await waiters this loop drives.)
+/// External resume kinds still keep the legacy re-entry path: their
+/// resolution installs callback-payload state that the suspended call
+/// can't see without unwinding.
 ///
 /// Returns `(final_result, events)` where `events` carries the
 /// `ApprovalRequested` audit events emitted across retry iterations
@@ -645,6 +651,35 @@ async fn execute_with_inline_gate_retry(
             .await;
         call_ctx.call_approval_granted = false;
 
+        // Snapshot the original gate (for re-emission on
+        // Cancelled+Authentication, see below).
+        let original_err = match &result {
+            Err(EngineError::GatePaused {
+                resume_kind,
+                paused_lease,
+                resume_output,
+                gate_name,
+                action_name,
+                call_id,
+                parameters,
+            }) if matches!(
+                **resume_kind,
+                crate::gate::ResumeKind::Approval { .. }
+                    | crate::gate::ResumeKind::Authentication { .. }
+            ) =>
+            {
+                Some(EngineError::GatePaused {
+                    gate_name: gate_name.clone(),
+                    action_name: action_name.clone(),
+                    call_id: call_id.clone(),
+                    parameters: parameters.clone(),
+                    resume_kind: resume_kind.clone(),
+                    paused_lease: paused_lease.clone(),
+                    resume_output: resume_output.clone(),
+                })
+            }
+            _ => None,
+        };
         let (gate_name, action_name, call_id, parameters, resume_kind) = match result {
             Err(EngineError::GatePaused {
                 gate_name,
@@ -653,7 +688,12 @@ async fn execute_with_inline_gate_retry(
                 parameters,
                 resume_kind,
                 ..
-            }) if matches!(*resume_kind, crate::gate::ResumeKind::Approval { .. }) => {
+            }) if matches!(
+                *resume_kind,
+                crate::gate::ResumeKind::Approval { .. }
+                    | crate::gate::ResumeKind::Authentication { .. }
+            ) =>
+            {
                 (gate_name, action_name, call_id, *parameters, *resume_kind)
             }
             other => return (other, emitted_events),
@@ -690,7 +730,7 @@ async fn execute_with_inline_gate_retry(
                 action_name: action_name.clone(),
                 call_id: call_id.clone(),
                 parameters: parameters.clone(),
-                resume_kind,
+                resume_kind: resume_kind.clone(),
                 conversation_id: exec_ctx.conversation_id,
             })
             .await;
@@ -698,6 +738,21 @@ async fn execute_with_inline_gate_retry(
         if let Some(outcome) =
             crate::executor::scripting::denial_outcome_for_resolution(&resolution)
         {
+            // Cancelled+Authentication → unwind to legacy
+            // `ThreadOutcome::GatePaused` so missions / non-inline-aware
+            // controllers can still surface a Paused state. Cancelled
+            // here means the controller can't resolve the auth inline
+            // (e.g. `CancellingGateController` in tests, or a
+            // BridgeGateController without OAuth wiring) — that's
+            // semantically "no inline path exists" and the legacy
+            // unwind is the right fallback. Denied / explicit
+            // Cancelled-by-user remain failures.
+            if matches!(resolution, crate::gate::GateResolution::Cancelled)
+                && matches!(resume_kind, crate::gate::ResumeKind::Authentication { .. })
+                && let Some(err) = original_err
+            {
+                return (Err(err), emitted_events);
+            }
             return (
                 Err(EngineError::Effect {
                     reason: outcome.effect_reason(),

@@ -250,7 +250,13 @@ impl WorkspacePool {
             ws = ws.with_additional_read_scopes(self.workspace_config.read_scopes.clone());
         }
 
-        ws = ws.with_memory_layers(self.workspace_config.memory_layers.clone());
+        let mut memory_layers = self.workspace_config.memory_layers.clone();
+        for layer in &mut memory_layers {
+            if layer.sensitivity == crate::workspace::layer::LayerSensitivity::Private {
+                layer.scope = user_id.to_string();
+            }
+        }
+        ws = ws.with_memory_layers(memory_layers);
         ws
     }
 

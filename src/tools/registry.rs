@@ -18,9 +18,9 @@ use crate::tools::builtin::{
     GlobTool, GrepTool, HttpTool, JobEventsTool, JobPromptTool, JobStatusTool, JsonTool,
     ListDirTool, ListJobsTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool,
     PlanUpdateTool, PromptQueue, ReadFileTool, ShellTool, SkillInstallTool, SkillListTool,
-    SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool,
-    ToolListTool, ToolPermissionSetTool, ToolRemoveTool, ToolSearchTool, ToolUpgradeTool,
-    WriteFileTool, shared_file_history, shared_read_file_state,
+    SkillRemoveTool, SkillSearchTool, TimeTool, ToolAuthTool, ToolInstallTool, ToolListTool,
+    ToolPermissionSetTool, ToolRemoveTool, ToolSearchTool, ToolUpgradeTool, WriteFileTool,
+    shared_file_history, shared_read_file_state,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{
@@ -79,7 +79,6 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "tool_search",
     "tool_install",
     "tool_auth",
-    "tool_activate",
     "tool_list",
     "tool_remove",
     "tool_upgrade",
@@ -703,19 +702,18 @@ impl ToolRegistry {
         tracing::debug!("Registered 2 secret management tools (list, delete)");
     }
 
-    /// Register extension management tools (search, install, auth, activate, list, remove).
+    /// Register extension management tools (search, install, auth, list, remove).
     ///
     /// These allow the LLM to manage MCP servers and WASM tools through conversation.
     pub fn register_extension_tools(&self, manager: Arc<ExtensionManager>) {
         self.register_sync(Arc::new(ToolSearchTool::new(Arc::clone(&manager))));
         self.register_sync(Arc::new(ToolInstallTool::new(Arc::clone(&manager))));
         self.register_sync(Arc::new(ToolAuthTool::new(Arc::clone(&manager))));
-        self.register_sync(Arc::new(ToolActivateTool::new(Arc::clone(&manager))));
         self.register_sync(Arc::new(ToolListTool::new(Arc::clone(&manager))));
         self.register_sync(Arc::new(ToolRemoveTool::new(Arc::clone(&manager))));
         self.register_sync(Arc::new(ToolUpgradeTool::new(Arc::clone(&manager))));
         self.register_sync(Arc::new(ExtensionInfoTool::new(manager)));
-        tracing::debug!("Registered 8 extension management tools");
+        tracing::debug!("Registered 7 extension management tools");
     }
 
     /// Register the permission management tool (`tool_permission_set`).

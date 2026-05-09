@@ -985,7 +985,10 @@ async fn skill_prompt_context_survives_compaction_and_resume() {
             name: "slack".into(),
             display_name: Some("Slack".into()),
             kind: ironclaw_engine::CapabilitySummaryKind::Provider,
-            status: ironclaw_engine::CapabilityStatus::NeedsAuth,
+            // NeedsSetup keeps slack visible in the Activatable
+            // Integrations prompt section. NeedsAuth is direct-callable
+            // post-#3133 and lives in the regular action inventory.
+            status: ironclaw_engine::CapabilityStatus::NeedsSetup,
             description: Some("Slack workspace integration".into()),
             action_preview: vec!["slack_send".into()],
             routing_hint: None,
@@ -1082,7 +1085,10 @@ async fn skill_prompt_context_survives_compaction_and_resume() {
     assert!(post_compaction_system_prompt.contains("Active Skills"));
     assert!(post_compaction_system_prompt.contains("/missing"));
     assert!(post_compaction_system_prompt.contains("`slack` [provider]"));
-    assert!(post_compaction_system_prompt.contains("tool_activate(name=\"<integration>\")"));
+    assert!(
+        post_compaction_system_prompt
+            .contains("need user setup before their tools become callable")
+    );
     assert_eq!(
         post_compaction_system_prompt
             .matches("## Activatable Integrations")
@@ -1110,7 +1116,7 @@ async fn skill_prompt_context_survives_compaction_and_resume() {
     assert!(resumed_system_prompt.contains("Active Skills"));
     assert!(resumed_system_prompt.contains("/missing"));
     assert!(resumed_system_prompt.contains("`slack` [provider]"));
-    assert!(resumed_system_prompt.contains("tool_activate(name=\"<integration>\")"));
+    assert!(resumed_system_prompt.contains("need user setup before their tools become callable"));
     assert_eq!(
         resumed_system_prompt
             .matches("## Activatable Integrations")

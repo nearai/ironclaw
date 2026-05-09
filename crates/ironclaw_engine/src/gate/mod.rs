@@ -194,11 +194,21 @@ pub struct GatePauseRequest {
 /// double-execution of side effects from earlier tool calls in the
 /// same step.
 ///
-/// Restricted to `ResumeKind::Approval`. Authentication and External
-/// resume kinds keep their existing re-entry-based flow because their
-/// resolution installs new state (credentials, callback payloads) that
-/// only takes effect on the next run-through, not via direct hand-back
-/// to the suspended call.
+/// Handles `ResumeKind::Approval` and `ResumeKind::Authentication`.
+/// External resume kinds still keep the legacy re-entry-based flow:
+/// their resolution installs callback-payload state that can't be
+/// handed back to the suspended call without unwinding.
+///
+/// For Authentication, the host-side controller is expected to resolve
+/// the gate with `GateResolution::Approved` once the credential has
+/// been written to the secrets store (the OAuth-callback path on the
+/// gateway handles this — see
+/// `bridge::resolve_inline_gates_for_credential`, which wakes parked
+/// inline-await waiters). `bridge::resume_paused_missions_for_credential`
+/// is the parallel path that resumes background missions whose
+/// child threads were paused by the same gate. The paused tool call
+/// retries inline and reads the credential the same way it would
+/// have on a fresh execution.
 #[async_trait]
 pub trait GateController: Send + Sync {
     /// Pause execution until the user resolves the gate.

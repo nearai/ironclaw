@@ -407,6 +407,27 @@ pub(crate) async fn oauth_callback_handler(
     }
 
     if success {
+        // Half-2 of #3133, two-pronged auto-resume:
+        //
+        // 1. Wake any Tier 0 / Tier 1 inline-await VMs parked on this
+        //    credential. The CodeAct VM (mission's child thread, in
+        //    the bug-shape #3133 reported) keeps its full state across
+        //    the OAuth round-trip; on Approved it retries the original
+        //    action and continues without unwinding.
+        // 2. Auto-resume any paused background missions whose
+        //    `paused_gate` matches this credential. This handles the
+        //    case where the mission's child thread already finished
+        //    (Tier 0 unwind, or Tier 1 hit MaxIterations) before
+        //    OAuth completed.
+        // Both are best-effort — failures are logged inside the bridge
+        // helpers and never block the OAuth landing page.
+        let _ =
+            crate::bridge::resolve_inline_gates_for_credential(&flow.user_id, &flow.secret_name)
+                .await;
+        let _ =
+            crate::bridge::resume_paused_missions_for_credential(&flow.user_id, &flow.secret_name)
+                .await;
+
         match crate::bridge::resolve_engine_auth_callback(&flow.user_id, &flow.secret_name).await {
             Ok(crate::bridge::AuthCallbackContinuation::ResolveGateExternal {
                 channel,

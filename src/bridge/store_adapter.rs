@@ -1900,14 +1900,18 @@ impl Store for HybridStore {
         project_id: ProjectId,
         user_id: &str,
     ) -> Result<Vec<Mission>, EngineError> {
-        Ok(self
+        let mut missions: Vec<Mission> = self
             .missions
             .read()
             .await
             .values()
             .filter(|mission| mission.project_id == project_id && mission.user_id == user_id)
             .cloned()
-            .collect())
+            .collect();
+        // HashMap iteration is non-deterministic; sort by (name, id)
+        // so callers see a stable order across runs.
+        missions.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.0.cmp(&b.id.0)));
+        Ok(missions)
     }
 
     async fn list_all_threads(&self, project_id: ProjectId) -> Result<Vec<Thread>, EngineError> {
@@ -1922,14 +1926,16 @@ impl Store for HybridStore {
     }
 
     async fn list_all_missions(&self, project_id: ProjectId) -> Result<Vec<Mission>, EngineError> {
-        Ok(self
+        let mut missions: Vec<Mission> = self
             .missions
             .read()
             .await
             .values()
             .filter(|mission| mission.project_id == project_id)
             .cloned()
-            .collect())
+            .collect();
+        missions.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.0.cmp(&b.id.0)));
+        Ok(missions)
     }
 
     async fn update_mission_status(

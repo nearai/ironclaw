@@ -88,12 +88,27 @@ struct PreExecKey {
 /// [`BridgeGateController::pause`]; removes come from
 /// [`GateResolutions::try_deliver`] (the resolve endpoint).
 ///
+/// Authentication gates additionally register their `request_id`
+/// under the `(user_id, credential_name)` pair they are waiting on,
+/// so the OAuth callback path can wake the parked VM by credential
+/// name without having to know the engine-internal request_id —
+/// scoped per user so a credential write under one account never
+/// wakes a parked gate from a different account that happens to share
+/// the same credential name.
+///
 /// Stranded entries from a prior crash do not exist — restarting the
 /// process drops the registry. Stale `PendingGate` rows surviving
 /// restart are cleaned up by the startup sweep in `router.rs`.
 #[derive(Default)]
 pub struct GateResolutions {
     inner: Mutex<HashMap<Uuid, oneshot::Sender<GateResolution>>>,
+    /// Secondary index: `(user_id, credential_name)` → request_ids
+    /// parked on it. Used by [`Self::deliver_for_credential`] so the
+    /// OAuth-callback path can wake a Tier 0/Tier 1 inline-await for
+    /// the credential that was just written. The user_id component
+    /// keeps multi-tenant deployments from cross-waking — only the
+    /// owning user's parked gates fire.
+    by_credential: Mutex<HashMap<(String, String), HashSet<Uuid>>>,
 }
 
 impl GateResolutions {
@@ -106,18 +121,79 @@ impl GateResolutions {
     /// `false` if not (no live VM — fall through to legacy re-entry).
     pub async fn try_deliver(&self, request_id: Uuid, resolution: GateResolution) -> bool {
         let sender = self.inner.lock().await.remove(&request_id);
+        // Best-effort: drop any credential-index entries that point at
+        // this request_id (we don't know which credential without
+        // tracking the reverse mapping; keep the index lazy by sweeping
+        // sets that contain the id).
+        {
+            let mut idx = self.by_credential.lock().await;
+            idx.retain(|_, set| {
+                set.remove(&request_id);
+                !set.is_empty()
+            });
+        }
         match sender {
             Some(tx) => tx.send(resolution).is_ok(),
             None => false,
         }
     }
 
+    /// Deliver `Approved` to every parked Authentication gate that was
+    /// waiting on `(user_id, credential_name)`. Returns the count of
+    /// waiters woken. Used by the OAuth-callback path: when a
+    /// credential is written, every paused tool call (Tier 0 or
+    /// Tier 1, foreground or mission child thread) belonging to
+    /// `user_id` that was blocked on that credential can resume
+    /// inline and retry the action against the now-present secret.
+    /// Other users' parked gates on the same credential name are
+    /// left untouched.
+    pub async fn deliver_for_credential(&self, user_id: &str, credential_name: &str) -> usize {
+        let request_ids: Vec<Uuid> = {
+            let mut idx = self.by_credential.lock().await;
+            idx.remove(&(user_id.to_string(), credential_name.to_string()))
+                .map(|set| set.into_iter().collect())
+                .unwrap_or_default()
+        };
+        let mut delivered = 0;
+        for request_id in request_ids {
+            if self
+                .try_deliver(request_id, GateResolution::Approved { always: false })
+                .await
+            {
+                delivered += 1;
+            }
+        }
+        delivered
+    }
+
     async fn register(&self, request_id: Uuid, sender: oneshot::Sender<GateResolution>) {
         self.inner.lock().await.insert(request_id, sender);
     }
 
+    /// Register `request_id` against `(user_id, credential_name)` so
+    /// an OAuth completion can wake it by credential name later,
+    /// scoped to the owning user.
+    async fn register_credential(
+        &self,
+        user_id: String,
+        credential_name: String,
+        request_id: Uuid,
+    ) {
+        self.by_credential
+            .lock()
+            .await
+            .entry((user_id, credential_name))
+            .or_default()
+            .insert(request_id);
+    }
+
     async fn forget(&self, request_id: Uuid) {
         self.inner.lock().await.remove(&request_id);
+        let mut idx = self.by_credential.lock().await;
+        idx.retain(|_, set| {
+            set.remove(&request_id);
+            !set.is_empty()
+        });
     }
 }
 
@@ -455,17 +531,17 @@ impl BridgeGateController {
 #[async_trait]
 impl GateController for BridgeGateController {
     async fn pause(&self, request: GatePauseRequest) -> GateResolution {
-        // Inline gate-await currently only handles Approval. Authentication
-        // and External resume kinds need state installed *before* the
-        // suspended call can succeed (credential in secrets store, callback
-        // payload), so they keep the legacy `ThreadOutcome::GatePaused`
-        // re-entry path. The engine should not be reaching here for those
-        // kinds; if it does, treat as cancellation so the call surfaces a
-        // clear error rather than hanging.
-        if !matches!(request.resume_kind, ResumeKind::Approval { .. }) {
+        // Inline gate-await handles Approval and Authentication.
+        // External resume kinds keep the legacy
+        // `ThreadOutcome::GatePaused` re-entry path because their
+        // resolution installs callback-payload state that can't be
+        // handed back to the suspended call without unwinding. Surface
+        // External as Cancelled so the call returns a clean error
+        // instead of hanging.
+        if matches!(request.resume_kind, ResumeKind::External { .. }) {
             debug!(
                 kind = %request.resume_kind.kind_name(),
-                "BridgeGateController: non-Approval resume kind reached inline await; cancelling",
+                "BridgeGateController: External resume kind reached inline await; cancelling",
             );
             return GateResolution::Cancelled;
         }
@@ -476,13 +552,20 @@ impl GateController for BridgeGateController {
         else {
             // No per-execution context registered. This shouldn't happen
             // when invoked through `handle_with_engine`, which always
-            // populates it before invoking the engine. If it does, the
-            // safe move is to cancel — we have no channel to surface a
-            // prompt on.
+            // populates it before invoking the engine. Mission /
+            // background threads also reach here today; they fall
+            // through to the legacy `ThreadOutcome::GatePaused` unwind
+            // path so `process_mission_outcome_and_notify` (#3133
+            // half-1) transitions the mission to Paused. The half-2
+            // mission auto-resume path (`resume_paused_for_credential`)
+            // resumes the mission after OAuth completes. Cancelling
+            // here is the right wire for that flow — it produces the
+            // legacy unwind that the mission state machine consumes.
             debug!(
                 user = %request.user_id,
                 thread = %request.thread_id,
-                "BridgeGateController: no per-execution context registered; cancelling",
+                kind = %request.resume_kind.kind_name(),
+                "BridgeGateController: no per-execution context — cancelling (mission/background path)"
             );
             return GateResolution::Cancelled;
         };
@@ -541,6 +624,23 @@ impl GateController for BridgeGateController {
 
         let (tx, rx) = oneshot::channel();
         self.resolutions.register(request_id, tx).await;
+        // For Authentication gates, also index this request_id by
+        // the credential name we're waiting on so the OAuth callback
+        // path can wake us by credential without having to know the
+        // request_id. Forget on exit cleans the index either way.
+        if let ResumeKind::Authentication {
+            ref credential_name,
+            ..
+        } = request.resume_kind
+        {
+            self.resolutions
+                .register_credential(
+                    request.user_id.clone(),
+                    credential_name.as_str().to_string(),
+                    request_id,
+                )
+                .await;
+        }
 
         // Track this in-flight pause so `cancel_thread()` can wake it
         // promptly on `ThreadManager::stop_thread()`. Without this,

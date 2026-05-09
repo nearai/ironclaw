@@ -392,6 +392,22 @@ impl near::agent::host::Host for StoreData {
             self.inject_host_credentials(&host, &mut headers, &mut url);
         }
 
+        // Apply IRONCLAW_TEST_HTTP_REWRITE_MAP for tests (parallel to
+        // the WASM-channel path in `src/channels/wasm/wrapper.rs`).
+        // Without this, a test fixture's rewrite of e.g.
+        // gmail.googleapis.com → mock_llm doesn't apply to WASM tools'
+        // HTTP calls, and the tool reaches the real upstream — the
+        // exact bug uncovered while debugging the #3133 live test.
+        #[cfg(any(test, debug_assertions))]
+        if let Some(rewritten) = rewrite_http_url_for_tool_testing(&url) {
+            tracing::debug!(
+                original = %url,
+                rewritten = %rewritten,
+                "WASM tool HTTP: applying TEST_HTTP_REWRITE_MAP"
+            );
+            url = rewritten;
+        }
+
         // Get the max response size from capabilities (default 10MB).
         let max_response_bytes = self
             .host_state
@@ -1229,6 +1245,26 @@ impl Tool for WasmToolWrapper {
         Some(&self.prepared.name)
     }
 
+    /// Walk the WASM tool's declared HTTP credentials and return every
+    /// non-optional `secret_name`. The engine's auth preflight
+    /// (`AuthManager::check_action_auth`) uses this to raise an
+    /// `Authentication` gate when the tool is called and any required
+    /// credential is missing from the secrets store — so the model can
+    /// call e.g. `gmail` directly with no separate enablement step.
+    fn required_credentials(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(http) = &self.capabilities.http {
+            for mapping in http.credentials.values() {
+                if !mapping.optional {
+                    out.push(mapping.secret_name.clone());
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// Compose the tool schema for LLM function calling.
     ///
     /// When the advertised schema is permissive (no typed properties), appends
@@ -1533,6 +1569,85 @@ async fn resolve_host_credentials(
         resolved,
         missing_required,
     }
+}
+
+/// Apply `IRONCLAW_TEST_HTTP_REWRITE_MAP` to a WASM-tool HTTP request.
+///
+/// Mirrors the WASM-channel rewrite at
+/// `src/channels/wasm/wrapper.rs::rewrite_http_url_for_testing`. The
+/// env var is a JSON object `{ host: replacement_base }` (e.g.
+/// `{"gmail.googleapis.com":"http://127.0.0.1:8080"}`); a matching
+/// host substitutes the host's scheme/authority while preserving path
+/// and query. Replacement bases must be loopback URLs.
+///
+/// Without this, WASM tools' HTTP calls (e.g. `gmail` hitting
+/// gmail.googleapis.com) ignored the test rewrite and reached the
+/// real upstream — the bug uncovered while debugging the #3133 live
+/// test.
+#[cfg(any(test, debug_assertions))]
+pub(crate) fn rewrite_http_url_for_tool_testing(url: &str) -> Option<String> {
+    let raw = std::env::var("IRONCLAW_TEST_HTTP_REWRITE_MAP").ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let map: HashMap<String, String> = serde_json::from_str(trimmed).ok()?;
+    let parsed = url::Url::parse(url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = parsed.host_str()?.to_lowercase();
+    let base = map.get(&host)?.trim().trim_end_matches('/').to_string();
+    // Match `channels::wasm::wrapper::is_loopback_test_rewrite_base`:
+    // accept any http/https loopback URL (`localhost`, `127.0.0.1/8`,
+    // `[::1]`) via URL parsing rather than hardcoded `http://...` prefix
+    // matching, which silently dropped valid forms like
+    // `https://localhost:8443` that the channel-side helper accepts.
+    if !is_loopback_test_rewrite_base(&base) {
+        tracing::warn!(
+            host = %host,
+            base = %base,
+            "IRONCLAW_TEST_HTTP_REWRITE_MAP: ignoring non-loopback target"
+        );
+        return None;
+    }
+    let path = parsed.path().trim_start_matches('/');
+    let mut rewritten = format!("{base}/{path}");
+    if let Some(query) = parsed.query() {
+        rewritten.push('?');
+        rewritten.push_str(query);
+    }
+    Some(rewritten)
+}
+
+/// Validate that a test-rewrite target is an http/https loopback URL.
+///
+/// Accepts `localhost`, IPv4 loopback (`127.0.0.0/8`), and IPv6 `::1`
+/// (the `url` crate keeps brackets on IPv6 hosts, so we strip them
+/// before `IpAddr::parse`). Mirrors
+/// `channels::wasm::wrapper::is_loopback_test_rewrite_base` — single
+/// source of truth would be nicer, but the two `wrapper.rs` files sit
+/// in sibling modules with independent `cfg(any(test,
+/// debug_assertions))` gates.
+#[cfg(any(test, debug_assertions))]
+fn is_loopback_test_rewrite_base(base: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(base) else {
+        return false;
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return false;
+    }
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    let host = host
+        .strip_prefix('[')
+        .and_then(|v| v.strip_suffix(']'))
+        .unwrap_or(host);
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Extract the hostname from a URL string.
@@ -4108,5 +4223,85 @@ mod tests {
             !debug_output.contains("raw-secret-bytes"),
             "secret_value leaked: {debug_output}"
         );
+    }
+
+    #[test]
+    fn is_loopback_test_rewrite_base_accepts_http_and_https_loopback() {
+        // Mirror the channel-side helper: accept localhost / 127.0.0.0/8 /
+        // [::1] under both http and https, reject anything else. Locks in
+        // the contract that previously diverged from the channel-side
+        // (PR #3366 review).
+        assert!(super::is_loopback_test_rewrite_base("http://localhost"));
+        assert!(super::is_loopback_test_rewrite_base(
+            "http://localhost:9999"
+        ));
+        assert!(super::is_loopback_test_rewrite_base("http://127.0.0.1"));
+        assert!(super::is_loopback_test_rewrite_base(
+            "http://127.0.0.1:8080"
+        ));
+        assert!(super::is_loopback_test_rewrite_base("http://[::1]"));
+        assert!(super::is_loopback_test_rewrite_base("http://[::1]:8443"));
+        assert!(super::is_loopback_test_rewrite_base("https://localhost"));
+        assert!(super::is_loopback_test_rewrite_base(
+            "https://localhost:8443"
+        ));
+        assert!(super::is_loopback_test_rewrite_base("https://127.0.0.1"));
+        assert!(super::is_loopback_test_rewrite_base("https://[::1]"));
+
+        // Non-loopback / wrong scheme / malformed → reject.
+        assert!(!super::is_loopback_test_rewrite_base("https://example.com"));
+        assert!(!super::is_loopback_test_rewrite_base("http://10.0.0.1"));
+        assert!(!super::is_loopback_test_rewrite_base("http://0.0.0.0"));
+        assert!(!super::is_loopback_test_rewrite_base("ftp://localhost"));
+        assert!(!super::is_loopback_test_rewrite_base("not a url"));
+    }
+
+    #[test]
+    fn rewrite_http_url_for_tool_testing_accepts_https_loopback() {
+        // Regression for PR #3366 review: the tool-side rewrite previously
+        // hardcoded `http://...` prefix matches and silently rejected valid
+        // https-loopback bases that the channel-side helper accepts.
+        let _guard = crate::config::helpers::lock_env();
+        let original = std::env::var("IRONCLAW_TEST_HTTP_REWRITE_MAP").ok();
+
+        // SAFETY: guarded by lock_env() — no concurrent env access.
+        unsafe {
+            std::env::set_var(
+                "IRONCLAW_TEST_HTTP_REWRITE_MAP",
+                r#"{"gmail.googleapis.com":"https://localhost:8443"}"#,
+            );
+        }
+        let rewritten = super::rewrite_http_url_for_tool_testing(
+            "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+        );
+        assert_eq!(
+            rewritten.as_deref(),
+            Some("https://localhost:8443/gmail/v1/users/me/profile"),
+            "https-loopback base must be accepted (parity with channel-side helper)"
+        );
+
+        // Non-loopback target is still rejected.
+        unsafe {
+            std::env::set_var(
+                "IRONCLAW_TEST_HTTP_REWRITE_MAP",
+                r#"{"gmail.googleapis.com":"https://attacker.example.com"}"#,
+            );
+        }
+        let rejected = super::rewrite_http_url_for_tool_testing(
+            "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+        );
+        assert!(
+            rejected.is_none(),
+            "non-loopback rewrite targets must remain rejected"
+        );
+
+        // SAFETY: restore original env var under the same lock.
+        unsafe {
+            if let Some(ref val) = original {
+                std::env::set_var("IRONCLAW_TEST_HTTP_REWRITE_MAP", val);
+            } else {
+                std::env::remove_var("IRONCLAW_TEST_HTTP_REWRITE_MAP");
+            }
+        }
     }
 }

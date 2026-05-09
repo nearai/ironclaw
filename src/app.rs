@@ -1691,11 +1691,6 @@ mod tests {
         registry.register_builtin_tools();
 
         let owner = "test-user";
-        assert_eq!(
-            crate::tools::permissions::seeded_default_permission("tool_activate"),
-            Some(PermissionState::AlwaysAllow),
-            "tool_activate should seed AlwaysAllow so subgates control auth/setup"
-        );
 
         // 1. Initial seed: creates defaults for all registered tools.
         super::seed_tool_permissions(&registry, Some(&db), owner).await;

@@ -447,20 +447,18 @@ mod live_tests {
             gate_auth_url.is_some()
         );
 
-        // The agent must NOT have run a tool_install / tool_activate
-        // recovery loop — that's the bad behaviour the post-flight
-        // detector eliminates. Match both bare names and the
-        // argument-prefixed `"<name>(args)"` form emitted by
-        // `format_action_display_name`; an exact-match check would silently
-        // miss `"tool_install(foo)"` and turn this into a false negative.
-        let bad_recovery = phase_a_tools.iter().any(|t| {
-            tool_name_matches(t, "tool_install")
-                || tool_name_matches(t, "tool_activate")
-                || tool_name_matches(t, "tool-install")
-        });
+        // The agent must NOT have run a tool_install recovery loop —
+        // that's the bad behaviour the post-flight detector eliminates.
+        // Match both bare names and the argument-prefixed `"<name>(args)"`
+        // form emitted by `format_action_display_name`; an exact-match
+        // check would silently miss `"tool_install(foo)"` and turn this
+        // into a false negative.
+        let bad_recovery = phase_a_tools
+            .iter()
+            .any(|t| tool_name_matches(t, "tool_install") || tool_name_matches(t, "tool-install"));
         assert!(
             !bad_recovery,
-            "Phase A: agent ran a tool_install/tool_activate recovery loop instead \
+            "Phase A: agent ran a tool_install recovery loop instead \
              of pausing for auth on the first iteration. Tools attempted: {phase_a_tools:?}"
         );
 
@@ -545,9 +543,9 @@ mod live_tests {
         //
         // We assert two things:
         //
-        //   1. No `tool_install` / `tool_activate` / `secret_list`
-        //      tool ever appears in Phase B's tool activity (the
-        //      pre-fix recovery loop's smoking gun).
+        //   1. No `tool_install` / `secret_list` tool ever appears in
+        //      Phase B's tool activity (the pre-fix recovery loop's
+        //      smoking gun).
         //
         //   2. The first tool that does run in Phase B is one of
         //      `google_drive_tool` or its action variants (so we know
@@ -566,7 +564,6 @@ mod live_tests {
         let phase_b_recovery = phase_b_tools.iter().any(|t| {
             tool_name_matches(t, "tool_install")
                 || tool_name_matches(t, "tool-install")
-                || tool_name_matches(t, "tool_activate")
                 || tool_name_matches(t, "secret_list")
                 || tool_name_matches(t, "tool_search")
         });
