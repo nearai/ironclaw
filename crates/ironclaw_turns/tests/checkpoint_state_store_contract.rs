@@ -252,6 +252,140 @@ fn turn_checkpoint_public_status_does_not_expose_checkpoint_payload() {
     }
 }
 
+#[tokio::test]
+async fn checkpoint_state_store_round_trips_empty_payload() {
+    let store = InMemoryCheckpointStateStore::default();
+    let scope = turn_scope("thread-checkpoint-empty");
+    let turn_id = TurnId::new();
+    let run_id = TurnRunId::new();
+
+    let record = store
+        .put_checkpoint_state(PutCheckpointStateRequest::new(
+            scope.clone(),
+            turn_id,
+            run_id,
+            CheckpointSchemaId::new("interactive_checkpoint_v1").unwrap(),
+            RunProfileVersion::new(1),
+            LoopCheckpointKind::BeforeModel,
+            Vec::<u8>::new(),
+        ))
+        .await
+        .unwrap();
+
+    assert!(record.payload.is_empty());
+    assert_eq!(record.payload.len(), 0);
+
+    let loaded = store
+        .get_checkpoint_state(get_request(&record, scope, turn_id, run_id))
+        .await
+        .unwrap()
+        .expect("empty payload should round-trip");
+
+    assert_eq!(loaded.payload.as_bytes(), &[] as &[u8]);
+}
+
+#[tokio::test]
+async fn checkpoint_state_store_accepts_exact_max_size_payload() {
+    let store = InMemoryCheckpointStateStore::default();
+    let scope = turn_scope("thread-checkpoint-max-size");
+    let turn_id = TurnId::new();
+    let run_id = TurnRunId::new();
+    let payload = vec![b'A'; MAX_CHECKPOINT_STATE_PAYLOAD_BYTES];
+
+    let record = store
+        .put_checkpoint_state(PutCheckpointStateRequest::new(
+            scope.clone(),
+            turn_id,
+            run_id,
+            CheckpointSchemaId::new("interactive_checkpoint_v1").unwrap(),
+            RunProfileVersion::new(1),
+            LoopCheckpointKind::BeforeSideEffect,
+            payload.clone(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(record.payload.len(), MAX_CHECKPOINT_STATE_PAYLOAD_BYTES);
+
+    let loaded = store
+        .get_checkpoint_state(get_request(&record, scope, turn_id, run_id))
+        .await
+        .unwrap()
+        .expect("exact max-size payload should round-trip");
+
+    assert_eq!(loaded.payload.as_bytes(), payload.as_slice());
+}
+
+#[tokio::test]
+async fn checkpoint_state_store_multiple_puts_produce_distinct_refs() {
+    let store = InMemoryCheckpointStateStore::default();
+    let scope = turn_scope("thread-checkpoint-multi");
+    let turn_id = TurnId::new();
+    let run_id = TurnRunId::new();
+
+    let record_a = store
+        .put_checkpoint_state(PutCheckpointStateRequest::new(
+            scope.clone(),
+            turn_id,
+            run_id,
+            CheckpointSchemaId::new("interactive_checkpoint_v1").unwrap(),
+            RunProfileVersion::new(1),
+            LoopCheckpointKind::BeforeModel,
+            b"payload-a".to_vec(),
+        ))
+        .await
+        .unwrap();
+
+    let record_b = store
+        .put_checkpoint_state(PutCheckpointStateRequest::new(
+            scope.clone(),
+            turn_id,
+            run_id,
+            CheckpointSchemaId::new("interactive_checkpoint_v1").unwrap(),
+            RunProfileVersion::new(1),
+            LoopCheckpointKind::BeforeModel,
+            b"payload-b".to_vec(),
+        ))
+        .await
+        .unwrap();
+
+    assert_ne!(record_a.state_ref, record_b.state_ref, "each put must produce a unique state_ref");
+
+    let loaded_a = store
+        .get_checkpoint_state(get_request(&record_a, scope.clone(), turn_id, run_id))
+        .await
+        .unwrap()
+        .expect("first record should be independently retrievable");
+    assert_eq!(loaded_a.payload.as_bytes(), b"payload-a");
+
+    let loaded_b = store
+        .get_checkpoint_state(get_request(&record_b, scope, turn_id, run_id))
+        .await
+        .unwrap()
+        .expect("second record should be independently retrievable");
+    assert_eq!(loaded_b.payload.as_bytes(), b"payload-b");
+}
+
+#[tokio::test]
+async fn checkpoint_state_store_rejects_cross_turn_id_ref() {
+    let store = InMemoryCheckpointStateStore::default();
+    let scope = turn_scope("thread-checkpoint-cross-turn");
+    let turn_id = TurnId::new();
+    let run_id = TurnRunId::new();
+    let record = put_test_state(&store, scope.clone(), turn_id, run_id).await;
+
+    let different_turn_id = TurnId::new();
+    let loaded = store
+        .get_checkpoint_state(get_request(&record, scope, different_turn_id, run_id))
+        .await
+        .unwrap();
+
+    assert!(
+        loaded.is_none(),
+        "checkpoint state must not be returned for a different turn_id"
+    );
+}
+
 fn get_request(
     record: &CheckpointStateRecord,
     scope: TurnScope,
