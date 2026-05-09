@@ -68,6 +68,37 @@ async fn libsql_secret_store_verify_can_decrypt_existing_secrets_rejects_wrong_k
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
+async fn libsql_secret_store_key_check_rejects_concurrent_conflict_winner_with_wrong_key() {
+    let dir = tempfile::tempdir().unwrap().keep();
+    let db_path = dir.join("secrets.db");
+    let database = Arc::new(libsql::Builder::new_local(&db_path).build().await.unwrap());
+    let store = LibSqlSecretsStore::new(Arc::clone(&database), test_crypto());
+    store.run_migrations().await.unwrap();
+
+    let conn = database.connect().unwrap();
+    conn.execute("BEGIN IMMEDIATE", ()).await.unwrap();
+    insert_libsql_secret_store_key_check(&conn, test_crypto()).await;
+
+    let losing_store = LibSqlSecretsStore::new(Arc::clone(&database), wrong_crypto());
+    let verification = tokio::task::spawn_blocking(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(losing_store.verify_can_decrypt_existing_secrets())
+    });
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    conn.execute("COMMIT", ()).await.unwrap();
+
+    let error = verification
+        .await
+        .unwrap()
+        .expect_err("wrong key must verify the committed key-check conflict winner");
+    assert!(matches!(error, SecretError::DecryptionFailed(_)));
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
 async fn libsql_secret_store_consume_if_matches_is_one_shot_and_durable() {
     let dir = tempfile::tempdir().unwrap().keep();
     let db_path = dir.join("secrets.db");
@@ -157,6 +188,50 @@ async fn postgres_secret_store_verify_can_decrypt_existing_secrets_rejects_wrong
 
 #[cfg(feature = "postgres")]
 #[tokio::test]
+async fn postgres_secret_store_key_check_rejects_concurrent_conflict_winner_with_wrong_key() {
+    let Some(pool) = postgres_pool().await else {
+        return;
+    };
+    let store = PostgresSecretsStore::new(pool.clone(), test_crypto());
+    store.run_migrations().await.unwrap();
+
+    let mut client = pool.get().await.unwrap();
+    client
+        .execute(
+            "DELETE FROM reborn_secret_store_key_check WHERE id = $1",
+            &[&"active"],
+        )
+        .await
+        .unwrap();
+    let transaction = client.transaction().await.unwrap();
+    insert_postgres_secret_store_key_check(&transaction, test_crypto()).await;
+
+    let losing_store = PostgresSecretsStore::new(pool.clone(), wrong_crypto());
+    let verification =
+        tokio::spawn(async move { losing_store.verify_can_decrypt_existing_secrets().await });
+    for _ in 0..1000 {
+        tokio::task::yield_now().await;
+    }
+    transaction.commit().await.unwrap();
+
+    let error = verification
+        .await
+        .unwrap()
+        .expect_err("wrong key must verify the committed key-check conflict winner");
+    assert!(matches!(error, SecretError::DecryptionFailed(_)));
+
+    let cleanup = pool.get().await.unwrap();
+    cleanup
+        .execute(
+            "DELETE FROM reborn_secret_store_key_check WHERE id = $1",
+            &[&"active"],
+        )
+        .await
+        .unwrap();
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
 async fn postgres_secret_store_consume_if_matches_is_one_shot_and_durable() {
     let Some(store) = postgres_store().await else {
         return;
@@ -197,6 +272,21 @@ async fn libsql_store(path: &std::path::Path, crypto: Arc<SecretsCrypto>) -> Lib
     store
 }
 
+#[cfg(feature = "libsql")]
+async fn insert_libsql_secret_store_key_check(
+    conn: &libsql::Connection,
+    crypto: Arc<SecretsCrypto>,
+) {
+    let (encrypted_value, key_salt) = crypto.encrypt(b"reborn-secret-store-key-check-v1").unwrap();
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO reborn_secret_store_key_check (id, encrypted_value, key_salt, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)",
+        libsql::params!["active", encrypted_value, key_salt, now],
+    )
+    .await
+    .unwrap();
+}
+
 #[cfg(feature = "postgres")]
 async fn postgres_store() -> Option<PostgresSecretsStore> {
     postgres_store_with_crypto(test_crypto()).await
@@ -204,6 +294,17 @@ async fn postgres_store() -> Option<PostgresSecretsStore> {
 
 #[cfg(feature = "postgres")]
 async fn postgres_store_with_crypto(crypto: Arc<SecretsCrypto>) -> Option<PostgresSecretsStore> {
+    let pool = postgres_pool().await?;
+    let store = PostgresSecretsStore::new(pool, crypto);
+    store
+        .run_migrations()
+        .await
+        .expect("DATABASE_URL must point at a reachable Postgres test database");
+    Some(store)
+}
+
+#[cfg(feature = "postgres")]
+async fn postgres_pool() -> Option<deadpool_postgres::Pool> {
     let Ok(database_url) = std::env::var("DATABASE_URL") else {
         eprintln!("skipping Postgres secret store contract: DATABASE_URL is not set");
         return None;
@@ -212,16 +313,28 @@ async fn postgres_store_with_crypto(crypto: Arc<SecretsCrypto>) -> Option<Postgr
         .parse()
         .expect("DATABASE_URL must parse as a Postgres connection string");
     let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
-    let pool = deadpool_postgres::Pool::builder(manager)
-        .max_size(4)
-        .build()
-        .expect("Postgres pool must build");
-    let store = PostgresSecretsStore::new(pool, crypto);
-    store
-        .run_migrations()
+    Some(
+        deadpool_postgres::Pool::builder(manager)
+            .max_size(4)
+            .build()
+            .expect("Postgres pool must build"),
+    )
+}
+
+#[cfg(feature = "postgres")]
+async fn insert_postgres_secret_store_key_check(
+    client: &impl deadpool_postgres::GenericClient,
+    crypto: Arc<SecretsCrypto>,
+) {
+    let (encrypted_value, key_salt) = crypto.encrypt(b"reborn-secret-store-key-check-v1").unwrap();
+    let now = chrono::Utc::now().to_rfc3339();
+    client
+        .execute(
+            "INSERT INTO reborn_secret_store_key_check (id, encrypted_value, key_salt, created_at, updated_at) VALUES ($1, $2, $3, $4, $4)",
+            &[&"active", &encrypted_value, &key_salt, &now],
+        )
         .await
-        .expect("DATABASE_URL must point at a reachable Postgres test database");
-    Some(store)
+        .unwrap();
 }
 
 fn test_crypto() -> Arc<SecretsCrypto> {

@@ -52,6 +52,18 @@ async fn reborn_secret_store_requires_explicit_operator_master_key() {
 }
 
 #[tokio::test]
+async fn reborn_secret_store_backend_unavailable_error_does_not_format_backend_details() {
+    let error = RebornSecretStoreError::BackendUnavailable;
+
+    let display = error.to_string();
+    let debug = format!("{error:?}");
+
+    assert!(!display.contains("/tmp/operator/private/reborn-secrets.db"));
+    assert!(!debug.contains("/tmp/operator/private/reborn-secrets.db"));
+    assert_eq!(display, "reborn secret store backend unavailable");
+}
+
+#[tokio::test]
 async fn reborn_secret_store_fails_closed_when_existing_rows_use_another_master_key() {
     let dir = tempfile::tempdir().unwrap().keep();
     let db_path = dir.join("reborn-secrets.db");

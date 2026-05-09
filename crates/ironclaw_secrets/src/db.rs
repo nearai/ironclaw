@@ -1509,7 +1509,13 @@ async fn libsql_verify_or_bootstrap_secret_store_key_check(
     if let Some((encrypted_value, key_salt)) = libsql_first_secret_payload(conn).await? {
         crypto.decrypt(&encrypted_value, &key_salt)?;
     }
-    libsql_insert_secret_store_key_check(conn, crypto).await
+    libsql_insert_secret_store_key_check(conn, crypto).await?;
+    let Some((encrypted_value, key_salt)) = libsql_secret_store_key_check(conn).await? else {
+        return Err(SecretError::Database(
+            "secret store key check missing after bootstrap".to_string(),
+        ));
+    };
+    verify_secret_store_key_check(crypto, &encrypted_value, &key_salt)
 }
 
 #[cfg(feature = "libsql")]
@@ -1663,7 +1669,13 @@ async fn postgres_verify_or_bootstrap_secret_store_key_check(
     if let Some((encrypted_value, key_salt)) = postgres_first_secret_payload(client).await? {
         crypto.decrypt(&encrypted_value, &key_salt)?;
     }
-    postgres_insert_secret_store_key_check(client, crypto).await
+    postgres_insert_secret_store_key_check(client, crypto).await?;
+    let Some((encrypted_value, key_salt)) = postgres_secret_store_key_check(client).await? else {
+        return Err(SecretError::Database(
+            "secret store key check missing after bootstrap".to_string(),
+        ));
+    };
+    verify_secret_store_key_check(crypto, &encrypted_value, &key_salt)
 }
 
 #[cfg(feature = "postgres")]

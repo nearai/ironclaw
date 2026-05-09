@@ -38,7 +38,7 @@ pub enum RebornSecretStoreHealthStatus {
 pub enum RebornSecretStoreError {
     MissingMasterKey,
     InvalidMasterKey,
-    BackendUnavailable { reason: String },
+    BackendUnavailable,
 }
 
 impl fmt::Display for RebornSecretStoreError {
@@ -49,11 +49,8 @@ impl fmt::Display for RebornSecretStoreError {
             Self::InvalidMasterKey => {
                 formatter.write_str("reborn secret store master key is invalid")
             }
-            Self::BackendUnavailable { reason } => {
-                write!(
-                    formatter,
-                    "reborn secret store backend unavailable: {reason}"
-                )
+            Self::BackendUnavailable => {
+                formatter.write_str("reborn secret store backend unavailable")
             }
         }
     }
@@ -104,9 +101,7 @@ pub async fn build_libsql_reborn_secret_store(
         .ok_or(RebornSecretStoreError::MissingMasterKey)?;
     let crypto = Arc::new(SecretsCrypto::new(master_key).map_err(|error| match error {
         SecretError::InvalidMasterKey => RebornSecretStoreError::InvalidMasterKey,
-        other => RebornSecretStoreError::BackendUnavailable {
-            reason: other.to_string(),
-        },
+        _ => RebornSecretStoreError::BackendUnavailable,
     })?);
     let backend = Arc::new(LibSqlSecretsStore::new(config.database, crypto));
     backend
@@ -123,9 +118,7 @@ pub async fn build_libsql_reborn_secret_store(
 fn map_secret_store_error(error: SecretError) -> RebornSecretStoreError {
     match error {
         SecretError::InvalidMasterKey => RebornSecretStoreError::InvalidMasterKey,
-        other => RebornSecretStoreError::BackendUnavailable {
-            reason: other.to_string(),
-        },
+        _ => RebornSecretStoreError::BackendUnavailable,
     }
 }
 
