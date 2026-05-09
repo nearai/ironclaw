@@ -1,11 +1,11 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw::llm::{
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_llm::{
     CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider,
     ToolCompletionRequest, ToolCompletionResponse,
 };
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_loop_support::{
     HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessage,
     HostManagedModelMessageRole, HostManagedModelRequest,
