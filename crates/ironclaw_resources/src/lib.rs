@@ -12,6 +12,8 @@ use std::future::Future;
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use std::sync::{OnceLock, mpsc};
 
 use fs2::FileExt;
 
@@ -527,21 +529,78 @@ CREATE TABLE IF NOT EXISTS ironclaw_resource_governor_snapshots (\
 );";
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-fn run_async_in_storage_thread<T, Fut, F>(build: F) -> Result<T, ResourceError>
+type AsyncStorageJob = Box<dyn FnOnce(&tokio::runtime::Runtime) + Send + 'static>;
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+#[derive(Debug, Clone)]
+struct AsyncStorageWorker {
+    sender: mpsc::Sender<AsyncStorageJob>,
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+impl AsyncStorageWorker {
+    fn spawn(name: &'static str) -> Result<Self, ResourceError> {
+        let (sender, receiver) = mpsc::channel::<AsyncStorageJob>();
+        let (ready_sender, ready_receiver) = mpsc::channel();
+        std::thread::Builder::new()
+            .name(name.to_string())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        let _ = ready_sender.send(Err(storage_error(error)));
+                        return;
+                    }
+                };
+                let _ = ready_sender.send(Ok(()));
+                while let Ok(job) = receiver.recv() {
+                    job(&runtime);
+                }
+            })
+            .map_err(storage_error)?;
+        ready_receiver
+            .recv()
+            .map_err(|_| storage_error("resource governor storage worker failed to start"))??;
+        Ok(Self { sender })
+    }
+
+    fn run<T, Fut, F>(&self, build: F) -> Result<T, ResourceError>
+    where
+        T: Send + 'static,
+        Fut: Future<Output = Result<T, ResourceError>> + Send + 'static,
+        F: FnOnce() -> Fut + Send + 'static,
+    {
+        let (result_sender, result_receiver) = mpsc::channel();
+        self.sender
+            .send(Box::new(move |runtime| {
+                let result = runtime.block_on(build());
+                let _ = result_sender.send(result);
+            }))
+            .map_err(|_| storage_error("resource governor storage worker stopped"))?;
+        result_receiver
+            .recv()
+            .map_err(|_| storage_error("resource governor storage worker stopped"))?
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn run_async_on_shared_storage_worker<T, Fut, F>(build: F) -> Result<T, ResourceError>
 where
     T: Send + 'static,
     Fut: Future<Output = Result<T, ResourceError>> + Send + 'static,
     F: FnOnce() -> Fut + Send + 'static,
 {
-    std::thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(storage_error)?;
-        runtime.block_on(build())
-    })
-    .join()
-    .map_err(|_| storage_error("resource governor storage worker panicked"))?
+    static WORKER: OnceLock<Result<AsyncStorageWorker, String>> = OnceLock::new();
+    let worker = WORKER.get_or_init(|| {
+        AsyncStorageWorker::spawn("resource-governor-storage").map_err(|error| error.to_string())
+    });
+    match worker {
+        Ok(worker) => worker.run(build),
+        Err(error) => Err(storage_error(error)),
+    }
 }
 
 #[cfg(feature = "libsql")]
@@ -558,10 +617,21 @@ impl LibSqlResourceGovernorStore {
 
     pub async fn run_migrations(&self) -> Result<(), ResourceError> {
         let conn = self.connect().await?;
-        conn.execute_batch(RESOURCE_GOVERNOR_SCHEMA)
+        conn.execute_batch("BEGIN IMMEDIATE")
             .await
             .map_err(storage_error)?;
-        Ok(())
+        let result = conn.execute_batch(RESOURCE_GOVERNOR_SCHEMA).await;
+        match result {
+            Ok(_) => conn
+                .execute_batch("COMMIT")
+                .await
+                .map(|_| ())
+                .map_err(storage_error),
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK").await;
+                Err(storage_error(error))
+            }
+        }
     }
 
     async fn connect(&self) -> Result<libsql::Connection, ResourceError> {
@@ -581,8 +651,7 @@ impl ResourceGovernorStore for LibSqlResourceGovernorStore {
         F: FnOnce(&mut ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static,
     {
         let store = self.clone();
-        run_async_in_storage_thread(move || async move {
-            store.run_migrations().await?;
+        run_async_on_shared_storage_worker(move || async move {
             let conn = store.connect().await?;
             conn.execute_batch("BEGIN IMMEDIATE")
                 .await
@@ -651,12 +720,16 @@ impl PostgresResourceGovernorStore {
     }
 
     pub async fn run_migrations(&self) -> Result<(), ResourceError> {
-        let client = self.pool.get().await.map_err(storage_error)?;
-        client
-            .batch_execute(RESOURCE_GOVERNOR_SCHEMA)
-            .await
-            .map_err(storage_error)?;
-        Ok(())
+        let mut client = self.pool.get().await.map_err(storage_error)?;
+        let transaction = client.transaction().await.map_err(storage_error)?;
+        let result = transaction.batch_execute(RESOURCE_GOVERNOR_SCHEMA).await;
+        match result {
+            Ok(()) => transaction.commit().await.map_err(storage_error),
+            Err(error) => {
+                let _ = transaction.rollback().await;
+                Err(storage_error(error))
+            }
+        }
     }
 }
 
@@ -668,8 +741,7 @@ impl ResourceGovernorStore for PostgresResourceGovernorStore {
         F: FnOnce(&mut ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static,
     {
         let store = self.clone();
-        run_async_in_storage_thread(move || async move {
-            store.run_migrations().await?;
+        run_async_on_shared_storage_worker(move || async move {
             let mut client = store.pool.get().await.map_err(storage_error)?;
             let transaction = client.transaction().await.map_err(storage_error)?;
             transaction
