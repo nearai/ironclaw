@@ -212,10 +212,11 @@ def _write_google_skill(skills_dir: str, mock_api_host: str) -> None:
             f"""---
 name: google_auth_matrix
 version: "1.0.0"
-keywords:
-  - google
-  - drive
-  - gmail
+activation:
+  keywords:
+    - google
+    - drive
+    - gmail
 credentials:
   - name: google_oauth_token
     provider: google

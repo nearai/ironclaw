@@ -112,12 +112,13 @@ def _write_github_skill(skills_dir: str, mock_api_host: str):
     skill_content = f"""---
 name: github
 version: "1.0.0"
-keywords:
-  - github
-  - issues
-  - repo
-tags:
-  - github
+activation:
+  keywords:
+    - github
+    - issues
+    - repo
+  tags:
+    - github
 credentials:
   - name: github_token
     provider: github
