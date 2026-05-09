@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AcceptedMessageRef, AdmissionRejection, CancelRunRequest, CancelRunResponse, GateRef,
-    GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef, ResumeTurnRequest,
-    ResumeTurnResponse, RunProfileResolver, SourceBindingRef, SubmitTurnRequest,
+    GetRunStateRequest, IdempotencyKey, LoopCheckpointRecord, ReplyTargetBindingRef,
+    ResumeTurnRequest, ResumeTurnResponse, RunProfileResolver, SourceBindingRef, SubmitTurnRequest,
     SubmitTurnResponse, ThreadBusy, TurnActor, TurnAdmissionPolicy, TurnAdmissionReservationRecord,
     TurnCheckpointId, TurnError, TurnErrorCategory, TurnId, TurnLeaseToken, TurnLifecycleEvent,
     TurnRunId, TurnRunProfile, TurnRunState, TurnRunnerId, TurnScope, TurnStatus, TurnTimestamp,
@@ -275,6 +275,8 @@ pub struct TurnPersistenceSnapshot {
     pub runs: Vec<TurnRunRecord>,
     pub active_locks: Vec<TurnActiveLockRecord>,
     pub checkpoints: Vec<TurnCheckpointRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loop_checkpoints: Vec<LoopCheckpointRecord>,
     pub idempotency_records: Vec<TurnIdempotencyRecord>,
     #[serde(default)]
     pub events: Vec<TurnLifecycleEvent>,

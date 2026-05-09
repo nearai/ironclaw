@@ -10,10 +10,11 @@ use chrono::{Duration as ChronoDuration, Utc};
 use crate::{
     AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason,
     AllowAllTurnAdmissionLimitProvider, BlockedReason, CancelRunRequest, CancelRunResponse,
-    GetRunStateRequest, IdempotencyKey, LoopExitMapping, ReplyTargetBindingRef, ResumeTurnRequest,
-    ResumeTurnResponse, RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver,
-    SanitizedFailure, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
-    TurnActiveLockKey, TurnActiveLockRecord, TurnActor, TurnAdmissionClass,
+    GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey, LoopCheckpointRecord,
+    LoopCheckpointStore, LoopExitMapping, PutLoopCheckpointRequest, ReplyTargetBindingRef,
+    ResumeTurnRequest, ResumeTurnResponse, RunProfileResolutionError, RunProfileResolutionRequest,
+    RunProfileResolver, SanitizedFailure, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
+    ThreadBusy, TurnActiveLockKey, TurnActiveLockRecord, TurnActor, TurnAdmissionClass,
     TurnAdmissionLimitProvider, TurnAdmissionPolicy, TurnAdmissionReservationRecord,
     TurnCheckpointId, TurnCheckpointRecord, TurnError, TurnEventKind, TurnIdempotencyErrorReplay,
     TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnIdempotencyRecord,
@@ -75,6 +76,7 @@ struct Inner {
     terminal_runs: VecDeque<TurnRunId>,
     active_locks: HashMap<TurnActiveLockKey, TurnActiveLockRecord>,
     checkpoints: Vec<TurnCheckpointRecord>,
+    loop_checkpoints: HashMap<TurnCheckpointId, LoopCheckpointRecord>,
     submit_idempotency: HashMap<SubmitIdempotencyKey, Result<SubmitTurnResponse, TurnError>>,
     submit_idempotency_in_flight: HashSet<SubmitIdempotencyKey>,
     resume_idempotency: HashMap<RunIdempotencyKey, Result<ResumeTurnResponse, TurnError>>,
@@ -297,6 +299,49 @@ impl TurnEventProjectionSource for InMemoryTurnStateStore {
             limit,
             inner.event_retention_floor,
         ))
+    }
+}
+
+#[async_trait]
+impl LoopCheckpointStore for InMemoryTurnStateStore {
+    async fn put_loop_checkpoint(
+        &self,
+        request: PutLoopCheckpointRequest,
+    ) -> Result<LoopCheckpointRecord, TurnError> {
+        let checkpoint_id = TurnCheckpointId::new();
+        let record = LoopCheckpointRecord {
+            checkpoint_id,
+            scope: request.scope,
+            turn_id: request.turn_id,
+            run_id: request.run_id,
+            state_ref: request.state_ref,
+            schema_id: request.schema_id,
+            schema_version: request.schema_version,
+            kind: request.kind,
+            created_at: Utc::now(),
+        };
+        let mut inner = self.lock_inner()?;
+        inner.loop_checkpoints.insert(checkpoint_id, record.clone());
+        Ok(record)
+    }
+
+    async fn get_loop_checkpoint(
+        &self,
+        request: GetLoopCheckpointRequest,
+    ) -> Result<Option<LoopCheckpointRecord>, TurnError> {
+        let inner = self.lock_inner()?;
+        let Some(record) = inner.loop_checkpoints.get(&request.checkpoint_id) else {
+            return Ok(None);
+        };
+        if record.scope == request.scope
+            && record.turn_id == request.turn_id
+            && record.run_id == request.run_id
+            && record.checkpoint_id == request.checkpoint_id
+        {
+            Ok(Some(record.clone()))
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -783,6 +828,12 @@ impl Inner {
             }
         }
 
+        let loop_checkpoints = snapshot
+            .loop_checkpoints
+            .into_iter()
+            .map(|record| (record.checkpoint_id, record))
+            .collect::<HashMap<_, _>>();
+
         let events = snapshot.events;
         cursor = cursor.max(events.iter().map(|event| event.cursor.0).max().unwrap_or(0));
         cursor = cursor.max(snapshot.event_retention_floor.0);
@@ -829,6 +880,7 @@ impl Inner {
             terminal_runs,
             active_locks,
             checkpoints: snapshot.checkpoints,
+            loop_checkpoints,
             submit_idempotency,
             submit_idempotency_in_flight: HashSet::new(),
             resume_idempotency,
@@ -895,6 +947,12 @@ impl Inner {
                 .cmp(&b.created_at)
                 .then_with(|| a.sequence.cmp(&b.sequence))
         });
+        let mut loop_checkpoints = self.loop_checkpoints.values().cloned().collect::<Vec<_>>();
+        loop_checkpoints.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.checkpoint_id.as_uuid().cmp(&b.checkpoint_id.as_uuid()))
+        });
         let mut idempotency_records = self
             .idempotency_records
             .values()
@@ -912,6 +970,7 @@ impl Inner {
             runs,
             active_locks,
             checkpoints,
+            loop_checkpoints,
             idempotency_records,
             events: self.events.clone(),
             event_retention_floor: self.event_retention_floor,

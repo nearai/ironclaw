@@ -27,8 +27,8 @@ use ironclaw_turns::{
         InMemoryLoopHostMilestoneSink, LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort,
         LoopCheckpointRequest, LoopContextRequest, LoopDriverId, LoopDriverNoteKind,
         LoopHostMilestone, LoopInputCursor, LoopInputCursorToken, LoopInputPort, LoopModelRequest,
-        LoopProgressEvent, LoopPromptBundleRequest, LoopRunContext, ParentLoopOutput, PromptMode,
-        VisibleCapabilityRequest,
+        LoopProgressEvent, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
+        ParentLoopOutput, PromptMode, VisibleCapabilityRequest,
     },
     runner::ClaimedTurnRun,
 };
@@ -151,6 +151,29 @@ async fn text_only_host_factory_builds_complete_agent_loop_driver_host() {
         ]
     );
     assert_public_milestones_hide_raw_payloads(&fixture.milestones());
+}
+
+#[tokio::test]
+async fn text_only_host_prompt_accepts_empty_surface_version() {
+    let fixture = HostFixture::new("thread-host-prompt-surface", "hello reborn").await;
+    let host = fixture.build_host().await;
+    let surface = host
+        .visible_capabilities(VisibleCapabilityRequest)
+        .await
+        .unwrap();
+
+    let prompt_bundle = host
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: Some(surface.version),
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(prompt_bundle.messages.len(), 1);
 }
 
 #[tokio::test]

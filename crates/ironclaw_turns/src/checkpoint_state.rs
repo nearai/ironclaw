@@ -2,6 +2,7 @@ use std::{collections::HashMap, fmt, sync::Mutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
@@ -148,7 +149,7 @@ pub trait CheckpointStateStore: Send + Sync {
     ) -> Result<Option<CheckpointStateRecord>, TurnError>;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopCheckpointRecord {
     pub checkpoint_id: TurnCheckpointId,
     pub scope: TurnScope,

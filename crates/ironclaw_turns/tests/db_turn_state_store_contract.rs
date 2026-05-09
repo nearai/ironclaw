@@ -12,16 +12,18 @@ use std::{
 use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, DefaultTurnCoordinator, IdempotencyKey,
-    InMemoryRunProfileResolver, InMemoryTurnStateStoreLimits, LoopCompleted, LoopCompletionKind,
-    LoopExit, LoopExitInvalidHandling, LoopExitValidationPolicy, LoopMessageRef,
-    ReplyTargetBindingRef, ResolvedRunProfile, RunProfileRequest, RunProfileResolutionError,
-    RunProfileResolutionRequest, RunProfileResolver, SanitizedCancelReason, SanitizedFailure,
-    SourceBindingRef, StaticTurnAdmissionLimitProvider, SubmitTurnRequest, SubmitTurnResponse,
-    ThreadBusy, TurnActor, TurnAdmissionAxisKind, TurnAdmissionCapacityDenial, TurnCoordinator,
-    TurnError, TurnEventKind, TurnEventProjectionCursor, TurnEventProjectionError,
-    TurnEventProjectionRequest, TurnEventProjectionService, TurnLeaseToken, TurnRunId,
-    TurnRunnerId, TurnScope, TurnStatus,
+    AcceptedMessageRef, CancelRunRequest, CheckpointSchemaId, DefaultTurnCoordinator,
+    GetLoopCheckpointRequest, IdempotencyKey, InMemoryRunProfileResolver,
+    InMemoryTurnStateStoreLimits, LoopCheckpointStateRef, LoopCheckpointStore, LoopCompleted,
+    LoopCompletionKind, LoopExit, LoopExitInvalidHandling, LoopExitValidationPolicy,
+    LoopMessageRef, PutLoopCheckpointRequest, ReplyTargetBindingRef, ResolvedRunProfile,
+    RunProfileRequest, RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver,
+    RunProfileVersion, SanitizedCancelReason, SanitizedFailure, SourceBindingRef,
+    StaticTurnAdmissionLimitProvider, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
+    TurnAdmissionAxisKind, TurnAdmissionCapacityDenial, TurnCoordinator, TurnError, TurnEventKind,
+    TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
+    TurnEventProjectionService, TurnId, TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope,
+    TurnStatus,
     events::EventCursor,
     runner::{
         ApplyLoopExitRequest, ClaimRunRequest, CompleteRunRequest, HeartbeatRequest,
@@ -211,6 +213,47 @@ async fn libsql_turn_state_store_persists_submit_and_busy_across_instances() {
         .await
         .unwrap();
     assert_eq!(duplicate, accepted);
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_loop_checkpoint_store_persists_mapping_across_instances() {
+    let (db, _dir) = libsql_db().await;
+    let store = LibSqlTurnStateStore::new(db.clone());
+    store.run_migrations().await.unwrap();
+    let scope = scope("thread-loop-checkpoint-db");
+    let turn_id = TurnId::new();
+    let run_id = TurnRunId::new();
+    let state_ref = LoopCheckpointStateRef::new("checkpoint:db-loop-state").unwrap();
+    let schema_id = CheckpointSchemaId::new("interactive_checkpoint_v1").unwrap();
+    let schema_version = RunProfileVersion::new(3);
+
+    let checkpoint = store
+        .put_loop_checkpoint(PutLoopCheckpointRequest {
+            scope: scope.clone(),
+            turn_id,
+            run_id,
+            state_ref: state_ref.clone(),
+            schema_id: schema_id.clone(),
+            schema_version,
+            kind: ironclaw_turns::run_profile::LoopCheckpointKind::BeforeModel,
+        })
+        .await
+        .unwrap();
+
+    let reopened = LibSqlTurnStateStore::new(db);
+    let loaded = reopened
+        .get_loop_checkpoint(GetLoopCheckpointRequest {
+            scope,
+            turn_id,
+            run_id,
+            checkpoint_id: checkpoint.checkpoint_id,
+        })
+        .await
+        .unwrap()
+        .expect("libSQL checkpoint id mapping should survive store reopen");
+
+    assert_eq!(loaded, checkpoint);
 }
 
 #[cfg(feature = "libsql")]
@@ -645,6 +688,51 @@ async fn libsql_turn_state_store_persists_runner_recovery_and_cancel_flow() {
 
 #[cfg(feature = "postgres")]
 #[tokio::test]
+async fn postgres_loop_checkpoint_store_persists_mapping_across_instances_when_configured() {
+    let Some(pool) = postgres_pool().await else {
+        return;
+    };
+    let suffix = unique_suffix();
+    let store = PostgresTurnStateStore::new(pool.clone());
+    store.run_migrations().await.unwrap();
+    let scope = scope(&format!("thread-loop-checkpoint-postgres-{suffix}"));
+    let turn_id = TurnId::new();
+    let run_id = TurnRunId::new();
+    let state_ref =
+        LoopCheckpointStateRef::new(format!("checkpoint:pg-loop-state:{suffix}")).unwrap();
+    let schema_id = CheckpointSchemaId::new("interactive_checkpoint_v1").unwrap();
+    let schema_version = RunProfileVersion::new(3);
+
+    let checkpoint = store
+        .put_loop_checkpoint(PutLoopCheckpointRequest {
+            scope: scope.clone(),
+            turn_id,
+            run_id,
+            state_ref: state_ref.clone(),
+            schema_id: schema_id.clone(),
+            schema_version,
+            kind: ironclaw_turns::run_profile::LoopCheckpointKind::BeforeModel,
+        })
+        .await
+        .unwrap();
+
+    let reopened = PostgresTurnStateStore::new(pool);
+    let loaded = reopened
+        .get_loop_checkpoint(GetLoopCheckpointRequest {
+            scope,
+            turn_id,
+            run_id,
+            checkpoint_id: checkpoint.checkpoint_id,
+        })
+        .await
+        .unwrap()
+        .expect("Postgres checkpoint id mapping should survive store reopen");
+
+    assert_eq!(loaded, checkpoint);
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
 async fn postgres_turn_state_store_persists_submit_and_busy_across_instances_when_configured() {
     let Some(pool) = postgres_pool().await else {
         return;
@@ -983,8 +1071,10 @@ async fn postgres_turn_state_store_persists_cancelled_loop_exit_application_when
 fn postgres_turn_state_store_implements_turn_contract_traits() {
     fn assert_state_store<T: ironclaw_turns::TurnStateStore>() {}
     fn assert_runner_port<T: TurnRunTransitionPort>() {}
+    fn assert_loop_checkpoint_store<T: LoopCheckpointStore>() {}
     assert_state_store::<PostgresTurnStateStore>();
     assert_runner_port::<PostgresTurnStateStore>();
+    assert_loop_checkpoint_store::<PostgresTurnStateStore>();
 }
 
 #[cfg(feature = "libsql")]

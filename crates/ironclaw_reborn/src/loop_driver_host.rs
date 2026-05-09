@@ -115,13 +115,21 @@ where
             run_context.clone(),
             max_messages,
         ));
+        let current_surface_version = EmptyLoopCapabilityPort
+            .visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .map_err(|error| RebornLoopDriverHostError::InvalidRequest {
+                reason: error.safe_summary,
+            })?
+            .version;
         let prompt: Arc<dyn LoopPromptPort> = Arc::new(
             HostManagedLoopPromptPort::new(
                 run_context.clone(),
                 Arc::clone(&context),
                 Arc::clone(&self.milestone_sink),
             )
-            .with_default_message_limit(max_messages),
+            .with_default_message_limit(max_messages)
+            .with_current_surface_version(current_surface_version),
         );
         let input: Arc<dyn LoopInputPort> =
             Arc::new(NoExtraLoopInputPort::new(run_context.clone()));
