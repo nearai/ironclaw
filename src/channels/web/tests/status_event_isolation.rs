@@ -195,6 +195,16 @@ async fn scoped_status_event_routes_in_single_tenant_too() {
 /// Adding a new status variant should require updating this list — if
 /// that is missed, the leak surface grows silently and this is the test
 /// that catches it.
+///
+/// The `_compile_time_appevent_variant_check` helper below pairs with
+/// the runtime `leak_candidates` list as a build-time reminder: it
+/// exhaustively matches every `AppEvent` variant, so adding a new
+/// variant fails the test compilation until the helper is updated.
+/// When you update the helper, also extend `leak_candidates` with the
+/// new variant so the runtime drop assertion actually exercises it.
+/// This is two-step (compile fails → developer adds to both places)
+/// rather than fully automatic, but it converts a silent regression
+/// into a loud build break.
 #[tokio::test]
 async fn unscoped_drop_holds_for_every_status_variant_in_multi_tenant() {
     let manager = SseManager::new();
@@ -246,4 +256,62 @@ async fn unscoped_drop_holds_for_every_status_variant_in_multi_tenant() {
          before the heartbeat sentinel — got {first:?}. If a new AppEvent variant was \
          added to the dispatch path, add it to `leak_candidates` and re-run."
     );
+}
+
+/// Compile-time reminder for `unscoped_drop_holds_for_every_status_variant_in_multi_tenant`.
+///
+/// This function is never called. It exists only so the exhaustive match
+/// below fails to compile when a new `AppEvent` variant is added — that
+/// failure is the prompt to update both this helper AND the runtime
+/// `leak_candidates` list above. Without this, a new variant that bypasses
+/// the dispatcher's drop-in-multi-tenant rule could silently ship.
+///
+/// The match must list every variant explicitly; do not add a `_` arm.
+/// `event_type()` in `crates/ironclaw_common/src/event.rs` follows the
+/// same pattern for the same reason.
+#[allow(dead_code)]
+fn _compile_time_appevent_variant_check(e: AppEvent) {
+    match e {
+        AppEvent::Response { .. }
+        | AppEvent::Thinking { .. }
+        | AppEvent::ToolStarted { .. }
+        | AppEvent::ToolCompleted { .. }
+        | AppEvent::ToolResult { .. }
+        | AppEvent::StreamChunk { .. }
+        | AppEvent::Status { .. }
+        | AppEvent::JobStarted { .. }
+        | AppEvent::ApprovalNeeded { .. }
+        | AppEvent::OnboardingState { .. }
+        | AppEvent::GateRequired { .. }
+        | AppEvent::GateResolved { .. }
+        | AppEvent::Error { .. }
+        | AppEvent::Heartbeat
+        | AppEvent::JobMessage { .. }
+        | AppEvent::JobToolUse { .. }
+        | AppEvent::JobToolResult { .. }
+        | AppEvent::JobStatus { .. }
+        | AppEvent::JobResult { .. }
+        | AppEvent::ImageGenerated { .. }
+        | AppEvent::Suggestions { .. }
+        | AppEvent::TurnCost { .. }
+        | AppEvent::SkillActivated { .. }
+        | AppEvent::ExtensionStatus { .. }
+        | AppEvent::ReasoningUpdate { .. }
+        | AppEvent::JobReasoning { .. }
+        | AppEvent::ToolResultFull { .. }
+        | AppEvent::TurnMetrics { .. }
+        | AppEvent::ThreadStateChanged { .. }
+        | AppEvent::ChildThreadSpawned { .. }
+        | AppEvent::ChildThreadCompleted { .. }
+        | AppEvent::MissionThreadSpawned { .. }
+        | AppEvent::PlanUpdate { .. }
+        | AppEvent::CodeExecuted { .. }
+        | AppEvent::Warning { .. }
+        | AppEvent::CodeExecutionFailed { .. }
+        | AppEvent::LeaseGranted { .. }
+        | AppEvent::LeaseRevoked { .. }
+        | AppEvent::LeaseExpired { .. }
+        | AppEvent::SelfImprovement { .. }
+        | AppEvent::OrchestratorRollback { .. } => {}
+    }
 }

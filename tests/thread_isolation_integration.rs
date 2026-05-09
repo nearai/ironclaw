@@ -279,7 +279,27 @@ async fn bob_threads_list_excludes_alice_threads() {
 }
 
 // ---------------------------------------------------------------------------
-// Engine v2 — detail / steps / events all gate on is_owned_by
+// Engine v2 — detail / steps / events
+//
+// Scope: these tests pin the *handler shape* — an unknown thread id
+// returns 404 / empty rather than 500ing or leaking. They do NOT
+// exercise the cross-tenant ownership branch (Alice's actual id with
+// Bob's token), because seeding an engine v2 thread requires
+// `ENGINE_STATE` (a process-wide `OnceCell` in `bridge/router.rs`)
+// to be initialized with a backing `Store`. That fixture doesn't
+// exist for the integration test surface today; building it without
+// breaking the singleton's invariants for parallel test runs is its
+// own change.
+//
+// The ownership gate itself lives in
+// `src/bridge/router.rs::{get_engine_thread, list_engine_thread_steps,
+// list_engine_thread_events}` and uses `thread.is_owned_by(user_id)`.
+// That predicate is unit-tested upstream; the missing piece here is
+// the call-site test through the handler.
+//
+// Follow-up: introduce a per-test `ENGINE_STATE` injection seam (or a
+// memory-backed `Store` test fixture) and add the Alice-seed/Bob-probe
+// variant of each test below.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]

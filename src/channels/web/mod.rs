@@ -653,6 +653,13 @@ pub const GATEWAY_CHANNEL_NAME: &str = "gateway";
 /// Extracted from `Channel::send_status` so the routing rule can be
 /// asserted by unit tests without standing up a `GatewayChannel`. See
 /// `tests::status_event_isolation`.
+///
+/// **Internal bridge contract.** This is `pub` only so the sandbox
+/// `JobEvent` rx loop in `src/main.rs` can route through the same
+/// drop/WARN/broadcast policy as `Channel::send_status`. It is not part
+/// of a stable public API; downstream consumers must not depend on it.
+/// Callers from inside the `web` slice should use `send_status` rather
+/// than reaching for this directly.
 pub fn dispatch_status_event(
     sse: &platform::sse::SseManager,
     multi_tenant_mode: bool,

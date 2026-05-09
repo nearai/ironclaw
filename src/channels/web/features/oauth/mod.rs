@@ -83,8 +83,17 @@ fn redact_oauth_state_for_logs(state: &str) -> String {
 ///
 /// Falls back to `owner_id` when the secret is missing
 /// (single-tenant deployments or flows started before the field was
-/// stored). Returns the resolved user_id as a `String` so the caller
-/// owns the value past the secret store's lifetime.
+/// stored). When `multi_tenant_mode` is true, the fallback emits a
+/// WARN: in a multi-tenant deployment a missing initiator secret
+/// means we have no way to recover the original tenant, and quietly
+/// routing the toast to `owner_id` reintroduces the same misroute
+/// the rest of this PR closes. The completion still proceeds —
+/// the `oauth_user` value is also used to seed the pairing identity,
+/// and aborting the callback would leave a dangling Slack install —
+/// but the WARN surfaces the lost-initiator case for operators.
+///
+/// Returns the resolved user_id as a `String` so the caller owns the
+/// value past the secret store's lifetime.
 ///
 /// This helper is the canonical broadcast-target resolver. The
 /// pairing-identity creation path also uses it so the toast and the
@@ -93,14 +102,26 @@ async fn resolve_relay_oauth_user(
     secrets: &(dyn crate::secrets::SecretsStore + Send + Sync),
     owner_id: &str,
     extension_name: &str,
+    multi_tenant_mode: bool,
 ) -> String {
     let user_key = format!("relay:{extension_name}:oauth_user");
-    secrets
-        .get_decrypted(owner_id, &user_key)
-        .await
-        .ok()
-        .map(|s| s.expose().to_string())
-        .unwrap_or_else(|| owner_id.to_string())
+    match secrets.get_decrypted(owner_id, &user_key).await.ok() {
+        Some(s) => s.expose().to_string(),
+        None => {
+            if multi_tenant_mode {
+                tracing::warn!(
+                    extension = %extension_name,
+                    owner_id = %owner_id,
+                    "relay OAuth callback: missing `relay:{{ext}}:oauth_user` secret in \
+                     multi-tenant mode — falling back to gateway owner_id for the \
+                     completion broadcast. The original initiator is unrecoverable \
+                     (likely a flow started before the field was stored, or a \
+                     premature secret delete). Toast may reach the wrong tab."
+                );
+            }
+            owner_id.to_string()
+        }
+    }
 }
 
 /// OAuth callback handler for the web gateway.
@@ -752,6 +773,7 @@ pub(crate) async fn slack_relay_oauth_callback_handler(
         ext_mgr.secrets().as_ref(),
         &state.owner_id,
         &relay_extension_name,
+        state.multi_tenant_mode,
     )
     .await;
 
@@ -986,8 +1008,15 @@ mod tests {
             .await
             .expect("seed oauth_user secret"); // safety: cfg(test) fixture
 
-        let resolved =
-            super::resolve_relay_oauth_user(secrets.as_ref(), owner_id, extension_name).await;
+        // Multi-tenant flag is irrelevant when the secret IS present —
+        // the resolved value comes from the stored initiator regardless.
+        let resolved = super::resolve_relay_oauth_user(
+            secrets.as_ref(),
+            owner_id,
+            extension_name,
+            true, // multi_tenant_mode
+        )
+        .await;
         assert_eq!(
             resolved, initiating_user,
             "callback must broadcast to the initiating user, not the gateway owner"
@@ -996,16 +1025,51 @@ mod tests {
 
     /// Falls back to `owner_id` when the secret was never written —
     /// covers single-tenant deployments and pre-multi-tenant flows.
+    /// In single-tenant mode the fallback is silent: owner == only user,
+    /// so routing the toast there is correct, not a misroute.
     #[tokio::test]
     async fn resolve_relay_oauth_user_falls_back_to_owner_id() {
         let secrets = test_secrets_store();
         let owner_id = "single-tenant-owner";
 
-        let resolved =
-            super::resolve_relay_oauth_user(secrets.as_ref(), owner_id, DEFAULT_RELAY_NAME).await;
+        let resolved = super::resolve_relay_oauth_user(
+            secrets.as_ref(),
+            owner_id,
+            DEFAULT_RELAY_NAME,
+            false, // multi_tenant_mode
+        )
+        .await;
         assert_eq!(
             resolved, owner_id,
             "missing secret must fall back to owner_id, not panic or empty-string"
+        );
+    }
+
+    /// In multi-tenant mode a missing initiator secret means the
+    /// original tenant is unrecoverable. The function still falls back
+    /// to `owner_id` so the OAuth flow doesn't strand a half-installed
+    /// Slack relay, but the WARN documented in `resolve_relay_oauth_user`
+    /// is the operator-visible signal that a toast may have reached the
+    /// wrong tab. We can't easily assert on tracing output without
+    /// pulling in `tracing-test`, so this test pins the behavioral
+    /// contract: even with `multi_tenant_mode=true`, the function does
+    /// not panic, return empty-string, or block the callback.
+    #[tokio::test]
+    async fn resolve_relay_oauth_user_multitenant_fallback_returns_owner_id() {
+        let secrets = test_secrets_store();
+        let owner_id = "gateway-owner";
+
+        let resolved = super::resolve_relay_oauth_user(
+            secrets.as_ref(),
+            owner_id,
+            DEFAULT_RELAY_NAME,
+            true, // multi_tenant_mode
+        )
+        .await;
+        assert_eq!(
+            resolved, owner_id,
+            "multi-tenant fallback must still return owner_id (and emit the WARN); \
+             returning empty would crash the broadcast call site"
         );
     }
 
