@@ -20,6 +20,8 @@ This inventory tracks skip/xfail debt found in `tests/e2e/scenarios/` while audi
 
 **ClawHub skills search/install** is selected because it is the smallest high-value deterministic cluster: the tests are intended to validate the browser skills UI lifecycle, but currently depend on live ClawHub search results and network timing. The E2E README already recommends `page.route()` for tabs that depend on external data. Mocking `/api/skills`, `/api/skills/search`, `/api/skills/install`, and `DELETE /api/skills/{name}` keeps the test end-to-end at the browser/API contract layer without requiring live external services.
 
+Live ClawHub contract coverage belongs below the browser E2E tier: gateway/API integration tests should validate request/response shape, authentication, error handling, and registry availability separately from deterministic UI lifecycle tests.
+
 ## Remaining debt policy
 
 - Runtime skips are acceptable only when the prerequisite is genuinely outside the deterministic E2E harness and the reason names that prerequisite.

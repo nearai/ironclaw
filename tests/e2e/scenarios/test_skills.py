@@ -1,6 +1,6 @@
 """Scenario 3: Skills search, install, and remove lifecycle."""
 
-import asyncio
+import json
 from urllib.parse import unquote, urlparse
 
 from helpers import SEL
@@ -49,6 +49,7 @@ async def mock_skills_api(page):
     still exercising the real browser code paths.
     """
     installed = []
+    install_requests = []
 
     async def fulfill_json(route, payload):
         await route.fulfill(
@@ -81,6 +82,7 @@ async def mock_skills_api(page):
             return
 
         if path == "/api/skills/install" and request.method == "POST":
+            install_requests.append(json.loads(request.post_data or "{}"))
             if not any(skill["name"] == MOCK_INSTALLED_SKILL["name"] for skill in installed):
                 installed = [dict(MOCK_INSTALLED_SKILL)]
             await fulfill_json(
@@ -104,6 +106,7 @@ async def mock_skills_api(page):
         await route.continue_()
 
     await page.route("**/api/skills**", handle)
+    return {"install_requests": install_requests}
 
 
 async def test_skills_tab_visible(page):
@@ -133,7 +136,7 @@ async def test_skills_search(page):
 
 async def test_skills_install_and_remove(page):
     """Install a mocked catalog skill from search results, then remove it."""
-    await mock_skills_api(page)
+    mock_api = await mock_skills_api(page)
     await go_to_skills(page)
 
     search_input = page.locator(SEL["skill_search_input"])
@@ -143,18 +146,18 @@ async def test_skills_install_and_remove(page):
     results = page.locator(SEL["skill_search_result"])
     await results.first.wait_for(state="visible", timeout=5000)
 
-    page.once("dialog", lambda dialog: asyncio.create_task(dialog.accept()))
-
     install_btn = results.first.locator("button", has_text="Install")
     assert await install_btn.count() == 1, "Expected mocked catalog skill to be installable"
     async with page.expect_response(lambda r: "/api/skills/install" in r.url) as install_response:
         await install_btn.click()
     response = await install_response.value
     assert response.ok
+    assert mock_api["install_requests"] == [
+        {"name": MOCK_CATALOG_SKILL["name"], "slug": MOCK_CATALOG_SKILL["slug"]}
+    ], "Install request should use the catalog skill name and slug"
 
-    # The install action updates the search card immediately; refresh the
-    # installed-skills list so the remove path starts from that UI surface.
-    await page.evaluate("loadSkills()")
+    # The app refreshes the installed-skills list after a successful install;
+    # waiting on the DOM keeps this as a black-box UI contract.
     installed = page.locator(SEL["skill_installed"])
     await installed.first.wait_for(state="visible", timeout=5000)
 
