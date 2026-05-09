@@ -3,7 +3,8 @@
 #
 # Defaults to fast, local-only checks that should not read real provider keys,
 # user profiles, or the developer's ~/.ironclaw state. Expensive deterministic
-# tiers are opt-in via IRONCLAW_HERMETIC_REPLAY=1 and IRONCLAW_HERMETIC_E2E=1.
+# tiers are opt-in via IRONCLAW_HERMETIC_DUAL_BACKEND=1,
+# IRONCLAW_HERMETIC_REPLAY=1, and IRONCLAW_HERMETIC_E2E=1.
 
 set -euo pipefail
 
@@ -37,6 +38,11 @@ CREDENTIAL_VARS=(
     ANTHROPIC_OAUTH_TOKEN
     GEMINI_API_KEY
     GOOGLE_API_KEY
+    LLM_API_KEY
+    NEARAI_API_KEY
+    NEARAI_SESSION_TOKEN
+    TINFOIL_API_KEY
+    TRANSCRIPTION_API_KEY
     GOOGLE_OAUTH_CLIENT_ID
     GOOGLE_OAUTH_CLIENT_SECRET
     GOOGLE_OAUTH_TOKEN
@@ -51,6 +57,7 @@ CREDENTIAL_VARS=(
     AWS_SECRET_ACCESS_KEY
     AWS_SESSION_TOKEN
     AWS_PROFILE
+    CHANNEL_RELAY_API_KEY
     DATABASE_URL
     LIBSQL_URL
     LIBSQL_AUTH_TOKEN
@@ -111,6 +118,10 @@ print_environment_summary() {
     echo "==> hermetic environment"
     mask_var OPENAI_API_KEY
     mask_var ANTHROPIC_API_KEY
+    mask_var NEARAI_API_KEY
+    mask_var NEARAI_SESSION_TOKEN
+    mask_var TINFOIL_API_KEY
+    mask_var LLM_API_KEY
     mask_var DATABASE_URL
     mask_var DATABASE_BACKEND
     mask_var LIBSQL_PATH
@@ -145,8 +156,12 @@ if [ "${IRONCLAW_PREPUSH_TEST:-1}" = "1" ]; then
     echo "==> tests (lib only)"
     run_cmd cargo test --locked --lib
 
-    echo "==> tests (libsql hermetic configuration)"
-    run_cmd cargo test --locked --no-default-features --features libsql
+    if [ "${IRONCLAW_HERMETIC_DUAL_BACKEND:-0}" = "1" ]; then
+        echo "==> tests (libsql hermetic configuration)"
+        run_cmd cargo test --locked --no-default-features --features libsql
+    else
+        echo "==> libsql hermetic tests skipped (IRONCLAW_HERMETIC_DUAL_BACKEND=1 to enable)"
+    fi
 
     if [ "${IRONCLAW_HERMETIC_REPLAY:-0}" = "1" ]; then
         echo "==> replay snapshot tests"
@@ -164,8 +179,12 @@ if [ "${IRONCLAW_PREPUSH_TEST:-1}" = "1" ]; then
         run_cmd cargo build --locked --no-default-features --features libsql
 
         echo "==> browser e2e smoke"
-        run_cmd pytest tests/e2e/scenarios/test_connection.py tests/e2e/scenarios/test_chat.py -v --timeout=120
+        run_cmd python3 -m pytest tests/e2e/scenarios/test_connection.py tests/e2e/scenarios/test_chat.py -v --timeout=120
     fi
 else
     echo "==> tests skipped (IRONCLAW_PREPUSH_TEST=0)"
+fi
+
+if [ "$KEEP_TMP" = "1" ]; then
+    echo "tmpdir kept: $TMP_ROOT"
 fi

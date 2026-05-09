@@ -72,14 +72,14 @@ cargo fmt --all -- --check
 bash scripts/pre-commit-safety.sh
 cargo clippy --locked --all-targets -- -D clippy::correctness
 cargo test --locked --lib
-cargo test --locked --no-default-features --features libsql
 ```
 
 Optional deterministic tiers are available when you want broader local coverage:
 
 ```bash
-IRONCLAW_HERMETIC_REPLAY=1 scripts/ci/hermetic_gate.sh  # replay snapshot tests
-IRONCLAW_HERMETIC_E2E=1 scripts/ci/hermetic_gate.sh     # browser smoke E2E slice
+IRONCLAW_HERMETIC_DUAL_BACKEND=1 scripts/ci/hermetic_gate.sh  # libsql feature matrix
+IRONCLAW_HERMETIC_REPLAY=1 scripts/ci/hermetic_gate.sh        # replay snapshot tests
+IRONCLAW_HERMETIC_E2E=1 scripts/ci/hermetic_gate.sh           # browser smoke E2E slice
 ```
 
 The pre-push hook runs this wrapper by default. You can bypass the whole hook with `git push --no-verify`, or skip only the test portions with `IRONCLAW_PREPUSH_TEST=0 git push` while still keeping fmt, safety checks, and clippy correctness.

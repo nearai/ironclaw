@@ -67,21 +67,29 @@ assert_not_contains "real home does not leak" "$run_default" "/real/home/that/mu
 assert_not_contains "secrets do not leak" "$run_default" "secret-openai"
 
 ENV_BACKUP=""
+ENV_SYMLINK_TARGET=""
 ENV_EXISTED=0
-if [ -e .env ]; then
+ENV_WAS_SYMLINK=0
+if [ -L .env ]; then
+    ENV_SYMLINK_TARGET=$(readlink .env)
+    ENV_EXISTED=1
+    ENV_WAS_SYMLINK=1
+elif [ -e .env ]; then
     ENV_BACKUP=$(mktemp "${TMPDIR:-/tmp}/ironclaw-env-backup.XXXXXX")
     cp .env "$ENV_BACKUP"
     ENV_EXISTED=1
 fi
 cleanup_env_fixture() {
-    if [ "$ENV_EXISTED" -eq 1 ]; then
+    rm -f .env
+    if [ "$ENV_WAS_SYMLINK" -eq 1 ]; then
+        ln -s "$ENV_SYMLINK_TARGET" .env
+    elif [ "$ENV_EXISTED" -eq 1 ]; then
         cp "$ENV_BACKUP" .env
-        rm -f "$ENV_BACKUP"
-    else
-        rm -f .env
     fi
+    rm -f "${ENV_BACKUP:-}"
 }
 trap cleanup_env_fixture EXIT
+rm -f .env
 cat > .env <<'EOF_ENV'
 OPENAI_API_KEY=dotenv-openai-secret
 ANTHROPIC_API_KEY=dotenv-anthropic-secret
@@ -102,25 +110,43 @@ assert_contains "runs fmt" "$run_default" "cargo fmt --all -- --check"
 assert_contains "runs pre-commit safety" "$run_default" "bash scripts/pre-commit-safety.sh"
 assert_contains "runs correctness clippy" "$run_default" "cargo clippy --locked --all-targets -- -D clippy::correctness"
 assert_contains "runs lib tests" "$run_default" "cargo test --locked --lib"
-assert_contains "runs libsql hermetic tests" "$run_default" "cargo test --locked --no-default-features --features libsql"
+assert_contains "libsql hermetic tests are opt-in" "$run_default" "IRONCLAW_HERMETIC_DUAL_BACKEND=1 to enable"
+assert_not_contains "dual backend tier is opt-in" "$run_default" "cargo test --locked --no-default-features --features libsql"
 assert_not_contains "replay tier is opt-in" "$run_default" "cargo insta test"
 assert_not_contains "browser e2e tier is opt-in" "$run_default" "pytest tests/e2e"
 
 run_optional=$(
     IRONCLAW_HERMETIC_DRY_RUN=1 \
+    IRONCLAW_HERMETIC_DUAL_BACKEND=1 \
     IRONCLAW_HERMETIC_REPLAY=1 \
     IRONCLAW_HERMETIC_E2E=1 \
     scripts/ci/hermetic_gate.sh
 )
+assert_contains "dual backend tier can be enabled" "$run_optional" "cargo test --locked --no-default-features --features libsql"
 assert_contains "replay tier can be enabled" "$run_optional" "cargo insta test"
 assert_contains "e2e tier builds libsql binary" "$run_optional" "cargo build --locked --no-default-features --features libsql"
-assert_contains "e2e tier runs browser smoke slice" "$run_optional" "pytest tests/e2e/scenarios/test_connection.py tests/e2e/scenarios/test_chat.py -v --timeout=120"
+assert_contains "e2e tier runs browser smoke slice" "$run_optional" "python3 -m pytest tests/e2e/scenarios/test_connection.py tests/e2e/scenarios/test_chat.py -v --timeout=120"
+
+run_keep_tmp=$(
+    IRONCLAW_HERMETIC_DRY_RUN=1 \
+    IRONCLAW_HERMETIC_KEEP_TMP=1 \
+    scripts/ci/hermetic_gate.sh
+)
+assert_contains "keep tmp prints retained path" "$run_keep_tmp" "tmpdir kept:"
 
 if grep -Fq 'hermetic_gate.sh' .githooks/pre-push; then
     echo "OK: pre-push invokes hermetic gate"
     PASS=$((PASS + 1))
 else
     echo "FAIL: pre-push invokes hermetic gate"
+    FAIL=$((FAIL + 1))
+fi
+
+if [ "$(readlink .githooks/commit-msg 2>/dev/null || true)" = "../scripts/commit-msg-regression.sh" ]; then
+    echo "OK: commit-msg hook delegates regression enforcement"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: commit-msg hook delegates regression enforcement"
     FAIL=$((FAIL + 1))
 fi
 
