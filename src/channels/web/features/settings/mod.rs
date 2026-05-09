@@ -1681,47 +1681,14 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // env guard must span async hot-reload flow
     async fn settings_set_handler_triggers_llm_provider_hot_reload() {
-        use ironclaw_llm::{LlmConfig, SessionConfig, SessionManager, build_provider_chain};
+        use ironclaw_llm::{SessionConfig, SessionManager, build_provider_chain};
 
         let _env_guard = lock_env();
         let secrets = test_secrets_store();
         let (db, tmp) = crate::testing::test_db().await;
 
         // Starting config: NEAR AI backend with "model-start".
-        let mut initial = LlmConfig {
-            backend: "nearai".to_string(),
-            session: SessionConfig::default(),
-            nearai: ironclaw_llm::config::NearAiConfig {
-                model: "model-start".to_string(),
-                cheap_model: None,
-                base_url: "https://api.near.ai".to_string(),
-                api_key: None,
-                fallback_model: None,
-                max_retries: 0,
-                circuit_breaker_threshold: None,
-                circuit_breaker_recovery_secs: 30,
-                response_cache_enabled: false,
-                response_cache_ttl_secs: 3600,
-                response_cache_max_entries: 1000,
-                failover_cooldown_secs: 300,
-                failover_cooldown_threshold: 3,
-                smart_routing_cascade: true,
-            },
-            provider: None,
-            bedrock: None,
-            gemini_oauth: None,
-            request_timeout_secs: 120,
-            cheap_model: None,
-            smart_routing_cascade: true,
-            openai_codex: None,
-            max_retries: 0,
-            circuit_breaker_threshold: None,
-            circuit_breaker_recovery_secs: 30,
-            response_cache_enabled: false,
-            response_cache_ttl_secs: 3600,
-            response_cache_max_entries: 1000,
-        };
-        initial.nearai.model = "model-start".to_string();
+        let initial = ironclaw_llm::testing::nearai_test_config("model-start");
 
         let session = Arc::new(SessionManager::new(SessionConfig::default()));
         let (primary, _cheap, _recording, reload_handle) =
@@ -1834,44 +1801,12 @@ mod tests {
         Arc<dyn ironclaw_llm::LlmProvider>,
         tempfile::TempDir,
     ) {
-        use ironclaw_llm::{LlmConfig, SessionConfig, SessionManager, build_provider_chain};
+        use ironclaw_llm::{SessionConfig, SessionManager, build_provider_chain};
 
         let secrets = test_secrets_store();
         let (db, tmp) = crate::testing::test_db().await;
 
-        let initial = LlmConfig {
-            backend: "nearai".to_string(),
-            session: SessionConfig::default(),
-            nearai: ironclaw_llm::config::NearAiConfig {
-                model: "model-start".to_string(),
-                cheap_model: None,
-                base_url: "https://api.near.ai".to_string(),
-                api_key: None,
-                fallback_model: None,
-                max_retries: 0,
-                circuit_breaker_threshold: None,
-                circuit_breaker_recovery_secs: 30,
-                response_cache_enabled: false,
-                response_cache_ttl_secs: 3600,
-                response_cache_max_entries: 1000,
-                failover_cooldown_secs: 300,
-                failover_cooldown_threshold: 3,
-                smart_routing_cascade: true,
-            },
-            provider: None,
-            bedrock: None,
-            gemini_oauth: None,
-            request_timeout_secs: 120,
-            cheap_model: None,
-            smart_routing_cascade: true,
-            openai_codex: None,
-            max_retries: 0,
-            circuit_breaker_threshold: None,
-            circuit_breaker_recovery_secs: 30,
-            response_cache_enabled: false,
-            response_cache_ttl_secs: 3600,
-            response_cache_max_entries: 1000,
-        };
+        let initial = ironclaw_llm::testing::nearai_test_config("model-start");
         let session = Arc::new(SessionManager::new(SessionConfig::default()));
         let (primary, _cheap, _recording, reload_handle) =
             build_provider_chain(&initial, Arc::clone(&session))

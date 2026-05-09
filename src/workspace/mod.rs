@@ -67,7 +67,8 @@ pub use embedding_cache::{CachedEmbeddingProvider, EmbeddingCacheConfig};
 #[cfg(feature = "bedrock")]
 pub use embeddings::BedrockEmbeddings;
 pub use embeddings::{
-    EmbeddingProvider, MockEmbeddings, NearAiEmbeddings, OllamaEmbeddings, OpenAiEmbeddings,
+    BedrockEmbeddingSetup, EmbeddingProvider, MockEmbeddings, NearAiEmbeddings, OllamaEmbeddings,
+    OpenAiEmbeddings,
 };
 #[cfg(feature = "postgres")]
 pub use repository::Repository;

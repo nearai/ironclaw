@@ -3913,6 +3913,7 @@ dependencies = [
  "ironclaw_engine",
  "ironclaw_gateway",
  "ironclaw_llm",
+ "ironclaw_oauth",
  "ironclaw_safety",
  "ironclaw_skills",
  "ironclaw_tui",
@@ -4287,6 +4288,16 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "ironclaw_oauth"
+version = "0.1.0"
+dependencies = [
+ "ironclaw_common",
+ "thiserror 2.0.18",
+ "tokio",
+ "urlencoding",
 ]
 
 [[package]]

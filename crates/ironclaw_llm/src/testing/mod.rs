@@ -5,6 +5,56 @@
 
 pub mod fault_injection;
 
+// ── Config builders ─────────────────────────────────────────────────────
+
+/// Build an [`crate::config::LlmConfig`] wired to the NEAR AI backend with
+/// the given model name and all caps/timeouts/cache settings collapsed to
+/// test-friendly defaults (no retries, no circuit breaker, no response
+/// cache, no failover).
+///
+/// Designed for hot-reload, smart-routing, and provider-chain tests where
+/// the only field a test cares about is the active model. Callers that
+/// want different behaviour should clone the result and override fields.
+///
+/// Replaces the inline `LlmConfig { ... NearAiConfig { ... } }` literal
+/// that several downstream tests had duplicated — using this helper keeps
+/// them shielded from `NearAiConfig` field churn.
+pub fn nearai_test_config(model: impl Into<String>) -> crate::config::LlmConfig {
+    crate::config::LlmConfig {
+        backend: "nearai".to_string(),
+        session: crate::session::SessionConfig::default(),
+        nearai: crate::config::NearAiConfig {
+            model: model.into(),
+            cheap_model: None,
+            base_url: "https://api.near.ai".to_string(),
+            api_key: None,
+            fallback_model: None,
+            max_retries: 0,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
+            failover_cooldown_secs: 300,
+            failover_cooldown_threshold: 3,
+            smart_routing_cascade: true,
+        },
+        provider: None,
+        bedrock: None,
+        gemini_oauth: None,
+        request_timeout_secs: 120,
+        cheap_model: None,
+        smart_routing_cascade: true,
+        openai_codex: None,
+        max_retries: 0,
+        circuit_breaker_threshold: None,
+        circuit_breaker_recovery_secs: 30,
+        response_cache_enabled: false,
+        response_cache_ttl_secs: 3600,
+        response_cache_max_entries: 1000,
+    }
+}
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 

@@ -701,20 +701,21 @@ fn resolve_registry_provider(
     // is also overridden to the private ChatGPT backend endpoint.
     let mut codex_base_url_override: Option<String> = None;
     let codex_creds = if parse_optional_env("LLM_USE_CODEX_AUTH", false)? {
-        let path = optional_env("CODEX_AUTH_PATH")?
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(ironclaw_llm::codex_auth::default_codex_auth_path);
-        ironclaw_llm::codex_auth::load_codex_credentials(&path)
+        let override_path = optional_env("CODEX_AUTH_PATH")?.map(std::path::PathBuf::from);
+        ironclaw_llm::auth::load_persisted_credentials(
+            ironclaw_llm::auth::CredentialSource::CodexCli,
+            override_path.as_deref(),
+        )
     } else {
         None
     };
 
     let codex_refresh_token = codex_creds.as_ref().and_then(|c| c.refresh_token.clone());
-    let codex_auth_path = codex_creds.as_ref().and_then(|c| c.auth_path.clone());
+    let codex_auth_path = codex_creds.as_ref().and_then(|c| c.source_path.clone());
 
     let api_key = if let Some(creds) = codex_creds {
-        if creds.is_chatgpt_mode {
-            codex_base_url_override = Some(creds.base_url().to_string());
+        if creds.is_subscription {
+            codex_base_url_override = Some(creds.base_url.clone());
         }
         Some(creds.token)
     } else if let Some(env_var) = api_key_env {
@@ -810,7 +811,7 @@ fn resolve_registry_provider(
     };
     let extra_headers = if canonical_id == "github_copilot" {
         merge_extra_headers(
-            ironclaw_llm::github_copilot_auth::default_headers(),
+            ironclaw_llm::auth::default_headers(ironclaw_llm::auth::AuthBackend::GithubCopilot),
             extra_headers,
         )
     } else {

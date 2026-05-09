@@ -548,14 +548,26 @@ impl AppBuilder {
             tools.register_secrets_tools(Arc::clone(ss));
         }
 
-        // Create embeddings provider using the unified method
+        // Create embeddings provider using the unified method.
+        // Translate the LLM-side `BedrockConfig` into the embeddings-side
+        // `BedrockEmbeddingSetup` at the boundary so the embeddings layer
+        // does not depend on `ironclaw_llm` config types.
+        let bedrock_setup =
+            self.config
+                .llm
+                .bedrock
+                .as_ref()
+                .map(|b| crate::workspace::BedrockEmbeddingSetup {
+                    region: b.region.clone(),
+                    profile: b.profile.clone(),
+                });
         let embeddings = self
             .config
             .embeddings
             .create_provider(
                 &self.config.llm.nearai.base_url,
                 self.session.clone(),
-                self.config.llm.bedrock.as_ref(),
+                bedrock_setup.as_ref(),
             )
             .await;
 

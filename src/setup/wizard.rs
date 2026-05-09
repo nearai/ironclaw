@@ -32,13 +32,31 @@ use crate::setup::prompts::{
     confirm, input, optional_input, print_banner, print_error, print_header, print_info,
     print_step, print_success, secret_input, select_many, select_one,
 };
-use ironclaw_llm::models::{
-    build_nearai_model_fetch_config, fetch_anthropic_models, fetch_ollama_models,
-    fetch_openai_compatible_models, fetch_openai_models,
-};
-#[cfg(test)]
-use ironclaw_llm::models::{is_openai_chat_model, sort_openai_models};
+use ironclaw_llm::auth::AuthPrompt;
+use ironclaw_llm::models::{ModelFetchOptions, build_nearai_model_fetch_config, fetch_models_for};
 use ironclaw_llm::{SessionConfig, SessionManager};
+
+/// `AuthPrompt` impl for the interactive setup wizard: prints the device
+/// code to stdout and tries to open the verification URL in a browser.
+struct WizardAuthPrompt;
+
+impl AuthPrompt for WizardAuthPrompt {
+    fn show_device_code(&self, verification_uri: &str, user_code: &str) {
+        print_info(&format!("Verification URL: {verification_uri}"));
+        print_info(&format!("One-time code: {user_code}"));
+        if let Err(e) = open::that(verification_uri) {
+            tracing::debug!(
+                url = %verification_uri,
+                error = %e,
+                "Failed to open device login URL in browser"
+            );
+            print_info("Open the URL above manually if your browser did not launch.");
+        } else {
+            print_info("Opened your browser to complete the device login.");
+        }
+        print_info("Waiting for authorization...");
+    }
+}
 
 // unused const, keep commented for clarity / future use
 // const CHANNEL_INDEX_CLI: usize = 0;
@@ -1689,58 +1707,31 @@ impl SetupWizard {
             return Err(SetupError::Auth("No token provided".to_string()));
         }
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .map_err(|e| SetupError::Auth(format!("Failed to create HTTP client: {e}")))?;
+        ironclaw_llm::auth::validate_token(ironclaw_llm::auth::AuthBackend::GithubCopilot, &token)
+            .await
+            .map_err(|e| SetupError::Auth(e.to_string()))?;
 
-        self.save_github_copilot_token(&client, &token).await
+        self.save_github_copilot_token(&token).await
     }
 
     async fn setup_github_copilot_device_login(&mut self) -> Result<(), SetupError> {
         self.set_llm_backend_preserving_model("github_copilot");
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .map_err(|e| SetupError::Auth(format!("Failed to create HTTP client: {e}")))?;
-
-        let device = ironclaw_llm::github_copilot_auth::request_device_code(&client)
-            .await
-            .map_err(|e| SetupError::Auth(e.to_string()))?;
-
         print_info("Authorize IronClaw with GitHub Copilot in your browser.");
-        print_info(&format!("Verification URL: {}", device.verification_uri));
-        print_info(&format!("One-time code: {}", device.user_code));
+        let outcome = ironclaw_llm::auth::start_login(
+            ironclaw_llm::auth::LoginRequest::GithubCopilot,
+            &WizardAuthPrompt,
+        )
+        .await
+        .map_err(|e| SetupError::Auth(e.to_string()))?;
 
-        if let Err(e) = open::that(&device.verification_uri) {
-            tracing::debug!(
-                url = %device.verification_uri,
-                error = %e,
-                "Failed to open GitHub Copilot device login URL"
-            );
-            print_info("Open the URL above manually if your browser did not launch.");
-        } else {
-            print_info("Opened your browser to GitHub device login.");
-        }
-
-        print_info("Waiting for GitHub authorization...");
-        let token = ironclaw_llm::github_copilot_auth::wait_for_device_login(&client, &device)
-            .await
-            .map_err(|e| SetupError::Auth(e.to_string()))?;
-
-        self.save_github_copilot_token(&client, &token).await
+        let token = outcome.token_to_persist.ok_or_else(|| {
+            SetupError::Auth("github_copilot login returned no token".to_string())
+        })?;
+        self.save_github_copilot_token(token.expose_secret()).await
     }
 
-    async fn save_github_copilot_token(
-        &mut self,
-        client: &reqwest::Client,
-        token: &str,
-    ) -> Result<(), SetupError> {
-        ironclaw_llm::github_copilot_auth::validate_token(client, token)
-            .await
-            .map_err(|e| SetupError::Auth(e.to_string()))?;
-
+    async fn save_github_copilot_token(&mut self, token: &str) -> Result<(), SetupError> {
         if let Ok(ctx) = self.init_secrets_context().await {
             let key = SecretString::from(token.to_string());
             ctx.save_secret("llm_github_copilot_token", &key)
@@ -1915,17 +1906,14 @@ impl SetupWizard {
             self.settings.selected_model = None;
         }
 
-        use crate::config::OpenAiCodexConfig;
-        use ironclaw_llm::OpenAiCodexSessionManager;
-
-        let config = OpenAiCodexConfig::default();
-
-        let mgr = OpenAiCodexSessionManager::new(config).map_err(|e| {
-            SetupError::Config(format!("OpenAI Codex session manager init failed: {}", e))
-        })?;
-        mgr.device_code_login().await.map_err(|e| {
-            SetupError::Config(format!("OpenAI Codex authentication failed: {}", e))
-        })?;
+        ironclaw_llm::auth::start_login(
+            ironclaw_llm::auth::LoginRequest::OpenAiCodex(
+                ironclaw_llm::auth::OpenAiCodexLoginOptions::default(),
+            ),
+            &WizardAuthPrompt,
+        )
+        .await
+        .map_err(|e| SetupError::Config(format!("OpenAI Codex authentication failed: {e}")))?;
 
         print_success("OpenAI Codex configured (ChatGPT subscription)");
         Ok(())
@@ -2107,27 +2095,22 @@ impl SetupWizard {
         print_info("Starting Gemini CLI OAuth authentication...");
         println!();
 
-        let creds_path = crate::config::GeminiOauthConfig::default_credentials_path();
-        let cred_manager = ironclaw_llm::gemini_oauth::CredentialManager::new(&creds_path)
-            .map_err(|e| {
-                SetupError::Config(format!(
-                    "Failed to initialize Gemini credential manager: {}",
-                    e
-                ))
-            })?;
+        let credentials_path = crate::config::GeminiOauthConfig::default_credentials_path();
+        let outcome = ironclaw_llm::auth::start_login(
+            ironclaw_llm::auth::LoginRequest::Gemini { credentials_path },
+            &WizardAuthPrompt,
+        )
+        .await
+        .map_err(|e| {
+            SetupError::Config(format!(
+                "Gemini CLI authentication failed: {e}. Please try again."
+            ))
+        })?;
 
-        match cred_manager.get_valid_credential().await {
-            Ok(cred) => {
-                print_success("Gemini CLI authentication successful!");
-                if let Some(ref pid) = cred.project_id {
-                    print_info(&format!("Cloud Code project: {}", pid));
-                }
-            }
-            Err(e) => {
-                return Err(SetupError::Config(format!(
-                    "Gemini CLI authentication failed: {}. Please try again.",
-                    e
-                )));
+        print_success("Gemini CLI authentication successful!");
+        for (key, value) in &outcome.display {
+            if key == "project_id" {
+                print_info(&format!("Cloud Code project: {value}"));
             }
         }
 
@@ -2232,31 +2215,29 @@ impl SetupWizard {
                             .as_ref()
                             .map(|k| k.expose_secret().to_string());
 
-                        let models = match backend {
-                            "anthropic" => fetch_anthropic_models(cached_key.as_deref()).await,
-                            "openai" => fetch_openai_models(cached_key.as_deref()).await,
-                            "ollama" => {
-                                let base_url = self
-                                    .settings
-                                    .ollama_base_url
-                                    .as_deref()
-                                    .or(def.default_base_url.as_deref())
-                                    .unwrap_or("http://localhost:11434");
-                                let models = fetch_ollama_models(base_url).await;
-                                if models.is_empty() {
-                                    print_info(
-                                        "No models found. Pull one first: ollama pull llama3",
-                                    );
-                                }
-                                models
-                            }
-                            _ => {
-                                // Generic OpenAI-compatible model listing
-                                let base_url = def.default_base_url.as_deref().unwrap_or("");
-                                fetch_openai_compatible_models(base_url, cached_key.as_deref())
-                                    .await
-                            }
+                        let ollama_base = self
+                            .settings
+                            .ollama_base_url
+                            .as_deref()
+                            .or(def.default_base_url.as_deref())
+                            .unwrap_or("http://localhost:11434");
+                        let base_url = if backend == "ollama" {
+                            Some(ollama_base)
+                        } else {
+                            def.default_base_url.as_deref()
                         };
+
+                        let models = fetch_models_for(
+                            backend,
+                            &ModelFetchOptions {
+                                api_key: cached_key.as_deref(),
+                                base_url,
+                            },
+                        )
+                        .await;
+                        if backend == "ollama" && models.is_empty() {
+                            print_info("No models found. Pull one first: ollama pull llama3");
+                        }
 
                         // Apply models_filter from setup hint
                         let models = if let Some(filter) =
@@ -4230,7 +4211,7 @@ mod tests {
     async fn test_fetch_anthropic_models_static_fallback() {
         // With no API key, should return static defaults
         let _guard = EnvGuard::clear("ANTHROPIC_API_KEY");
-        let models = fetch_anthropic_models(None).await;
+        let models = fetch_models_for("anthropic", &ModelFetchOptions::default()).await;
         assert!(!models.is_empty());
         assert!(
             models.iter().any(|(id, _)| id.contains("claude")),
@@ -4241,7 +4222,7 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_openai_models_static_fallback() {
         let _guard = EnvGuard::clear("OPENAI_API_KEY");
-        let models = fetch_openai_models(None).await;
+        let models = fetch_models_for("openai", &ModelFetchOptions::default()).await;
         assert!(!models.is_empty());
         assert_eq!(models[0].0, "gpt-5.3-codex");
         assert!(
@@ -4278,49 +4259,6 @@ mod tests {
             wizard.settings.llm_backend.as_deref(),
             Some("github_copilot")
         );
-    }
-
-    #[test]
-    fn test_is_openai_chat_model_includes_gpt5_and_filters_non_chat_variants() {
-        assert!(is_openai_chat_model("gpt-5"));
-        assert!(is_openai_chat_model("gpt-5-mini-2026-01-01"));
-        assert!(is_openai_chat_model("o3-2025-04-16"));
-        assert!(!is_openai_chat_model("chatgpt-image-latest"));
-        assert!(!is_openai_chat_model("gpt-4o-realtime-preview"));
-        assert!(!is_openai_chat_model("gpt-4o-mini-transcribe"));
-        assert!(!is_openai_chat_model("text-embedding-3-large"));
-    }
-
-    #[test]
-    fn test_sort_openai_models_prioritizes_best_models_first() {
-        let mut models = vec![
-            ("gpt-4o-mini".to_string(), "gpt-4o-mini".to_string()),
-            ("gpt-5-mini".to_string(), "gpt-5-mini".to_string()),
-            ("o3".to_string(), "o3".to_string()),
-            ("gpt-4.1".to_string(), "gpt-4.1".to_string()),
-            ("gpt-5".to_string(), "gpt-5".to_string()),
-        ];
-
-        sort_openai_models(&mut models);
-
-        let ordered: Vec<String> = models.into_iter().map(|(id, _)| id).collect();
-        assert_eq!(
-            ordered,
-            vec![
-                "gpt-5".to_string(),
-                "gpt-5-mini".to_string(),
-                "o3".to_string(),
-                "gpt-4.1".to_string(),
-                "gpt-4o-mini".to_string(),
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn test_fetch_ollama_models_unreachable_fallback() {
-        // Point at a port nothing listens on
-        let models = fetch_ollama_models("http://127.0.0.1:1").await;
-        assert!(!models.is_empty(), "should fall back to static defaults");
     }
 
     #[tokio::test]
