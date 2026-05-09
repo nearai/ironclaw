@@ -5,12 +5,17 @@
 //! session thread, and submits the turn to the coordinator.
 
 use async_trait::async_trait;
-use ironclaw_product_adapters::{ProductInboundAck, ProductInboundEnvelope};
-use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
-use ironclaw_turns::{
-    IdempotencyKey, ReplyTargetBindingRef, SourceBindingRef, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnScope,
+use ironclaw_product_adapters::{ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload};
+use ironclaw_threads::{
+    AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, SessionThreadService,
+    ThreadScope,
 };
+use ironclaw_turns::{AcceptedMessageRef, TurnError, TurnErrorCategory, TurnRunId};
+use ironclaw_turns::{
+    IdempotencyKey, ReplyTargetBindingRef, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
+    TurnActor, TurnCoordinator, TurnScope,
+};
+use uuid::Uuid;
 
 use crate::binding::{ConversationBindingService, ResolveBindingRequest, ResolvedBinding};
 use crate::error::ProductWorkflowError;
@@ -71,36 +76,39 @@ pub trait InboundTurnService: Send + Sync {
 }
 
 /// Default implementation that composes a [`ConversationBindingService`] with a
-/// [`TurnCoordinator`].
-pub struct DefaultInboundTurnService<B, C> {
+/// [`SessionThreadService`] and [`TurnCoordinator`].
+pub struct DefaultInboundTurnService<B, T, C> {
     binding_service: B,
+    thread_service: T,
     turn_coordinator: C,
 }
 
-impl<B, C> DefaultInboundTurnService<B, C>
+impl<B, T, C> DefaultInboundTurnService<B, T, C>
 where
     B: ConversationBindingService,
+    T: SessionThreadService,
     C: TurnCoordinator,
 {
-    pub fn new(binding_service: B, turn_coordinator: C) -> Self {
+    pub fn new(binding_service: B, thread_service: T, turn_coordinator: C) -> Self {
         Self {
             binding_service,
+            thread_service,
             turn_coordinator,
         }
     }
 }
 
 #[async_trait]
-impl<B, C> InboundTurnService for DefaultInboundTurnService<B, C>
+impl<B, T, C> InboundTurnService for DefaultInboundTurnService<B, T, C>
 where
     B: ConversationBindingService,
+    T: SessionThreadService,
     C: TurnCoordinator,
 {
     async fn accept_user_message(
         &self,
         envelope: &ProductInboundEnvelope,
     ) -> Result<InboundTurnOutcome, ProductWorkflowError> {
-        // Step 1: Resolve conversation binding.
         let binding = self
             .binding_service
             .resolve_binding(ResolveBindingRequest {
@@ -112,46 +120,69 @@ where
             })
             .await?;
 
-        // Step 2: Build the turn submission request.
-        let scope = TurnScope::new(
+        let thread_scope = thread_scope_from_binding(&binding)?;
+        self.thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: thread_scope.clone(),
+                thread_id: Some(binding.thread_id.clone()),
+                created_by_actor_id: binding.user_id.as_str().to_string(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .map_err(|e| ProductWorkflowError::Transient {
+                reason: format!("failed to ensure thread: {e}"),
+            })?;
+
+        let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
+            return Err(ProductWorkflowError::UnsupportedActionKind {
+                kind: "non_user_message".into(),
+            });
+        };
+        let source_binding_id = envelope.source_binding_key();
+        let reply_target_binding_id = format!("reply:{source_binding_id}");
+        let accepted = self
+            .thread_service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: thread_scope.clone(),
+                thread_id: binding.thread_id.clone(),
+                actor_id: binding.user_id.as_str().to_string(),
+                source_binding_id: Some(source_binding_id.clone()),
+                reply_target_binding_id: Some(reply_target_binding_id.clone()),
+                external_event_id: Some(envelope.external_event_id().as_str().to_string()),
+                content: MessageContent::text(payload.text.clone()),
+            })
+            .await
+            .map_err(|e| ProductWorkflowError::Transient {
+                reason: format!("failed to accept inbound message: {e}"),
+            })?;
+
+        let turn_scope = TurnScope::new(
             binding.tenant_id.clone(),
             binding.agent_id.clone(),
             binding.project_id.clone(),
             binding.thread_id.clone(),
         );
         let actor = TurnActor::new(binding.user_id.clone());
-        let source_binding_ref =
-            SourceBindingRef::new(envelope.source_binding_key()).map_err(|e| {
-                ProductWorkflowError::BindingResolutionFailed {
-                    reason: format!("invalid source binding ref: {e}"),
-                }
+        let source_binding_ref = bounded_ref::<SourceBindingRef>("src", &source_binding_id)?;
+        let accepted_message_ref = AcceptedMessageRef::new(format!("msg:{}", accepted.message_id))
+            .map_err(|e| ProductWorkflowError::TurnSubmissionRejected {
+                reason: format!("invalid accepted message ref: {e}"),
             })?;
-        let accepted_message_ref = AcceptedMessageRef::new(format!(
-            "msg:{}",
-            envelope.external_event_id()
-        ))
-        .map_err(|e| ProductWorkflowError::TurnSubmissionRejected {
-            reason: format!("invalid accepted message ref: {e}"),
-        })?;
-        let reply_target_binding_ref = ReplyTargetBindingRef::new(format!(
-            "reply:{}",
-            envelope.source_binding_key()
-        ))
-        .map_err(|e| ProductWorkflowError::TurnSubmissionRejected {
-            reason: format!("invalid reply target binding ref: {e}"),
-        })?;
-        let idempotency_key = IdempotencyKey::new(format!(
-            "turn:{}:{}:{}",
-            envelope.adapter_id(),
-            envelope.installation_id(),
-            envelope.external_event_id()
-        ))
-        .map_err(|e| ProductWorkflowError::TurnSubmissionRejected {
-            reason: format!("invalid idempotency key: {e}"),
-        })?;
+        let reply_target_binding_ref =
+            bounded_ref::<ReplyTargetBindingRef>("reply", &reply_target_binding_id)?;
+        let idempotency_key = bounded_ref::<IdempotencyKey>(
+            "turn",
+            &format!(
+                "{}:{}:{}",
+                envelope.adapter_id(),
+                envelope.installation_id(),
+                envelope.external_event_id()
+            ),
+        )?;
 
         let request = SubmitTurnRequest {
-            scope,
+            scope: turn_scope,
             actor,
             accepted_message_ref: accepted_message_ref.clone(),
             source_binding_ref,
@@ -161,19 +192,104 @@ where
             received_at: envelope.received_at(),
         };
 
-        // Step 3: Submit to turn coordinator.
-        let response = self.turn_coordinator.submit_turn(request).await.map_err(|e| {
-            ProductWorkflowError::TurnSubmissionRejected {
-                reason: e.to_string(),
+        match self.turn_coordinator.submit_turn(request).await {
+            Ok(SubmitTurnResponse::Accepted {
+                turn_id, run_id, ..
+            }) => {
+                self.thread_service
+                    .mark_message_submitted(
+                        &thread_scope,
+                        &binding.thread_id,
+                        accepted.message_id,
+                        turn_id.to_string(),
+                        run_id.to_string(),
+                    )
+                    .await
+                    .map_err(|e| ProductWorkflowError::Transient {
+                        reason: format!("failed to mark message submitted: {e}"),
+                    })?;
+                Ok(InboundTurnOutcome::Submitted {
+                    accepted_message_ref,
+                    submitted_run_id: run_id,
+                    binding,
+                })
             }
-        })?;
-
-        match response {
-            SubmitTurnResponse::Accepted { run_id, .. } => Ok(InboundTurnOutcome::Submitted {
-                accepted_message_ref,
-                submitted_run_id: run_id,
-                binding,
+            Err(TurnError::ThreadBusy(busy)) => {
+                self.thread_service
+                    .mark_message_deferred_busy(
+                        &thread_scope,
+                        &binding.thread_id,
+                        accepted.message_id,
+                    )
+                    .await
+                    .map_err(|e| ProductWorkflowError::Transient {
+                        reason: format!("failed to mark message deferred: {e}"),
+                    })?;
+                Ok(InboundTurnOutcome::DeferredBusy {
+                    accepted_message_ref,
+                    active_run_id: busy.active_run_id,
+                    binding,
+                })
+            }
+            Err(error) if error.category() == TurnErrorCategory::Unavailable => {
+                Err(ProductWorkflowError::Transient {
+                    reason: error.to_string(),
+                })
+            }
+            Err(error) => Err(ProductWorkflowError::TurnSubmissionRejected {
+                reason: error.to_string(),
             }),
         }
     }
+}
+
+fn thread_scope_from_binding(
+    binding: &ResolvedBinding,
+) -> Result<ThreadScope, ProductWorkflowError> {
+    let Some(agent_id) = binding.agent_id.clone() else {
+        return Err(ProductWorkflowError::BindingResolutionFailed {
+            reason: "resolved binding missing agent_id required for thread scope".into(),
+        });
+    };
+    Ok(ThreadScope {
+        tenant_id: binding.tenant_id.clone(),
+        agent_id,
+        project_id: binding.project_id.clone(),
+        owner_user_id: Some(binding.user_id.clone()),
+        mission_id: None,
+    })
+}
+
+trait RefFactory: Sized {
+    fn build(value: String) -> Result<Self, String>;
+}
+
+impl RefFactory for SourceBindingRef {
+    fn build(value: String) -> Result<Self, String> {
+        Self::new(value)
+    }
+}
+
+impl RefFactory for ReplyTargetBindingRef {
+    fn build(value: String) -> Result<Self, String> {
+        Self::new(value)
+    }
+}
+
+impl RefFactory for IdempotencyKey {
+    fn build(value: String) -> Result<Self, String> {
+        Self::new(value)
+    }
+}
+
+fn bounded_ref<T: RefFactory>(prefix: &str, raw: &str) -> Result<T, ProductWorkflowError> {
+    let value = if raw.len() <= 240 && !raw.chars().any(|c| c == '\0' || c.is_control()) {
+        format!("{prefix}:{raw}")
+    } else {
+        let id = Uuid::new_v5(&Uuid::NAMESPACE_OID, raw.as_bytes());
+        format!("{prefix}:{id}")
+    };
+    T::build(value).map_err(|e| ProductWorkflowError::TurnSubmissionRejected {
+        reason: format!("invalid {prefix} ref: {e}"),
+    })
 }

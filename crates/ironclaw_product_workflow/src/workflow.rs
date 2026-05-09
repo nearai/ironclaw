@@ -8,9 +8,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
-    ProductWorkflow, ProjectionSubscriptionRequest,
+    ProductRejection, ProductRejectionKind, ProductWorkflow, ProjectionSubscriptionRequest,
 };
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::action::{ActionDispatchKind, ActionFingerprintKey};
 use crate::error::ProductWorkflowError;
@@ -43,7 +43,6 @@ impl ProductWorkflow for DefaultProductWorkflow {
         &self,
         envelope: ProductInboundEnvelope,
     ) -> Result<ProductInboundAck, ProductAdapterError> {
-        // Step 1: Check idempotency ledger.
         let fingerprint = ActionFingerprintKey::new(
             envelope.adapter_id(),
             envelope.installation_id(),
@@ -68,33 +67,42 @@ impl ProductWorkflow for DefaultProductWorkflow {
                         prior: Box::new(prior_outcome),
                     });
                 }
-                // Settled but no outcome recorded — treat as internal error.
-                return Err(ProductAdapterError::Internal {
+                Err(ProductAdapterError::Internal {
                     detail: ironclaw_product_adapters::RedactedString::new(
                         "settled action missing outcome",
                     ),
-                });
+                })
             }
             IdempotencyDecision::New(mut action) => {
-                // Step 2: Dispatch based on payload kind.
-                let result = dispatch_payload(
-                    &envelope,
-                    &*self.inbound_turn_service,
-                )
-                .await;
+                let result = dispatch_payload(&envelope, &*self.inbound_turn_service).await;
 
                 match result {
                     Ok(ack) => {
-                        let dispatch_kind =
-                            ActionDispatchKind::from_payload(envelope.payload());
-                        action.mark_dispatched(dispatch_kind);
+                        action.mark_dispatched(dispatch_kind_from_ack(&ack, envelope.payload()));
                         action.settle(ack.clone());
-                        if let Err(e) = self.idempotency_ledger.settle(action).await {
-                            warn!(error = %e, "failed to settle idempotency ledger entry");
-                        }
+                        self.idempotency_ledger.settle(action).await.map_err(|e| {
+                            ProductAdapterError::from(ProductWorkflowError::Transient {
+                                reason: format!("failed to settle idempotency ledger entry: {e}"),
+                            })
+                        })?;
                         Ok(ack)
                     }
-                    Err(e) => Err(ProductAdapterError::from(e)),
+                    Err(e) => {
+                        if let Some(ack) = terminal_ack_for_error(&e) {
+                            action.mark_dispatched(ActionDispatchKind::from_payload(
+                                envelope.payload(),
+                            ));
+                            action.settle(ack);
+                            self.idempotency_ledger.settle(action).await.map_err(|settle_err| {
+                                ProductAdapterError::from(ProductWorkflowError::Transient {
+                                    reason: format!(
+                                        "failed to settle rejected idempotency ledger entry: {settle_err}"
+                                    ),
+                                })
+                            })?;
+                        }
+                        Err(ProductAdapterError::from(e))
+                    }
                 }
             }
         }
@@ -104,8 +112,6 @@ impl ProductWorkflow for DefaultProductWorkflow {
         &self,
         _envelope: ProductInboundEnvelope,
     ) -> Result<ProjectionSubscriptionRequest, ProductAdapterError> {
-        // Projection subscription resolution is a read-only operation.
-        // Full implementation deferred to #3281 (EventStreamManager).
         Err(ProductAdapterError::Internal {
             detail: ironclaw_product_adapters::RedactedString::new(
                 "projection subscription resolution not yet implemented",
@@ -120,41 +126,75 @@ async fn dispatch_payload(
 ) -> Result<ProductInboundAck, ProductWorkflowError> {
     match envelope.payload() {
         ProductInboundPayload::UserMessage(_) => {
-            let outcome = inbound_turn_service
-                .accept_user_message(envelope)
-                .await?;
+            let outcome = inbound_turn_service.accept_user_message(envelope).await?;
             Ok(outcome.to_ack())
         }
         ProductInboundPayload::Command(cmd) => {
-            // Command routing seam — full matrix in #3286.
             Err(ProductWorkflowError::CommandRoutingUnavailable {
                 command: cmd.command.clone(),
             })
         }
         ProductInboundPayload::ApprovalResolution(_) => {
-            // Approval/auth interaction services — future work.
             Err(ProductWorkflowError::UnsupportedActionKind {
                 kind: "approval_resolution".into(),
             })
         }
         ProductInboundPayload::AuthResolution(_) => {
-            // Auth resolution interaction services — future work.
             Err(ProductWorkflowError::UnsupportedActionKind {
                 kind: "auth_resolution".into(),
             })
         }
         ProductInboundPayload::SubscriptionRequest(_) => {
-            // Read/subscription dispatch — #3281 owns streams.
             Err(ProductWorkflowError::UnsupportedActionKind {
                 kind: "subscription_request".into(),
             })
         }
         ProductInboundPayload::LinkedThreadAction(_) => {
-            // Linked thread action — future work.
             Err(ProductWorkflowError::UnsupportedActionKind {
                 kind: "linked_thread_action".into(),
             })
         }
         ProductInboundPayload::NoOp => Ok(ProductInboundAck::NoOp),
+    }
+}
+
+fn dispatch_kind_from_ack(
+    ack: &ProductInboundAck,
+    payload: &ProductInboundPayload,
+) -> ActionDispatchKind {
+    match ack {
+        ProductInboundAck::Accepted {
+            submitted_run_id, ..
+        } => ActionDispatchKind::UserMessageTurn {
+            run_id: *submitted_run_id,
+        },
+        ProductInboundAck::DeferredBusy { active_run_id, .. } => {
+            ActionDispatchKind::UserMessageTurn {
+                run_id: *active_run_id,
+            }
+        }
+        _ => ActionDispatchKind::from_payload(payload),
+    }
+}
+
+fn terminal_ack_for_error(error: &ProductWorkflowError) -> Option<ProductInboundAck> {
+    match error {
+        ProductWorkflowError::CommandRoutingUnavailable { command } => {
+            Some(ProductInboundAck::Rejected(ProductRejection::permanent(
+                ProductRejectionKind::PolicyDenied,
+                format!("command routing unavailable: {command}"),
+            )))
+        }
+        ProductWorkflowError::UnsupportedActionKind { kind } => {
+            Some(ProductInboundAck::Rejected(ProductRejection::permanent(
+                ProductRejectionKind::PolicyDenied,
+                format!("unsupported action kind: {kind}"),
+            )))
+        }
+        ProductWorkflowError::BindingResolutionFailed { .. }
+        | ProductWorkflowError::TurnSubmissionRejected { .. }
+        | ProductWorkflowError::TurnResumeRejected { .. }
+        | ProductWorkflowError::Transient { .. }
+        | ProductWorkflowError::DuplicateAction { .. } => None,
     }
 }

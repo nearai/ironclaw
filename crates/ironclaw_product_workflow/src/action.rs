@@ -135,10 +135,7 @@ pub struct ProductInboundAction {
 
 impl ProductInboundAction {
     /// Create a new action record in the `Received` phase.
-    pub fn begin(
-        fingerprint: ActionFingerprintKey,
-        received_at: DateTime<Utc>,
-    ) -> Self {
+    pub fn begin(fingerprint: ActionFingerprintKey, received_at: DateTime<Utc>) -> Self {
         Self {
             action_id: ProductActionId::new(),
             fingerprint,

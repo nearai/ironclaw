@@ -54,31 +54,23 @@ impl From<ProductWorkflowError> for ProductAdapterError {
                     detail: RedactedString::new(reason),
                 }
             }
-            ProductWorkflowError::TurnResumeRejected { reason } => {
-                ProductAdapterError::Internal {
-                    detail: RedactedString::new(reason),
-                }
-            }
-            ProductWorkflowError::Transient { reason } => {
-                ProductAdapterError::WorkflowTransient {
-                    reason: RedactedString::new(reason),
-                }
-            }
+            ProductWorkflowError::TurnResumeRejected { reason } => ProductAdapterError::Internal {
+                detail: RedactedString::new(reason),
+            },
+            ProductWorkflowError::Transient { reason } => ProductAdapterError::WorkflowTransient {
+                reason: RedactedString::new(reason),
+            },
             ProductWorkflowError::DuplicateAction { .. } => ProductAdapterError::Internal {
                 detail: RedactedString::new("duplicate action escaped workflow layer"),
             },
             ProductWorkflowError::CommandRoutingUnavailable { command } => {
                 ProductAdapterError::Internal {
-                    detail: RedactedString::new(format!(
-                        "command routing unavailable: {command}"
-                    )),
+                    detail: RedactedString::new(format!("command routing unavailable: {command}")),
                 }
             }
-            ProductWorkflowError::UnsupportedActionKind { kind } => {
-                ProductAdapterError::Internal {
-                    detail: RedactedString::new(format!("unsupported action kind: {kind}")),
-                }
-            }
+            ProductWorkflowError::UnsupportedActionKind { kind } => ProductAdapterError::Internal {
+                detail: RedactedString::new(format!("unsupported action kind: {kind}")),
+            },
         }
     }
 }

@@ -10,7 +10,7 @@ use ironclaw_product_adapters::{
     ProtocolAuthEvidence, TrustedInboundContext, UserMessagePayload,
 };
 use ironclaw_product_workflow::{
-    DefaultProductWorkflow, FakeIdempotencyLedger, FakeInboundTurnService,
+    ActionDispatchKind, DefaultProductWorkflow, FakeIdempotencyLedger, FakeInboundTurnService,
 };
 
 fn sample_envelope(event_suffix: &str) -> ProductInboundEnvelope {
@@ -124,6 +124,91 @@ async fn duplicate_envelope_replays_prior_outcome() {
     assert!(matches!(second_ack, ProductInboundAck::Duplicate { .. }));
     // InboundTurnService should NOT be called a second time.
     assert_eq!(inbound.accepted_count(), 1);
+}
+
+#[tokio::test]
+async fn settled_user_message_records_actual_submitted_run_id() {
+    let (workflow, _inbound, ledger) = build_workflow();
+    let envelope = sample_envelope("run-id");
+
+    let ack = workflow.accept_inbound(envelope).await.expect("accept");
+    let ProductInboundAck::Accepted {
+        submitted_run_id, ..
+    } = ack
+    else {
+        panic!("expected accepted ack");
+    };
+    let actions = ledger.settled_actions();
+    assert_eq!(actions.len(), 1);
+    assert_eq!(
+        actions[0].dispatch_kind,
+        Some(ActionDispatchKind::UserMessageTurn {
+            run_id: submitted_run_id
+        })
+    );
+}
+
+#[tokio::test]
+async fn settle_failure_does_not_return_success_ack() {
+    let (workflow, inbound, ledger) = build_workflow();
+    ledger.force_settle_failure(ironclaw_product_workflow::ProductWorkflowError::Transient {
+        reason: "settle timeout".into(),
+    });
+
+    let envelope = sample_envelope("settle-fail");
+    let err = workflow
+        .accept_inbound(envelope)
+        .await
+        .expect_err("settle failure should fail request");
+    assert!(err.is_retryable());
+    assert_eq!(inbound.accepted_count(), 1);
+    assert_eq!(ledger.settled_count(), 0);
+}
+
+#[tokio::test]
+async fn unsupported_action_is_settled_as_terminal_rejection() {
+    let (workflow, _inbound, ledger) = build_workflow();
+    let envelope = sample_noop_envelope("unsupported-base");
+    let context = TrustedInboundContext::from_verified_evidence(
+        envelope.adapter_id().clone(),
+        envelope.installation_id().clone(),
+        Utc::now(),
+        &ProtocolAuthEvidence::test_verified(
+            AuthRequirement::SharedSecretHeader {
+                header_name: "X-Secret".into(),
+            },
+            "install_alpha",
+        ),
+    )
+    .expect("verified");
+    let parsed = ParsedProductInbound::new(
+        ExternalEventId::new("evt:unsupported").expect("valid"),
+        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("valid"),
+        ExternalConversationRef::new(None, "conv1", None, None).expect("valid"),
+        ProductInboundPayload::AuthResolution(
+            ironclaw_product_adapters::AuthResolutionPayload::new(
+                "auth:1",
+                ironclaw_product_adapters::AuthResolutionResult::Denied,
+            )
+            .expect("valid"),
+        ),
+    )
+    .expect("parsed");
+    let unsupported =
+        ProductInboundEnvelope::from_trusted_parse(context, parsed).expect("envelope");
+
+    let err = workflow
+        .accept_inbound(unsupported.clone())
+        .await
+        .expect_err("unsupported should error");
+    assert!(!err.is_retryable());
+    assert_eq!(ledger.settled_count(), 1);
+
+    let replay = workflow
+        .accept_inbound(unsupported)
+        .await
+        .expect("duplicate replay");
+    assert!(matches!(replay, ProductInboundAck::Duplicate { .. }));
 }
 
 #[tokio::test]

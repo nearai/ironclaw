@@ -34,9 +34,7 @@ pub use action::{
 pub use binding::{ConversationBindingService, ResolveBindingRequest, ResolvedBinding};
 pub use error::ProductWorkflowError;
 #[cfg(any(test, feature = "test-support"))]
-pub use fakes::{
-    FakeConversationBindingService, FakeIdempotencyLedger, FakeInboundTurnService,
-};
+pub use fakes::{FakeConversationBindingService, FakeIdempotencyLedger, FakeInboundTurnService};
 pub use inbound_turn::{DefaultInboundTurnService, InboundTurnOutcome, InboundTurnService};
 pub use ledger::{IdempotencyDecision, IdempotencyLedger};
 pub use workflow::DefaultProductWorkflow;

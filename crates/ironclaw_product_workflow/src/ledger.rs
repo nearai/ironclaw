@@ -29,10 +29,7 @@ pub trait IdempotencyLedger: Send + Sync {
     ) -> Result<IdempotencyDecision, ProductWorkflowError>;
 
     /// Settle an in-progress action with a terminal outcome.
-    async fn settle(
-        &self,
-        action: ProductInboundAction,
-    ) -> Result<(), ProductWorkflowError>;
+    async fn settle(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError>;
 }
 
 /// Result of an idempotency check.
