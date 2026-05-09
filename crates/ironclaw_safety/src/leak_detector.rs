@@ -510,7 +510,7 @@ fn default_patterns() -> Vec<LeakPattern> {
         // Bearer tokens (redact instead of block, might be intentional)
         LeakPattern {
             name: "bearer_token".to_string(),
-            regex: Regex::new(r"Bearer\s+[a-zA-Z0-9_-]{20,}").unwrap(), // safety: hardcoded literal
+            regex: Regex::new(r"Bearer\s+[a-zA-Z0-9._-]{20,}").unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::High,
             action: LeakAction::Redact,
         },
@@ -649,6 +649,25 @@ mod tests {
         let redacted = result.redacted_content.unwrap();
         assert!(redacted.contains("[REDACTED]"));
         assert!(!redacted.contains("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"));
+    }
+
+    #[test]
+    fn test_redact_bearer_jwt_token_without_tail_leak() {
+        let detector = LeakDetector::new();
+        let header = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
+        let payload = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let signature = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let content = format!("token: Bearer {header}.{payload}.{signature}");
+
+        let redacted = detector.scan_and_clean(&content).unwrap();
+
+        assert_eq!(redacted, "token: [REDACTED]");
+        for forbidden in [header, payload, signature] {
+            assert!(
+                !redacted.contains(forbidden),
+                "redacted bearer JWT leaked token fragment {forbidden}: {redacted}"
+            );
+        }
     }
 
     #[test]

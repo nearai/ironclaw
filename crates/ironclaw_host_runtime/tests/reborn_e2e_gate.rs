@@ -257,7 +257,7 @@ async fn reborn_e2e_gate_fails_unsupported_obligations_before_runtime_events_or_
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
         Arc::clone(&governor),
-        Arc::new(ObligatingAuthorizer),
+        Arc::new(ObligatingAuthorizer::new(vec![Obligation::AuditBefore])),
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
@@ -297,6 +297,126 @@ async fn reborn_e2e_gate_fails_unsupported_obligations_before_runtime_events_or_
     assert_eq!(
         governor.usage_for(&tenant_account),
         ResourceTally::default()
+    );
+}
+
+#[tokio::test]
+async fn reborn_e2e_gate_redacts_runtime_output_before_public_result() {
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let events = InMemoryEventSink::new();
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ObligatingAuthorizer::new(vec![Obligation::RedactOutput])),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy()))
+    .with_run_state(Arc::clone(&run_state))
+    .with_script_runtime(Arc::new(ScriptRuntime::new(
+        ScriptRuntimeConfig::for_testing(),
+        EchoScriptBackend,
+    )))
+    .with_event_sink(Arc::new(events.clone()));
+    let runtime = services.host_runtime_for_local_testing();
+    let context = execution_context_with_dispatch_grant();
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let leaked_header = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
+    let leaked_payload = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let leaked_signature = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let leaked = format!("Bearer {leaked_header}.{leaked_payload}.{leaked_signature}");
+
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context,
+            script_capability_id(),
+            ResourceEstimate::default(),
+            json!({"authorization": leaked, "message": "redact before public result"}),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            let serialized = serde_json::to_string(&completed.output).unwrap();
+            assert_eq!(
+                completed.output,
+                json!({"authorization": "[REDACTED]", "message": "redact before public result"})
+            );
+            for forbidden in [leaked_header, leaked_payload, leaked_signature] {
+                assert!(
+                    !serialized.contains(forbidden),
+                    "redacted public result leaked token fragment {forbidden}: {serialized}"
+                );
+            }
+        }
+        other => panic!("expected completed redacted outcome, got {other:?}"),
+    }
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(run.status, RunStatus::Completed);
+    let serialized_events = serde_json::to_string(&events.events()).unwrap();
+    assert!(
+        !serialized_events.contains(&leaked),
+        "runtime events must not leak raw output before redaction: {serialized_events}"
+    );
+}
+
+#[tokio::test]
+async fn reborn_e2e_gate_blocks_oversized_runtime_output_before_publication() {
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let events = InMemoryEventSink::new();
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ObligatingAuthorizer::new(vec![
+            Obligation::EnforceOutputLimit { bytes: 8 },
+        ])),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy()))
+    .with_run_state(Arc::clone(&run_state))
+    .with_script_runtime(Arc::new(ScriptRuntime::new(
+        ScriptRuntimeConfig::for_testing(),
+        EchoScriptBackend,
+    )))
+    .with_event_sink(Arc::new(events.clone()));
+    let runtime = services.host_runtime_for_local_testing();
+    let context = execution_context_with_dispatch_grant();
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let forbidden = "OUTPUT_LIMIT_SENTINEL_MUST_NOT_LEAK";
+
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context,
+            script_capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": forbidden}),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Failed(failure) => {
+            assert_eq!(failure.kind, RuntimeFailureKind::OutputTooLarge);
+            let rendered = format!("{failure:?}");
+            assert!(!rendered.contains(forbidden));
+        }
+        other => panic!("expected output-limit failure, got {other:?}"),
+    }
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(run.status, RunStatus::Failed);
+    assert_eq!(run.error_kind.as_deref(), Some("ObligationFailed"));
+    let serialized_events = serde_json::to_string(&events.events()).unwrap();
+    assert!(
+        !serialized_events.contains(forbidden),
+        "runtime events must not leak blocked output: {serialized_events}"
     );
 }
 
@@ -524,7 +644,15 @@ impl TrustAwareCapabilityDispatchAuthorizer for ApprovalThenGrantAuthorizer {
     }
 }
 
-struct ObligatingAuthorizer;
+struct ObligatingAuthorizer {
+    obligations: Vec<Obligation>,
+}
+
+impl ObligatingAuthorizer {
+    fn new(obligations: Vec<Obligation>) -> Self {
+        Self { obligations }
+    }
+}
 
 #[async_trait]
 impl TrustAwareCapabilityDispatchAuthorizer for ObligatingAuthorizer {
@@ -536,7 +664,7 @@ impl TrustAwareCapabilityDispatchAuthorizer for ObligatingAuthorizer {
         _trust_decision: &TrustDecision,
     ) -> Decision {
         Decision::Allow {
-            obligations: Obligations::new(vec![Obligation::AuditBefore]).unwrap(),
+            obligations: Obligations::new(self.obligations.clone()).unwrap(),
         }
     }
 }
