@@ -765,10 +765,7 @@ pub(crate) async fn slack_relay_oauth_callback_handler(
 
     // Resolve the IronClaw user who initiated this OAuth flow BEFORE the
     // result block so the completion toast can be routed to that tenant
-    // even on the failure path. The same `relay:{ext}:oauth_user` secret
-    // is also consumed inside the success path to create the pairing
-    // identity; that delete is the cleanup, this read is the broadcast
-    // target.
+    // even on the failure path.
     let oauth_user = resolve_relay_oauth_user(
         ext_mgr.secrets().as_ref(),
         &state.owner_id,
@@ -776,6 +773,21 @@ pub(crate) async fn slack_relay_oauth_callback_handler(
         state.multi_tenant_mode,
     )
     .await;
+
+    // Delete the temporary `relay:{ext}:oauth_user` secret unconditionally
+    // once we've captured its value — regardless of whether the result
+    // block below short-circuits, whether `pairing_store` is wired up,
+    // or whether identity pairing later fails. Leaving it behind would
+    // let a subsequent OAuth callback for the same extension read a
+    // stale initiating user and misroute the toast (Copilot review on
+    // PR #3390 commit d247bde8). The previous cleanup site inside the
+    // `if let Some(pairing_store)` branch was unreachable on three of
+    // those failure paths.
+    let oauth_user_key = format!("relay:{}:oauth_user", relay_extension_name);
+    let _ = ext_mgr
+        .secrets()
+        .delete(&state.owner_id, &oauth_user_key)
+        .await;
 
     let result: Result<(), String> = async {
         let store = state.store.as_ref().ok_or_else(|| {
@@ -849,13 +861,10 @@ pub(crate) async fn slack_relay_oauth_callback_handler(
             // The outer `oauth_user` (resolved by `resolve_relay_oauth_user`
             // above the result block) is the IronClaw user this OAuth flow
             // belongs to. Reuse it here so the pairing identity and the
-            // completion toast always agree on the target tenant.
-            // Cleanup of the temporary secret happens regardless of
-            // whether `create_identity` later succeeds, so a failure
-            // doesn't leave the credential lingering.
-            let user_key = format!("relay:{}:oauth_user", relay_extension_name);
-            let _ = ext_mgr.secrets().delete(&state.owner_id, &user_key).await;
-
+            // completion toast always agree on the target tenant. The
+            // temporary `relay:{ext}:oauth_user` secret was already
+            // deleted unconditionally above the result block, so we
+            // never reach this branch with a stale credential lingering.
             let user_record = if let Some(ref db) = state.store {
                 db.get_user(&oauth_user).await.ok().flatten()
             } else {
@@ -2297,6 +2306,83 @@ mod tests {
         let state_key = format!("relay:{}:oauth_state", legacy_relay_name);
         let exists = secrets.exists("test", &state_key).await.unwrap_or(true);
         assert!(!exists, "Legacy CSRF nonce should be deleted after use");
+    }
+
+    /// Regression: the `relay:{ext}:oauth_user` secret stores the
+    /// IronClaw user who initiated the OAuth flow. The callback must
+    /// consume it unconditionally once the value is read, regardless of
+    /// whether downstream activation, identity-pairing, or a missing
+    /// `pairing_store` causes the result block to short-circuit. Leaving
+    /// the secret behind would let a subsequent OAuth callback for the
+    /// same extension read a stale initiating user and misroute the
+    /// completion toast.
+    ///
+    /// The test fixture has no real relay service and no `pairing_store`
+    /// wired up, so the result block errors out after the CSRF check
+    /// passes — exactly the failure path Copilot flagged on PR #3390
+    /// (comment id 3211833864) where the previous in-`if-let` cleanup
+    /// site was unreachable.
+    #[tokio::test]
+    async fn test_relay_oauth_callback_consumes_oauth_user_secret_on_failure_path() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let secrets = test_secrets_store();
+        let nonce = "test-nonce-oauth-user-cleanup";
+        let relay_name = crate::extensions::naming::canonicalize_extension_name(DEFAULT_RELAY_NAME)
+            .expect("canonical relay name");
+
+        secrets
+            .create(
+                "test",
+                crate::secrets::CreateSecretParams::new(
+                    format!("relay:{}:oauth_state", relay_name),
+                    nonce,
+                ),
+            )
+            .await
+            .expect("store nonce"); // safety: cfg(test) fixture
+        secrets
+            .create(
+                "test",
+                crate::secrets::CreateSecretParams::new(
+                    format!("relay:{}:oauth_user", relay_name),
+                    "alice", // initiating user, deliberately != owner_id
+                ),
+            )
+            .await
+            .expect("store oauth_user secret"); // safety: cfg(test) fixture
+
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets.clone());
+        let state = test_gateway_state(Some(ext_mgr));
+        let app = test_relay_oauth_router(state);
+
+        let req = axum::http::Request::builder()
+            .uri(format!(
+                "/oauth/slack/callback?team_id=T123&provider=slack&state={}",
+                nonce
+            ))
+            .body(Body::empty())
+            .expect("request");
+
+        let _resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        // We don't assert on the response body — the result block almost
+        // certainly errors (no real relay backend), and that's the point:
+        // the cleanup must still run on the failure path.
+
+        let oauth_user_key = format!("relay:{}:oauth_user", relay_name);
+        let exists = secrets
+            .exists("test", &oauth_user_key)
+            .await
+            .unwrap_or(true);
+        assert!(
+            !exists,
+            "relay:{{ext}}:oauth_user must be deleted unconditionally — \
+             leaving it behind on the failure path lets a subsequent \
+             OAuth callback misroute the completion toast"
+        );
     }
 
     #[tokio::test]
