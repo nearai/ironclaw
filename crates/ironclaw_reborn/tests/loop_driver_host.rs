@@ -17,10 +17,10 @@ use ironclaw_threads::{
 use ironclaw_turns::{
     AcceptedMessageRef, CheckpointStateStore, EventCursor, GetCheckpointStateRequest,
     GetLoopCheckpointRequest, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
-    InMemoryRunProfileResolver, LoopCheckpointStore, PutCheckpointStateRequest,
-    ReplyTargetBindingRef, RunProfileId, RunProfileResolutionRequest, RunProfileResolver,
-    RunProfileVersion, SourceBindingRef, TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope,
-    TurnStatus,
+    InMemoryRunProfileResolver, InMemoryTurnStateStore, InMemoryTurnStateStoreLimits,
+    LoopCheckpointStore, PutCheckpointStateRequest, ReplyTargetBindingRef, RunProfileId,
+    RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion, SourceBindingRef,
+    TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope, TurnStatus,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostErrorKind, CapabilityInputRef, CapabilityInvocation,
         CapabilityOutcome, CapabilitySurfaceVersion, FinalizeAssistantMessage,
@@ -154,6 +154,110 @@ async fn text_only_host_factory_builds_complete_agent_loop_driver_host() {
 }
 
 #[tokio::test]
+async fn text_only_host_e2e_flow_persists_checkpoint_mapping_in_turn_state_store() {
+    let fixture = HostFixture::new("thread-host-turn-state-e2e", "hello durable host").await;
+    let turn_state_store = Arc::new(InMemoryTurnStateStore::default());
+    let host = fixture
+        .factory_with_loop_checkpoint_store(turn_state_store.clone())
+        .build_text_only_host(RebornLoopDriverHostRequest {
+            claimed_run: fixture.claimed.clone(),
+            loop_run_context: fixture.context.clone(),
+        })
+        .await
+        .unwrap();
+    let host_dyn: &(dyn AgentLoopDriverHost + Send + Sync) = &host;
+
+    let surface = host_dyn
+        .visible_capabilities(VisibleCapabilityRequest)
+        .await
+        .unwrap();
+    let surface_version = surface.version.clone();
+    let prompt_bundle = host_dyn
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: Some(surface_version.clone()),
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+        })
+        .await
+        .unwrap();
+    let model_response = host_dyn
+        .stream_model(LoopModelRequest {
+            messages: prompt_bundle.messages,
+            surface_version: Some(surface_version.clone()),
+            model_preference: None,
+        })
+        .await
+        .unwrap();
+    let ParentLoopOutput::AssistantReply(reply) = model_response.output else {
+        panic!("expected assistant reply");
+    };
+    host_dyn
+        .finalize_assistant_message(FinalizeAssistantMessage { reply })
+        .await
+        .unwrap();
+    let gateway_requests = fixture.gateway.requests();
+    assert_eq!(gateway_requests.len(), 1);
+    assert_eq!(
+        gateway_requests[0].run_id,
+        fixture.context.run_id.to_string()
+    );
+    assert_eq!(
+        gateway_requests[0].turn_id,
+        fixture.context.turn_id.to_string()
+    );
+    assert_eq!(
+        gateway_requests[0].surface_version.as_ref(),
+        Some(&surface_version)
+    );
+
+    let checkpoint_state = fixture
+        .stage_checkpoint_state(LoopCheckpointKind::BeforeBlock, b"durable resume bytes")
+        .await;
+    let checkpoint_id = host_dyn
+        .checkpoint(LoopCheckpointRequest {
+            kind: LoopCheckpointKind::BeforeBlock,
+            state_ref: checkpoint_state.state_ref.clone(),
+        })
+        .await
+        .unwrap();
+
+    let snapshot = turn_state_store.persistence_snapshot();
+    assert_eq!(snapshot.loop_checkpoints.len(), 1);
+    let reopened = InMemoryTurnStateStore::from_persistence_snapshot(
+        snapshot,
+        InMemoryTurnStateStoreLimits::default(),
+    )
+    .unwrap();
+    let checkpoint_record = reopened
+        .get_loop_checkpoint(GetLoopCheckpointRequest {
+            scope: fixture.context.scope.clone(),
+            turn_id: fixture.context.turn_id,
+            run_id: fixture.context.run_id,
+            checkpoint_id,
+        })
+        .await
+        .unwrap()
+        .expect("checkpoint id should survive turn-state reload");
+    assert_eq!(checkpoint_record.state_ref, checkpoint_state.state_ref);
+
+    let history = fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(history.messages.iter().any(|message| {
+        message.kind == MessageKind::Assistant
+            && message.status == MessageStatus::Finalized
+            && message.content.as_deref() == Some("model says hi")
+    }));
+}
+
+#[tokio::test]
 async fn text_only_host_prompt_accepts_empty_surface_version() {
     let fixture = HostFixture::new("thread-host-prompt-surface", "hello reborn").await;
     let host = fixture.build_host().await;
@@ -177,6 +281,55 @@ async fn text_only_host_prompt_accepts_empty_surface_version() {
 }
 
 #[tokio::test]
+async fn text_only_host_prompt_rejects_stale_surface_version() {
+    let fixture = HostFixture::new("thread-host-prompt-stale", "hello reborn").await;
+    let host = fixture.build_host().await;
+
+    let error = host
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: Some(CapabilitySurfaceVersion::new("stale:v1").unwrap()),
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::StaleSurface);
+}
+
+#[tokio::test]
+async fn text_only_host_prompt_rejects_codeact_mode_and_zero_budget() {
+    let fixture = HostFixture::new("thread-host-prompt-mode", "hello reborn").await;
+    let host = fixture.build_host().await;
+
+    let codeact = host
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::CodeAct,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(codeact.kind, AgentLoopHostErrorKind::PolicyDenied);
+
+    let zero_budget = host
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(0),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(zero_budget.kind, AgentLoopHostErrorKind::BudgetExceeded);
+}
+
+#[tokio::test]
 async fn text_only_host_factory_rejects_scope_mismatch() {
     let fixture = HostFixture::new("thread-host-scope", "hello").await;
     let mut wrong_context = fixture.context.clone();
@@ -192,6 +345,52 @@ async fn text_only_host_factory_rejects_scope_mismatch() {
         .unwrap_err();
 
     assert!(error.to_string().contains("claimed run"));
+}
+
+#[tokio::test]
+async fn text_only_host_factory_rejects_non_running_claimed_run() {
+    let fixture = HostFixture::new("thread-host-non-running", "hello").await;
+    let mut claimed = fixture.claimed.clone();
+    claimed.state.status = TurnStatus::Queued;
+
+    let error = fixture
+        .factory()
+        .build_text_only_host(RebornLoopDriverHostRequest {
+            claimed_run: claimed,
+            loop_run_context: fixture.context.clone(),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("must be running"));
+}
+
+#[tokio::test]
+async fn text_only_host_factory_rejects_thread_scope_mismatch() {
+    let fixture = HostFixture::new("thread-host-thread-scope-mismatch", "hello").await;
+    let wrong_scope = ThreadScope {
+        tenant_id: TenantId::new("tenant-other").unwrap(),
+        ..fixture.thread_scope.clone()
+    };
+    let factory = RebornLoopDriverHostFactory::new(
+        Arc::clone(&fixture.thread_service),
+        wrong_scope,
+        Arc::clone(&fixture.gateway),
+        fixture.checkpoint_state_store.clone(),
+        fixture.loop_checkpoint_store.clone(),
+        fixture.milestone_sink.clone(),
+        TextOnlyLoopHostConfig { max_messages: 8 },
+    );
+
+    let error = factory
+        .build_text_only_host(RebornLoopDriverHostRequest {
+            claimed_run: fixture.claimed.clone(),
+            loop_run_context: fixture.context.clone(),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("thread scope"));
 }
 
 #[tokio::test]
@@ -249,6 +448,28 @@ async fn no_extra_loop_input_port_rejects_foreign_cursor() {
             ),
             8,
         )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::ScopeMismatch);
+}
+
+#[tokio::test]
+async fn no_extra_loop_input_port_ack_rejects_foreign_cursor() {
+    let fixture = HostFixture::new("thread-host-input-ack", "hello").await;
+    let host = fixture.build_host().await;
+    let other_context = LoopRunContext::new(
+        fixture.context.scope.clone(),
+        fixture.context.turn_id,
+        TurnRunId::new(),
+        fixture.context.resolved_run_profile.clone(),
+    );
+
+    let error = host
+        .ack_inputs(LoopInputCursor::from_host_token(
+            &other_context,
+            LoopInputCursorToken::new("input-cursor:foreign-ack").unwrap(),
+        ))
         .await
         .unwrap_err();
 
@@ -333,6 +554,25 @@ async fn text_only_host_checkpoint_port_rejects_foreign_state_ref() {
         .checkpoint(LoopCheckpointRequest {
             kind: LoopCheckpointKind::BeforeModel,
             state_ref: foreign_state.state_ref,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::CheckpointRejected);
+}
+
+#[tokio::test]
+async fn text_only_host_checkpoint_port_rejects_kind_mismatch() {
+    let fixture = HostFixture::new("thread-host-checkpoint-kind", "hello").await;
+    let host = fixture.build_host().await;
+    let state = fixture
+        .stage_checkpoint_state(LoopCheckpointKind::BeforeModel, b"model checkpoint")
+        .await;
+
+    let error = host
+        .checkpoint(LoopCheckpointRequest {
+            kind: LoopCheckpointKind::BeforeSideEffect,
+            state_ref: state.state_ref,
         })
         .await
         .unwrap_err();
@@ -494,12 +734,19 @@ impl HostFixture {
     fn factory(
         &self,
     ) -> RebornLoopDriverHostFactory<InMemorySessionThreadService, RecordingGateway> {
+        self.factory_with_loop_checkpoint_store(self.loop_checkpoint_store.clone())
+    }
+
+    fn factory_with_loop_checkpoint_store(
+        &self,
+        loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
+    ) -> RebornLoopDriverHostFactory<InMemorySessionThreadService, RecordingGateway> {
         RebornLoopDriverHostFactory::new(
             Arc::clone(&self.thread_service),
             self.thread_scope.clone(),
             Arc::clone(&self.gateway),
             self.checkpoint_state_store.clone(),
-            self.loop_checkpoint_store.clone(),
+            loop_checkpoint_store,
             self.milestone_sink.clone(),
             TextOnlyLoopHostConfig { max_messages: 8 },
         )

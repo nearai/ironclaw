@@ -258,6 +258,42 @@ async fn libsql_loop_checkpoint_store_persists_mapping_across_instances() {
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
+async fn libsql_loop_checkpoint_store_rejects_cross_scope_after_reopen() {
+    let (db, _dir) = libsql_db().await;
+    let store = LibSqlTurnStateStore::new(db.clone());
+    store.run_migrations().await.unwrap();
+    let checkpoint_scope = scope("thread-loop-checkpoint-db-scope-a");
+    let turn_id = TurnId::new();
+    let run_id = TurnRunId::new();
+    let checkpoint = store
+        .put_loop_checkpoint(PutLoopCheckpointRequest {
+            scope: checkpoint_scope.clone(),
+            turn_id,
+            run_id,
+            state_ref: LoopCheckpointStateRef::new("checkpoint:db-loop-state-scope").unwrap(),
+            schema_id: CheckpointSchemaId::new("interactive_checkpoint_v1").unwrap(),
+            schema_version: RunProfileVersion::new(3),
+            kind: ironclaw_turns::run_profile::LoopCheckpointKind::BeforeBlock,
+        })
+        .await
+        .unwrap();
+
+    let reopened = LibSqlTurnStateStore::new(db);
+    let loaded = reopened
+        .get_loop_checkpoint(GetLoopCheckpointRequest {
+            scope: scope("thread-loop-checkpoint-db-scope-b"),
+            turn_id,
+            run_id,
+            checkpoint_id: checkpoint.checkpoint_id,
+        })
+        .await
+        .unwrap();
+
+    assert!(loaded.is_none());
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
 async fn libsql_turn_state_store_persists_admission_reservations_across_instances() {
     let (db, _dir) = libsql_db().await;
     let limits = Arc::new(
@@ -729,6 +765,48 @@ async fn postgres_loop_checkpoint_store_persists_mapping_across_instances_when_c
         .expect("Postgres checkpoint id mapping should survive store reopen");
 
     assert_eq!(loaded, checkpoint);
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_loop_checkpoint_store_rejects_cross_scope_after_reopen_when_configured() {
+    let Some(pool) = postgres_pool().await else {
+        return;
+    };
+    let suffix = unique_suffix();
+    let store = PostgresTurnStateStore::new(pool.clone());
+    store.run_migrations().await.unwrap();
+    let checkpoint_scope = scope(&format!("thread-loop-checkpoint-postgres-scope-a-{suffix}"));
+    let turn_id = TurnId::new();
+    let run_id = TurnRunId::new();
+    let checkpoint = store
+        .put_loop_checkpoint(PutLoopCheckpointRequest {
+            scope: checkpoint_scope.clone(),
+            turn_id,
+            run_id,
+            state_ref: LoopCheckpointStateRef::new(format!(
+                "checkpoint:pg-loop-state-scope:{suffix}"
+            ))
+            .unwrap(),
+            schema_id: CheckpointSchemaId::new("interactive_checkpoint_v1").unwrap(),
+            schema_version: RunProfileVersion::new(3),
+            kind: ironclaw_turns::run_profile::LoopCheckpointKind::BeforeBlock,
+        })
+        .await
+        .unwrap();
+
+    let reopened = PostgresTurnStateStore::new(pool);
+    let loaded = reopened
+        .get_loop_checkpoint(GetLoopCheckpointRequest {
+            scope: scope(&format!("thread-loop-checkpoint-postgres-scope-b-{suffix}")),
+            turn_id,
+            run_id,
+            checkpoint_id: checkpoint.checkpoint_id,
+        })
+        .await
+        .unwrap();
+
+    assert!(loaded.is_none());
 }
 
 #[cfg(feature = "postgres")]

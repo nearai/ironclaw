@@ -139,6 +139,45 @@ async fn turn_state_loop_checkpoint_store_survives_persistence_snapshot() {
 }
 
 #[tokio::test]
+async fn turn_state_loop_checkpoint_store_rejects_cross_scope_after_snapshot_reload() {
+    let state_store = InMemoryCheckpointStateStore::default();
+    let checkpoint_store = InMemoryTurnStateStore::default();
+    let scope = turn_scope("thread-loop-checkpoint-snapshot-scope-a");
+    let turn_id = TurnId::new();
+    let run_id = TurnRunId::new();
+    let state_record = put_test_state(&state_store, scope.clone(), turn_id, run_id).await;
+    let checkpoint = checkpoint_store
+        .put_loop_checkpoint(PutLoopCheckpointRequest {
+            scope: scope.clone(),
+            turn_id,
+            run_id,
+            state_ref: state_record.state_ref,
+            schema_id: state_record.schema_id,
+            schema_version: state_record.schema_version,
+            kind: state_record.kind,
+        })
+        .await
+        .unwrap();
+
+    let reopened = InMemoryTurnStateStore::from_persistence_snapshot(
+        checkpoint_store.persistence_snapshot(),
+        InMemoryTurnStateStoreLimits::default(),
+    )
+    .unwrap();
+    let loaded = reopened
+        .get_loop_checkpoint(GetLoopCheckpointRequest {
+            scope: turn_scope("thread-loop-checkpoint-snapshot-scope-b"),
+            turn_id,
+            run_id,
+            checkpoint_id: checkpoint.checkpoint_id,
+        })
+        .await
+        .unwrap();
+
+    assert!(loaded.is_none());
+}
+
+#[tokio::test]
 async fn loop_checkpoint_store_rejects_cross_run_checkpoint_id() {
     let state_store = InMemoryCheckpointStateStore::default();
     let checkpoint_store = InMemoryLoopCheckpointStore::default();
