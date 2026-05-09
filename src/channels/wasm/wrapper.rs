@@ -7850,6 +7850,7 @@ mod tests {
                 None,
                 &metadata_json,
                 &[],
+                &[],
             )
             .await
             .expect("wecom websocket respond should succeed");

@@ -2854,12 +2854,12 @@ mod tests {
             }
         }
 
-        let llm: Arc<dyn crate::llm::LlmProvider> = Arc::new(StaticLlmProvider);
+        let llm: Arc<dyn ironclaw_llm::LlmProvider> = Arc::new(StaticLlmProvider);
         make_thread_ops_test_agent_with(llm, Arc::new(crate::tools::ToolRegistry::new())).await
     }
 
     async fn make_thread_ops_test_agent_with(
-        llm: Arc<dyn crate::llm::LlmProvider>,
+        llm: Arc<dyn ironclaw_llm::LlmProvider>,
         tools: Arc<crate::tools::ToolRegistry>,
     ) -> (Agent, Arc<TokioMutex<Vec<StatusUpdate>>>) {
         let statuses = Arc::new(TokioMutex::new(Vec::new()));
@@ -2954,7 +2954,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl crate::llm::LlmProvider for SequencedImageLlm {
+    impl ironclaw_llm::LlmProvider for SequencedImageLlm {
         fn model_name(&self) -> &str {
             "sequenced-image-mock"
         }
@@ -2965,13 +2965,13 @@ mod tests {
 
         async fn complete(
             &self,
-            _request: crate::llm::CompletionRequest,
-        ) -> Result<crate::llm::CompletionResponse, crate::error::LlmError> {
-            Ok(crate::llm::CompletionResponse {
+            _request: ironclaw_llm::CompletionRequest,
+        ) -> Result<ironclaw_llm::CompletionResponse, crate::error::LlmError> {
+            Ok(ironclaw_llm::CompletionResponse {
                 content: "unused".to_string(),
                 input_tokens: 0,
                 output_tokens: 0,
-                finish_reason: crate::llm::FinishReason::Stop,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })
@@ -2979,36 +2979,39 @@ mod tests {
 
         async fn complete_with_tools(
             &self,
-            _request: crate::llm::ToolCompletionRequest,
-        ) -> Result<crate::llm::ToolCompletionResponse, crate::error::LlmError> {
+            _request: ironclaw_llm::ToolCompletionRequest,
+        ) -> Result<ironclaw_llm::ToolCompletionResponse, crate::error::LlmError> {
             let call = self.calls.fetch_add(1, Ordering::Relaxed);
             if call == 0 {
-                return Ok(crate::llm::ToolCompletionResponse {
+                return Ok(ironclaw_llm::ToolCompletionResponse {
                     content: None,
                     tool_calls: vec![ToolCall {
                         id: "call_img_0".to_string(),
                         name: "image_generate".to_string(),
                         arguments: serde_json::json!({"prompt": "cat"}),
                         reasoning: None,
+                        signature: None,
                     }],
                     input_tokens: 0,
                     output_tokens: 0,
-                    finish_reason: crate::llm::FinishReason::ToolUse,
+                    finish_reason: ironclaw_llm::FinishReason::ToolUse,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
+                    reasoning: None,
                 });
             }
 
-            Ok(crate::llm::ToolCompletionResponse {
+            Ok(ironclaw_llm::ToolCompletionResponse {
                 content: Some(
                     "已生成小猫图片：\n\n![小猫](/mnt/data/generated_image.jpg)".to_string(),
                 ),
                 tool_calls: Vec::new(),
                 input_tokens: 0,
                 output_tokens: 0,
-                finish_reason: crate::llm::FinishReason::Stop,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
     }
@@ -3885,7 +3888,7 @@ mod tests {
 
         let tools = Arc::new(ToolRegistry::new());
         tools.register(Arc::new(GeneratedImageTool)).await;
-        let llm: Arc<dyn crate::llm::LlmProvider> = Arc::new(SequencedImageLlm::new());
+        let llm: Arc<dyn ironclaw_llm::LlmProvider> = Arc::new(SequencedImageLlm::new());
         let (agent, statuses) = make_thread_ops_test_agent_with(llm, tools).await;
         let session_id = Uuid::new_v4();
         let thread_id = Uuid::new_v4();
