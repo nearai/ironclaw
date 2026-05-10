@@ -783,6 +783,25 @@ fn capability_denied_reason_kind_is_typed_and_wire_compatible() {
         CapabilityDeniedReasonKind::EmptySurface
     );
     assert_eq!(decoded.reason_kind.as_str(), "empty_surface");
+    assert_eq!(decoded.reason_kind.to_string(), "empty_surface");
+
+    let historical_unknown = serde_json::json!({
+        "reason_kind": "host_policy_denied",
+        "safe_summary": "capability denied by host policy"
+    });
+    let decoded_unknown = serde_json::from_value::<CapabilityDenied>(historical_unknown).unwrap();
+    assert_eq!(decoded_unknown.reason_kind.as_str(), "host_policy_denied");
+    assert_eq!(
+        decoded_unknown.reason_kind.to_string(),
+        "host_policy_denied"
+    );
+    assert!(matches!(
+        decoded_unknown.reason_kind,
+        CapabilityDeniedReasonKind::Unknown(_)
+    ));
+
+    let unknown_wire = serde_json::to_string(&decoded_unknown).unwrap();
+    assert!(unknown_wire.contains(r#""reason_kind":"host_policy_denied""#));
 }
 
 #[tokio::test]
