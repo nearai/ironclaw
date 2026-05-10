@@ -802,6 +802,11 @@ fn capability_denied_reason_kind_is_typed_and_wire_compatible() {
 
     let unknown_wire = serde_json::to_string(&decoded_unknown).unwrap();
     assert!(unknown_wire.contains(r#""reason_kind":"host_policy_denied""#));
+
+    let constructed_unknown = CapabilityDeniedReasonKind::unknown("host_policy_denied").unwrap();
+    assert_eq!(constructed_unknown.as_str(), "host_policy_denied");
+    assert!(CapabilityDeniedReasonKind::unknown("api_key").is_err());
+    assert!(CapabilityDeniedReasonKind::unknown("secret_policy").is_err());
 }
 
 #[tokio::test]

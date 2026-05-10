@@ -794,10 +794,27 @@ pub struct CapabilityDenied {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CapabilityDeniedReasonKind {
     EmptySurface,
-    Unknown(String),
+    Unknown(CapabilityDeniedReasonKindValue),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CapabilityDeniedReasonKindValue(String);
+
+impl CapabilityDeniedReasonKindValue {
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        validate_loop_safe_identifier(value.into(), "capability denied reason kind", 128).map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
 }
 
 impl CapabilityDeniedReasonKind {
+    pub fn unknown(value: impl Into<String>) -> Result<Self, String> {
+        CapabilityDeniedReasonKindValue::new(value).map(Self::Unknown)
+    }
+
     pub fn as_str(&self) -> &str {
         match self {
             Self::EmptySurface => "empty_surface",
@@ -829,9 +846,7 @@ impl<'de> Deserialize<'de> for CapabilityDeniedReasonKind {
         let value = String::deserialize(deserializer)?;
         match value.as_str() {
             "empty_surface" => Ok(Self::EmptySurface),
-            _ => validate_loop_safe_identifier(value, "capability denied reason kind", 128)
-                .map(Self::Unknown)
-                .map_err(serde::de::Error::custom),
+            _ => Self::unknown(value).map_err(serde::de::Error::custom),
         }
     }
 }
