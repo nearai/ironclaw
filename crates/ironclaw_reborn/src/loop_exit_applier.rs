@@ -13,9 +13,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use ironclaw_turns::{
-    LoopExit, LoopExitInvalidHandling, LoopExitValidationPolicy, LoopGateRef, LoopMessageRef,
-    LoopResultRef, ResolvedRunProfile, TurnCheckpointId, TurnError, TurnLeaseToken, TurnRunId,
-    TurnRunState, TurnRunnerId, TurnScope,
+    GateRef, LoopBlockedKind, LoopExit, LoopExitInvalidHandling, LoopExitValidationPolicy,
+    LoopMessageRef, LoopResultRef, ResolvedRunProfile, TurnCheckpointId, TurnError, TurnLeaseToken,
+    TurnRunId, TurnRunState, TurnRunnerId, TurnScope,
     runner::{ApplyValidatedLoopExitRequest, TurnRunTransitionPort},
 };
 
@@ -47,8 +47,18 @@ pub trait LoopExitEvidencePort: Send + Sync {
         &self,
         scope: &TurnScope,
         run_id: TurnRunId,
+        kind: LoopBlockedKind,
         checkpoint_id: &TurnCheckpointId,
-        gate_ref: &LoopGateRef,
+        gate_ref: &GateRef,
+    ) -> Result<bool, TurnError>;
+
+    /// Verify that the final checkpoint exists durably, belongs to the run, and
+    /// has the correct terminal checkpoint kind for the claimed exit.
+    async fn verify_final_checkpoint(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+        checkpoint_id: &TurnCheckpointId,
     ) -> Result<bool, TurnError>;
 
     /// Verify that failure diagnostic evidence exists durably if required
@@ -122,6 +132,7 @@ impl LoopExitApplier {
     ) -> Result<LoopExitValidationPolicy, TurnError> {
         let mut policy = LoopExitValidationPolicy {
             require_final_checkpoint: false,
+            final_checkpoint_verified: false,
             host_cancellation_observed: false,
             invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
             completion_refs_verified: false,
@@ -142,6 +153,14 @@ impl LoopExitApplier {
                         &completed.result_refs,
                     )
                     .await?;
+                policy.final_checkpoint_verified = self
+                    .verify_required_final_checkpoint(
+                        scope,
+                        run_id,
+                        profile,
+                        completed.final_checkpoint_id.as_ref(),
+                    )
+                    .await?;
             }
             LoopExit::Blocked(blocked) => {
                 policy.blocked_evidence_verified = self
@@ -149,28 +168,63 @@ impl LoopExitApplier {
                     .verify_blocked_evidence(
                         scope,
                         run_id,
+                        blocked.kind,
                         &blocked.checkpoint_id,
                         &blocked.gate_ref,
                     )
                     .await?;
             }
-            LoopExit::Cancelled(_) => {
+            LoopExit::Cancelled(cancelled) => {
                 policy.require_final_checkpoint =
                     profile.checkpoint_policy.require_final_checkpoint;
                 policy.host_cancellation_observed =
                     self.evidence_port.is_cancellation_observed(run_id).await?;
+                policy.final_checkpoint_verified = self
+                    .verify_required_final_checkpoint(
+                        scope,
+                        run_id,
+                        profile,
+                        cancelled.checkpoint_id.as_ref(),
+                    )
+                    .await?;
             }
-            LoopExit::Failed(_) => {
+            LoopExit::Failed(failed) => {
                 policy.require_final_checkpoint =
                     profile.checkpoint_policy.require_final_checkpoint;
                 policy.failure_evidence_verified = self
                     .evidence_port
                     .verify_failure_evidence(scope, run_id)
                     .await?;
+                policy.final_checkpoint_verified = self
+                    .verify_required_final_checkpoint(
+                        scope,
+                        run_id,
+                        profile,
+                        failed.checkpoint_id.as_ref(),
+                    )
+                    .await?;
             }
         }
 
         Ok(policy)
+    }
+
+    async fn verify_required_final_checkpoint(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+        profile: &ResolvedRunProfile,
+        checkpoint_id: Option<&TurnCheckpointId>,
+    ) -> Result<bool, TurnError> {
+        if !profile.checkpoint_policy.require_final_checkpoint {
+            return Ok(false);
+        }
+        let Some(checkpoint_id) = checkpoint_id else {
+            return Ok(false);
+        };
+        self.evidence_port
+            .verify_final_checkpoint(scope, run_id, checkpoint_id)
+            .await
     }
 }
 
@@ -182,6 +236,7 @@ impl LoopExitApplier {
 pub struct InMemoryLoopExitEvidencePort {
     completion_refs_verified: bool,
     blocked_evidence_verified: bool,
+    final_checkpoint_verified: bool,
     failure_evidence_verified: bool,
     cancellation_observed: bool,
 }
@@ -193,6 +248,7 @@ impl InMemoryLoopExitEvidencePort {
         Self {
             completion_refs_verified: false,
             blocked_evidence_verified: false,
+            final_checkpoint_verified: false,
             failure_evidence_verified: false,
             cancellation_observed: false,
         }
@@ -207,6 +263,12 @@ impl InMemoryLoopExitEvidencePort {
     /// Set whether blocked evidence verification succeeds.
     pub fn with_blocked_evidence_verified(mut self, verified: bool) -> Self {
         self.blocked_evidence_verified = verified;
+        self
+    }
+
+    /// Set whether final checkpoint verification succeeds.
+    pub fn with_final_checkpoint_verified(mut self, verified: bool) -> Self {
+        self.final_checkpoint_verified = verified;
         self
     }
 
@@ -227,6 +289,7 @@ impl InMemoryLoopExitEvidencePort {
         Self {
             completion_refs_verified: true,
             blocked_evidence_verified: true,
+            final_checkpoint_verified: true,
             failure_evidence_verified: true,
             cancellation_observed: true,
         }
@@ -257,10 +320,20 @@ impl LoopExitEvidencePort for InMemoryLoopExitEvidencePort {
         &self,
         _scope: &TurnScope,
         _run_id: TurnRunId,
+        _kind: LoopBlockedKind,
         _checkpoint_id: &TurnCheckpointId,
-        _gate_ref: &LoopGateRef,
+        _gate_ref: &GateRef,
     ) -> Result<bool, TurnError> {
         Ok(self.blocked_evidence_verified)
+    }
+
+    async fn verify_final_checkpoint(
+        &self,
+        _scope: &TurnScope,
+        _run_id: TurnRunId,
+        _checkpoint_id: &TurnCheckpointId,
+    ) -> Result<bool, TurnError> {
+        Ok(self.final_checkpoint_verified)
     }
 
     async fn verify_failure_evidence(

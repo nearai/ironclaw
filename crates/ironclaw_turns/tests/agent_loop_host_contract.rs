@@ -7,9 +7,9 @@ use ironclaw_host_api::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError,
-    DefaultTurnCoordinator, IdempotencyKey, InMemoryTurnStateStore, LoopBlocked, LoopBlockedKind,
-    LoopCompleted, LoopCompletionKind, LoopExit, LoopExitId, LoopGateRef, LoopMessageRef,
-    ReplyTargetBindingRef, RunProfileRequest, RunProfileVersion, SourceBindingRef,
+    DefaultTurnCoordinator, GateRef, IdempotencyKey, InMemoryTurnStateStore, LoopBlocked,
+    LoopBlockedKind, LoopCompleted, LoopCompletionKind, LoopExit, LoopExitId, LoopGateRef,
+    LoopMessageRef, ReplyTargetBindingRef, RunProfileRequest, RunProfileVersion, SourceBindingRef,
     SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnCoordinator,
     TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnStatus,
     events::EventCursor,
@@ -913,7 +913,8 @@ impl AgentLoopDriver for CapabilityDriver {
         .map_err(driver_error)?;
         Ok(LoopExit::Blocked(LoopBlocked {
             kind: LoopBlockedKind::Approval,
-            gate_ref,
+            gate_ref: GateRef::new(gate_ref.as_str())
+                .map_err(|reason| AgentLoopDriverError::InvalidRequest { reason })?,
             checkpoint_id,
             exit_id: LoopExitId::new("exit:capability-driver").unwrap(),
         }))

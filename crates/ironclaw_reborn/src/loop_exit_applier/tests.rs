@@ -4,9 +4,9 @@ use async_trait::async_trait;
 
 use ironclaw_host_api::{TenantId, ThreadId};
 use ironclaw_turns::{
-    AcceptedMessageRef, BlockedReason, EventCursor, LoopBlocked, LoopBlockedKind, LoopCancelled,
-    LoopCancelledReasonKind, LoopCompleted, LoopCompletionKind, LoopExit, LoopExitId,
-    LoopExitMapping, LoopFailed, LoopFailureKind, LoopGateRef, LoopMessageRef,
+    AcceptedMessageRef, BlockedReason, EventCursor, GateRef, LoopBlocked, LoopBlockedKind,
+    LoopCancelled, LoopCancelledReasonKind, LoopCompleted, LoopCompletionKind, LoopExit,
+    LoopExitId, LoopExitMapping, LoopFailed, LoopFailureKind, LoopMessageRef,
     ReplyTargetBindingRef, RunProfileId, RunProfileVersion, SourceBindingRef, TurnCheckpointId,
     TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope,
     TurnStatus,
@@ -264,9 +264,13 @@ fn completed_exit_no_checkpoint() -> LoopExit {
 }
 
 fn blocked_exit(kind: LoopBlockedKind) -> LoopExit {
+    blocked_exit_with_ref(kind, "gate:test-1")
+}
+
+fn blocked_exit_with_ref(kind: LoopBlockedKind, gate_ref: &str) -> LoopExit {
     LoopExit::Blocked(LoopBlocked {
         kind,
-        gate_ref: LoopGateRef::new("gate:test-1").expect("valid"),
+        gate_ref: GateRef::new(gate_ref).expect("valid"),
         checkpoint_id: TurnCheckpointId::new(),
         exit_id: LoopExitId::new("exit:blocked-1").expect("valid"),
     })
@@ -281,6 +285,15 @@ fn cancelled_exit() -> LoopExit {
     })
 }
 
+fn cancelled_exit_with_checkpoint() -> LoopExit {
+    LoopExit::Cancelled(LoopCancelled {
+        reason_kind: LoopCancelledReasonKind::HostCancellation,
+        checkpoint_id: Some(TurnCheckpointId::new()),
+        interrupted_message_refs: vec![],
+        exit_id: LoopExitId::new("exit:cancelled-cp-1").expect("valid"),
+    })
+}
+
 fn failed_exit() -> LoopExit {
     LoopExit::Failed(LoopFailed {
         reason_kind: LoopFailureKind::ModelError,
@@ -288,6 +301,16 @@ fn failed_exit() -> LoopExit {
         usage_summary_ref: None,
         diagnostic_ref: None,
         exit_id: LoopExitId::new("exit:failed-1").expect("valid"),
+    })
+}
+
+fn failed_exit_with_checkpoint() -> LoopExit {
+    LoopExit::Failed(LoopFailed {
+        reason_kind: LoopFailureKind::ModelError,
+        checkpoint_id: Some(TurnCheckpointId::new()),
+        usage_summary_ref: None,
+        diagnostic_ref: None,
+        exit_id: LoopExitId::new("exit:failed-cp-1").expect("valid"),
     })
 }
 
@@ -363,6 +386,41 @@ async fn completed_missing_checkpoint_when_required_violation() {
 }
 
 #[tokio::test]
+async fn completed_final_checkpoint_requires_durable_evidence() {
+    let s = setup(
+        InMemoryLoopExitEvidencePort::new().with_completion_refs_verified(true),
+        TurnStatus::RecoveryRequired,
+    );
+    let profile = test_profile(true); // require_final_checkpoint = true
+
+    s.apply(completed_exit_with_refs(), &profile)
+        .await
+        .expect("should succeed");
+
+    assert!(is_recovery_mapping(&s.captured_mapping()));
+}
+
+#[tokio::test]
+async fn completed_final_checkpoint_verified_trusted() {
+    let s = setup(
+        InMemoryLoopExitEvidencePort::new()
+            .with_completion_refs_verified(true)
+            .with_final_checkpoint_verified(true),
+        TurnStatus::Completed,
+    );
+    let profile = test_profile(true); // require_final_checkpoint = true
+
+    s.apply(completed_exit_with_refs(), &profile)
+        .await
+        .expect("should succeed");
+
+    assert_eq!(
+        s.captured_mapping(),
+        LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Completed)
+    );
+}
+
+#[tokio::test]
 async fn completed_missing_checkpoint_when_not_required_trusted() {
     let s = setup(
         InMemoryLoopExitEvidencePort::new().with_completion_refs_verified(true),
@@ -409,9 +467,12 @@ async fn blocked_process_verified_trusted() {
     );
     let profile = test_profile(false);
 
-    s.apply(blocked_exit(LoopBlockedKind::Process), &profile)
-        .await
-        .expect("should succeed");
+    s.apply(
+        blocked_exit_with_ref(LoopBlockedKind::Process, "process:test-1"),
+        &profile,
+    )
+    .await
+    .expect("should succeed");
 
     let mapping = s.captured_mapping();
     match &mapping {
@@ -420,6 +481,21 @@ async fn blocked_process_verified_trusted() {
         }
         other => panic!("expected Blocked outcome, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn blocked_process_rejects_gate_ref_even_when_evidence_verified() {
+    let s = setup(
+        InMemoryLoopExitEvidencePort::new().with_blocked_evidence_verified(true),
+        TurnStatus::RecoveryRequired,
+    );
+    let profile = test_profile(false);
+
+    s.apply(blocked_exit(LoopBlockedKind::Process), &profile)
+        .await
+        .expect("should succeed");
+
+    assert!(is_recovery_mapping(&s.captured_mapping()));
 }
 
 #[tokio::test]
@@ -471,6 +547,41 @@ async fn cancelled_missing_checkpoint_when_required_violation() {
 }
 
 #[tokio::test]
+async fn cancelled_final_checkpoint_requires_durable_evidence() {
+    let s = setup(
+        InMemoryLoopExitEvidencePort::new().with_cancellation_observed(true),
+        TurnStatus::RecoveryRequired,
+    );
+    let profile = test_profile(true);
+
+    s.apply(cancelled_exit_with_checkpoint(), &profile)
+        .await
+        .expect("should succeed");
+
+    assert!(is_recovery_mapping(&s.captured_mapping()));
+}
+
+#[tokio::test]
+async fn cancelled_final_checkpoint_verified_trusted() {
+    let s = setup(
+        InMemoryLoopExitEvidencePort::new()
+            .with_cancellation_observed(true)
+            .with_final_checkpoint_verified(true),
+        TurnStatus::Cancelled,
+    );
+    let profile = test_profile(true);
+
+    s.apply(cancelled_exit_with_checkpoint(), &profile)
+        .await
+        .expect("should succeed");
+
+    assert_eq!(
+        s.captured_mapping(),
+        LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Cancelled)
+    );
+}
+
+#[tokio::test]
 async fn cancelled_not_observed_violation() {
     let s = setup(
         InMemoryLoopExitEvidencePort::new().with_cancellation_observed(false),
@@ -519,6 +630,44 @@ async fn failed_unverified_violation() {
         .expect("should succeed");
 
     assert!(is_recovery_mapping(&s.captured_mapping()));
+}
+
+#[tokio::test]
+async fn failed_final_checkpoint_requires_durable_evidence() {
+    let s = setup(
+        InMemoryLoopExitEvidencePort::new().with_failure_evidence_verified(true),
+        TurnStatus::RecoveryRequired,
+    );
+    let profile = test_profile(true);
+
+    s.apply(failed_exit_with_checkpoint(), &profile)
+        .await
+        .expect("should succeed");
+
+    assert!(is_recovery_mapping(&s.captured_mapping()));
+}
+
+#[tokio::test]
+async fn failed_final_checkpoint_verified_trusted() {
+    let s = setup(
+        InMemoryLoopExitEvidencePort::new()
+            .with_failure_evidence_verified(true)
+            .with_final_checkpoint_verified(true),
+        TurnStatus::Failed,
+    );
+    let profile = test_profile(true);
+
+    s.apply(failed_exit_with_checkpoint(), &profile)
+        .await
+        .expect("should succeed");
+
+    let mapping = s.captured_mapping();
+    match &mapping {
+        LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Failed { failure }) => {
+            assert_eq!(failure.category(), "model_error");
+        }
+        other => panic!("expected Failed outcome, got {other:?}"),
+    }
 }
 
 #[tokio::test]

@@ -607,7 +607,7 @@ async fn worker_records_recovery_when_exit_application_fails() {
 }
 
 #[tokio::test]
-async fn worker_cancellation_waits_for_inflight_driver_before_shutdown() {
+async fn worker_cancellation_preempts_inflight_driver_and_records_recovery() {
     let desc = test_descriptor();
     let started = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
@@ -643,17 +643,27 @@ async fn worker_cancellation_waits_for_inflight_driver_before_shutdown() {
     wake_sender.wake();
     started.notified().await;
     cancel.cancel();
-    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let finished = tokio::time::timeout(Duration::from_millis(200), async {
+        while !handle.is_finished() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_ok();
+    if !finished {
+        release.notify_one();
+    }
     assert!(
-        !handle.is_finished(),
-        "worker must not preempt an in-flight driver on cancellation"
+        finished,
+        "worker should stop active driver after cancellation"
     );
 
-    release.notify_one();
     handle.await.expect("worker task should complete");
 
     let calls = port.calls();
-    assert!(calls.contains(&TransitionCall::ApplyValidatedLoopExit));
+    assert!(calls.contains(&TransitionCall::RecordRecoveryRequired));
+    assert!(!calls.contains(&TransitionCall::ApplyValidatedLoopExit));
     let claim_count = calls
         .iter()
         .filter(|call| **call == TransitionCall::Claim)
@@ -962,6 +972,85 @@ async fn heartbeat_runs_during_driver_execution() {
         heartbeat_count >= 2,
         "should have sent multiple heartbeats, got {heartbeat_count}"
     );
+}
+
+#[tokio::test]
+async fn heartbeat_failure_records_recovery_without_applying_exit() {
+    let desc = test_descriptor();
+    let driver =
+        Arc::new(MockDriver::completing(desc.clone()).with_delay(Duration::from_millis(300)));
+    let registry = Arc::new(setup_registry(driver));
+    let claimed = make_claimed_run(&desc, test_scope(), TurnStatus::Queued);
+    let port = Arc::new(MockTransitionPort::new().with_claim_result(Ok(Some(claimed))));
+    {
+        let mut heartbeat_result = port.heartbeat_result.lock().expect("lock");
+        *heartbeat_result = Err(TurnError::LeaseMismatch);
+    }
+
+    let (_ws, wake_receiver) = TurnRunnerWakeReceiver::new();
+    let config = TurnRunnerWorkerConfig {
+        heartbeat_interval: Duration::from_millis(50),
+        poll_interval: Duration::from_millis(50),
+        scope_filter: None,
+    };
+
+    let worker = TurnRunnerWorker::new(
+        config,
+        port.clone(),
+        registry,
+        Arc::new(MockHostFactory),
+        wake_receiver,
+        make_applier(port.clone()),
+    );
+
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+    let handle = tokio::spawn(async move { worker.run(cancel_clone).await });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    cancel.cancel();
+    handle.await.expect("worker task should complete");
+
+    let calls = port.calls();
+    assert!(calls.contains(&TransitionCall::Heartbeat));
+    assert!(calls.contains(&TransitionCall::RecordRecoveryRequired));
+    assert!(!calls.contains(&TransitionCall::ApplyValidatedLoopExit));
+}
+
+#[tokio::test]
+async fn zero_duration_config_does_not_panic() {
+    let desc = test_descriptor();
+    let driver = Arc::new(MockDriver::completing(desc.clone()));
+    let registry = Arc::new(setup_registry(driver));
+    let claimed = make_claimed_run(&desc, test_scope(), TurnStatus::Queued);
+    let port = Arc::new(MockTransitionPort::new().with_claim_result(Ok(Some(claimed))));
+
+    let (_ws, wake_receiver) = TurnRunnerWakeReceiver::new();
+    let config = TurnRunnerWorkerConfig {
+        heartbeat_interval: Duration::ZERO,
+        poll_interval: Duration::ZERO,
+        scope_filter: None,
+    };
+
+    let worker = TurnRunnerWorker::new(
+        config,
+        port.clone(),
+        registry,
+        Arc::new(MockHostFactory),
+        wake_receiver,
+        make_applier(port.clone()),
+    );
+
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+    let handle = tokio::spawn(async move { worker.run(cancel_clone).await });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    cancel.cancel();
+    let join = tokio::time::timeout(Duration::from_secs(1), handle)
+        .await
+        .expect("worker should not hang");
+    join.expect("worker should not panic");
 }
 
 #[tokio::test]

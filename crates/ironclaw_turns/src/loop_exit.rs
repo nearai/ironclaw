@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize, de};
 use crate::{
     BlockedReason, GateRef, LoopDiagnosticRef, LoopExitId, LoopGateRef, LoopMessageRef,
     LoopResultRef, LoopUsageSummaryRef, SanitizedFailure, TurnCheckpointId,
-    runner::TurnRunnerOutcome,
+    run_profile::LoopProcessRef, runner::TurnRunnerOutcome,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,64 +31,9 @@ impl LoopExit {
         let exit_id = self.exit_id().clone();
         match self {
             Self::Completed(exit) => validate_completed_exit(exit_id, exit, policy),
-            Self::Blocked(exit) if policy.blocked_evidence_verified => {
-                match exit.kind.to_blocked_reason(exit.gate_ref) {
-                    Ok(reason) => LoopExitValidationDecision::trusted(
-                        exit_id,
-                        TurnRunnerOutcome::Blocked {
-                            checkpoint_id: exit.checkpoint_id,
-                            reason,
-                        },
-                    ),
-                    Err(()) => invalid_exit_decision(
-                        exit_id,
-                        LoopExitViolationKind::UnverifiedBlockedEvidence,
-                        policy.invalid_handling,
-                    ),
-                }
-            }
-            Self::Blocked(_exit) => invalid_exit_decision(
-                exit_id,
-                LoopExitViolationKind::UnverifiedBlockedEvidence,
-                policy.invalid_handling,
-            ),
-            Self::Cancelled(_exit) if !policy.host_cancellation_observed => invalid_exit_decision(
-                exit_id,
-                LoopExitViolationKind::CancellationNotObserved,
-                policy.invalid_handling,
-            ),
-            Self::Cancelled(exit)
-                if policy.require_final_checkpoint && exit.checkpoint_id.is_none() =>
-            {
-                invalid_exit_decision(
-                    exit_id,
-                    LoopExitViolationKind::MissingFinalCheckpoint,
-                    policy.invalid_handling,
-                )
-            }
-            Self::Cancelled(_exit) => {
-                LoopExitValidationDecision::trusted(exit_id, TurnRunnerOutcome::Cancelled)
-            }
-            Self::Failed(_exit) if !policy.failure_evidence_verified => invalid_exit_decision(
-                exit_id,
-                LoopExitViolationKind::UnverifiedFailureEvidence,
-                policy.invalid_handling,
-            ),
-            Self::Failed(exit)
-                if policy.require_final_checkpoint && exit.checkpoint_id.is_none() =>
-            {
-                invalid_exit_decision(
-                    exit_id,
-                    LoopExitViolationKind::MissingFinalCheckpoint,
-                    policy.invalid_handling,
-                )
-            }
-            Self::Failed(exit) => LoopExitValidationDecision::trusted(
-                exit_id,
-                TurnRunnerOutcome::Failed {
-                    failure: exit.reason_kind.to_sanitized_failure(),
-                },
-            ),
+            Self::Blocked(exit) => validate_blocked_exit(exit_id, exit, policy),
+            Self::Cancelled(exit) => validate_cancelled_exit(exit_id, exit, policy),
+            Self::Failed(exit) => validate_failed_exit(exit_id, exit, policy),
         }
     }
 
@@ -144,7 +89,9 @@ pub enum LoopCompletionKind {
 #[serde(deny_unknown_fields)]
 pub struct LoopBlocked {
     pub kind: LoopBlockedKind,
-    pub gate_ref: LoopGateRef,
+    /// Durable suspension reference. Approval/auth/resource blocks must use a
+    /// `gate:` loop ref; process blocks must use a `process:` loop ref.
+    pub gate_ref: GateRef,
     pub checkpoint_id: TurnCheckpointId,
     pub exit_id: LoopExitId,
 }
@@ -160,15 +107,38 @@ pub enum LoopBlockedKind {
 }
 
 impl LoopBlockedKind {
-    fn to_blocked_reason(self, gate_ref: LoopGateRef) -> Result<BlockedReason, ()> {
-        let gate_ref = GateRef::new(gate_ref.as_str()).map_err(|_| ())?;
-        Ok(match self {
-            Self::Approval => BlockedReason::Approval { gate_ref },
-            Self::Auth => BlockedReason::Auth { gate_ref },
-            Self::Resource => BlockedReason::Resource { gate_ref },
-            Self::Process => BlockedReason::Process { gate_ref },
-        })
+    fn to_blocked_reason(self, gate_ref: GateRef) -> Result<BlockedReason, ()> {
+        match self {
+            Self::Approval => {
+                require_loop_gate_ref(&gate_ref)?;
+                Ok(BlockedReason::Approval { gate_ref })
+            }
+            Self::Auth => {
+                require_loop_gate_ref(&gate_ref)?;
+                Ok(BlockedReason::Auth { gate_ref })
+            }
+            Self::Resource => {
+                require_loop_gate_ref(&gate_ref)?;
+                Ok(BlockedReason::Resource { gate_ref })
+            }
+            Self::Process => {
+                require_loop_process_ref(&gate_ref)?;
+                Ok(BlockedReason::Process { gate_ref })
+            }
+        }
     }
+}
+
+fn require_loop_gate_ref(gate_ref: &GateRef) -> Result<(), ()> {
+    LoopGateRef::new(gate_ref.as_str())
+        .map(|_| ())
+        .map_err(|_| ())
+}
+
+fn require_loop_process_ref(gate_ref: &GateRef) -> Result<(), ()> {
+    LoopProcessRef::new(gate_ref.as_str())
+        .map(|_| ())
+        .map_err(|_| ())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -239,6 +209,8 @@ pub enum LoopExitInvalidHandling {
 #[serde(deny_unknown_fields)]
 pub struct LoopExitValidationPolicy {
     pub require_final_checkpoint: bool,
+    #[serde(default)]
+    pub final_checkpoint_verified: bool,
     pub host_cancellation_observed: bool,
     pub invalid_handling: LoopExitInvalidHandling,
     pub completion_refs_verified: bool,
@@ -250,6 +222,7 @@ impl Default for LoopExitValidationPolicy {
     fn default() -> Self {
         Self {
             require_final_checkpoint: false,
+            final_checkpoint_verified: false,
             host_cancellation_observed: false,
             invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
             completion_refs_verified: false,
@@ -312,6 +285,7 @@ pub enum LoopExitViolationKind {
     MissingCompletionReference,
     UnverifiedCompletionReference,
     MissingFinalCheckpoint,
+    UnverifiedFinalCheckpoint,
     UnverifiedBlockedEvidence,
     UnverifiedFailureEvidence,
     CancellationNotObserved,
@@ -323,6 +297,7 @@ impl LoopExitViolationKind {
             Self::MissingCompletionReference => "missing_completion_reference",
             Self::UnverifiedCompletionReference => "unverified_completion_reference",
             Self::MissingFinalCheckpoint => "missing_final_checkpoint",
+            Self::UnverifiedFinalCheckpoint => "unverified_final_checkpoint",
             Self::UnverifiedBlockedEvidence => "unverified_blocked_evidence",
             Self::UnverifiedFailureEvidence => "unverified_failure_evidence",
             Self::CancellationNotObserved => "cancellation_not_observed",
@@ -335,6 +310,7 @@ impl LoopExitViolationKind {
             Self::MissingCompletionReference
             | Self::UnverifiedCompletionReference
             | Self::MissingFinalCheckpoint
+            | Self::UnverifiedFinalCheckpoint
             | Self::UnverifiedBlockedEvidence
             | Self::UnverifiedFailureEvidence => "driver_protocol_violation",
         }
@@ -387,15 +363,116 @@ fn validate_completed_exit(
         );
     }
 
-    if policy.require_final_checkpoint && exit.final_checkpoint_id.is_none() {
+    if let Some(decision) =
+        final_checkpoint_violation(&exit_id, exit.final_checkpoint_id.is_some(), policy)
+    {
+        return decision;
+    }
+
+    LoopExitValidationDecision::trusted(exit_id, TurnRunnerOutcome::Completed)
+}
+
+fn validate_blocked_exit(
+    exit_id: LoopExitId,
+    exit: LoopBlocked,
+    policy: LoopExitValidationPolicy,
+) -> LoopExitValidationDecision {
+    if !policy.blocked_evidence_verified {
         return invalid_exit_decision(
             exit_id,
-            LoopExitViolationKind::MissingFinalCheckpoint,
+            LoopExitViolationKind::UnverifiedBlockedEvidence,
             policy.invalid_handling,
         );
     }
 
-    LoopExitValidationDecision::trusted(exit_id, TurnRunnerOutcome::Completed)
+    match exit.kind.to_blocked_reason(exit.gate_ref) {
+        Ok(reason) => LoopExitValidationDecision::trusted(
+            exit_id,
+            TurnRunnerOutcome::Blocked {
+                checkpoint_id: exit.checkpoint_id,
+                reason,
+            },
+        ),
+        Err(()) => invalid_exit_decision(
+            exit_id,
+            LoopExitViolationKind::UnverifiedBlockedEvidence,
+            policy.invalid_handling,
+        ),
+    }
+}
+
+fn validate_cancelled_exit(
+    exit_id: LoopExitId,
+    exit: LoopCancelled,
+    policy: LoopExitValidationPolicy,
+) -> LoopExitValidationDecision {
+    if !policy.host_cancellation_observed {
+        return invalid_exit_decision(
+            exit_id,
+            LoopExitViolationKind::CancellationNotObserved,
+            policy.invalid_handling,
+        );
+    }
+
+    if let Some(decision) =
+        final_checkpoint_violation(&exit_id, exit.checkpoint_id.is_some(), policy)
+    {
+        return decision;
+    }
+
+    LoopExitValidationDecision::trusted(exit_id, TurnRunnerOutcome::Cancelled)
+}
+
+fn validate_failed_exit(
+    exit_id: LoopExitId,
+    exit: LoopFailed,
+    policy: LoopExitValidationPolicy,
+) -> LoopExitValidationDecision {
+    if !policy.failure_evidence_verified {
+        return invalid_exit_decision(
+            exit_id,
+            LoopExitViolationKind::UnverifiedFailureEvidence,
+            policy.invalid_handling,
+        );
+    }
+
+    if let Some(decision) =
+        final_checkpoint_violation(&exit_id, exit.checkpoint_id.is_some(), policy)
+    {
+        return decision;
+    }
+
+    LoopExitValidationDecision::trusted(
+        exit_id,
+        TurnRunnerOutcome::Failed {
+            failure: exit.reason_kind.to_sanitized_failure(),
+        },
+    )
+}
+
+fn final_checkpoint_violation(
+    exit_id: &LoopExitId,
+    checkpoint_present: bool,
+    policy: LoopExitValidationPolicy,
+) -> Option<LoopExitValidationDecision> {
+    if !policy.require_final_checkpoint {
+        return None;
+    }
+    if !checkpoint_present {
+        return Some(invalid_exit_decision(
+            exit_id.clone(),
+            LoopExitViolationKind::MissingFinalCheckpoint,
+            policy.invalid_handling,
+        ));
+    }
+    if !policy.final_checkpoint_verified {
+        return Some(invalid_exit_decision(
+            exit_id.clone(),
+            LoopExitViolationKind::UnverifiedFinalCheckpoint,
+            policy.invalid_handling,
+        ));
+    }
+    None
 }
 
 fn invalid_exit_decision(

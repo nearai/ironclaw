@@ -16,6 +16,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+const MIN_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(1);
+const MIN_POLL_INTERVAL: Duration = Duration::from_millis(1);
+
 use async_trait::async_trait;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -76,6 +79,18 @@ impl Default for TurnRunnerWorkerConfig {
             poll_interval: Duration::from_secs(5),
             scope_filter: None,
         }
+    }
+}
+
+impl TurnRunnerWorkerConfig {
+    fn normalized(mut self) -> Self {
+        if self.heartbeat_interval.is_zero() {
+            self.heartbeat_interval = MIN_HEARTBEAT_INTERVAL;
+        }
+        if self.poll_interval.is_zero() {
+            self.poll_interval = MIN_POLL_INTERVAL;
+        }
+        self
     }
 }
 
@@ -198,6 +213,7 @@ impl TurnRunnerWorker {
         loop_exit_applier: Arc<LoopExitApplier>,
     ) -> Self {
         let runner_id = TurnRunnerId::new();
+        let config = config.normalized();
         debug!(runner_id = ?runner_id, "turn runner worker created");
         Self {
             runner_id,
@@ -224,9 +240,8 @@ impl TurnRunnerWorker {
     /// 4. Run the claimed run to `LoopExit` / application
     /// 5. Repeat
     ///
-    /// Cancellation stops future claim attempts. It does not preempt an in-flight
-    /// driver invocation; the claimed run is allowed to return a `LoopExit`,
-    /// then the worker applies that exit before shutting down.
+    /// Cancellation stops future claim attempts and preempts an in-flight
+    /// driver invocation by recording `RecoveryRequired` for the claimed run.
     pub async fn run(&self, cancel: CancellationToken) {
         debug!(runner_id = ?self.runner_id, "turn runner worker started");
 
@@ -244,7 +259,7 @@ impl TurnRunnerWorker {
             }
 
             while !cancel.is_cancelled() {
-                match self.try_claim_and_run().await {
+                match self.try_claim_and_run(cancel.clone()).await {
                     Ok(true) => continue,
                     Ok(false) => break,
                     Err(err) => {
@@ -267,7 +282,7 @@ impl TurnRunnerWorker {
     /// Returns `Ok(true)` when a run was claimed and executed, and `Ok(false)`
     /// when the queue is empty. The main loop uses this to drain available work
     /// after each wake/poll tick without waiting for another interval.
-    async fn try_claim_and_run(&self) -> Result<bool, TurnRunnerError> {
+    async fn try_claim_and_run(&self, cancel: CancellationToken) -> Result<bool, TurnRunnerError> {
         let lease_token = TurnLeaseToken::new();
         let request = ClaimRunRequest {
             runner_id: self.runner_id,
@@ -296,12 +311,12 @@ impl TurnRunnerWorker {
             "claimed turn run"
         );
 
-        self.execute_claimed_run(claimed).await;
+        self.execute_claimed_run(claimed, cancel).await;
         Ok(true)
     }
 
     /// Execute a claimed run: heartbeat, invoke driver, apply exit.
-    async fn execute_claimed_run(&self, claimed: ClaimedTurnRun) {
+    async fn execute_claimed_run(&self, claimed: ClaimedTurnRun, cancel: CancellationToken) {
         let run_id = claimed.state.run_id;
         let runner_id = claimed.runner_id;
         let lease_token = claimed.lease_token;
@@ -326,14 +341,20 @@ impl TurnRunnerWorker {
         // can outlive the claimed run.
         let exit_result = tokio::select! {
             result = &mut driver => result,
-            () = &mut heartbeat => {
-                warn!(
-                    runner_id = ?runner_id,
-                    run_id = ?run_id,
-                    "heartbeat loop stopped before driver returned"
-                );
-                Err(DriverInvocationError::HeartbeatStopped)
+            heartbeat_result = &mut heartbeat => {
+                match heartbeat_result {
+                    Ok(()) => {
+                        warn!(
+                            runner_id = ?runner_id,
+                            run_id = ?run_id,
+                            "heartbeat loop stopped before driver returned"
+                        );
+                        Err(DriverInvocationError::HeartbeatStopped)
+                    }
+                    Err(err) => Err(DriverInvocationError::HeartbeatFailed(err)),
+                }
             }
+            () = cancel.cancelled() => Err(DriverInvocationError::WorkerCancelled),
         };
         heartbeat_cancel.cancel();
 
@@ -509,6 +530,8 @@ impl TurnRunnerWorker {
                 "driver_failed"
             }
             DriverInvocationError::HeartbeatStopped => "heartbeat_stopped",
+            DriverInvocationError::HeartbeatFailed(_) => "heartbeat_failed",
+            DriverInvocationError::WorkerCancelled => "worker_cancelled",
         };
 
         let Some(failure) = sanitized_failure(category) else {
@@ -540,7 +563,7 @@ async fn heartbeat_loop(
     lease_token: TurnLeaseToken,
     interval: Duration,
     cancel: CancellationToken,
-) {
+) -> Result<(), TurnError> {
     let mut tick = tokio::time::interval(interval);
     // Skip the first immediate tick
     tick.tick().await;
@@ -553,7 +576,7 @@ async fn heartbeat_loop(
                     run_id = ?run_id,
                     "heartbeat loop stopped"
                 );
-                break;
+                return Ok(());
             }
             _ = tick.tick() => {
                 let request = HeartbeatRequest {
@@ -576,10 +599,7 @@ async fn heartbeat_loop(
                             error = %err,
                             "heartbeat failed"
                         );
-                        // Heartbeat failure is not fatal — the driver invocation
-                        // continues. If the lease actually expires, the store will
-                        // transition to RecoveryRequired on the next claim/recovery
-                        // sweep.
+                        return Err(err);
                     }
                 }
             }
@@ -608,6 +628,8 @@ enum DriverInvocationError {
     HostCreationFailed { reason: String },
     DriverError(AgentLoopDriverError),
     HeartbeatStopped,
+    HeartbeatFailed(TurnError),
+    WorkerCancelled,
 }
 
 impl std::fmt::Display for DriverInvocationError {
@@ -617,6 +639,10 @@ impl std::fmt::Display for DriverInvocationError {
             Self::HostCreationFailed { reason } => write!(f, "host creation failed: {reason}"),
             Self::DriverError(err) => write!(f, "driver error: {err}"),
             Self::HeartbeatStopped => write!(f, "heartbeat stopped before driver returned"),
+            Self::HeartbeatFailed(err) => {
+                write!(f, "heartbeat failed before driver returned: {err}")
+            }
+            Self::WorkerCancelled => write!(f, "worker cancelled before driver returned"),
         }
     }
 }

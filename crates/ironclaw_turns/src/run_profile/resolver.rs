@@ -415,6 +415,10 @@ fn fingerprint_for(
             .max_checkpoint_bytes
             .to_string(),
     );
+    update_bool(
+        definition.checkpoint_policy.require_final_checkpoint,
+        &mut update,
+    );
     update(resource_budget_policy.tier.as_str());
     update(&resource_budget_policy.max_model_calls.to_string());
     update(
@@ -452,4 +456,23 @@ fn fingerprint_for(
         update(&source.summary);
     }
     RunProfileFingerprint::from_trusted_string(format!("fp:{hash:016x}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fingerprint_changes_when_final_checkpoint_requirement_changes() {
+        let request = RunProfileResolutionRequest::interactive_default();
+        let mut definition = interactive_profile();
+        let provenance = provenance_for(&definition, &request);
+        let budget = definition.resource_budget_policy.clone();
+        let without_requirement = fingerprint_for(&definition, &budget, &provenance);
+
+        definition.checkpoint_policy.require_final_checkpoint = true;
+        let with_requirement = fingerprint_for(&definition, &budget, &provenance);
+
+        assert_ne!(without_requirement, with_requirement);
+    }
 }

@@ -19,6 +19,7 @@ fn completed_ask_user_exit_maps_to_trusted_completed_outcome_without_final_check
     })
     .validate(LoopExitValidationPolicy {
         require_final_checkpoint: false,
+        final_checkpoint_verified: false,
         host_cancellation_observed: false,
         invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: true,
@@ -44,6 +45,7 @@ fn completed_exit_without_durable_refs_maps_to_protocol_failure_or_recovery() {
 
     let safe_decision = exit.clone().validate(LoopExitValidationPolicy {
         require_final_checkpoint: false,
+        final_checkpoint_verified: false,
         host_cancellation_observed: false,
         invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: true,
@@ -64,6 +66,7 @@ fn completed_exit_without_durable_refs_maps_to_protocol_failure_or_recovery() {
 
     let uncertain_decision = exit.validate(LoopExitValidationPolicy {
         require_final_checkpoint: false,
+        final_checkpoint_verified: false,
         host_cancellation_observed: false,
         invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
         completion_refs_verified: true,
@@ -92,6 +95,7 @@ fn completed_exit_requires_host_verified_completion_refs_before_trusted_mapping(
 
     let decision = exit.validate(LoopExitValidationPolicy {
         require_final_checkpoint: false,
+        final_checkpoint_verified: false,
         host_cancellation_observed: false,
         invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
         completion_refs_verified: false,
@@ -121,6 +125,7 @@ fn final_checkpoint_policy_rejects_terminal_exit_without_checkpoint() {
     })
     .validate(LoopExitValidationPolicy {
         require_final_checkpoint: true,
+        final_checkpoint_verified: true,
         host_cancellation_observed: false,
         invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: true,
@@ -146,6 +151,7 @@ fn final_checkpoint_policy_rejects_cancelled_and_failed_terminal_exits_without_c
     let cancelled = LoopExit::cancelled_for_observed_interrupt(exit_id("exit:cancelled-no-final"))
         .validate(LoopExitValidationPolicy {
             require_final_checkpoint: true,
+            final_checkpoint_verified: true,
             host_cancellation_observed: true,
             invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
             completion_refs_verified: false,
@@ -164,6 +170,7 @@ fn final_checkpoint_policy_rejects_cancelled_and_failed_terminal_exits_without_c
     let failed = LoopExit::failed(LoopFailureKind::DriverBug, exit_id("exit:failed-no-final"))
         .validate(LoopExitValidationPolicy {
             require_final_checkpoint: true,
+            final_checkpoint_verified: true,
             host_cancellation_observed: false,
             invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
             completion_refs_verified: false,
@@ -187,12 +194,13 @@ fn blocked_exit_maps_to_block_run_outcome_with_verified_checkpoint_and_gate_ref(
     let gate_ref = GateRef::new(loop_gate_ref.as_str()).unwrap();
     let decision = LoopExit::Blocked(LoopBlocked {
         kind: LoopBlockedKind::Approval,
-        gate_ref: loop_gate_ref,
+        gate_ref: gate_ref.clone(),
         checkpoint_id,
         exit_id: exit_id("exit:blocked"),
     })
     .validate(LoopExitValidationPolicy {
         require_final_checkpoint: false,
+        final_checkpoint_verified: false,
         host_cancellation_observed: false,
         invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
         completion_refs_verified: false,
@@ -215,12 +223,13 @@ fn blocked_exit_maps_to_block_run_outcome_with_verified_checkpoint_and_gate_ref(
 fn blocked_exit_requires_host_verified_gate_and_checkpoint_before_trusted_mapping() {
     let decision = LoopExit::Blocked(LoopBlocked {
         kind: LoopBlockedKind::Approval,
-        gate_ref: loop_gate_ref("gate:approval-gate"),
+        gate_ref: GateRef::new("gate:approval-gate").unwrap(),
         checkpoint_id: TurnCheckpointId::new(),
         exit_id: exit_id("exit:unverified-blocked"),
     })
     .validate(LoopExitValidationPolicy {
         require_final_checkpoint: false,
+        final_checkpoint_verified: false,
         host_cancellation_observed: false,
         invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
         completion_refs_verified: false,
@@ -244,6 +253,7 @@ fn cancelled_exit_requires_observed_host_cancellation() {
 
     let rejected = exit.clone().validate(LoopExitValidationPolicy {
         require_final_checkpoint: false,
+        final_checkpoint_verified: false,
         host_cancellation_observed: false,
         invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: false,
@@ -264,6 +274,7 @@ fn cancelled_exit_requires_observed_host_cancellation() {
 
     let accepted = exit.validate(LoopExitValidationPolicy {
         require_final_checkpoint: false,
+        final_checkpoint_verified: false,
         host_cancellation_observed: true,
         invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: false,
