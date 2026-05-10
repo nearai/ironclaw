@@ -15,8 +15,9 @@ use ironclaw_turns::{
     events::EventCursor,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
-        CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDescriptorView,
-        CapabilityInputRef, CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion,
+        CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
+        CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityInputRef,
+        CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion,
         FinalizeAssistantMessage, HostManagedLoopModelPort, HostManagedLoopPromptPort,
         InMemoryLoopHostMilestoneSink, LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort,
         LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle, LoopContextMessage,
@@ -760,6 +761,52 @@ fn loop_host_refs_validate_when_deserialized() {
         "driver_note": {"kind": "planning", "safe_summary": "raw\nprovider error"}
     });
     assert!(serde_json::from_value::<LoopProgressEvent>(unsafe_note).is_err());
+}
+
+#[test]
+fn capability_denied_reason_kind_is_typed_and_wire_compatible() {
+    let denied = CapabilityDenied {
+        reason_kind: CapabilityDeniedReasonKind::EmptySurface,
+        safe_summary: "no capabilities are available to this loop".to_string(),
+    };
+
+    let wire = serde_json::to_string(&denied).unwrap();
+    assert!(wire.contains(r#""reason_kind":"empty_surface""#));
+
+    let legacy = serde_json::json!({
+        "reason_kind": "empty_surface",
+        "safe_summary": "no capabilities are available to this loop"
+    });
+    let decoded = serde_json::from_value::<CapabilityDenied>(legacy).unwrap();
+    assert_eq!(
+        decoded.reason_kind,
+        CapabilityDeniedReasonKind::EmptySurface
+    );
+    assert_eq!(decoded.reason_kind.as_str(), "empty_surface");
+    assert_eq!(decoded.reason_kind.to_string(), "empty_surface");
+
+    let historical_unknown = serde_json::json!({
+        "reason_kind": "host_policy_denied",
+        "safe_summary": "capability denied by host policy"
+    });
+    let decoded_unknown = serde_json::from_value::<CapabilityDenied>(historical_unknown).unwrap();
+    assert_eq!(decoded_unknown.reason_kind.as_str(), "host_policy_denied");
+    assert_eq!(
+        decoded_unknown.reason_kind.to_string(),
+        "host_policy_denied"
+    );
+    assert!(matches!(
+        decoded_unknown.reason_kind,
+        CapabilityDeniedReasonKind::Unknown(_)
+    ));
+
+    let unknown_wire = serde_json::to_string(&decoded_unknown).unwrap();
+    assert!(unknown_wire.contains(r#""reason_kind":"host_policy_denied""#));
+
+    let constructed_unknown = CapabilityDeniedReasonKind::unknown("host_policy_denied").unwrap();
+    assert_eq!(constructed_unknown.as_str(), "host_policy_denied");
+    assert!(CapabilityDeniedReasonKind::unknown("api_key").is_err());
+    assert!(CapabilityDeniedReasonKind::unknown("secret_policy").is_err());
 }
 
 #[tokio::test]

@@ -19,16 +19,17 @@ use ironclaw_threads::{
     UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
-    LoopMessageRef,
+    LoopMessageRef, TurnId, TurnRunId,
     run_profile::ModelProfileId,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply, BeginAssistantDraft,
-        CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied, CapabilityInvocation,
-        CapabilityOutcome, CapabilitySurfaceVersion, FinalizeAssistantMessage, LoopContextBundle,
-        LoopContextMessage, LoopContextPort, LoopContextRequest, LoopHostMilestoneEmitter,
-        LoopHostMilestoneSink, LoopInputCursor, LoopModelMessage, LoopModelPort, LoopModelRequest,
-        LoopModelResponse, LoopRunContext, LoopRunInfoPort, LoopTranscriptPort, ModelStreamChunk,
-        ParentLoopOutput, UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
+        CapabilityDeniedReasonKind, CapabilityInvocation, CapabilityOutcome,
+        CapabilitySurfaceVersion, FinalizeAssistantMessage, LoopContextBundle, LoopContextMessage,
+        LoopContextPort, LoopContextRequest, LoopHostMilestoneEmitter, LoopHostMilestoneSink,
+        LoopInputCursor, LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse,
+        LoopRunContext, LoopRunInfoPort, LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput,
+        UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -399,7 +400,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for EmptyLoopCapabilityPort
             .into_iter()
             .map(|_| {
                 CapabilityOutcome::Denied(CapabilityDenied {
-                    reason_kind: "empty_surface".to_string(),
+                    reason_kind: CapabilityDeniedReasonKind::EmptySurface,
                     safe_summary: "no capabilities are available to this loop".to_string(),
                 })
             })
@@ -504,8 +505,8 @@ where
                 model_profile_id: model_profile_id.clone(),
                 messages: resolved_messages,
                 surface_version: request.surface_version,
-                run_id: self.run_context.run_id.to_string(),
-                turn_id: self.run_context.turn_id.to_string(),
+                run_id: self.run_context.run_id,
+                turn_id: self.run_context.turn_id,
             })
             .await
             .map_err(model_gateway_error)?;
@@ -644,8 +645,8 @@ pub struct HostManagedModelRequest {
     pub model_profile_id: ModelProfileId,
     pub messages: Vec<HostManagedModelMessage>,
     pub surface_version: Option<CapabilitySurfaceVersion>,
-    pub run_id: String,
-    pub turn_id: String,
+    pub run_id: TurnRunId,
+    pub turn_id: TurnId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

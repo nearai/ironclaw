@@ -787,8 +787,68 @@ pub struct ProcessHandleSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityDenied {
-    pub reason_kind: String,
+    pub reason_kind: CapabilityDeniedReasonKind,
     pub safe_summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CapabilityDeniedReasonKind {
+    EmptySurface,
+    Unknown(CapabilityDeniedReasonKindValue),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CapabilityDeniedReasonKindValue(String);
+
+impl CapabilityDeniedReasonKindValue {
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        validate_loop_safe_identifier(value.into(), "capability denied reason kind", 128).map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl CapabilityDeniedReasonKind {
+    pub fn unknown(value: impl Into<String>) -> Result<Self, String> {
+        CapabilityDeniedReasonKindValue::new(value).map(Self::Unknown)
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::EmptySurface => "empty_surface",
+            Self::Unknown(value) => value.as_str(),
+        }
+    }
+}
+
+impl std::fmt::Display for CapabilityDeniedReasonKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for CapabilityDeniedReasonKind {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for CapabilityDeniedReasonKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        match value.as_str() {
+            "empty_surface" => Ok(Self::EmptySurface),
+            _ => Self::unknown(value).map_err(serde::de::Error::custom),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

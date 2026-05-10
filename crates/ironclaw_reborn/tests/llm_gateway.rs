@@ -34,10 +34,11 @@ async fn gateway_calls_llm_provider_for_allowed_model_profile() {
         .allow_model_profile(interactive_model(), Some("host-selected-model".to_string()));
     let gateway = LlmProviderModelGateway::new(provider.clone(), policy);
 
-    let response = gateway
-        .stream_model(model_request(interactive_model()))
-        .await
-        .unwrap();
+    let request = model_request(interactive_model());
+    let expected_run_id = request.run_id.to_string();
+    let expected_turn_id = request.turn_id.to_string();
+
+    let response = gateway.stream_model(request).await.unwrap();
 
     assert_eq!(
         response.safe_text_deltas,
@@ -52,6 +53,14 @@ async fn gateway_calls_llm_provider_for_allowed_model_profile() {
             .get("model_profile_id")
             .map(String::as_str),
         Some("interactive_model")
+    );
+    assert_eq!(
+        requests[0].metadata.get("run_id").map(String::as_str),
+        Some(expected_run_id.as_str())
+    );
+    assert_eq!(
+        requests[0].metadata.get("turn_id").map(String::as_str),
+        Some(expected_turn_id.as_str())
     );
     assert_eq!(requests[0].messages.len(), 2);
     assert_eq!(requests[0].messages[0].content, "system instructions");
@@ -401,6 +410,54 @@ fn interactive_model() -> ModelProfileId {
     ModelProfileId::new("interactive_model").unwrap()
 }
 
+#[test]
+fn host_managed_model_request_accepts_legacy_string_identity_wire_shape() {
+    let wire = serde_json::json!({
+        "model_profile_id": "interactive_model",
+        "messages": [
+            {
+                "role": "system",
+                "content": "system instructions",
+                "content_ref": "msg:11111111-1111-1111-1111-111111111111"
+            }
+        ],
+        "surface_version": null,
+        "run_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        "turn_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    });
+
+    let decoded = serde_json::from_value::<HostManagedModelRequest>(wire).unwrap();
+    assert_eq!(
+        decoded.model_profile_id,
+        ModelProfileId::new("interactive_model").unwrap()
+    );
+    assert_eq!(
+        decoded.run_id.to_string(),
+        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    );
+    assert_eq!(
+        decoded.turn_id.to_string(),
+        "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    );
+
+    let encoded = serde_json::to_value(&decoded).unwrap();
+    assert_eq!(encoded["run_id"], "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+    assert_eq!(encoded["turn_id"], "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+}
+
+#[test]
+fn host_managed_model_request_rejects_invalid_legacy_identity_strings() {
+    let wire = serde_json::json!({
+        "model_profile_id": "interactive_model",
+        "messages": [],
+        "surface_version": null,
+        "run_id": "not-a-uuid",
+        "turn_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    });
+
+    assert!(serde_json::from_value::<HostManagedModelRequest>(wire).is_err());
+}
+
 fn model_request(model_profile_id: ModelProfileId) -> HostManagedModelRequest {
     HostManagedModelRequest {
         model_profile_id,
@@ -419,8 +476,8 @@ fn model_request(model_profile_id: ModelProfileId) -> HostManagedModelRequest {
             },
         ],
         surface_version: None,
-        run_id: "run-1".to_string(),
-        turn_id: "turn-1".to_string(),
+        run_id: TurnRunId::new(),
+        turn_id: TurnId::new(),
     }
 }
 

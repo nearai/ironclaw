@@ -24,13 +24,13 @@ use ironclaw_turns::{
     RunProfileVersion, SourceBindingRef, TurnError, TurnLeaseToken, TurnRunId, TurnRunnerId,
     TurnScope, TurnStatus,
     run_profile::{
-        AgentLoopDriverHost, AgentLoopHostErrorKind, CapabilityInputRef, CapabilityInvocation,
-        CapabilityOutcome, CapabilitySurfaceVersion, FinalizeAssistantMessage,
-        InMemoryLoopHostMilestoneSink, LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort,
-        LoopCheckpointRequest, LoopContextRequest, LoopDriverId, LoopDriverNoteKind,
-        LoopHostMilestone, LoopInputCursor, LoopInputCursorToken, LoopInputPort, LoopModelRequest,
-        LoopProgressEvent, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-        ParentLoopOutput, PromptMode, VisibleCapabilityRequest,
+        AgentLoopDriverHost, AgentLoopHostErrorKind, CapabilityDeniedReasonKind,
+        CapabilityInputRef, CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion,
+        FinalizeAssistantMessage, InMemoryLoopHostMilestoneSink, LoopCapabilityPort,
+        LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest, LoopContextRequest,
+        LoopDriverId, LoopDriverNoteKind, LoopHostMilestone, LoopInputCursor, LoopInputCursorToken,
+        LoopInputPort, LoopModelRequest, LoopProgressEvent, LoopPromptBundleRequest,
+        LoopPromptPort, LoopRunContext, ParentLoopOutput, PromptMode, VisibleCapabilityRequest,
     },
     runner::ClaimedTurnRun,
 };
@@ -219,14 +219,8 @@ async fn text_only_host_e2e_flow_persists_checkpoint_mapping_in_turn_state_store
         .unwrap();
     let gateway_requests = fixture.gateway.requests();
     assert_eq!(gateway_requests.len(), 1);
-    assert_eq!(
-        gateway_requests[0].run_id,
-        fixture.context.run_id.to_string()
-    );
-    assert_eq!(
-        gateway_requests[0].turn_id,
-        fixture.context.turn_id.to_string()
-    );
+    assert_eq!(gateway_requests[0].run_id, fixture.context.run_id);
+    assert_eq!(gateway_requests[0].turn_id, fixture.context.turn_id);
     assert_eq!(
         gateway_requests[0].surface_version.as_ref(),
         Some(&surface_version)
@@ -669,7 +663,7 @@ async fn text_only_host_empty_capability_surface_denies_invocation() {
 
     assert!(matches!(
         outcome.outcomes.as_slice(),
-        [CapabilityOutcome::Denied(denied)] if denied.reason_kind == "empty_surface"
+        [CapabilityOutcome::Denied(denied)] if denied.reason_kind == CapabilityDeniedReasonKind::EmptySurface
     ));
 
     let stale = host
