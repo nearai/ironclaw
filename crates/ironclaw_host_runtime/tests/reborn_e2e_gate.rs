@@ -413,6 +413,11 @@ async fn reborn_e2e_gate_blocks_oversized_runtime_output_before_publication() {
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(run.status, RunStatus::Failed);
     assert_eq!(run.error_kind.as_deref(), Some("ObligationFailed"));
+    let serialized_run = serde_json::to_string(&run).unwrap();
+    assert!(
+        !serialized_run.contains(forbidden),
+        "run-state record must not leak blocked output: {serialized_run}"
+    );
     let serialized_events = serde_json::to_string(&events.events()).unwrap();
     assert!(
         !serialized_events.contains(forbidden),

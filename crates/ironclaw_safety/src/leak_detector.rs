@@ -671,6 +671,39 @@ mod tests {
     }
 
     #[test]
+    fn test_redact_bearer_token_preserves_adjacent_sentence_boundary() {
+        let detector = LeakDetector::new();
+        let token = "abcdef1234567890123456";
+        let content = format!("prefix Bearer {token}. The next sentence.");
+
+        let redacted = detector.scan_and_clean(&content).unwrap();
+
+        assert_eq!(redacted, "prefix [REDACTED] The next sentence.");
+        assert!(!redacted.contains(token));
+        assert!(redacted.ends_with("The next sentence."));
+    }
+
+    #[test]
+    fn test_redact_dotted_opaque_bearer_token_without_fragment_leak() {
+        let detector = LeakDetector::new();
+        let prefix = "opaquePrefix1234567890";
+        let middle = "middle.segment.value";
+        let suffix = "opaqueSuffix0987654321";
+        let token = format!("{prefix}.{middle}.{suffix}");
+        let content = format!("token=Bearer {token}; after token");
+
+        let redacted = detector.scan_and_clean(&content).unwrap();
+
+        assert_eq!(redacted, "token=[REDACTED]; after token");
+        for forbidden in [prefix, middle, suffix] {
+            assert!(
+                !redacted.contains(forbidden),
+                "redacted dotted bearer token leaked fragment {forbidden}: {redacted}"
+            );
+        }
+    }
+
+    #[test]
     fn test_scan_and_clean_blocks() {
         let detector = LeakDetector::new();
         let content = "sk-proj-test1234567890abcdefghij";

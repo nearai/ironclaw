@@ -52,6 +52,8 @@ use ironclaw_processes::{
 use ironclaw_reborn_event_store::{
     RebornEventStoreConfig, RebornEventStoreError, RebornProfile, build_reborn_event_stores,
 };
+#[cfg(feature = "libsql")]
+use ironclaw_resources::ResourceTally;
 use ironclaw_resources::{
     InMemoryResourceGovernor, JsonFileResourceGovernorStore, PersistentResourceGovernor,
     ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits,
@@ -337,7 +339,7 @@ async fn with_libsql_resource_governor_closes_process_reservations_on_cancel() {
     assert_eq!(outcome.cancelled, vec![RuntimeWorkId::Process(process_id)]);
     assert_eq!(
         governor.reserved_for(&account).unwrap(),
-        ironclaw_resources::ResourceTally::default()
+        ResourceTally::default()
     );
     assert!(matches!(
         governor.release(reservation_id).unwrap_err(),
