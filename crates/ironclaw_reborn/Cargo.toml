@@ -24,6 +24,9 @@ ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 secrecy = { version = "0.10", optional = true }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = "0.1"
 
 [dev-dependencies]
 chrono = "0.4"
@@ -31,7 +34,7 @@ ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 rust_decimal = "1"
 serde_json = "1"
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 
 [[test]]
 name = "llm_gateway"

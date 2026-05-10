@@ -14,6 +14,8 @@ pub enum TurnStatus {
     BlockedApproval,
     BlockedAuth,
     BlockedResource,
+    /// Blocked waiting for a spawned process to complete.
+    BlockedProcess,
     CancelRequested,
     Cancelled,
     Completed,
@@ -101,9 +103,19 @@ fn compatibility_profile_id(resolved: &ResolvedRunProfile) -> RunProfileId {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BlockedReason {
-    Approval { gate_ref: GateRef },
-    Auth { gate_ref: GateRef },
-    Resource { gate_ref: GateRef },
+    Approval {
+        gate_ref: GateRef,
+    },
+    Auth {
+        gate_ref: GateRef,
+    },
+    Resource {
+        gate_ref: GateRef,
+    },
+    /// Blocked waiting for a spawned process — maps to `TurnStatus::BlockedProcess`.
+    Process {
+        gate_ref: GateRef,
+    },
 }
 
 impl BlockedReason {
@@ -112,14 +124,16 @@ impl BlockedReason {
             Self::Approval { .. } => TurnStatus::BlockedApproval,
             Self::Auth { .. } => TurnStatus::BlockedAuth,
             Self::Resource { .. } => TurnStatus::BlockedResource,
+            Self::Process { .. } => TurnStatus::BlockedProcess,
         }
     }
 
     pub fn gate_ref(&self) -> &GateRef {
         match self {
-            Self::Approval { gate_ref } | Self::Auth { gate_ref } | Self::Resource { gate_ref } => {
-                gate_ref
-            }
+            Self::Approval { gate_ref }
+            | Self::Auth { gate_ref }
+            | Self::Resource { gate_ref }
+            | Self::Process { gate_ref } => gate_ref,
         }
     }
 }

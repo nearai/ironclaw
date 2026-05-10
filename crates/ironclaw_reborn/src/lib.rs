@@ -6,6 +6,8 @@
 
 pub mod driver_registry;
 pub mod loop_driver_host;
+pub mod loop_exit_applier;
+pub mod turn_runner;
 
 #[cfg(feature = "root-llm-provider")]
 pub mod model_gateway;

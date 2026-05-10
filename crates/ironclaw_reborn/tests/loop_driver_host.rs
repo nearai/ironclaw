@@ -9,6 +9,7 @@ use ironclaw_loop_support::{
 };
 use ironclaw_reborn::{
     RebornLoopDriverHostFactory, RebornLoopDriverHostRequest, TextOnlyLoopHostConfig,
+    turn_runner::HostFactory,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
@@ -152,6 +153,24 @@ async fn text_only_host_factory_builds_complete_agent_loop_driver_host() {
         ]
     );
     assert_public_milestones_hide_raw_payloads(&fixture.milestones());
+}
+
+#[tokio::test]
+async fn text_only_host_factory_implements_turn_runner_host_factory() {
+    let fixture = HostFixture::new("thread-host-turn-runner-factory", "hello runner").await;
+    let factory = fixture.factory();
+
+    let host = factory.create_host(&fixture.claimed).await.unwrap();
+
+    assert_eq!(host.run_context().run_id, fixture.context.run_id);
+    let context = host
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 8,
+        })
+        .await
+        .unwrap();
+    assert_eq!(context.messages.len(), 1);
 }
 
 #[tokio::test]

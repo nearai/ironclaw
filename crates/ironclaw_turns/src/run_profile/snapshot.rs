@@ -78,6 +78,7 @@ impl ResolvedRunProfile {
                 require_before_side_effect: true,
                 require_before_block: true,
                 max_checkpoint_bytes: 64 * 1024,
+                require_final_checkpoint: false,
             },
             resource_budget_policy: ResourceBudgetPolicy {
                 tier: ResourceBudgetTier::from_trusted_static("interactive_standard"),

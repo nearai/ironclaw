@@ -22,6 +22,11 @@ pub struct CheckpointPolicy {
     pub require_before_side_effect: bool,
     pub require_before_block: bool,
     pub max_checkpoint_bytes: u64,
+    /// When true, terminal exits (Completed, Cancelled, Failed) require a
+    /// final_checkpoint_id. Production profiles set this; local/test profiles
+    /// may relax it.
+    #[serde(default)]
+    pub require_final_checkpoint: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

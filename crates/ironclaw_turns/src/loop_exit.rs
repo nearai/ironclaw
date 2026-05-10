@@ -139,6 +139,8 @@ pub enum LoopBlockedKind {
     Approval,
     Auth,
     Resource,
+    /// Spawned process suspension — maps to `BlockedReason::Process`.
+    Process,
 }
 
 impl LoopBlockedKind {
@@ -148,6 +150,7 @@ impl LoopBlockedKind {
             Self::Approval => BlockedReason::Approval { gate_ref },
             Self::Auth => BlockedReason::Auth { gate_ref },
             Self::Resource => BlockedReason::Resource { gate_ref },
+            Self::Process => BlockedReason::Process { gate_ref },
         })
     }
 }

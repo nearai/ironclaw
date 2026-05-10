@@ -541,6 +541,38 @@ fn validate_claimed_run_context(
     Ok(())
 }
 
+#[async_trait]
+impl<S, G> crate::turn_runner::HostFactory for RebornLoopDriverHostFactory<S, G>
+where
+    S: SessionThreadService + ?Sized + Send + Sync + 'static,
+    G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
+{
+    async fn create_host(
+        &self,
+        claimed: &ClaimedTurnRun,
+    ) -> Result<
+        Box<dyn ironclaw_turns::run_profile::AgentLoopDriverHost + Send + Sync>,
+        crate::turn_runner::HostFactoryError,
+    > {
+        let loop_run_context = LoopRunContext::new(
+            claimed.state.scope.clone(),
+            claimed.state.turn_id,
+            claimed.state.run_id,
+            claimed.resolved_run_profile.clone(),
+        );
+        self.build_text_only_host(RebornLoopDriverHostRequest {
+            claimed_run: claimed.clone(),
+            loop_run_context,
+        })
+        .await
+        .map(|host| {
+            Box::new(host)
+                as Box<dyn ironclaw_turns::run_profile::AgentLoopDriverHost + Send + Sync>
+        })
+        .map_err(|error| crate::turn_runner::HostFactoryError::new(error.to_string()))
+    }
+}
+
 fn persisted_profile_id(profile_id: &RunProfileId) -> RunProfileId {
     if profile_id.is_interactive_default() {
         RunProfileId::default_profile()
