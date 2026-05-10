@@ -301,11 +301,44 @@ pub struct OutgoingResponse {
     pub metadata: serde_json::Value,
 }
 
+/// Strip model-generated channel/reasoning tags from response text.
+/// Some models emit internal tags like `<|channel>thought\n<channel|>`
+/// that should never reach the user.
+fn strip_channel_tags(s: &str) -> String {
+    let mut result = s.to_string();
+    // Remove combined thought+close tag patterns (with real newline)
+    result = result.replace("<|channel>thought\n<channel|>", "");
+    result = result.replace("<|channel>response\n<channel|>", "");
+    // Without newline (rare but possible)
+    result = result.replace("<|channel>thought<channel|>", "");
+    result = result.replace("<|channel>response<channel|>", "");
+    // Standalone opening tag with newline
+    result = result.replace("<|channel>thought\n", "");
+    result = result.replace("<|channel>response\n", "");
+    // Standalone tags
+    result = result.replace("<|channel>thought", "");
+    result = result.replace("<|channel>response", "");
+    result = result.replace("<channel|>", "");
+    result = result.replace("<|channel>", "");
+    // Also handle tool_call closing tag (rare leak)
+    result = result.replace("<tool_call|>", "");
+    let cleaned = result.trim().to_string();
+    let final_result = cleaned.replace("\n\n\n", "\n\n");
+    if final_result.len() != s.len() {
+        tracing::warn!(
+            original_len = s.len(),
+            cleaned_len = final_result.len(),
+            "strip_channel_tags: removed channel tags from response"
+        );
+    }
+    final_result
+}
+
 impl OutgoingResponse {
     /// Create a simple text response.
     pub fn text(content: impl Into<String>) -> Self {
         Self {
-            content: content.into(),
+            content: strip_channel_tags(&content.into()),
             thread_id: None,
             attachments: Vec::new(),
             inline_attachments: Vec::new(),
