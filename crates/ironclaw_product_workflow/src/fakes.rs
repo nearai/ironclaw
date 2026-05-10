@@ -118,6 +118,7 @@ pub struct FakeIdempotencyLedger {
 
 #[derive(Default)]
 struct FakeIdempotencyState {
+    in_flight: HashMap<ActionFingerprintKey, ProductInboundAction>,
     settled: HashMap<ActionFingerprintKey, ProductInboundAction>,
     fail_with: Option<ProductWorkflowError>,
     settle_fail_with: Option<ProductWorkflowError>,
@@ -140,6 +141,23 @@ impl FakeIdempotencyLedger {
     pub fn force_settle_failure(&self, error: ProductWorkflowError) {
         let mut state = self.state.lock().expect("fake ledger state lock poisoned"); // safety: test-support fake
         state.settle_fail_with = Some(error);
+    }
+
+    /// How many actions are reserved but not settled.
+    pub fn in_flight_count(&self) -> usize {
+        let state = self.state.lock().expect("fake ledger state lock poisoned"); // safety: test-support fake
+        state.in_flight.len()
+    }
+
+    /// Expire in-flight actions received before `cutoff`, simulating the
+    /// durable-ledger recovery sweeper/TTL contract.
+    pub fn expire_in_flight_before(&self, cutoff: DateTime<Utc>) -> usize {
+        let mut state = self.state.lock().expect("fake ledger state lock poisoned"); // safety: test-support fake
+        let before = state.in_flight.len();
+        state
+            .in_flight
+            .retain(|_, action| action.received_at >= cutoff);
+        before - state.in_flight.len()
     }
 
     /// How many actions have been settled.
@@ -168,17 +186,22 @@ impl IdempotencyLedger for FakeIdempotencyLedger {
         fingerprint: ActionFingerprintKey,
         received_at: DateTime<Utc>,
     ) -> Result<IdempotencyDecision, ProductWorkflowError> {
-        let state = self.state.lock().expect("fake ledger state lock poisoned"); // safety: test-support fake
+        let mut state = self.state.lock().expect("fake ledger state lock poisoned"); // safety: test-support fake
         if let Some(error) = state.fail_with.clone() {
             return Err(error);
         }
         if let Some(prior) = state.settled.get(&fingerprint) {
             return Ok(IdempotencyDecision::Replay(prior.clone()));
         }
-        Ok(IdempotencyDecision::New(ProductInboundAction::begin(
-            fingerprint,
-            received_at,
-        )))
+        if state.in_flight.contains_key(&fingerprint) {
+            return Err(ProductWorkflowError::Transient {
+                reason: "idempotency fingerprint already in flight; retry after recovery lease"
+                    .into(),
+            });
+        }
+        let action = ProductInboundAction::begin(fingerprint.clone(), received_at);
+        state.in_flight.insert(fingerprint, action.clone());
+        Ok(IdempotencyDecision::New(action))
     }
 
     async fn settle(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError> {
@@ -189,6 +212,7 @@ impl IdempotencyLedger for FakeIdempotencyLedger {
         if let Some(error) = state.settle_fail_with.clone() {
             return Err(error);
         }
+        state.in_flight.remove(&action.fingerprint);
         state.settled.insert(action.fingerprint.clone(), action);
         Ok(())
     }
@@ -205,6 +229,7 @@ pub struct FakeInboundTurnService {
 
 #[derive(Default)]
 struct FakeInboundTurnState {
+    attempts: usize,
     accepted: Vec<ProductInboundEnvelope>,
     fail_with: Option<ProductWorkflowError>,
     programmed_outcome: Option<InboundTurnOutcome>,
@@ -233,6 +258,15 @@ impl FakeInboundTurnService {
             .lock()
             .expect("fake inbound turn state lock poisoned"); // safety: test-support fake
         state.fail_with = Some(error);
+    }
+
+    /// How many submission attempts reached this fake.
+    pub fn attempt_count(&self) -> usize {
+        let state = self
+            .state
+            .lock()
+            .expect("fake inbound turn state lock poisoned"); // safety: test-support fake
+        state.attempts
     }
 
     /// Get all envelopes that were accepted.
@@ -266,6 +300,7 @@ impl InboundTurnService for FakeInboundTurnService {
             .state
             .lock()
             .expect("fake inbound turn state lock poisoned"); // safety: test-support fake
+        state.attempts += 1;
         if let Some(error) = state.fail_with.clone() {
             return Err(error);
         }

@@ -13,6 +13,24 @@ use crate::error::ProductWorkflowError;
 ///
 /// Host runtimes provide a durable implementation backed by the DB layer.
 /// Tests use the in-memory fake from the `test-support` feature.
+///
+/// # Non-terminal action recovery contract
+///
+/// `begin_or_replay` reserves a fingerprint by recording a `Received` action
+/// before workflow dispatch starts. A durable implementation must not leave that
+/// reservation permanent if the process crashes or a transient dispatch failure
+/// prevents `settle` from recording a terminal outcome. Implementations must use
+/// a recovery lease/TTL (or an equivalent background sweeper) for non-terminal
+/// `Received`/`Dispatched` actions:
+///
+/// - settled actions replay forever;
+/// - fresh non-terminal actions return a transient error so callers retry later
+///   instead of dispatching the same side effect concurrently;
+/// - expired non-terminal actions are reclaimed by the sweeper or by
+///   `begin_or_replay` before returning `New` for the fingerprint again.
+///
+/// The test-support fake models fresh in-flight reservations and exposes
+/// `expire_in_flight_before` to simulate the sweeper path in downstream tests.
 #[async_trait]
 pub trait IdempotencyLedger: Send + Sync {
     /// Attempt to begin a new action for the given fingerprint.

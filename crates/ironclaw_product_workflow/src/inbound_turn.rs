@@ -140,7 +140,7 @@ where
             });
         };
         let source_binding_id = envelope.source_binding_key();
-        let reply_target_binding_id = format!("reply:{source_binding_id}");
+        let reply_target_binding_id = source_binding_id.clone();
         let accepted = self
             .thread_service
             .accept_inbound_message(AcceptInboundMessageRequest {

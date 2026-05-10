@@ -9,9 +9,11 @@ use ironclaw_product_adapters::{
     AdapterInstallationId, ExternalEventId, ProductAdapterId, ProductInboundAck,
     ProductInboundPayload,
 };
-use ironclaw_turns::TurnRunId;
+use ironclaw_turns::{LoopGateRef, TurnRunId};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+use crate::error::ProductWorkflowError;
 
 /// Unique identifier for a product inbound action ledger entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -40,29 +42,117 @@ impl std::fmt::Display for ProductActionId {
     }
 }
 
+const SOURCE_BINDING_KEY_MAX_BYTES: usize = 2_048;
+const PRODUCT_COMMAND_NAME_MAX_BYTES: usize = 256;
+const INTERACTION_REF_MAX_BYTES: usize = 512;
+
+fn validate_typed_token(kind: &'static str, value: &str, max_bytes: usize) -> Result<(), String> {
+    if value.is_empty() {
+        return Err(format!("{kind} must not be empty"));
+    }
+    if value.len() > max_bytes {
+        return Err(format!("{kind} exceeds {max_bytes}-byte limit"));
+    }
+    if value.chars().any(|c| c == '\0' || c.is_control()) {
+        return Err(format!("{kind} contains unsupported control characters"));
+    }
+    Ok(())
+}
+
+macro_rules! typed_token {
+    ($name:ident, $kind:literal, $max_bytes:expr) => {
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        #[serde(try_from = "String")]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn new(value: impl Into<String>) -> Result<Self, String> {
+                let value = value.into();
+                validate_typed_token($kind, &value, $max_bytes)?;
+                Ok(Self(value))
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+
+            pub fn into_inner(self) -> String {
+                self.0
+            }
+        }
+
+        impl TryFrom<String> for $name {
+            type Error = String;
+
+            fn try_from(value: String) -> Result<Self, Self::Error> {
+                Self::new(value)
+            }
+        }
+
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str {
+                self.as_str()
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+
+        impl From<$name> for String {
+            fn from(value: $name) -> Self {
+                value.0
+            }
+        }
+    };
+}
+
+typed_token!(
+    SourceBindingKey,
+    "source binding key",
+    SOURCE_BINDING_KEY_MAX_BYTES
+);
+typed_token!(
+    ProductCommandName,
+    "product command name",
+    PRODUCT_COMMAND_NAME_MAX_BYTES
+);
+typed_token!(
+    AuthRequestRef,
+    "auth request ref",
+    INTERACTION_REF_MAX_BYTES
+);
+typed_token!(
+    LinkedThreadActionId,
+    "linked thread action id",
+    INTERACTION_REF_MAX_BYTES
+);
+
 /// Composite deduplication key for inbound actions. Two envelopes with the same
 /// fingerprint are considered duplicates and the second will replay the first
 /// outcome.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ActionFingerprintKey {
-    pub adapter_id: String,
-    pub installation_id: String,
-    pub source_binding_key: String,
-    pub external_event_id: String,
+    pub adapter_id: ProductAdapterId,
+    pub installation_id: AdapterInstallationId,
+    pub source_binding_key: SourceBindingKey,
+    pub external_event_id: ExternalEventId,
 }
 
 impl ActionFingerprintKey {
     pub fn new(
-        adapter_id: &ProductAdapterId,
-        installation_id: &AdapterInstallationId,
-        source_binding_key: &str,
-        external_event_id: &ExternalEventId,
+        adapter_id: ProductAdapterId,
+        installation_id: AdapterInstallationId,
+        source_binding_key: SourceBindingKey,
+        external_event_id: ExternalEventId,
     ) -> Self {
         Self {
-            adapter_id: adapter_id.as_str().to_string(),
-            installation_id: installation_id.as_str().to_string(),
-            source_binding_key: source_binding_key.to_string(),
-            external_event_id: external_event_id.as_str().to_string(),
+            adapter_id,
+            installation_id,
+            source_binding_key,
+            external_event_id,
         }
     }
 }
@@ -88,35 +178,40 @@ pub enum ActionPhase {
 #[serde(rename_all = "snake_case")]
 pub enum ActionDispatchKind {
     UserMessageTurn { run_id: TurnRunId },
-    Command { command: String },
-    ApprovalResolution { gate_ref: String },
-    AuthResolution { auth_request_ref: String },
+    Command { command: ProductCommandName },
+    ApprovalResolution { gate_ref: LoopGateRef },
+    AuthResolution { auth_request_ref: AuthRequestRef },
     ProjectionSubscription,
-    LinkedThreadAction { action_id: String },
+    LinkedThreadAction { action_id: LinkedThreadActionId },
     NoOp,
 }
 
 impl ActionDispatchKind {
-    /// Derive the dispatch kind from a product inbound payload.
-    pub fn from_payload(payload: &ProductInboundPayload) -> Self {
+    /// Derive the dispatch kind from a product inbound payload while preserving
+    /// typed internal identifiers after boundary validation.
+    pub fn try_from_payload(payload: &ProductInboundPayload) -> Result<Self, ProductWorkflowError> {
         match payload {
-            ProductInboundPayload::UserMessage(_) => Self::UserMessageTurn {
+            ProductInboundPayload::UserMessage(_) => Ok(Self::UserMessageTurn {
                 run_id: TurnRunId::new(),
-            },
-            ProductInboundPayload::Command(cmd) => Self::Command {
-                command: cmd.command.clone(),
-            },
-            ProductInboundPayload::ApprovalResolution(res) => Self::ApprovalResolution {
-                gate_ref: res.gate_ref.clone(),
-            },
-            ProductInboundPayload::AuthResolution(res) => Self::AuthResolution {
-                auth_request_ref: res.auth_request_ref.clone(),
-            },
-            ProductInboundPayload::SubscriptionRequest(_) => Self::ProjectionSubscription,
-            ProductInboundPayload::LinkedThreadAction(lta) => Self::LinkedThreadAction {
-                action_id: lta.action_id.clone(),
-            },
-            ProductInboundPayload::NoOp => Self::NoOp,
+            }),
+            ProductInboundPayload::Command(cmd) => Ok(Self::Command {
+                command: ProductCommandName::new(cmd.command.clone())
+                    .map_err(|reason| ProductWorkflowError::TurnSubmissionRejected { reason })?,
+            }),
+            ProductInboundPayload::ApprovalResolution(res) => Ok(Self::ApprovalResolution {
+                gate_ref: LoopGateRef::new(res.gate_ref.clone())
+                    .map_err(|reason| ProductWorkflowError::TurnSubmissionRejected { reason })?,
+            }),
+            ProductInboundPayload::AuthResolution(res) => Ok(Self::AuthResolution {
+                auth_request_ref: AuthRequestRef::new(res.auth_request_ref.clone())
+                    .map_err(|reason| ProductWorkflowError::TurnSubmissionRejected { reason })?,
+            }),
+            ProductInboundPayload::SubscriptionRequest(_) => Ok(Self::ProjectionSubscription),
+            ProductInboundPayload::LinkedThreadAction(lta) => Ok(Self::LinkedThreadAction {
+                action_id: LinkedThreadActionId::new(lta.action_id.clone())
+                    .map_err(|reason| ProductWorkflowError::TurnSubmissionRejected { reason })?,
+            }),
+            ProductInboundPayload::NoOp => Ok(Self::NoOp),
         }
     }
 }

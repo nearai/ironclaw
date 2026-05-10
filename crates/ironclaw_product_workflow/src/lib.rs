@@ -29,7 +29,8 @@ pub mod ledger;
 pub mod workflow;
 
 pub use action::{
-    ActionDispatchKind, ActionFingerprintKey, ActionPhase, ProductActionId, ProductInboundAction,
+    ActionDispatchKind, ActionFingerprintKey, ActionPhase, AuthRequestRef, LinkedThreadActionId,
+    ProductActionId, ProductCommandName, ProductInboundAction, SourceBindingKey,
 };
 pub use binding::{ConversationBindingService, ResolveBindingRequest, ResolvedBinding};
 pub use error::ProductWorkflowError;

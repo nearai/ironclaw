@@ -1,7 +1,8 @@
 //! Contract tests for the InboundTurnService.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
@@ -17,10 +18,59 @@ use ironclaw_threads::{
     InMemorySessionThreadService, MessageStatus, SessionThreadService, ThreadHistoryRequest,
     ThreadScope,
 };
-use ironclaw_turns::{DefaultTurnCoordinator, InMemoryTurnStateStore};
+use ironclaw_turns::{
+    CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator, EventCursor, GetRunStateRequest,
+    InMemoryTurnStateStore, ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion,
+    SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator, TurnError, TurnId, TurnRunId,
+    TurnRunState, TurnStatus,
+};
 
 fn sample_user_message_envelope(event_suffix: &str) -> ProductInboundEnvelope {
     sample_user_message_envelope_with_text(event_suffix, "hello world")
+}
+
+#[derive(Default)]
+struct CapturingTurnCoordinator {
+    last_submit: Arc<Mutex<Option<SubmitTurnRequest>>>,
+}
+
+#[async_trait]
+impl TurnCoordinator for CapturingTurnCoordinator {
+    async fn submit_turn(
+        &self,
+        request: SubmitTurnRequest,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        let response = SubmitTurnResponse::Accepted {
+            turn_id: TurnId::new(),
+            run_id: TurnRunId::new(),
+            status: TurnStatus::Queued,
+            resolved_run_profile_id: RunProfileId::default_profile(),
+            resolved_run_profile_version: RunProfileVersion::new(1),
+            event_cursor: EventCursor::default(),
+            accepted_message_ref: request.accepted_message_ref.clone(),
+            reply_target_binding_ref: request.reply_target_binding_ref.clone(),
+        };
+        *self
+            .last_submit
+            .lock()
+            .expect("capturing coordinator lock poisoned") = Some(request);
+        Ok(response)
+    }
+
+    async fn resume_turn(
+        &self,
+        _request: ResumeTurnRequest,
+    ) -> Result<ResumeTurnResponse, TurnError> {
+        panic!("resume_turn is not used by inbound turn contract tests")
+    }
+
+    async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
+        panic!("cancel_run is not used by inbound turn contract tests")
+    }
+
+    async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        panic!("get_run_state is not used by inbound turn contract tests")
+    }
 }
 
 fn sample_user_message_envelope_with_text(
@@ -131,6 +181,31 @@ async fn busy_thread_persists_second_message_as_deferred() {
     assert_eq!(history.messages.len(), 2);
     assert_eq!(history.messages[1].content.as_deref(), Some("second"));
     assert_eq!(history.messages[1].status, MessageStatus::DeferredBusy);
+}
+
+#[tokio::test]
+async fn reply_target_binding_ref_has_single_reply_prefix() {
+    let binding_service = FakeConversationBindingService::new();
+    let thread_service = InMemorySessionThreadService::default();
+    let coordinator = CapturingTurnCoordinator::default();
+    let captured_submit = coordinator.last_submit.clone();
+    let service = DefaultInboundTurnService::new(binding_service, thread_service, coordinator);
+
+    let envelope = sample_user_message_envelope("reply-prefix");
+    service
+        .accept_user_message(&envelope)
+        .await
+        .expect("submit");
+
+    let request = captured_submit
+        .lock()
+        .expect("captured submit lock poisoned")
+        .clone()
+        .expect("submit request captured");
+    let reply_ref = request.reply_target_binding_ref.as_str();
+    assert!(reply_ref.starts_with("reply:"));
+    assert!(!reply_ref.starts_with("reply:reply:"));
+    assert_eq!(reply_ref.matches("reply:").count(), 1);
 }
 
 #[tokio::test]

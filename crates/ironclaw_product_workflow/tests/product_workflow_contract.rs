@@ -2,16 +2,21 @@
 
 use std::sync::Arc;
 
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use ironclaw_product_adapters::{
-    AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
-    ExternalEventId, ParsedProductInbound, ProductAdapterId, ProductInboundAck,
-    ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason, ProductWorkflow,
-    ProtocolAuthEvidence, TrustedInboundContext, UserMessagePayload,
+    AdapterInstallationId, ApprovalDecision, ApprovalResolutionPayload, AuthRequirement,
+    AuthResolutionPayload, AuthResolutionResult, ExternalActorRef, ExternalConversationRef,
+    ExternalEventId, InboundCommandPayload, LinkedThreadActionPayload, ParsedProductInbound,
+    ProductAdapterId, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
+    ProductTriggerReason, ProductWorkflow, ProtocolAuthEvidence, TrustedInboundContext,
+    UserMessagePayload,
 };
 use ironclaw_product_workflow::{
-    ActionDispatchKind, DefaultProductWorkflow, FakeIdempotencyLedger, FakeInboundTurnService,
+    ActionDispatchKind, ActionFingerprintKey, AuthRequestRef, DefaultProductWorkflow,
+    FakeIdempotencyLedger, FakeInboundTurnService, IdempotencyDecision, IdempotencyLedger,
+    LinkedThreadActionId, ProductCommandName, ProductWorkflowError, SourceBindingKey,
 };
+use ironclaw_turns::LoopGateRef;
 
 fn sample_envelope(event_suffix: &str) -> ProductInboundEnvelope {
     let evidence = ProtocolAuthEvidence::test_verified(
@@ -66,6 +71,70 @@ fn sample_noop_envelope(event_suffix: &str) -> ProductInboundEnvelope {
     .expect("parsed");
 
     ProductInboundEnvelope::from_trusted_parse(context, parsed).expect("envelope")
+}
+
+#[test]
+fn action_fingerprint_retains_typed_identifiers() {
+    let adapter_id = ProductAdapterId::new("test_adapter").expect("valid");
+    let installation_id = AdapterInstallationId::new("install_alpha").expect("valid");
+    let source_binding_key = SourceBindingKey::new("space:0:;conversation:5:conv1;topic:0:;")
+        .expect("valid source binding key");
+    let external_event_id = ExternalEventId::new("evt:typed").expect("valid");
+
+    let fingerprint = ActionFingerprintKey::new(
+        adapter_id.clone(),
+        installation_id.clone(),
+        source_binding_key.clone(),
+        external_event_id.clone(),
+    );
+
+    assert_eq!(fingerprint.adapter_id, adapter_id);
+    assert_eq!(fingerprint.installation_id, installation_id);
+    assert_eq!(fingerprint.source_binding_key, source_binding_key);
+    assert_eq!(fingerprint.external_event_id, external_event_id);
+}
+
+#[test]
+fn action_dispatch_kind_retains_typed_payload_refs() {
+    let command_payload = ProductInboundPayload::Command(
+        InboundCommandPayload::new("help", "", ProductTriggerReason::BotCommand).expect("valid"),
+    );
+    assert_eq!(
+        ActionDispatchKind::try_from_payload(&command_payload).expect("command kind"),
+        ActionDispatchKind::Command {
+            command: ProductCommandName::new("help").expect("valid command")
+        }
+    );
+
+    let gate_ref = LoopGateRef::new("gate:approval-1").expect("valid gate ref");
+    let approval_payload = ProductInboundPayload::ApprovalResolution(
+        ApprovalResolutionPayload::new(gate_ref.as_str(), ApprovalDecision::ApproveOnce)
+            .expect("valid"),
+    );
+    assert_eq!(
+        ActionDispatchKind::try_from_payload(&approval_payload).expect("approval kind"),
+        ActionDispatchKind::ApprovalResolution { gate_ref }
+    );
+
+    let auth_payload = ProductInboundPayload::AuthResolution(
+        AuthResolutionPayload::new("auth-request-1", AuthResolutionResult::Denied).expect("valid"),
+    );
+    assert_eq!(
+        ActionDispatchKind::try_from_payload(&auth_payload).expect("auth kind"),
+        ActionDispatchKind::AuthResolution {
+            auth_request_ref: AuthRequestRef::new("auth-request-1").expect("valid auth ref")
+        }
+    );
+
+    let linked_payload = ProductInboundPayload::LinkedThreadAction(
+        LinkedThreadActionPayload::new("open-thread", None, None).expect("valid"),
+    );
+    assert_eq!(
+        ActionDispatchKind::try_from_payload(&linked_payload).expect("linked kind"),
+        ActionDispatchKind::LinkedThreadAction {
+            action_id: LinkedThreadActionId::new("open-thread").expect("valid action id")
+        }
+    );
 }
 
 fn build_workflow() -> (
@@ -146,6 +215,67 @@ async fn settled_user_message_records_actual_submitted_run_id() {
             run_id: submitted_run_id
         })
     );
+}
+
+#[tokio::test]
+async fn transient_dispatch_failure_keeps_fingerprint_reserved_until_recovery() {
+    let (workflow, inbound, ledger) = build_workflow();
+    inbound.force_failure(ProductWorkflowError::Transient {
+        reason: "turn coordinator unavailable".into(),
+    });
+
+    let envelope = sample_envelope("transient-reserved");
+    let first_err = workflow
+        .accept_inbound(envelope.clone())
+        .await
+        .expect_err("first attempt should be retryable");
+    assert!(first_err.is_retryable());
+    assert_eq!(inbound.attempt_count(), 1);
+
+    let second_err = workflow
+        .accept_inbound(envelope)
+        .await
+        .expect_err("same in-flight fingerprint should be reserved");
+    assert!(second_err.is_retryable());
+    assert_eq!(
+        inbound.attempt_count(),
+        1,
+        "reserved fingerprint must not dispatch the same action twice before recovery cleanup"
+    );
+    assert_eq!(ledger.settled_count(), 0);
+}
+
+#[tokio::test]
+async fn fake_ledger_expiration_reclaims_in_flight_fingerprint() {
+    let ledger = FakeIdempotencyLedger::new();
+    let received_at = Utc::now();
+    let fingerprint = ActionFingerprintKey::new(
+        ProductAdapterId::new("test_adapter").expect("valid"),
+        AdapterInstallationId::new("install_alpha").expect("valid"),
+        SourceBindingKey::new("space:0:;conversation:5:conv1;topic:0:;").expect("valid"),
+        ExternalEventId::new("evt:lease").expect("valid"),
+    );
+
+    let first = ledger
+        .begin_or_replay(fingerprint.clone(), received_at)
+        .await
+        .expect("reserve");
+    assert!(matches!(first, IdempotencyDecision::New(_)));
+    let duplicate = ledger
+        .begin_or_replay(fingerprint.clone(), received_at)
+        .await
+        .expect_err("fresh in-flight action blocks duplicate dispatch");
+    assert!(matches!(duplicate, ProductWorkflowError::Transient { .. }));
+
+    assert_eq!(
+        ledger.expire_in_flight_before(received_at + Duration::seconds(1)),
+        1
+    );
+    let reclaimed = ledger
+        .begin_or_replay(fingerprint, received_at)
+        .await
+        .expect("expired fingerprint can be reclaimed");
+    assert!(matches!(reclaimed, IdempotencyDecision::New(_)));
 }
 
 #[tokio::test]

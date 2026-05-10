@@ -12,7 +12,7 @@ use ironclaw_product_adapters::{
 };
 use tracing::debug;
 
-use crate::action::{ActionDispatchKind, ActionFingerprintKey};
+use crate::action::{ActionDispatchKind, ActionFingerprintKey, SourceBindingKey};
 use crate::error::ProductWorkflowError;
 use crate::inbound_turn::InboundTurnService;
 use crate::ledger::{IdempotencyDecision, IdempotencyLedger};
@@ -43,11 +43,15 @@ impl ProductWorkflow for DefaultProductWorkflow {
         &self,
         envelope: ProductInboundEnvelope,
     ) -> Result<ProductInboundAck, ProductAdapterError> {
+        let source_binding_key =
+            SourceBindingKey::new(envelope.source_binding_key()).map_err(|reason| {
+                ProductAdapterError::from(ProductWorkflowError::BindingResolutionFailed { reason })
+            })?;
         let fingerprint = ActionFingerprintKey::new(
-            envelope.adapter_id(),
-            envelope.installation_id(),
-            &envelope.source_binding_key(),
-            envelope.external_event_id(),
+            envelope.adapter_id().clone(),
+            envelope.installation_id().clone(),
+            source_binding_key,
+            envelope.external_event_id().clone(),
         );
 
         let decision = self
@@ -78,7 +82,7 @@ impl ProductWorkflow for DefaultProductWorkflow {
 
                 match result {
                     Ok(ack) => {
-                        action.mark_dispatched(dispatch_kind_from_ack(&ack, envelope.payload()));
+                        action.mark_dispatched(dispatch_kind_from_ack(&ack, envelope.payload())?);
                         action.settle(ack.clone());
                         self.idempotency_ledger.settle(action).await.map_err(|e| {
                             ProductAdapterError::from(ProductWorkflowError::Transient {
@@ -89,9 +93,9 @@ impl ProductWorkflow for DefaultProductWorkflow {
                     }
                     Err(e) => {
                         if let Some(ack) = terminal_ack_for_error(&e) {
-                            action.mark_dispatched(ActionDispatchKind::from_payload(
+                            action.mark_dispatched(ActionDispatchKind::try_from_payload(
                                 envelope.payload(),
-                            ));
+                            )?);
                             action.settle(ack);
                             self.idempotency_ledger.settle(action).await.map_err(|settle_err| {
                                 ProductAdapterError::from(ProductWorkflowError::Transient {
@@ -161,19 +165,19 @@ async fn dispatch_payload(
 fn dispatch_kind_from_ack(
     ack: &ProductInboundAck,
     payload: &ProductInboundPayload,
-) -> ActionDispatchKind {
+) -> Result<ActionDispatchKind, ProductWorkflowError> {
     match ack {
         ProductInboundAck::Accepted {
             submitted_run_id, ..
-        } => ActionDispatchKind::UserMessageTurn {
+        } => Ok(ActionDispatchKind::UserMessageTurn {
             run_id: *submitted_run_id,
-        },
+        }),
         ProductInboundAck::DeferredBusy { active_run_id, .. } => {
-            ActionDispatchKind::UserMessageTurn {
+            Ok(ActionDispatchKind::UserMessageTurn {
                 run_id: *active_run_id,
-            }
+            })
         }
-        _ => ActionDispatchKind::from_payload(payload),
+        _ => ActionDispatchKind::try_from_payload(payload),
     }
 }
 
