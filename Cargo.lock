@@ -4535,6 +4535,14 @@ dependencies = [
  "anyhow",
  "clap",
  "ironclaw_reborn",
+ "ironclaw_reborn_config",
+ "tempfile",
+]
+
+[[package]]
+name = "ironclaw_reborn_config"
+version = "0.1.0"
+dependencies = [
  "tempfile",
 ]
 

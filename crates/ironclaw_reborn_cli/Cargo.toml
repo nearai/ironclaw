@@ -19,6 +19,7 @@ dist = false
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 ironclaw_reborn = { path = "../ironclaw_reborn", version = "0.1.0" }
+ironclaw_reborn_config = { path = "../ironclaw_reborn_config", version = "0.1.0" }
 
 [[bin]]
 name = "ironclaw-reborn"
