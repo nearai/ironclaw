@@ -419,8 +419,8 @@ fn model_request(model_profile_id: ModelProfileId) -> HostManagedModelRequest {
             },
         ],
         surface_version: None,
-        run_id: "run-1".to_string(),
-        turn_id: "turn-1".to_string(),
+        run_id: TurnRunId::new(),
+        turn_id: TurnId::new(),
     }
 }
 

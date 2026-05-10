@@ -160,10 +160,10 @@ where
         );
         completion
             .metadata
-            .insert("turn_id".to_string(), request.turn_id);
+            .insert("turn_id".to_string(), request.turn_id.to_string());
         completion
             .metadata
-            .insert("run_id".to_string(), request.run_id);
+            .insert("run_id".to_string(), request.run_id.to_string());
 
         let response = self
             .provider

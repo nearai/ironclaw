@@ -25,9 +25,9 @@ pub use driver::{
 pub use host::{
     AgentLoopDriverHost, AgentLoopHost, AgentLoopHostError, AgentLoopHostErrorKind,
     AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityBatchInvocation,
-    CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityDenied, CapabilityDescriptorView,
-    CapabilityFailure, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
-    CapabilityResultMessage, CapabilitySurfaceVersion, FinalizeAssistantMessage,
+    CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityDenied, CapabilityDeniedReasonKind,
+    CapabilityDescriptorView, CapabilityFailure, CapabilityInputRef, CapabilityInvocation,
+    CapabilityOutcome, CapabilityResultMessage, CapabilitySurfaceVersion, FinalizeAssistantMessage,
     LoopCancelReasonKind, LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort,
     LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle, LoopContextMessage,
     LoopContextPort, LoopContextRequest, LoopContextSnippet, LoopDriverNoteKind, LoopInput,

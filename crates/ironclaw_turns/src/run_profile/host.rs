@@ -787,8 +787,22 @@ pub struct ProcessHandleSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityDenied {
-    pub reason_kind: String,
+    pub reason_kind: CapabilityDeniedReasonKind,
     pub safe_summary: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityDeniedReasonKind {
+    EmptySurface,
+}
+
+impl CapabilityDeniedReasonKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::EmptySurface => "empty_surface",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -23,12 +23,13 @@ use ironclaw_turns::{
     LoopMessageRef, RunProfileResolutionRequest, RunProfileResolver, TurnActor, TurnId, TurnRunId,
     TurnScope,
     run_profile::{
-        AgentLoopHostErrorKind, AssistantReply, BeginAssistantDraft, CapabilityInputRef,
-        CapabilityInvocation, CapabilitySurfaceVersion, FinalizeAssistantMessage,
-        InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, LoopCapabilityPort,
-        LoopContextPort, LoopContextRequest, LoopHostMilestoneKind, LoopInputCursor,
-        LoopInputCursorToken, LoopModelMessage, LoopModelPort, LoopModelRequest, LoopRunContext,
-        LoopTranscriptPort, ParentLoopOutput, UpdateAssistantDraft, VisibleCapabilityRequest,
+        AgentLoopHostErrorKind, AssistantReply, BeginAssistantDraft, CapabilityDeniedReasonKind,
+        CapabilityInputRef, CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion,
+        FinalizeAssistantMessage, InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver,
+        LoopCapabilityPort, LoopContextPort, LoopContextRequest, LoopHostMilestoneKind,
+        LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelPort, LoopModelRequest,
+        LoopRunContext, LoopTranscriptPort, ParentLoopOutput, UpdateAssistantDraft,
+        VisibleCapabilityRequest,
     },
 };
 use tracing_test::traced_test;
@@ -490,6 +491,29 @@ async fn empty_capability_port_exposes_empty_surface_and_rejects_invocations() {
 }
 
 #[tokio::test]
+async fn empty_capability_batch_returns_typed_denial_reason() {
+    let port = EmptyLoopCapabilityPort;
+
+    let outcome = port
+        .invoke_capability_batch(ironclaw_turns::run_profile::CapabilityBatchInvocation {
+            invocations: vec![CapabilityInvocation {
+                surface_version: CapabilitySurfaceVersion::new("empty:v1").unwrap(),
+                capability_id: CapabilityId::new("demo.echo").unwrap(),
+                input_ref: CapabilityInputRef::new("input:opaque").unwrap(),
+            }],
+            stop_on_first_suspension: true,
+        })
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        outcome.outcomes.as_slice(),
+        [CapabilityOutcome::Denied(denied)]
+            if denied.reason_kind == CapabilityDeniedReasonKind::EmptySurface
+    ));
+}
+
+#[tokio::test]
 async fn empty_capability_batch_rejects_stale_surface() {
     let port = EmptyLoopCapabilityPort;
 
@@ -545,6 +569,8 @@ async fn model_port_resolves_thread_message_refs_and_delegates_to_gateway() {
     let calls = gateway.calls.lock().unwrap();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].model_profile_id.as_str(), "interactive_model");
+    assert_eq!(calls[0].run_id, fixture.run_context.run_id);
+    assert_eq!(calls[0].turn_id, fixture.run_context.turn_id);
     assert_eq!(calls[0].messages[0].role, HostManagedModelMessageRole::User);
     assert_eq!(calls[0].messages[0].content, "hello reborn");
 }
