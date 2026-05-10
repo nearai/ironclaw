@@ -91,7 +91,19 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
         manifest.contains("[[bin]]") && manifest.contains("name = \"ironclaw-reborn\""),
         "Reborn CLI crate must declare the ironclaw-reborn binary explicitly"
     );
-    assert_no_normal_workspace_deps(&dependencies, "ironclaw_reborn_cli", ["ironclaw"]);
+    let actual_workspace_deps = dependencies
+        .get("ironclaw_reborn_cli")
+        .expect("ironclaw_reborn_cli must be in cargo metadata")
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected_workspace_deps = ["ironclaw_reborn".to_string()]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        actual_workspace_deps, expected_workspace_deps,
+        "ironclaw_reborn_cli should enter Reborn through ironclaw_reborn only; add explicit architectural justification before depending on other workspace crates"
+    );
 }
 
 #[test]

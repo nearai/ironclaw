@@ -85,3 +85,59 @@ fn doctor_default_home_is_reborn_scoped_and_dry_run() {
         "doctor should not create default Reborn or v1 state directories"
     );
 }
+
+#[test]
+fn doctor_rejects_empty_reborn_home_override() {
+    let output = Command::new(reborn_bin())
+        .arg("doctor")
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", "")
+        .output()
+        .expect("ironclaw-reborn doctor should run");
+
+    assert!(!output.status.success(), "doctor should reject empty home");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("IRONCLAW_REBORN_HOME must not be empty"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn doctor_rejects_relative_reborn_home_override() {
+    let output = Command::new(reborn_bin())
+        .arg("doctor")
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", "relative/reborn")
+        .output()
+        .expect("ironclaw-reborn doctor should run");
+
+    assert!(
+        !output.status.success(),
+        "doctor should reject relative home"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("IRONCLAW_REBORN_HOME must be an absolute path"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn doctor_rejects_missing_home_for_default_reborn_home() {
+    let output = Command::new(reborn_bin())
+        .arg("doctor")
+        .env_clear()
+        .output()
+        .expect("ironclaw-reborn doctor should run");
+
+    assert!(
+        !output.status.success(),
+        "doctor should reject missing home"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("HOME or USERPROFILE must be set"),
+        "stderr: {stderr}"
+    );
+}

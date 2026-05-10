@@ -10,6 +10,11 @@ homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
 publish = false
 
+# First PR establishes the binary boundary only. Release packaging is a
+# follow-up decision after `run`/docs land and `dist plan` is verified.
+[package.metadata.dist]
+dist = false
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
