@@ -30,5 +30,6 @@ tokio-postgres = { version = "0.7", optional = true }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
+static_assertions = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt"] }

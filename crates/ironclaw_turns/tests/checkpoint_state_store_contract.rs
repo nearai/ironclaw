@@ -187,6 +187,13 @@ fn checkpoint_state_record_debug_redacts_payload() {
 }
 
 #[test]
+fn redacted_checkpoint_payload_is_not_serializable() {
+    static_assertions::assert_not_impl_any!(
+        RedactedCheckpointPayload: serde::Serialize, serde::de::DeserializeOwned
+    );
+}
+
+#[test]
 fn turn_checkpoint_public_status_does_not_expose_checkpoint_payload() {
     let payload = b"RAW_CHECKPOINT_PAYLOAD sk-secret /host/path tool_input".to_vec();
     let payload = RedactedCheckpointPayload::new(payload).unwrap();
@@ -273,7 +280,6 @@ async fn checkpoint_state_store_round_trips_empty_payload() {
         .unwrap();
 
     assert!(record.payload.is_empty());
-    assert_eq!(record.payload.len(), 0);
 
     let loaded = store
         .get_checkpoint_state(get_request(&record, scope, turn_id, run_id))
@@ -323,6 +329,8 @@ async fn checkpoint_state_store_multiple_puts_produce_distinct_refs() {
     let turn_id = TurnId::new();
     let run_id = TurnRunId::new();
 
+    let payload = b"same".to_vec();
+
     let record_a = store
         .put_checkpoint_state(PutCheckpointStateRequest::new(
             scope.clone(),
@@ -331,7 +339,7 @@ async fn checkpoint_state_store_multiple_puts_produce_distinct_refs() {
             CheckpointSchemaId::new("interactive_checkpoint_v1").unwrap(),
             RunProfileVersion::new(1),
             LoopCheckpointKind::BeforeModel,
-            b"payload-a".to_vec(),
+            payload.clone(),
         ))
         .await
         .unwrap();
@@ -344,26 +352,29 @@ async fn checkpoint_state_store_multiple_puts_produce_distinct_refs() {
             CheckpointSchemaId::new("interactive_checkpoint_v1").unwrap(),
             RunProfileVersion::new(1),
             LoopCheckpointKind::BeforeModel,
-            b"payload-b".to_vec(),
+            payload.clone(),
         ))
         .await
         .unwrap();
 
-    assert_ne!(record_a.state_ref, record_b.state_ref, "each put must produce a unique state_ref");
+    assert_ne!(
+        record_a.state_ref, record_b.state_ref,
+        "each put must produce a unique state_ref"
+    );
 
     let loaded_a = store
         .get_checkpoint_state(get_request(&record_a, scope.clone(), turn_id, run_id))
         .await
         .unwrap()
         .expect("first record should be independently retrievable");
-    assert_eq!(loaded_a.payload.as_bytes(), b"payload-a");
+    assert_eq!(loaded_a.payload.as_bytes(), payload.as_slice());
 
     let loaded_b = store
         .get_checkpoint_state(get_request(&record_b, scope, turn_id, run_id))
         .await
         .unwrap()
         .expect("second record should be independently retrievable");
-    assert_eq!(loaded_b.payload.as_bytes(), b"payload-b");
+    assert_eq!(loaded_b.payload.as_bytes(), payload.as_slice());
 }
 
 #[tokio::test]
@@ -383,6 +394,21 @@ async fn checkpoint_state_store_rejects_cross_turn_id_ref() {
     assert!(
         loaded.is_none(),
         "checkpoint state must not be returned for a different turn_id"
+    );
+
+    let loaded = store
+        .get_checkpoint_state(get_request(
+            &record,
+            turn_scope("thread-checkpoint-cross-all"),
+            TurnId::new(),
+            TurnRunId::new(),
+        ))
+        .await
+        .unwrap();
+
+    assert!(
+        loaded.is_none(),
+        "checkpoint state must not be returned when scope, turn_id, and run_id differ"
     );
 }
 
