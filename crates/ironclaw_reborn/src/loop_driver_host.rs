@@ -542,7 +542,7 @@ fn validate_claimed_run_context(
 }
 
 fn persisted_profile_id(profile_id: &RunProfileId) -> RunProfileId {
-    if profile_id.as_str() == "interactive_default" {
+    if profile_id.is_interactive_default() {
         RunProfileId::default_profile()
     } else {
         profile_id.clone()
@@ -553,8 +553,16 @@ fn validate_thread_scope(
     thread_scope: &ThreadScope,
     run_context: &LoopRunContext,
 ) -> Result<(), RebornLoopDriverHostError> {
+    // Reborn text-only hosts currently wrap `ironclaw_threads::ThreadScope`,
+    // whose production transcript boundary is agent-scoped. Agentless turn
+    // scopes are rejected here until that lower thread boundary grows an
+    // explicit agentless thread scope.
+    if run_context.scope.agent_id.as_ref() != Some(&thread_scope.agent_id) {
+        return Err(RebornLoopDriverHostError::ScopeMismatch {
+            reason: "text-only loop host requires a matching agent-scoped thread".to_string(),
+        });
+    }
     if thread_scope.tenant_id != run_context.scope.tenant_id
-        || Some(thread_scope.agent_id.clone()) != run_context.scope.agent_id
         || thread_scope.project_id != run_context.scope.project_id
     {
         return Err(RebornLoopDriverHostError::ScopeMismatch {
@@ -578,12 +586,21 @@ fn turn_error_to_host_error(error: TurnError) -> AgentLoopHostError {
             AgentLoopHostErrorKind::Unavailable,
             "checkpoint state store is unavailable",
         ),
-        TurnError::ScopeNotFound
-        | TurnError::Conflict { .. }
-        | TurnError::InvalidTransition { .. }
-        | TurnError::LeaseMismatch => AgentLoopHostError::new(
+        TurnError::ScopeNotFound => AgentLoopHostError::new(
             AgentLoopHostErrorKind::CheckpointRejected,
-            "checkpoint state ref is unavailable for this loop run",
+            "checkpoint state scope was not found for this loop run",
+        ),
+        TurnError::Conflict { .. } => AgentLoopHostError::new(
+            AgentLoopHostErrorKind::CheckpointRejected,
+            "checkpoint state write conflicted with current turn state",
+        ),
+        TurnError::InvalidTransition { .. } => AgentLoopHostError::new(
+            AgentLoopHostErrorKind::CheckpointRejected,
+            "checkpoint state write was invalid for current turn state",
+        ),
+        TurnError::LeaseMismatch => AgentLoopHostError::new(
+            AgentLoopHostErrorKind::CheckpointRejected,
+            "checkpoint state write lease no longer matches current run",
         ),
         TurnError::ThreadBusy(_) | TurnError::AdmissionRejected(_) => AgentLoopHostError::new(
             AgentLoopHostErrorKind::Unavailable,

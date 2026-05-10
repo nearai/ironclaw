@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
 use ironclaw_turns::{
     AcceptedMessageRef, CheckpointSchemaId, CheckpointStateRecord, CheckpointStateStore,
@@ -92,6 +94,61 @@ async fn loop_checkpoint_store_maps_checkpoint_ids_to_staged_state_refs() {
         .expect("checkpoint id should resolve to state ref");
 
     assert_eq!(loaded, checkpoint);
+}
+
+#[tokio::test]
+async fn loop_checkpoint_store_handles_parallel_puts() {
+    let state_store = Arc::new(InMemoryCheckpointStateStore::default());
+    let checkpoint_store = Arc::new(InMemoryLoopCheckpointStore::default());
+    let scope = turn_scope("thread-loop-checkpoint-parallel");
+    let turn_id = TurnId::new();
+    let run_id = TurnRunId::new();
+    let write = |suffix: &'static str| {
+        let state_store = Arc::clone(&state_store);
+        let checkpoint_store = Arc::clone(&checkpoint_store);
+        let scope = scope.clone();
+        async move {
+            let state_record = put_test_state(&state_store, scope.clone(), turn_id, run_id).await;
+            checkpoint_store
+                .put_loop_checkpoint(PutLoopCheckpointRequest {
+                    scope,
+                    turn_id,
+                    run_id,
+                    state_ref: state_record.state_ref,
+                    schema_id: state_record.schema_id,
+                    schema_version: state_record.schema_version,
+                    kind: state_record.kind,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{suffix} checkpoint put failed: {error}"))
+        }
+    };
+
+    let (first, second, third, fourth) = tokio::join!(
+        write("first"),
+        write("second"),
+        write("third"),
+        write("fourth")
+    );
+
+    let checkpoint_ids = [
+        first.checkpoint_id,
+        second.checkpoint_id,
+        third.checkpoint_id,
+        fourth.checkpoint_id,
+    ];
+    for checkpoint_id in checkpoint_ids {
+        let loaded = checkpoint_store
+            .get_loop_checkpoint(GetLoopCheckpointRequest {
+                scope: scope.clone(),
+                turn_id,
+                run_id,
+                checkpoint_id,
+            })
+            .await
+            .unwrap();
+        assert!(loaded.is_some());
+    }
 }
 
 #[tokio::test]

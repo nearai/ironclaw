@@ -1,7 +1,8 @@
 use ironclaw_turns::{
     AgentLoopDriverDescriptor, CapabilitySurfaceProfileId, InMemoryRunProfileResolver,
-    ModelProfileId, PrivilegedRunProfileDimension, RunProfileRequest, RunProfileRequestAuthority,
-    RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
+    ModelProfileId, PrivilegedRunProfileDimension, RunProfileId, RunProfileRequest,
+    RunProfileRequestAuthority, RunProfileResolutionError, RunProfileResolutionRequest,
+    RunProfileResolver, RunProfileVersion,
 };
 
 #[tokio::test]
@@ -13,6 +14,7 @@ async fn default_interactive_profile_resolves_stable_driver_and_redacted_snapsho
         .await
         .unwrap();
 
+    assert_eq!(RunProfileId::interactive_default(), snapshot.profile_id);
     assert_eq!(snapshot.profile_id.as_str(), "interactive_default");
     assert_eq!(snapshot.profile_version, RunProfileVersion::new(1));
     assert_eq!(snapshot.run_class_id.as_str(), "interactive_coding");

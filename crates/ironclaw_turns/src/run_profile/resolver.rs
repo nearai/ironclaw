@@ -207,7 +207,7 @@ fn interactive_profile() -> RunProfileDefinition {
     let checkpoint_schema_id = CheckpointSchemaId::from_trusted_static("interactive_checkpoint_v1");
     let checkpoint_schema_version = RunProfileVersion::new(1);
     RunProfileDefinition {
-        profile_id: RunProfileId::from_trusted_static("interactive_default"),
+        profile_id: RunProfileId::interactive_default(),
         profile_version: RunProfileVersion::new(1),
         run_class_id: RunClassId::from_trusted_static("interactive_coding"),
         loop_driver: AgentLoopDriverDescriptor {
@@ -258,7 +258,7 @@ fn long_running_mission_profile() -> RunProfileDefinition {
     let checkpoint_schema_id = CheckpointSchemaId::from_trusted_static("durable_mission_v1");
     let checkpoint_schema_version = RunProfileVersion::new(1);
     RunProfileDefinition {
-        profile_id: RunProfileId::from_trusted_static("long_running_mission"),
+        profile_id: RunProfileId::long_running_mission(),
         profile_version: RunProfileVersion::new(1),
         run_class_id: RunClassId::from_trusted_static("long_running_mission"),
         loop_driver: AgentLoopDriverDescriptor {
@@ -321,16 +321,20 @@ fn provenance_for(
     RedactedRunProfileProvenance {
         sources: vec![RedactedRunProfileSource {
             layer: RunProfileSourceLayer::from_trusted_static("system_default"),
-            source_ref: RunProfileSourceRef::from_trusted_static(
-                match definition.profile_id.as_str() {
-                    "interactive_default" => "builtin:interactive_default:v1",
-                    "long_running_mission" => "builtin:long_running_mission:v1",
-                    _ => "builtin:unknown:v1",
-                },
-            ),
+            source_ref: source_ref_for(definition),
             summary: summary.to_string(),
         }],
         effective_privileges: definition.required_privileges.clone(),
+    }
+}
+
+fn source_ref_for(definition: &RunProfileDefinition) -> RunProfileSourceRef {
+    if definition.profile_id == RunProfileId::interactive_default() {
+        RunProfileSourceRef::from_trusted_static("builtin:interactive_default:v1")
+    } else if definition.profile_id == RunProfileId::long_running_mission() {
+        RunProfileSourceRef::from_trusted_static("builtin:long_running_mission:v1")
+    } else {
+        RunProfileSourceRef::from_trusted_static("builtin:unknown:v1")
     }
 }
 

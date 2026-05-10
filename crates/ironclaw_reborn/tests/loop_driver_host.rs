@@ -18,9 +18,10 @@ use ironclaw_turns::{
     AcceptedMessageRef, CheckpointStateStore, EventCursor, GetCheckpointStateRequest,
     GetLoopCheckpointRequest, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
     InMemoryRunProfileResolver, InMemoryTurnStateStore, InMemoryTurnStateStoreLimits,
-    LoopCheckpointStore, PutCheckpointStateRequest, ReplyTargetBindingRef, RunProfileId,
-    RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion, SourceBindingRef,
-    TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope, TurnStatus,
+    LoopCheckpointRecord, LoopCheckpointStore, PutCheckpointStateRequest, PutLoopCheckpointRequest,
+    ReplyTargetBindingRef, RunProfileId, RunProfileResolutionRequest, RunProfileResolver,
+    RunProfileVersion, SourceBindingRef, TurnError, TurnLeaseToken, TurnRunId, TurnRunnerId,
+    TurnScope, TurnStatus,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostErrorKind, CapabilityInputRef, CapabilityInvocation,
         CapabilityOutcome, CapabilitySurfaceVersion, FinalizeAssistantMessage,
@@ -394,6 +395,26 @@ async fn text_only_host_factory_rejects_thread_scope_mismatch() {
 }
 
 #[tokio::test]
+async fn text_only_host_factory_rejects_agentless_turn_scope() {
+    let fixture = HostFixture::new("thread-host-agentless-scope", "hello").await;
+    let mut context = fixture.context.clone();
+    context.scope.agent_id = None;
+    let mut claimed = fixture.claimed.clone();
+    claimed.state.scope = context.scope.clone();
+
+    let error = fixture
+        .factory()
+        .build_text_only_host(RebornLoopDriverHostRequest {
+            claimed_run: claimed,
+            loop_run_context: context,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("agent-scoped thread"));
+}
+
+#[tokio::test]
 async fn text_only_host_factory_rejects_persisted_profile_identity_mismatch() {
     let fixture = HostFixture::new("thread-host-profile-mismatch", "hello").await;
     let mut claimed = fixture.claimed.clone();
@@ -578,6 +599,32 @@ async fn text_only_host_checkpoint_port_rejects_kind_mismatch() {
         .unwrap_err();
 
     assert_eq!(error.kind, AgentLoopHostErrorKind::CheckpointRejected);
+}
+
+#[tokio::test]
+async fn text_only_host_checkpoint_port_maps_store_failures_to_unavailable() {
+    let fixture = HostFixture::new("thread-host-checkpoint-store-error", "hello").await;
+    let factory = fixture.factory_with_loop_checkpoint_store(Arc::new(FailingLoopCheckpointStore));
+    let host = factory
+        .build_text_only_host(RebornLoopDriverHostRequest {
+            claimed_run: fixture.claimed.clone(),
+            loop_run_context: fixture.context.clone(),
+        })
+        .await
+        .unwrap();
+    let state = fixture
+        .stage_checkpoint_state(LoopCheckpointKind::BeforeBlock, b"state before store error")
+        .await;
+
+    let error = host
+        .checkpoint(LoopCheckpointRequest {
+            kind: LoopCheckpointKind::BeforeBlock,
+            state_ref: state.state_ref,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
 }
 
 #[tokio::test]
@@ -804,6 +851,10 @@ fn thread_scope_from_turn(scope: &TurnScope) -> ThreadScope {
 }
 
 fn assert_public_milestones_hide_raw_payloads(milestones: &[LoopHostMilestone]) {
+    // Milestones are public progress metadata: they may carry durable refs and
+    // safe summaries, never raw model text, checkpoint bytes, tool input,
+    // secrets, or host paths. Drivers must rehydrate content through scoped
+    // stores instead of learning it from milestone JSON.
     let wire = serde_json::to_string(milestones).unwrap();
     for forbidden in [
         "RAW_CHECKPOINT_PAYLOAD",
@@ -813,6 +864,29 @@ fn assert_public_milestones_hide_raw_payloads(milestones: &[LoopHostMilestone]) 
         "model says hi",
     ] {
         assert!(!wire.contains(forbidden), "milestone leaked {forbidden}");
+    }
+}
+
+struct FailingLoopCheckpointStore;
+
+#[async_trait]
+impl LoopCheckpointStore for FailingLoopCheckpointStore {
+    async fn put_loop_checkpoint(
+        &self,
+        _request: PutLoopCheckpointRequest,
+    ) -> Result<LoopCheckpointRecord, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "loop checkpoint store offline".to_string(),
+        })
+    }
+
+    async fn get_loop_checkpoint(
+        &self,
+        _request: GetLoopCheckpointRequest,
+    ) -> Result<Option<LoopCheckpointRecord>, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "loop checkpoint store offline".to_string(),
+        })
     }
 }
 

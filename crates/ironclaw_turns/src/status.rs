@@ -92,7 +92,7 @@ impl<'de> Deserialize<'de> for TurnRunProfile {
 }
 
 fn compatibility_profile_id(resolved: &ResolvedRunProfile) -> RunProfileId {
-    if resolved.profile_id.as_str() == "interactive_default" {
+    if resolved.profile_id.is_interactive_default() {
         RunProfileId::default_profile()
     } else {
         resolved.profile_id.clone()
