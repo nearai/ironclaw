@@ -402,10 +402,10 @@ async fn blocked_approval_verified_trusted() {
 }
 
 #[tokio::test]
-async fn blocked_process_verified_trusted() {
+async fn blocked_process_maps_to_recovery_even_when_evidence_is_verified() {
     let s = setup(
         InMemoryLoopExitEvidencePort::new().with_blocked_evidence_verified(true),
-        TurnStatus::BlockedProcess,
+        TurnStatus::RecoveryRequired,
     );
     let profile = test_profile(false);
 
@@ -413,13 +413,7 @@ async fn blocked_process_verified_trusted() {
         .await
         .expect("should succeed");
 
-    let mapping = s.captured_mapping();
-    match &mapping {
-        LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Blocked { reason, .. }) => {
-            assert!(matches!(reason, BlockedReason::Process { .. }));
-        }
-        other => panic!("expected Blocked outcome, got {other:?}"),
-    }
+    assert!(is_recovery_mapping(&s.captured_mapping()));
 }
 
 #[tokio::test]

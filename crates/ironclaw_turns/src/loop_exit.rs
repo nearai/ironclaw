@@ -52,6 +52,15 @@ impl LoopExit {
                 LoopExitViolationKind::UnverifiedBlockedEvidence,
                 policy.invalid_handling,
             ),
+            Self::Cancelled(exit)
+                if policy.require_final_checkpoint && exit.checkpoint_id.is_none() =>
+            {
+                invalid_exit_decision(
+                    exit_id,
+                    LoopExitViolationKind::MissingFinalCheckpoint,
+                    policy.invalid_handling,
+                )
+            }
             Self::Cancelled(_exit) if policy.host_cancellation_observed => {
                 LoopExitValidationDecision::trusted(exit_id, TurnRunnerOutcome::Cancelled)
             }
@@ -60,6 +69,15 @@ impl LoopExit {
                 LoopExitViolationKind::CancellationNotObserved,
                 policy.invalid_handling,
             ),
+            Self::Failed(exit)
+                if policy.require_final_checkpoint && exit.checkpoint_id.is_none() =>
+            {
+                invalid_exit_decision(
+                    exit_id,
+                    LoopExitViolationKind::MissingFinalCheckpoint,
+                    policy.invalid_handling,
+                )
+            }
             Self::Failed(exit) if policy.failure_evidence_verified => {
                 LoopExitValidationDecision::trusted(
                     exit_id,
@@ -139,19 +157,21 @@ pub enum LoopBlockedKind {
     Approval,
     Auth,
     Resource,
-    /// Spawned process suspension — maps to `BlockedReason::Process`.
+    /// Spawned process suspension is parsed for forward compatibility but is
+    /// not trusted by the MVP `LoopExit` applicator because process completion
+    /// uses a separate host-owned transition.
     Process,
 }
 
 impl LoopBlockedKind {
     fn to_blocked_reason(self, gate_ref: LoopGateRef) -> Result<BlockedReason, ()> {
         let gate_ref = GateRef::new(gate_ref.as_str()).map_err(|_| ())?;
-        Ok(match self {
-            Self::Approval => BlockedReason::Approval { gate_ref },
-            Self::Auth => BlockedReason::Auth { gate_ref },
-            Self::Resource => BlockedReason::Resource { gate_ref },
-            Self::Process => BlockedReason::Process { gate_ref },
-        })
+        match self {
+            Self::Approval => Ok(BlockedReason::Approval { gate_ref }),
+            Self::Auth => Ok(BlockedReason::Auth { gate_ref }),
+            Self::Resource => Ok(BlockedReason::Resource { gate_ref }),
+            Self::Process => Err(()),
+        }
     }
 }
 

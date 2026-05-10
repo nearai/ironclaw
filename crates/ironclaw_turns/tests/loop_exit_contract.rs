@@ -112,34 +112,49 @@ fn completed_exit_requires_host_verified_completion_refs_before_trusted_mapping(
 
 #[test]
 fn final_checkpoint_policy_rejects_terminal_exit_without_checkpoint() {
-    let decision = LoopExit::Completed(LoopCompleted {
-        completion_kind: LoopCompletionKind::FinalReply,
-        reply_message_refs: vec![message_ref("msg:assistant-final")],
-        result_refs: vec![],
-        final_checkpoint_id: None,
-        usage_summary_ref: None,
-        exit_id: exit_id("exit:no-final-checkpoint"),
-    })
-    .validate(LoopExitValidationPolicy {
-        require_final_checkpoint: true,
-        host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::FailTerminal,
-        completion_refs_verified: true,
-        blocked_evidence_verified: false,
-        failure_evidence_verified: false,
-    });
+    let cases = [
+        LoopExit::Completed(LoopCompleted {
+            completion_kind: LoopCompletionKind::FinalReply,
+            reply_message_refs: vec![message_ref("msg:assistant-final")],
+            result_refs: vec![],
+            final_checkpoint_id: None,
+            usage_summary_ref: None,
+            exit_id: exit_id("exit:no-final-checkpoint-completed"),
+        }),
+        LoopExit::Cancelled(LoopCancelled {
+            reason_kind: LoopCancelledReasonKind::HostCancellation,
+            checkpoint_id: None,
+            interrupted_message_refs: vec![],
+            exit_id: exit_id("exit:no-final-checkpoint-cancelled"),
+        }),
+        LoopExit::failed(
+            LoopFailureKind::DriverBug,
+            exit_id("exit:no-final-checkpoint-failed"),
+        ),
+    ];
 
-    assert_eq!(
-        decision.violation.unwrap().category(),
-        "missing_final_checkpoint"
-    );
-    assert_eq!(
-        decision.mapping,
-        TurnRunnerOutcome::Failed {
-            failure: SanitizedFailure::new("driver_protocol_violation").unwrap(),
-        }
-        .into()
-    );
+    for exit in cases {
+        let decision = exit.validate(LoopExitValidationPolicy {
+            require_final_checkpoint: true,
+            host_cancellation_observed: true,
+            invalid_handling: LoopExitInvalidHandling::FailTerminal,
+            completion_refs_verified: true,
+            blocked_evidence_verified: false,
+            failure_evidence_verified: true,
+        });
+
+        assert_eq!(
+            decision.violation.unwrap().category(),
+            "missing_final_checkpoint"
+        );
+        assert_eq!(
+            decision.mapping,
+            TurnRunnerOutcome::Failed {
+                failure: SanitizedFailure::new("driver_protocol_violation").unwrap(),
+            }
+            .into()
+        );
+    }
 }
 
 #[test]
@@ -489,6 +504,7 @@ fn blocked_variants_map_to_correct_blocked_reason() {
             LoopBlockedKind::Approval => BlockedReason::Approval { gate_ref },
             LoopBlockedKind::Auth => BlockedReason::Auth { gate_ref },
             LoopBlockedKind::Resource => BlockedReason::Resource { gate_ref },
+            LoopBlockedKind::Process => unreachable!("process is tested separately as untrusted"),
         };
 
         assert_eq!(decision.violation, None);
@@ -501,6 +517,29 @@ fn blocked_variants_map_to_correct_blocked_reason() {
             .into()
         );
     }
+}
+
+#[test]
+fn blocked_process_exit_maps_to_recovery_even_with_verified_evidence() {
+    let decision = LoopExit::Blocked(LoopBlocked {
+        kind: LoopBlockedKind::Process,
+        gate_ref: loop_gate_ref("gate:process-gate"),
+        checkpoint_id: TurnCheckpointId::new(),
+        exit_id: exit_id("exit:process-blocked"),
+    })
+    .validate(LoopExitValidationPolicy {
+        blocked_evidence_verified: true,
+        ..LoopExitValidationPolicy::default()
+    });
+
+    assert_eq!(
+        decision.violation.unwrap().category(),
+        "unverified_blocked_evidence"
+    );
+    assert!(matches!(
+        decision.mapping,
+        ironclaw_turns::LoopExitMapping::RecoveryRequired { .. }
+    ));
 }
 
 #[test]
@@ -594,6 +633,7 @@ fn terminal_statuses_release_lock_and_non_terminal_keep_it() {
         TurnStatus::BlockedApproval,
         TurnStatus::BlockedAuth,
         TurnStatus::BlockedResource,
+        TurnStatus::BlockedProcess,
         TurnStatus::CancelRequested,
         TurnStatus::Cancelled,
         TurnStatus::Completed,
@@ -606,6 +646,7 @@ fn terminal_statuses_release_lock_and_non_terminal_keep_it() {
             TurnStatus::BlockedApproval => (false, true),
             TurnStatus::BlockedAuth => (false, true),
             TurnStatus::BlockedResource => (false, true),
+            TurnStatus::BlockedProcess => (false, true),
             TurnStatus::CancelRequested => (false, true),
             TurnStatus::Cancelled => (true, false),
             TurnStatus::Completed => (true, false),
