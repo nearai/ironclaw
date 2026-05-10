@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use ironclaw_turns::{
     LoopExit, LoopExitInvalidHandling, LoopExitValidationPolicy, LoopGateRef, LoopMessageRef,
     LoopResultRef, ResolvedRunProfile, TurnCheckpointId, TurnError, TurnLeaseToken, TurnRunId,
-    TurnRunnerId, TurnRunState, TurnScope,
+    TurnRunState, TurnRunnerId, TurnScope,
     runner::{ApplyValidatedLoopExitRequest, TurnRunTransitionPort},
 };
 
@@ -60,10 +60,7 @@ pub trait LoopExitEvidencePort: Send + Sync {
     ) -> Result<bool, TurnError>;
 
     /// Check whether a host cancellation signal was received for this run.
-    async fn is_cancellation_observed(
-        &self,
-        run_id: TurnRunId,
-    ) -> Result<bool, TurnError>;
+    async fn is_cancellation_observed(&self, run_id: TurnRunId) -> Result<bool, TurnError>;
 }
 
 /// Trusted loop-exit applier that derives evidence from durable stores.
@@ -158,10 +155,8 @@ impl LoopExitApplier {
                     .await?;
             }
             LoopExit::Cancelled(_) => {
-                policy.host_cancellation_observed = self
-                    .evidence_port
-                    .is_cancellation_observed(run_id)
-                    .await?;
+                policy.host_cancellation_observed =
+                    self.evidence_port.is_cancellation_observed(run_id).await?;
             }
             LoopExit::Failed(_) => {
                 policy.require_final_checkpoint =
@@ -181,6 +176,7 @@ impl LoopExitApplier {
 ///
 /// All evidence verification returns `Ok(false)` by default (most restrictive /
 /// untrusted). Use builder methods to override individual responses.
+#[cfg(test)]
 pub struct InMemoryLoopExitEvidencePort {
     completion_refs_verified: bool,
     blocked_evidence_verified: bool,
@@ -188,6 +184,7 @@ pub struct InMemoryLoopExitEvidencePort {
     cancellation_observed: bool,
 }
 
+#[cfg(test)]
 impl InMemoryLoopExitEvidencePort {
     /// Create a new in-memory evidence port with all evidence unverified.
     pub fn new() -> Self {
@@ -234,12 +231,14 @@ impl InMemoryLoopExitEvidencePort {
     }
 }
 
+#[cfg(test)]
 impl Default for InMemoryLoopExitEvidencePort {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(test)]
 #[async_trait]
 impl LoopExitEvidencePort for InMemoryLoopExitEvidencePort {
     async fn verify_completion_refs(
@@ -270,10 +269,7 @@ impl LoopExitEvidencePort for InMemoryLoopExitEvidencePort {
         Ok(self.failure_evidence_verified)
     }
 
-    async fn is_cancellation_observed(
-        &self,
-        _run_id: TurnRunId,
-    ) -> Result<bool, TurnError> {
+    async fn is_cancellation_observed(&self, _run_id: TurnRunId) -> Result<bool, TurnError> {
         Ok(self.cancellation_observed)
     }
 }

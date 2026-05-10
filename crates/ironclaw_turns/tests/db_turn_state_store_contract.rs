@@ -12,18 +12,18 @@ use std::{
 use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CheckpointSchemaId, DefaultTurnCoordinator,
+    AcceptedMessageRef, CancelRunRequest, CheckpointSchemaId, DefaultTurnCoordinator, GateRef,
     GetLoopCheckpointRequest, IdempotencyKey, InMemoryRunProfileResolver,
-    InMemoryTurnStateStoreLimits, LoopCheckpointStateRef, LoopCheckpointStore, LoopCompleted,
-    LoopCompletionKind, LoopExit, LoopExitInvalidHandling, LoopExitValidationPolicy,
-    LoopMessageRef, PutLoopCheckpointRequest, ReplyTargetBindingRef, ResolvedRunProfile,
-    RunProfileRequest, RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver,
-    RunProfileVersion, SanitizedCancelReason, SanitizedFailure, SourceBindingRef,
-    StaticTurnAdmissionLimitProvider, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
-    TurnAdmissionAxisKind, TurnAdmissionCapacityDenial, TurnCoordinator, TurnError, TurnEventKind,
-    TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
-    TurnEventProjectionService, TurnId, TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope,
-    TurnStatus,
+    InMemoryTurnStateStoreLimits, LoopBlocked, LoopBlockedKind, LoopCheckpointStateRef,
+    LoopCheckpointStore, LoopCompleted, LoopCompletionKind, LoopExit, LoopExitInvalidHandling,
+    LoopExitValidationPolicy, LoopMessageRef, PutLoopCheckpointRequest, ReplyTargetBindingRef,
+    ResolvedRunProfile, RunProfileRequest, RunProfileResolutionError, RunProfileResolutionRequest,
+    RunProfileResolver, RunProfileVersion, SanitizedCancelReason, SanitizedFailure,
+    SourceBindingRef, StaticTurnAdmissionLimitProvider, SubmitTurnRequest, SubmitTurnResponse,
+    ThreadBusy, TurnActor, TurnAdmissionAxisKind, TurnAdmissionCapacityDenial, TurnCheckpointId,
+    TurnCoordinator, TurnError, TurnEventKind, TurnEventProjectionCursor,
+    TurnEventProjectionError, TurnEventProjectionRequest, TurnEventProjectionService, TurnId,
+    TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope, TurnStatus,
     events::EventCursor,
     runner::{
         ApplyLoopExitRequest, ClaimRunRequest, CompleteRunRequest, HeartbeatRequest,
@@ -543,6 +543,70 @@ async fn libsql_turn_state_store_persists_apply_loop_exit_recovery_across_instan
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
+async fn libsql_turn_state_store_persists_blocked_process_loop_exit_across_instances() {
+    let (db, _dir) = libsql_db().await;
+    let store = Arc::new(LibSqlTurnStateStore::new(db.clone()));
+    store.run_migrations().await.unwrap();
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+    let thread = "thread-blocked-process-libsql";
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(thread, "idem-submit-blocked-process"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = ironclaw_turns::TurnRunnerId::new();
+    let lease_token = ironclaw_turns::TurnLeaseToken::new();
+    let claimed = store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope(thread)),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.state.run_id, run_id);
+
+    let blocked = apply_loop_exit(
+        store.as_ref(),
+        ApplyLoopExitRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            exit: blocked_process_exit("exit:blocked-process-libsql"),
+            validation_policy: LoopExitValidationPolicy {
+                require_final_checkpoint: false,
+                host_cancellation_observed: false,
+                invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
+                completion_refs_verified: false,
+                blocked_evidence_verified: true,
+                failure_evidence_verified: false,
+            },
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(blocked.status, TurnStatus::BlockedProcess);
+
+    let reopened = Arc::new(LibSqlTurnStateStore::new(db));
+    let snapshot = reopened.persistence_snapshot().await.unwrap();
+    let run = snapshot
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .unwrap();
+    assert_eq!(run.status, TurnStatus::BlockedProcess);
+    let lock = snapshot
+        .active_locks
+        .iter()
+        .find(|lock| lock.run_id == run_id)
+        .unwrap();
+    assert_eq!(lock.status, TurnStatus::BlockedProcess);
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
 async fn libsql_turn_state_store_persists_cancelled_loop_exit_application() {
     let (db, _dir) = libsql_db().await;
     let store = Arc::new(LibSqlTurnStateStore::new(db.clone()));
@@ -1007,6 +1071,76 @@ async fn postgres_turn_state_store_persists_apply_loop_exit_recovery_when_config
 
 #[cfg(feature = "postgres")]
 #[tokio::test]
+async fn postgres_turn_state_store_persists_blocked_process_loop_exit_when_configured() {
+    let Some(pool) = postgres_pool().await else {
+        return;
+    };
+    let suffix = unique_suffix();
+    let thread = format!("pg-blocked-process-{suffix}");
+    let store = Arc::new(PostgresTurnStateStore::new(pool.clone()));
+    store.run_migrations().await.unwrap();
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                &thread,
+                &format!("idem-submit-blocked-{suffix}"),
+            ))
+            .await
+            .unwrap(),
+    );
+    let runner_id = ironclaw_turns::TurnRunnerId::new();
+    let lease_token = ironclaw_turns::TurnLeaseToken::new();
+    let claimed = store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope(&thread)),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.state.run_id, run_id);
+
+    let blocked = apply_loop_exit(
+        store.as_ref(),
+        ApplyLoopExitRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            exit: blocked_process_exit(&format!("exit:blocked-process-{suffix}")),
+            validation_policy: LoopExitValidationPolicy {
+                require_final_checkpoint: false,
+                host_cancellation_observed: false,
+                invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
+                completion_refs_verified: false,
+                blocked_evidence_verified: true,
+                failure_evidence_verified: false,
+            },
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(blocked.status, TurnStatus::BlockedProcess);
+
+    let reopened = Arc::new(PostgresTurnStateStore::new(pool));
+    let snapshot = reopened.persistence_snapshot().await.unwrap();
+    let run = snapshot
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .unwrap();
+    assert_eq!(run.status, TurnStatus::BlockedProcess);
+    let lock = snapshot
+        .active_locks
+        .iter()
+        .find(|lock| lock.run_id == run_id)
+        .unwrap();
+    assert_eq!(lock.status, TurnStatus::BlockedProcess);
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
 async fn postgres_turn_state_store_persists_cancelled_loop_exit_application_when_configured() {
     let Some(pool) = postgres_pool().await else {
         return;
@@ -1234,6 +1368,15 @@ fn completed_exit(exit_id: &str) -> LoopExit {
         result_refs: vec![],
         final_checkpoint_id: None,
         usage_summary_ref: None,
+        exit_id: ironclaw_turns::LoopExitId::new(exit_id).unwrap(),
+    })
+}
+
+fn blocked_process_exit(exit_id: &str) -> LoopExit {
+    LoopExit::Blocked(LoopBlocked {
+        kind: LoopBlockedKind::Process,
+        gate_ref: LoopGateRef::new("gate:process-test-worker").unwrap(),
+        checkpoint_id: TurnCheckpointId::new(),
         exit_id: ironclaw_turns::LoopExitId::new(exit_id).unwrap(),
     })
 }

@@ -164,7 +164,8 @@ done
 
 # Filter a unified diff (DIFF_OUTPUT-shaped) to drop `+` lines that come from
 # test code: either inside a `#[cfg(test)] mod tests` block (per the
-# precomputed boundaries) or in any file under the top-level `tests/` dir.
+# precomputed boundaries), in any file under a `tests/` dir, or in module files
+# named `tests.rs` (common Rust unit-test layout: `#[cfg(test)] mod tests;`).
 # Marker, header, and context lines pass through untouched so downstream
 # grep/awk pipelines still see file/hunk anchors.
 strip_test_mod_lines() {
@@ -186,7 +187,7 @@ strip_test_mod_lines() {
         /^\+\+\+ b\// {
             cur_file = substr($0, 7)
             cur_start = (cur_file in test_start) ? test_start[cur_file] : 0
-            cur_skip_all = (cur_file ~ /(^|\/)tests\//)
+            cur_skip_all = (cur_file ~ /(^|\/)tests\// || cur_file ~ /(^|\/)tests\.rs$/)
             new_line = 0
             print
             next

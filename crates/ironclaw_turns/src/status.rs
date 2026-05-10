@@ -103,11 +103,19 @@ fn compatibility_profile_id(resolved: &ResolvedRunProfile) -> RunProfileId {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BlockedReason {
-    Approval { gate_ref: GateRef },
-    Auth { gate_ref: GateRef },
-    Resource { gate_ref: GateRef },
+    Approval {
+        gate_ref: GateRef,
+    },
+    Auth {
+        gate_ref: GateRef,
+    },
+    Resource {
+        gate_ref: GateRef,
+    },
     /// Blocked waiting for a spawned process — maps to `TurnStatus::BlockedProcess`.
-    Process { gate_ref: GateRef },
+    Process {
+        gate_ref: GateRef,
+    },
 }
 
 impl BlockedReason {

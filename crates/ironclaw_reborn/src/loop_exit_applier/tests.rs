@@ -4,12 +4,12 @@ use async_trait::async_trait;
 
 use ironclaw_host_api::{TenantId, ThreadId};
 use ironclaw_turns::{
-    AcceptedMessageRef, BlockedReason, EventCursor, GateRef, LoopBlocked, LoopBlockedKind,
-    LoopCancelled, LoopCancelledReasonKind, LoopCompleted, LoopCompletionKind, LoopExit,
-    LoopExitId, LoopExitMapping, LoopFailed, LoopFailureKind, LoopGateRef, LoopMessageRef,
-    LoopResultRef, ReplyTargetBindingRef, RunProfileId, RunProfileVersion, SanitizedFailure,
-    SourceBindingRef, TurnCheckpointId, TurnError, TurnId, TurnLeaseToken, TurnRunId,
-    TurnRunState, TurnRunnerId, TurnScope, TurnStatus,
+    AcceptedMessageRef, BlockedReason, EventCursor, LoopBlocked, LoopBlockedKind, LoopCancelled,
+    LoopCancelledReasonKind, LoopCompleted, LoopCompletionKind, LoopExit, LoopExitId,
+    LoopExitMapping, LoopFailed, LoopFailureKind, LoopGateRef, LoopMessageRef,
+    ReplyTargetBindingRef, RunProfileId, RunProfileVersion, SourceBindingRef, TurnCheckpointId,
+    TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope,
+    TurnStatus,
     run_profile::*,
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
@@ -176,10 +176,7 @@ impl TurnRunTransitionPort for CapturingTransitionPort {
         &self,
         request: ApplyValidatedLoopExitRequest,
     ) -> Result<TurnRunState, TurnError> {
-        self.captured_requests
-            .lock()
-            .expect("lock")
-            .push(request);
+        self.captured_requests.lock().expect("lock").push(request);
         Ok(test_run_state(self.result_status))
     }
 }
@@ -308,7 +305,9 @@ async fn completed_final_reply_verified_refs_trusted() {
     );
     let profile = test_profile(false);
 
-    s.apply(completed_exit_with_refs(), &profile).await.expect("should succeed");
+    s.apply(completed_exit_with_refs(), &profile)
+        .await
+        .expect("should succeed");
 
     let mapping = s.captured_mapping();
     assert_eq!(
@@ -325,7 +324,9 @@ async fn completed_final_reply_unverified_refs_recovery() {
     );
     let profile = test_profile(false);
 
-    s.apply(completed_exit_with_refs(), &profile).await.expect("should succeed");
+    s.apply(completed_exit_with_refs(), &profile)
+        .await
+        .expect("should succeed");
 
     assert!(is_recovery_mapping(&s.captured_mapping()));
 }
@@ -338,7 +339,9 @@ async fn completed_no_reply_empty_refs_violation() {
     );
     let profile = test_profile(false);
 
-    s.apply(completed_exit_no_reply(), &profile).await.expect("should succeed");
+    s.apply(completed_exit_no_reply(), &profile)
+        .await
+        .expect("should succeed");
 
     // NoReply with empty refs → MissingCompletionReference via validate()
     assert!(is_recovery_mapping(&s.captured_mapping()));
@@ -442,7 +445,9 @@ async fn cancelled_observed_trusted() {
     );
     let profile = test_profile(false);
 
-    s.apply(cancelled_exit(), &profile).await.expect("should succeed");
+    s.apply(cancelled_exit(), &profile)
+        .await
+        .expect("should succeed");
 
     assert_eq!(
         s.captured_mapping(),
@@ -458,7 +463,9 @@ async fn cancelled_not_observed_violation() {
     );
     let profile = test_profile(false);
 
-    s.apply(cancelled_exit(), &profile).await.expect("should succeed");
+    s.apply(cancelled_exit(), &profile)
+        .await
+        .expect("should succeed");
 
     assert!(is_recovery_mapping(&s.captured_mapping()));
 }
@@ -471,7 +478,9 @@ async fn failed_verified_trusted() {
     );
     let profile = test_profile(false);
 
-    s.apply(failed_exit(), &profile).await.expect("should succeed");
+    s.apply(failed_exit(), &profile)
+        .await
+        .expect("should succeed");
 
     let mapping = s.captured_mapping();
     match &mapping {
@@ -490,7 +499,9 @@ async fn failed_unverified_violation() {
     );
     let profile = test_profile(false);
 
-    s.apply(failed_exit(), &profile).await.expect("should succeed");
+    s.apply(failed_exit(), &profile)
+        .await
+        .expect("should succeed");
 
     assert!(is_recovery_mapping(&s.captured_mapping()));
 }

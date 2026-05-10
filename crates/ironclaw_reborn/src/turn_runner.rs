@@ -19,15 +19,15 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 use ironclaw_turns::{
     AgentLoopDriverError, AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, LoopExit,
-    ResolvedRunProfile, SanitizedFailure, TurnError, TurnLeaseToken,
-    TurnRunId, TurnRunnerId, TurnScope, TurnStatus,
+    ResolvedRunProfile, SanitizedFailure, TurnError, TurnLeaseToken, TurnRunId, TurnRunnerId,
+    TurnScope, TurnStatus,
     runner::{
-        ClaimRunRequest, ClaimedTurnRun, HeartbeatRequest,
-        RecordRecoveryRequiredRequest, TurnRunTransitionPort,
+        ClaimRunRequest, ClaimedTurnRun, HeartbeatRequest, RecordRecoveryRequiredRequest,
+        TurnRunTransitionPort,
     },
 };
 
@@ -38,11 +38,22 @@ use crate::driver_registry::{DriverRegistry, LoopDriverRegistryKey};
 /// Create a `SanitizedFailure` from a known-valid static category.
 ///
 /// All categories used here are lowercase ASCII with underscores, satisfying
-/// validation invariants. Infallible for these literals.
-fn sanitized_failure(category: &'static str) -> SanitizedFailure {
-    // Safety: all call sites use known-valid lowercase_underscore categories.
-    SanitizedFailure::new(category)
-        .unwrap_or_else(|_| SanitizedFailure::new("unknown_failure").expect("infallible literal"))
+/// validation invariants. Returning `None` is only possible if a static literal
+/// is changed to an invalid category.
+fn sanitized_failure(category: &'static str) -> Option<SanitizedFailure> {
+    match SanitizedFailure::new(category) {
+        Ok(failure) => Some(failure),
+        Err(error) => {
+            error!(category, %error, "invalid static recovery failure category");
+            SanitizedFailure::new("unknown_failure").map_or_else(
+                |fallback_error| {
+                    error!(%fallback_error, "fallback recovery failure category invalid");
+                    None
+                },
+                Some,
+            )
+        }
+    }
 }
 
 /// Configuration for the turn-runner worker.
@@ -88,6 +99,9 @@ pub trait HostFactory: Send + Sync {
 }
 
 /// Error returned when host construction fails.
+///
+/// TODO(reborn): split retriable/permanent host errors if host-side failure
+/// handling needs different recovery policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostFactoryError {
     pub reason: String,
@@ -184,7 +198,7 @@ impl TurnRunnerWorker {
         loop_exit_applier: Arc<LoopExitApplier>,
     ) -> Self {
         let runner_id = TurnRunnerId::new();
-        info!(runner_id = ?runner_id, "turn runner worker created");
+        debug!(runner_id = ?runner_id, "turn runner worker created");
         Self {
             runner_id,
             config,
@@ -209,13 +223,17 @@ impl TurnRunnerWorker {
     /// 3. If none claimed, continue
     /// 4. Run the claimed run to `LoopExit` / application
     /// 5. Repeat
+    ///
+    /// Cancellation stops future claim attempts. It does not preempt an in-flight
+    /// driver invocation; the claimed run is allowed to return a `LoopExit`,
+    /// then the worker applies that exit before shutting down.
     pub async fn run(&self, cancel: CancellationToken) {
-        info!(runner_id = ?self.runner_id, "turn runner worker started");
+        debug!(runner_id = ?self.runner_id, "turn runner worker started");
 
         loop {
             tokio::select! {
                 () = cancel.cancelled() => {
-                    info!(runner_id = ?self.runner_id, "turn runner worker shutting down");
+                    debug!(runner_id = ?self.runner_id, "turn runner worker shutting down");
                     break;
                 }
                 () = self.wake_receiver.wait_or_timeout(self.config.poll_interval) => {}
@@ -234,7 +252,7 @@ impl TurnRunnerWorker {
             }
         }
 
-        info!(runner_id = ?self.runner_id, "turn runner worker stopped");
+        debug!(runner_id = ?self.runner_id, "turn runner worker stopped");
     }
 
     /// Attempt one claim-and-run cycle.
@@ -260,7 +278,7 @@ impl TurnRunnerWorker {
         let run_id = claimed.state.run_id;
         let status = claimed.state.status;
 
-        info!(
+        debug!(
             runner_id = ?self.runner_id,
             run_id = ?run_id,
             status = ?status,
@@ -286,7 +304,12 @@ impl TurnRunnerWorker {
             let interval = self.config.heartbeat_interval;
             let cancel = heartbeat_cancel.clone();
             tokio::spawn(heartbeat_loop(
-                port, run_id, runner_id, lease_token, interval, cancel,
+                port,
+                run_id,
+                runner_id,
+                lease_token,
+                interval,
+                cancel,
             ))
         };
 
@@ -322,18 +345,18 @@ impl TurnRunnerWorker {
         claimed: &ClaimedTurnRun,
     ) -> Result<LoopExit, DriverInvocationError> {
         let descriptor = &claimed.resolved_run_profile.loop_driver;
-        let registry_key = LoopDriverRegistryKey::from_descriptor(descriptor).map_err(
-            |reason| DriverInvocationError::DriverNotFound {
-                reason: format!("invalid descriptor: {reason}"),
-            },
-        )?;
-
-        let registered = self
-            .driver_registry
-            .get(&registry_key)
-            .ok_or_else(|| DriverInvocationError::DriverNotFound {
-                reason: format!("no registered driver for {registry_key}"),
+        let registry_key =
+            LoopDriverRegistryKey::from_descriptor(descriptor).map_err(|reason| {
+                DriverInvocationError::DriverNotFound {
+                    reason: format!("invalid descriptor: {reason}"),
+                }
             })?;
+
+        let registered = self.driver_registry.get(&registry_key).ok_or_else(|| {
+            DriverInvocationError::DriverNotFound {
+                reason: format!("no registered driver for {registry_key}"),
+            }
+        })?;
 
         let driver = registered.driver();
 
@@ -342,16 +365,14 @@ impl TurnRunnerWorker {
             .host_factory
             .create_host(claimed)
             .await
-            .map_err(|err| DriverInvocationError::HostCreationFailed {
-                reason: err.reason,
-            })?;
+            .map_err(|err| DriverInvocationError::HostCreationFailed { reason: err.reason })?;
 
         let status = claimed.state.status;
         let turn_id = claimed.state.turn_id;
         let run_id = claimed.state.run_id;
 
-        match status {
-            TurnStatus::Queued => {
+        match (status, claimed.state.checkpoint_id) {
+            (TurnStatus::Queued, _) => {
                 let request = AgentLoopDriverRunRequest {
                     turn_id,
                     run_id,
@@ -363,12 +384,7 @@ impl TurnRunnerWorker {
                     .map_err(DriverInvocationError::DriverError)
             }
             // Resumed runs have a checkpoint
-            _ if claimed.state.checkpoint_id.is_some() => {
-                let checkpoint_id = claimed
-                    .state
-                    .checkpoint_id
-                    // Safety: we just checked is_some above
-                    .expect("infallible: checked is_some");
+            (_, Some(checkpoint_id)) => {
                 let request = AgentLoopDriverResumeRequest {
                     turn_id,
                     run_id,
@@ -415,7 +431,7 @@ impl TurnRunnerWorker {
             .await
         {
             Ok(state) => {
-                info!(
+                debug!(
                     runner_id = ?runner_id,
                     run_id = ?run_id,
                     status = ?state.status,
@@ -430,7 +446,9 @@ impl TurnRunnerWorker {
                     "failed to apply loop exit"
                 );
                 // If exit application fails, try recording recovery
-                let failure = sanitized_failure("exit_application_failed");
+                let Some(failure) = sanitized_failure("exit_application_failed") else {
+                    return;
+                };
                 let recovery_request = RecordRecoveryRequiredRequest {
                     run_id,
                     runner_id,
@@ -475,7 +493,9 @@ impl TurnRunnerWorker {
             }
         };
 
-        let failure = sanitized_failure(category);
+        let Some(failure) = sanitized_failure(category) else {
+            return;
+        };
         let request = RecordRecoveryRequiredRequest {
             run_id,
             runner_id,
@@ -483,11 +503,7 @@ impl TurnRunnerWorker {
             failure,
         };
 
-        if let Err(err) = self
-            .transition_port
-            .record_recovery_required(request)
-            .await
-        {
+        if let Err(err) = self.transition_port.record_recovery_required(request).await {
             error!(
                 runner_id = ?runner_id,
                 run_id = ?run_id,

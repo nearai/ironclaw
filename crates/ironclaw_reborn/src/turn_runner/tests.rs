@@ -156,10 +156,7 @@ impl MockTransitionPort {
         Self {
             claim_results: Mutex::new(Vec::new()),
             heartbeat_result: Mutex::new(Ok(EventCursor(1))),
-            apply_exit_result: Mutex::new(Ok(test_run_state(
-                test_scope(),
-                TurnStatus::Completed,
-            ))),
+            apply_exit_result: Mutex::new(Ok(test_run_state(test_scope(), TurnStatus::Completed))),
             recovery_result: Mutex::new(Ok(test_run_state(
                 test_scope(),
                 TurnStatus::RecoveryRequired,
@@ -184,10 +181,7 @@ impl TurnRunTransitionPort for MockTransitionPort {
         &self,
         _request: ClaimRunRequest,
     ) -> Result<Option<ClaimedTurnRun>, TurnError> {
-        self.calls
-            .lock()
-            .expect("lock")
-            .push(TransitionCall::Claim);
+        self.calls.lock().expect("lock").push(TransitionCall::Claim);
         let mut results = self.claim_results.lock().expect("lock");
         if results.is_empty() {
             Ok(None)
@@ -312,6 +306,53 @@ impl AgentLoopDriver for MockDriver {
             tokio::time::sleep(self.run_delay).await;
         }
         self.run_result.lock().expect("lock").clone()
+    }
+}
+
+struct BlockingDriver {
+    descriptor: AgentLoopDriverDescriptor,
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+impl BlockingDriver {
+    fn new(
+        descriptor: AgentLoopDriverDescriptor,
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    ) -> Self {
+        Self {
+            descriptor,
+            started,
+            release,
+        }
+    }
+}
+
+#[async_trait]
+impl AgentLoopDriver for BlockingDriver {
+    fn descriptor(&self) -> AgentLoopDriverDescriptor {
+        self.descriptor.clone()
+    }
+
+    async fn run(
+        &self,
+        _request: AgentLoopDriverRunRequest,
+        _host: &(dyn AgentLoopDriverHost + Send + Sync),
+    ) -> Result<LoopExit, AgentLoopDriverError> {
+        self.started.notify_one();
+        self.release.notified().await;
+        Ok(test_completed_exit())
+    }
+
+    async fn resume(
+        &self,
+        _request: AgentLoopDriverResumeRequest,
+        _host: &(dyn AgentLoopDriverHost + Send + Sync),
+    ) -> Result<LoopExit, AgentLoopDriverError> {
+        self.started.notify_one();
+        self.release.notified().await;
+        Ok(test_completed_exit())
     }
 }
 
@@ -523,6 +564,104 @@ async fn worker_claims_and_completes_run() {
 }
 
 #[tokio::test]
+async fn worker_records_recovery_when_exit_application_fails() {
+    let desc = test_descriptor();
+    let driver = Arc::new(MockDriver::completing(desc.clone()));
+    let registry = Arc::new(setup_registry(driver));
+    let claimed = make_claimed_run(&desc, test_scope(), TurnStatus::Queued);
+    let port = Arc::new(MockTransitionPort::new().with_claim_result(Ok(Some(claimed))));
+    {
+        let mut apply_exit_result = port.apply_exit_result.lock().expect("lock");
+        *apply_exit_result = Err(TurnError::Unavailable {
+            reason: "apply failed".to_string(),
+        });
+    }
+
+    let (_wake_sender, wake_receiver) = TurnRunnerWakeReceiver::new();
+    let config = TurnRunnerWorkerConfig {
+        heartbeat_interval: Duration::from_secs(60),
+        poll_interval: Duration::from_millis(50),
+        scope_filter: None,
+    };
+
+    let worker = TurnRunnerWorker::new(
+        config,
+        port.clone(),
+        registry,
+        Arc::new(MockHostFactory),
+        wake_receiver,
+        make_applier(port.clone()),
+    );
+
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+    let handle = tokio::spawn(async move { worker.run(cancel_clone).await });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    cancel.cancel();
+    handle.await.expect("worker task should complete");
+
+    let calls = port.calls();
+    assert!(calls.contains(&TransitionCall::ApplyValidatedLoopExit));
+    assert!(calls.contains(&TransitionCall::RecordRecoveryRequired));
+}
+
+#[tokio::test]
+async fn worker_cancellation_waits_for_inflight_driver_before_shutdown() {
+    let desc = test_descriptor();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let driver = Arc::new(BlockingDriver::new(
+        desc.clone(),
+        started.clone(),
+        release.clone(),
+    ));
+    let registry = Arc::new(setup_registry(driver));
+    let claimed = make_claimed_run(&desc, test_scope(), TurnStatus::Queued);
+    let port = Arc::new(MockTransitionPort::new().with_claim_result(Ok(Some(claimed))));
+
+    let (wake_sender, wake_receiver) = TurnRunnerWakeReceiver::new();
+    let config = TurnRunnerWorkerConfig {
+        heartbeat_interval: Duration::from_secs(60),
+        poll_interval: Duration::from_secs(60),
+        scope_filter: None,
+    };
+
+    let worker = TurnRunnerWorker::new(
+        config,
+        port.clone(),
+        registry,
+        Arc::new(MockHostFactory),
+        wake_receiver,
+        make_applier(port.clone()),
+    );
+
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+    let handle = tokio::spawn(async move { worker.run(cancel_clone).await });
+
+    wake_sender.wake();
+    started.notified().await;
+    cancel.cancel();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(
+        !handle.is_finished(),
+        "worker must not preempt an in-flight driver on cancellation"
+    );
+
+    release.notify_one();
+    handle.await.expect("worker task should complete");
+
+    let calls = port.calls();
+    assert!(calls.contains(&TransitionCall::ApplyValidatedLoopExit));
+    let claim_count = calls
+        .iter()
+        .filter(|call| **call == TransitionCall::Claim)
+        .count();
+    assert_eq!(claim_count, 1, "cancellation should stop future claims");
+}
+
+#[tokio::test]
 async fn worker_records_recovery_on_driver_error() {
     let desc = test_descriptor();
     let driver = Arc::new(MockDriver::failing(
@@ -559,7 +698,10 @@ async fn worker_records_recovery_on_driver_error() {
     cancel.cancel();
     handle.await.expect("worker task should complete");
 
-    assert!(port.calls().contains(&TransitionCall::RecordRecoveryRequired));
+    assert!(
+        port.calls()
+            .contains(&TransitionCall::RecordRecoveryRequired)
+    );
 }
 
 #[tokio::test]
@@ -598,7 +740,10 @@ async fn worker_records_recovery_on_host_factory_error() {
     cancel.cancel();
     handle.await.expect("worker task should complete");
 
-    assert!(port.calls().contains(&TransitionCall::RecordRecoveryRequired));
+    assert!(
+        port.calls()
+            .contains(&TransitionCall::RecordRecoveryRequired)
+    );
 }
 
 #[tokio::test]
@@ -636,7 +781,10 @@ async fn worker_records_recovery_when_driver_not_found() {
     cancel.cancel();
     handle.await.expect("worker task should complete");
 
-    assert!(port.calls().contains(&TransitionCall::RecordRecoveryRequired));
+    assert!(
+        port.calls()
+            .contains(&TransitionCall::RecordRecoveryRequired)
+    );
 }
 
 #[tokio::test]
@@ -675,7 +823,10 @@ async fn worker_continues_when_no_runs_available() {
         .iter()
         .filter(|c| **c == TransitionCall::Claim)
         .count();
-    assert!(claim_count >= 1, "should have attempted claims, got {claim_count}");
+    assert!(
+        claim_count >= 1,
+        "should have attempted claims, got {claim_count}"
+    );
 }
 
 #[tokio::test]
@@ -717,9 +868,8 @@ async fn wake_signal_triggers_claim_attempt() {
 #[tokio::test]
 async fn heartbeat_runs_during_driver_execution() {
     let desc = test_descriptor();
-    let driver = Arc::new(
-        MockDriver::completing(desc.clone()).with_delay(Duration::from_millis(300)),
-    );
+    let driver =
+        Arc::new(MockDriver::completing(desc.clone()).with_delay(Duration::from_millis(300)));
     let registry = Arc::new(setup_registry(driver));
     let claimed = make_claimed_run(&desc, test_scope(), TurnStatus::Queued);
     let port = Arc::new(MockTransitionPort::new().with_claim_result(Ok(Some(claimed))));
