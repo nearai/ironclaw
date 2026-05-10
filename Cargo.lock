@@ -4531,6 +4531,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_reborn_cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ironclaw_reborn",
+ "tempfile",
+]
+
+[[package]]
 name = "ironclaw_reborn_event_store"
 version = "0.1.0"
 dependencies = [

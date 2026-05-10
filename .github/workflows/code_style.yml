@@ -26,12 +26,14 @@ jobs:
     outputs:
       has_code: ${{ steps.non_pr.outputs.has_code || steps.diff.outputs.has_code }}
       has_boundary_check: ${{ steps.non_pr.outputs.has_boundary_check || steps.diff.outputs.has_boundary_check }}
+      has_reborn_cli: ${{ steps.non_pr.outputs.has_reborn_cli || steps.diff.outputs.has_reborn_cli }}
     steps:
       - id: non_pr
         if: github.event_name == 'push'
         run: |
           echo "has_code=true" >> "$GITHUB_OUTPUT"
           echo "has_boundary_check=true" >> "$GITHUB_OUTPUT"
+          echo "has_reborn_cli=true" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         with:
@@ -55,6 +57,12 @@ jobs:
             echo "has_boundary_check=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_boundary_check=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/ironclaw_reborn_cli/|crates/ironclaw_architecture/tests/reborn_dependency_boundaries\.rs$|Cargo\.toml$|Cargo\.lock$|\.github/workflows/code_style\.yml$)'; then
+            echo "has_reborn_cli=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_reborn_cli=false" >> "$GITHUB_OUTPUT"
           fi
 
   clippy-matrix:
@@ -175,6 +183,27 @@ jobs:
       - name: Check lints
         run: cargo clippy --all --tests --examples ${{ matrix.flags }} -- -D warnings
 
+  reborn-cli-smoke:
+    name: Reborn CLI smoke tests
+    needs: changes
+    if: needs.changes.outputs.has_reborn_cli == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: reborn-cli-smoke
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Test Reborn CLI binary crate
+        run: cargo test -p ironclaw_reborn_cli
+      - name: Test Reborn architecture boundaries
+        run: cargo test -p ironclaw_architecture reborn
+
   no-panics:
     name: No panics in production code
     needs: changes
@@ -224,6 +253,7 @@ jobs:
       - clippy
       - clippy-windows
       - deny-check
+      - reborn-cli-smoke
       - no-panics
       - gateway-boundaries
     steps:
@@ -249,6 +279,7 @@ jobs:
 
           for job_result in \
             "no-panics=${{ needs.no-panics.result }}" \
+            "reborn-cli-smoke=${{ needs.reborn-cli-smoke.result }}" \
             "clippy-windows=${{ needs.clippy-windows.result }}"; do
             name="${job_result%%=*}"
             result="${job_result##*=}"

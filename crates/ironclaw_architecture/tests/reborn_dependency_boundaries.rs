@@ -63,6 +63,50 @@ fn reborn_crate_dependency_boundaries_hold() {
 }
 
 #[test]
+fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
+    let metadata = cargo_metadata();
+    let packages = metadata["packages"]
+        .as_array()
+        .expect("cargo metadata must include packages");
+    let dependencies = packages
+        .iter()
+        .filter_map(package_dependencies)
+        .collect::<HashMap<_, _>>();
+
+    let root = workspace_root();
+    let manifest_path = root.join("crates/ironclaw_reborn_cli/Cargo.toml");
+    assert!(
+        manifest_path.exists(),
+        "Reborn should ship as a separate binary crate at {}",
+        manifest_path.display()
+    );
+
+    let manifest =
+        std::fs::read_to_string(&manifest_path).expect("Reborn CLI manifest must be readable");
+    assert!(
+        manifest.contains("name = \"ironclaw_reborn_cli\""),
+        "Reborn CLI crate package name should be ironclaw_reborn_cli"
+    );
+    assert!(
+        manifest.contains("[[bin]]") && manifest.contains("name = \"ironclaw-reborn\""),
+        "Reborn CLI crate must declare the ironclaw-reborn binary explicitly"
+    );
+    let actual_workspace_deps = dependencies
+        .get("ironclaw_reborn_cli")
+        .expect("ironclaw_reborn_cli must be in cargo metadata")
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected_workspace_deps = ["ironclaw_reborn".to_string()]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        actual_workspace_deps, expected_workspace_deps,
+        "ironclaw_reborn_cli should enter Reborn through ironclaw_reborn only; add explicit architectural justification before depending on other workspace crates"
+    );
+}
+
+#[test]
 fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
     let root = workspace_root();
     let lib = std::fs::read_to_string(root.join("crates/ironclaw_host_runtime/src/lib.rs"))
@@ -285,6 +329,16 @@ struct BoundaryRule {
 
 fn boundary_rules() -> Vec<BoundaryRule> {
     vec![
+        BoundaryRule {
+            crate_name: "ironclaw_reborn_cli",
+            forbidden: vec![
+                "ironclaw",
+                "ironclaw_engine",
+                "ironclaw_gateway",
+                "ironclaw_skills",
+                "ironclaw_tui",
+            ],
+        },
         BoundaryRule {
             crate_name: "ironclaw_filesystem",
             forbidden: vec![

@@ -1,8 +1,9 @@
 use ironclaw_turns::{
-    BlockedReason, GateRef, LoopBlocked, LoopBlockedKind, LoopCompleted, LoopCompletionKind,
-    LoopExit, LoopExitId, LoopExitInvalidHandling, LoopExitValidationDecision,
-    LoopExitValidationPolicy, LoopFailureKind, LoopGateRef, LoopMessageRef, LoopResultRef,
-    SanitizedFailure, TurnCheckpointId, runner::TurnRunnerOutcome,
+    BlockedReason, GateRef, LoopBlocked, LoopBlockedKind, LoopCancelled, LoopCancelledReasonKind,
+    LoopCompleted, LoopCompletionKind, LoopExit, LoopExitId, LoopExitInvalidHandling,
+    LoopExitValidationDecision, LoopExitValidationPolicy, LoopExitViolationKind, LoopFailureKind,
+    LoopGateRef, LoopMessageRef, LoopResultRef, SanitizedFailure, TurnCheckpointId, TurnStatus,
+    runner::TurnRunnerOutcome,
 };
 use serde_json::json;
 
@@ -185,6 +186,57 @@ fn final_checkpoint_policy_rejects_cancelled_and_failed_terminal_exits_without_c
         failed.mapping,
         ironclaw_turns::LoopExitMapping::RecoveryRequired { .. }
     ));
+}
+
+#[test]
+fn validation_policy_requires_final_checkpoint_only_when_configured() {
+    let cases = [
+        (
+            false,
+            None,
+            TurnRunnerOutcome::Completed.into(),
+            "relaxed policy should accept durable completion refs without a final checkpoint",
+        ),
+        (
+            true,
+            Some(LoopExitViolationKind::MissingFinalCheckpoint),
+            TurnRunnerOutcome::Failed {
+                failure: SanitizedFailure::new("driver_protocol_violation").unwrap(),
+            }
+            .into(),
+            "strict policy should reject terminal exits without a final checkpoint",
+        ),
+    ];
+
+    for (require_final_checkpoint, expected_violation, expected_mapping, context) in cases {
+        let decision = LoopExit::Completed(LoopCompleted {
+            completion_kind: LoopCompletionKind::FinalReply,
+            reply_message_refs: vec![message_ref("msg:assistant-final")],
+            result_refs: vec![],
+            final_checkpoint_id: None,
+            usage_summary_ref: None,
+            exit_id: exit_id("exit:checkpoint-policy"),
+        })
+        .validate(LoopExitValidationPolicy {
+            require_final_checkpoint,
+            final_checkpoint_verified: false,
+            host_cancellation_observed: false,
+            invalid_handling: LoopExitInvalidHandling::FailTerminal,
+            completion_refs_verified: true,
+            blocked_evidence_verified: false,
+            failure_evidence_verified: false,
+        });
+
+        assert_eq!(
+            decision
+                .violation
+                .as_ref()
+                .map(|violation| violation.kind()),
+            expected_violation,
+            "{context}"
+        );
+        assert_eq!(decision.mapping, expected_mapping, "{context}");
+    }
 }
 
 #[test]
@@ -404,6 +456,234 @@ fn loop_refs_reject_raw_payload_like_values_inside_ref_strings() {
     assert!(LoopGateRef::new("gate:approval-gate").is_ok());
 }
 
+// --- Gap coverage tests (KB-037) ---
+
+#[test]
+fn no_reply_with_empty_refs_maps_to_missing_completion_reference_violation() {
+    let exit = LoopExit::Completed(LoopCompleted {
+        completion_kind: LoopCompletionKind::NoReply,
+        reply_message_refs: vec![],
+        result_refs: vec![],
+        final_checkpoint_id: None,
+        usage_summary_ref: None,
+        exit_id: exit_id("exit:no-reply-empty"),
+    });
+
+    let decision = exit.validate(LoopExitValidationPolicy {
+        require_final_checkpoint: false,
+        final_checkpoint_verified: false,
+        host_cancellation_observed: false,
+        invalid_handling: LoopExitInvalidHandling::FailTerminal,
+        completion_refs_verified: true,
+        blocked_evidence_verified: false,
+        failure_evidence_verified: false,
+    });
+
+    assert_eq!(
+        decision.violation.as_ref().unwrap().kind(),
+        LoopExitViolationKind::MissingCompletionReference,
+    );
+    assert_eq!(
+        decision.mapping,
+        TurnRunnerOutcome::Failed {
+            failure: SanitizedFailure::new("driver_protocol_violation").unwrap(),
+        }
+        .into()
+    );
+}
+
+#[test]
+fn delegated_result_with_result_refs_maps_to_trusted_completed() {
+    let decision = LoopExit::Completed(LoopCompleted {
+        completion_kind: LoopCompletionKind::DelegatedResult,
+        reply_message_refs: vec![],
+        result_refs: vec![result_ref("result:delegated-job-1")],
+        final_checkpoint_id: None,
+        usage_summary_ref: None,
+        exit_id: exit_id("exit:delegated"),
+    })
+    .validate(LoopExitValidationPolicy {
+        require_final_checkpoint: false,
+        final_checkpoint_verified: false,
+        host_cancellation_observed: false,
+        invalid_handling: LoopExitInvalidHandling::FailTerminal,
+        completion_refs_verified: true,
+        blocked_evidence_verified: false,
+        failure_evidence_verified: false,
+    });
+
+    assert_eq!(decision.violation, None);
+    assert_eq!(decision.mapping, TurnRunnerOutcome::Completed.into());
+}
+
+#[test]
+fn blocked_variants_map_to_correct_blocked_reason() {
+    for kind in [
+        LoopBlockedKind::Approval,
+        LoopBlockedKind::Auth,
+        LoopBlockedKind::Resource,
+    ] {
+        let checkpoint_id = TurnCheckpointId::new();
+        let lg = loop_gate_ref("gate:test-gate");
+        let gate_ref = GateRef::new(lg.as_str()).unwrap();
+
+        let decision = LoopExit::Blocked(LoopBlocked {
+            kind,
+            gate_ref: gate_ref.clone(),
+            checkpoint_id,
+            exit_id: exit_id("exit:blocked-variant"),
+        })
+        .validate(LoopExitValidationPolicy {
+            blocked_evidence_verified: true,
+            ..LoopExitValidationPolicy::default()
+        });
+
+        let expected_reason = match kind {
+            LoopBlockedKind::Approval => BlockedReason::Approval { gate_ref },
+            LoopBlockedKind::Auth => BlockedReason::Auth { gate_ref },
+            LoopBlockedKind::Resource => BlockedReason::Resource { gate_ref },
+            LoopBlockedKind::Process => {
+                unreachable!("process blocks use process refs, not gate refs")
+            }
+        };
+
+        assert_eq!(decision.violation, None);
+        assert_eq!(
+            decision.mapping,
+            TurnRunnerOutcome::Blocked {
+                checkpoint_id,
+                reason: expected_reason,
+            }
+            .into()
+        );
+    }
+}
+
+#[test]
+fn all_failure_kinds_produce_stable_sanitized_category_strings() {
+    let variants: &[(LoopFailureKind, &str)] = &[
+        (LoopFailureKind::ModelError, "model_error"),
+        (LoopFailureKind::ContextBuildFailed, "context_build_failed"),
+        (
+            LoopFailureKind::CapabilityProtocolError,
+            "capability_protocol_error",
+        ),
+        (LoopFailureKind::IterationLimit, "iteration_limit"),
+        (LoopFailureKind::InvalidModelOutput, "invalid_model_output"),
+        (LoopFailureKind::CheckpointRejected, "checkpoint_rejected"),
+        (
+            LoopFailureKind::TranscriptWriteFailed,
+            "transcript_write_failed",
+        ),
+        (LoopFailureKind::DriverBug, "driver_bug"),
+        (
+            LoopFailureKind::InterruptedUnexpectedly,
+            "interrupted_unexpectedly",
+        ),
+    ];
+
+    for (kind, expected_category) in variants {
+        let decision = LoopExit::failed(*kind, exit_id("exit:failure-variant")).validate(
+            LoopExitValidationPolicy {
+                failure_evidence_verified: true,
+                ..LoopExitValidationPolicy::default()
+            },
+        );
+
+        assert_eq!(
+            decision.violation, None,
+            "unexpected violation for {kind:?}"
+        );
+        assert_eq!(
+            decision.mapping,
+            TurnRunnerOutcome::Failed {
+                failure: SanitizedFailure::new(*expected_category).unwrap(),
+            }
+            .into(),
+            "wrong category for {kind:?}"
+        );
+    }
+}
+
+#[test]
+fn recovery_required_is_not_a_loop_exit_variant() {
+    // Attempt various shapes that might be confused with a recovery_required variant
+    for payload in [
+        json!("recovery_required"),
+        json!({"type": "recovery_required"}),
+        json!({"type": "recovery_required", "failure": {"category": "test"}}),
+        json!({"recovery_required": {}}),
+        json!({"recovery_required": {"failure": {"category": "test"}}}),
+        json!({"recovery_required": null}),
+    ] {
+        assert!(
+            serde_json::from_value::<LoopExit>(payload.clone()).is_err(),
+            "LoopExit accepted recovery_required variant: {payload}"
+        );
+    }
+}
+
+#[test]
+fn cancelled_with_checkpoint_and_interrupted_refs_maps_to_cancelled_outcome() {
+    let checkpoint_id = TurnCheckpointId::new();
+    let exit = LoopExit::Cancelled(LoopCancelled {
+        reason_kind: LoopCancelledReasonKind::HostCancellation,
+        checkpoint_id: Some(checkpoint_id),
+        interrupted_message_refs: vec![message_ref("msg:partial-1"), message_ref("msg:partial-2")],
+        exit_id: exit_id("exit:cancelled-with-checkpoint"),
+    });
+
+    let decision = exit.validate(LoopExitValidationPolicy {
+        host_cancellation_observed: true,
+        ..LoopExitValidationPolicy::default()
+    });
+
+    assert_eq!(decision.violation, None);
+    assert_eq!(decision.mapping, TurnRunnerOutcome::Cancelled.into());
+}
+
+#[test]
+fn terminal_statuses_release_lock_and_non_terminal_keep_it() {
+    for status in [
+        TurnStatus::Queued,
+        TurnStatus::Running,
+        TurnStatus::BlockedApproval,
+        TurnStatus::BlockedAuth,
+        TurnStatus::BlockedResource,
+        TurnStatus::BlockedProcess,
+        TurnStatus::CancelRequested,
+        TurnStatus::Cancelled,
+        TurnStatus::Completed,
+        TurnStatus::Failed,
+        TurnStatus::RecoveryRequired,
+    ] {
+        let (expected_terminal, expected_keeps_lock) = match status {
+            TurnStatus::Queued => (false, true),
+            TurnStatus::Running => (false, true),
+            TurnStatus::BlockedApproval => (false, true),
+            TurnStatus::BlockedAuth => (false, true),
+            TurnStatus::BlockedResource => (false, true),
+            TurnStatus::BlockedProcess => (false, true),
+            TurnStatus::CancelRequested => (false, true),
+            TurnStatus::Cancelled => (true, false),
+            TurnStatus::Completed => (true, false),
+            TurnStatus::Failed => (true, false),
+            TurnStatus::RecoveryRequired => (false, true),
+        };
+
+        assert_eq!(
+            status.is_terminal(),
+            expected_terminal,
+            "{status:?} terminal classification changed"
+        );
+        assert_eq!(
+            status.keeps_active_lock(),
+            expected_keeps_lock,
+            "{status:?} lock retention changed"
+        );
+    }
+}
+
 fn exit_id(value: &str) -> LoopExitId {
     LoopExitId::new(value).unwrap()
 }
@@ -416,7 +696,6 @@ fn loop_gate_ref(value: &str) -> LoopGateRef {
     LoopGateRef::new(value).unwrap()
 }
 
-#[allow(dead_code)]
 fn result_ref(value: &str) -> LoopResultRef {
     LoopResultRef::new(value).unwrap()
 }

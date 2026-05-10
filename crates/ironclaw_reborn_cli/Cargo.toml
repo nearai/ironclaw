@@ -1,0 +1,28 @@
+[package]
+name = "ironclaw_reborn_cli"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Standalone IronClaw Reborn binary"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+# First PR establishes the binary boundary only. Release packaging is a
+# follow-up decision after `run`/docs land and `dist plan` is verified.
+[package.metadata.dist]
+dist = false
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+ironclaw_reborn = { path = "../ironclaw_reborn", version = "0.1.0" }
+
+[[bin]]
+name = "ironclaw-reborn"
+path = "src/main.rs"
+
+[dev-dependencies]
+tempfile = "3"
