@@ -887,12 +887,13 @@ async fn async_main() -> anyhow::Result<()> {
         gw = gw.with_log_level_handle(Arc::clone(&log_level_handle));
         gw = gw.with_tool_registry(Arc::clone(&components.tools));
         if let Some(ref db) = components.db {
-            let dispatcher = Arc::new(ironclaw::tools::dispatch::ToolDispatcher::new(
+            let dispatcher = ironclaw::tools::dispatch::ToolDispatcher::new(
                 Arc::clone(&components.tools),
                 Arc::clone(&components.safety),
                 Arc::clone(db),
-            ));
-            gw = gw.with_tool_dispatcher(dispatcher);
+            )
+            .with_channel_routing(Arc::clone(&channel_routing_arc));
+            gw = gw.with_tool_dispatcher(Arc::new(dispatcher));
         }
         if let Some(ref ext_mgr) = components.extension_manager {
             // Enable gateway mode so MCP OAuth returns auth URLs to the frontend
@@ -1428,7 +1429,7 @@ async fn async_main() -> anyhow::Result<()> {
                         // Handle SIGHUP signal
                     }
                 }
-                tracing::info!("SIGHUP received — reloading HTTP webhook config");
+                tracing::debug!("SIGHUP received — reloading HTTP webhook config");
 
                 // Flush settings cache so direct DB edits are picked up.
                 if let Some(ref cache) = sighup_settings_cache {

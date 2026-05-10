@@ -143,7 +143,9 @@ impl Worker {
         };
 
         // Resolve routing channel: use origin channel if present; fall back to
-        // empty string so resolve_group() returns the default group (fail-closed).
+        // empty string so resolve_group() maps to the default group (fail-closed).
+        // The empty-string sentinel is intentional — `is_dm("")` returns false, so
+        // routine/heartbeat-spawned jobs always get the default group, never DM bypass.
         let effective_channel = channel.unwrap_or("");
 
         let builtin_names = self.tools().builtin_tool_names().await;

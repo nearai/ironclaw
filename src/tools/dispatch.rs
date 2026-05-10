@@ -20,6 +20,7 @@ use std::time::Instant;
 use tracing::debug;
 use uuid::Uuid;
 
+use crate::agent::channel_routing::ChannelRoutingConfig;
 use crate::context::{ActionRecord, JobContext};
 use crate::db::Database;
 use crate::tools::registry::ToolRegistry;
@@ -62,10 +63,20 @@ impl std::fmt::Display for DispatchSource {
 /// same safety pipeline as the agent worker (param normalization, schema
 /// validation, sensitive-param redaction, per-tool timeout, output
 /// sanitization) plus `ActionRecord` persistence.
+///
+/// When a `channel_routing` config is wired in, `dispatch()` enforces
+/// channel routing at execution time for `DispatchSource::Channel` callers
+/// — this is the security boundary that prevents a jailbroken LLM or
+/// misbehaving gateway handler from executing a filtered tool by naming it
+/// directly. The presentation-layer filter (`apply_channel_routing`) hides
+/// tools from the LLM; dispatch-time enforcement is the authoritative gate.
 pub struct ToolDispatcher {
     registry: Arc<ToolRegistry>,
     safety: Arc<SafetyLayer>,
     store: Arc<dyn Database>,
+    /// Optional channel routing config for execution-time enforcement.
+    channel_routing:
+        Option<Arc<tokio::sync::RwLock<Option<ChannelRoutingConfig>>>>,
 }
 
 impl ToolDispatcher {
@@ -79,7 +90,17 @@ impl ToolDispatcher {
             registry,
             safety,
             store,
+            channel_routing: None,
         }
+    }
+
+    /// Wire in the shared channel routing Arc for execution-time enforcement.
+    pub fn with_channel_routing(
+        mut self,
+        routing: Arc<tokio::sync::RwLock<Option<ChannelRoutingConfig>>>,
+    ) -> Self {
+        self.channel_routing = Some(routing);
+        self
     }
 
     /// Execute a tool by name with the given parameters.
@@ -124,6 +145,26 @@ impl ToolDispatcher {
             self.registry.get_resolved(tool_name).await.ok_or_else(|| {
                 ToolError::ExecutionFailed(format!("tool not found: {tool_name}"))
             })?;
+
+        // 0. Channel routing enforcement — execution-time gate.
+        //    Complements the presentation-layer filter in `apply_channel_routing`
+        //    (which hides tools from the LLM). This check enforces the boundary
+        //    for any caller that names a tool string directly, regardless of
+        //    what the LLM saw. Only applied for Channel sources — Routine and
+        //    System callers are internal and bypass routing.
+        if let DispatchSource::Channel(ref channel) = source {
+            if let Some(ref routing_arc) = self.channel_routing {
+                let routing = routing_arc.read().await;
+                if let Some(ref config) = *routing {
+                    let builtin_names = self.registry.builtin_tool_names().await;
+                    if !config.is_tool_permitted(channel, &resolved_name, &builtin_names) {
+                        return Err(ToolError::ExecutionFailed(format!(
+                            "tool '{resolved_name}' is not available on channel '{channel}'"
+                        )));
+                    }
+                }
+            }
+        }
 
         // 1. Normalize parameters (coerce types, fill defaults).
         let normalized_params = prepare_tool_params(tool.as_ref(), &params);
@@ -812,6 +853,125 @@ mod integration_tests {
         assert!(
             result.is_ok(),
             "unprotected target must succeed; got: {result:?}"
+        );
+    }
+
+    // ── Channel routing enforcement (dispatch-time) ──────────
+    //
+    // Drives `ToolDispatcher::dispatch()` with a channel routing config that
+    // restricts a channel to a specific MCP server prefix. Asserts that a
+    // tool outside the allowlist is rejected at execution time, not just
+    // hidden from the LLM at the presentation layer. Per
+    // `.claude/rules/testing.md` ("Test Through the Caller") — the unit test
+    // for `is_tool_permitted` alone doesn't cover the dispatcher wiring.
+
+    struct RestrictedMcpTool;
+
+    #[async_trait]
+    impl Tool for RestrictedMcpTool {
+        fn name(&self) -> &str {
+            "Smartlead_send_email"
+        }
+        fn description(&self) -> &str {
+            "Stub representing a restricted MCP tool."
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object" })
+        }
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::success(
+                serde_json::json!({ "sent": true }),
+                Duration::from_millis(1),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_rejects_filtered_tool_at_execution_time() {
+        // Build a routing config that restricts "research" channel to Archon
+        // only — Smartlead_send_email is outside the allowlist.
+        let config_json = serde_json::json!({
+            "groups": {
+                "research": ["Archon"]
+            },
+            "builtin_whitelist": {},
+            "channels": {
+                "research-channel": "research"
+            },
+            "default_group": "research"
+        });
+        let routing_config: ChannelRoutingConfig =
+            serde_json::from_value(config_json).expect("valid routing config");
+        let routing_arc = ChannelRoutingConfig::none_arc();
+        *routing_arc.write().await = Some(routing_config);
+
+        let (dispatcher, _backend, _db, registry, _dir) = test_dispatcher().await;
+        registry.register_sync(Arc::new(RestrictedMcpTool));
+
+        let dispatcher = ToolDispatcher::new(
+            Arc::clone(dispatcher.registry()),
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 65_536,
+                injection_check_enabled: false,
+            })),
+            _db,
+        )
+        .with_channel_routing(routing_arc);
+
+        // Attempt to dispatch the filtered tool from the restricted channel.
+        let result = dispatcher
+            .dispatch(
+                "Smartlead_send_email",
+                serde_json::json!({}),
+                "tester",
+                DispatchSource::Channel("research-channel".into()),
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(ToolError::ExecutionFailed(ref msg)) if msg.contains("not available on channel")),
+            "filtered tool must be rejected at dispatch time; got {result:?}"
+        );
+
+        // Same tool on a DM channel (gateway = DM_EXACT) must pass through.
+        let (dispatcher2, _backend2, _db2, registry2, _dir2) = test_dispatcher().await;
+        let routing_arc2 = ChannelRoutingConfig::none_arc();
+        *routing_arc2.write().await = Some(
+            serde_json::from_value(serde_json::json!({
+                "groups": { "research": ["Archon"] },
+                "builtin_whitelist": {},
+                "channels": {},
+                "default_group": "research"
+            }))
+            .unwrap(),
+        );
+        registry2.register_sync(Arc::new(RestrictedMcpTool));
+        let dispatcher2 = ToolDispatcher::new(
+            Arc::clone(dispatcher2.registry()),
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 65_536,
+                injection_check_enabled: false,
+            })),
+            _db2,
+        )
+        .with_channel_routing(routing_arc2);
+
+        // "gateway" is in DM_EXACT — routing is bypassed entirely.
+        let dm_result = dispatcher2
+            .dispatch(
+                "Smartlead_send_email",
+                serde_json::json!({}),
+                "tester",
+                DispatchSource::Channel("gateway".into()),
+            )
+            .await;
+        assert!(
+            dm_result.is_ok(),
+            "DM_EXACT channel must bypass dispatch-time routing; got {dm_result:?}"
         );
     }
 }
