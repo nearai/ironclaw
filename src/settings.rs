@@ -1210,6 +1210,11 @@ impl Settings {
     /// this helper folds them into `extras` once on load and clears the
     /// originals so subsequent saves write only the new shape.
     ///
+    /// Existing extras values win over the legacy fields. A file that
+    /// somehow carries both shapes (manual hand-edit, or a future writer
+    /// that emits both) keeps the new-shape value rather than getting
+    /// silently overwritten with the legacy one.
+    ///
     /// Idempotent: re-runs are no-ops because the named fields are
     /// `take()`-drained.
     pub fn migrate_legacy_provider_fields(&mut self) {
@@ -1221,13 +1226,19 @@ impl Settings {
                 .llm_builtin_overrides
                 .entry("bedrock".to_string())
                 .or_default();
-            if let Some(v) = region {
+            if let Some(v) = region
+                && entry.extra("region").is_none()
+            {
                 entry.set_extra("region", v);
             }
-            if let Some(v) = cross_region {
+            if let Some(v) = cross_region
+                && entry.extra("cross_region").is_none()
+            {
                 entry.set_extra("cross_region", v);
             }
-            if let Some(v) = profile {
+            if let Some(v) = profile
+                && entry.extra("profile").is_none()
+            {
                 entry.set_extra("profile", v);
             }
         }
@@ -2949,5 +2960,105 @@ mod tests {
             debug_output.contains("[REDACTED]"),
             "Debug output must show [REDACTED] for api_key"
         );
+    }
+
+    /// Upgrade-path: a legacy `settings.json` carrying named `bedrock_*`
+    /// columns must round-trip through `load_from` → `save` → `load_from`
+    /// without losing data or re-emitting the deprecated columns.
+    #[test]
+    fn legacy_bedrock_migration_round_trips_through_save() {
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let path = tmpdir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "llm_backend": "bedrock",
+                "bedrock_region": "eu-west-1",
+                "bedrock_cross_region": "eu",
+                "bedrock_profile": "prod-bedrock"
+            }"#,
+        )
+        .expect("write legacy fixture");
+
+        let settings = Settings::load_from(&path);
+        let serialized = serde_json::to_string(&settings).expect("serialize");
+        std::fs::write(&path, &serialized).expect("write reloaded settings");
+
+        assert!(
+            !serialized.contains("\"bedrock_region\""),
+            "saved settings must not re-emit deprecated bedrock_region: {serialized}"
+        );
+        assert!(!serialized.contains("\"bedrock_cross_region\""));
+        assert!(!serialized.contains("\"bedrock_profile\""));
+
+        let reloaded = Settings::load_from(&path);
+        let bedrock = reloaded
+            .llm_builtin_overrides
+            .get("bedrock")
+            .expect("bedrock entry must survive round-trip");
+        assert_eq!(bedrock.extra("region"), Some("eu-west-1"));
+        assert_eq!(bedrock.extra("cross_region"), Some("eu"));
+        assert_eq!(bedrock.extra("profile"), Some("prod-bedrock"));
+    }
+
+    /// Defense-in-depth: a settings file that somehow carries BOTH a legacy
+    /// `bedrock_region` column AND a populated `extras["region"]` must keep
+    /// the new-shape value, not silently downgrade to the legacy one.
+    /// Reachable in practice only via manual hand-edit, but the docstring
+    /// promises this behaviour.
+    #[test]
+    fn legacy_bedrock_migration_preserves_existing_extras() {
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let path = tmpdir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "llm_backend": "bedrock",
+                "bedrock_region": "eu-west-1",
+                "bedrock_profile": "prod-bedrock",
+                "llm_builtin_overrides": {
+                    "bedrock": {
+                        "extras": {
+                            "region": "us-east-2"
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("write conflicting fixture");
+
+        let settings = Settings::load_from(&path);
+        let bedrock = settings
+            .llm_builtin_overrides
+            .get("bedrock")
+            .expect("bedrock entry");
+        assert_eq!(
+            bedrock.extra("region"),
+            Some("us-east-2"),
+            "pre-existing extras value must win over legacy bedrock_region"
+        );
+        assert_eq!(
+            bedrock.extra("profile"),
+            Some("prod-bedrock"),
+            "absent extras must still be backfilled from legacy field"
+        );
+        assert!(settings.bedrock_region.is_none(), "legacy field is drained");
+        assert!(settings.bedrock_profile.is_none());
+    }
+
+    /// `migrate_legacy_provider_fields` is idempotent in-memory: once the
+    /// named fields are drained, repeated calls observe `None` and exit
+    /// without touching `extras`.
+    #[test]
+    fn legacy_bedrock_migration_is_idempotent_in_memory() {
+        let mut settings = Settings {
+            bedrock_region: Some("eu-west-1".to_string()),
+            ..Default::default()
+        };
+        settings.migrate_legacy_provider_fields();
+        let before = serde_json::to_value(&settings.llm_builtin_overrides).expect("serialize");
+        settings.migrate_legacy_provider_fields();
+        let after = serde_json::to_value(&settings.llm_builtin_overrides).expect("serialize");
+        assert_eq!(after, before, "second migrate call must be a no-op");
     }
 }
