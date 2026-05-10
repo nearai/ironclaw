@@ -122,9 +122,7 @@ impl Scheduler {
     pub fn set_channel_routing(
         &mut self,
         routing: Arc<
-            tokio::sync::RwLock<
-                Option<crate::agent::channel_routing::ChannelRoutingConfig>,
-            >,
+            tokio::sync::RwLock<Option<crate::agent::channel_routing::ChannelRoutingConfig>>,
         >,
     ) {
         self.channel_routing = routing;

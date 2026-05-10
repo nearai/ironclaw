@@ -766,6 +766,7 @@ pub struct TestRigBuilder {
     wasm_tools: Vec<WasmToolSpec>,
     keep_bootstrap: bool,
     engine_v2: bool,
+    local_jobs_only: bool,
     channel_name_override: Option<String>,
     seeded_secrets: Option<SeededSecretsConfig>,
     /// Pre-seed the SecretsStore with `(name, value)` pairs before the
@@ -795,6 +796,7 @@ impl TestRigBuilder {
             wasm_tools: Vec::new(),
             keep_bootstrap: false,
             engine_v2: false,
+            local_jobs_only: false,
             channel_name_override: None,
             seeded_secrets: None,
             pre_seed_secrets: Vec::new(),
@@ -979,6 +981,16 @@ impl TestRigBuilder {
         self
     }
 
+    /// Force built-in job tools to use the local ContextManager-only path.
+    ///
+    /// This avoids spawning background worker loops that would otherwise share
+    /// the same replay LLM and consume trace steps intended for the foreground
+    /// chat turn.
+    pub fn with_local_jobs_only(mut self) -> Self {
+        self.local_jobs_only = true;
+        self
+    }
+
     /// Add pre-recorded HTTP exchanges for the `ReplayingHttpInterceptor`.
     ///
     /// When set, all `http` tool calls will return these responses in order
@@ -1028,6 +1040,7 @@ impl TestRigBuilder {
             wasm_tools,
             keep_bootstrap,
             engine_v2,
+            local_jobs_only,
             channel_name_override,
             seeded_secrets,
             pre_seed_secrets,
@@ -1235,7 +1248,11 @@ impl TestRigBuilder {
 
             components.tools.register_job_tools(
                 Arc::clone(&components.context_manager),
-                Some(scheduler_slot.clone()),
+                if local_jobs_only {
+                    None
+                } else {
+                    Some(scheduler_slot.clone())
+                },
                 None,
                 components.db.clone(),
                 None,

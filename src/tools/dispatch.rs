@@ -75,8 +75,7 @@ pub struct ToolDispatcher {
     safety: Arc<SafetyLayer>,
     store: Arc<dyn Database>,
     /// Optional channel routing config for execution-time enforcement.
-    channel_routing:
-        Option<Arc<tokio::sync::RwLock<Option<ChannelRoutingConfig>>>>,
+    channel_routing: Option<Arc<tokio::sync::RwLock<Option<ChannelRoutingConfig>>>>,
 }
 
 impl ToolDispatcher {
