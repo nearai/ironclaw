@@ -42,3 +42,16 @@ pub use types::{
 fn path_prefix_matches(prefix: &str, path: &str) -> bool {
     std::path::Path::new(path).starts_with(std::path::Path::new(prefix))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::path_prefix_matches;
+
+    #[test]
+    fn path_prefix_matches_root_and_component_boundaries() {
+        assert!(path_prefix_matches("/", "/projects"));
+        assert!(path_prefix_matches("/projects", "/projects"));
+        assert!(path_prefix_matches("/projects", "/projects/readme.md"));
+        assert!(!path_prefix_matches("/projects", "/projects-private"));
+    }
+}
