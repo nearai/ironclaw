@@ -120,6 +120,13 @@ impl InMemoryRunProfileRegistry {
         }
     }
 
+    /// Add a profile definition to the registry.
+    ///
+    /// Used for testing custom profile configurations.
+    pub fn push_profile(&mut self, definition: RunProfileDefinition) {
+        self.profiles.push(definition);
+    }
+
     pub fn profile(&self, profile_id: &str) -> Option<&RunProfileDefinition> {
         self.profiles
             .iter()
@@ -152,6 +159,21 @@ pub struct RunProfileDefinition {
 }
 
 impl RunProfileDefinition {
+    /// Create an interactive profile definition with a configured default model route.
+    ///
+    /// Useful for testing route resolution through the full resolver pipeline.
+    pub fn interactive_with_model_route(
+        profile_id: &str,
+        default_route: ModelRoute,
+        policy: ModelSelectionPolicy,
+    ) -> Result<Self, String> {
+        let mut base = interactive_profile();
+        base.profile_id = RunProfileId::new(profile_id)?;
+        base.default_model_route = Some(default_route);
+        base.model_selection_policy = policy;
+        Ok(base)
+    }
+
     fn resolve(&self, request: &RunProfileResolutionRequest) -> ResolvedRunProfile {
         let mut provenance = provenance_for(self, request);
         let resource_budget_policy = self.resolve_resource_budget_policy(request, &mut provenance);
