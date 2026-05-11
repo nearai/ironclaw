@@ -507,7 +507,6 @@ impl RuntimeCapabilityOutcome {
 
 /// Stable reasons for capability suspension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub enum RuntimeBlockedReason {
     ApprovalRequired,
     AuthRequired,

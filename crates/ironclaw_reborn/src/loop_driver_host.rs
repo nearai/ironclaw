@@ -897,7 +897,6 @@ fn blocked_summary(reason: RuntimeBlockedReason) -> &'static str {
         RuntimeBlockedReason::AuthRequired => "capability requires authentication",
         RuntimeBlockedReason::ResourceLimit => "capability is blocked by resource limits",
         RuntimeBlockedReason::ResourceUnavailable => "capability resources are unavailable",
-        _ => "capability is blocked",
     }
 }
 
