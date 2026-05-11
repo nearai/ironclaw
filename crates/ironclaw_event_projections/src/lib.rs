@@ -6,7 +6,7 @@
 //! so it stays independent of concrete JSONL/PostgreSQL/libSQL adapters.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -44,6 +44,15 @@ const STATE_REPLAY_PAGE_LIMIT: usize = 256;
 /// caller knows it must re-snapshot rather than silently see a partial
 /// run-state view.
 const STATE_REPLAY_MAX_EVENTS: usize = 100_000;
+
+static MEMORY_EVENTS_EXTENSION_ID: LazyLock<ExtensionId> = LazyLock::new(|| {
+    ExtensionId::new("memory.events").expect("static memory events extension id is valid")
+});
+
+static MEMORY_PROMPT_SAFETY_EXTENSION_ID: LazyLock<ExtensionId> = LazyLock::new(|| {
+    ExtensionId::new("memory.prompt_safety")
+        .expect("static memory prompt-safety extension id is valid")
+});
 
 /// Maximum page size accepted by the projection service.
 ///
@@ -446,7 +455,7 @@ fn memory_significant_audit(
         invocation_id: resource_scope.invocation_id,
         process_id: None,
         approval_request_id: None,
-        extension_id: Some(memory_extension_id("memory.events")?),
+        extension_id: Some((*MEMORY_EVENTS_EXTENSION_ID).clone()),
         action: ActionSummary {
             kind: memory_significant_action_kind(event.kind).to_string(),
             target: None,
@@ -487,7 +496,7 @@ fn prompt_write_safety_audit(
         invocation_id: resource_scope.invocation_id,
         process_id: None,
         approval_request_id: None,
-        extension_id: Some(memory_extension_id("memory.prompt_safety")?),
+        extension_id: Some((*MEMORY_PROMPT_SAFETY_EXTENSION_ID).clone()),
         action: ActionSummary {
             kind: prompt_write_action_kind(event.operation).to_string(),
             target: None,
@@ -497,7 +506,8 @@ fn prompt_write_safety_audit(
             kind: event
                 .reason_code
                 .map(prompt_safety_reason_projection_kind)
-                .unwrap_or_else(|| prompt_safety_event_kind_label(event.kind).to_string()),
+                .unwrap_or_else(|| prompt_safety_event_kind_label(event.kind))
+                .to_string(),
             reason: None,
             actor: None,
         },
@@ -564,11 +574,6 @@ fn resource_scope_matches_memory_scope(
         && resource_scope.project_id.as_ref().map(ProjectId::as_str) == memory_scope.project_id()
 }
 
-fn memory_extension_id(value: &str) -> Result<ExtensionId, MemoryEventSinkError> {
-    ExtensionId::new(value)
-        .map_err(|error| memory_audit_error(format!("invalid memory extension id: {error}")))
-}
-
 fn memory_significant_action_kind(kind: MemorySignificantEventKind) -> &'static str {
     match kind {
         MemorySignificantEventKind::DocumentWritten => "memory_document_written",
@@ -603,7 +608,7 @@ fn prompt_write_action_kind(operation: PromptWriteOperation) -> &'static str {
     }
 }
 
-fn prompt_safety_reason_projection_kind(reason: PromptSafetyReasonCode) -> String {
+fn prompt_safety_reason_projection_kind(reason: PromptSafetyReasonCode) -> &'static str {
     match reason {
         PromptSafetyReasonCode::HighRiskPromptInjection => "prompt_high_risk",
         PromptSafetyReasonCode::CriticalPromptInjection => "prompt_critical",
@@ -613,7 +618,6 @@ fn prompt_safety_reason_projection_kind(reason: PromptSafetyReasonCode) -> Strin
         PromptSafetyReasonCode::PromptWriteBypassNotAllowed => "prompt_bypass_denied",
         PromptSafetyReasonCode::PromptWriteSafetyEventUnavailable => "prompt_event_unavailable",
     }
-    .to_string()
 }
 
 fn prompt_safety_event_kind_label(kind: PromptWriteSafetyEventKind) -> &'static str {
