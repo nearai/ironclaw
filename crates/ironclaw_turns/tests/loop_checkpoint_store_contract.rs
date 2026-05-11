@@ -1,7 +1,7 @@
 #![cfg(any(feature = "libsql", feature = "postgres"))]
 
 use chrono::{TimeZone, Utc};
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
 use ironclaw_turns::{
     GateRef, LoopCheckpointStore, TurnCheckpointId, TurnCheckpointRecord, TurnRunId, TurnScope,
     TurnStatus,
