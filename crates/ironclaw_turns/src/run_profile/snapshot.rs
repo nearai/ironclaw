@@ -4,6 +4,7 @@ use crate::{RunProfileId, RunProfileVersion};
 
 use super::{
     driver::AgentLoopDriverDescriptor,
+    model_route::ResolvedModelRoute,
     policy::{
         CancellationPolicy, CheckpointPolicy, RedactedRunProfileProvenance,
         RedactedRunProfileSource, ResourceBudgetPolicy, RuntimeProfileConstraints, SteeringPolicy,
@@ -34,6 +35,7 @@ pub struct ResolvedRunProfile {
     pub runner_pool_id: Option<RunnerPoolId>,
     pub scheduling_class: SchedulingClass,
     pub concurrency_class: ConcurrencyClass,
+    pub resolved_model_route: Option<ResolvedModelRoute>,
     pub resolution_fingerprint: RunProfileFingerprint,
     pub provenance: RedactedRunProfileProvenance,
 }
@@ -91,6 +93,7 @@ impl ResolvedRunProfile {
             runner_pool_id: None,
             scheduling_class: SchedulingClass::from_trusted_static("interactive"),
             concurrency_class: ConcurrencyClass::from_trusted_static("thread_serial"),
+            resolved_model_route: None,
             resolution_fingerprint: RunProfileFingerprint::from_trusted_static(
                 "legacy-persisted-profile-v1",
             ),

@@ -5,6 +5,10 @@ use crate::{RunProfileId, RunProfileRequest, RunProfileVersion};
 
 use super::{
     driver::AgentLoopDriverDescriptor,
+    model_route::{
+        InMemoryModelRouteResolver, ModelRoute, ModelRouteResolver, ModelSelectionPolicy,
+        ModelSlot, ResolvedModelRoute,
+    },
     policy::{
         CancellationPolicy, CheckpointPolicy, PrivilegedRunProfileDimension,
         RedactedRunProfileProvenance, RedactedRunProfileSource, ResourceBudgetPolicy,
@@ -143,13 +147,21 @@ pub struct RunProfileDefinition {
     scheduling_class: SchedulingClass,
     concurrency_class: ConcurrencyClass,
     required_privileges: Vec<PrivilegedRunProfileDimension>,
+    default_model_route: Option<ModelRoute>,
+    model_selection_policy: ModelSelectionPolicy,
 }
 
 impl RunProfileDefinition {
     fn resolve(&self, request: &RunProfileResolutionRequest) -> ResolvedRunProfile {
         let mut provenance = provenance_for(self, request);
         let resource_budget_policy = self.resolve_resource_budget_policy(request, &mut provenance);
-        let fingerprint = fingerprint_for(self, &resource_budget_policy, &provenance);
+        let resolved_model_route = self.resolve_default_model_route();
+        let fingerprint = fingerprint_for(
+            self,
+            &resource_budget_policy,
+            &resolved_model_route,
+            &provenance,
+        );
         ResolvedRunProfile {
             run_class_id: self.run_class_id.clone(),
             profile_id: self.profile_id.clone(),
@@ -168,9 +180,23 @@ impl RunProfileDefinition {
             runner_pool_id: self.runner_pool_id.clone(),
             scheduling_class: self.scheduling_class.clone(),
             concurrency_class: self.concurrency_class.clone(),
+            resolved_model_route,
             resolution_fingerprint: fingerprint,
             provenance,
         }
+    }
+
+    fn resolve_default_model_route(&self) -> Option<ResolvedModelRoute> {
+        let default_route = self.default_model_route.as_ref()?;
+        let resolver = InMemoryModelRouteResolver;
+        resolver
+            .resolve_model_route(
+                &ModelSlot::Default,
+                None,
+                &self.model_selection_policy,
+                Some(default_route),
+            )
+            .ok()
     }
 
     fn resolve_resource_budget_policy(
@@ -251,6 +277,8 @@ fn interactive_profile() -> RunProfileDefinition {
         scheduling_class: SchedulingClass::from_trusted_static("interactive"),
         concurrency_class: ConcurrencyClass::from_trusted_static("thread_serial"),
         required_privileges: Vec::new(),
+        default_model_route: None,
+        model_selection_policy: ModelSelectionPolicy::DeveloperAnyConfigured,
     }
 }
 
@@ -306,6 +334,8 @@ fn long_running_mission_profile() -> RunProfileDefinition {
             PrivilegedRunProfileDimension::SpecialDriver,
             PrivilegedRunProfileDimension::RunnerPool,
         ],
+        default_model_route: None,
+        model_selection_policy: ModelSelectionPolicy::DeveloperAnyConfigured,
     }
 }
 
@@ -345,6 +375,7 @@ fn update_bool(value: bool, update: &mut impl FnMut(&str)) {
 fn fingerprint_for(
     definition: &RunProfileDefinition,
     resource_budget_policy: &ResourceBudgetPolicy,
+    resolved_model_route: &Option<ResolvedModelRoute>,
     provenance: &RedactedRunProfileProvenance,
 ) -> RunProfileFingerprint {
     let mut hash = 0xcbf29ce484222325_u64;
@@ -439,6 +470,10 @@ fn fingerprint_for(
     );
     update(definition.scheduling_class.as_str());
     update(definition.concurrency_class.as_str());
+    if let Some(route) = resolved_model_route {
+        update(route.route.provider_id.as_str());
+        update(route.route.model_id.as_str());
+    }
     for dimension in &provenance.effective_privileges {
         update(dimension.category());
     }

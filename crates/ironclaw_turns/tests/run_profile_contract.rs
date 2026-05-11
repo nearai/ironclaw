@@ -5,6 +5,7 @@ use ironclaw_turns::{
     RunProfileResolver, RunProfileVersion,
 };
 
+
 #[tokio::test]
 async fn default_interactive_profile_resolves_stable_driver_and_redacted_snapshot() {
     let resolver = InMemoryRunProfileResolver::default();
@@ -176,4 +177,47 @@ fn agent_loop_driver_descriptor_wire_shape_excludes_raw_authority_handles() {
     assert!(wire.get("process_host").is_none());
     assert!(wire.get("raw_provider_client").is_none());
     assert!(wire.get("secrets").is_none());
+}
+
+#[tokio::test]
+async fn builtin_profiles_have_no_resolved_model_route_by_default() {
+    let resolver = InMemoryRunProfileResolver::default();
+
+    let interactive = resolver
+        .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+        .await
+        .unwrap();
+    assert!(
+        interactive.resolved_model_route.is_none(),
+        "interactive profile should have no resolved model route by default"
+    );
+
+    let mission = resolver
+        .resolve_run_profile(
+            RunProfileResolutionRequest::interactive_default()
+                .with_requested_run_profile(RunProfileRequest::new("long_running_mission").unwrap())
+                .with_authority(RunProfileRequestAuthority::Admin),
+        )
+        .await
+        .unwrap();
+    assert!(
+        mission.resolved_model_route.is_none(),
+        "mission profile should have no resolved model route by default"
+    );
+}
+
+#[tokio::test]
+async fn resolved_model_route_serializes_in_snapshot() {
+    // Verify that the resolved_model_route field round-trips through serde
+    // in the full ResolvedRunProfile snapshot.
+    let resolver = InMemoryRunProfileResolver::default();
+    let snapshot = resolver
+        .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+        .await
+        .unwrap();
+
+    let json = serde_json::to_string(&snapshot).unwrap();
+    let deserialized: ironclaw_turns::ResolvedRunProfile =
+        serde_json::from_str(&json).unwrap();
+    assert_eq!(snapshot.resolved_model_route, deserialized.resolved_model_route);
 }
