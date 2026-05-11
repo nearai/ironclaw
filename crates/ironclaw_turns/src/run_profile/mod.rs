@@ -32,7 +32,8 @@ pub use milestones::{
 };
 pub use model::{
     HostManagedLoopModelPort, LoopModelBudgetAccountant, LoopModelGateway, LoopModelGatewayError,
-    LoopModelGatewayRequest, ModelCallOutcome, NoOpBudgetAccountant,
+    LoopModelGatewayRequest, LoopModelPolicyGuard, ModelCallOutcome, NoOpBudgetAccountant,
+    NoOpPolicyGuard,
 };
 pub use policy::{
     CancellationPolicy, CheckpointPolicy, PrivilegedRunProfileDimension,

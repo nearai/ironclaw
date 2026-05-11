@@ -229,6 +229,8 @@ impl LoopRunContext {
 #[serde(rename_all = "snake_case")]
 pub enum AgentLoopHostErrorKind {
     Unauthorized,
+    /// The credential required for the model provider is missing or expired.
+    CredentialUnavailable,
     ScopeMismatch,
     StaleSurface,
     InvalidInvocation,
@@ -245,6 +247,7 @@ impl AgentLoopHostErrorKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Unauthorized => "unauthorized",
+            Self::CredentialUnavailable => "credential_unavailable",
             Self::ScopeMismatch => "scope_mismatch",
             Self::StaleSurface => "stale_surface",
             Self::InvalidInvocation => "invalid_invocation",

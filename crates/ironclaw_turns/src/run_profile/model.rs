@@ -98,6 +98,36 @@ pub trait LoopModelGateway: Send + Sync {
     ) -> Result<LoopModelResponse, LoopModelGatewayError>;
 }
 
+/// Provider/model policy guard consulted before dispatching a model call.
+///
+/// Implementations may enforce allow/deny lists for models, providers, or
+/// any request-level policy. A denial short-circuits the call before any
+/// provider or credential is touched.
+#[async_trait]
+pub trait LoopModelPolicyGuard: Send + Sync {
+    /// Return `Ok(())` to allow the call, or `Err` with
+    /// `AgentLoopHostErrorKind::PolicyDenied` and a sanitized summary.
+    async fn check_model_policy(
+        &self,
+        context: &LoopRunContext,
+        request: &LoopModelRequest,
+    ) -> Result<(), LoopModelGatewayError>;
+}
+
+/// A no-op policy guard that allows every model call.
+pub struct NoOpPolicyGuard;
+
+#[async_trait]
+impl LoopModelPolicyGuard for NoOpPolicyGuard {
+    async fn check_model_policy(
+        &self,
+        _context: &LoopRunContext,
+        _request: &LoopModelRequest,
+    ) -> Result<(), LoopModelGatewayError> {
+        Ok(())
+    }
+}
+
 /// A no-op budget accountant that approves every call and records nothing.
 ///
 /// Used as the default when no budget policy is configured.
@@ -133,6 +163,7 @@ where
     gateway: Arc<G>,
     milestones: LoopHostMilestoneEmitter<S>,
     accountant: Arc<dyn LoopModelBudgetAccountant>,
+    policy_guard: Arc<dyn LoopModelPolicyGuard>,
 }
 
 impl<G, S> HostManagedLoopModelPort<G, S>
@@ -147,6 +178,7 @@ where
             gateway,
             milestones,
             accountant: Arc::new(NoOpBudgetAccountant),
+            policy_guard: Arc::new(NoOpPolicyGuard),
         }
     }
 
@@ -163,6 +195,25 @@ where
             gateway,
             milestones,
             accountant,
+            policy_guard: Arc::new(NoOpPolicyGuard),
+        }
+    }
+
+    /// Create a fully-configured port with policy guard and budget accountant.
+    pub fn with_guards(
+        context: LoopRunContext,
+        gateway: Arc<G>,
+        milestone_sink: Arc<S>,
+        accountant: Arc<dyn LoopModelBudgetAccountant>,
+        policy_guard: Arc<dyn LoopModelPolicyGuard>,
+    ) -> Self {
+        let milestones = LoopHostMilestoneEmitter::new(context.clone(), milestone_sink);
+        Self {
+            context,
+            gateway,
+            milestones,
+            accountant,
+            policy_guard,
         }
     }
 }
@@ -177,6 +228,15 @@ where
         &self,
         request: LoopModelRequest,
     ) -> Result<LoopModelResponse, AgentLoopHostError> {
+        // Policy check — rejects before any provider or credential is touched.
+        if let Err(policy_error) = self
+            .policy_guard
+            .check_model_policy(&self.context, &request)
+            .await
+        {
+            return Err(policy_error.into_host_error());
+        }
+
         // Pre-call budget check — rejects before touching the provider.
         if let Err(budget_error) = self.accountant.pre_model_call(&self.context, &request).await {
             return Err(budget_error.into_host_error());
