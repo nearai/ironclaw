@@ -5,6 +5,8 @@ use crate::context::JobContext;
 use crate::pairing::PairingStore;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 
+const CHANNEL: &str = "slack-relay";
+
 pub struct PairingApproveTool {
     store: Arc<PairingStore>,
 }
@@ -22,7 +24,7 @@ impl Tool for PairingApproveTool {
     }
 
     fn description(&self) -> &str {
-        "Approve a channel pairing code to bind an external account (e.g. Slack) to the current IronClaw user. The user receives the code in their messaging app and provides it here."
+        "Approve a Slack pairing code to bind the user's Slack account to their IronClaw user. The user receives the code in Slack and provides it here."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -31,12 +33,7 @@ impl Tool for PairingApproveTool {
             "properties": {
                 "code": {
                     "type": "string",
-                    "description": "The pairing code received in the messaging app (e.g. WZG8LQAB)"
-                },
-                "channel": {
-                    "type": "string",
-                    "description": "The channel to pair with (default: slack-relay)",
-                    "default": "slack-relay"
+                    "description": "The pairing code received in Slack (e.g. WZG8LQAB)"
                 }
             },
             "required": ["code"]
@@ -51,10 +48,7 @@ impl Tool for PairingApproveTool {
         let start = std::time::Instant::now();
 
         let code = require_str(&params, "code")?;
-        let channel = params
-            .get("channel")
-            .and_then(|v| v.as_str())
-            .unwrap_or("slack-relay");
+        let channel = CHANNEL;
 
         let user_id =
             crate::ownership::UserId::new(&ctx.user_id, crate::ownership::UserRole::Regular)
@@ -82,25 +76,43 @@ impl Tool for PairingApproveTool {
     }
 
     fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
-        ApprovalRequirement::UnlessAutoApproved
+        ApprovalRequirement::Always
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::registry::is_protected_tool_name;
 
     #[test]
     fn tool_metadata() {
         let store = Arc::new(PairingStore::new_noop());
         let tool = PairingApproveTool::new(store);
         assert_eq!(tool.name(), "pairing_approve");
-        assert!(tool.description().contains("pairing code"));
+        assert!(tool.description().contains("Slack"));
         let schema = tool.parameters_schema();
         assert!(schema["properties"]["code"].is_object());
+        assert!(schema["properties"]["channel"].is_null());
+    }
+
+    #[test]
+    fn always_requires_approval() {
+        let store = Arc::new(PairingStore::new_noop());
+        let tool = PairingApproveTool::new(store);
         assert_eq!(
             tool.requires_approval(&serde_json::json!({})),
-            ApprovalRequirement::UnlessAutoApproved
+            ApprovalRequirement::Always
         );
+    }
+
+    #[test]
+    fn is_protected_builtin() {
+        assert!(is_protected_tool_name("pairing_approve"));
+    }
+
+    #[test]
+    fn channel_is_slack_relay() {
+        assert_eq!(CHANNEL, "slack-relay");
     }
 }
