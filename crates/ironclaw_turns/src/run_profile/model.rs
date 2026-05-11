@@ -96,9 +96,17 @@ where
         &self,
         request: LoopModelRequest,
     ) -> Result<LoopModelResponse, AgentLoopHostError> {
-        self.milestones
+        if let Err(error) = self
+            .milestones
             .model_started(request.model_preference.clone())
-            .await?;
+            .await
+        {
+            tracing::debug!(
+                kind = ?error.kind,
+                diagnostic_ref = ?error.diagnostic_ref,
+                "loop model_started milestone failed before model request"
+            );
+        }
         let response = match self
             .gateway
             .stream_model(LoopModelGatewayRequest {

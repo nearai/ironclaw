@@ -1007,6 +1007,10 @@ async fn replay_projection_keeps_model_completed_running_until_reply_finalized()
         after_reply_finalized.runs[0].status,
         RunProjectionStatus::Completed
     );
+    assert_eq!(
+        after_reply_finalized.runs[0].capability_id, model_capability,
+        "assistant_reply_finalized must not reclassify the model run capability"
+    );
 }
 
 #[tokio::test]

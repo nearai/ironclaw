@@ -3,12 +3,16 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_events::{DurableEventLog, EventError, RuntimeEvent};
 use ironclaw_host_api::{
-    AgentId, CapabilityId, InvocationId, MissionId, ProjectId, ResourceScope, TenantId, UserId,
+    AgentId, CapabilityId, InvocationId, MissionId, ProjectId, ResourceScope, TenantId, ThreadId,
+    UserId,
 };
 use ironclaw_threads::ThreadScope;
-use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, LoopHostMilestone, LoopHostMilestoneKind,
-    LoopHostMilestoneSink,
+use ironclaw_turns::{
+    TurnRunId,
+    run_profile::{
+        AgentLoopHostError, AgentLoopHostErrorKind, LoopHostMilestone, LoopHostMilestoneKind,
+        LoopHostMilestoneSink,
+    },
 };
 
 const MODEL_CAPABILITY_ID: &str = "loop.model";
@@ -25,6 +29,8 @@ pub struct DurableLoopHostMilestoneScope {
     agent_id: Option<AgentId>,
     project_id: Option<ProjectId>,
     mission_id: Option<MissionId>,
+    thread_id: Option<ThreadId>,
+    run_id: Option<TurnRunId>,
 }
 
 impl DurableLoopHostMilestoneScope {
@@ -41,7 +47,20 @@ impl DurableLoopHostMilestoneScope {
             agent_id: Some(thread_scope.agent_id.clone()),
             project_id: thread_scope.project_id.clone(),
             mission_id: thread_scope.mission_id.clone(),
+            thread_id: None,
+            run_id: None,
         })
+    }
+
+    pub fn from_thread_scope_for_run(
+        thread_scope: &ThreadScope,
+        thread_id: ThreadId,
+        run_id: TurnRunId,
+    ) -> Result<Self, AgentLoopHostError> {
+        let mut scope = Self::from_thread_scope(thread_scope)?;
+        scope.thread_id = Some(thread_id);
+        scope.run_id = Some(run_id);
+        Ok(scope)
     }
 
     fn resource_scope(
@@ -56,6 +75,24 @@ impl DurableLoopHostMilestoneScope {
                 AgentLoopHostErrorKind::ScopeMismatch,
                 "loop milestone scope does not match durable event scope",
             ));
+        }
+        match &self.thread_id {
+            Some(thread_id) if milestone.scope.thread_id != *thread_id => {
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::ScopeMismatch,
+                    "loop milestone thread does not match durable event scope",
+                ));
+            }
+            _ => {}
+        }
+        match &self.run_id {
+            Some(run_id) if milestone.run_id != *run_id => {
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::ScopeMismatch,
+                    "loop milestone run does not match durable event scope",
+                ));
+            }
+            _ => {}
         }
         Ok(ResourceScope {
             tenant_id: self.tenant_id.clone(),

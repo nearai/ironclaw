@@ -803,6 +803,47 @@ async fn model_port_emits_started_and_failed_milestones_when_gateway_fails() {
 
 #[traced_test]
 #[tokio::test]
+async fn model_port_logs_model_started_milestone_failure_without_losing_response() {
+    let fixture = ThreadFixture::new().await;
+    let milestone_sink = Arc::new(FailOnModelStartedMilestoneSink::default());
+    let gateway = Arc::new(RecordingGateway::reply(
+        "model response survives start milestone failure",
+    ));
+    let port = ThreadBackedLoopModelPort::with_milestone_sink(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway,
+        16,
+        milestone_sink.clone(),
+    );
+
+    let response = port
+        .stream_model(LoopModelRequest {
+            messages: vec![LoopModelMessage {
+                role: "user".to_string(),
+                content_ref: LoopMessageRef::new(format!("msg:{}", fixture.user_message_id))
+                    .unwrap(),
+            }],
+            surface_version: None,
+            model_preference: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        response.output,
+        ParentLoopOutput::AssistantReply(AssistantReply { ref content })
+            if content == "model response survives start milestone failure"
+    ));
+    assert_eq!(milestone_sink.kind_names(), vec!["model_completed"]);
+    assert!(logs_contain(
+        "loop model_started milestone failed before model request"
+    ));
+}
+
+#[traced_test]
+#[tokio::test]
 async fn model_port_logs_model_completed_milestone_failure_without_losing_response() {
     let fixture = ThreadFixture::new().await;
     let milestone_sink = Arc::new(FailOnModelCompletedMilestoneSink::default());
@@ -1234,6 +1275,39 @@ impl ironclaw_turns::run_profile::LoopHostMilestoneSink for FailOnceMilestoneSin
             ));
         }
         attempts.push(milestone);
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct FailOnModelStartedMilestoneSink {
+    published: Mutex<Vec<ironclaw_turns::run_profile::LoopHostMilestone>>,
+}
+
+impl FailOnModelStartedMilestoneSink {
+    fn kind_names(&self) -> Vec<&'static str> {
+        self.published
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|milestone| milestone.kind.kind_name())
+            .collect()
+    }
+}
+
+#[async_trait]
+impl ironclaw_turns::run_profile::LoopHostMilestoneSink for FailOnModelStartedMilestoneSink {
+    async fn publish_loop_milestone(
+        &self,
+        milestone: ironclaw_turns::run_profile::LoopHostMilestone,
+    ) -> Result<(), ironclaw_turns::run_profile::AgentLoopHostError> {
+        if matches!(milestone.kind, LoopHostMilestoneKind::ModelStarted { .. }) {
+            return Err(ironclaw_turns::run_profile::AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "loop milestone sink unavailable",
+            ));
+        }
+        self.published.lock().unwrap().push(milestone);
         Ok(())
     }
 }

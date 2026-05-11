@@ -1126,7 +1126,12 @@ fn apply_run_event(
         });
 
     run.status = status;
-    run.capability_id = event.capability_id.clone();
+    // Reply-finalized is a transcript milestone for the same loop run; keep the
+    // primary run capability (`loop.model`) instead of reclassifying the run as
+    // an assistant-reply event.
+    if event.kind != RuntimeEventKind::AssistantReplyFinalized {
+        run.capability_id = event.capability_id.clone();
+    }
     run.thread_id = event.scope.thread_id.clone();
     if event.provider.is_some() {
         run.provider = event.provider.clone();

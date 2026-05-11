@@ -14,7 +14,7 @@ use ironclaw_events::{
     DurableAuditLog, DurableEventLog, EventStreamKey, InMemoryDurableAuditLog,
     InMemoryDurableEventLog, ReadScope,
 };
-use ironclaw_host_api::{AgentId, MissionId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{AgentId, CapabilityId, MissionId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelRequest, HostManagedModelResponse,
@@ -131,6 +131,67 @@ async fn durable_milestone_sink_rejects_mismatched_milestone_scope() {
         .expect_err("durable milestone sink must reject foreign turn scope");
 
     assert_eq!(error.kind, AgentLoopHostErrorKind::ScopeMismatch);
+    let manager = event_stream_manager(events, Arc::new(InMemoryDurableAuditLog::new()));
+    let snapshot = manager
+        .runtime_snapshot(ProjectionRequest {
+            scope: projection_scope(),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+    assert!(snapshot.timeline.entries.is_empty());
+}
+
+#[tokio::test]
+async fn durable_milestone_sink_rejects_mismatched_thread_or_run_binding() {
+    let events: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let thread_scope = ThreadScope {
+        tenant_id: tenant_id(),
+        agent_id: agent_id(),
+        project_id: Some(project_id()),
+        owner_user_id: Some(user_id()),
+        mission_id: Some(mission_id()),
+    };
+    let expected_thread_id = ThreadId::new("thread-loop-events-expected").unwrap();
+    let expected_run_id = TurnRunId::new();
+    let sink = DurableLoopHostMilestoneSink::new(
+        Arc::clone(&events),
+        DurableLoopHostMilestoneScope::from_thread_scope_for_run(
+            &thread_scope,
+            expected_thread_id.clone(),
+            expected_run_id,
+        )
+        .unwrap(),
+    );
+
+    let wrong_thread = loop_milestone_for_scope(TurnScope::new(
+        tenant_id(),
+        Some(agent_id()),
+        Some(project_id()),
+        ThreadId::new("thread-loop-events-wrong").unwrap(),
+    ));
+    let error = sink
+        .publish_loop_milestone(wrong_thread)
+        .await
+        .expect_err("durable milestone sink must reject foreign thread scope");
+    assert_eq!(error.kind, AgentLoopHostErrorKind::ScopeMismatch);
+
+    let wrong_run = LoopHostMilestone {
+        run_id: TurnRunId::new(),
+        ..loop_milestone_for_scope(TurnScope::new(
+            tenant_id(),
+            Some(agent_id()),
+            Some(project_id()),
+            expected_thread_id,
+        ))
+    };
+    let error = sink
+        .publish_loop_milestone(wrong_run)
+        .await
+        .expect_err("durable milestone sink must reject foreign run scope");
+    assert_eq!(error.kind, AgentLoopHostErrorKind::ScopeMismatch);
+
     let manager = event_stream_manager(events, Arc::new(InMemoryDurableAuditLog::new()));
     let snapshot = manager
         .runtime_snapshot(ProjectionRequest {
@@ -297,6 +358,11 @@ async fn drive_model_reply_milestones_and_assert_projection(
     assert_eq!(
         success_thread.runs[0].status,
         RunProjectionStatus::Completed
+    );
+    assert_eq!(
+        success_thread.runs[0].capability_id,
+        CapabilityId::new("loop.model").unwrap(),
+        "assistant_reply_finalized must not reclassify the model run capability"
     );
 
     let success_replay_scope = projection_scope_for_thread(success_thread_id.clone());
@@ -529,8 +595,12 @@ impl HostFixture {
             )
             .await
             .unwrap();
-        let milestone_scope = DurableLoopHostMilestoneScope::from_thread_scope(&thread_scope)
-            .expect("thread fixture has owner user for milestone scope");
+        let milestone_scope = DurableLoopHostMilestoneScope::from_thread_scope_for_run(
+            &thread_scope,
+            thread_id.clone(),
+            run_id,
+        )
+        .expect("thread fixture has owner user for milestone scope");
         let milestone_sink: Arc<dyn LoopHostMilestoneSink> =
             Arc::new(DurableLoopHostMilestoneSink::new(events, milestone_scope));
 

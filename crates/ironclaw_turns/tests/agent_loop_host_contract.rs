@@ -157,6 +157,43 @@ async fn host_managed_model_port_routes_gateway_and_emits_model_milestones() {
 }
 
 #[tokio::test]
+async fn host_managed_model_port_returns_response_when_model_started_milestone_fails() {
+    let context = claimed_run_context().await;
+    let milestone_sink = Arc::new(FailingOnModelStartedMilestoneSink::default());
+    let gateway = Arc::new(RecordingLoopModelGateway::default());
+    gateway.push_response(Ok(LoopModelResponse {
+        chunks: vec![ironclaw_turns::run_profile::ModelStreamChunk {
+            safe_text_delta: "safe delta".to_string(),
+        }],
+        output: ParentLoopOutput::AssistantReply(AssistantReply {
+            content: "model response survived start milestone failure".to_string(),
+        }),
+        effective_model_profile_id: context.resolved_run_profile.model_profile_id.clone(),
+    }));
+    let port =
+        HostManagedLoopModelPort::new(context.clone(), gateway.clone(), milestone_sink.clone());
+
+    let response = port
+        .stream_model(LoopModelRequest {
+            messages: Vec::new(),
+            surface_version: None,
+            model_preference: None,
+        })
+        .await
+        .unwrap();
+
+    let ParentLoopOutput::AssistantReply(reply) = response.output else {
+        panic!("expected assistant reply");
+    };
+    assert_eq!(
+        reply.content,
+        "model response survived start milestone failure"
+    );
+    assert_eq!(gateway.requests().len(), 1);
+    assert_eq!(milestone_sink.kind_names(), vec!["model_completed"]);
+}
+
+#[tokio::test]
 async fn host_managed_model_port_returns_response_when_model_completed_milestone_fails() {
     let context = claimed_run_context().await;
     let milestone_sink = Arc::new(FailingOnModelCompletedMilestoneSink::default());
@@ -980,6 +1017,37 @@ impl AgentLoopDriver for CapabilityDriver {
             host,
         )
         .await
+    }
+}
+
+#[derive(Default)]
+struct FailingOnModelStartedMilestoneSink {
+    kind_names: Mutex<Vec<&'static str>>,
+}
+
+impl FailingOnModelStartedMilestoneSink {
+    fn kind_names(&self) -> Vec<&'static str> {
+        self.kind_names.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl LoopHostMilestoneSink for FailingOnModelStartedMilestoneSink {
+    async fn publish_loop_milestone(
+        &self,
+        milestone: LoopHostMilestone,
+    ) -> Result<(), AgentLoopHostError> {
+        if matches!(milestone.kind, LoopHostMilestoneKind::ModelStarted { .. }) {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "milestone sink unavailable",
+            ));
+        }
+        self.kind_names
+            .lock()
+            .unwrap()
+            .push(milestone.kind.kind_name());
+        Ok(())
     }
 }
 

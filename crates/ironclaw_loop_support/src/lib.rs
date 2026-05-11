@@ -498,7 +498,7 @@ where
                 .clone()
         });
         let resolved_messages = self.resolve_model_messages(request.messages).await?;
-        self.emit_model_started(requested_model_profile_id).await?;
+        self.emit_model_started(requested_model_profile_id).await;
         let gateway_response = match self
             .gateway
             .stream_model(HostManagedModelRequest {
@@ -537,16 +537,18 @@ where
     S: SessionThreadService + ?Sized + Send + Sync,
     G: HostManagedModelGateway + ?Sized + Send + Sync,
 {
-    async fn emit_model_started(
-        &self,
-        requested_model_profile_id: Option<ModelProfileId>,
-    ) -> Result<(), AgentLoopHostError> {
+    async fn emit_model_started(&self, requested_model_profile_id: Option<ModelProfileId>) {
         if let Some(milestone_sink) = &self.milestone_sink {
             let milestones =
                 LoopHostMilestoneEmitter::new(self.run_context.clone(), Arc::clone(milestone_sink));
-            milestones.model_started(requested_model_profile_id).await?;
+            if let Err(error) = milestones.model_started(requested_model_profile_id).await {
+                tracing::debug!(
+                    kind = ?error.kind,
+                    diagnostic_ref = ?error.diagnostic_ref,
+                    "loop model_started milestone failed before model request"
+                );
+            }
         }
-        Ok(())
     }
 
     async fn emit_model_completed(&self, effective_model_profile_id: ModelProfileId) {
