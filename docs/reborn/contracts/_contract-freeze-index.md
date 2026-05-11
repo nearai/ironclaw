@@ -89,6 +89,7 @@ If a task needs to change one of those answers, it is not implementation work; i
 - [`turn-runner.md`](turn-runner.md)
 - [`conversation-binding.md`](conversation-binding.md)
 - [`migration-compatibility.md`](migration-compatibility.md)
+- [`trust-boundary-hardening.md`](trust-boundary-hardening.md)
 
 ---
 
