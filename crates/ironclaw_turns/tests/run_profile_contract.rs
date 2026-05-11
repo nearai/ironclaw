@@ -221,3 +221,90 @@ async fn resolved_model_route_serializes_in_snapshot() {
         serde_json::from_str(&json).unwrap();
     assert_eq!(snapshot.resolved_model_route, deserialized.resolved_model_route);
 }
+
+#[tokio::test]
+async fn profile_with_configured_model_route_includes_resolved_route_in_snapshot() {
+    use ironclaw_turns::run_profile::{
+        InMemoryRunProfileRegistry, ModelId, ModelRoute, ModelSelectionPolicy, ModelSlot,
+        ProviderId, RunProfileDefinition,
+    };
+    use ironclaw_turns::InMemoryRunProfileResolver;
+
+    let route = ModelRoute {
+        provider_id: ProviderId::new("openai").unwrap(),
+        model_id: ModelId::new("gpt-4o").unwrap(),
+    };
+    let definition = RunProfileDefinition::interactive_with_model_route(
+        "routed_interactive",
+        route.clone(),
+        ModelSelectionPolicy::DeveloperAnyConfigured,
+    )
+    .unwrap();
+
+    let mut registry = InMemoryRunProfileRegistry::with_builtin_profiles();
+    registry.push_profile(definition);
+    let resolver = InMemoryRunProfileResolver::new(registry);
+
+    let snapshot = resolver
+        .resolve_run_profile(
+            RunProfileResolutionRequest::interactive_default()
+                .with_requested_run_profile(RunProfileRequest::new("routed_interactive").unwrap()),
+        )
+        .await
+        .unwrap();
+
+    let resolved = snapshot
+        .resolved_model_route
+        .as_ref()
+        .expect("profile with default_model_route should resolve to Some");
+    assert_eq!(resolved.slot, ModelSlot::Default);
+    assert_eq!(resolved.route.provider_id.as_str(), "openai");
+    assert_eq!(resolved.route.model_id.as_str(), "gpt-4o");
+
+    // Verify serde round-trip with Some(route)
+    let json = serde_json::to_string(&snapshot).unwrap();
+    let deserialized: ironclaw_turns::ResolvedRunProfile = serde_json::from_str(&json).unwrap();
+    assert_eq!(snapshot.resolved_model_route, deserialized.resolved_model_route);
+}
+
+#[tokio::test]
+async fn fingerprint_changes_when_model_route_is_present_vs_absent() {
+    use ironclaw_turns::run_profile::{
+        InMemoryRunProfileRegistry, ModelId, ModelRoute, ModelSelectionPolicy, ProviderId,
+        RunProfileDefinition,
+    };
+    use ironclaw_turns::InMemoryRunProfileResolver;
+
+    let route = ModelRoute {
+        provider_id: ProviderId::new("anthropic").unwrap(),
+        model_id: ModelId::new("claude-sonnet").unwrap(),
+    };
+    let routed = RunProfileDefinition::interactive_with_model_route(
+        "routed_fp",
+        route,
+        ModelSelectionPolicy::DeveloperAnyConfigured,
+    )
+    .unwrap();
+
+    let mut registry = InMemoryRunProfileRegistry::with_builtin_profiles();
+    registry.push_profile(routed);
+    let resolver = InMemoryRunProfileResolver::new(registry);
+
+    let with_route = resolver
+        .resolve_run_profile(
+            RunProfileResolutionRequest::interactive_default()
+                .with_requested_run_profile(RunProfileRequest::new("routed_fp").unwrap()),
+        )
+        .await
+        .unwrap();
+    let without_route = resolver
+        .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+        .await
+        .unwrap();
+
+    assert_ne!(
+        with_route.resolution_fingerprint,
+        without_route.resolution_fingerprint,
+        "fingerprint must differ when model route is present vs absent"
+    );
+}
