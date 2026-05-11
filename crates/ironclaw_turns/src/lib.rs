@@ -81,8 +81,8 @@ pub use status::{
     SanitizedFailure, TurnError, TurnErrorCategory, TurnRunProfile, TurnRunState, TurnStatus,
 };
 pub use store::{
-    LoopCheckpointStore, TurnActiveLockKey, TurnActiveLockRecord, TurnCheckpointRecord,
-    TurnIdempotencyErrorReplay, TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind,
-    TurnIdempotencyRecord, TurnIdempotencyReplay, TurnLockVersion, TurnPersistenceSnapshot,
-    TurnRecord, TurnRunRecord, TurnStateStore,
+    TurnActiveLockKey, TurnActiveLockRecord, TurnCheckpointRecord, TurnIdempotencyErrorReplay,
+    TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnIdempotencyRecord,
+    TurnIdempotencyReplay, TurnLockVersion, TurnPersistenceSnapshot, TurnRecord, TurnRunRecord,
+    TurnStateStore,
 };

@@ -142,34 +142,6 @@ pub struct TurnCheckpointRecord {
     pub created_at: TurnTimestamp,
 }
 
-/// Direct single-row checkpoint read/write operations.
-///
-/// Unlike the snapshot-based path (`TurnRunTransitionPort::block_run` →
-/// `libsql_replace_snapshot`/`postgres_replace_snapshot`) which loads the full
-/// `TurnPersistenceSnapshot`, `LoopCheckpointStore` provides targeted
-/// `INSERT`/`SELECT` operations scoped by checkpoint ID and run.
-///
-/// Implementations must preserve idempotent `put` semantics (re-inserting the
-/// same `checkpoint_id` is not an error) and cross-run isolation (`get` returns
-/// `None` when the checkpoint belongs to a different `run_id`).
-#[async_trait]
-pub trait LoopCheckpointStore: Send + Sync {
-    /// Insert a single checkpoint record scoped to the run.
-    /// Idempotent: re-inserting the same `checkpoint_id` is not an error.
-    async fn put_loop_checkpoint(
-        &self,
-        record: TurnCheckpointRecord,
-    ) -> Result<(), TurnError>;
-
-    /// Direct lookup by `checkpoint_id`. Returns `None` if not found or if the
-    /// checkpoint belongs to a different `run_id` (cross-run rejection).
-    async fn get_loop_checkpoint(
-        &self,
-        checkpoint_id: TurnCheckpointId,
-        run_id: TurnRunId,
-    ) -> Result<Option<TurnCheckpointRecord>, TurnError>;
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnIdempotencyOperationKind {

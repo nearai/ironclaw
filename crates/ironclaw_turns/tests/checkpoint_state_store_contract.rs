@@ -435,7 +435,7 @@ fn turn_checkpoint_public_status_does_not_expose_checkpoint_payload() {
     };
     let event = TurnLifecycleEvent {
         cursor: EventCursor(2),
-        scope,
+        scope: scope.clone(),
         run_id,
         status: TurnStatus::BlockedApproval,
         kind: TurnEventKind::Blocked,
@@ -445,9 +445,12 @@ fn turn_checkpoint_public_status_does_not_expose_checkpoint_payload() {
         checkpoints: vec![TurnCheckpointRecord {
             checkpoint_id,
             run_id,
+            scope: Some(scope.clone()),
             sequence: 1,
             status: TurnStatus::BlockedApproval,
             gate_ref: GateRef::new("gate-checkpoint-public").unwrap(),
+            kind: LoopCheckpointKind::BeforeBlock,
+            state_ref: LoopCheckpointStateRef::new("checkpoint:public-status").unwrap(),
             created_at: fixed_time(),
         }],
         events: vec![event.clone()],

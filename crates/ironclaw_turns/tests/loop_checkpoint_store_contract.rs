@@ -1,16 +1,17 @@
-#![cfg(any(feature = "libsql", feature = "postgres"))]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use std::sync::Arc;
 
-use chrono::{TimeZone, Utc};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
 use ironclaw_turns::{
-    GateRef, LoopCheckpointStore, TurnCheckpointId, TurnCheckpointRecord, TurnRunId, TurnScope,
-    TurnStatus,
-    run_profile::{LoopCheckpointKind, LoopCheckpointStateRef},
+    CheckpointSchemaId, GetLoopCheckpointRequest, InMemoryLoopCheckpointStore,
+    InMemoryTurnStateStore, LoopCheckpointStateRef, LoopCheckpointStore, PutLoopCheckpointRequest,
+    RunProfileVersion, TurnId, TurnRunId, TurnScope, run_profile::LoopCheckpointKind,
 };
-use std::sync::Arc;
 
 #[cfg(feature = "libsql")]
 use ironclaw_turns::LibSqlTurnStateStore;
+#[cfg(feature = "postgres")]
+use ironclaw_turns::PostgresTurnStateStore;
 
 fn test_scope(thread: &str) -> TurnScope {
     TurnScope::new(
@@ -21,119 +22,106 @@ fn test_scope(thread: &str) -> TurnScope {
     )
 }
 
-fn make_checkpoint(
-    run_id: TurnRunId,
-    sequence: u64,
-    kind: LoopCheckpointKind,
-) -> TurnCheckpointRecord {
-    TurnCheckpointRecord {
-        checkpoint_id: TurnCheckpointId::new(),
+fn put_request(scope: TurnScope, turn_id: TurnId, run_id: TurnRunId) -> PutLoopCheckpointRequest {
+    PutLoopCheckpointRequest {
+        scope,
+        turn_id,
         run_id,
-        scope: Some(test_scope("thread-a")),
-        sequence,
-        status: TurnStatus::BlockedApproval,
-        gate_ref: GateRef::new("gate:test-gate").unwrap(),
-        kind,
         state_ref: LoopCheckpointStateRef::new("checkpoint:test-state").unwrap(),
-        created_at: Utc.with_ymd_and_hms(2026, 5, 11, 12, 0, 0).unwrap(),
+        schema_id: CheckpointSchemaId::new("interactive_checkpoint_v1").unwrap(),
+        schema_version: RunProfileVersion::new(1),
+        kind: LoopCheckpointKind::BeforeModel,
     }
 }
 
-// ── Tests against in-memory backend ──────────────────────────────────────────
-
-#[tokio::test]
-async fn inmemory_put_get_roundtrip() {
-    let store = ironclaw_turns::InMemoryTurnStateStore::default();
+async fn assert_loop_checkpoint_store_roundtrip(store: &(impl LoopCheckpointStore + ?Sized)) {
+    let scope = test_scope("thread-loop-checkpoint-roundtrip");
+    let turn_id = TurnId::new();
     let run_id = TurnRunId::new();
-    let record = make_checkpoint(run_id, 1, LoopCheckpointKind::BeforeModel);
-    let checkpoint_id = record.checkpoint_id;
-
-    store.put_loop_checkpoint(record.clone()).await.unwrap();
-    let fetched = store
-        .get_loop_checkpoint(checkpoint_id, run_id)
+    let checkpoint = store
+        .put_loop_checkpoint(put_request(scope.clone(), turn_id, run_id))
         .await
         .unwrap();
 
-    let fetched = fetched.expect("should find checkpoint");
-    assert_eq!(fetched.checkpoint_id, checkpoint_id);
-    assert_eq!(fetched.run_id, run_id);
-    assert_eq!(fetched.kind, LoopCheckpointKind::BeforeModel);
-    assert_eq!(
-        fetched.state_ref,
-        LoopCheckpointStateRef::new("checkpoint:test-state").unwrap()
-    );
-    assert_eq!(fetched.scope, Some(test_scope("thread-a")));
+    let loaded = store
+        .get_loop_checkpoint(GetLoopCheckpointRequest {
+            scope: scope.clone(),
+            turn_id,
+            run_id,
+            checkpoint_id: checkpoint.checkpoint_id,
+        })
+        .await
+        .unwrap()
+        .expect("checkpoint id should resolve to state ref");
+
+    assert_eq!(loaded, checkpoint);
+    assert_eq!(loaded.scope, scope);
+    assert_eq!(loaded.turn_id, turn_id);
+    assert_eq!(loaded.run_id, run_id);
+    assert_eq!(loaded.kind, LoopCheckpointKind::BeforeModel);
 }
 
-#[tokio::test]
-async fn inmemory_cross_run_rejection() {
-    let store = ironclaw_turns::InMemoryTurnStateStore::default();
-    let run_a = TurnRunId::new();
-    let run_b = TurnRunId::new();
-    let record = make_checkpoint(run_a, 1, LoopCheckpointKind::BeforeBlock);
-    let checkpoint_id = record.checkpoint_id;
-
-    store.put_loop_checkpoint(record).await.unwrap();
-    let fetched = store
-        .get_loop_checkpoint(checkpoint_id, run_b)
+async fn assert_loop_checkpoint_store_cross_scope_and_run_miss(
+    store: &(impl LoopCheckpointStore + ?Sized),
+) {
+    let scope = test_scope("thread-loop-checkpoint-scope-a");
+    let turn_id = TurnId::new();
+    let run_id = TurnRunId::new();
+    let checkpoint = store
+        .put_loop_checkpoint(put_request(scope.clone(), turn_id, run_id))
         .await
         .unwrap();
-    assert!(fetched.is_none(), "cross-run lookup should return None");
+
+    let cross_scope = store
+        .get_loop_checkpoint(GetLoopCheckpointRequest {
+            scope: test_scope("thread-loop-checkpoint-scope-b"),
+            turn_id,
+            run_id,
+            checkpoint_id: checkpoint.checkpoint_id,
+        })
+        .await
+        .unwrap();
+    assert!(cross_scope.is_none(), "cross-scope lookup must fail closed");
+
+    let cross_run = store
+        .get_loop_checkpoint(GetLoopCheckpointRequest {
+            scope,
+            turn_id,
+            run_id: TurnRunId::new(),
+            checkpoint_id: checkpoint.checkpoint_id,
+        })
+        .await
+        .unwrap();
+    assert!(cross_run.is_none(), "cross-run lookup must fail closed");
 }
 
 #[tokio::test]
-async fn inmemory_multiple_checkpoints_per_run() {
-    let store = ironclaw_turns::InMemoryTurnStateStore::default();
-    let run_id = TurnRunId::new();
-
-    let r1 = make_checkpoint(run_id, 1, LoopCheckpointKind::BeforeModel);
-    let r2 = make_checkpoint(run_id, 2, LoopCheckpointKind::BeforeSideEffect);
-    let r3 = make_checkpoint(run_id, 3, LoopCheckpointKind::Final);
-    let id1 = r1.checkpoint_id;
-    let id2 = r2.checkpoint_id;
-    let id3 = r3.checkpoint_id;
-
-    store.put_loop_checkpoint(r1).await.unwrap();
-    store.put_loop_checkpoint(r2).await.unwrap();
-    store.put_loop_checkpoint(r3).await.unwrap();
-
-    assert!(store.get_loop_checkpoint(id1, run_id).await.unwrap().is_some());
-    assert!(store.get_loop_checkpoint(id2, run_id).await.unwrap().is_some());
-    assert!(store.get_loop_checkpoint(id3, run_id).await.unwrap().is_some());
+async fn inmemory_standalone_loop_checkpoint_roundtrip() {
+    let store = InMemoryLoopCheckpointStore::default();
+    assert_loop_checkpoint_store_roundtrip(&store).await;
+    assert_loop_checkpoint_store_cross_scope_and_run_miss(&store).await;
 }
 
 #[tokio::test]
-async fn inmemory_idempotent_put() {
-    let store = ironclaw_turns::InMemoryTurnStateStore::default();
-    let run_id = TurnRunId::new();
-    let record = make_checkpoint(run_id, 1, LoopCheckpointKind::BeforeBlock);
+async fn inmemory_turn_state_loop_checkpoint_roundtrip_and_snapshot() {
+    let store = InMemoryTurnStateStore::default();
+    assert_loop_checkpoint_store_roundtrip(&store).await;
+    assert_loop_checkpoint_store_cross_scope_and_run_miss(&store).await;
 
-    store.put_loop_checkpoint(record.clone()).await.unwrap();
-    // Second put with same checkpoint_id should succeed without error.
-    store.put_loop_checkpoint(record).await.unwrap();
-}
-
-#[tokio::test]
-async fn serde_backward_compat_missing_fields() {
-    // Simulate old persisted JSON that lacks kind, state_ref, and scope.
-    let json = r#"{
-        "checkpoint_id": "00000000-0000-0000-0000-000000000001",
-        "run_id": "00000000-0000-0000-0000-000000000002",
-        "sequence": 1,
-        "status": "BlockedApproval",
-        "gate_ref": "gate:test",
-        "created_at": "2026-05-11T12:00:00Z"
-    }"#;
-    let record: TurnCheckpointRecord = serde_json::from_str(json).unwrap();
-    assert_eq!(record.kind, LoopCheckpointKind::BeforeBlock);
-    assert_eq!(
-        record.state_ref,
-        LoopCheckpointStateRef::new("checkpoint:unknown").unwrap()
+    let snapshot = store.persistence_snapshot();
+    assert_eq!(snapshot.loop_checkpoints.len(), 2);
+    assert!(
+        snapshot.checkpoints.is_empty(),
+        "loop checkpoint mappings must not use turn_checkpoints"
     );
-    assert_eq!(record.scope, None);
-}
 
-// ── Tests against libSQL backend ─────────────────────────────────────────────
+    let reopened = InMemoryTurnStateStore::from_persistence_snapshot(
+        snapshot,
+        ironclaw_turns::InMemoryTurnStateStoreLimits::default(),
+    )
+    .unwrap();
+    assert_loop_checkpoint_store_cross_scope_and_run_miss(&reopened).await;
+}
 
 #[cfg(feature = "libsql")]
 async fn libsql_store() -> (Arc<LibSqlTurnStateStore>, tempfile::TempDir) {
@@ -147,75 +135,70 @@ async fn libsql_store() -> (Arc<LibSqlTurnStateStore>, tempfile::TempDir) {
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
-async fn libsql_put_get_roundtrip() {
+async fn libsql_loop_checkpoint_roundtrip_uses_loop_mapping_table() {
     let (store, _dir) = libsql_store().await;
-    let run_id = TurnRunId::new();
-    let record = make_checkpoint(run_id, 1, LoopCheckpointKind::BeforeModel);
-    let checkpoint_id = record.checkpoint_id;
+    assert_loop_checkpoint_store_roundtrip(store.as_ref()).await;
+    assert_loop_checkpoint_store_cross_scope_and_run_miss(store.as_ref()).await;
 
-    store.put_loop_checkpoint(record.clone()).await.unwrap();
-    let fetched = store
-        .get_loop_checkpoint(checkpoint_id, run_id)
-        .await
-        .unwrap()
-        .expect("should find checkpoint");
-
-    assert_eq!(fetched.checkpoint_id, checkpoint_id);
-    assert_eq!(fetched.run_id, run_id);
-    assert_eq!(fetched.kind, LoopCheckpointKind::BeforeModel);
-    assert_eq!(
-        fetched.state_ref,
-        LoopCheckpointStateRef::new("checkpoint:test-state").unwrap()
+    let snapshot = store.persistence_snapshot().await.unwrap();
+    assert_eq!(snapshot.loop_checkpoints.len(), 2);
+    assert!(
+        snapshot.checkpoints.is_empty(),
+        "libSQL loop mappings must not be written to turn_checkpoints"
     );
-    assert_eq!(fetched.scope, Some(test_scope("thread-a")));
 }
 
-#[cfg(feature = "libsql")]
+#[cfg(feature = "postgres")]
 #[tokio::test]
-async fn libsql_cross_run_rejection() {
-    let (store, _dir) = libsql_store().await;
-    let run_a = TurnRunId::new();
-    let run_b = TurnRunId::new();
-    let record = make_checkpoint(run_a, 1, LoopCheckpointKind::BeforeBlock);
-    let checkpoint_id = record.checkpoint_id;
+async fn postgres_loop_checkpoint_roundtrip_uses_loop_mapping_table() {
+    let Some(pool) = postgres_pool().await else {
+        return;
+    };
+    let store = Arc::new(PostgresTurnStateStore::new(pool));
+    store.run_migrations().await.unwrap();
+    assert_loop_checkpoint_store_roundtrip(store.as_ref()).await;
+    assert_loop_checkpoint_store_cross_scope_and_run_miss(store.as_ref()).await;
 
-    store.put_loop_checkpoint(record).await.unwrap();
-    let fetched = store
-        .get_loop_checkpoint(checkpoint_id, run_b)
-        .await
+    let snapshot = store.persistence_snapshot().await.unwrap();
+    assert!(
+        snapshot
+            .loop_checkpoints
+            .iter()
+            .any(|record| record.state_ref.as_str() == "checkpoint:test-state"),
+        "Postgres loop mappings must be written to turn_loop_checkpoints"
+    );
+    assert!(
+        snapshot
+            .checkpoints
+            .iter()
+            .all(|record| record.state_ref.as_str() != "checkpoint:test-state"),
+        "Postgres loop mappings must not be written to turn_checkpoints"
+    );
+}
+
+#[cfg(feature = "postgres")]
+async fn postgres_pool() -> Option<deadpool_postgres::Pool> {
+    let Ok(url) = std::env::var("IRONCLAW_TURNS_POSTGRES_URL") else {
+        eprintln!(
+            "skipping postgres loop checkpoint contract: IRONCLAW_TURNS_POSTGRES_URL not set"
+        );
+        return None;
+    };
+    let config: tokio_postgres::Config = match url.parse() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("skipping postgres loop checkpoint contract: invalid url ({error})");
+            return None;
+        }
+    };
+    let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
+    let pool = deadpool_postgres::Pool::builder(manager)
+        .max_size(4)
+        .build()
         .unwrap();
-    assert!(fetched.is_none(), "cross-run lookup should return None");
-}
-
-#[cfg(feature = "libsql")]
-#[tokio::test]
-async fn libsql_multiple_checkpoints_per_run() {
-    let (store, _dir) = libsql_store().await;
-    let run_id = TurnRunId::new();
-
-    let r1 = make_checkpoint(run_id, 1, LoopCheckpointKind::BeforeModel);
-    let r2 = make_checkpoint(run_id, 2, LoopCheckpointKind::BeforeSideEffect);
-    let r3 = make_checkpoint(run_id, 3, LoopCheckpointKind::Final);
-    let id1 = r1.checkpoint_id;
-    let id2 = r2.checkpoint_id;
-    let id3 = r3.checkpoint_id;
-
-    store.put_loop_checkpoint(r1).await.unwrap();
-    store.put_loop_checkpoint(r2).await.unwrap();
-    store.put_loop_checkpoint(r3).await.unwrap();
-
-    assert!(store.get_loop_checkpoint(id1, run_id).await.unwrap().is_some());
-    assert!(store.get_loop_checkpoint(id2, run_id).await.unwrap().is_some());
-    assert!(store.get_loop_checkpoint(id3, run_id).await.unwrap().is_some());
-}
-
-#[cfg(feature = "libsql")]
-#[tokio::test]
-async fn libsql_idempotent_put() {
-    let (store, _dir) = libsql_store().await;
-    let run_id = TurnRunId::new();
-    let record = make_checkpoint(run_id, 1, LoopCheckpointKind::BeforeBlock);
-
-    store.put_loop_checkpoint(record.clone()).await.unwrap();
-    store.put_loop_checkpoint(record).await.unwrap();
+    if let Err(error) = pool.get().await {
+        eprintln!("skipping postgres loop checkpoint contract: database unavailable ({error})");
+        return None;
+    }
+    Some(pool)
 }

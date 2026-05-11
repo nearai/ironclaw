@@ -725,40 +725,6 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
     }
 }
 
-#[async_trait]
-impl crate::LoopCheckpointStore for InMemoryTurnStateStore {
-    async fn put_loop_checkpoint(
-        &self,
-        record: TurnCheckpointRecord,
-    ) -> Result<(), crate::TurnError> {
-        let mut inner = self.lock_inner()?;
-        // Idempotent: update if same checkpoint_id exists, else push.
-        if let Some(existing) = inner
-            .checkpoints
-            .iter_mut()
-            .find(|c| c.checkpoint_id == record.checkpoint_id)
-        {
-            *existing = record;
-        } else {
-            inner.checkpoints.push(record);
-        }
-        Ok(())
-    }
-
-    async fn get_loop_checkpoint(
-        &self,
-        checkpoint_id: crate::TurnCheckpointId,
-        run_id: crate::TurnRunId,
-    ) -> Result<Option<TurnCheckpointRecord>, crate::TurnError> {
-        let inner = self.lock_inner()?;
-        Ok(inner
-            .checkpoints
-            .iter()
-            .find(|c| c.checkpoint_id == checkpoint_id && c.run_id == run_id)
-            .cloned())
-    }
-}
-
 impl Inner {
     fn from_persistence_snapshot(
         snapshot: TurnPersistenceSnapshot,
