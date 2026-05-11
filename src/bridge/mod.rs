@@ -43,6 +43,7 @@ pub use router::{
     ProjectOverviewEntry,
     ProjectsOverviewResponse,
     clear_engine_pending_auth,
+    clear_engine_pending_auth_for_credential,
     discard_engine_pending_auth_request,
     // Query functions
     fire_engine_mission,

@@ -201,6 +201,18 @@ async def test_telegram_pairing_reply_names_every_surface(
         f"pairing reply must mention CLI fallback: {pairing_text}"
     )
 
+    # Telegram itself must NOT be advertised as a chat surface for the
+    # `approve telegram CODE` command. The recipient is by definition
+    # unpaired, so their DMs are intercepted by the allowlist gate in
+    # the WASM channel before the agent parser ever sees the command —
+    # they'd just get another pairing reply. Pairing approval requires
+    # an already-authenticated IronClaw surface (web / TUI / CLI).
+    # Reference: review on PR #3381.
+    assert "TUI / web / Telegram" not in pairing_text, (
+        "pairing reply must not list Telegram itself as a chat surface "
+        f"for the approve command: {pairing_text}"
+    )
+
     code = extract_pairing_code(messages)
     assert code, f"Expected pairing code in reply, got: {pairing_text}"
     assert code.isalnum() and code.isupper(), (
@@ -353,4 +365,109 @@ async def test_chat_surface_rejects_invalid_pairing_code(
 
     assert "Invalid or expired pairing code" in invalid_response, (
         f"Invalid pairing claim must surface a clear rejection, got: {invalid_response}"
+    )
+
+
+async def test_telegram_dm_approve_command_is_intercepted_by_allowlist_gate(
+    isolated_telegram_e2e_server,
+):
+    """An unpaired Telegram user cannot complete pairing from Telegram itself.
+
+    Reviewer concern on PR #3381: if the bot's pairing reply tells users
+    they can type `approve telegram CODE` "in any IronClaw chat
+    (TUI / web / Telegram)", a user following that instruction *back into
+    Telegram* gets the message intercepted by `handle_message`'s
+    allowlist gate before the agent parser ever sees it — they just get
+    another pairing reply.
+
+    The fix is to remove Telegram from the surfaces the bot promises.
+    This test locks in the channel-layer behavior that motivates the
+    fix: an unpaired DM containing `approve telegram CODE` must NOT
+    complete pairing — it must be re-issued as a pairing reply (or, at
+    worst, ignored). It exercises the Telegram webhook path, not
+    `/api/chat/send`, so it covers exactly the layer the reviewer
+    flagged.
+    """
+    if not _LOCAL_TELEGRAM_WASM.exists():
+        pytest.skip(
+            "Locally-built Telegram WASM not present at "
+            f"{_LOCAL_TELEGRAM_WASM} — channel-layer interception is in "
+            "the WASM binary and can't be exercised against the registry "
+            "artifact."
+        )
+    base_url = isolated_telegram_e2e_server["base_url"]
+    http_url = isolated_telegram_e2e_server["http_url"]
+    fake_tg_url = isolated_telegram_e2e_server["fake_tg_url"]
+    channels_dir = isolated_telegram_e2e_server["channels_dir"]
+
+    await activate_telegram(base_url, http_url, fake_tg_url, channels_dir)
+    await reset_fake_tg(fake_tg_url)
+
+    # Step 1 — DM the bot to mint a pairing code.
+    pairing_resp = await post_telegram_webhook(
+        http_url,
+        {
+            "update_id": _next_test_update_id(),
+            "message": {
+                "message_id": 7001,
+                "from": {
+                    "id": PAIRED_USER_ID,
+                    "is_bot": False,
+                    "first_name": "Allowlist Gate Tester",
+                },
+                "chat": {"id": PAIRED_USER_ID, "type": "private"},
+                "date": int(time.time()),
+                "text": "hello",
+            },
+        },
+        secret=WEBHOOK_SECRET,
+    )
+    assert pairing_resp.status_code == 200
+
+    pairing_messages = await wait_for_sent_messages(
+        fake_tg_url, min_count=1, timeout=60
+    )
+    code = extract_pairing_code(pairing_messages)
+    assert code, f"Expected pairing code, got messages: {pairing_messages}"
+    await reset_fake_tg(fake_tg_url)
+
+    # Step 2 — Same unpaired user types `approve telegram CODE` back
+    # into the Telegram DM. The allowlist gate in `handle_message`
+    # must intercept this before the agent parser sees it.
+    claim_resp = await post_telegram_webhook(
+        http_url,
+        {
+            "update_id": _next_test_update_id(),
+            "message": {
+                "message_id": 7002,
+                "from": {
+                    "id": PAIRED_USER_ID,
+                    "is_bot": False,
+                    "first_name": "Allowlist Gate Tester",
+                },
+                "chat": {"id": PAIRED_USER_ID, "type": "private"},
+                "date": int(time.time()),
+                "text": f"approve telegram {code}",
+            },
+        },
+        secret=WEBHOOK_SECRET,
+    )
+    assert claim_resp.status_code == 200
+
+    follow_up_messages = await wait_for_sent_messages(
+        fake_tg_url, min_count=1, timeout=60
+    )
+    follow_up_text = "\n".join(m.get("text", "") for m in follow_up_messages)
+
+    # The user must NOT see "Pairing approved" — they're still unpaired,
+    # the channel layer correctly didn't route their DM to the agent.
+    assert "Pairing approved" not in follow_up_text, (
+        "An unpaired Telegram DM must not complete pairing approval; "
+        f"got: {follow_up_text}"
+    )
+    # And they should see *another* pairing reply (the channel layer
+    # treats every unauthorized DM as a fresh pairing request).
+    assert "Pair this Telegram account" in follow_up_text, (
+        "Unpaired Telegram DM must produce another pairing reply, not "
+        f"silent intake: {follow_up_text}"
     )

@@ -3831,6 +3831,45 @@ pub async fn clear_engine_pending_auth(user_id: &str, thread_id: Option<&str>) {
     }
 }
 
+/// Clear pending auth gates for a user that match a specific credential.
+///
+/// Used by OAuth failure paths where we need to release the gate that
+/// was waiting on *this* OAuth flow without disturbing unrelated
+/// authentication gates. A bare `clear_engine_pending_auth(user, None)`
+/// would discard every pending Authentication gate for the user — e.g. a
+/// failed Gmail callback would also nuke an in-flight Slack/MCP gate
+/// running on a different thread.
+///
+/// `credential_name` is taken as `&str` so callers in
+/// `src/channels/web/**` don't have to construct an
+/// `ironclaw_common::CredentialName` at the web boundary (per
+/// `web/CLAUDE.md` — credential identity stays backend-side). Invalid
+/// credential strings silently no-op rather than erroring; the gate
+/// simply stays open and the user retries.
+pub async fn clear_engine_pending_auth_for_credential(user_id: &str, credential_name: &str) {
+    let Ok(target) = ironclaw_common::CredentialName::new(credential_name) else {
+        return;
+    };
+    let Some(lock) = ENGINE_STATE.get() else {
+        return;
+    };
+    let guard = lock.read().await;
+    let Some(state) = guard.as_ref() else {
+        return;
+    };
+
+    for gate in state.pending_gates.list_for_user(user_id).await {
+        if let ironclaw_engine::ResumeKind::Authentication {
+            credential_name: gate_credential,
+            ..
+        } = &gate.resume_kind
+            && gate_credential == &target
+        {
+            let _ = state.pending_gates.discard(&gate.key()).await;
+        }
+    }
+}
+
 pub async fn discard_engine_pending_auth_request(
     user_id: &str,
     request_id: uuid::Uuid,
@@ -9253,6 +9292,212 @@ mod tests {
         let guard = lock.read().await;
         let state = guard.as_ref().unwrap();
         assert!(state.pending_gates.list_for_user("alice").await.is_empty());
+        drop(guard);
+        *lock.write().await = None;
+    }
+
+    /// Regression for review on #3381: the OAuth failure cleanup must
+    /// scope to the credential of the failed flow, not nuke every
+    /// pending auth gate the user has open. Concrete failure mode this
+    /// covers — Gmail OAuth fails while a Slack auth gate is in flight
+    /// on a different thread; only the Gmail gate should clear.
+    #[tokio::test]
+    async fn clear_engine_pending_auth_for_credential_only_clears_matching_credential() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let store = Arc::new(TestStore::new());
+        let state = make_expected_test_state(store);
+        let thread_gmail = ironclaw_engine::ThreadId::new();
+        let thread_slack = ironclaw_engine::ThreadId::new();
+
+        state
+            .pending_gates
+            .insert(sample_pending_gate(
+                "alice",
+                thread_gmail,
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name: ironclaw_common::CredentialName::new("google_oauth_token")
+                        .unwrap(),
+                    instructions: "complete OAuth".into(),
+                    auth_url: None,
+                },
+            ))
+            .await
+            .unwrap();
+        state
+            .pending_gates
+            .insert(sample_pending_gate(
+                "alice",
+                thread_slack,
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name: ironclaw_common::CredentialName::new("slack_oauth_token")
+                        .unwrap(),
+                    instructions: "complete OAuth".into(),
+                    auth_url: None,
+                },
+            ))
+            .await
+            .unwrap();
+
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+        *lock.write().await = Some(state);
+
+        clear_engine_pending_auth_for_credential("alice", "google_oauth_token").await;
+
+        let guard = lock.read().await;
+        let state = guard.as_ref().unwrap();
+        let remaining = state.pending_gates.list_for_user("alice").await;
+        assert_eq!(
+            remaining.len(),
+            1,
+            "only the Gmail gate should be discarded; Slack must remain"
+        );
+        assert!(
+            remaining.iter().any(|gate| gate.thread_id == thread_slack),
+            "Slack gate must survive Gmail OAuth failure"
+        );
+        drop(guard);
+        *lock.write().await = None;
+    }
+
+    /// Regression for review on PR #3381: an OAuth callback that arrives
+    /// after the 5-minute flow expiry is a terminal failure — the engine
+    /// pending auth gate must be cleared, otherwise the conversation
+    /// sits paused forever waiting on a callback that will never arrive
+    /// (#3320). Cleanup must stay scoped to the failed flow's credential
+    /// so an unrelated auth gate (Slack/MCP) running on a different
+    /// thread for the same user survives.
+    #[tokio::test]
+    async fn oauth_callback_expired_flow_clears_credential_scoped_engine_gate() {
+        use crate::channels::web::features::oauth::oauth_callback_handler;
+        use crate::channels::web::test_helpers::{test_ext_mgr, test_gateway_state};
+        use crate::testing::credentials::TEST_GATEWAY_CRYPTO_KEY;
+        use axum::body::Body;
+        use axum::routing::get;
+        use tower::ServiceExt;
+
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+
+        // Two pending auth gates for the same user, on different threads
+        // and different credentials. The OAuth callback will be for the
+        // Gmail flow; the Slack gate must survive.
+        let store = Arc::new(TestStore::new());
+        let engine_state = make_expected_test_state(store);
+        let thread_gmail = ironclaw_engine::ThreadId::new();
+        let thread_slack = ironclaw_engine::ThreadId::new();
+        engine_state
+            .pending_gates
+            .insert(sample_pending_gate(
+                "expiry-user",
+                thread_gmail,
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name: ironclaw_common::CredentialName::new("google_oauth_token")
+                        .unwrap(),
+                    instructions: "complete OAuth".into(),
+                    auth_url: None,
+                },
+            ))
+            .await
+            .unwrap();
+        engine_state
+            .pending_gates
+            .insert(sample_pending_gate(
+                "expiry-user",
+                thread_slack,
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name: ironclaw_common::CredentialName::new("slack_oauth_token")
+                        .unwrap(),
+                    instructions: "complete OAuth".into(),
+                    auth_url: None,
+                },
+            ))
+            .await
+            .unwrap();
+
+        let lock = ENGINE_STATE.get_or_init(|| TokioRwLock::new(None));
+        *lock.write().await = None;
+        *lock.write().await = Some(engine_state);
+
+        // GatewayState with an ext_mgr holding an expired pending flow
+        // for the Gmail credential. The `state` query parameter we send
+        // below must round-trip through `decode_hosted_oauth_state`, so
+        // we mint it via the matching encoder.
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
+                crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
+                    TEST_GATEWAY_CRYPTO_KEY.to_string(),
+                ))
+                .expect("crypto"),
+            )));
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets.clone());
+
+        let flow_id = "expiry-flow".to_string();
+        let encoded_state = crate::auth::oauth::encode_hosted_oauth_state(&flow_id, None);
+        let expired_created_at = std::time::Instant::now()
+            .checked_sub(crate::auth::oauth::OAUTH_FLOW_EXPIRY + Duration::from_secs(1))
+            .expect("monotonic clock");
+        let flow = crate::auth::oauth::PendingOAuthFlow {
+            extension_name: ironclaw_common::ExtensionName::new("gmail").unwrap(),
+            display_name: "Gmail".to_string(),
+            token_url: "https://example.com/token".to_string(),
+            client_id: "client123".to_string(),
+            client_secret: None,
+            redirect_uri: "https://example.com/oauth/callback".to_string(),
+            code_verifier: None,
+            access_token_field: "access_token".to_string(),
+            secret_name: "google_oauth_token".to_string(),
+            provider: None,
+            validation_endpoint: None,
+            scopes: vec![],
+            user_id: "expiry-user".to_string(),
+            secrets,
+            sse_manager: None,
+            gateway_token: None,
+            token_exchange_extra_params: std::collections::HashMap::new(),
+            client_id_secret_name: None,
+            client_secret_secret_name: None,
+            client_secret_expires_at: None,
+            created_at: expired_created_at,
+            auto_activate_extension: true,
+        };
+        ext_mgr
+            .pending_oauth_flows()
+            .write()
+            .await
+            .insert(flow_id, flow);
+
+        let gateway_state = test_gateway_state(Some(ext_mgr));
+        let app = axum::Router::new()
+            .route("/oauth/callback", get(oauth_callback_handler))
+            .with_state(gateway_state);
+
+        let req = axum::http::Request::builder()
+            .uri(format!(
+                "/oauth/callback?code=test_code&state={}",
+                encoded_state
+            ))
+            .body(Body::empty())
+            .expect("request");
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        // The Gmail gate (matching credential) must be gone; the Slack
+        // gate (different credential) must survive.
+        let guard = lock.read().await;
+        let state = guard.as_ref().unwrap();
+        let remaining = state.pending_gates.list_for_user("expiry-user").await;
+        assert_eq!(
+            remaining.len(),
+            1,
+            "expired OAuth callback must clear the matching auth gate; \
+             unrelated gate must survive. Remaining: {remaining:?}"
+        );
+        assert!(
+            remaining.iter().any(|gate| gate.thread_id == thread_slack),
+            "Slack gate must survive Gmail flow expiry"
+        );
         drop(guard);
         *lock.write().await = None;
     }

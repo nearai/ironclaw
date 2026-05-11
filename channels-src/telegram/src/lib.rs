@@ -1831,12 +1831,19 @@ fn send_pairing_reply(chat_id: i64, code: &str) -> Result<(), String> {
     // the code into their TUI/CLI chat, where there was no handler for it.
     // The agent now also accepts `approve telegram <code>` typed in any chat
     // surface, so we surface that path alongside the web/CLI options.
+    //
+    // Telegram itself is *not* listed as a chat surface here: the recipient
+    // is by definition unpaired, so their DMs are intercepted by the
+    // allowlist gate in `handle_message` *before* the agent parser ever
+    // sees `approve telegram <code>`. They'd just get another pairing
+    // reply. Pairing approval requires an already-authenticated IronClaw
+    // surface (web / TUI / CLI). Reference: PR review on #3381.
     send_message(
         chat_id,
         &format!(
             "Pair this Telegram account with IronClaw using one of:\n\
              • Web: Settings → Channels → Telegram → paste `{code}`\n\
-             • Any IronClaw chat (TUI / web / Telegram): type `approve telegram {code}`\n\
+             • Any signed-in IronClaw chat (TUI / web): type `approve telegram {code}`\n\
              • Terminal: `ironclaw pairing approve telegram {code}`",
         ),
         None,

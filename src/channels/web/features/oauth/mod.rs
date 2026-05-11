@@ -190,7 +190,14 @@ pub(crate) async fn oauth_callback_handler(
         // user_id to discard the engine gate against. The bare `.remove()`
         // path returned the flow before but in the original code the value
         // was thrown away.
+        //
+        // We also keep `secret_name` so we can scope the gate cleanup to
+        // the failed OAuth flow's credential — the broader
+        // `clear_engine_pending_auth(user, None)` path would also discard
+        // unrelated pending auth gates (Slack/MCP/etc.) that happen to be
+        // open for the same user on a different thread.
         let mut removed_user_id: Option<String> = None;
+        let mut removed_secret_name: Option<String> = None;
         if let Some(state_param) = params.get("state")
             && !state_param.is_empty()
             && let Ok(decoded) = oauth::decode_hosted_oauth_state(state_param)
@@ -202,6 +209,7 @@ pub(crate) async fn oauth_callback_handler(
                 .remove(&decoded.flow_id)
         {
             removed_user_id = Some(flow.user_id);
+            removed_secret_name = Some(flow.secret_name);
         }
 
         tracing::warn!(
@@ -214,10 +222,17 @@ pub(crate) async fn oauth_callback_handler(
         );
 
         if let Some(ref user_id) = removed_user_id {
-            // Discard any pending engine auth gate for this user; the OAuth
-            // dance is over and the gate is unresolvable. Without this the
-            // engine sits paused forever (#3320).
-            crate::bridge::clear_engine_pending_auth(user_id, None).await;
+            // Discard the pending engine auth gate that was waiting on
+            // *this* OAuth flow (matched by credential name). Without this
+            // the engine sits paused forever (#3320). Scoping by
+            // credential keeps the cleanup from nuking unrelated auth
+            // gates the user may have open in parallel — see PR review
+            // on #3381. The bridge helper takes the credential as `&str`
+            // and parses it backend-side, so the web layer keeps its
+            // string-typed boundary intact.
+            if let Some(ref secret) = removed_secret_name {
+                crate::bridge::clear_engine_pending_auth_for_credential(user_id, secret).await;
+            }
         }
 
         return oauth_error_page(&description);
@@ -332,7 +347,18 @@ pub(crate) async fn oauth_callback_handler(
                 },
             );
         }
-        clear_auth_mode(&state, &flow.user_id).await;
+        // Expiry is a terminal failure path just like provider-error and
+        // exchange-failure: discard the engine pending auth gate so the
+        // conversation isn't blocked on a callback that will never arrive
+        // (#3320). Scoped to this flow's credential so unrelated auth
+        // gates the user has open in parallel survive — review feedback
+        // on #3381. Use `clear_session_auth_mode_for_thread` for the
+        // legacy v1 cleanup; the broader `clear_auth_mode` helper would
+        // re-call `clear_engine_pending_auth(user, None)` and undo the
+        // credential scoping we just applied.
+        crate::bridge::clear_engine_pending_auth_for_credential(&flow.user_id, &flow.secret_name)
+            .await;
+        let _ = clear_session_auth_mode_for_thread(&state, &flow.user_id, None).await;
         return oauth_error_page(&flow.display_name);
     }
 
@@ -469,6 +495,10 @@ pub(crate) async fn oauth_callback_handler(
             // tracing on the gateway. Then auto-cancel the engine pending
             // auth gate for this user so subsequent messages aren't blocked
             // waiting for an OAuth resume that will never arrive (#3320).
+            //
+            // Scope the cleanup to the failed flow's credential so an
+            // unrelated pending auth gate (e.g. Slack/MCP open in another
+            // thread) survives — review feedback on #3381.
             let correlation = oauth_failure_correlation_id(flow.extension_name.as_str());
             tracing::warn!(
                 category = OauthCallbackFailure::Exchange.as_str(),
@@ -478,7 +508,11 @@ pub(crate) async fn oauth_callback_handler(
                 error = %e,
                 "OAuth failed via gateway callback"
             );
-            crate::bridge::clear_engine_pending_auth(&flow.user_id, None).await;
+            crate::bridge::clear_engine_pending_auth_for_credential(
+                &flow.user_id,
+                &flow.secret_name,
+            )
+            .await;
         }
     }
 

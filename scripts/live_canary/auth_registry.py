@@ -33,6 +33,10 @@ AUTH_CHANNEL_TESTS = [
     # surface in production.
     "tests/e2e/scenarios/test_telegram_pairing_chat_claim.py::test_telegram_pairing_reply_names_every_surface",
     "tests/e2e/scenarios/test_telegram_pairing_chat_claim.py::test_chat_surface_approves_pairing_code",
+    # PR #3381 review — `approve telegram CODE` typed in Telegram itself
+    # must NOT complete pairing (the allowlist gate intercepts before the
+    # agent parser), and the bot's reply must not promise that surface.
+    "tests/e2e/scenarios/test_telegram_pairing_chat_claim.py::test_telegram_dm_approve_command_is_intercepted_by_allowlist_gate",
 ]
 
 AUTH_PROFILES: dict[str, list[str]] = {
