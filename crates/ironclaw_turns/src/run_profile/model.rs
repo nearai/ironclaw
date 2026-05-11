@@ -12,6 +12,44 @@ use super::host::{
 };
 use super::milestones::{LoopHostMilestoneEmitter, LoopHostMilestoneSink};
 
+/// Outcome passed to [`LoopModelBudgetAccountant::post_model_call`] so the
+/// accountant can record usage on success or note the failure kind.
+#[derive(Debug, Clone)]
+pub enum ModelCallOutcome<'a> {
+    /// The model call succeeded; the response is available for inspection.
+    Success(&'a LoopModelResponse),
+    /// The model call failed with the given gateway error.
+    Failure(&'a LoopModelGatewayError),
+}
+
+/// Budget/resource accounting boundary invoked around every model call flowing
+/// through [`HostManagedLoopModelPort`].
+///
+/// Implementations may enforce token budgets, call-count limits, cost caps, or
+/// any other resource policy. A `pre_model_call` rejection short-circuits the
+/// provider call entirely.
+#[async_trait]
+pub trait LoopModelBudgetAccountant: Send + Sync {
+    /// Called **before** dispatching the model request. Return `Err` with
+    /// `AgentLoopHostErrorKind::BudgetExceeded` to reject the call.
+    async fn pre_model_call(
+        &self,
+        context: &LoopRunContext,
+        request: &LoopModelRequest,
+    ) -> Result<(), LoopModelGatewayError>;
+
+    /// Called **after** the model call completes (or fails). Implementations
+    /// should record usage and are expected to be infallible in practice; the
+    /// error return is provided for forward-compatibility but the caller logs
+    /// and discards it.
+    async fn post_model_call(
+        &self,
+        context: &LoopRunContext,
+        request: &LoopModelRequest,
+        outcome: ModelCallOutcome<'_>,
+    ) -> Result<(), LoopModelGatewayError>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopModelGatewayRequest {
     pub context: LoopRunContext,
@@ -60,6 +98,31 @@ pub trait LoopModelGateway: Send + Sync {
     ) -> Result<LoopModelResponse, LoopModelGatewayError>;
 }
 
+/// A no-op budget accountant that approves every call and records nothing.
+///
+/// Used as the default when no budget policy is configured.
+pub struct NoOpBudgetAccountant;
+
+#[async_trait]
+impl LoopModelBudgetAccountant for NoOpBudgetAccountant {
+    async fn pre_model_call(
+        &self,
+        _context: &LoopRunContext,
+        _request: &LoopModelRequest,
+    ) -> Result<(), LoopModelGatewayError> {
+        Ok(())
+    }
+
+    async fn post_model_call(
+        &self,
+        _context: &LoopRunContext,
+        _request: &LoopModelRequest,
+        _outcome: ModelCallOutcome<'_>,
+    ) -> Result<(), LoopModelGatewayError> {
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 pub struct HostManagedLoopModelPort<G, S>
 where
@@ -69,6 +132,7 @@ where
     context: LoopRunContext,
     gateway: Arc<G>,
     milestones: LoopHostMilestoneEmitter<S>,
+    accountant: Arc<dyn LoopModelBudgetAccountant>,
 }
 
 impl<G, S> HostManagedLoopModelPort<G, S>
@@ -82,6 +146,23 @@ where
             context,
             gateway,
             milestones,
+            accountant: Arc::new(NoOpBudgetAccountant),
+        }
+    }
+
+    /// Create a port with a custom budget accountant injected.
+    pub fn with_accountant(
+        context: LoopRunContext,
+        gateway: Arc<G>,
+        milestone_sink: Arc<S>,
+        accountant: Arc<dyn LoopModelBudgetAccountant>,
+    ) -> Self {
+        let milestones = LoopHostMilestoneEmitter::new(context.clone(), milestone_sink);
+        Self {
+            context,
+            gateway,
+            milestones,
+            accountant,
         }
     }
 }
@@ -96,17 +177,41 @@ where
         &self,
         request: LoopModelRequest,
     ) -> Result<LoopModelResponse, AgentLoopHostError> {
+        // Pre-call budget check — rejects before touching the provider.
+        if let Err(budget_error) = self.accountant.pre_model_call(&self.context, &request).await {
+            return Err(budget_error.into_host_error());
+        }
+
         self.milestones
             .model_started(request.model_preference.clone())
             .await?;
-        let response = self
+
+        let gateway_result = self
             .gateway
             .stream_model(LoopModelGatewayRequest {
                 context: self.context.clone(),
-                request,
+                request: request.clone(),
             })
+            .await;
+
+        // Post-call accounting fires on BOTH success and failure.
+        let outcome = match &gateway_result {
+            Ok(response) => ModelCallOutcome::Success(response),
+            Err(error) => ModelCallOutcome::Failure(error),
+        };
+        if let Err(post_error) = self
+            .accountant
+            .post_model_call(&self.context, &request, outcome)
             .await
-            .map_err(LoopModelGatewayError::into_host_error)?;
+        {
+            tracing::debug!(
+                kind = ?post_error.kind,
+                "post_model_call accounting failed; discarding accounting error"
+            );
+        }
+
+        let response = gateway_result.map_err(LoopModelGatewayError::into_host_error)?;
+
         if let Err(error) = self
             .milestones
             .model_completed(response.effective_model_profile_id.clone())
