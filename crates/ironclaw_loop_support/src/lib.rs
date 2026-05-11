@@ -499,7 +499,7 @@ where
         });
         let resolved_messages = self.resolve_model_messages(request.messages).await?;
         self.emit_model_started(requested_model_profile_id).await?;
-        let gateway_response = self
+        let gateway_response = match self
             .gateway
             .stream_model(HostManagedModelRequest {
                 model_profile_id: model_profile_id.clone(),
@@ -509,7 +509,14 @@ where
                 turn_id: self.run_context.turn_id,
             })
             .await
-            .map_err(model_gateway_error)?;
+        {
+            Ok(response) => response,
+            Err(error) => {
+                let host_error = model_gateway_error(error);
+                self.emit_model_failed(host_error.kind).await;
+                return Err(host_error);
+            }
+        };
 
         self.emit_model_completed(model_profile_id.clone()).await;
 
@@ -551,6 +558,20 @@ where
                     kind = ?error.kind,
                     diagnostic_ref = ?error.diagnostic_ref,
                     "loop model_completed milestone failed after successful model response"
+                );
+            }
+        }
+    }
+
+    async fn emit_model_failed(&self, reason_kind: AgentLoopHostErrorKind) {
+        if let Some(milestone_sink) = &self.milestone_sink {
+            let milestones =
+                LoopHostMilestoneEmitter::new(self.run_context.clone(), Arc::clone(milestone_sink));
+            if let Err(error) = milestones.model_failed(reason_kind).await {
+                tracing::debug!(
+                    kind = ?error.kind,
+                    diagnostic_ref = ?error.diagnostic_ref,
+                    "loop model_failed milestone failed after model error"
                 );
             }
         }

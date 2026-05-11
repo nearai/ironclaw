@@ -745,7 +745,7 @@ async fn model_port_emits_model_milestones_without_prompt_or_output_payloads() {
 }
 
 #[tokio::test]
-async fn model_port_emits_only_started_milestone_when_gateway_fails() {
+async fn model_port_emits_started_and_failed_milestones_when_gateway_fails() {
     let fixture = ThreadFixture::new_with_user_content("RAW_PROMPT_TEXT_SENTINEL").await;
     let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let gateway = Arc::new(RecordingGateway::deny(
@@ -775,11 +775,17 @@ async fn model_port_emits_only_started_milestone_when_gateway_fails() {
 
     assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
     let milestones = milestone_sink.milestones();
-    assert_eq!(milestones.len(), 1);
+    assert_eq!(milestones.len(), 2);
     assert!(matches!(
         &milestones[0].kind,
         LoopHostMilestoneKind::ModelStarted {
             requested_model_profile_id: None
+        }
+    ));
+    assert!(matches!(
+        &milestones[1].kind,
+        LoopHostMilestoneKind::ModelFailed {
+            reason_kind: AgentLoopHostErrorKind::PolicyDenied
         }
     ));
     let wire = serde_json::to_string(&milestones).unwrap();

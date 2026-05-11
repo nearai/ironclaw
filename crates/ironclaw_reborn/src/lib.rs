@@ -6,6 +6,7 @@
 
 pub mod driver_registry;
 pub mod loop_driver_host;
+pub mod milestone_events;
 pub mod turn_runner;
 
 #[cfg(feature = "root-llm-provider")]
@@ -18,6 +19,7 @@ pub use loop_driver_host::{
     RebornLoopDriverHost, RebornLoopDriverHostError, RebornLoopDriverHostFactory,
     RebornLoopDriverHostRequest, TextOnlyLoopHostConfig,
 };
+pub use milestone_events::DurableLoopHostMilestoneSink;
 #[cfg(feature = "root-llm-provider")]
 pub use model_gateway::{
     LlmModelProfilePolicy, LlmProviderModelGateway, ThreadBackedLoopModelGateway,

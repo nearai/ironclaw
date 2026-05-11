@@ -47,12 +47,18 @@ pub enum RuntimeEventKind {
     RuntimeSelected,
     DispatchSucceeded,
     DispatchFailed,
+    ModelStarted,
+    ModelCompleted,
+    ModelFailed,
+    AssistantReplyFinalized,
     ProcessStarted,
     ProcessCompleted,
     ProcessFailed,
     ProcessKilled,
 }
 ```
+
+Model/reply milestone events are metadata-only loop milestones. They carry scope, capability id, and sanitized failure kind when applicable; they do not carry raw prompts, assistant content, provider errors, host paths, secrets, or message payloads.
 
 Approval-specific runtime event kinds are deliberately absent. Approval resolution belongs to the audit envelope contract.
 

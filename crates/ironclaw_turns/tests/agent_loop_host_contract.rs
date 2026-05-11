@@ -228,7 +228,7 @@ async fn host_managed_model_port_sanitizes_gateway_errors() {
             .iter()
             .map(|milestone| milestone.kind.kind_name())
             .collect::<Vec<_>>(),
-        vec!["model_started"]
+        vec!["model_started", "model_failed"]
     );
 }
 

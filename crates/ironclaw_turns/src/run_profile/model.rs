@@ -99,14 +99,27 @@ where
         self.milestones
             .model_started(request.model_preference.clone())
             .await?;
-        let response = self
+        let response = match self
             .gateway
             .stream_model(LoopModelGatewayRequest {
                 context: self.context.clone(),
                 request,
             })
             .await
-            .map_err(LoopModelGatewayError::into_host_error)?;
+        {
+            Ok(response) => response,
+            Err(error) => {
+                let host_error = error.into_host_error();
+                if let Err(milestone_error) = self.milestones.model_failed(host_error.kind).await {
+                    tracing::debug!(
+                        kind = ?milestone_error.kind,
+                        diagnostic_ref = ?milestone_error.diagnostic_ref,
+                        "loop model_failed milestone failed after model error"
+                    );
+                }
+                return Err(host_error);
+            }
+        };
         if let Err(error) = self
             .milestones
             .model_completed(response.effective_model_profile_id.clone())

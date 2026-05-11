@@ -175,6 +175,10 @@ pub enum TimelineEntryKind {
     RuntimeSelected,
     DispatchSucceeded,
     DispatchFailed,
+    ModelStarted,
+    ModelCompleted,
+    ModelFailed,
+    AssistantReplyFinalized,
     ProcessStarted,
     ProcessCompleted,
     ProcessFailed,
@@ -188,6 +192,10 @@ impl From<RuntimeEventKind> for TimelineEntryKind {
             RuntimeEventKind::RuntimeSelected => Self::RuntimeSelected,
             RuntimeEventKind::DispatchSucceeded => Self::DispatchSucceeded,
             RuntimeEventKind::DispatchFailed => Self::DispatchFailed,
+            RuntimeEventKind::ModelStarted => Self::ModelStarted,
+            RuntimeEventKind::ModelCompleted => Self::ModelCompleted,
+            RuntimeEventKind::ModelFailed => Self::ModelFailed,
+            RuntimeEventKind::AssistantReplyFinalized => Self::AssistantReplyFinalized,
             RuntimeEventKind::ProcessStarted => Self::ProcessStarted,
             RuntimeEventKind::ProcessCompleted => Self::ProcessCompleted,
             RuntimeEventKind::ProcessFailed => Self::ProcessFailed,
@@ -1144,6 +1152,7 @@ fn run_status_for_event(
     match kind {
         RuntimeEventKind::DispatchRequested
         | RuntimeEventKind::RuntimeSelected
+        | RuntimeEventKind::ModelStarted
         | RuntimeEventKind::ProcessStarted => RunProjectionStatus::Running,
         RuntimeEventKind::DispatchSucceeded
             if has_active_process && current_status == Some(RunProjectionStatus::Running) =>
@@ -1164,12 +1173,13 @@ fn run_status_for_event(
         {
             current_status.unwrap_or(RunProjectionStatus::Failed)
         }
-        RuntimeEventKind::DispatchSucceeded | RuntimeEventKind::ProcessCompleted => {
-            RunProjectionStatus::Completed
-        }
-        RuntimeEventKind::DispatchFailed | RuntimeEventKind::ProcessFailed => {
-            RunProjectionStatus::Failed
-        }
+        RuntimeEventKind::DispatchSucceeded
+        | RuntimeEventKind::ModelCompleted
+        | RuntimeEventKind::AssistantReplyFinalized
+        | RuntimeEventKind::ProcessCompleted => RunProjectionStatus::Completed,
+        RuntimeEventKind::DispatchFailed
+        | RuntimeEventKind::ModelFailed
+        | RuntimeEventKind::ProcessFailed => RunProjectionStatus::Failed,
         RuntimeEventKind::ProcessKilled => RunProjectionStatus::Killed,
     }
 }

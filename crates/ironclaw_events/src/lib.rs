@@ -81,6 +81,10 @@ pub enum RuntimeEventKind {
     RuntimeSelected,
     DispatchSucceeded,
     DispatchFailed,
+    ModelStarted,
+    ModelCompleted,
+    ModelFailed,
+    AssistantReplyFinalized,
     ProcessStarted,
     ProcessCompleted,
     ProcessFailed,
@@ -93,8 +97,8 @@ pub enum RuntimeEventKind {
 /// `error_kind` is constrained by [`sanitize_error_kind`] on every wire
 /// crossing:
 ///
-/// - the typed `dispatch_failed` / `process_failed` constructors apply
-///   sanitization at construction time;
+/// - the typed `dispatch_failed` / `model_failed` / `process_failed`
+///   constructors apply sanitization at construction time;
 /// - the custom [`Deserialize`] impl re-runs the sanitizer on any inbound
 ///   JSONL/wire payload;
 /// - the custom [`Serialize`] impl re-runs the sanitizer before emitting the
@@ -252,6 +256,62 @@ impl RuntimeEvent {
             process_id: None,
             output_bytes: None,
             error_kind: Some(sanitize_error_kind(error_kind)),
+        })
+    }
+
+    pub fn model_started(scope: ResourceScope, capability_id: CapabilityId) -> Self {
+        Self::new(RuntimeEventPayload {
+            kind: RuntimeEventKind::ModelStarted,
+            scope,
+            capability_id,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            output_bytes: None,
+            error_kind: None,
+        })
+    }
+
+    pub fn model_completed(scope: ResourceScope, capability_id: CapabilityId) -> Self {
+        Self::new(RuntimeEventPayload {
+            kind: RuntimeEventKind::ModelCompleted,
+            scope,
+            capability_id,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            output_bytes: None,
+            error_kind: None,
+        })
+    }
+
+    pub fn model_failed(
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+        error_kind: impl Into<String>,
+    ) -> Self {
+        Self::new(RuntimeEventPayload {
+            kind: RuntimeEventKind::ModelFailed,
+            scope,
+            capability_id,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            output_bytes: None,
+            error_kind: Some(sanitize_error_kind(error_kind)),
+        })
+    }
+
+    pub fn assistant_reply_finalized(scope: ResourceScope, capability_id: CapabilityId) -> Self {
+        Self::new(RuntimeEventPayload {
+            kind: RuntimeEventKind::AssistantReplyFinalized,
+            scope,
+            capability_id,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            output_bytes: None,
+            error_kind: None,
         })
     }
 
