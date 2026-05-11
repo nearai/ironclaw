@@ -80,7 +80,9 @@ use crate::{
     BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime,
     FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, HostRuntimeError,
     NetworkObligationPolicyStore, ProcessObligationLifecycleStore, RuntimeBackendHealth,
-    RuntimeSecretInjectionStore, TurnRunExecutor, TurnRunScheduler, TurnRunSchedulerConfig,
+    RuntimeSecretInjectionStore, SystemCapabilityRegistry, SystemHost,
+    SystemInvocationAuthorityVerifier, TurnRunExecutor, TurnRunScheduler, TurnRunSchedulerConfig,
+    system::{SystemRuntimeAdapter, no_approval_authorizer},
 };
 
 type SharedRuntimeHttpEgress = Arc<Mutex<Option<Arc<dyn RuntimeHttpEgress>>>>;
@@ -156,6 +158,8 @@ pub enum ProductionWiringComponent {
     McpRuntime,
     WasmRuntime,
     FirstPartyRuntime,
+    SystemRuntime,
+    SystemAuthorityVerifier,
     TurnState,
     TurnRunWakeNotifier,
 }
@@ -181,6 +185,8 @@ impl ProductionWiringComponent {
             Self::McpRuntime => "mcp_runtime",
             Self::WasmRuntime => "wasm_runtime",
             Self::FirstPartyRuntime => "first_party_runtime",
+            Self::SystemRuntime => "system_runtime",
+            Self::SystemAuthorityVerifier => "system_authority_verifier",
             Self::TurnState => "turn_state",
             Self::TurnRunWakeNotifier => "turn_run_wake_notifier",
         }
@@ -262,6 +268,8 @@ struct ProductionComponentTypes {
     script_runtime: Option<&'static str>,
     mcp_runtime: Option<&'static str>,
     first_party_runtime: Option<&'static str>,
+    system_runtime: Option<&'static str>,
+    system_authority_verifier: Option<&'static str>,
     turn_state: Option<&'static str>,
     turn_run_transition_port: Option<&'static str>,
     turn_run_transition_port_verified: bool,
@@ -318,6 +326,8 @@ where
     script_runtime: Option<Arc<dyn ScriptExecutor>>,
     mcp_runtime: Option<Arc<dyn McpExecutor>>,
     first_party_runtime: Option<Arc<FirstPartyCapabilityRegistry>>,
+    system_runtime: Option<Arc<SystemCapabilityRegistry>>,
+    system_authority_verifier: Option<Arc<dyn SystemInvocationAuthorityVerifier>>,
     wasm_runtime: Option<Arc<WasmRuntimeAdapter>>,
     turn_state: Option<Arc<dyn TurnStateStore>>,
     turn_run_transition_port: Option<Arc<dyn TurnRunTransitionPort>>,
@@ -373,6 +383,8 @@ where
             script_runtime: None,
             mcp_runtime: None,
             first_party_runtime: None,
+            system_runtime: None,
+            system_authority_verifier: None,
             wasm_runtime: None,
             turn_state: None,
             turn_run_transition_port: None,
@@ -398,6 +410,8 @@ where
                 script_runtime: None,
                 mcp_runtime: None,
                 first_party_runtime: None,
+                system_runtime: None,
+                system_authority_verifier: None,
                 turn_state: None,
                 turn_run_transition_port: None,
                 turn_run_transition_port_verified: false,
@@ -436,6 +450,8 @@ where
             script_runtime,
             mcp_runtime,
             first_party_runtime,
+            system_runtime,
+            system_authority_verifier,
             wasm_runtime,
             turn_state,
             turn_run_transition_port,
@@ -468,6 +484,8 @@ where
             script_runtime,
             mcp_runtime,
             first_party_runtime,
+            system_runtime,
+            system_authority_verifier,
             wasm_runtime,
             turn_state,
             turn_run_transition_port,
@@ -522,6 +540,8 @@ where
             script_runtime,
             mcp_runtime,
             first_party_runtime,
+            system_runtime,
+            system_authority_verifier,
             wasm_runtime,
             turn_state,
             turn_run_transition_port,
@@ -564,6 +584,8 @@ where
             script_runtime,
             mcp_runtime,
             first_party_runtime,
+            system_runtime,
+            system_authority_verifier,
             wasm_runtime,
             turn_state,
             turn_run_transition_port,
@@ -949,6 +971,21 @@ where
         self
     }
 
+    pub fn with_system_capabilities(mut self, registry: Arc<SystemCapabilityRegistry>) -> Self {
+        self.component_types.system_runtime = Some(type_name::<SystemCapabilityRegistry>());
+        self.system_runtime = Some(registry);
+        self
+    }
+
+    pub fn with_system_authority_verifier<T>(mut self, verifier: Arc<T>) -> Self
+    where
+        T: SystemInvocationAuthorityVerifier + 'static,
+    {
+        self.component_types.system_authority_verifier = Some(type_name::<T>());
+        self.system_authority_verifier = Some(verifier);
+        self
+    }
+
     fn with_wasm_runtime(mut self, runtime: Arc<WasmRuntimeAdapter>) -> Self {
         self.component_types
             .wasm_runtime_credential_provider_captured = self.wasm_credential_provider.is_some();
@@ -1078,13 +1115,8 @@ where
                 RuntimeKind::Script
                 | RuntimeKind::Mcp
                 | RuntimeKind::Wasm
-                | RuntimeKind::FirstParty => {}
-                RuntimeKind::System => self.push_issue(
-                    &mut issues,
-                    ProductionWiringComponent::RuntimeBackend,
-                    ProductionWiringIssueKind::UnsupportedRequirement,
-                    None,
-                ),
+                | RuntimeKind::FirstParty
+                | RuntimeKind::System => {}
             }
         }
         if config.requires_runtime(RuntimeKind::Script) {
@@ -1113,6 +1145,18 @@ where
                 &mut issues,
                 ProductionWiringComponent::FirstPartyRuntime,
                 self.first_party_runtime_covers_declared_capabilities(),
+            );
+        }
+        if config.requires_runtime(RuntimeKind::System) {
+            self.push_missing(
+                &mut issues,
+                ProductionWiringComponent::SystemRuntime,
+                self.system_runtime_covers_declared_capabilities(),
+            );
+            self.push_missing(
+                &mut issues,
+                ProductionWiringComponent::SystemAuthorityVerifier,
+                self.system_authority_verifier.is_some(),
             );
         }
 
@@ -1432,6 +1476,12 @@ where
                 Arc::new(FirstPartyRuntimeAdapter::from_registry(Arc::clone(runtime))),
             );
         }
+        if let Some(runtime) = &self.system_runtime {
+            dispatcher = dispatcher.with_runtime_adapter_arc(
+                RuntimeKind::System,
+                Arc::new(SystemRuntimeAdapter::from_registry(Arc::clone(runtime))),
+            );
+        }
         if let Some(runtime) = &self.wasm_runtime {
             dispatcher =
                 dispatcher.with_runtime_adapter_arc(RuntimeKind::Wasm, Arc::clone(runtime));
@@ -1447,6 +1497,58 @@ where
     #[doc(hidden)]
     pub fn host_runtime_for_local_testing(&self) -> DefaultHostRuntime {
         self.build_host_runtime()
+    }
+
+    pub fn system_host_for_production(
+        &self,
+        production_config: &ProductionWiringConfig,
+    ) -> Result<SystemHost, ProductionWiringReport> {
+        let mut config = production_config.clone();
+        if !config.requires_runtime(RuntimeKind::System) {
+            config.required_runtime_backends.push(RuntimeKind::System);
+        }
+        self.validate_production_wiring(&config)?;
+        self.build_system_host()
+    }
+
+    #[doc(hidden)]
+    pub fn system_host_for_local_testing(&self) -> Result<SystemHost, ProductionWiringReport> {
+        self.build_system_host()
+    }
+
+    fn build_system_host(&self) -> Result<SystemHost, ProductionWiringReport> {
+        let Some(authority_verifier) = &self.system_authority_verifier else {
+            return Err(production_wiring_report(
+                ProductionWiringComponent::SystemAuthorityVerifier,
+                ProductionWiringIssueKind::Missing,
+                None,
+            ));
+        };
+        let Some(audit_sink) = &self.audit_sink else {
+            return Err(production_wiring_report(
+                ProductionWiringComponent::AuditSink,
+                ProductionWiringIssueKind::Missing,
+                None,
+            ));
+        };
+        if !self.system_runtime_covers_declared_capabilities() {
+            return Err(production_wiring_report(
+                ProductionWiringComponent::SystemRuntime,
+                ProductionWiringIssueKind::Missing,
+                self.component_types.system_runtime,
+            ));
+        }
+        let dispatcher: Arc<dyn CapabilityDispatcher> = Arc::new(self.runtime_dispatcher());
+        Ok(SystemHost::new(
+            Arc::clone(&self.registry),
+            dispatcher,
+            no_approval_authorizer(Arc::clone(&self.authorizer)),
+            Arc::clone(&self.trust_policy),
+            Arc::clone(authority_verifier),
+            Arc::clone(audit_sink),
+            self.run_state.clone(),
+            Arc::new(self.builtin_obligation_handler()),
+        ))
     }
 
     /// Builds the upper facade with the same dispatcher, process services,
@@ -1573,6 +1675,9 @@ where
         if self.first_party_runtime_covers_declared_capabilities() {
             backends.push(RuntimeKind::FirstParty);
         }
+        if self.system_runtime_covers_declared_capabilities() {
+            backends.push(RuntimeKind::System);
+        }
         backends
     }
 
@@ -1589,6 +1694,21 @@ where
             return false;
         }
         declared.all(|descriptor| first_party_runtime.contains_handler(&descriptor.id))
+    }
+
+    fn system_runtime_covers_declared_capabilities(&self) -> bool {
+        let Some(system_runtime) = &self.system_runtime else {
+            return false;
+        };
+        let mut declared = self
+            .registry
+            .capabilities()
+            .filter(|descriptor| descriptor.runtime == RuntimeKind::System)
+            .peekable();
+        if declared.peek().is_none() {
+            return false;
+        }
+        declared.all(|descriptor| system_runtime.contains_handler(&descriptor.id))
     }
 }
 
@@ -2291,7 +2411,8 @@ fn dispatch_error_kind(error: &DispatchError) -> &'static str {
         DispatchError::Mcp { kind }
         | DispatchError::Script { kind }
         | DispatchError::Wasm { kind }
-        | DispatchError::FirstParty { kind } => kind.event_kind(),
+        | DispatchError::FirstParty { kind }
+        | DispatchError::System { kind } => kind.event_kind(),
     }
 }
 

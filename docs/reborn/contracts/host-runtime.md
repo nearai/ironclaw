@@ -52,7 +52,22 @@ HostRuntime::invoke_capability
   -> registered host-owned handler
 ```
 
-First-party handlers are composition-owned and keyed by `CapabilityId`; user-installed manifests must not self-assign first-party/system authority. A missing handler fails closed as `UndeclaredCapability` before handler side effects. The adapter owns resource reservation/reconciliation, emits the same dispatcher runtime events as other runtime lanes, and surfaces only stable redacted dispatch categories. `RuntimeKind::System` remains deferred for a stricter host-only adapter.
+First-party handlers are composition-owned and keyed by `CapabilityId`; user-installed manifests must not self-assign first-party/system authority. A missing handler fails closed as `UndeclaredCapability` before handler side effects. The adapter owns resource reservation/reconciliation, emits the same dispatcher runtime events as other runtime lanes, and surfaces only stable redacted dispatch categories.
+
+## System runtime adapter
+
+`HostRuntimeServices` can also register host-only system handlers through `SystemCapabilityRegistry` plus a `SystemInvocationAuthorityVerifier`. `RuntimeKind::System` stays disjoint from FirstParty and is only reachable through the internal `SystemHost` facade:
+
+```text
+SystemHost::invoke_system_capability(sealed authority + operation id)
+  -> authority verifier / system trust check
+  -> CapabilityHost authorization / obligations (no interactive approvals)
+  -> RuntimeDispatcher
+  -> SystemRuntimeAdapter
+  -> registered host-only handler
+```
+
+System capabilities are omitted from ordinary `HostRuntime::visible_capabilities(...)`, and direct public `HostRuntime::invoke_capability(...)`/resume attempts fail closed even with normal grants. System invocations require host-minted `SystemInvocationAuthority` carrying issuer, reason, operation/idempotency id, and the exact `ResourceScope`; `SystemHost` rejects scope mismatches before handler side effects. Missing handlers fail closed as `UndeclaredCapability`; handler errors may report usage for reconciliation; panics release reservations; direct adapter calls without the `SystemHost` task-local authority fail closed. Every System invocation emits the normal dispatcher runtime event plus a mandatory redacted control-plane audit record with capability id, exact scope, authority metadata, operation id, outcome, and usage metadata, never raw input/output/secrets. Audit sink failure fails the System invocation closed.
 
 ## Runtime HTTP egress
 

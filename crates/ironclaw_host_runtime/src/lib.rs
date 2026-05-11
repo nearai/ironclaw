@@ -50,6 +50,7 @@ mod planner;
 mod production;
 mod services;
 mod surface;
+mod system;
 mod turn_scheduler;
 
 pub use first_party::{
@@ -67,6 +68,11 @@ pub use services::{
     ProductionWiringIssueKind, ProductionWiringReport, RegisteredRuntimeHealth,
 };
 pub use surface::{CapabilitySurfacePolicy, VisibleCapability, VisibleCapabilityAccess};
+pub use system::{
+    SystemCapabilityError, SystemCapabilityHandler, SystemCapabilityInvocationRequest,
+    SystemCapabilityRegistry, SystemCapabilityRequest, SystemCapabilityResult, SystemHost,
+    SystemInvocationAuthority, SystemInvocationAuthorityVerifier, SystemOperationId,
+};
 pub use turn_scheduler::{
     SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
     TurnRunSchedulerConfig, TurnRunSchedulerHandle,

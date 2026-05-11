@@ -370,6 +370,7 @@ fn dispatch_error_kind(error: &DispatchError) -> &'static str {
         DispatchError::Mcp { kind }
         | DispatchError::Script { kind }
         | DispatchError::Wasm { kind }
-        | DispatchError::FirstParty { kind } => kind.event_kind(),
+        | DispatchError::FirstParty { kind }
+        | DispatchError::System { kind } => kind.event_kind(),
     }
 }

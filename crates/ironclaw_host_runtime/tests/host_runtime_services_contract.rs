@@ -492,7 +492,7 @@ fn production_wiring_validation_classifies_combined_store_as_run_state_and_appro
 }
 
 #[test]
-fn production_wiring_validation_rejects_unsupported_runtime_requirements() {
+fn production_wiring_validation_requires_system_runtime_components() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
@@ -504,14 +504,21 @@ fn production_wiring_validation_rejects_unsupported_runtime_requirements() {
 
     let report = services
         .validate_production_wiring(&ProductionWiringConfig::new([RuntimeKind::System]))
-        .expect_err("system runtime requirements are not dispatcher backend requirements");
+        .expect_err("system runtime requirements need registry and authority verifier");
 
     assert!(
         report.contains(
-            ProductionWiringComponent::RuntimeBackend,
-            ProductionWiringIssueKind::UnsupportedRequirement
+            ProductionWiringComponent::SystemRuntime,
+            ProductionWiringIssueKind::Missing
         ),
-        "unsupported runtime backend requirement should be reported: {report:?}"
+        "missing system runtime backend should be reported: {report:?}"
+    );
+    assert!(
+        report.contains(
+            ProductionWiringComponent::SystemAuthorityVerifier,
+            ProductionWiringIssueKind::Missing
+        ),
+        "missing system authority verifier should be reported: {report:?}"
     );
 }
 

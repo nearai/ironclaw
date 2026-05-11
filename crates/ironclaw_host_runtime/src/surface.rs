@@ -16,7 +16,6 @@ const ALL_RUNTIME_KINDS: &[RuntimeKind] = &[
     RuntimeKind::Mcp,
     RuntimeKind::Script,
     RuntimeKind::FirstParty,
-    RuntimeKind::System,
 ];
 
 const ALL_EFFECT_KINDS: &[EffectKind] = &[
@@ -145,7 +144,8 @@ impl<'a> CapabilityCatalog<'a> {
             if capabilities.len() >= max_capabilities {
                 break;
             }
-            if !request.policy.allows_runtime(descriptor.runtime)
+            if descriptor.runtime == RuntimeKind::System
+                || !request.policy.allows_runtime(descriptor.runtime)
                 || !request.policy.allows_effects(&descriptor.effects)
             {
                 continue;

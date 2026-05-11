@@ -249,6 +249,15 @@ impl HostRuntime for DefaultHostRuntime {
         } = request;
         let scope = context.resource_scope.clone();
         let invocation_id = context.invocation_id;
+        if self.capability_is_system(&capability_id) {
+            return Ok(RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure {
+                capability_id,
+                kind: RuntimeFailureKind::Authorization,
+                message: Some(
+                    "system capabilities require the internal SystemHost facade".to_string(),
+                ),
+            }));
+        }
         // Forward the (currently advisory) idempotency key into spans for
         // audit/tracing only — dedupe enforcement is not yet implemented at
         // this layer (see `RuntimeCapabilityRequest::idempotency_key`).
@@ -315,6 +324,15 @@ impl HostRuntime for DefaultHostRuntime {
             trust_decision: _caller_trust_decision,
         } = request;
         let idempotency_key = idempotency_key.map(|key| key.as_str().to_string());
+        if self.capability_is_system(&capability_id) {
+            return Ok(RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure {
+                capability_id,
+                kind: RuntimeFailureKind::Authorization,
+                message: Some(
+                    "system capabilities require the internal SystemHost facade".to_string(),
+                ),
+            }));
+        }
         if let Some(key) = idempotency_key.as_deref() {
             tracing::debug!(
                 capability_id = %capability_id,
@@ -575,6 +593,13 @@ impl DefaultHostRuntime {
             host = host.with_obligation_handler(obligation_handler.as_ref());
         }
         host
+    }
+
+    fn capability_is_system(&self, capability_id: &CapabilityId) -> bool {
+        self.registry
+            .get_capability(capability_id)
+            .map(|descriptor| descriptor.runtime == RuntimeKind::System)
+            .unwrap_or(false)
     }
 
     fn evaluate_invocation_trust(

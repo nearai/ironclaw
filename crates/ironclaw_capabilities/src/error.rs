@@ -122,7 +122,8 @@ fn dispatch_error_kind(error: &DispatchError) -> String {
         DispatchError::Mcp { kind }
         | DispatchError::Script { kind }
         | DispatchError::Wasm { kind }
-        | DispatchError::FirstParty { kind } => kind.as_str().to_string(),
+        | DispatchError::FirstParty { kind }
+        | DispatchError::System { kind } => kind.as_str().to_string(),
     }
 }
 
