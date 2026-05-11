@@ -2,34 +2,47 @@
 
 **[LOCAL ONLY — DO NOT MERGE AS-IS]**
 
+## Naming convention
+
+| Branch | Purpose |
+|---|---|
+| `errol/payroll-v2-claw` | predecessor — `94c17ed4` delegation credential injection |
+| `errol/payroll-v2-claw-1-lite` | PR-clean — same as predecessor + LOCAL docs |
+| `errol/payroll-v2-claw-1` (this branch) | runnable local dev — `-1-lite` + unix_transport patch + docker plumbing |
+| `errol/mcp-unix-transport-reconnect` | standalone main-bound PR for the transport patch (off `origin/main`) |
+
 ## What's on this branch
 
-Predecessor: `errol/payroll-v2-claw` (1 commit ahead of `origin/main`).
+5 commits ahead of `origin/main` (newest first):
 
-Two commits ahead of main:
+1. `[LOCAL] docs: branch notes for runnable errol/payroll-v2-claw-1`
+2. `[LOCAL] docker: payroll-v2 dev plumbing for sibling trinity checkout`
+3. `fix(mcp): reconnect Unix transport on broken-pipe writes` (cherry-picked)
+4. `[LOCAL] docs: branch notes for errol/payroll-v2-claw-1` (from `-1-lite`)
+5. `94c17ed4 feat(mcp): inject Trinity delegation credential into t3n-mcp tool calls`
 
-1. `94c17ed4` — `feat(mcp): inject Trinity delegation credential into
-   t3n-mcp tool calls` (KEEP / SHIP). Already on the predecessor.
-2. `[LOCAL] docs: branch notes …` — drop before any real PR.
+## How to use this branch
 
-## What's NOT on this branch
+For a fresh local payroll-v2 stack:
 
-- `src/tools/mcp/unix_transport.rs` reconnect-on-EPIPE patch. Split
-  to `errol/mcp-unix-transport-reconnect` off `origin/main`.
-- `docker-compose.yml` and `docker/t3n-mcp-sidecar.Dockerfile`
-  payroll-v2 dev plumbing. Reverted to HEAD's tracked content.
-- Stale `src/cli/snapshots/*.snap.new` files (deleted; unrelated to
-  payroll-v2).
+```fish
+cd /Users/errol_hava/Documents/Central/Code/terminal3/t3-claw
+# Ensure .env has T3N_MCP_PRIVATE_KEY and T3N_MCP_AGENT_SECRET_HEX (see trinity's PAYROLL_V2_SPINUP.md §0)
+docker compose --profile app up --build
+```
 
-## To produce a real PR
+Watch http://localhost:3300.
 
-1. `git rebase -i origin/main` and drop the `[LOCAL]` commit.
-2. The remaining commit (`94c17ed4`) is the PR.
+For a real PR:
+- The delegation-injection commit (`94c17ed4`) ships from
+  `errol/payroll-v2-claw` or `-1-lite`.
+- The transport fix ships from `errol/mcp-unix-transport-reconnect`.
 
 ## Sister branches
 
 - `errol/payroll-v2-claw` (predecessor)
-- `errol/mcp-unix-transport-reconnect` (split-out transport fix off main)
+- `errol/payroll-v2-claw-1-lite` (PR-clean)
+- `errol/mcp-unix-transport-reconnect` (standalone)
 - `Terminal-3/trinity` `errol/payroll-v2-integration-1`
-- `Terminal-3/contracts` `errol/mat-1419-eth-auth-map(-1)`
+- `Terminal-3/contracts` `errol/mat-1419-eth-auth-map-1`
 - `t3-apps` `errol/payroll-v2-fe-1`
