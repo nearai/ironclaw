@@ -10,12 +10,18 @@ use super::host::{
     AgentLoopHostError, AgentLoopHostErrorKind, LoopModelPort, LoopModelRequest, LoopModelResponse,
     LoopRunContext, LoopSafeSummary,
 };
+use super::model_route::ResolvedModelRoute;
 use super::milestones::{LoopHostMilestoneEmitter, LoopHostMilestoneSink};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopModelGatewayRequest {
     pub context: LoopRunContext,
     pub request: LoopModelRequest,
+    /// The resolved model route from the run profile, if any.
+    ///
+    /// Gateway implementations use this to select the correct provider instance
+    /// instead of relying solely on `CompletionRequest.model`.
+    pub resolved_route: Option<ResolvedModelRoute>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
@@ -99,11 +105,17 @@ where
         self.milestones
             .model_started(request.model_preference.clone())
             .await?;
+        let resolved_route = self
+            .context
+            .resolved_run_profile
+            .resolved_model_route
+            .clone();
         let response = self
             .gateway
             .stream_model(LoopModelGatewayRequest {
                 context: self.context.clone(),
                 request,
+                resolved_route,
             })
             .await
             .map_err(LoopModelGatewayError::into_host_error)?;
