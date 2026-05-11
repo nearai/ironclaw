@@ -1,23 +1,27 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    path::Path,
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_event_projections::{
-    EventStreamManager, ProjectionRequest, ProjectionScope, ReplayAuditProjectionService,
-    ReplayEventProjectionService, RunProjectionStatus, TimelineEntryKind,
+    EventStreamManager, ProjectionCursor, ProjectionRequest, ProjectionScope,
+    ReplayAuditProjectionService, ReplayEventProjectionService, RunProjectionStatus,
+    TimelineEntryKind,
 };
 use ironclaw_events::{
     DurableAuditLog, DurableEventLog, EventStreamKey, InMemoryDurableAuditLog,
     InMemoryDurableEventLog, ReadScope,
 };
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{AgentId, MissionId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelRequest, HostManagedModelResponse,
 };
 use ironclaw_reborn::{
-    DurableLoopHostMilestoneSink, RebornLoopDriverHostFactory, RebornLoopDriverHostRequest,
-    TextOnlyLoopHostConfig,
+    DurableLoopHostMilestoneScope, DurableLoopHostMilestoneSink, RebornLoopDriverHostFactory,
+    RebornLoopDriverHostRequest, TextOnlyLoopHostConfig,
 };
 use ironclaw_reborn_event_store::{
     RebornEventStoreConfig, RebornProfile, build_reborn_event_stores,
@@ -32,8 +36,9 @@ use ironclaw_turns::{
     RunProfileResolver, RunProfileVersion, SourceBindingRef, TurnId, TurnLeaseToken, TurnRunId,
     TurnRunState, TurnRunnerId, TurnScope, TurnStatus,
     run_profile::{
-        AgentLoopHostErrorKind, FinalizeAssistantMessage, LoopHostMilestoneSink, LoopModelPort,
-        LoopModelRequest, LoopRunContext, LoopTranscriptPort, ParentLoopOutput,
+        AgentLoopHostErrorKind, FinalizeAssistantMessage, LoopDriverId, LoopHostMilestone,
+        LoopHostMilestoneKind, LoopHostMilestoneSink, LoopModelPort, LoopModelRequest,
+        LoopRunContext, LoopTranscriptPort, ParentLoopOutput,
     },
     runner::ClaimedTurnRun,
 };
@@ -53,10 +58,11 @@ async fn in_memory_durable_log_replays_loop_model_reply_milestones() {
 #[tokio::test]
 async fn jsonl_durable_log_replays_loop_model_reply_milestones() {
     let temp_dir = tempfile::tempdir().unwrap();
+    let event_root = temp_dir.path().join("reborn-events");
     let stores = build_reborn_event_stores(
         RebornProfile::Test,
         RebornEventStoreConfig::Jsonl {
-            root: temp_dir.path().join("reborn-events"),
+            root: event_root.clone(),
             accept_single_node_durable: true,
         },
     )
@@ -64,15 +70,88 @@ async fn jsonl_durable_log_replays_loop_model_reply_milestones() {
     .unwrap();
 
     drive_model_reply_milestones_and_assert_projection(stores.events, stores.audit).await;
+
+    let raw_jsonl = read_all_file_bytes_lossy(&event_root);
+    for forbidden in [
+        "RAW_PROMPT_SENTINEL",
+        "RAW_ASSISTANT_SENTINEL",
+        "RAW_PROVIDER_ERROR",
+        "sk-secret",
+        "/Users/firat",
+        "/tmp/assistant.txt",
+        "/var/provider.log",
+    ] {
+        assert!(
+            !raw_jsonl.contains(forbidden),
+            "raw JSONL leaked {forbidden}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn durable_milestone_scope_requires_thread_owner_binding() {
+    let thread_scope = ThreadScope {
+        tenant_id: tenant_id(),
+        agent_id: agent_id(),
+        project_id: Some(project_id()),
+        owner_user_id: None,
+        mission_id: Some(mission_id()),
+    };
+
+    let error = DurableLoopHostMilestoneScope::from_thread_scope(&thread_scope)
+        .expect_err("ownerless thread scope must not build a durable event scope");
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+}
+
+#[tokio::test]
+async fn durable_milestone_sink_rejects_mismatched_milestone_scope() {
+    let events: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let thread_scope = ThreadScope {
+        tenant_id: tenant_id(),
+        agent_id: agent_id(),
+        project_id: Some(project_id()),
+        owner_user_id: Some(user_id()),
+        mission_id: Some(mission_id()),
+    };
+    let sink = DurableLoopHostMilestoneSink::new(
+        Arc::clone(&events),
+        DurableLoopHostMilestoneScope::from_thread_scope(&thread_scope).unwrap(),
+    );
+    let milestone = loop_milestone_for_scope(TurnScope::new(
+        TenantId::new("tenant-loop-events-foreign").unwrap(),
+        Some(agent_id()),
+        Some(project_id()),
+        ThreadId::new("thread-loop-events-mismatch").unwrap(),
+    ));
+
+    let error = sink
+        .publish_loop_milestone(milestone)
+        .await
+        .expect_err("durable milestone sink must reject foreign turn scope");
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::ScopeMismatch);
+    let manager = event_stream_manager(events, Arc::new(InMemoryDurableAuditLog::new()));
+    let snapshot = manager
+        .runtime_snapshot(ProjectionRequest {
+            scope: projection_scope(),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+    assert!(snapshot.timeline.entries.is_empty());
 }
 
 async fn drive_model_reply_milestones_and_assert_projection(
     events: Arc<dyn DurableEventLog>,
     audit: Arc<dyn DurableAuditLog>,
 ) {
+    let success_thread_id = ThreadId::new("thread-loop-events-success").unwrap();
+    let failure_thread_id = ThreadId::new("thread-loop-events-failure").unwrap();
     let success = HostFixture::new(
         Arc::clone(&events),
-        "thread-loop-events-success",
+        success_thread_id.clone(),
         RAW_PROMPT_SENTINEL,
         ControlledGateway::reply(RAW_ASSISTANT_SENTINEL),
     )
@@ -96,7 +175,7 @@ async fn drive_model_reply_milestones_and_assert_projection(
 
     let failure = HostFixture::new(
         Arc::clone(&events),
-        "thread-loop-events-failure",
+        failure_thread_id.clone(),
         RAW_PROMPT_SENTINEL,
         ControlledGateway::fail(HostManagedModelError::safe(
             HostManagedModelErrorKind::Unavailable,
@@ -158,6 +237,98 @@ async fn drive_model_reply_milestones_and_assert_projection(
     assert!(statuses.contains(&RunProjectionStatus::Completed));
     assert!(statuses.contains(&RunProjectionStatus::Failed));
 
+    let success_thread = manager
+        .runtime_snapshot(ProjectionRequest {
+            scope: projection_scope_for_thread(success_thread_id.clone()),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        success_thread
+            .timeline
+            .entries
+            .iter()
+            .map(|entry| entry.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            TimelineEntryKind::ModelStarted,
+            TimelineEntryKind::ModelCompleted,
+            TimelineEntryKind::AssistantReplyFinalized,
+        ]
+    );
+    assert!(
+        success_thread
+            .timeline
+            .entries
+            .iter()
+            .all(|entry| entry.thread_id.as_ref() == Some(&success_thread_id))
+    );
+    assert_eq!(success_thread.runs.len(), 1);
+    assert_eq!(
+        success_thread.runs[0].status,
+        RunProjectionStatus::Completed
+    );
+
+    let success_replay_scope = projection_scope_for_thread(success_thread_id.clone());
+    let success_thread_replay = manager
+        .runtime_updates(ProjectionRequest {
+            scope: success_replay_scope.clone(),
+            after: Some(ProjectionCursor::origin_for_scope(success_replay_scope)),
+            limit: 16,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        success_thread_replay
+            .updates
+            .iter()
+            .map(|entry| entry.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            TimelineEntryKind::ModelStarted,
+            TimelineEntryKind::ModelCompleted,
+            TimelineEntryKind::AssistantReplyFinalized,
+        ]
+    );
+    assert!(
+        success_thread_replay
+            .updates
+            .iter()
+            .all(|entry| entry.thread_id.as_ref() == Some(&success_thread_id))
+    );
+
+    let failure_thread = manager
+        .runtime_snapshot(ProjectionRequest {
+            scope: projection_scope_for_thread(failure_thread_id.clone()),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        failure_thread
+            .timeline
+            .entries
+            .iter()
+            .map(|entry| entry.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            TimelineEntryKind::ModelStarted,
+            TimelineEntryKind::ModelFailed
+        ]
+    );
+    assert!(
+        failure_thread
+            .timeline
+            .entries
+            .iter()
+            .all(|entry| entry.thread_id.as_ref() == Some(&failure_thread_id))
+    );
+    assert_eq!(failure_thread.runs.len(), 1);
+    assert_eq!(failure_thread.runs[0].status, RunProjectionStatus::Failed);
+
     let wire = serde_json::to_string(&snapshot).unwrap();
     for forbidden in [
         "RAW_PROMPT_SENTINEL",
@@ -186,11 +357,51 @@ fn projection_scope() -> ProjectionScope {
         stream: EventStreamKey::new(tenant_id(), user_id(), Some(agent_id())),
         read_scope: ReadScope {
             project_id: Some(project_id()),
-            mission_id: None,
+            mission_id: Some(mission_id()),
             thread_id: None,
             process_id: None,
         },
     }
+}
+
+fn projection_scope_for_thread(thread_id: ThreadId) -> ProjectionScope {
+    ProjectionScope {
+        stream: EventStreamKey::new(tenant_id(), user_id(), Some(agent_id())),
+        read_scope: ReadScope {
+            project_id: Some(project_id()),
+            mission_id: Some(mission_id()),
+            thread_id: Some(thread_id),
+            process_id: None,
+        },
+    }
+}
+
+fn loop_milestone_for_scope(scope: TurnScope) -> LoopHostMilestone {
+    LoopHostMilestone {
+        scope,
+        turn_id: TurnId::new(),
+        run_id: TurnRunId::new(),
+        loop_driver_id: LoopDriverId::new("test-driver").unwrap(),
+        kind: LoopHostMilestoneKind::ModelStarted {
+            requested_model_profile_id: None,
+        },
+    }
+}
+
+fn read_all_file_bytes_lossy(root: &Path) -> String {
+    let mut output = String::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let metadata = std::fs::metadata(&path).unwrap();
+        if metadata.is_dir() {
+            for entry in std::fs::read_dir(path).unwrap() {
+                stack.push(entry.unwrap().path());
+            }
+        } else {
+            output.push_str(&String::from_utf8_lossy(&std::fs::read(path).unwrap()));
+        }
+    }
+    output
 }
 
 struct HostFixture {
@@ -207,7 +418,7 @@ struct HostFixture {
 impl HostFixture {
     async fn new(
         events: Arc<dyn DurableEventLog>,
-        thread_name: &str,
+        thread_id: ThreadId,
         user_content: &str,
         gateway: ControlledGateway,
     ) -> Self {
@@ -215,13 +426,12 @@ impl HostFixture {
         let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
         let loop_checkpoint_store = Arc::new(InMemoryLoopCheckpointStore::default());
         let gateway = Arc::new(gateway);
-        let thread_id = ThreadId::new(thread_name).unwrap();
         let thread_scope = ThreadScope {
             tenant_id: tenant_id(),
             agent_id: agent_id(),
             project_id: Some(project_id()),
             owner_user_id: Some(user_id()),
-            mission_id: None,
+            mission_id: Some(mission_id()),
         };
         thread_service
             .ensure_thread(EnsureThreadRequest {
@@ -240,7 +450,7 @@ impl HostFixture {
                 actor_id: user_id().to_string(),
                 source_binding_id: Some("source-web".to_string()),
                 reply_target_binding_id: Some("reply-web".to_string()),
-                external_event_id: Some(format!("event-{thread_name}")),
+                external_event_id: Some(format!("event-{thread_id}")),
                 content: MessageContent::text(user_content),
             })
             .await
@@ -263,8 +473,7 @@ impl HostFixture {
             turn_id,
             run_id,
             status: TurnStatus::Running,
-            accepted_message_ref: AcceptedMessageRef::new(format!("accepted-{thread_name}"))
-                .unwrap(),
+            accepted_message_ref: AcceptedMessageRef::new(format!("accepted-{thread_id}")).unwrap(),
             source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
             resolved_run_profile_id: RunProfileId::default_profile(),
@@ -292,8 +501,10 @@ impl HostFixture {
             )
             .await
             .unwrap();
+        let milestone_scope = DurableLoopHostMilestoneScope::from_thread_scope(&thread_scope)
+            .expect("thread fixture has owner user for milestone scope");
         let milestone_sink: Arc<dyn LoopHostMilestoneSink> =
-            Arc::new(DurableLoopHostMilestoneSink::new(events, user_id()));
+            Arc::new(DurableLoopHostMilestoneSink::new(events, milestone_scope));
 
         Self {
             thread_service,
@@ -368,6 +579,10 @@ fn agent_id() -> AgentId {
 
 fn project_id() -> ProjectId {
     ProjectId::new("project-loop-events").unwrap()
+}
+
+fn mission_id() -> MissionId {
+    MissionId::new("mission-loop-events").unwrap()
 }
 
 fn user_id() -> UserId {

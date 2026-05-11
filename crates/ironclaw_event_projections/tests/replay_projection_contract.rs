@@ -952,6 +952,64 @@ async fn replay_projection_updates_resume_after_projection_cursor() {
 }
 
 #[tokio::test]
+async fn replay_projection_keeps_model_completed_running_until_reply_finalized() {
+    let log = Arc::new(InMemoryDurableEventLog::new());
+    let service = ReplayEventProjectionService::new(Arc::clone(&log));
+    let scope = scope_for_thread(ThreadId::new("thread-a").unwrap());
+    let model_capability = CapabilityId::new("loop.model").unwrap();
+    let reply_capability = CapabilityId::new("loop.assistant_reply").unwrap();
+
+    log.append(RuntimeEvent::model_started(
+        scope.clone(),
+        model_capability.clone(),
+    ))
+    .await
+    .unwrap();
+    log.append(RuntimeEvent::model_completed(
+        scope.clone(),
+        model_capability.clone(),
+    ))
+    .await
+    .unwrap();
+
+    let after_model_completed = service
+        .snapshot(ProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&scope),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+    assert_eq!(after_model_completed.runs.len(), 1);
+    assert_eq!(
+        after_model_completed.runs[0].status,
+        RunProjectionStatus::Running,
+        "model_completed only means provider returned; reply finalization can still fail"
+    );
+
+    log.append(RuntimeEvent::assistant_reply_finalized(
+        scope.clone(),
+        reply_capability,
+    ))
+    .await
+    .unwrap();
+
+    let after_reply_finalized = service
+        .snapshot(ProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&scope),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+    assert_eq!(after_reply_finalized.runs.len(), 1);
+    assert_eq!(
+        after_reply_finalized.runs[0].status,
+        RunProjectionStatus::Completed
+    );
+}
+
+#[tokio::test]
 async fn replay_projection_updates_preserve_running_process_state_after_checkpoint() {
     let log = Arc::new(InMemoryDurableEventLog::new());
     let service = ReplayEventProjectionService::new(Arc::clone(&log));

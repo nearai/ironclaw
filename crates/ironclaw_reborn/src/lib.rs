@@ -19,7 +19,7 @@ pub use loop_driver_host::{
     RebornLoopDriverHost, RebornLoopDriverHostError, RebornLoopDriverHostFactory,
     RebornLoopDriverHostRequest, TextOnlyLoopHostConfig,
 };
-pub use milestone_events::DurableLoopHostMilestoneSink;
+pub use milestone_events::{DurableLoopHostMilestoneScope, DurableLoopHostMilestoneSink};
 #[cfg(feature = "root-llm-provider")]
 pub use model_gateway::{
     LlmModelProfilePolicy, LlmProviderModelGateway, ThreadBackedLoopModelGateway,

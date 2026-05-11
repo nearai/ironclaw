@@ -1153,6 +1153,7 @@ fn run_status_for_event(
         RuntimeEventKind::DispatchRequested
         | RuntimeEventKind::RuntimeSelected
         | RuntimeEventKind::ModelStarted
+        | RuntimeEventKind::ModelCompleted
         | RuntimeEventKind::ProcessStarted => RunProjectionStatus::Running,
         RuntimeEventKind::DispatchSucceeded
             if has_active_process && current_status == Some(RunProjectionStatus::Running) =>
@@ -1174,7 +1175,6 @@ fn run_status_for_event(
             current_status.unwrap_or(RunProjectionStatus::Failed)
         }
         RuntimeEventKind::DispatchSucceeded
-        | RuntimeEventKind::ModelCompleted
         | RuntimeEventKind::AssistantReplyFinalized
         | RuntimeEventKind::ProcessCompleted => RunProjectionStatus::Completed,
         RuntimeEventKind::DispatchFailed

@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_events::{DurableEventLog, EventError, RuntimeEvent};
-use ironclaw_host_api::{CapabilityId, InvocationId, ResourceScope, UserId};
+use ironclaw_host_api::{
+    AgentId, CapabilityId, InvocationId, MissionId, ProjectId, ResourceScope, TenantId, UserId,
+};
+use ironclaw_threads::ThreadScope;
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, LoopHostMilestone, LoopHostMilestoneKind,
     LoopHostMilestoneSink,
@@ -10,6 +13,61 @@ use ironclaw_turns::run_profile::{
 
 const MODEL_CAPABILITY_ID: &str = "loop.model";
 const ASSISTANT_REPLY_CAPABILITY_ID: &str = "loop.assistant_reply";
+
+/// Scope authority bound into the sink at construction time.
+///
+/// Building this from a canonical thread scope prevents callers from stitching
+/// runtime events together from an unrelated user or mission scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableLoopHostMilestoneScope {
+    tenant_id: TenantId,
+    user_id: UserId,
+    agent_id: Option<AgentId>,
+    project_id: Option<ProjectId>,
+    mission_id: Option<MissionId>,
+}
+
+impl DurableLoopHostMilestoneScope {
+    pub fn from_thread_scope(thread_scope: &ThreadScope) -> Result<Self, AgentLoopHostError> {
+        let Some(user_id) = thread_scope.owner_user_id.clone() else {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "loop milestone event scope requires a thread owner user",
+            ));
+        };
+        Ok(Self {
+            tenant_id: thread_scope.tenant_id.clone(),
+            user_id,
+            agent_id: Some(thread_scope.agent_id.clone()),
+            project_id: thread_scope.project_id.clone(),
+            mission_id: thread_scope.mission_id.clone(),
+        })
+    }
+
+    fn resource_scope(
+        &self,
+        milestone: &LoopHostMilestone,
+    ) -> Result<ResourceScope, AgentLoopHostError> {
+        if milestone.scope.tenant_id != self.tenant_id
+            || milestone.scope.agent_id != self.agent_id
+            || milestone.scope.project_id != self.project_id
+        {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::ScopeMismatch,
+                "loop milestone scope does not match durable event scope",
+            ));
+        }
+        Ok(ResourceScope {
+            tenant_id: self.tenant_id.clone(),
+            user_id: self.user_id.clone(),
+            agent_id: self.agent_id.clone(),
+            project_id: self.project_id.clone(),
+            mission_id: self.mission_id.clone(),
+            thread_id: Some(milestone.scope.thread_id.clone()),
+            invocation_id: InvocationId::from_uuid(milestone.run_id.as_uuid()),
+        })
+    }
+}
 
 /// Durable projection adapter for public AgentLoopHost milestones.
 ///
@@ -20,28 +78,23 @@ const ASSISTANT_REPLY_CAPABILITY_ID: &str = "loop.assistant_reply";
 #[derive(Clone)]
 pub struct DurableLoopHostMilestoneSink {
     event_log: Arc<dyn DurableEventLog>,
-    user_id: UserId,
+    scope: DurableLoopHostMilestoneScope,
 }
 
 impl DurableLoopHostMilestoneSink {
-    pub fn new(event_log: Arc<dyn DurableEventLog>, user_id: UserId) -> Self {
-        Self { event_log, user_id }
+    pub fn new(event_log: Arc<dyn DurableEventLog>, scope: DurableLoopHostMilestoneScope) -> Self {
+        Self { event_log, scope }
     }
 
     pub fn event_log(&self) -> Arc<dyn DurableEventLog> {
         Arc::clone(&self.event_log)
     }
 
-    fn resource_scope(&self, milestone: &LoopHostMilestone) -> ResourceScope {
-        ResourceScope {
-            tenant_id: milestone.scope.tenant_id.clone(),
-            user_id: self.user_id.clone(),
-            agent_id: milestone.scope.agent_id.clone(),
-            project_id: milestone.scope.project_id.clone(),
-            mission_id: None,
-            thread_id: Some(milestone.scope.thread_id.clone()),
-            invocation_id: InvocationId::from_uuid(milestone.run_id.as_uuid()),
-        }
+    fn resource_scope(
+        &self,
+        milestone: &LoopHostMilestone,
+    ) -> Result<ResourceScope, AgentLoopHostError> {
+        self.scope.resource_scope(milestone)
     }
 }
 
@@ -50,7 +103,7 @@ impl std::fmt::Debug for DurableLoopHostMilestoneSink {
         formatter
             .debug_struct("DurableLoopHostMilestoneSink")
             .field("event_log", &"<durable_event_log>")
-            .field("user_id", &self.user_id)
+            .field("scope", &self.scope)
             .finish()
     }
 }
@@ -77,7 +130,7 @@ impl DurableLoopHostMilestoneSink {
         &self,
         milestone: &LoopHostMilestone,
     ) -> Result<Option<RuntimeEvent>, AgentLoopHostError> {
-        let scope = self.resource_scope(milestone);
+        let scope = self.resource_scope(milestone)?;
         let event = match &milestone.kind {
             LoopHostMilestoneKind::ModelStarted { .. } => {
                 RuntimeEvent::model_started(scope, capability_id(MODEL_CAPABILITY_ID)?)
