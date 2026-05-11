@@ -63,6 +63,8 @@ profile_ref!(ResourceBudgetTier, "resource_budget_tier");
 profile_ref!(RunProfileFingerprint, "run_profile_fingerprint");
 profile_ref!(RunProfileSourceLayer, "run_profile_source_layer");
 profile_ref!(RunProfileSourceRef, "run_profile_source_ref");
+profile_ref!(ProviderId, "provider_id");
+profile_ref!(ModelId, "model_id");
 
 fn validate_profile_ref(kind: &'static str, value: &str) -> Result<(), String> {
     if value.is_empty() {
