@@ -129,13 +129,13 @@
   // `data-thread-id` → switchThread().
 
   function rebuildThreads() {
-    mobileThreadList.textContent = '';
-    for (const item of threadList.children) {
+    const clones = Array.from(threadList.children, (item) => {
       const clone = item.cloneNode(true);
       if (clone.id) clone.removeAttribute('id');
       clone.querySelectorAll('[id]').forEach((el) => el.removeAttribute('id'));
-      mobileThreadList.appendChild(clone);
-    }
+      return clone;
+    });
+    mobileThreadList.replaceChildren(...clones);
   }
 
   mobileThreadList.addEventListener('click', (e) => {
