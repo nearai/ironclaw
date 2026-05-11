@@ -7,6 +7,7 @@ mod identity;
 pub mod paths;
 pub mod platform;
 mod timezone;
+pub mod trust_boundary;
 mod util;
 
 pub use attachment::{AttachmentKind, IncomingAttachment};
@@ -22,6 +23,10 @@ pub use identity::{
 pub use paths::{compute_ironclaw_base_dir, ironclaw_base_dir};
 pub use platform::PlatformInfo;
 pub use timezone::{ValidTimezone, deserialize_option_lenient};
+pub use trust_boundary::{
+    BoundedCounter, HashAlgorithm, HashPurpose, LimitExceeded, OperatorErrorClass,
+    PromptContentTrust, TrustedConstructionWitness, UntrustedPromptContent, UntrustedPromptSource,
+};
 pub use util::{truncate_for_preview, truncate_preview};
 
 /// Maximum worker agent loop iterations. Used by the orchestrator (server-side
