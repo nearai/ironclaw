@@ -25,8 +25,8 @@ use tracing::{debug, error, warn};
 
 use ironclaw_turns::{
     AgentLoopDriverError, AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, LoopExit,
-    LoopExitInvalidHandling, LoopExitValidationPolicy, SanitizedFailure, TurnError, TurnLeaseToken,
-    TurnRunId, TurnRunnerId, TurnScope, TurnStatus,
+    LoopExitValidationPolicy, SanitizedFailure, TurnError, TurnLeaseToken, TurnRunId, TurnRunnerId,
+    TurnScope, TurnStatus,
     runner::{
         ApplyLoopExitRequest, ClaimRunRequest, ClaimedTurnRun, HeartbeatRequest,
         RecordRecoveryRequiredRequest, RecoverExpiredLeasesRequest, TurnRunTransitionPort,
@@ -603,22 +603,12 @@ fn recovery_record_rejection_is_expected(error: &TurnError) -> bool {
 /// evidence path is wired into this worker. Blocked, failed, and cancelled exits
 /// also remain fail-closed unless tests inject a narrower trusted policy.
 fn default_text_only_exit_validation_policy() -> LoopExitValidationPolicy {
-    LoopExitValidationPolicy {
-        require_final_checkpoint: false,
-        host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
-        completion_refs_verified: false,
-        blocked_evidence_verified: false,
-        failure_evidence_verified: false,
-    }
+    LoopExitValidationPolicy::recovery_required()
 }
 
 #[cfg(test)]
 fn trusted_text_only_exit_validation_policy_for_tests() -> LoopExitValidationPolicy {
-    LoopExitValidationPolicy {
-        completion_refs_verified: true,
-        ..default_text_only_exit_validation_policy()
-    }
+    default_text_only_exit_validation_policy().with_host_verified_completion_refs()
 }
 
 async fn heartbeat_loop(

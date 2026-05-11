@@ -15,21 +15,20 @@ use ironclaw_turns::{
     BlockedReason, CancelRunRequest, DefaultTurnCoordinator, GateRef, GetRunStateRequest,
     IdempotencyKey, InMemoryRunProfileResolver, InMemoryTurnEventSink, InMemoryTurnStateStore,
     InMemoryTurnStateStoreLimits, LoopCancelled, LoopCancelledReasonKind, LoopCompleted,
-    LoopCompletionKind, LoopDiagnosticRef, LoopExit, LoopExitId, LoopExitInvalidHandling,
-    LoopExitValidationPolicy, LoopFailed, LoopFailureKind, LoopGateRef, LoopMessageRef,
-    LoopUsageSummaryRef, ReplyTargetBindingRef, ResolvedRunProfile, ResumeTurnRequest,
-    RunProfileId, RunProfileRequest, RunProfileResolutionError, RunProfileResolutionRequest,
-    RunProfileResolver, RunProfileVersion, SanitizedCancelReason, SanitizedFailure,
-    SourceBindingRef, StaticTurnAdmissionLimitProvider, SubmitTurnRequest, SubmitTurnResponse,
-    ThreadBusy, TurnActor, TurnAdmissionAxisKind, TurnAdmissionBucketKind,
-    TurnAdmissionBucketScope, TurnAdmissionCapacityDenial, TurnAdmissionClass, TurnAdmissionPolicy,
-    TurnCheckpointId, TurnCoordinator, TurnError, TurnErrorCategory, TurnEventKind,
-    TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
-    TurnEventProjectionService, TurnEventSink, TurnIdempotencyOperationKind,
-    TurnIdempotencyOutcomeKind, TurnIdempotencyRecord, TurnIdempotencyReplay, TurnLeaseToken,
-    TurnLifecycleEvent, TurnLockVersion, TurnRunId, TurnRunProfile, TurnRunState, TurnRunWake,
-    TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnRunnerId, TurnScope, TurnStateStore,
-    TurnStatus,
+    LoopCompletionKind, LoopDiagnosticRef, LoopExit, LoopExitId, LoopExitValidationPolicy,
+    LoopFailed, LoopFailureKind, LoopGateRef, LoopMessageRef, LoopUsageSummaryRef,
+    ReplyTargetBindingRef, ResolvedRunProfile, ResumeTurnRequest, RunProfileId, RunProfileRequest,
+    RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
+    SanitizedCancelReason, SanitizedFailure, SourceBindingRef, StaticTurnAdmissionLimitProvider,
+    SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor, TurnAdmissionAxisKind,
+    TurnAdmissionBucketKind, TurnAdmissionBucketScope, TurnAdmissionCapacityDenial,
+    TurnAdmissionClass, TurnAdmissionPolicy, TurnCheckpointId, TurnCoordinator, TurnError,
+    TurnErrorCategory, TurnEventKind, TurnEventProjectionCursor, TurnEventProjectionError,
+    TurnEventProjectionRequest, TurnEventProjectionService, TurnEventSink,
+    TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnIdempotencyRecord,
+    TurnIdempotencyReplay, TurnLeaseToken, TurnLifecycleEvent, TurnLockVersion, TurnRunId,
+    TurnRunProfile, TurnRunState, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
+    TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
     events::EventCursor,
     runner::{
         ApplyLoopExitRequest, ApplyValidatedLoopExitRequest, BlockRunRequest,
@@ -254,14 +253,8 @@ async fn turn_lifecycle_projection_replays_failed_terminal_with_sanitized_reason
                 ),
                 exit_id: LoopExitId::new("exit:TURN_FAILED_EXIT_SENTINEL_3022").unwrap(),
             }),
-            validation_policy: LoopExitValidationPolicy {
-                require_final_checkpoint: false,
-                host_cancellation_observed: false,
-                invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
-                completion_refs_verified: false,
-                blocked_evidence_verified: false,
-                failure_evidence_verified: true,
-            },
+            validation_policy: LoopExitValidationPolicy::recovery_required()
+                .with_host_verified_failure_evidence(),
         },
     )
     .await
@@ -380,14 +373,8 @@ async fn turn_lifecycle_projection_replays_cancelled_terminal_without_raw_refs()
                 ],
                 exit_id: LoopExitId::new("exit:TURN_CANCELLED_EXIT_SENTINEL_3022").unwrap(),
             }),
-            validation_policy: LoopExitValidationPolicy {
-                require_final_checkpoint: false,
-                host_cancellation_observed: true,
-                invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
-                completion_refs_verified: false,
-                blocked_evidence_verified: false,
-                failure_evidence_verified: false,
-            },
+            validation_policy: LoopExitValidationPolicy::recovery_required()
+                .with_host_cancellation_observed(),
         },
     )
     .await
@@ -3800,14 +3787,8 @@ async fn loop_exit_application_completes_after_validation_and_releases_lock() {
             runner_id,
             lease_token,
             exit: completed_exit("exit:completed"),
-            validation_policy: LoopExitValidationPolicy {
-                require_final_checkpoint: false,
-                host_cancellation_observed: false,
-                invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
-                completion_refs_verified: true,
-                blocked_evidence_verified: false,
-                failure_evidence_verified: false,
-            },
+            validation_policy: LoopExitValidationPolicy::recovery_required()
+                .with_host_verified_completion_refs(),
         },
     )
     .await
@@ -3856,14 +3837,8 @@ async fn loop_exit_application_blocks_with_checkpoint_and_keeps_lock() {
                 checkpoint_id,
                 exit_id: ironclaw_turns::LoopExitId::new("exit:blocked").unwrap(),
             }),
-            validation_policy: LoopExitValidationPolicy {
-                require_final_checkpoint: false,
-                host_cancellation_observed: false,
-                invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
-                completion_refs_verified: false,
-                blocked_evidence_verified: true,
-                failure_evidence_verified: false,
-            },
+            validation_policy: LoopExitValidationPolicy::recovery_required()
+                .with_host_verified_blocked_evidence(),
         },
     )
     .await
@@ -3912,14 +3887,7 @@ async fn invalid_loop_exit_application_records_recovery_required_and_keeps_lock(
             runner_id,
             lease_token,
             exit: completed_exit("exit:unverified-completed"),
-            validation_policy: LoopExitValidationPolicy {
-                require_final_checkpoint: false,
-                host_cancellation_observed: false,
-                invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
-                completion_refs_verified: false,
-                blocked_evidence_verified: false,
-                failure_evidence_verified: false,
-            },
+            validation_policy: LoopExitValidationPolicy::recovery_required(),
         },
     )
     .await
@@ -3970,14 +3938,8 @@ async fn loop_exit_application_fails_after_validation_and_releases_lock() {
                 ironclaw_turns::LoopFailureKind::IterationLimit,
                 ironclaw_turns::LoopExitId::new("exit:failed").unwrap(),
             ),
-            validation_policy: LoopExitValidationPolicy {
-                require_final_checkpoint: false,
-                host_cancellation_observed: false,
-                invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
-                completion_refs_verified: false,
-                blocked_evidence_verified: false,
-                failure_evidence_verified: true,
-            },
+            validation_policy: LoopExitValidationPolicy::recovery_required()
+                .with_host_verified_failure_evidence(),
         },
     )
     .await
@@ -4008,14 +3970,8 @@ async fn loop_exit_application_uses_single_atomic_transition_port_call() {
             runner_id: TurnRunnerId::new(),
             lease_token: TurnLeaseToken::new(),
             exit: completed_exit("exit:completed-cancel-race"),
-            validation_policy: LoopExitValidationPolicy {
-                require_final_checkpoint: false,
-                host_cancellation_observed: false,
-                invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
-                completion_refs_verified: true,
-                blocked_evidence_verified: false,
-                failure_evidence_verified: false,
-            },
+            validation_policy: LoopExitValidationPolicy::recovery_required()
+                .with_host_verified_completion_refs(),
         },
     )
     .await
@@ -4056,14 +4012,8 @@ async fn non_cancelled_loop_exit_after_public_cancel_does_not_terminally_cancel(
             runner_id,
             lease_token,
             exit: completed_exit("exit:completed-after-cancel"),
-            validation_policy: LoopExitValidationPolicy {
-                require_final_checkpoint: false,
-                host_cancellation_observed: false,
-                invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
-                completion_refs_verified: true,
-                blocked_evidence_verified: false,
-                failure_evidence_verified: false,
-            },
+            validation_policy: LoopExitValidationPolicy::recovery_required()
+                .with_host_verified_completion_refs(),
         },
     )
     .await
@@ -4083,14 +4033,7 @@ async fn non_cancelled_loop_exit_after_public_cancel_does_not_terminally_cancel(
             runner_id,
             lease_token,
             exit: completed_exit("exit:invalid-after-cancel"),
-            validation_policy: LoopExitValidationPolicy {
-                require_final_checkpoint: false,
-                host_cancellation_observed: false,
-                invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
-                completion_refs_verified: false,
-                blocked_evidence_verified: false,
-                failure_evidence_verified: false,
-            },
+            validation_policy: LoopExitValidationPolicy::recovery_required(),
         },
     )
     .await
@@ -4142,14 +4085,8 @@ async fn observed_cancelled_loop_exit_without_recorded_cancel_enters_recovery_re
             exit: LoopExit::cancelled_for_observed_interrupt(
                 ironclaw_turns::LoopExitId::new("exit:cancelled-unrecorded").unwrap(),
             ),
-            validation_policy: LoopExitValidationPolicy {
-                require_final_checkpoint: false,
-                host_cancellation_observed: true,
-                invalid_handling: LoopExitInvalidHandling::FailTerminal,
-                completion_refs_verified: false,
-                blocked_evidence_verified: false,
-                failure_evidence_verified: false,
-            },
+            validation_policy: LoopExitValidationPolicy::fail_terminal()
+                .with_host_cancellation_observed(),
         },
     )
     .await
@@ -4222,14 +4159,8 @@ async fn loop_exit_application_cancels_only_after_public_cancel_request() {
             exit: LoopExit::cancelled_for_observed_interrupt(
                 ironclaw_turns::LoopExitId::new("exit:cancelled").unwrap(),
             ),
-            validation_policy: LoopExitValidationPolicy {
-                require_final_checkpoint: false,
-                host_cancellation_observed: true,
-                invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
-                completion_refs_verified: false,
-                blocked_evidence_verified: false,
-                failure_evidence_verified: false,
-            },
+            validation_policy: LoopExitValidationPolicy::recovery_required()
+                .with_host_cancellation_observed(),
         },
     )
     .await

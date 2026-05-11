@@ -24,11 +24,10 @@ use ironclaw_turns::{
     InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore, InMemoryRunProfileResolver,
     InMemoryTurnStateStore, InMemoryTurnStateStoreLimits, LoopCheckpointRecord,
     LoopCheckpointStore, LoopCompleted, LoopCompletionKind, LoopExit, LoopExitId,
-    LoopExitInvalidHandling, LoopExitValidationPolicy, PutCheckpointStateRequest,
-    PutLoopCheckpointRequest, ReplyTargetBindingRef, RunProfileId, RunProfileResolutionRequest,
-    RunProfileResolver, RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
-    TurnActor, TurnError, TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope, TurnStateStore,
-    TurnStatus,
+    LoopExitValidationPolicy, PutCheckpointStateRequest, PutLoopCheckpointRequest,
+    ReplyTargetBindingRef, RunProfileId, RunProfileResolutionRequest, RunProfileResolver,
+    RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
+    TurnError, TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostErrorKind, CapabilityDeniedReasonKind,
         CapabilityInputRef, CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion,
@@ -959,14 +958,7 @@ fn driver_host_error(
 }
 
 fn trusted_completion_refs_policy_for_test() -> LoopExitValidationPolicy {
-    LoopExitValidationPolicy {
-        require_final_checkpoint: false,
-        host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
-        completion_refs_verified: true,
-        blocked_evidence_verified: false,
-        failure_evidence_verified: false,
-    }
+    LoopExitValidationPolicy::recovery_required().with_host_verified_completion_refs()
 }
 
 async fn queue_fixture_turn(

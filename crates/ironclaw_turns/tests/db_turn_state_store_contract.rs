@@ -16,15 +16,15 @@ use ironclaw_turns::{
     GetLoopCheckpointRequest, IdempotencyKey, InMemoryRunProfileResolver,
     InMemoryTurnStateStoreLimits, LoopCancelled, LoopCancelledReasonKind, LoopCheckpointStateRef,
     LoopCheckpointStore, LoopCompleted, LoopCompletionKind, LoopDiagnosticRef, LoopExit,
-    LoopExitId, LoopExitInvalidHandling, LoopExitValidationPolicy, LoopFailed, LoopFailureKind,
-    LoopMessageRef, LoopUsageSummaryRef, PutLoopCheckpointRequest, ReplyTargetBindingRef,
-    ResolvedRunProfile, RunProfileRequest, RunProfileResolutionError, RunProfileResolutionRequest,
-    RunProfileResolver, RunProfileVersion, SanitizedCancelReason, SanitizedFailure,
-    SourceBindingRef, StaticTurnAdmissionLimitProvider, SubmitTurnRequest, SubmitTurnResponse,
-    ThreadBusy, TurnActor, TurnAdmissionAxisKind, TurnAdmissionCapacityDenial, TurnCoordinator,
-    TurnError, TurnEventKind, TurnEventProjectionCursor, TurnEventProjectionError,
-    TurnEventProjectionRequest, TurnEventProjectionService, TurnEventProjectionSource, TurnId,
-    TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
+    LoopExitId, LoopExitValidationPolicy, LoopFailed, LoopFailureKind, LoopMessageRef,
+    LoopUsageSummaryRef, PutLoopCheckpointRequest, ReplyTargetBindingRef, ResolvedRunProfile,
+    RunProfileRequest, RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver,
+    RunProfileVersion, SanitizedCancelReason, SanitizedFailure, SourceBindingRef,
+    StaticTurnAdmissionLimitProvider, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
+    TurnAdmissionAxisKind, TurnAdmissionCapacityDenial, TurnCoordinator, TurnError, TurnEventKind,
+    TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
+    TurnEventProjectionService, TurnEventProjectionSource, TurnId, TurnLeaseToken, TurnRunId,
+    TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
     events::EventCursor,
     runner::{
         ApplyLoopExitRequest, ClaimRunRequest, CompleteRunRequest, HeartbeatRequest,
@@ -522,14 +522,7 @@ async fn libsql_turn_state_store_persists_apply_loop_exit_recovery_across_instan
             runner_id,
             lease_token,
             exit: completed_exit("exit:unverified-completed"),
-            validation_policy: LoopExitValidationPolicy {
-                require_final_checkpoint: false,
-                host_cancellation_observed: false,
-                invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
-                completion_refs_verified: false,
-                blocked_evidence_verified: false,
-                failure_evidence_verified: false,
-            },
+            validation_policy: LoopExitValidationPolicy::recovery_required(),
         },
     )
     .await
@@ -610,14 +603,8 @@ async fn libsql_turn_state_store_persists_cancelled_loop_exit_application() {
             exit: LoopExit::cancelled_for_observed_interrupt(
                 ironclaw_turns::LoopExitId::new("exit:cancelled-before-recorded").unwrap(),
             ),
-            validation_policy: LoopExitValidationPolicy {
-                require_final_checkpoint: false,
-                host_cancellation_observed: true,
-                invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
-                completion_refs_verified: false,
-                blocked_evidence_verified: false,
-                failure_evidence_verified: false,
-            },
+            validation_policy: LoopExitValidationPolicy::recovery_required()
+                .with_host_cancellation_observed(),
         },
     )
     .await
@@ -660,14 +647,8 @@ async fn libsql_turn_state_store_persists_cancelled_loop_exit_application() {
             exit: LoopExit::cancelled_for_observed_interrupt(
                 ironclaw_turns::LoopExitId::new("exit:cancelled-recorded").unwrap(),
             ),
-            validation_policy: LoopExitValidationPolicy {
-                require_final_checkpoint: false,
-                host_cancellation_observed: true,
-                invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
-                completion_refs_verified: false,
-                blocked_evidence_verified: false,
-                failure_evidence_verified: false,
-            },
+            validation_policy: LoopExitValidationPolicy::recovery_required()
+                .with_host_cancellation_observed(),
         },
     )
     .await
@@ -1046,14 +1027,7 @@ async fn postgres_turn_state_store_persists_apply_loop_exit_recovery_when_config
             runner_id,
             lease_token,
             exit: completed_exit(&format!("exit:unverified-{suffix}")),
-            validation_policy: LoopExitValidationPolicy {
-                require_final_checkpoint: false,
-                host_cancellation_observed: false,
-                invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
-                completion_refs_verified: false,
-                blocked_evidence_verified: false,
-                failure_evidence_verified: false,
-            },
+            validation_policy: LoopExitValidationPolicy::recovery_required(),
         },
     )
     .await
@@ -1123,14 +1097,8 @@ async fn postgres_turn_state_store_persists_cancelled_loop_exit_application_when
                 ironclaw_turns::LoopExitId::new(format!("exit:cancelled-before-recorded-{suffix}"))
                     .unwrap(),
             ),
-            validation_policy: LoopExitValidationPolicy {
-                require_final_checkpoint: false,
-                host_cancellation_observed: true,
-                invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
-                completion_refs_verified: false,
-                blocked_evidence_verified: false,
-                failure_evidence_verified: false,
-            },
+            validation_policy: LoopExitValidationPolicy::recovery_required()
+                .with_host_cancellation_observed(),
         },
     )
     .await
@@ -1177,14 +1145,8 @@ async fn postgres_turn_state_store_persists_cancelled_loop_exit_application_when
                 ironclaw_turns::LoopExitId::new(format!("exit:cancelled-recorded-{suffix}"))
                     .unwrap(),
             ),
-            validation_policy: LoopExitValidationPolicy {
-                require_final_checkpoint: false,
-                host_cancellation_observed: true,
-                invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
-                completion_refs_verified: false,
-                blocked_evidence_verified: false,
-                failure_evidence_verified: false,
-            },
+            validation_policy: LoopExitValidationPolicy::recovery_required()
+                .with_host_cancellation_observed(),
         },
     )
     .await
@@ -1288,14 +1250,8 @@ async fn assert_db_turn_event_projection_replays_failed_terminal_after_reopen_wi
                 ),
                 exit_id: LoopExitId::new(format!("exit:{exit_marker}")).unwrap(),
             }),
-            validation_policy: LoopExitValidationPolicy {
-                require_final_checkpoint: false,
-                host_cancellation_observed: false,
-                invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
-                completion_refs_verified: false,
-                blocked_evidence_verified: false,
-                failure_evidence_verified: true,
-            },
+            validation_policy: LoopExitValidationPolicy::recovery_required()
+                .with_host_verified_failure_evidence(),
         },
     )
     .await
@@ -1423,14 +1379,8 @@ async fn assert_db_turn_event_projection_replays_cancelled_terminal_after_reopen
                 ],
                 exit_id: LoopExitId::new(format!("exit:{exit_marker}")).unwrap(),
             }),
-            validation_policy: LoopExitValidationPolicy {
-                require_final_checkpoint: false,
-                host_cancellation_observed: true,
-                invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
-                completion_refs_verified: false,
-                blocked_evidence_verified: false,
-                failure_evidence_verified: false,
-            },
+            validation_policy: LoopExitValidationPolicy::recovery_required()
+                .with_host_cancellation_observed(),
         },
     )
     .await

@@ -8,6 +8,87 @@ use ironclaw_turns::{
 use serde_json::json;
 
 #[test]
+fn validation_policy_named_constructors_keep_fail_closed_default_and_host_verified_evidence_explicit()
+ {
+    let default_policy = LoopExitValidationPolicy::recovery_required();
+    assert!(!default_policy.completion_refs_verified());
+    assert!(!default_policy.blocked_evidence_verified());
+    assert!(!default_policy.failure_evidence_verified());
+    assert!(!default_policy.host_cancellation_observed());
+    assert!(!default_policy.requires_final_checkpoint());
+    assert_eq!(
+        default_policy.invalid_handling(),
+        LoopExitInvalidHandling::RecoveryRequired
+    );
+
+    let trusted_policy = LoopExitValidationPolicy::fail_terminal()
+        .require_final_checkpoint()
+        .with_host_verified_completion_refs()
+        .with_host_verified_blocked_evidence()
+        .with_host_verified_failure_evidence()
+        .with_host_cancellation_observed();
+    assert!(trusted_policy.completion_refs_verified());
+    assert!(trusted_policy.blocked_evidence_verified());
+    assert!(trusted_policy.failure_evidence_verified());
+    assert!(trusted_policy.host_cancellation_observed());
+    assert!(trusted_policy.requires_final_checkpoint());
+    assert_eq!(
+        trusted_policy.invalid_handling(),
+        LoopExitInvalidHandling::FailTerminal
+    );
+}
+
+#[test]
+fn loop_exit_validation_policy_deserialization_cannot_mint_host_verified_evidence() {
+    for trusted_field in [
+        "host_cancellation_observed",
+        "completion_refs_verified",
+        "blocked_evidence_verified",
+        "failure_evidence_verified",
+    ] {
+        let mut forged = json!({
+            "require_final_checkpoint": false,
+            "host_cancellation_observed": false,
+            "invalid_handling": "recovery_required",
+            "completion_refs_verified": false,
+            "blocked_evidence_verified": false,
+            "failure_evidence_verified": false
+        });
+        forged[trusted_field] = json!(true);
+        assert!(
+            serde_json::from_value::<LoopExitValidationPolicy>(forged).is_err(),
+            "{trusted_field} should not be wire-mintable"
+        );
+    }
+
+    let forged_terminal = json!({
+        "require_final_checkpoint": false,
+        "host_cancellation_observed": false,
+        "invalid_handling": "fail_terminal",
+        "completion_refs_verified": false,
+        "blocked_evidence_verified": false,
+        "failure_evidence_verified": false
+    });
+    assert!(serde_json::from_value::<LoopExitValidationPolicy>(forged_terminal).is_err());
+
+    let strict_fail_closed = json!({
+        "require_final_checkpoint": true,
+        "host_cancellation_observed": false,
+        "invalid_handling": "recovery_required",
+        "completion_refs_verified": false,
+        "blocked_evidence_verified": false,
+        "failure_evidence_verified": false
+    });
+    let policy = serde_json::from_value::<LoopExitValidationPolicy>(strict_fail_closed).unwrap();
+    assert!(policy.requires_final_checkpoint());
+    assert!(!policy.completion_refs_verified());
+    assert_eq!(
+        policy.invalid_handling(),
+        LoopExitInvalidHandling::RecoveryRequired
+    );
+}
+
+#[test]
 fn completed_ask_user_exit_maps_to_trusted_completed_outcome_without_final_checkpoint() {
     let exit_id = exit_id("exit:completed");
     let decision = LoopExit::Completed(LoopCompleted {
@@ -18,14 +99,7 @@ fn completed_ask_user_exit_maps_to_trusted_completed_outcome_without_final_check
         usage_summary_ref: None,
         exit_id: exit_id.clone(),
     })
-    .validate(LoopExitValidationPolicy {
-        require_final_checkpoint: false,
-        host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::FailTerminal,
-        completion_refs_verified: true,
-        blocked_evidence_verified: false,
-        failure_evidence_verified: false,
-    });
+    .validate(LoopExitValidationPolicy::fail_terminal().with_host_verified_completion_refs());
 
     assert_eq!(decision.exit_id, exit_id);
     assert_eq!(decision.violation, None);
@@ -43,14 +117,9 @@ fn completed_exit_without_durable_refs_maps_to_protocol_failure_or_recovery() {
         exit_id: exit_id("exit:missing-refs"),
     });
 
-    let safe_decision = exit.clone().validate(LoopExitValidationPolicy {
-        require_final_checkpoint: false,
-        host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::FailTerminal,
-        completion_refs_verified: true,
-        blocked_evidence_verified: false,
-        failure_evidence_verified: false,
-    });
+    let safe_decision = exit
+        .clone()
+        .validate(LoopExitValidationPolicy::fail_terminal().with_host_verified_completion_refs());
     assert_eq!(
         safe_decision.mapping,
         TurnRunnerOutcome::Failed {
@@ -63,14 +132,9 @@ fn completed_exit_without_durable_refs_maps_to_protocol_failure_or_recovery() {
         "missing_completion_reference"
     );
 
-    let uncertain_decision = exit.validate(LoopExitValidationPolicy {
-        require_final_checkpoint: false,
-        host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
-        completion_refs_verified: true,
-        blocked_evidence_verified: false,
-        failure_evidence_verified: false,
-    });
+    let uncertain_decision = exit.validate(
+        LoopExitValidationPolicy::recovery_required().with_host_verified_completion_refs(),
+    );
     assert!(matches!(
         uncertain_decision,
         LoopExitValidationDecision {
@@ -91,14 +155,7 @@ fn completed_exit_requires_host_verified_completion_refs_before_trusted_mapping(
         exit_id: exit_id("exit:unverified-completion"),
     });
 
-    let decision = exit.validate(LoopExitValidationPolicy {
-        require_final_checkpoint: false,
-        host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
-        completion_refs_verified: false,
-        blocked_evidence_verified: false,
-        failure_evidence_verified: false,
-    });
+    let decision = exit.validate(LoopExitValidationPolicy::recovery_required());
 
     assert_eq!(
         decision.violation.unwrap().category(),
@@ -120,14 +177,11 @@ fn final_checkpoint_policy_rejects_terminal_exit_without_checkpoint() {
         usage_summary_ref: None,
         exit_id: exit_id("exit:no-final-checkpoint"),
     })
-    .validate(LoopExitValidationPolicy {
-        require_final_checkpoint: true,
-        host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::FailTerminal,
-        completion_refs_verified: true,
-        blocked_evidence_verified: false,
-        failure_evidence_verified: false,
-    });
+    .validate(
+        LoopExitValidationPolicy::fail_terminal()
+            .require_final_checkpoint()
+            .with_host_verified_completion_refs(),
+    );
 
     assert_eq!(
         decision.violation.unwrap().category(),
@@ -171,14 +225,11 @@ fn validation_policy_requires_final_checkpoint_only_when_configured() {
             usage_summary_ref: None,
             exit_id: exit_id("exit:checkpoint-policy"),
         })
-        .validate(LoopExitValidationPolicy {
-            require_final_checkpoint,
-            host_cancellation_observed: false,
-            invalid_handling: LoopExitInvalidHandling::FailTerminal,
-            completion_refs_verified: true,
-            blocked_evidence_verified: false,
-            failure_evidence_verified: false,
-        });
+        .validate(
+            LoopExitValidationPolicy::fail_terminal()
+                .with_final_checkpoint_required(require_final_checkpoint)
+                .with_host_verified_completion_refs(),
+        );
 
         assert_eq!(
             decision
@@ -203,14 +254,7 @@ fn blocked_exit_maps_to_block_run_outcome_with_verified_checkpoint_and_gate_ref(
         checkpoint_id,
         exit_id: exit_id("exit:blocked"),
     })
-    .validate(LoopExitValidationPolicy {
-        require_final_checkpoint: false,
-        host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
-        completion_refs_verified: false,
-        blocked_evidence_verified: true,
-        failure_evidence_verified: false,
-    });
+    .validate(LoopExitValidationPolicy::recovery_required().with_host_verified_blocked_evidence());
 
     assert_eq!(decision.violation, None);
     assert_eq!(
@@ -231,14 +275,7 @@ fn blocked_exit_requires_host_verified_gate_and_checkpoint_before_trusted_mappin
         checkpoint_id: TurnCheckpointId::new(),
         exit_id: exit_id("exit:unverified-blocked"),
     })
-    .validate(LoopExitValidationPolicy {
-        require_final_checkpoint: false,
-        host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
-        completion_refs_verified: false,
-        blocked_evidence_verified: false,
-        failure_evidence_verified: false,
-    });
+    .validate(LoopExitValidationPolicy::recovery_required());
 
     assert_eq!(
         decision.violation.unwrap().category(),
@@ -254,14 +291,9 @@ fn blocked_exit_requires_host_verified_gate_and_checkpoint_before_trusted_mappin
 fn cancelled_exit_requires_observed_host_cancellation() {
     let exit = LoopExit::cancelled_for_observed_interrupt(exit_id("exit:cancelled"));
 
-    let rejected = exit.clone().validate(LoopExitValidationPolicy {
-        require_final_checkpoint: false,
-        host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::FailTerminal,
-        completion_refs_verified: false,
-        blocked_evidence_verified: false,
-        failure_evidence_verified: false,
-    });
+    let rejected = exit
+        .clone()
+        .validate(LoopExitValidationPolicy::fail_terminal());
     assert_eq!(
         rejected.mapping,
         TurnRunnerOutcome::Failed {
@@ -274,14 +306,8 @@ fn cancelled_exit_requires_observed_host_cancellation() {
         "cancellation_not_observed"
     );
 
-    let accepted = exit.validate(LoopExitValidationPolicy {
-        require_final_checkpoint: false,
-        host_cancellation_observed: true,
-        invalid_handling: LoopExitInvalidHandling::FailTerminal,
-        completion_refs_verified: false,
-        blocked_evidence_verified: false,
-        failure_evidence_verified: false,
-    });
+    let accepted =
+        exit.validate(LoopExitValidationPolicy::fail_terminal().with_host_cancellation_observed());
     assert_eq!(accepted.mapping, TurnRunnerOutcome::Cancelled.into());
     assert_eq!(accepted.violation, None);
 }
@@ -292,10 +318,7 @@ fn iteration_limit_failure_maps_to_stable_sanitized_runner_failure_after_host_ve
         LoopFailureKind::IterationLimit,
         exit_id("exit:max-iterations"),
     )
-    .validate(LoopExitValidationPolicy {
-        failure_evidence_verified: true,
-        ..LoopExitValidationPolicy::default()
-    });
+    .validate(LoopExitValidationPolicy::recovery_required().with_host_verified_failure_evidence());
 
     assert_eq!(
         decision.mapping,
@@ -418,14 +441,8 @@ fn no_reply_with_empty_refs_maps_to_missing_completion_reference_violation() {
         exit_id: exit_id("exit:no-reply-empty"),
     });
 
-    let decision = exit.validate(LoopExitValidationPolicy {
-        require_final_checkpoint: false,
-        host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::FailTerminal,
-        completion_refs_verified: true,
-        blocked_evidence_verified: false,
-        failure_evidence_verified: false,
-    });
+    let decision = exit
+        .validate(LoopExitValidationPolicy::fail_terminal().with_host_verified_completion_refs());
 
     assert_eq!(
         decision.violation.as_ref().unwrap().kind(),
@@ -450,14 +467,7 @@ fn delegated_result_with_result_refs_maps_to_trusted_completed() {
         usage_summary_ref: None,
         exit_id: exit_id("exit:delegated"),
     })
-    .validate(LoopExitValidationPolicy {
-        require_final_checkpoint: false,
-        host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::FailTerminal,
-        completion_refs_verified: true,
-        blocked_evidence_verified: false,
-        failure_evidence_verified: false,
-    });
+    .validate(LoopExitValidationPolicy::fail_terminal().with_host_verified_completion_refs());
 
     assert_eq!(decision.violation, None);
     assert_eq!(decision.mapping, TurnRunnerOutcome::Completed.into());
@@ -480,10 +490,9 @@ fn blocked_variants_map_to_correct_blocked_reason() {
             checkpoint_id,
             exit_id: exit_id("exit:blocked-variant"),
         })
-        .validate(LoopExitValidationPolicy {
-            blocked_evidence_verified: true,
-            ..LoopExitValidationPolicy::default()
-        });
+        .validate(
+            LoopExitValidationPolicy::recovery_required().with_host_verified_blocked_evidence(),
+        );
 
         let expected_reason = match kind {
             LoopBlockedKind::Approval => BlockedReason::Approval { gate_ref },
@@ -528,10 +537,7 @@ fn all_failure_kinds_produce_stable_sanitized_category_strings() {
 
     for (kind, expected_category) in variants {
         let decision = LoopExit::failed(*kind, exit_id("exit:failure-variant")).validate(
-            LoopExitValidationPolicy {
-                failure_evidence_verified: true,
-                ..LoopExitValidationPolicy::default()
-            },
+            LoopExitValidationPolicy::recovery_required().with_host_verified_failure_evidence(),
         );
 
         assert_eq!(
@@ -577,10 +583,8 @@ fn cancelled_with_checkpoint_and_interrupted_refs_maps_to_cancelled_outcome() {
         exit_id: exit_id("exit:cancelled-with-checkpoint"),
     });
 
-    let decision = exit.validate(LoopExitValidationPolicy {
-        host_cancellation_observed: true,
-        ..LoopExitValidationPolicy::default()
-    });
+    let decision = exit
+        .validate(LoopExitValidationPolicy::recovery_required().with_host_cancellation_observed());
 
     assert_eq!(decision.violation, None);
     assert_eq!(decision.mapping, TurnRunnerOutcome::Cancelled.into());

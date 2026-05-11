@@ -216,15 +216,87 @@ pub enum LoopExitInvalidHandling {
     RecoveryRequired,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// Host-derived policy for validating a driver-supplied [`LoopExit`] claim.
+///
+/// Fields are private so callers cannot mint trusted evidence with struct
+/// literal syntax. Use the named constructors below so each trusted bit reads
+/// as host-verified evidence at the call site. The default remains fail-closed:
+/// invalid exits require recovery and no driver evidence is trusted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct LoopExitValidationPolicy {
-    pub require_final_checkpoint: bool,
-    pub host_cancellation_observed: bool,
-    pub invalid_handling: LoopExitInvalidHandling,
-    pub completion_refs_verified: bool,
-    pub blocked_evidence_verified: bool,
-    pub failure_evidence_verified: bool,
+    require_final_checkpoint: bool,
+    host_cancellation_observed: bool,
+    invalid_handling: LoopExitInvalidHandling,
+    completion_refs_verified: bool,
+    blocked_evidence_verified: bool,
+    failure_evidence_verified: bool,
+}
+
+impl LoopExitValidationPolicy {
+    pub fn recovery_required() -> Self {
+        Self::default()
+    }
+
+    pub fn fail_terminal() -> Self {
+        Self {
+            invalid_handling: LoopExitInvalidHandling::FailTerminal,
+            ..Self::default()
+        }
+    }
+
+    pub fn require_final_checkpoint(mut self) -> Self {
+        self.require_final_checkpoint = true;
+        self
+    }
+
+    pub fn with_final_checkpoint_required(mut self, required: bool) -> Self {
+        self.require_final_checkpoint = required;
+        self
+    }
+
+    pub fn with_host_cancellation_observed(mut self) -> Self {
+        self.host_cancellation_observed = true;
+        self
+    }
+
+    pub fn with_host_verified_completion_refs(mut self) -> Self {
+        self.completion_refs_verified = true;
+        self
+    }
+
+    pub fn with_host_verified_blocked_evidence(mut self) -> Self {
+        self.blocked_evidence_verified = true;
+        self
+    }
+
+    pub fn with_host_verified_failure_evidence(mut self) -> Self {
+        self.failure_evidence_verified = true;
+        self
+    }
+
+    pub fn requires_final_checkpoint(&self) -> bool {
+        self.require_final_checkpoint
+    }
+
+    pub fn host_cancellation_observed(&self) -> bool {
+        self.host_cancellation_observed
+    }
+
+    pub fn invalid_handling(&self) -> LoopExitInvalidHandling {
+        self.invalid_handling
+    }
+
+    pub fn completion_refs_verified(&self) -> bool {
+        self.completion_refs_verified
+    }
+
+    pub fn blocked_evidence_verified(&self) -> bool {
+        self.blocked_evidence_verified
+    }
+
+    pub fn failure_evidence_verified(&self) -> bool {
+        self.failure_evidence_verified
+    }
 }
 
 impl Default for LoopExitValidationPolicy {
@@ -237,6 +309,56 @@ impl Default for LoopExitValidationPolicy {
             blocked_evidence_verified: false,
             failure_evidence_verified: false,
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for LoopExitValidationPolicy {
+    /// Deserialize only the fail-closed policy subset.
+    ///
+    /// This is intentionally asymmetric with `Serialize`: host-minted policies
+    /// may be serialized for diagnostics/snapshots, but untrusted wire payloads
+    /// cannot deserialize back into host-verified evidence or terminal invalid
+    /// handling.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct WirePolicy {
+            #[serde(default)]
+            require_final_checkpoint: bool,
+            #[serde(default)]
+            host_cancellation_observed: bool,
+            #[serde(default)]
+            invalid_handling: Option<LoopExitInvalidHandling>,
+            #[serde(default)]
+            completion_refs_verified: bool,
+            #[serde(default)]
+            blocked_evidence_verified: bool,
+            #[serde(default)]
+            failure_evidence_verified: bool,
+        }
+
+        let wire = WirePolicy::deserialize(deserializer)?;
+        if wire.host_cancellation_observed
+            || wire.completion_refs_verified
+            || wire.blocked_evidence_verified
+            || wire.failure_evidence_verified
+        {
+            return Err(de::Error::custom(
+                "loop exit validation policy wire payload cannot mint host-verified evidence",
+            ));
+        }
+        if matches!(
+            wire.invalid_handling,
+            Some(LoopExitInvalidHandling::FailTerminal)
+        ) {
+            return Err(de::Error::custom(
+                "loop exit validation policy wire payload cannot select terminal invalid-exit handling",
+            ));
+        }
+        Ok(Self::recovery_required().with_final_checkpoint_required(wire.require_final_checkpoint))
     }
 }
 

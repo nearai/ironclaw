@@ -90,8 +90,9 @@ URL: https://github.com/nearai/ironclaw/pull/3460
 
 - owns: `LoopExitValidationPolicy` trusted construction path and evidence verification semantics.
 - owns: downstream match-site audit when loop exit/status/policy variants change.
+- status in this baseline PR: `LoopExitValidationPolicy` fields are private, wire deserialization cannot mint host-verified evidence, fail-closed construction uses named constructors, and host-verified evidence bits are explicit at call sites.
 - defers: global error classification helper unless runner/operator APIs change here.
-- follow-up: #3492 migration child issue/PR should make production loop-exit validation policy construction witness/sealed rather than public-field minted.
+- follow-up: #3492 migration child issue/PR should wire durable evidence ports into the host-side constructor calls where any remaining fake/test evidence exists.
 
 ### PR #3454 — Add Reborn loop capability host-runtime adapter slice
 
