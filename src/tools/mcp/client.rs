@@ -931,6 +931,8 @@ impl Tool for McpToolWrapper {
         let params = strip_top_level_nulls(params);
 
         let result = self.client.call_tool(&self.tool.name, params).await?;
+
+        // Check the MCP protocol-level error flag first.
         let content: String = result
             .content
             .iter()
@@ -940,6 +942,21 @@ impl Tool for McpToolWrapper {
         if result.is_error {
             return Err(ToolError::ExecutionFailed(content));
         }
+
+        // Also check for handler-reported errors (followup #3): a handler that
+        // returned `buildToolResponse("error", …)` sets `status: "error"` in
+        // the content but leaves `is_error` unset because the JSON-RPC call
+        // itself succeeded.  Without this check, such responses reach the
+        // caller as `Ok(…)` and the chat-history entry gets `has_error=false`,
+        // showing a spurious ✓ in the UI.
+        if let Some(details) = inspect_handler_error(&result) {
+            let mut msg = format!("MCP handler error: {}", details.message);
+            if let Some(reason) = details.reason {
+                msg.push_str(&format!(" (reason: {reason})"));
+            }
+            return Err(ToolError::ExecutionFailed(msg));
+        }
+
         Ok(ToolOutput::text(content, start.elapsed()))
     }
 
@@ -954,6 +971,56 @@ impl Tool for McpToolWrapper {
             ApprovalRequirement::Never
         }
     }
+}
+
+/// Details extracted from a handler-reported error response.
+pub(crate) struct HandlerErrorDetails {
+    pub message: String,
+    pub reason: Option<String>,
+}
+
+/// Extract error details from a JSON object that carries `status: "error"`.
+fn pick_error_details(payload: &serde_json::Value) -> Option<HandlerErrorDetails> {
+    if payload.get("status").and_then(|v| v.as_str()) != Some("error") {
+        return None;
+    }
+    let message = payload
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let reason = payload
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    Some(HandlerErrorDetails { message, reason })
+}
+
+/// Inspect a `CallToolResult` for a handler-reported error discriminant.
+///
+/// Mirrors the TypeScript `inspectErrorResponse` from
+/// `client/mcp/t3n-mcp/src/server/tools/shared/responseUtils.ts` (followup #3).
+///
+/// `buildToolResponse("error", …)` always writes both `structuredContent` and
+/// `content[0].text` (JSON-serialised).  We prefer `structuredContent` as the
+/// authoritative source: if it is present we use it exclusively and do not fall
+/// through to the text block.  The text-block path covers handlers that produce
+/// the same shape without going through `buildToolResponse`.
+///
+/// Returns `None` for success responses, non-matching shapes, or parse errors
+/// — callers treat `None` as "no handler-reported failure detected".
+pub(crate) fn inspect_handler_error(result: &CallToolResult) -> Option<HandlerErrorDetails> {
+    // When structuredContent is present it is authoritative — check it and
+    // return immediately regardless of whether it signals an error or not.
+    if let Some(structured) = &result.structured_content {
+        return pick_error_details(structured);
+    }
+
+    // Fall back to the first text content block's JSON payload for handlers
+    // that do not populate structuredContent.
+    let text = result.content.first().and_then(|b| b.as_text())?;
+    let parsed: serde_json::Value = serde_json::from_str(text).ok()?;
+    pick_error_details(&parsed)
 }
 
 /// Remove top-level keys whose value is JSON null from an object.
@@ -975,6 +1042,7 @@ fn strip_top_level_nulls(value: serde_json::Value) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::mcp::protocol::ContentBlock;
 
     #[test]
     fn test_mcp_request_list_tools() {
@@ -2394,5 +2462,126 @@ mod tests {
             args["cycle_id"], "2025-01",
             "caller-supplied params must be preserved alongside injected fields"
         );
+    }
+
+    // ── inspect_handler_error ────────────────────────────────────────────────
+
+    fn make_result(content: Vec<ContentBlock>, structured: Option<serde_json::Value>) -> CallToolResult {
+        CallToolResult {
+            content,
+            is_error: false,
+            structured_content: structured,
+        }
+    }
+
+    #[test]
+    fn inspect_handler_error_success_structured_returns_none() {
+        let result = make_result(
+            vec![ContentBlock::Text {
+                text: r#"{"status":"success","message":"ok"}"#.to_string(),
+            }],
+            Some(serde_json::json!({"status": "success", "message": "ok"})),
+        );
+        assert!(inspect_handler_error(&result).is_none());
+    }
+
+    #[test]
+    fn inspect_handler_error_error_via_structured_content() {
+        let result = make_result(
+            vec![ContentBlock::Text {
+                text: r#"{"status":"error","message":"bad thing","reason":"vc_id missing"}"#
+                    .to_string(),
+            }],
+            Some(serde_json::json!({
+                "status": "error",
+                "message": "bad thing",
+                "reason": "vc_id missing"
+            })),
+        );
+        let details = inspect_handler_error(&result).expect("should detect error");
+        assert_eq!(details.message, "bad thing");
+        assert_eq!(details.reason.as_deref(), Some("vc_id missing"));
+    }
+
+    #[test]
+    fn inspect_handler_error_error_via_text_content_fallback() {
+        // No structuredContent — error carried only in text block.
+        let result = make_result(
+            vec![ContentBlock::Text {
+                text: r#"{"status":"error","message":"expired credential"}"#.to_string(),
+            }],
+            None,
+        );
+        let details = inspect_handler_error(&result).expect("should detect error via text");
+        assert_eq!(details.message, "expired credential");
+        assert!(details.reason.is_none());
+    }
+
+    #[test]
+    fn inspect_handler_error_empty_content_returns_none() {
+        let result = make_result(vec![], None);
+        assert!(inspect_handler_error(&result).is_none());
+    }
+
+    #[test]
+    fn inspect_handler_error_non_text_content_returns_none() {
+        // Image block — no text to parse.
+        let result = make_result(
+            vec![ContentBlock::Image {
+                data: "base64data".to_string(),
+                mime_type: "image/png".to_string(),
+            }],
+            None,
+        );
+        assert!(inspect_handler_error(&result).is_none());
+    }
+
+    #[test]
+    fn inspect_handler_error_invalid_json_in_text_returns_none() {
+        let result = make_result(
+            vec![ContentBlock::Text {
+                text: "not valid json at all".to_string(),
+            }],
+            None,
+        );
+        assert!(inspect_handler_error(&result).is_none());
+    }
+
+    #[test]
+    fn inspect_handler_error_non_object_json_returns_none() {
+        let result = make_result(
+            vec![ContentBlock::Text {
+                text: r#"["status","error"]"#.to_string(),
+            }],
+            None,
+        );
+        assert!(inspect_handler_error(&result).is_none());
+    }
+
+    #[test]
+    fn inspect_handler_error_error_without_reason_field() {
+        // reason is optional — absence should not prevent detection.
+        let result = make_result(
+            vec![ContentBlock::Text {
+                text: r#"{"status":"error","message":"something failed"}"#.to_string(),
+            }],
+            None,
+        );
+        let details = inspect_handler_error(&result).expect("should detect error");
+        assert_eq!(details.message, "something failed");
+        assert!(details.reason.is_none());
+    }
+
+    #[test]
+    fn inspect_handler_error_structured_content_takes_precedence_over_text() {
+        // structuredContent says success, text says error — structured wins.
+        let result = make_result(
+            vec![ContentBlock::Text {
+                text: r#"{"status":"error","message":"text says error"}"#.to_string(),
+            }],
+            Some(serde_json::json!({"status": "success", "message": "structured says ok"})),
+        );
+        // structured content is checked first and returns None (not an error)
+        assert!(inspect_handler_error(&result).is_none());
     }
 }

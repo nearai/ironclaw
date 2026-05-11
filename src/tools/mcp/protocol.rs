@@ -284,6 +284,11 @@ pub struct CallToolResult {
     pub content: Vec<ContentBlock>,
     #[serde(default)]
     pub is_error: bool,
+    /// Typed response payload echoed alongside `content` by `buildToolResponse`.
+    /// Carries the same `{status, message, …}` object as the text content block,
+    /// allowing callers to inspect `status` without parsing JSON from the text.
+    #[serde(rename = "structuredContent", default)]
+    pub structured_content: Option<serde_json::Value>,
 }
 
 /// Content block in a tool result.
