@@ -10,7 +10,7 @@
     "api_key_required": false,
     "base_url_env": "NEARAI_BASE_URL",
     "model_env": "NEARAI_MODEL",
-    "default_model": "claude-sonnet-4-5",
+    "default_model": "auto",
     "description": "multi-model access via NEAR account",
     "setup": {
       "kind": "session_token",
