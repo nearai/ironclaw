@@ -95,11 +95,12 @@ impl LlmBuiltinOverride {
 
     /// Set an extras-bag field; clears the entry when `value` is empty.
     pub fn set_extra(&mut self, key: impl Into<String>, value: impl Into<String>) {
-        let v = value.into();
-        if v.is_empty() {
-            self.extras.remove(&key.into());
+        let key = key.into();
+        let value = value.into();
+        if value.is_empty() {
+            self.extras.remove(&key);
         } else {
-            self.extras.insert(key.into(), v);
+            self.extras.insert(key, value);
         }
     }
 }

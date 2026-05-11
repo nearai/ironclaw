@@ -512,16 +512,23 @@ fn backend_has_credentials(
         // this status path is keyed off env + ambient AWS config only
         // (matching the old behaviour where `has_api_key: false`
         // permanently advertised the backend as configured).
+        // `AWS_ACCESS_KEY_ID` alone is insufficient — the AWS SDK needs
+        // both the access key and secret to sign requests, and
+        // `AWS_SESSION_TOKEN` is supplemental to that pair (temporary
+        // credentials), never a substitute on its own.
         Some(SetupHint::AwsCredentials { .. }) => {
             read_env("AWS_PROFILE").is_some()
-                || read_env("AWS_ACCESS_KEY_ID").is_some()
-                || read_env("AWS_SESSION_TOKEN").is_some()
+                || (read_env("AWS_ACCESS_KEY_ID").is_some()
+                    && read_env("AWS_SECRET_ACCESS_KEY").is_some())
         }
         // OpenAI Codex device-code login persists a session file. The
-        // resolver reads `OpenAiCodexConfig::session_path`; we treat
-        // the default path as authoritative for the status flag.
-        Some(SetupHint::OAuthDeviceCode { .. }) => ironclaw_llm::OpenAiCodexConfig::default()
-            .session_path
+        // resolver reads `OpenAiCodexConfig::session_path`, which can
+        // be overridden via `OPENAI_CODEX_SESSION_PATH`; honour the env
+        // override here so the UI doesn't falsely report "not
+        // configured" when the session lives at a custom path.
+        Some(SetupHint::OAuthDeviceCode { .. }) => read_env("OPENAI_CODEX_SESSION_PATH")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| ironclaw_llm::OpenAiCodexConfig::default().session_path)
             .exists(),
         // Gemini OAuth + similar file-based flows. Expand `~` in the
         // hint, then test for file existence.
@@ -840,7 +847,9 @@ mod tests {
         unsafe {
             std::env::remove_var("AWS_PROFILE");
             std::env::remove_var("AWS_ACCESS_KEY_ID");
+            std::env::remove_var("AWS_SECRET_ACCESS_KEY");
             std::env::remove_var("AWS_SESSION_TOKEN");
+            std::env::remove_var("OPENAI_CODEX_SESSION_PATH");
             std::env::remove_var("NEARAI_API_KEY");
         }
 
@@ -934,6 +943,81 @@ mod tests {
             nearai.get("has_credentials").and_then(|v| v.as_bool()),
             Some(true)
         );
+    }
+
+    /// Regression: a host with only `AWS_ACCESS_KEY_ID` set (no
+    /// `AWS_SECRET_ACCESS_KEY`) cannot actually sign requests — the
+    /// AWS SDK needs the pair. Previously `has_credentials` returned
+    /// true on the access key alone (and also on a bare
+    /// `AWS_SESSION_TOKEN`), so the frontend would show Bedrock as
+    /// configured and a click would fail at first call.
+    #[tokio::test]
+    async fn test_bedrock_partial_aws_env_reports_not_configured() {
+        let _env_lock = crate::config::helpers::lock_env();
+        // SAFETY: scoped to this test via lock_env(); restored below.
+        unsafe {
+            std::env::remove_var("AWS_PROFILE");
+            std::env::remove_var("AWS_SESSION_TOKEN");
+            std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+            std::env::set_var("AWS_ACCESS_KEY_ID", "AKIA-test-only");
+        }
+        let arr_partial = build_llm_providers(false);
+        let bedrock = find_provider(arr_partial.as_array().unwrap(), "bedrock").expect("bedrock");
+        assert_eq!(
+            bedrock.get("has_credentials").and_then(|v| v.as_bool()),
+            Some(false),
+            "AWS_ACCESS_KEY_ID alone must not flip has_credentials true"
+        );
+
+        // SAFETY: scoped via lock_env().
+        unsafe {
+            std::env::set_var("AWS_SECRET_ACCESS_KEY", "secret-test-only");
+        }
+        let arr_full = build_llm_providers(false);
+        let bedrock_full =
+            find_provider(arr_full.as_array().unwrap(), "bedrock").expect("bedrock full");
+        assert_eq!(
+            bedrock_full
+                .get("has_credentials")
+                .and_then(|v| v.as_bool()),
+            Some(true),
+            "AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY must flip has_credentials true"
+        );
+
+        // SAFETY: clean up so neighbouring tests see a pristine env.
+        unsafe {
+            std::env::remove_var("AWS_ACCESS_KEY_ID");
+            std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+        }
+    }
+
+    /// Regression: Codex stores its session at a custom path when
+    /// `OPENAI_CODEX_SESSION_PATH` is set. The status helper used to
+    /// only probe the built-in default, so a user with the env
+    /// override saw "not configured" even when logged in.
+    #[tokio::test]
+    async fn test_openai_codex_honours_session_path_env() {
+        let _env_lock = crate::config::helpers::lock_env();
+        let tmp = tempfile::tempdir().expect("tmp");
+        let session_path = tmp.path().join("openai_codex_session.json");
+        std::fs::write(&session_path, "{}").expect("write session stub");
+
+        // SAFETY: scoped via lock_env(); restored below.
+        unsafe {
+            std::env::set_var("OPENAI_CODEX_SESSION_PATH", &session_path);
+        }
+        let arr = build_llm_providers(false);
+        let codex = find_provider(arr.as_array().unwrap(), "openai_codex").expect("codex");
+        assert_eq!(
+            codex.get("has_credentials").and_then(|v| v.as_bool()),
+            Some(true),
+            "Codex must honour OPENAI_CODEX_SESSION_PATH when probing has_credentials"
+        );
+
+        // SAFETY: scoped via lock_env().
+        unsafe {
+            std::env::remove_var("OPENAI_CODEX_SESSION_PATH");
+        }
     }
 
     #[tokio::test]
