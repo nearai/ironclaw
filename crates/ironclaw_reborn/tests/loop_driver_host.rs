@@ -6,16 +6,18 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::{
-    AgentId, CapabilityDescriptor, CapabilityId, CapabilitySet, EffectKind, ExecutionContext,
-    ExtensionId, MountView, PermissionMode, ProjectId, ResourceEstimate, ResourceUsage,
-    RuntimeKind, TenantId, ThreadId, TrustClass, UserId,
+    AgentId, ApprovalRequestId, CapabilityDescriptor, CapabilityId, CapabilitySet, EffectKind,
+    ExecutionContext, ExtensionId, MountView, PermissionMode, ProcessId, ProjectId,
+    ResourceEstimate, ResourceUsage, RuntimeKind, SecretHandle, TenantId, ThreadId, TrustClass,
+    UserId,
 };
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfacePolicy, HostRuntime,
-    HostRuntimeError, HostRuntimeHealth, HostRuntimeStatus, RuntimeCapabilityCompleted,
-    RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeCapabilityResumeRequest, RuntimeFailureKind, RuntimeStatusRequest, SurfaceKind,
-    VisibleCapability, VisibleCapabilityAccess,
+    HostRuntimeError, HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalGate, RuntimeAuthGate,
+    RuntimeBlockedReason, RuntimeCapabilityCompleted, RuntimeCapabilityFailure,
+    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
+    RuntimeFailureKind, RuntimeGateId, RuntimeProcessHandle, RuntimeResourceGate,
+    RuntimeStatusRequest, SurfaceKind, VisibleCapability, VisibleCapabilityAccess,
 };
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
@@ -907,6 +909,211 @@ async fn text_only_host_sanitizes_runtime_failure_message_before_driver_output()
         panic!("expected failed capability outcome");
     };
     assert_eq!(failure.safe_summary, "capability invocation failed");
+}
+
+#[tokio::test]
+async fn text_only_host_maps_runtime_suspension_and_process_outcomes() {
+    let fixture = HostFixture::new("thread-host-runtime-capability-suspensions", "hello").await;
+    let approval_id = CapabilityId::new("demo.approval").unwrap();
+    let auth_id = CapabilityId::new("demo.auth").unwrap();
+    let resource_id = CapabilityId::new("demo.resource").unwrap();
+    let process_id = CapabilityId::new("demo.process").unwrap();
+    let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
+        capability_descriptor(approval_id.as_str()),
+        capability_descriptor(auth_id.as_str()),
+        capability_descriptor(resource_id.as_str()),
+        capability_descriptor(process_id.as_str()),
+    ])));
+    runtime.push_outcome(RuntimeCapabilityOutcome::ApprovalRequired(
+        RuntimeApprovalGate {
+            approval_request_id: ApprovalRequestId::new(),
+            capability_id: approval_id.clone(),
+            reason: RuntimeBlockedReason::ApprovalRequired,
+        },
+    ));
+    runtime.push_outcome(RuntimeCapabilityOutcome::AuthRequired(RuntimeAuthGate {
+        gate_id: RuntimeGateId::new(),
+        capability_id: auth_id.clone(),
+        reason: RuntimeBlockedReason::AuthRequired,
+        required_secrets: vec![SecretHandle::new("api_key").unwrap()],
+    }));
+    runtime.push_outcome(RuntimeCapabilityOutcome::ResourceBlocked(
+        RuntimeResourceGate {
+            gate_id: RuntimeGateId::new(),
+            capability_id: resource_id.clone(),
+            reason: RuntimeBlockedReason::ResourceLimit,
+            estimate: ResourceEstimate::default(),
+        },
+    ));
+    runtime.push_outcome(RuntimeCapabilityOutcome::SpawnedProcess(
+        RuntimeProcessHandle {
+            process_id: ProcessId::new(),
+            capability_id: process_id.clone(),
+        },
+    ));
+    let io = Arc::new(InMemoryCapabilityIo::default());
+    let cases = [
+        (
+            approval_id.clone(),
+            CapabilityInputRef::new("input:approval-request").unwrap(),
+        ),
+        (
+            auth_id.clone(),
+            CapabilityInputRef::new("input:auth-request").unwrap(),
+        ),
+        (
+            resource_id.clone(),
+            CapabilityInputRef::new("input:resource-request").unwrap(),
+        ),
+        (
+            process_id.clone(),
+            CapabilityInputRef::new("input:process-request").unwrap(),
+        ),
+    ];
+    for (_, input_ref) in &cases {
+        io.put_input(input_ref.clone(), json!({"message": input_ref.as_str()}));
+    }
+    let capability_port = HostRuntimeLoopCapabilityPort::new(
+        runtime.clone(),
+        fixture.context.clone(),
+        host_runtime_visible_request(&fixture, ["demo"]),
+        io.clone(),
+        io,
+    );
+    let host = fixture
+        .factory()
+        .build_text_only_host_with_capabilities(
+            RebornLoopDriverHostRequest {
+                claimed_run: fixture.claimed.clone(),
+                loop_run_context: fixture.context.clone(),
+            },
+            Arc::new(capability_port),
+        )
+        .await
+        .unwrap();
+    let surface = host
+        .visible_capabilities(VisibleCapabilityRequest)
+        .await
+        .unwrap();
+
+    let mut outcomes = Vec::new();
+    for (capability_id, input_ref) in cases {
+        outcomes.push(
+            host.invoke_capability(CapabilityInvocation {
+                surface_version: surface.version.clone(),
+                capability_id,
+                input_ref,
+            })
+            .await
+            .unwrap(),
+        );
+    }
+
+    assert!(matches!(
+        &outcomes[0],
+        CapabilityOutcome::ApprovalRequired { gate_ref, safe_summary }
+            if gate_ref.as_str().starts_with("gate:approval-")
+                && safe_summary == "capability requires approval"
+    ));
+    assert!(matches!(
+        &outcomes[1],
+        CapabilityOutcome::AuthRequired { gate_ref, safe_summary }
+            if gate_ref.as_str().starts_with("gate:auth-")
+                && safe_summary == "capability requires authentication"
+    ));
+    assert!(matches!(
+        &outcomes[2],
+        CapabilityOutcome::ResourceBlocked { gate_ref, safe_summary }
+            if gate_ref.as_str().starts_with("gate:resource-")
+                && safe_summary == "capability is blocked by resource limits"
+    ));
+    assert!(matches!(
+        &outcomes[3],
+        CapabilityOutcome::SpawnedProcess(process)
+            if process.process_ref.as_str().starts_with("process:")
+                && process.safe_summary == "capability spawned background work"
+    ));
+    assert!(outcomes.iter().all(CapabilityOutcome::is_suspension));
+    assert_eq!(runtime.invocations().len(), 4);
+}
+
+#[tokio::test]
+async fn text_only_host_batch_stops_on_first_suspension_before_later_invocations() {
+    let fixture = HostFixture::new("thread-host-runtime-capability-batch-stop", "hello").await;
+    let approval_id = CapabilityId::new("demo.approval").unwrap();
+    let echo_id = CapabilityId::new("demo.echo").unwrap();
+    let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
+        capability_descriptor(approval_id.as_str()),
+        capability_descriptor(echo_id.as_str()),
+    ])));
+    runtime.push_outcome(RuntimeCapabilityOutcome::ApprovalRequired(
+        RuntimeApprovalGate {
+            approval_request_id: ApprovalRequestId::new(),
+            capability_id: approval_id.clone(),
+            reason: RuntimeBlockedReason::ApprovalRequired,
+        },
+    ));
+    runtime.push_outcome(RuntimeCapabilityOutcome::Completed(Box::new(
+        RuntimeCapabilityCompleted {
+            capability_id: echo_id.clone(),
+            output: json!({"should_not_run": true}),
+            usage: ResourceUsage::default(),
+        },
+    )));
+    let io = Arc::new(InMemoryCapabilityIo::default());
+    let approval_input = CapabilityInputRef::new("input:batch-approval").unwrap();
+    let echo_input = CapabilityInputRef::new("input:batch-echo").unwrap();
+    io.put_input(approval_input.clone(), json!({"message": "approval"}));
+    io.put_input(echo_input.clone(), json!({"message": "echo"}));
+    let capability_port = HostRuntimeLoopCapabilityPort::new(
+        runtime.clone(),
+        fixture.context.clone(),
+        host_runtime_visible_request(&fixture, ["demo"]),
+        io.clone(),
+        io,
+    );
+    let host = fixture
+        .factory()
+        .build_text_only_host_with_capabilities(
+            RebornLoopDriverHostRequest {
+                claimed_run: fixture.claimed.clone(),
+                loop_run_context: fixture.context.clone(),
+            },
+            Arc::new(capability_port),
+        )
+        .await
+        .unwrap();
+    let surface = host
+        .visible_capabilities(VisibleCapabilityRequest)
+        .await
+        .unwrap();
+
+    let batch = host
+        .invoke_capability_batch(ironclaw_turns::run_profile::CapabilityBatchInvocation {
+            invocations: vec![
+                CapabilityInvocation {
+                    surface_version: surface.version.clone(),
+                    capability_id: approval_id,
+                    input_ref: approval_input,
+                },
+                CapabilityInvocation {
+                    surface_version: surface.version,
+                    capability_id: echo_id,
+                    input_ref: echo_input,
+                },
+            ],
+            stop_on_first_suspension: true,
+        })
+        .await
+        .unwrap();
+
+    assert!(batch.stopped_on_suspension);
+    assert_eq!(batch.outcomes.len(), 1);
+    assert!(matches!(
+        batch.outcomes.as_slice(),
+        [CapabilityOutcome::ApprovalRequired { .. }]
+    ));
+    assert_eq!(runtime.invocations().len(), 1);
 }
 
 #[tokio::test]
