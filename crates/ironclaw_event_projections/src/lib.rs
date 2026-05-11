@@ -9,14 +9,23 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use ironclaw_events::{
-    DurableAuditLog, DurableEventLog, EventCursor, EventError, EventLogEntry, EventStreamKey,
-    ReadScope, RuntimeEvent, RuntimeEventKind, UNCLASSIFIED_ERROR_KIND, sanitize_error_kind,
+    AuditSink, DurableAuditLog, DurableEventLog, EventCursor, EventError, EventLogEntry,
+    EventStreamKey, ReadScope, RuntimeEvent, RuntimeEventKind, UNCLASSIFIED_ERROR_KIND,
+    sanitize_error_kind,
 };
+use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
 use ironclaw_host_api::{
-    ApprovalRequestId, AuditEnvelope, AuditEventId, AuditStage, CapabilityId, ExtensionId,
-    InvocationId, OBLIGATION_EVALUATION_ORDER, ObligationKind, ProcessId, ResourceScope,
-    RuntimeKind, ThreadId, Timestamp,
+    ActionResultSummary, ActionSummary, AgentId, ApprovalRequestId, AuditEnvelope, AuditEventId,
+    AuditStage, CapabilityId, CorrelationId, DecisionSummary, EffectKind, ExtensionId,
+    InvocationId, OBLIGATION_EVALUATION_ORDER, ObligationKind, ProcessId, ProjectId, ResourceScope,
+    RuntimeKind, TenantId, ThreadId, Timestamp, UserId, VirtualPath,
+};
+use ironclaw_memory::{
+    MemoryDocumentScope, MemorySignificantEvent, MemorySignificantEventKind,
+    MemorySignificantEventSink, PromptSafetyReasonCode, PromptWriteOperation,
+    PromptWriteSafetyEvent, PromptWriteSafetyEventKind, PromptWriteSafetyEventSink,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -338,6 +347,280 @@ pub enum AuditProjectionError {
     },
     #[error("audit projection source failed during {operation}")]
     Source { operation: &'static str },
+}
+
+/// Durable audit adapter for memory-owned redacted event seams.
+#[derive(Clone)]
+pub struct DurableMemoryAuditSink {
+    audit: Arc<dyn AuditSink>,
+}
+
+impl DurableMemoryAuditSink {
+    pub fn new(audit: Arc<dyn AuditSink>) -> Self {
+        Self { audit }
+    }
+}
+
+impl std::fmt::Debug for DurableMemoryAuditSink {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DurableMemoryAuditSink")
+            .field("audit", &"<audit_sink>")
+            .finish()
+    }
+}
+
+#[async_trait]
+impl MemorySignificantEventSink for DurableMemoryAuditSink {
+    async fn record_memory_significant_event(
+        &self,
+        event: MemorySignificantEvent,
+    ) -> Result<(), FilesystemError> {
+        let operation = memory_significant_operation(&event);
+        let record = memory_significant_audit(event, operation)?;
+        self.audit
+            .emit_audit(record)
+            .await
+            .map_err(|error| memory_audit_error(operation, error.to_string()))
+    }
+}
+
+#[async_trait]
+impl PromptWriteSafetyEventSink for DurableMemoryAuditSink {
+    async fn record_prompt_write_safety_event(
+        &self,
+        event: PromptWriteSafetyEvent,
+    ) -> Result<(), FilesystemError> {
+        let operation = prompt_write_operation_to_filesystem(event.operation);
+        let record = prompt_write_safety_audit(event, operation)?;
+        self.audit
+            .emit_audit(record)
+            .await
+            .map_err(|error| memory_audit_error(operation, error.to_string()))
+    }
+}
+
+fn memory_significant_audit(
+    event: MemorySignificantEvent,
+    operation: FilesystemOperation,
+) -> Result<AuditEnvelope, FilesystemError> {
+    let scope = memory_audit_scope(&event.scope, operation)?;
+    Ok(AuditEnvelope {
+        event_id: AuditEventId::new(),
+        correlation_id: CorrelationId::new(),
+        stage: AuditStage::After,
+        timestamp: Utc::now(),
+        tenant_id: scope.tenant_id,
+        user_id: scope.user_id,
+        agent_id: scope.agent_id,
+        project_id: scope.project_id,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+        process_id: None,
+        approval_request_id: None,
+        extension_id: Some(ExtensionId::new("memory.events").map_err(|error| {
+            memory_audit_error(
+                operation,
+                format!("invalid memory event extension id: {error}"),
+            )
+        })?),
+        action: ActionSummary {
+            kind: memory_significant_action_kind(event.kind).to_string(),
+            target: None,
+            effects: memory_significant_effects(event.kind),
+        },
+        decision: DecisionSummary {
+            kind: "memory_event_recorded".to_string(),
+            reason: None,
+            actor: None,
+        },
+        result: Some(ActionResultSummary {
+            success: true,
+            status: None,
+            output_bytes: event.byte_count,
+        }),
+    })
+}
+
+fn prompt_write_safety_audit(
+    event: PromptWriteSafetyEvent,
+    operation: FilesystemOperation,
+) -> Result<AuditEnvelope, FilesystemError> {
+    let scope = memory_audit_scope(&event.scope, operation)?;
+    Ok(AuditEnvelope {
+        event_id: AuditEventId::new(),
+        correlation_id: CorrelationId::new(),
+        stage: match event.kind {
+            PromptWriteSafetyEventKind::Rejected => AuditStage::Denied,
+            _ => AuditStage::After,
+        },
+        timestamp: Utc::now(),
+        tenant_id: scope.tenant_id,
+        user_id: scope.user_id,
+        agent_id: scope.agent_id,
+        project_id: scope.project_id,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+        process_id: None,
+        approval_request_id: None,
+        extension_id: Some(ExtensionId::new("memory.prompt_safety").map_err(|error| {
+            memory_audit_error(
+                operation,
+                format!("invalid memory prompt-safety extension id: {error}"),
+            )
+        })?),
+        action: ActionSummary {
+            kind: prompt_write_action_kind(event.operation).to_string(),
+            target: None,
+            effects: vec![EffectKind::WriteFilesystem],
+        },
+        decision: DecisionSummary {
+            kind: event
+                .reason_code
+                .map(prompt_safety_reason_projection_kind)
+                .unwrap_or_else(|| prompt_safety_event_kind_label(event.kind).to_string()),
+            reason: None,
+            actor: None,
+        },
+        result: prompt_safety_result(event.kind),
+    })
+}
+
+struct MemoryAuditScopeIds {
+    tenant_id: TenantId,
+    user_id: UserId,
+    agent_id: Option<AgentId>,
+    project_id: Option<ProjectId>,
+}
+
+fn memory_audit_scope(
+    scope: &MemoryDocumentScope,
+    operation: FilesystemOperation,
+) -> Result<MemoryAuditScopeIds, FilesystemError> {
+    Ok(MemoryAuditScopeIds {
+        tenant_id: TenantId::new(scope.tenant_id()).map_err(|error| {
+            memory_audit_error(operation, format!("invalid memory tenant id: {error}"))
+        })?,
+        user_id: UserId::new(scope.user_id()).map_err(|error| {
+            memory_audit_error(operation, format!("invalid memory user id: {error}"))
+        })?,
+        agent_id: scope
+            .agent_id()
+            .map(AgentId::new)
+            .transpose()
+            .map_err(|error| {
+                memory_audit_error(operation, format!("invalid memory agent id: {error}"))
+            })?,
+        project_id: scope
+            .project_id()
+            .map(ProjectId::new)
+            .transpose()
+            .map_err(|error| {
+                memory_audit_error(operation, format!("invalid memory project id: {error}"))
+            })?,
+    })
+}
+
+fn memory_significant_action_kind(kind: MemorySignificantEventKind) -> &'static str {
+    match kind {
+        MemorySignificantEventKind::DocumentWritten => "memory_document_written",
+        MemorySignificantEventKind::DocumentDeleted => "memory_document_deleted",
+        MemorySignificantEventKind::DocumentIndexed => "memory_document_indexed",
+        MemorySignificantEventKind::SearchPerformed => "memory_search_performed",
+        MemorySignificantEventKind::LayerRedirected => "memory_layer_redirected",
+    }
+}
+
+fn memory_significant_effects(kind: MemorySignificantEventKind) -> Vec<EffectKind> {
+    match kind {
+        MemorySignificantEventKind::DocumentWritten
+        | MemorySignificantEventKind::DocumentIndexed => {
+            vec![EffectKind::WriteFilesystem]
+        }
+        MemorySignificantEventKind::DocumentDeleted => vec![EffectKind::DeleteFilesystem],
+        MemorySignificantEventKind::SearchPerformed => vec![EffectKind::ReadFilesystem],
+        MemorySignificantEventKind::LayerRedirected => vec![EffectKind::WriteFilesystem],
+    }
+}
+
+fn memory_significant_operation(event: &MemorySignificantEvent) -> FilesystemOperation {
+    match event.kind {
+        MemorySignificantEventKind::DocumentWritten => FilesystemOperation::WriteFile,
+        MemorySignificantEventKind::DocumentDeleted => FilesystemOperation::Delete,
+        MemorySignificantEventKind::DocumentIndexed => FilesystemOperation::WriteFile,
+        MemorySignificantEventKind::SearchPerformed => FilesystemOperation::ReadFile,
+        MemorySignificantEventKind::LayerRedirected => FilesystemOperation::WriteFile,
+    }
+}
+
+fn prompt_write_operation_to_filesystem(operation: PromptWriteOperation) -> FilesystemOperation {
+    match operation {
+        PromptWriteOperation::Append => FilesystemOperation::AppendFile,
+        PromptWriteOperation::Write
+        | PromptWriteOperation::Patch
+        | PromptWriteOperation::Import
+        | PromptWriteOperation::Seed
+        | PromptWriteOperation::ProfileUpdate
+        | PromptWriteOperation::AdminSystemPromptUpdate => FilesystemOperation::WriteFile,
+    }
+}
+
+fn prompt_write_action_kind(operation: PromptWriteOperation) -> &'static str {
+    match operation {
+        PromptWriteOperation::Write => "write_file",
+        PromptWriteOperation::Append => "append_file",
+        PromptWriteOperation::Patch => "patch_file",
+        PromptWriteOperation::Import => "memory_import",
+        PromptWriteOperation::Seed => "memory_seed",
+        PromptWriteOperation::ProfileUpdate => "profile_update",
+        PromptWriteOperation::AdminSystemPromptUpdate => "admin_system_prompt_update",
+    }
+}
+
+fn prompt_safety_reason_projection_kind(reason: PromptSafetyReasonCode) -> String {
+    match reason {
+        PromptSafetyReasonCode::HighRiskPromptInjection => "prompt_high_risk",
+        PromptSafetyReasonCode::CriticalPromptInjection => "prompt_critical",
+        PromptSafetyReasonCode::PromptWritePolicyUnavailable => "prompt_policy_unavailable",
+        PromptSafetyReasonCode::PromptWritePolicyMisconfigured => "prompt_policy_misconfigured",
+        PromptSafetyReasonCode::ProtectedPathRegistryUnavailable => "protected_registry_missing",
+        PromptSafetyReasonCode::PromptWriteBypassNotAllowed => "prompt_bypass_denied",
+        PromptSafetyReasonCode::PromptWriteSafetyEventUnavailable => "prompt_event_unavailable",
+    }
+    .to_string()
+}
+
+fn prompt_safety_event_kind_label(kind: PromptWriteSafetyEventKind) -> &'static str {
+    match kind {
+        PromptWriteSafetyEventKind::Checked => "prompt_write_safety_checked",
+        PromptWriteSafetyEventKind::Warned => "prompt_write_safety_warned",
+        PromptWriteSafetyEventKind::Rejected => "prompt_write_safety_rejected",
+        PromptWriteSafetyEventKind::BypassAllowed => "prompt_write_safety_bypass_allowed",
+    }
+}
+
+fn prompt_safety_result(kind: PromptWriteSafetyEventKind) -> Option<ActionResultSummary> {
+    match kind {
+        PromptWriteSafetyEventKind::Rejected => None,
+        _ => Some(ActionResultSummary {
+            success: true,
+            status: None,
+            output_bytes: None,
+        }),
+    }
+}
+
+fn memory_audit_error(operation: FilesystemOperation, reason: String) -> FilesystemError {
+    match VirtualPath::new("/memory") {
+        Ok(path) => FilesystemError::Backend {
+            path,
+            operation,
+            reason,
+        },
+        Err(error) => FilesystemError::Contract(error),
+    }
 }
 
 #[async_trait]

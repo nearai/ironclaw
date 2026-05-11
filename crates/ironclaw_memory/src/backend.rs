@@ -7,6 +7,10 @@ use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
 
 use crate::chunking::{content_bytes_sha256, content_sha256};
 use crate::embedding::{EmbeddingProvider, embed_text};
+use crate::events::{
+    MemorySignificantEvent, MemorySignificantEventSink, MemorySignificantEventSource,
+    record_memory_significant_event,
+};
 use crate::indexer::MemoryDocumentIndexer;
 use crate::metadata::{MemoryWriteOptions, resolve_document_metadata};
 use crate::path::{
@@ -202,6 +206,7 @@ pub struct RepositoryMemoryBackend<R> {
     capabilities: MemoryBackendCapabilities,
     prompt_safety_policy: Option<Arc<dyn PromptWriteSafetyPolicy>>,
     prompt_safety_event_sink: Option<Arc<dyn PromptWriteSafetyEventSink>>,
+    memory_event_sink: Option<Arc<dyn MemorySignificantEventSink>>,
     prompt_protected_path_registry: PromptProtectedPathRegistry,
 }
 
@@ -226,6 +231,7 @@ where
                 registry.clone(),
             ))),
             prompt_safety_event_sink: None,
+            memory_event_sink: None,
             prompt_protected_path_registry: registry,
         }
     }
@@ -271,6 +277,15 @@ where
     {
         let event_sink: Arc<dyn PromptWriteSafetyEventSink> = event_sink;
         self.prompt_safety_event_sink = Some(event_sink);
+        self
+    }
+
+    pub fn with_memory_event_sink<S>(mut self, event_sink: Arc<S>) -> Self
+    where
+        S: MemorySignificantEventSink + 'static,
+    {
+        let event_sink: Arc<dyn MemorySignificantEventSink> = event_sink;
+        self.memory_event_sink = Some(event_sink);
         self
     }
 
@@ -431,6 +446,15 @@ where
         self.repository
             .write_document_with_options(path, bytes, &options)
             .await?;
+        record_memory_significant_event(
+            self.memory_event_sink.as_ref(),
+            MemorySignificantEvent::document_written(
+                path,
+                MemorySignificantEventSource::RepositoryMemoryBackend,
+                bytes.len() as u64,
+            ),
+        )
+        .await;
         if let Some(indexer) = &self.indexer {
             let _ = indexer.reindex_document(path).await;
         }
@@ -509,10 +533,19 @@ where
             .repository
             .compare_and_append_document_with_options(path, expected_previous_hash, bytes, &options)
             .await?;
-        if outcome == MemoryAppendOutcome::Appended
-            && let Some(indexer) = &self.indexer
-        {
-            let _ = indexer.reindex_document(path).await;
+        if outcome == MemoryAppendOutcome::Appended {
+            record_memory_significant_event(
+                self.memory_event_sink.as_ref(),
+                MemorySignificantEvent::document_written(
+                    path,
+                    MemorySignificantEventSource::RepositoryMemoryBackend,
+                    bytes.len() as u64,
+                ),
+            )
+            .await;
+            if let Some(indexer) = &self.indexer {
+                let _ = indexer.reindex_document(path).await;
+            }
         }
         Ok(outcome)
     }
@@ -615,9 +648,21 @@ where
             }
         }
 
-        self.repository
+        let results = self
+            .repository
             .search_documents(context.scope(), &request)
-            .await
+            .await?;
+        record_memory_significant_event(
+            self.memory_event_sink.as_ref(),
+            MemorySignificantEvent::search_performed(
+                context.scope(),
+                MemorySignificantEventSource::RepositoryMemoryBackend,
+                &request,
+                results.len() as u64,
+            ),
+        )
+        .await;
+        Ok(results)
     }
 }
 

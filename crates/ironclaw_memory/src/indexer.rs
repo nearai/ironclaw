@@ -9,6 +9,10 @@ use crate::chunking::{ChunkConfig, MemoryChunkWrite, chunk_document, content_sha
 use crate::embedding::{
     EmbeddingProvider, embedding_filesystem_error, validate_embedding_dimension,
 };
+use crate::events::{
+    MemorySignificantEvent, MemorySignificantEventSink, MemorySignificantEventSource,
+    record_memory_significant_event,
+};
 use crate::metadata::resolve_document_metadata;
 use crate::path::{MemoryDocumentPath, memory_error, valid_memory_path};
 use crate::repo::MemoryDocumentRepository;
@@ -42,6 +46,7 @@ pub struct ChunkingMemoryDocumentIndexer<R> {
     repository: Arc<R>,
     chunk_config: ChunkConfig,
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
+    memory_event_sink: Option<Arc<dyn MemorySignificantEventSink>>,
 }
 
 impl<R> ChunkingMemoryDocumentIndexer<R>
@@ -53,6 +58,7 @@ where
             repository,
             chunk_config: ChunkConfig::default(),
             embedding_provider: None,
+            memory_event_sink: None,
         }
     }
 
@@ -67,6 +73,36 @@ where
     {
         self.embedding_provider = Some(provider);
         self
+    }
+
+    pub fn with_memory_event_sink<S>(mut self, event_sink: Arc<S>) -> Self
+    where
+        S: MemorySignificantEventSink + 'static,
+    {
+        let event_sink: Arc<dyn MemorySignificantEventSink> = event_sink;
+        self.memory_event_sink = Some(event_sink);
+        self
+    }
+
+    async fn replace_document_chunks_and_record(
+        &self,
+        path: &MemoryDocumentPath,
+        expected_content_hash: &str,
+        chunks: &[MemoryChunkWrite],
+    ) -> Result<(), FilesystemError> {
+        self.repository
+            .replace_document_chunks_if_current(path, expected_content_hash, chunks)
+            .await?;
+        record_memory_significant_event(
+            self.memory_event_sink.as_ref(),
+            MemorySignificantEvent::document_indexed(
+                path,
+                MemorySignificantEventSource::ChunkingMemoryDocumentIndexer,
+                chunks.len() as u64,
+            ),
+        )
+        .await;
+        Ok(())
     }
 }
 
@@ -98,15 +134,13 @@ where
         let metadata = resolve_document_metadata(self.repository.as_ref(), path).await?;
         if metadata.skip_indexing == Some(true) {
             return self
-                .repository
-                .replace_document_chunks_if_current(path, &content_hash_at_read, &[])
+                .replace_document_chunks_and_record(path, &content_hash_at_read, &[])
                 .await;
         }
         let chunk_texts = chunk_document(content, self.chunk_config.clone());
         if chunk_texts.is_empty() {
             return self
-                .repository
-                .replace_document_chunks_if_current(path, &content_hash_at_read, &[])
+                .replace_document_chunks_and_record(path, &content_hash_at_read, &[])
                 .await;
         }
         let chunks = match build_chunk_writes(
@@ -137,8 +171,7 @@ where
                         embedding: None,
                     })
                     .collect();
-                self.repository
-                    .replace_document_chunks_if_current(path, &content_hash_at_read, &text_only)
+                self.replace_document_chunks_and_record(path, &content_hash_at_read, &text_only)
                     .await?;
                 return Err(error);
             }
@@ -164,12 +197,10 @@ where
         let metadata_at_commit = resolve_document_metadata(self.repository.as_ref(), path).await?;
         if metadata_at_commit.skip_indexing == Some(true) {
             return self
-                .repository
-                .replace_document_chunks_if_current(path, &content_hash_at_read, &[])
+                .replace_document_chunks_and_record(path, &content_hash_at_read, &[])
                 .await;
         }
-        self.repository
-            .replace_document_chunks_if_current(path, &content_hash_at_read, &chunks)
+        self.replace_document_chunks_and_record(path, &content_hash_at_read, &chunks)
             .await
     }
 }
