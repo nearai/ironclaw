@@ -4225,6 +4225,7 @@ dependencies = [
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_mcp",
+ "ironclaw_memory",
  "ironclaw_network",
  "ironclaw_processes",
  "ironclaw_reborn_event_store",
