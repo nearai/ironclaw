@@ -469,9 +469,13 @@ fn validate_snapshot(snapshot: &SkillRunSnapshot) -> Result<(), SkillContextErro
         return Err(SkillContextError::InvalidSnapshotVersion);
     }
 
-    let mut sorted_entries = snapshot.entries.clone();
-    sorted_entries.sort_by(compare_skill_entries);
-    let expected_version = compute_snapshot_version(&sorted_entries);
+    let expected_version = if entries_are_sorted_by_key(&snapshot.entries) {
+        compute_snapshot_version(&snapshot.entries)
+    } else {
+        let mut sorted_entries = snapshot.entries.clone();
+        sorted_entries.sort_by(compare_skill_entries);
+        compute_snapshot_version(&sorted_entries)
+    };
     if snapshot.snapshot_version != expected_version {
         return Err(SkillContextError::InvalidSnapshotVersion);
     }
@@ -488,6 +492,12 @@ fn validate_budget(budget: SkillContextBudget) -> Result<(), SkillContextError> 
     }
 
     Ok(())
+}
+
+fn entries_are_sorted_by_key(entries: &[InstalledSkillSnapshot]) -> bool {
+    entries
+        .windows(2)
+        .all(|pair| compare_skill_entries(&pair[0], &pair[1]) != Ordering::Greater)
 }
 
 fn compare_visible_skill_entries(
@@ -573,8 +583,22 @@ fn contains_raw_host_path(text: &str) -> bool {
 }
 
 fn contains_internal_handle_marker(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    lower.contains("cap_") || lower.contains("secret://") || lower.contains("secret:")
+    contains_ascii_case_insensitive(text, "cap_")
+        || contains_ascii_case_insensitive(text, "secret://")
+        || contains_ascii_case_insensitive(text, "secret:")
+}
+
+fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+    let haystack = haystack.as_bytes();
+    let needle = needle.as_bytes();
+    !needle.is_empty()
+        && haystack.len() >= needle.len()
+        && haystack.windows(needle.len()).any(|window| {
+            window
+                .iter()
+                .zip(needle)
+                .all(|(left, right)| left.eq_ignore_ascii_case(right))
+        })
 }
 
 fn checked_context_total_bytes(
@@ -647,5 +671,32 @@ mod tests {
     fn context_byte_accumulator_reports_arithmetic_overflow() {
         let err = checked_context_total_bytes(usize::MAX, 1, 0, usize::MAX).unwrap_err();
         assert_eq!(err, SkillContextError::ContextBudgetExceeded);
+    }
+
+    #[test]
+    fn entries_are_sorted_detects_sorted_and_unsorted_snapshots() {
+        let alpha = InstalledSkillSnapshot {
+            name: "alpha".to_string(),
+            trust: SkillTrustLevel::Trusted,
+            visibility: SkillVisibility::Visible,
+            prompt_content: Some("prompt".to_string()),
+            safe_description: "description".to_string(),
+            ordering_key: "alpha".to_string(),
+        };
+        let beta = InstalledSkillSnapshot {
+            name: "beta".to_string(),
+            ordering_key: "beta".to_string(),
+            ..alpha.clone()
+        };
+
+        assert!(entries_are_sorted_by_key(&[alpha.clone(), beta.clone()]));
+        assert!(!entries_are_sorted_by_key(&[beta, alpha]));
+    }
+
+    #[test]
+    fn internal_handle_marker_search_is_case_insensitive_without_lowercase_copy() {
+        assert!(contains_internal_handle_marker("uses CAP_file_read"));
+        assert!(contains_internal_handle_marker("uses Secret://oauth"));
+        assert!(!contains_internal_handle_marker("capacity planning"));
     }
 }
