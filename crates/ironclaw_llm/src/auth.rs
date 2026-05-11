@@ -105,6 +105,23 @@ impl OpenAiCodexLoginOptions {
         }
     }
 
+    /// Build options from a fully-resolved [`OpenAiCodexConfig`] — the
+    /// shape produced by the binary's `LlmConfig::resolve` pipeline,
+    /// which already layered TOML / env / DB precedence.
+    ///
+    /// Use this from `ironclaw login --openai-codex` so config-file
+    /// overrides for endpoints / client id / session path keep working,
+    /// not just env vars. Each field becomes `Some(_)` so it wins over
+    /// the built-in default in [`Self::into_codex_config`].
+    pub fn from_resolved_config(cfg: &OpenAiCodexConfig) -> Self {
+        Self {
+            auth_endpoint: Some(cfg.auth_endpoint.clone()),
+            api_base_url: Some(cfg.api_base_url.clone()),
+            client_id: Some(cfg.client_id.clone()),
+            session_path: Some(cfg.session_path.clone()),
+        }
+    }
+
     fn into_codex_config(self) -> OpenAiCodexConfig {
         let mut cfg = OpenAiCodexConfig::default();
         if let Some(v) = self.auth_endpoint {
@@ -171,6 +188,14 @@ pub enum AuthError {
         reason: String,
     },
 
+    /// The backend does not validate a single bearer token — its
+    /// credentials are managed end-to-end via [`start_login`] (OAuth
+    /// device-code, credential file, etc.). Callers asking to validate
+    /// a plain token against one of these backends should route through
+    /// `start_login` instead.
+    #[error("{backend:?}: token validation not supported; credentials are managed via start_login")]
+    TokenValidationNotSupported { backend: AuthBackend },
+
     #[error("{0}")]
     Other(String),
 }
@@ -212,9 +237,9 @@ pub async fn validate_token(backend: AuthBackend, token: &str) -> Result<(), Aut
                 .await
                 .map_err(|e| AuthError::invalid("github_copilot", e))
         }
-        AuthBackend::Gemini | AuthBackend::OpenAiCodex => Err(AuthError::Other(format!(
-            "validate_token not supported for {backend:?}; tokens are managed via start_login"
-        ))),
+        AuthBackend::Gemini | AuthBackend::OpenAiCodex => {
+            Err(AuthError::TokenValidationNotSupported { backend })
+        }
     }
 }
 

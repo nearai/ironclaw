@@ -28,9 +28,14 @@ pub struct ModelFetchOptions<'a> {
 ///   `options.base_url`. Used by openrouter, deepseek, custom endpoints,
 ///   etc.
 ///
-/// Always returns *something* — on network/auth failure each fetcher
-/// falls back to its own static default list so the setup wizard can
-/// still progress offline.
+/// For `anthropic` / `openai` / `ollama`, the per-backend fetcher falls
+/// back to its own static default list on network or auth failure so
+/// the setup wizard can still progress offline.
+///
+/// The generic openai-compatible branch has **no static fallback** — it
+/// returns an empty list if `options.base_url` is missing/empty or the
+/// `/v1/models` call fails. Callers must handle the empty case (e.g.
+/// fall back to the registry's default model).
 pub async fn fetch_models_for(
     provider_id: &str,
     options: &ModelFetchOptions<'_>,

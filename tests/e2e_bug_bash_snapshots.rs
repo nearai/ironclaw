@@ -25,7 +25,7 @@ mod bug_bash_tests {
         "/tests/fixtures/llm_traces/bug_bash"
     );
 
-    /// Regression for [#2541](https://github.com/near/ironclaw/issues/2541):
+    /// Regression for [#2541](https://github.com/nearai/ironclaw/issues/2541):
     /// agent must invoke a tool (not answer from training data) when the user
     /// asks it to do something. The snapshot pins `tool_calls` to a non-empty
     /// list with the `echo` tool. If the agent regresses to text-only

@@ -1161,6 +1161,13 @@ impl Settings {
             }
         }
 
+        // Same migration that runs on JSON disk loads — DB rows written
+        // before Layer D still carry the named `bedrock_*` columns, and
+        // resolvers now read only from `llm_builtin_overrides["bedrock"]
+        // .extras`. Without this call, existing DB-backed operators
+        // silently lose their bedrock region/profile/cross-region after
+        // upgrading.
+        settings.migrate_legacy_provider_fields();
         settings
     }
 
@@ -1260,8 +1267,13 @@ impl Settings {
             Err(e) => return Err(format!("failed to read {}: {}", path.display(), e)),
         };
 
-        let settings: Self = toml::from_str(&data)
+        let mut settings: Self = toml::from_str(&data)
             .map_err(|e| format!("invalid TOML in {}: {}", path.display(), e))?;
+        // Same migration that runs on JSON disk loads and DB rebuilds —
+        // TOML files written before Layer D still carry the named
+        // `bedrock_*` keys at the top level, and resolvers now read
+        // only from `llm_builtin_overrides["bedrock"].extras`.
+        settings.migrate_legacy_provider_fields();
         Ok(Some(settings))
     }
 
@@ -3043,6 +3055,79 @@ mod tests {
             "absent extras must still be backfilled from legacy field"
         );
         assert!(settings.bedrock_region.is_none(), "legacy field is drained");
+        assert!(settings.bedrock_profile.is_none());
+    }
+
+    /// Upgrade-path: a DB row carrying legacy `bedrock_*` settings
+    /// (written before Layer D) must reach the resolver via the new
+    /// `llm_builtin_overrides["bedrock"].extras` bag after
+    /// `Settings::from_db_map`. Without the migration call inside
+    /// `from_db_map`, the resolver would silently fall back to env vars
+    /// or defaults and route through the wrong AWS region/profile.
+    #[test]
+    fn legacy_bedrock_fields_migrate_into_extras_on_db_load() {
+        let mut map: std::collections::HashMap<String, serde_json::Value> = Default::default();
+        map.insert(
+            "llm_backend".to_string(),
+            serde_json::Value::String("bedrock".to_string()),
+        );
+        map.insert(
+            "bedrock_region".to_string(),
+            serde_json::Value::String("eu-west-1".to_string()),
+        );
+        map.insert(
+            "bedrock_cross_region".to_string(),
+            serde_json::Value::String("eu".to_string()),
+        );
+        map.insert(
+            "bedrock_profile".to_string(),
+            serde_json::Value::String("prod-bedrock".to_string()),
+        );
+
+        let settings = Settings::from_db_map(&map);
+        let bedrock = settings
+            .llm_builtin_overrides
+            .get("bedrock")
+            .expect("bedrock entry must exist after DB migration");
+        assert_eq!(bedrock.extra("region"), Some("eu-west-1"));
+        assert_eq!(bedrock.extra("cross_region"), Some("eu"));
+        assert_eq!(bedrock.extra("profile"), Some("prod-bedrock"));
+        assert!(
+            settings.bedrock_region.is_none(),
+            "named bedrock_region must be drained by the migration"
+        );
+        assert!(settings.bedrock_cross_region.is_none());
+        assert!(settings.bedrock_profile.is_none());
+    }
+
+    /// Upgrade-path: a `config.toml` written before Layer D carries the
+    /// named `bedrock_*` keys at the top level. `Settings::load_toml`
+    /// must run the same migration as JSON and DB loads so the resolver
+    /// sees the values via `extras`.
+    #[test]
+    fn legacy_bedrock_fields_migrate_into_extras_on_toml_load() {
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let path = tmpdir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"llm_backend = "bedrock"
+bedrock_region = "eu-west-1"
+bedrock_cross_region = "eu"
+bedrock_profile = "prod-bedrock"
+"#,
+        )
+        .expect("write legacy toml fixture");
+
+        let settings = Settings::load_toml(&path).expect("load ok").expect("some");
+        let bedrock = settings
+            .llm_builtin_overrides
+            .get("bedrock")
+            .expect("bedrock entry must exist after TOML migration");
+        assert_eq!(bedrock.extra("region"), Some("eu-west-1"));
+        assert_eq!(bedrock.extra("cross_region"), Some("eu"));
+        assert_eq!(bedrock.extra("profile"), Some("prod-bedrock"));
+        assert!(settings.bedrock_region.is_none());
+        assert!(settings.bedrock_cross_region.is_none());
         assert!(settings.bedrock_profile.is_none());
     }
 

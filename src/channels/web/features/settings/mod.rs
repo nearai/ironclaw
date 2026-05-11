@@ -713,7 +713,11 @@ pub async fn settings_import_handler(
 fn is_admin_only_setting_key(key: &str) -> bool {
     // Single source of truth lives in `crate::config::helpers` so the
     // write-side gate here cannot drift from the read-side strip filter.
-    crate::config::helpers::ADMIN_ONLY_LLM_SETTING_KEYS.contains(&key)
+    // Must match dotted subpaths too: a non-admin write to
+    // `llm_builtin_overrides.bedrock.extras.region` reaches the same
+    // resolver state as a write to `llm_builtin_overrides`, so the gate
+    // has to cover both shapes.
+    crate::config::helpers::is_admin_only_llm_key(key)
 }
 
 fn ensure_setting_write_allowed(
@@ -1637,6 +1641,28 @@ mod tests {
         assert!(is_admin_only_setting_key("ollama_base_url"));
         assert!(is_admin_only_setting_key("openai_compatible_base_url"));
         assert!(!is_admin_only_setting_key("selected_model"));
+    }
+
+    /// Regression: dotted subpaths under an admin-only root must also be
+    /// gated. The read-side strip filter (`strip_admin_only_llm_keys`)
+    /// supports both exact-match and dotted-prefix matching; the
+    /// write-side gate used to only check exact match, so a non-admin
+    /// could write `llm_builtin_overrides.bedrock.extras.region` directly
+    /// even though the root key was protected.
+    #[test]
+    fn test_admin_only_setting_keys_cover_dotted_subpaths() {
+        assert!(is_admin_only_setting_key(
+            "llm_builtin_overrides.bedrock.extras.region"
+        ));
+        assert!(is_admin_only_setting_key(
+            "llm_builtin_overrides.bedrock.api_key"
+        ));
+        assert!(is_admin_only_setting_key(
+            "llm_custom_providers.my_provider.base_url"
+        ));
+        // Sanity: unrelated dotted subpaths must still be allowed.
+        assert!(!is_admin_only_setting_key("tool_permissions.http"));
+        assert!(!is_admin_only_setting_key("agent.name"));
     }
 
     #[tokio::test]

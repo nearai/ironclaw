@@ -273,12 +273,27 @@ async fn async_main() -> anyhow::Result<()> {
                     }
                 }
 
-                start_login(
-                    LoginRequest::OpenAiCodex(OpenAiCodexLoginOptions::from_env()),
-                    &CliPrompt,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("{}", e))?;
+                // Resolve the full config so codex endpoints / client-id /
+                // session-path overrides committed to TOML or DB are
+                // honoured, not just env vars. `Config::from_env` runs the
+                // standard precedence pipeline (TOML < env < DB), and any
+                // resolved codex config wins over the env-only fallback.
+                let opts = match Config::from_env().await {
+                    Ok(cfg) => cfg
+                        .llm
+                        .openai_codex
+                        .as_ref()
+                        .map(OpenAiCodexLoginOptions::from_resolved_config)
+                        .unwrap_or_else(OpenAiCodexLoginOptions::from_env),
+                    // Login should still work on a fresh machine where
+                    // `Config::from_env` would fail (e.g. no DB). Fall
+                    // back to env-only options in that case.
+                    Err(_) => OpenAiCodexLoginOptions::from_env(),
+                };
+
+                start_login(LoginRequest::OpenAiCodex(opts), &CliPrompt)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e))?;
                 println!(
                     "OpenAI Codex authentication complete. Set LLM_BACKEND=openai_codex to use it."
                 );

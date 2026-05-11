@@ -34,13 +34,13 @@ cargo run
 
 | Issue | Fixture | Regression assertion encoded in the snapshot |
 |-------|---------|-----------------------------------------------|
-| [#2540](https://github.com/near/ironclaw/issues/2540) | `routine_timeout_regression.json` (TODO — record) | `final_state == Done`, total wall time under 300 s |
-| [#2541](https://github.com/near/ironclaw/issues/2541) | `summarization_uses_tools.json` | at least one `echo` tool call on a "do X" prompt |
-| [#2542](https://github.com/near/ironclaw/issues/2542) | `routine_setup_has_terminal.json` (TODO — record) | conversation ends with `Done` or `Failed`, non-empty surface |
-| [#2543](https://github.com/near/ironclaw/issues/2543) | `linear_oauth_recognized.json` (TODO — record) | no retrospective `tool_error` with `authorization` category |
-| [#2544](https://github.com/near/ironclaw/issues/2544) | `plan_followed_by_execution.json` (TODO — record) | at least one `ActionExecuted` event after the plan step |
-| [#2545](https://github.com/near/ironclaw/issues/2545) | `tool_result_non_empty.json` (TODO — record) | `ToolResult` preview length bucket > 0 |
-| [#2546](https://github.com/near/ironclaw/issues/2546) | `orchestrator_error_wrapped.json` (TODO — record) | no raw "HTTP 502" in conversation surface |
+| [#2540](https://github.com/nearai/ironclaw/issues/2540) | `routine_timeout_regression.json` (TODO — record) | `final_state == Done`, total wall time under 300 s |
+| [#2541](https://github.com/nearai/ironclaw/issues/2541) | `summarization_uses_tools.json` | at least one `echo` tool call on a "do X" prompt |
+| [#2542](https://github.com/nearai/ironclaw/issues/2542) | `routine_setup_has_terminal.json` (TODO — record) | conversation ends with `Done` or `Failed`, non-empty surface |
+| [#2543](https://github.com/nearai/ironclaw/issues/2543) | `linear_oauth_recognized.json` (TODO — record) | no retrospective `tool_error` with `authorization` category |
+| [#2544](https://github.com/nearai/ironclaw/issues/2544) | `plan_followed_by_execution.json` (TODO — record) | at least one `ActionExecuted` event after the plan step |
+| [#2545](https://github.com/nearai/ironclaw/issues/2545) | `tool_result_non_empty.json` (TODO — record) | `ToolResult` preview length bucket > 0 |
+| [#2546](https://github.com/nearai/ironclaw/issues/2546) | `orchestrator_error_wrapped.json` (TODO — record) | no raw "HTTP 502" in conversation surface |
 
 The TODO entries are placeholders until we have a staging environment that
 can reproduce the bug. Each line names the fixture file the snapshot test

@@ -221,6 +221,39 @@ impl SetupHint {
             _ => None,
         }
     }
+
+    /// Wire-stable snake_case discriminator for this setup hint.
+    ///
+    /// Matches the `#[serde(tag = "kind", rename_all = "snake_case")]`
+    /// representation, so the same string can be used as a typed
+    /// identifier in JSON payloads (e.g. the web LLM providers payload's
+    /// `credential_kind` field) without going through
+    /// `serde_json::to_value`. Useful for callers that need to branch
+    /// on which credential flow a backend uses (api_key, session_token,
+    /// file_based_credentials, …) so the answer doesn't drift from
+    /// what the wizard dispatches on.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::ApiKey { .. } => "api_key",
+            Self::Ollama { .. } => "ollama",
+            Self::OpenAiCompatible { .. } => "open_ai_compatible",
+            Self::AwsCredentials { .. } => "aws_credentials",
+            Self::OAuthDeviceCode { .. } => "o_auth_device_code",
+            Self::FileBasedCredentials { .. } => "file_based_credentials",
+            Self::SessionToken { .. } => "session_token",
+        }
+    }
+
+    /// For [`SetupHint::FileBasedCredentials`], the default path hint
+    /// the wizard offers (may contain `~`); `None` for other variants.
+    pub fn default_path_hint(&self) -> Option<&str> {
+        match self {
+            Self::FileBasedCredentials {
+                default_path_hint, ..
+            } => default_path_hint.as_deref(),
+            _ => None,
+        }
+    }
 }
 
 /// Validates unsupported_params during deserialization.
