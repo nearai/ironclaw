@@ -260,29 +260,11 @@ impl RuntimeEvent {
     }
 
     pub fn model_started(scope: ResourceScope, capability_id: CapabilityId) -> Self {
-        Self::new(RuntimeEventPayload {
-            kind: RuntimeEventKind::ModelStarted,
-            scope,
-            capability_id,
-            provider: None,
-            runtime: None,
-            process_id: None,
-            output_bytes: None,
-            error_kind: None,
-        })
+        Self::new_metadata_only(RuntimeEventKind::ModelStarted, scope, capability_id)
     }
 
     pub fn model_completed(scope: ResourceScope, capability_id: CapabilityId) -> Self {
-        Self::new(RuntimeEventPayload {
-            kind: RuntimeEventKind::ModelCompleted,
-            scope,
-            capability_id,
-            provider: None,
-            runtime: None,
-            process_id: None,
-            output_bytes: None,
-            error_kind: None,
-        })
+        Self::new_metadata_only(RuntimeEventKind::ModelCompleted, scope, capability_id)
     }
 
     pub fn model_failed(
@@ -303,8 +285,20 @@ impl RuntimeEvent {
     }
 
     pub fn assistant_reply_finalized(scope: ResourceScope, capability_id: CapabilityId) -> Self {
+        Self::new_metadata_only(
+            RuntimeEventKind::AssistantReplyFinalized,
+            scope,
+            capability_id,
+        )
+    }
+
+    fn new_metadata_only(
+        kind: RuntimeEventKind,
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+    ) -> Self {
         Self::new(RuntimeEventPayload {
-            kind: RuntimeEventKind::AssistantReplyFinalized,
+            kind,
             scope,
             capability_id,
             provider: None,

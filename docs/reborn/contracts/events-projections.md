@@ -262,6 +262,12 @@ Durable backends must match `InMemoryDurableEventLog` cursor behavior:
 
 Product-facing timeline, status, approval, auth, tool-call, process, resource, and memory views should be projections over durable logs, not a second source of truth. Projection services must tolerate replay gaps with explicit snapshot/rebase behavior and must not mutate control-plane state while deriving read models.
 
+Run status projections are projection-local read models. Model/reply milestone events use this status mapping:
+
+- `ModelStarted` and `ModelCompleted` keep the run `running`; model completion means the provider returned, not that the durable reply/transcript finalized.
+- `AssistantReplyFinalized` marks the run `completed` for metadata-only loop model/reply runs.
+- `ModelFailed` marks the run `failed` with sanitized `error_kind` only.
+
 ### Outbound egress and subscription state
 
 `ironclaw_outbound` owns the metadata-only state needed around projection delivery:

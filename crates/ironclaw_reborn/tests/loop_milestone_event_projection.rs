@@ -168,6 +168,34 @@ async fn drive_model_reply_milestones_and_assert_projection(
     let ParentLoopOutput::AssistantReply(reply) = model_response.output else {
         panic!("expected assistant reply output");
     };
+
+    let before_reply_finalized = event_stream_manager(Arc::clone(&events), Arc::clone(&audit))
+        .runtime_snapshot(ProjectionRequest {
+            scope: projection_scope_for_thread(success_thread_id.clone()),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        before_reply_finalized
+            .timeline
+            .entries
+            .iter()
+            .map(|entry| entry.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            TimelineEntryKind::ModelStarted,
+            TimelineEntryKind::ModelCompleted,
+        ]
+    );
+    assert_eq!(before_reply_finalized.runs.len(), 1);
+    assert_eq!(
+        before_reply_finalized.runs[0].status,
+        RunProjectionStatus::Running,
+        "model_completed only means provider returned; reply finalization can still fail"
+    );
+
     success_host
         .finalize_assistant_message(FinalizeAssistantMessage { reply })
         .await
