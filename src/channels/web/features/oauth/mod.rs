@@ -186,42 +186,58 @@ pub(crate) async fn oauth_callback_handler(
             .unwrap_or_else(|| "no-state".to_string());
         let correlation = oauth_failure_correlation_id(&state_seed);
 
-        // Pull the flow out by user_id before discarding it so we have a
-        // user_id to discard the engine gate against. The bare `.remove()`
-        // path returned the flow before but in the original code the value
-        // was thrown away.
-        //
-        // We also keep `secret_name` so we can scope the gate cleanup to
-        // the failed OAuth flow's credential — the broader
-        // `clear_engine_pending_auth(user, None)` path would also discard
-        // unrelated pending auth gates (Slack/MCP/etc.) that happen to be
-        // open for the same user on a different thread.
-        let mut removed_user_id: Option<String> = None;
-        let mut removed_secret_name: Option<String> = None;
-        if let Some(state_param) = params.get("state")
+        // Pull the full flow out so we can mirror the failure handling of
+        // the exchange-failure and expiry paths: SSE `OnboardingState::Failed`
+        // for the UI, legacy-v1 session `pending_auth` clear, and
+        // credential-scoped engine gate clear. Without all three, an
+        // `?error=access_denied` from the provider would leave the auth
+        // card spinning and a legacy v1 session intercepting the next
+        // user message as a token (Copilot review on PR #3381).
+        let removed_flow = if let Some(state_param) = params.get("state")
             && !state_param.is_empty()
             && let Ok(decoded) = oauth::decode_hosted_oauth_state(state_param)
             && let Some(ext_mgr) = state.extension_manager.as_ref()
-            && let Some(flow) = ext_mgr
+        {
+            ext_mgr
                 .pending_oauth_flows()
                 .write()
                 .await
                 .remove(&decoded.flow_id)
-        {
-            removed_user_id = Some(flow.user_id);
-            removed_secret_name = Some(flow.secret_name);
-        }
+        } else {
+            None
+        };
 
         tracing::warn!(
             category = OauthCallbackFailure::ProviderError.as_str(),
             correlation = %correlation,
             error = %error,
             description = %description,
-            user_id = removed_user_id.as_deref().unwrap_or("<unknown>"),
+            user_id = removed_flow
+                .as_ref()
+                .map(|f| f.user_id.as_str())
+                .unwrap_or("<unknown>"),
             "OAuth callback received provider error"
         );
 
-        if let Some(ref user_id) = removed_user_id {
+        if let Some(ref flow) = removed_flow {
+            // Notify the UI so the auth card stops spinning and shows the
+            // error instead. Same shape as the expiry branch.
+            if let Some(ref sse) = flow.sse_manager {
+                sse.broadcast_for_user(
+                    &flow.user_id,
+                    AppEvent::OnboardingState {
+                        extension_name: flow.extension_name.clone(),
+                        state: crate::channels::web::types::OnboardingStateDto::Failed,
+                        request_id: None,
+                        message: Some(description.clone()),
+                        instructions: None,
+                        auth_url: None,
+                        setup_url: None,
+                        onboarding: None,
+                        thread_id: None,
+                    },
+                );
+            }
             // Discard the pending engine auth gate that was waiting on
             // *this* OAuth flow (matched by credential name). Without this
             // the engine sits paused forever (#3320). Scoping by
@@ -230,9 +246,18 @@ pub(crate) async fn oauth_callback_handler(
             // on #3381. The bridge helper takes the credential as `&str`
             // and parses it backend-side, so the web layer keeps its
             // string-typed boundary intact.
-            if let Some(ref secret) = removed_secret_name {
-                crate::bridge::clear_engine_pending_auth_for_credential(user_id, secret).await;
-            }
+            crate::bridge::clear_engine_pending_auth_for_credential(
+                &flow.user_id,
+                &flow.secret_name,
+            )
+            .await;
+            // Legacy v1 session cleanup: drop `pending_auth` so the next
+            // user message goes through to the LLM rather than being
+            // intercepted as a token. Use `clear_session_auth_mode_for_thread`
+            // (not the broader `clear_auth_mode`) because the latter would
+            // re-call the unscoped engine cleanup and undo the credential
+            // scoping above.
+            let _ = clear_session_auth_mode_for_thread(&state, &flow.user_id, None).await;
         }
 
         return oauth_error_page(&description);
@@ -520,12 +545,16 @@ pub(crate) async fn oauth_callback_handler(
     // user message goes through to the LLM instead of being intercepted
     // as a token.
     //
-    // Do NOT clear the engine pending-auth gate here: the successful
-    // callback path still needs the pending gate so it can resolve and
-    // replay the paused action (preserving the paused_lease), and failed
-    // callbacks should leave the gate visible for retry from the UI.
-    // The gate is cleared by the engine itself when `ExternalCallback`
-    // resolves (success) or when the user explicitly cancels (failure).
+    // Engine-gate handling is scoped per failure mode and done earlier in
+    // each branch — provider-error, expiry, and exchange-failure each
+    // call `clear_engine_pending_auth_for_credential` at their own
+    // failure site (#3320 + PR #3381 review). The successful-callback
+    // path intentionally leaves the gate intact so the `ExternalCallback`
+    // resume below can resolve it and replay the paused action
+    // (preserving the paused_lease). This is why we use the legacy-v1-only
+    // `clear_session_auth_mode_for_thread` here instead of the broader
+    // `clear_auth_mode` helper — `clear_auth_mode` would also discard
+    // the engine gate on the *success* path and undo the resume.
     let _ = clear_session_auth_mode_for_thread(&state, &flow.user_id, None).await;
 
     // After successful OAuth, auto-activate the extension so it moves
@@ -1378,6 +1407,63 @@ mod tests {
             !flows.contains_key(flow_id),
             "pending OAuth flow should be drained on provider error"
         );
+    }
+
+    /// Regression for Copilot review on PR #3381: the provider-error
+    /// branch must mirror the exchange-failure / expiry branches —
+    /// broadcast `OnboardingState::Failed` so the UI auth card stops
+    /// spinning, not just drain the pending flow and return an error
+    /// page. Without the SSE emit the legacy v1 web UI gets no signal
+    /// that the OAuth dance has terminated.
+    #[tokio::test]
+    async fn test_oauth_callback_provider_error_broadcasts_onboarding_failed() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(Arc::clone(&secrets));
+        let sse_mgr = Arc::new(SseManager::new());
+        let mut receiver = sse_mgr.sender().subscribe();
+        let flow = fresh_pending_oauth_flow(Arc::clone(&secrets), Some(Arc::clone(&sse_mgr)), None);
+        let flow_id = "provider-error-broadcast-flow";
+        ext_mgr
+            .pending_oauth_flows()
+            .write()
+            .await
+            .insert(flow_id.to_string(), flow);
+
+        let state_param = crate::auth::oauth::encode_hosted_oauth_state(flow_id, None);
+        let state = test_gateway_state(Some(Arc::clone(&ext_mgr)));
+        let app = test_oauth_router(state);
+
+        let req = axum::http::Request::builder()
+            .uri(format!(
+                "/oauth/callback?error=access_denied&error_description=user_denied&state={}",
+                urlencoding::encode(&state_param)
+            ))
+            .body(Body::empty())
+            .expect("request");
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        match receiver.recv().await.expect("onboarding_state event").event {
+            crate::channels::web::types::AppEvent::OnboardingState {
+                extension_name,
+                state,
+                message,
+                ..
+            } => {
+                assert_eq!(extension_name, "test_tool");
+                assert_eq!(
+                    state,
+                    crate::channels::web::types::OnboardingStateDto::Failed
+                );
+                assert_eq!(message.as_deref(), Some("user_denied"));
+            }
+            event => panic!("expected OnboardingState event, got {event:?}"),
+        }
     }
 
     #[tokio::test]
