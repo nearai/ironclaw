@@ -4,7 +4,7 @@
 //! delete secrets on behalf of individual users so their BastionClaw agent can
 //! call back to external services with per-user credentials.
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use axum::{
     Json,
@@ -12,6 +12,7 @@ use axum::{
     http::StatusCode,
 };
 use base64::Engine as _;
+use regex::Regex;
 
 use crate::channels::web::auth::AdminUser;
 use crate::channels::web::server::GatewayState;
@@ -20,6 +21,9 @@ use crate::secrets::CreateSecretParams;
 // ── Byte-length constants mirrored from client/t3n-sdk/src/client/delegation.ts ──
 const ETH_SIG_LEN: usize = 65;
 const AGENT_PUBKEY_LEN: usize = 33;
+
+static ORG_DID_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^did:t3n:[0-9a-f]{40}$").expect("static regex"));
 
 /// Reasons a `t3n_delegation_token` value can fail shape validation.
 ///
@@ -209,8 +213,7 @@ fn validate_delegation_token(value: &str) -> Result<(), DelegationTokenValidatio
     }
 
     // ── 7. org_did must be a fully-qualified did:t3n:<40 lowercase hex> ───────
-    let org_did_re = regex::Regex::new(r"^did:t3n:[0-9a-f]{40}$").expect("static regex");
-    if !org_did_re.is_match(&org_did) {
+    if !ORG_DID_RE.is_match(&org_did) {
         return Err(DelegationTokenValidationError::InvalidOrgDidShape { value: org_did });
     }
 
@@ -502,7 +505,7 @@ mod tests {
 
     #[test]
     fn rejects_wrong_user_sig_length() {
-        // 39 bytes — the bug we actually hit on 2026-05-11.
+        // 39 bytes — short of a valid 65-byte ETH signature.
         let short_sig = b64u_encode(&[0xABu8; 39]);
         let mut v: serde_json::Value = serde_json::from_str(&valid_token()).unwrap();
         v["user_sig"] = serde_json::Value::String(short_sig);
