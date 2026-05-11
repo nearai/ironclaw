@@ -8,7 +8,6 @@ publish = false
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 ironclaw_events = { path = "../ironclaw_events" }
-ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_memory = { path = "../ironclaw_memory" }
 serde = { version = "1", features = ["derive"] }
@@ -16,6 +15,7 @@ thiserror = "2"
 
 [dev-dependencies]
 ironclaw_extensions = { path = "../ironclaw_extensions" }
+ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_memory = { path = "../ironclaw_memory", features = ["libsql"] }
 ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store" }
 libsql = { version = "0.6", default-features = false, features = ["core", "replication", "remote", "tls"] }

@@ -4,12 +4,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
+use ironclaw_host_api::{CorrelationId, ResourceScope};
 
 use crate::chunking::{content_bytes_sha256, content_sha256};
 use crate::embedding::{EmbeddingProvider, embed_text};
 use crate::events::{
-    MemorySignificantEvent, MemorySignificantEventSink, MemorySignificantEventSource,
-    record_memory_significant_event,
+    MemoryAuditContext, MemorySignificantEvent, MemorySignificantEventSink,
+    MemorySignificantEventSource, record_memory_significant_event,
 };
 use crate::indexer::MemoryDocumentIndexer;
 use crate::metadata::{MemoryWriteOptions, resolve_document_metadata};
@@ -53,6 +54,7 @@ pub struct MemoryBackendCapabilities {
 pub struct MemoryContext {
     scope: MemoryDocumentScope,
     invocation_id: Option<String>,
+    audit_context: Option<MemoryAuditContext>,
     prompt_write_safety_allowance: Option<PromptSafetyAllowanceId>,
     prompt_write_safety_enforced: bool,
 }
@@ -62,6 +64,7 @@ impl MemoryContext {
         Self {
             scope,
             invocation_id: None,
+            audit_context: None,
             prompt_write_safety_allowance: None,
             prompt_write_safety_enforced: false,
         }
@@ -69,6 +72,16 @@ impl MemoryContext {
 
     pub fn with_invocation_id(mut self, invocation_id: impl Into<String>) -> Self {
         self.invocation_id = Some(invocation_id.into());
+        self
+    }
+
+    pub fn with_audit_context(
+        mut self,
+        resource_scope: ResourceScope,
+        correlation_id: CorrelationId,
+    ) -> Self {
+        self.invocation_id = Some(resource_scope.invocation_id.to_string());
+        self.audit_context = Some(MemoryAuditContext::new(resource_scope, correlation_id));
         self
     }
 
@@ -105,6 +118,10 @@ impl MemoryContext {
 
     pub fn invocation_id(&self) -> Option<&str> {
         self.invocation_id.as_deref()
+    }
+
+    pub fn audit_context(&self) -> Option<&MemoryAuditContext> {
+        self.audit_context.as_ref()
     }
 
     pub fn prompt_write_safety_allowance(&self) -> Option<&PromptSafetyAllowanceId> {
@@ -430,6 +447,7 @@ where
                     content,
                     previous_content_hash: previous_hash.as_deref(),
                     allowance: context.prompt_write_safety_allowance(),
+                    audit_context: context.audit_context(),
                     filesystem_operation: FilesystemOperation::WriteFile,
                 },
             )
@@ -452,11 +470,14 @@ where
                 path,
                 MemorySignificantEventSource::RepositoryMemoryBackend,
                 bytes.len() as u64,
-            ),
+            )
+            .with_audit_context(context.audit_context()),
         )
         .await;
         if let Some(indexer) = &self.indexer {
-            let _ = indexer.reindex_document(path).await;
+            let _ = indexer
+                .reindex_document_with_audit_context(path, context.audit_context())
+                .await;
         }
         Ok(())
     }
@@ -516,6 +537,7 @@ where
                     content,
                     previous_content_hash: previous_hash.as_deref(),
                     allowance: context.prompt_write_safety_allowance(),
+                    audit_context: context.audit_context(),
                     filesystem_operation: FilesystemOperation::AppendFile,
                 },
             )
@@ -540,11 +562,14 @@ where
                     path,
                     MemorySignificantEventSource::RepositoryMemoryBackend,
                     bytes.len() as u64,
-                ),
+                )
+                .with_audit_context(context.audit_context()),
             )
             .await;
             if let Some(indexer) = &self.indexer {
-                let _ = indexer.reindex_document(path).await;
+                let _ = indexer
+                    .reindex_document_with_audit_context(path, context.audit_context())
+                    .await;
             }
         }
         Ok(outcome)
@@ -659,7 +684,8 @@ where
                 MemorySignificantEventSource::RepositoryMemoryBackend,
                 &request,
                 results.len() as u64,
-            ),
+            )
+            .with_audit_context(context.audit_context()),
         )
         .await;
         Ok(results)

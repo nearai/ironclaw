@@ -8,7 +8,7 @@ use ironclaw_memory::{
     ChunkConfig, DefaultPromptWriteSafetyPolicy, InMemoryMemoryDocumentRepository,
     MemoryAppendOutcome, MemoryBackend, MemoryBackendCapabilities, MemoryBackendFilesystemAdapter,
     MemoryContext, MemoryDocumentFilesystem, MemoryDocumentIndexer, MemoryDocumentPath,
-    MemoryDocumentRepository, MemoryDocumentScope, MemorySearchRequest,
+    MemoryDocumentRepository, MemoryDocumentScope, MemoryEventSinkError, MemorySearchRequest,
     PromptProtectedPathRegistry, PromptSafetyAllowanceId, PromptSafetyPolicyVersion,
     PromptSafetyReasonCode, PromptSafetySeverity, PromptWriteOperation, PromptWriteSafetyDecision,
     PromptWriteSafetyError, PromptWriteSafetyEvent, PromptWriteSafetyEventKind,
@@ -1394,7 +1394,7 @@ impl PromptWriteSafetyEventSink for RecordingPromptSafetyEventSink {
     async fn record_prompt_write_safety_event(
         &self,
         event: PromptWriteSafetyEvent,
-    ) -> Result<(), FilesystemError> {
+    ) -> Result<(), MemoryEventSinkError> {
         self.events.lock().unwrap().push(event);
         Ok(())
     }
@@ -1407,12 +1407,8 @@ impl PromptWriteSafetyEventSink for FailingPromptSafetyEventSink {
     async fn record_prompt_write_safety_event(
         &self,
         _event: PromptWriteSafetyEvent,
-    ) -> Result<(), FilesystemError> {
-        Err(FilesystemError::Backend {
-            path: VirtualPath::new("/memory").unwrap(),
-            operation: FilesystemOperation::WriteFile,
-            reason: "event sink unavailable".to_string(),
-        })
+    ) -> Result<(), MemoryEventSinkError> {
+        Err(MemoryEventSinkError::new("event sink unavailable"))
     }
 }
 

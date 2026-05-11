@@ -10,8 +10,8 @@ use crate::embedding::{
     EmbeddingProvider, embedding_filesystem_error, validate_embedding_dimension,
 };
 use crate::events::{
-    MemorySignificantEvent, MemorySignificantEventSink, MemorySignificantEventSource,
-    record_memory_significant_event,
+    MemoryAuditContext, MemorySignificantEvent, MemorySignificantEventSink,
+    MemorySignificantEventSource, record_memory_significant_event,
 };
 use crate::metadata::resolve_document_metadata;
 use crate::path::{MemoryDocumentPath, memory_error, valid_memory_path};
@@ -21,6 +21,29 @@ use crate::repo::MemoryDocumentRepository;
 #[async_trait]
 pub trait MemoryDocumentIndexer: Send + Sync {
     async fn reindex_document(&self, path: &MemoryDocumentPath) -> Result<(), FilesystemError>;
+
+    async fn reindex_document_with_audit_context(
+        &self,
+        path: &MemoryDocumentPath,
+        audit_context: Option<&MemoryAuditContext>,
+    ) -> Result<(), FilesystemError> {
+        let _ = audit_context;
+        self.reindex_document(path).await
+    }
+}
+
+/// Outcome of a hash-guarded chunk replacement attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryChunkReplaceOutcome {
+    Replaced,
+    SkippedMissingDocument,
+    SkippedStaleContentHash,
+}
+
+impl MemoryChunkReplaceOutcome {
+    pub fn did_mutate(self) -> bool {
+        matches!(self, Self::Replaced)
+    }
 }
 
 /// Repository operations used by the memory indexer to keep chunk/search rows in sync.
@@ -38,7 +61,7 @@ pub trait MemoryDocumentIndexRepository: Send + Sync {
         path: &MemoryDocumentPath,
         expected_content_hash: &str,
         chunks: &[MemoryChunkWrite],
-    ) -> Result<(), FilesystemError>;
+    ) -> Result<MemoryChunkReplaceOutcome, FilesystemError>;
 }
 
 /// Memory document indexer that chunks documents and updates DB-backed chunk rows.
@@ -89,20 +112,25 @@ where
         path: &MemoryDocumentPath,
         expected_content_hash: &str,
         chunks: &[MemoryChunkWrite],
-    ) -> Result<(), FilesystemError> {
-        self.repository
+        audit_context: Option<&MemoryAuditContext>,
+    ) -> Result<MemoryChunkReplaceOutcome, FilesystemError> {
+        let outcome = self
+            .repository
             .replace_document_chunks_if_current(path, expected_content_hash, chunks)
             .await?;
-        record_memory_significant_event(
-            self.memory_event_sink.as_ref(),
-            MemorySignificantEvent::document_indexed(
-                path,
-                MemorySignificantEventSource::ChunkingMemoryDocumentIndexer,
-                chunks.len() as u64,
-            ),
-        )
-        .await;
-        Ok(())
+        if outcome.did_mutate() {
+            record_memory_significant_event(
+                self.memory_event_sink.as_ref(),
+                MemorySignificantEvent::document_indexed(
+                    path,
+                    MemorySignificantEventSource::ChunkingMemoryDocumentIndexer,
+                    chunks.len() as u64,
+                )
+                .with_audit_context(audit_context),
+            )
+            .await;
+        }
+        Ok(outcome)
     }
 }
 
@@ -112,6 +140,14 @@ where
     R: MemoryDocumentRepository + MemoryDocumentIndexRepository + 'static,
 {
     async fn reindex_document(&self, path: &MemoryDocumentPath) -> Result<(), FilesystemError> {
+        self.reindex_document_with_audit_context(path, None).await
+    }
+
+    async fn reindex_document_with_audit_context(
+        &self,
+        path: &MemoryDocumentPath,
+        audit_context: Option<&MemoryAuditContext>,
+    ) -> Result<(), FilesystemError> {
         let Some(bytes) = self.repository.read_document(path).await? else {
             return Ok(());
         };
@@ -133,15 +169,25 @@ where
         let content_hash_at_read = content_sha256(content);
         let metadata = resolve_document_metadata(self.repository.as_ref(), path).await?;
         if metadata.skip_indexing == Some(true) {
-            return self
-                .replace_document_chunks_and_record(path, &content_hash_at_read, &[])
-                .await;
+            self.replace_document_chunks_and_record(
+                path,
+                &content_hash_at_read,
+                &[],
+                audit_context,
+            )
+            .await?;
+            return Ok(());
         }
         let chunk_texts = chunk_document(content, self.chunk_config.clone());
         if chunk_texts.is_empty() {
-            return self
-                .replace_document_chunks_and_record(path, &content_hash_at_read, &[])
-                .await;
+            self.replace_document_chunks_and_record(
+                path,
+                &content_hash_at_read,
+                &[],
+                audit_context,
+            )
+            .await?;
+            return Ok(());
         }
         let chunks = match build_chunk_writes(
             path,
@@ -171,8 +217,13 @@ where
                         embedding: None,
                     })
                     .collect();
-                self.replace_document_chunks_and_record(path, &content_hash_at_read, &text_only)
-                    .await?;
+                self.replace_document_chunks_and_record(
+                    path,
+                    &content_hash_at_read,
+                    &text_only,
+                    audit_context,
+                )
+                .await?;
                 return Err(error);
             }
         };
@@ -196,12 +247,23 @@ where
         // #3180 MED `indexer.rs:122`).
         let metadata_at_commit = resolve_document_metadata(self.repository.as_ref(), path).await?;
         if metadata_at_commit.skip_indexing == Some(true) {
-            return self
-                .replace_document_chunks_and_record(path, &content_hash_at_read, &[])
-                .await;
+            self.replace_document_chunks_and_record(
+                path,
+                &content_hash_at_read,
+                &[],
+                audit_context,
+            )
+            .await?;
+            return Ok(());
         }
-        self.replace_document_chunks_and_record(path, &content_hash_at_read, &chunks)
-            .await
+        self.replace_document_chunks_and_record(
+            path,
+            &content_hash_at_read,
+            &chunks,
+            audit_context,
+        )
+        .await?;
+        Ok(())
     }
 }
 
@@ -263,6 +325,7 @@ mod tests {
 
     use super::*;
     use crate::embedding::EmbeddingError;
+    use crate::events::MemoryEventSinkError;
     use crate::path::MemoryDocumentScope;
     use crate::search::{MemorySearchRequest, MemorySearchResult};
 
@@ -295,6 +358,7 @@ mod tests {
         // {"skip_indexing": true} when set, otherwise empty
         metadata: Option<serde_json::Value>,
         calls: Mutex<Vec<IndexerCall>>,
+        replace_outcome: MemoryChunkReplaceOutcome,
     }
 
     impl RecordingRepo {
@@ -303,11 +367,17 @@ mod tests {
                 content: content.into(),
                 metadata: None,
                 calls: Mutex::new(Vec::new()),
+                replace_outcome: MemoryChunkReplaceOutcome::Replaced,
             }
         }
 
         fn with_skip_indexing(mut self) -> Self {
             self.metadata = Some(serde_json::json!({"skip_indexing": true}));
+            self
+        }
+
+        fn with_replace_outcome(mut self, outcome: MemoryChunkReplaceOutcome) -> Self {
+            self.replace_outcome = outcome;
             self
         }
     }
@@ -359,11 +429,33 @@ mod tests {
             _path: &MemoryDocumentPath,
             expected_content_hash: &str,
             chunks: &[MemoryChunkWrite],
-        ) -> Result<(), FilesystemError> {
+        ) -> Result<MemoryChunkReplaceOutcome, FilesystemError> {
             self.calls.lock().unwrap().push(IndexerCall::Replace {
                 chunks: chunks.len(),
                 hash: expected_content_hash.to_string(),
             });
+            Ok(self.replace_outcome)
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingMemoryEventSink {
+        events: Mutex<Vec<MemorySignificantEvent>>,
+    }
+
+    impl RecordingMemoryEventSink {
+        fn events(&self) -> Vec<MemorySignificantEvent> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl MemorySignificantEventSink for RecordingMemoryEventSink {
+        async fn record_memory_significant_event(
+            &self,
+            event: MemorySignificantEvent,
+        ) -> Result<(), MemoryEventSinkError> {
+            self.events.lock().unwrap().push(event);
             Ok(())
         }
     }
@@ -421,6 +513,32 @@ mod tests {
             IndexerCall::Replace { chunks, hash }
                 if *chunks > 0 && hash == &content_sha256(content)
         ));
+    }
+
+    #[tokio::test]
+    async fn stale_hash_noop_does_not_emit_document_indexed_event() {
+        let content = "alpha beta gamma delta epsilon";
+        let repo = Arc::new(
+            RecordingRepo::new(content)
+                .with_replace_outcome(MemoryChunkReplaceOutcome::SkippedStaleContentHash),
+        );
+        let sink = Arc::new(RecordingMemoryEventSink::default());
+        let indexer = ChunkingMemoryDocumentIndexer::new(repo.clone())
+            .with_memory_event_sink(Arc::clone(&sink));
+
+        indexer.reindex_document(&doc_path()).await.unwrap();
+
+        let calls = repo.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "replace still runs through hash guard");
+        assert!(matches!(
+            &calls[0],
+            IndexerCall::Replace { chunks, hash }
+                if *chunks > 0 && hash == &content_sha256(content)
+        ));
+        assert!(
+            sink.events().is_empty(),
+            "stale/no-op chunk replacement must not emit document_indexed"
+        );
     }
 
     #[tokio::test]
@@ -515,12 +633,12 @@ mod tests {
             _path: &MemoryDocumentPath,
             expected_content_hash: &str,
             chunks: &[MemoryChunkWrite],
-        ) -> Result<(), FilesystemError> {
+        ) -> Result<MemoryChunkReplaceOutcome, FilesystemError> {
             self.calls.lock().unwrap().push(IndexerCall::Replace {
                 chunks: chunks.len(),
                 hash: expected_content_hash.to_string(),
             });
-            Ok(())
+            Ok(MemoryChunkReplaceOutcome::Replaced)
         }
     }
 

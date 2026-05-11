@@ -8,11 +8,53 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_filesystem::FilesystemError;
+use ironclaw_host_api::{CorrelationId, ResourceScope};
 
 use crate::chunking::content_sha256;
 use crate::path::{MemoryDocumentPath, MemoryDocumentScope};
 use crate::search::MemorySearchRequest;
+
+/// Redacted caller/audit context attached to memory events when the caller has one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryAuditContext {
+    pub resource_scope: ResourceScope,
+    pub correlation_id: CorrelationId,
+}
+
+impl MemoryAuditContext {
+    pub fn new(resource_scope: ResourceScope, correlation_id: CorrelationId) -> Self {
+        Self {
+            resource_scope,
+            correlation_id,
+        }
+    }
+}
+
+/// Error returned by host-composed memory event sinks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryEventSinkError {
+    reason: String,
+}
+
+impl MemoryEventSinkError {
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+}
+
+impl std::fmt::Display for MemoryEventSinkError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.reason)
+    }
+}
+
+impl std::error::Error for MemoryEventSinkError {}
 
 /// Significant memory fact class emitted by memory services.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +114,7 @@ pub struct MemorySignificantEvent {
     pub result_count: Option<u64>,
     pub full_text: Option<bool>,
     pub vector: Option<bool>,
+    pub audit_context: Option<MemoryAuditContext>,
 }
 
 impl MemorySignificantEvent {
@@ -91,6 +134,7 @@ impl MemorySignificantEvent {
             result_count: None,
             full_text: None,
             vector: None,
+            audit_context: None,
         }
     }
 
@@ -110,6 +154,7 @@ impl MemorySignificantEvent {
             result_count: None,
             full_text: None,
             vector: None,
+            audit_context: None,
         }
     }
 
@@ -130,7 +175,13 @@ impl MemorySignificantEvent {
             result_count: Some(result_count),
             full_text: Some(request.full_text()),
             vector: Some(request.vector()),
+            audit_context: None,
         }
+    }
+
+    pub fn with_audit_context(mut self, audit_context: Option<&MemoryAuditContext>) -> Self {
+        self.audit_context = audit_context.cloned();
+        self
     }
 }
 
@@ -140,7 +191,7 @@ pub trait MemorySignificantEventSink: Send + Sync {
     async fn record_memory_significant_event(
         &self,
         event: MemorySignificantEvent,
-    ) -> Result<(), FilesystemError>;
+    ) -> Result<(), MemoryEventSinkError>;
 }
 
 pub(crate) async fn record_memory_significant_event(

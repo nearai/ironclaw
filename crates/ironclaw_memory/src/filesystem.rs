@@ -261,6 +261,7 @@ impl RootFilesystem for MemoryBackendFilesystemAdapter {
                     content,
                     previous_content_hash: previous_hash.as_deref(),
                     allowance: context.prompt_write_safety_allowance(),
+                    audit_context: context.audit_context(),
                     filesystem_operation: FilesystemOperation::WriteFile,
                 },
             )
@@ -341,6 +342,7 @@ impl RootFilesystem for MemoryBackendFilesystemAdapter {
                         content,
                         previous_content_hash: previous_prompt_hash.as_deref(),
                         allowance: context.prompt_write_safety_allowance(),
+                        audit_context: context.audit_context(),
                         filesystem_operation: FilesystemOperation::AppendFile,
                     },
                 )
@@ -615,6 +617,7 @@ impl RootFilesystem for MemoryDocumentFilesystem {
                     content,
                     previous_content_hash: previous_hash.as_deref(),
                     allowance: prompt_safety_allowance.as_ref(),
+                    audit_context: None,
                     filesystem_operation: FilesystemOperation::WriteFile,
                 },
             )
@@ -716,6 +719,7 @@ impl RootFilesystem for MemoryDocumentFilesystem {
                         content,
                         previous_content_hash: previous_prompt_hash.as_deref(),
                         allowance: prompt_safety_allowance.as_ref(),
+                        audit_context: None,
                         filesystem_operation: FilesystemOperation::AppendFile,
                     },
                 )
