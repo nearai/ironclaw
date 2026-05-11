@@ -28,6 +28,7 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | `recording.rs` | `RecordingLlm` — trace capture for E2E replay testing (`IRONCLAW_RECORD_TRACE`) |
 | `bedrock.rs` | AWS Bedrock provider via native Converse API (feature-gated: `--features bedrock`) |
 | `anthropic_oauth.rs` | Anthropic OAuth provider (Claude.ai subscription / OAuth tokens, fallback when no API key) |
+| `provider_pool.rs` | `RouteKeyedProviderPool` — route-keyed cache of `Arc<dyn LlmProvider>` instances for per-route provider management |
 | `gemini_oauth.rs` | Gemini OAuth provider (Cloud OAuth credentials → `generativelanguage.googleapis.com`) |
 | `github_copilot.rs` | GitHub Copilot Chat provider (uses dedicated reqwest client, not `RigAdapter`) |
 | `github_copilot_auth.rs` | Copilot session-token exchange and refresh (`CopilotTokenManager`) |

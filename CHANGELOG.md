@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(reborn)* add model route types (`ModelSlot`, `ModelRoute`, `ModelSelectionPolicy`, `ModelRouteResolver`) and `ResolvedModelRoute` snapshot for user-selectable model routing with policy modes (`ManagedOnly`, `UserSelectableAllowlist`, `DeveloperAnyConfigured`)
+- *(reborn)* add `RouteKeyedProviderPool` in `ironclaw_llm` for per-route LLM provider instance management
+- *(reborn)* wire resolved model route into `ResolvedRunProfile` and `LoopModelGatewayRequest` for in-progress run isolation
+
 ## [0.28.0](https://github.com/nearai/ironclaw/compare/ironclaw-v0.27.0...ironclaw-v0.28.0) - 2026-05-07
 
 ### Added
