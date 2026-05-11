@@ -33,7 +33,7 @@ Add tests inside `crates/ironclaw_common/src/trust_boundary.rs` for these exact 
 ```rust
 #[test]
 fn untrusted_prompt_envelope_escapes_body_and_attributes() {
-    let content = UntrustedPromptContent::new(
+    let content = UntrustedPromptContent::new_host_classified(
         UntrustedPromptSource::Memory,
         PromptContentTrust::Installed,
         Some("mem\"1".to_string()),
@@ -101,7 +101,7 @@ Implement:
 pub enum UntrustedPromptSource { Memory, Skill, Extension, Search, Tool, Other(String) }
 pub enum PromptContentTrust { Sandbox, Installed, Trusted, FirstParty, System, Unknown }
 pub struct UntrustedPromptContent { source, trust, id, body }
-impl UntrustedPromptContent { pub fn new(...); pub fn render_envelope(&self) -> String; }
+impl UntrustedPromptContent { pub fn new_unclassified(...); pub fn new_host_classified(...); pub fn render_envelope(&self) -> String; }
 
 pub enum HashPurpose { StableCacheKey, Fingerprint, ReplaySurfaceVersion, TrustBinding, TamperCheck, AuthenticityAdjacent }
 pub enum HashAlgorithm { Fnv, DefaultHasher, Sha256, Blake3, Other(String) }
@@ -111,7 +111,8 @@ pub enum OperatorErrorClass { Transient, Permanent, Misconfigured, PolicyDenied 
 impl OperatorErrorClass { pub fn is_retryable(self) -> bool; }
 
 pub struct BoundedCounter { limit: usize, used: usize }
-pub struct LimitExceeded { limit: usize, attempted: usize }
+pub enum LimitExceededReason { LimitExceeded, Overflow }
+pub struct LimitExceeded { limit: usize, attempted: usize, reason: LimitExceededReason }
 impl BoundedCounter { pub fn new(limit: usize) -> Self; pub fn try_add(&mut self, amount: usize) -> Result<usize, LimitExceeded>; }
 ```
 

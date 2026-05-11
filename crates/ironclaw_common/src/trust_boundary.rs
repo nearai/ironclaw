@@ -36,7 +36,7 @@ impl UntrustedPromptSource {
 /// Trust metadata attached to untrusted prompt content.
 ///
 /// This is only model-facing provenance. It is not an authority grant.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PromptContentTrust {
     Sandbox,
@@ -61,7 +61,11 @@ impl PromptContentTrust {
 }
 
 /// Text that must be rendered as data, not as raw prompt instructions.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// This type is intentionally not deserializable. Host prompt assembly code
+/// must classify source/trust provenance after authorization instead of
+/// accepting model-facing trust labels from wire JSON.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UntrustedPromptContent {
     source: UntrustedPromptSource,
     trust: PromptContentTrust,
@@ -70,7 +74,27 @@ pub struct UntrustedPromptContent {
 }
 
 impl UntrustedPromptContent {
-    pub fn new(
+    /// Construct content whose trust provenance has not been host-classified.
+    pub fn new_unclassified(
+        source: UntrustedPromptSource,
+        id: Option<String>,
+        body: String,
+    ) -> Self {
+        Self {
+            source,
+            trust: PromptContentTrust::Unknown,
+            id,
+            body,
+        }
+    }
+
+    /// Construct content after host-side classification of model-facing trust
+    /// provenance.
+    ///
+    /// This constructor does not grant authority. Callers must only pass trust
+    /// values derived from an already-authorized host policy or registry row,
+    /// never directly from retrieved content or user/provider JSON.
+    pub fn new_host_classified(
         source: UntrustedPromptSource,
         trust: PromptContentTrust,
         id: Option<String>,
@@ -239,12 +263,14 @@ impl BoundedCounter {
             return Err(LimitExceeded {
                 limit: self.limit,
                 attempted: usize::MAX,
+                reason: LimitExceededReason::Overflow,
             });
         };
         if attempted > self.limit {
             return Err(LimitExceeded {
                 limit: self.limit,
                 attempted,
+                reason: LimitExceededReason::LimitExceeded,
             });
         }
         self.used = attempted;
@@ -252,12 +278,21 @@ impl BoundedCounter {
     }
 }
 
+/// Why an admission counter rejected a new amount.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LimitExceededReason {
+    LimitExceeded,
+    Overflow,
+}
+
 /// Stable limit-exceeded error for admission/back-pressure helpers.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("limit exceeded: attempted {attempted} > limit {limit}")]
+#[error("limit exceeded: attempted {attempted} > limit {limit} ({reason:?})")]
 pub struct LimitExceeded {
     limit: usize,
     attempted: usize,
+    reason: LimitExceededReason,
 }
 
 impl LimitExceeded {
@@ -267,6 +302,10 @@ impl LimitExceeded {
 
     pub fn attempted(&self) -> usize {
         self.attempted
+    }
+
+    pub fn reason(&self) -> LimitExceededReason {
+        self.reason
     }
 }
 
@@ -289,7 +328,7 @@ mod tests {
 
     #[test]
     fn untrusted_prompt_envelope_escapes_body_and_attributes() {
-        let content = UntrustedPromptContent::new(
+        let content = UntrustedPromptContent::new_host_classified(
             UntrustedPromptSource::Memory,
             PromptContentTrust::Installed,
             Some("mem\"1".to_string()),
@@ -336,5 +375,16 @@ mod tests {
         let err = overflow.try_add(1).unwrap_err();
         assert_eq!(err.limit(), usize::MAX);
         assert_eq!(err.attempted(), usize::MAX);
+        assert_eq!(err.reason(), LimitExceededReason::Overflow);
+    }
+
+    #[test]
+    fn sealed_witness_pattern_is_explicit_for_host_minted_values() {
+        struct HostOnlyWitness;
+        impl super::private::Sealed for HostOnlyWitness {}
+        impl TrustedConstructionWitness for HostOnlyWitness {}
+
+        fn requires_host_witness<W: TrustedConstructionWitness>() {}
+        requires_host_witness::<HostOnlyWitness>();
     }
 }

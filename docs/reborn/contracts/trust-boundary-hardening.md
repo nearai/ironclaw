@@ -127,7 +127,7 @@ UntrustedPromptContent {
     body: String,
 }
 
-UntrustedPromptEnvelope::render_xmlish(...)
+UntrustedPromptContent::render_envelope(...)
 ```
 
 The primitive should be pure and unit-tested. Later slices wire it through `HostManagedLoopPromptPort`, memory prompt services, and skill context services.
