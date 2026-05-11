@@ -40,7 +40,6 @@ use crate::LoopMessageRef;
 
 use super::{
     AgentLoopHostError, AgentLoopHostErrorKind, LoopContextSnippet, LoopContextSnippetMetadata,
-    UntrustedContextKind, untrusted_context_summary,
 };
 
 // ---------------------------------------------------------------------------
