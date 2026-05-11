@@ -16,6 +16,7 @@ mod policy;
 mod prompt;
 mod refs;
 mod resolver;
+mod skill_context;
 mod snapshot;
 
 pub use driver::{
@@ -61,5 +62,10 @@ pub use refs::{
 pub use resolver::{
     InMemoryRunProfileRegistry, InMemoryRunProfileResolver, RunProfileDefinition,
     RunProfileResolutionRequest, RunProfileResolver,
+};
+pub use skill_context::{
+    InstalledSkillSnapshot, NoopSkillContextSource, SkillContextBudget, SkillContextError,
+    SkillContextService, SkillContextSnippet, SkillContextSource, SkillRunSnapshot,
+    SkillTrustLevel, SkillVisibility,
 };
 pub use snapshot::ResolvedRunProfile;
