@@ -4,11 +4,12 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_loop_support::{
-    HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
-    HostManagedModelResponse,
+    HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
+    HostManagedModelRequest, HostManagedModelResponse,
 };
 use ironclaw_reborn::{
     RebornLoopDriverHostFactory, RebornLoopDriverHostRequest, TextOnlyLoopHostConfig,
+    TextOnlyModelReplyDriver,
     driver_registry::{DriverKind, DriverRegistry, DriverRequirements},
     turn_runner::{HostFactory, TurnRunnerWakeReceiver, TurnRunnerWorker, TurnRunnerWorkerConfig},
 };
@@ -159,6 +160,142 @@ async fn text_only_host_factory_builds_complete_agent_loop_driver_host() {
         ]
     );
     assert_public_milestones_hide_raw_payloads(&fixture.milestones());
+}
+
+#[tokio::test]
+async fn text_only_model_reply_driver_runs_prompt_model_transcript_path() {
+    let mut fixture = HostFixture::new(
+        "thread-driver-happy",
+        "RAW_PROMPT_TEXT_SENTINEL sk-prompt-secret /host/path tool_input",
+    )
+    .await;
+    let driver = TextOnlyModelReplyDriver::default();
+    assign_driver_to_fixture(&mut fixture, driver.descriptor());
+    let host = fixture.build_host().await;
+
+    let exit = driver
+        .run(driver_request(&fixture.context), &host)
+        .await
+        .unwrap();
+
+    let LoopExit::Completed(completed) = exit else {
+        panic!("expected completed final reply exit");
+    };
+    assert_eq!(completed.completion_kind, LoopCompletionKind::FinalReply);
+    assert_eq!(completed.result_refs, Vec::new());
+    assert_eq!(completed.reply_message_refs.len(), 1);
+    let reply_ref = completed.reply_message_refs[0].clone();
+
+    let history = fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    let assistant = history
+        .messages
+        .iter()
+        .find(|message| message.kind == MessageKind::Assistant)
+        .expect("driver must persist assistant reply through transcript port");
+    assert_eq!(assistant.status, MessageStatus::Finalized);
+    assert_eq!(assistant.content.as_deref(), Some("model says hi"));
+    assert_eq!(reply_ref.as_str(), format!("msg:{}", assistant.message_id));
+
+    let requests = fixture.gateway.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].messages.len(), 1);
+    assert_eq!(
+        requests[0].messages[0].content,
+        "RAW_PROMPT_TEXT_SENTINEL sk-prompt-secret /host/path tool_input"
+    );
+    assert_eq!(
+        fixture.milestone_names(),
+        vec![
+            "prompt_bundle_built",
+            "model_started",
+            "model_completed",
+            "assistant_reply_finalized",
+        ]
+    );
+    assert_public_milestones_hide_raw_payloads(&fixture.milestones());
+    assert_driver_public_outputs_hide_raw_payloads(&completed);
+}
+
+#[tokio::test]
+async fn text_only_model_reply_driver_sanitizes_model_failures_and_skips_transcript_write() {
+    let mut fixture = HostFixture::new(
+        "thread-driver-model-error",
+        "RAW_PROMPT_TEXT_SENTINEL sk-prompt-secret /host/path tool_input",
+    )
+    .await;
+    fixture.gateway.fail_with_model_error(
+        HostManagedModelErrorKind::PolicyDenied,
+        "RAW_PROVIDER_ERROR invalid api key sk-provider-secret /host/path tool_input",
+    );
+    let driver = TextOnlyModelReplyDriver::default();
+    assign_driver_to_fixture(&mut fixture, driver.descriptor());
+    let host = fixture.build_host().await;
+
+    let error = driver
+        .run(driver_request(&fixture.context), &host)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        AgentLoopDriverError::Failed { ref reason_kind } if reason_kind == "model_error"
+    ));
+    assert_driver_error_hides_raw_payloads(&error);
+    assert_no_assistant_message(&fixture).await;
+    assert_eq!(
+        fixture.milestone_names(),
+        vec!["prompt_bundle_built", "model_started"]
+    );
+    assert_public_milestones_hide_raw_payloads(&fixture.milestones());
+}
+
+#[tokio::test]
+async fn text_only_model_reply_driver_rejects_capability_calls_without_dispatching_tools() {
+    let mut fixture = HostFixture::new("thread-driver-capability-call", "hello needs tool").await;
+    fixture.gateway.respond_with_capability_calls();
+    let driver = TextOnlyModelReplyDriver::default();
+    assign_driver_to_fixture(&mut fixture, driver.descriptor());
+    let host = fixture.build_host().await;
+
+    let error = driver
+        .run(driver_request(&fixture.context), &host)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        AgentLoopDriverError::Failed { ref reason_kind } if reason_kind == "invalid_model_output"
+    ));
+    assert_driver_error_hides_raw_payloads(&error);
+    assert_no_assistant_message(&fixture).await;
+    assert_eq!(
+        fixture.milestone_names(),
+        vec!["prompt_bundle_built", "model_started", "model_completed"]
+    );
+}
+
+#[tokio::test]
+async fn text_only_model_reply_driver_rejects_profiles_not_assigned_to_driver() {
+    let fixture = HostFixture::new("thread-driver-profile-mismatch", "hello mismatch").await;
+    let host = fixture.build_host().await;
+    let driver = TextOnlyModelReplyDriver::default();
+
+    let error = driver
+        .run(driver_request(&fixture.context), &host)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, AgentLoopDriverError::InvalidRequest { .. }));
+    assert!(fixture.gateway.requests().is_empty());
+    assert!(fixture.milestones().is_empty());
+    assert_driver_error_hides_raw_payloads(&error);
 }
 
 #[tokio::test]
@@ -1219,21 +1356,74 @@ fn thread_scope_from_turn(scope: &TurnScope) -> ThreadScope {
     }
 }
 
+fn assign_driver_to_fixture(fixture: &mut HostFixture, descriptor: AgentLoopDriverDescriptor) {
+    fixture.context.resolved_run_profile.loop_driver = descriptor.clone();
+    fixture.context.loop_driver_id = descriptor.id.clone();
+    fixture.context.loop_driver_version = descriptor.version;
+    fixture.claimed.resolved_run_profile = fixture.context.resolved_run_profile.clone();
+}
+
+fn driver_request(context: &LoopRunContext) -> AgentLoopDriverRunRequest {
+    AgentLoopDriverRunRequest {
+        turn_id: context.turn_id,
+        run_id: context.run_id,
+        resolved_run_profile: context.resolved_run_profile.clone(),
+    }
+}
+
+async fn assert_no_assistant_message(fixture: &HostFixture) {
+    let history = fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        !history
+            .messages
+            .iter()
+            .any(|message| message.kind == MessageKind::Assistant)
+    );
+}
+
+fn assert_driver_error_hides_raw_payloads(error: &AgentLoopDriverError) {
+    assert_serialized_or_debug_hides_raw_payloads(&format!("{error:?}"));
+}
+
+fn assert_driver_public_outputs_hide_raw_payloads<T: serde::Serialize>(value: &T) {
+    let wire = serde_json::to_string(value).unwrap();
+    assert_serialized_or_debug_hides_raw_payloads(&wire);
+}
+
+fn assert_serialized_or_debug_hides_raw_payloads(wire: &str) {
+    for forbidden in [
+        "RAW_CHECKPOINT_PAYLOAD",
+        "RAW_PROMPT_TEXT_SENTINEL",
+        "RAW_PROVIDER_ERROR",
+        "invalid api key",
+        "sk-secret",
+        "sk-prompt-secret",
+        "sk-provider-secret",
+        "/host/path",
+        "tool_input",
+        "model says hi",
+    ] {
+        assert!(
+            !wire.contains(forbidden),
+            "public output leaked {forbidden}"
+        );
+    }
+}
+
 fn assert_public_milestones_hide_raw_payloads(milestones: &[LoopHostMilestone]) {
     // Milestones are public progress metadata: they may carry durable refs and
     // safe summaries, never raw model text, checkpoint bytes, tool input,
     // secrets, or host paths. Drivers must rehydrate content through scoped
     // stores instead of learning it from milestone JSON.
     let wire = serde_json::to_string(milestones).unwrap();
-    for forbidden in [
-        "RAW_CHECKPOINT_PAYLOAD",
-        "sk-secret",
-        "/host/path",
-        "tool_input",
-        "model says hi",
-    ] {
-        assert!(!wire.contains(forbidden), "milestone leaked {forbidden}");
-    }
+    assert_serialized_or_debug_hides_raw_payloads(&wire);
 }
 
 struct FailingLoopCheckpointStore;
@@ -1261,15 +1451,36 @@ impl LoopCheckpointStore for FailingLoopCheckpointStore {
 
 struct RecordingGateway {
     requests: Mutex<Vec<HostManagedModelRequest>>,
-    response: HostManagedModelResponse,
+    response: Mutex<Result<HostManagedModelResponse, HostManagedModelError>>,
 }
 
 impl RecordingGateway {
     fn reply(content: impl Into<String>) -> Self {
         Self {
             requests: Mutex::new(Vec::new()),
-            response: HostManagedModelResponse::assistant_reply(content),
+            response: Mutex::new(Ok(HostManagedModelResponse::assistant_reply(content))),
         }
+    }
+
+    fn fail_with_model_error(
+        &self,
+        kind: HostManagedModelErrorKind,
+        raw_detail: impl Into<String>,
+    ) {
+        *self.response.lock().unwrap() = Err(HostManagedModelError::new(kind, raw_detail));
+    }
+
+    fn respond_with_capability_calls(&self) {
+        *self.response.lock().unwrap() = Ok(HostManagedModelResponse {
+            safe_text_deltas: Vec::new(),
+            output: ParentLoopOutput::CapabilityCalls(vec![
+                ironclaw_turns::run_profile::CapabilityCallCandidate {
+                    surface_version: CapabilitySurfaceVersion::new("empty:v1").unwrap(),
+                    capability_id: CapabilityId::new("demo.echo").unwrap(),
+                    input_ref: CapabilityInputRef::new("input:opaque-tool-call").unwrap(),
+                },
+            ]),
+        });
     }
 
     fn requests(&self) -> Vec<HostManagedModelRequest> {
@@ -1284,6 +1495,6 @@ impl HostManagedModelGateway for RecordingGateway {
         request: HostManagedModelRequest,
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         self.requests.lock().unwrap().push(request);
-        Ok(self.response.clone())
+        self.response.lock().unwrap().clone()
     }
 }

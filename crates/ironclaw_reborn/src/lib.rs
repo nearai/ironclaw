@@ -6,6 +6,7 @@
 
 pub mod driver_registry;
 pub mod loop_driver_host;
+pub mod text_loop_driver;
 pub mod turn_runner;
 
 #[cfg(feature = "root-llm-provider")]
@@ -22,3 +23,4 @@ pub use loop_driver_host::{
 pub use model_gateway::{
     LlmModelProfilePolicy, LlmProviderModelGateway, ThreadBackedLoopModelGateway,
 };
+pub use text_loop_driver::{TextOnlyModelReplyDriver, TextOnlyModelReplyDriverConfig};

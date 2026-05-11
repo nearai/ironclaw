@@ -4526,6 +4526,7 @@ dependencies = [
  "libsql",
  "rust_decimal",
  "secrecy",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
