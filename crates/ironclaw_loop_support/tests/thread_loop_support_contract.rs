@@ -483,6 +483,69 @@ async fn prompt_port_records_installed_skill_trust_metadata_without_prompt_paylo
 }
 
 #[tokio::test]
+async fn prompt_port_records_multiple_active_skill_metadata_in_prompt_order() {
+    let fixture = ThreadFixture::new().await;
+    let source = Arc::new(StaticSkillContextSource::new(vec![
+        HostSkillContextCandidate::new(
+            skill_md("bravo", "trusted bravo description", "trusted prompt"),
+            Some(SkillTrust::Trusted),
+            Some(SkillVisibility::Visible),
+        ),
+        HostSkillContextCandidate::new(
+            skill_md("alpha", "installed alpha description", "installed prompt"),
+            Some(SkillTrust::Installed),
+            Some(SkillVisibility::Visible),
+        ),
+    ]));
+    let context_port = Arc::new(
+        ThreadBackedLoopContextPort::new(
+            Arc::clone(&fixture.thread_service),
+            fixture.thread_scope.clone(),
+            fixture.run_context.clone(),
+            16,
+        )
+        .with_skill_context_source(source),
+    );
+    let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let prompt_port = HostManagedLoopPromptPort::new(
+        fixture.run_context.clone(),
+        context_port,
+        milestones.clone(),
+    );
+
+    prompt_port
+        .build_prompt_bundle(ironclaw_turns::run_profile::LoopPromptBundleRequest {
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: None,
+        })
+        .await
+        .unwrap();
+
+    let recorded = milestones.milestones();
+    let LoopHostMilestoneKind::PromptBundleBuilt { skill_context, .. } = &recorded[0].kind else {
+        panic!("expected prompt_bundle_built milestone");
+    };
+    assert_eq!(
+        skill_context,
+        &vec![
+            PromptSkillContextMetadata {
+                ordinal: 0,
+                source_name: "alpha".to_string(),
+                trust_level: "installed".to_string(),
+            },
+            PromptSkillContextMetadata {
+                ordinal: 1,
+                source_name: "bravo".to_string(),
+                trust_level: "trusted".to_string(),
+            },
+        ]
+    );
+}
+
+#[tokio::test]
 async fn prompt_and_model_ports_keep_duplicate_skill_names_distinct() {
     let fixture = ThreadFixture::new().await;
     let source = Arc::new(StaticSkillContextSource::new(vec![
