@@ -863,17 +863,42 @@ pub async fn start_server(
             auth_middleware,
         ));
 
-    // CORS: restrict to same-origin by default. Only localhost/127.0.0.1
-    // origins are allowed, since the gateway is a local-first service.
+    // CORS: restrict to same-origin by default. The gateway is a
+    // local-first service; only same-origin requests are permitted out
+    // of the box.
+    //
+    // Operators running a separate FE on a different localhost port
+    // (e.g. the trinity payroll-v2 FE on :3200, per the runbook's #24)
+    // must opt in via `BASTIONCLAW_ALLOWED_ORIGINS` — a comma-separated
+    // list of fully-qualified origins like `http://localhost:3200`.
+    // Each entry is parsed independently; an invalid value is logged
+    // and skipped rather than aborting startup.
+    let mut allowed_origins: Vec<header::HeaderValue> = vec![
+        format!("http://{}:{}", addr.ip(), addr.port())
+            .parse()
+            .expect("valid origin"),
+        format!("http://localhost:{}", addr.port())
+            .parse()
+            .expect("valid origin"),
+    ];
+    if let Ok(extra) = std::env::var("BASTIONCLAW_ALLOWED_ORIGINS") {
+        for raw in extra.split(',') {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            match trimmed.parse::<header::HeaderValue>() {
+                Ok(origin) => allowed_origins.push(origin),
+                Err(err) => tracing::warn!(
+                    %err,
+                    origin = trimmed,
+                    "BASTIONCLAW_ALLOWED_ORIGINS entry rejected as invalid origin"
+                ),
+            }
+        }
+    }
     let cors = CorsLayer::new()
-        .allow_origin([
-            format!("http://{}:{}", addr.ip(), addr.port())
-                .parse()
-                .expect("valid origin"),
-            format!("http://localhost:{}", addr.port())
-                .parse()
-                .expect("valid origin"),
-        ])
+        .allow_origin(allowed_origins)
         .allow_methods([
             axum::http::Method::GET,
             axum::http::Method::POST,
