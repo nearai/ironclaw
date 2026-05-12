@@ -618,10 +618,9 @@ async fn async_main() -> anyhow::Result<()> {
 
             let to_persist = token.clone();
             tokio::spawn(async move {
-                if let Err(e) = ironclaw::bootstrap::upsert_bootstrap_var(
-                    "GATEWAY_AUTH_TOKEN",
-                    &to_persist,
-                ) {
+                if let Err(e) =
+                    ironclaw::bootstrap::upsert_bootstrap_var("GATEWAY_AUTH_TOKEN", &to_persist)
+                {
                     tracing::warn!("Failed to persist auto-generated gateway auth token: {e}");
                 } else {
                     tracing::debug!("Persisted auto-generated gateway auth token to bootstrap env");
@@ -638,9 +637,9 @@ async fn async_main() -> anyhow::Result<()> {
                         .delete_setting("default", "channels.gateway_auth_token")
                         .await
                     {
-                        Ok(true) => tracing::debug!(
-                            "Removed legacy gateway auth token from DB settings"
-                        ),
+                        Ok(true) => {
+                            tracing::debug!("Removed legacy gateway auth token from DB settings")
+                        }
                         Ok(false) => {}
                         Err(e) => tracing::warn!(
                             "Failed to remove legacy gateway auth token from DB settings: {e}"
