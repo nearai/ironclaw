@@ -427,7 +427,7 @@ async fn production_loop_model_gateway_preserves_error_kind_when_summary_is_resa
         .unwrap_err();
 
     assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
-    assert_eq!(error.safe_summary, "model gateway failed");
+    assert_eq!(error.safe_summary, "model profile is not permitted");
 }
 
 #[tokio::test]

@@ -35,8 +35,8 @@ use ironclaw_turns::{
         CapabilitySurfaceVersion, FinalizeAssistantMessage, LoopContextBundle, LoopContextMessage,
         LoopContextPort, LoopContextRequest, LoopHostMilestoneEmitter, LoopHostMilestoneSink,
         LoopInputCursor, LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse,
-        LoopRunContext, LoopRunInfoPort, LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput,
-        UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, ModelStreamChunk,
+        ParentLoopOutput, UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
         sanitize_model_visible_text,
     },
 };
@@ -1057,7 +1057,12 @@ fn transcript_write_error(_error: SessionThreadError) -> AgentLoopHostError {
 }
 
 fn model_gateway_error(error: HostManagedModelError) -> AgentLoopHostError {
-    AgentLoopHostError::new(model_error_kind(error.kind), error.safe_summary)
+    let safe_summary = if LoopSafeSummary::new(error.safe_summary.clone()).is_ok() {
+        error.safe_summary
+    } else {
+        safe_model_summary(error.kind).to_string()
+    };
+    AgentLoopHostError::new(model_error_kind(error.kind), safe_summary)
 }
 
 fn sanitize_parent_loop_output(output: ParentLoopOutput) -> ParentLoopOutput {

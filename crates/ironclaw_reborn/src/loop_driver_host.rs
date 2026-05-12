@@ -30,14 +30,17 @@ use ironclaw_turns::{
         CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailure,
         CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, CapabilitySurfaceVersion,
-        FinalizeAssistantMessage, LoopCapabilityPort, LoopCheckpointPort, LoopCheckpointRequest,
-        LoopContextBundle, LoopContextPort, LoopContextRequest, LoopHostMilestoneEmitter,
-        LoopHostMilestoneSink, LoopInputBatch, LoopInputCursor, LoopInputPort, LoopModelMessage,
-        LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProcessRef, LoopProgressEvent,
-        LoopProgressPort, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest,
-        LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort,
-        ProcessHandleSummary, PromptMode, PromptSkillContextMetadata, UpdateAssistantDraft,
-        VisibleCapabilityRequest, VisibleCapabilitySurface, skill_snippet_model_message_ref,
+        FinalizeAssistantMessage, HostManagedLoopModelPort, LoopCapabilityPort, LoopCheckpointPort,
+        LoopCheckpointRequest, LoopContextBundle, LoopContextPort, LoopContextRequest,
+        LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputBatch, LoopInputCursor,
+        LoopInputPort, LoopModelBudgetAccountant, LoopModelGateway, LoopModelGatewayError,
+        LoopModelGatewayRequest, LoopModelMessage, LoopModelPolicyGuard, LoopModelPort,
+        LoopModelRequest, LoopModelResponse, LoopProcessRef, LoopProgressEvent, LoopProgressPort,
+        LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort,
+        LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, NoOpBudgetAccountant,
+        NoOpPolicyGuard, ProcessHandleSummary, PromptMode, PromptSkillContextMetadata,
+        UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        skill_snippet_model_message_ref,
     },
     runner::ClaimedTurnRun,
 };
@@ -1124,6 +1127,8 @@ where
     checkpoint_state_store: Arc<dyn CheckpointStateStore>,
     loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
+    model_accountant: Arc<dyn LoopModelBudgetAccountant>,
+    model_policy_guard: Arc<dyn LoopModelPolicyGuard>,
     config: TextOnlyLoopHostConfig,
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
 }
@@ -1150,6 +1155,8 @@ where
             checkpoint_state_store,
             loop_checkpoint_store,
             milestone_sink,
+            model_accountant: Arc::new(NoOpBudgetAccountant),
+            model_policy_guard: Arc::new(NoOpPolicyGuard),
             config,
             skill_context_source: None,
         }
@@ -1166,6 +1173,19 @@ where
     {
         let resolver: Arc<dyn ModelRouteResolver> = resolver;
         self.model_route_resolver = Some(resolver);
+        self
+    }
+
+    pub fn with_model_budget_accountant(
+        mut self,
+        accountant: Arc<dyn LoopModelBudgetAccountant>,
+    ) -> Self {
+        self.model_accountant = accountant;
+        self
+    }
+
+    pub fn with_model_policy_guard(mut self, policy_guard: Arc<dyn LoopModelPolicyGuard>) -> Self {
+        self.model_policy_guard = policy_guard;
         self
     }
 
@@ -1218,18 +1238,20 @@ where
         );
         let input: Arc<dyn LoopInputPort> =
             Arc::new(NoExtraLoopInputPort::new(run_context.clone()));
-        let mut model_adapter = ThreadBackedLoopModelPort::with_milestone_sink(
+        let model_gateway = Arc::new(ThreadResolvingLoopModelGateway::new(
             Arc::clone(&self.thread_service),
             self.thread_scope.clone(),
-            run_context.clone(),
             Arc::clone(&self.model_gateway),
             max_messages,
+            self.skill_context_source.clone(),
+        ));
+        let model: Arc<dyn LoopModelPort> = Arc::new(HostManagedLoopModelPort::with_guards(
+            run_context.clone(),
+            model_gateway,
             Arc::clone(&self.milestone_sink),
-        );
-        if let Some(source) = self.skill_context_source.as_ref() {
-            model_adapter = model_adapter.with_skill_context_source(source.clone());
-        }
-        let model: Arc<dyn LoopModelPort> = Arc::new(model_adapter);
+            Arc::clone(&self.model_accountant),
+            Arc::clone(&self.model_policy_guard),
+        ));
         let checkpoint: Arc<dyn LoopCheckpointPort> = Arc::new(HostManagedLoopCheckpointPort::new(
             run_context.clone(),
             Arc::clone(&self.checkpoint_state_store),
@@ -1299,6 +1321,83 @@ where
             .map_err(model_route_error_to_host_error)?;
         Ok(run_context.with_resolved_model_route(snapshot.to_loop_model_route_snapshot()))
     }
+}
+
+struct ThreadResolvingLoopModelGateway<S, G>
+where
+    S: SessionThreadService + ?Sized,
+    G: HostManagedModelGateway + ?Sized,
+{
+    thread_service: Arc<S>,
+    thread_scope: ThreadScope,
+    host_gateway: Arc<G>,
+    max_messages: usize,
+    skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
+}
+
+impl<S, G> ThreadResolvingLoopModelGateway<S, G>
+where
+    S: SessionThreadService + ?Sized,
+    G: HostManagedModelGateway + ?Sized,
+{
+    fn new(
+        thread_service: Arc<S>,
+        thread_scope: ThreadScope,
+        host_gateway: Arc<G>,
+        max_messages: usize,
+        skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
+    ) -> Self {
+        Self {
+            thread_service,
+            thread_scope,
+            host_gateway,
+            max_messages,
+            skill_context_source,
+        }
+    }
+}
+
+#[async_trait]
+impl<S, G> LoopModelGateway for ThreadResolvingLoopModelGateway<S, G>
+where
+    S: SessionThreadService + ?Sized + Send + Sync,
+    G: HostManagedModelGateway + ?Sized + Send + Sync,
+{
+    async fn stream_model(
+        &self,
+        request: LoopModelGatewayRequest,
+    ) -> Result<LoopModelResponse, LoopModelGatewayError> {
+        let mut model_port = ThreadBackedLoopModelPort::new(
+            Arc::clone(&self.thread_service),
+            self.thread_scope.clone(),
+            request.context,
+            Arc::clone(&self.host_gateway),
+            self.max_messages,
+        );
+        if let Some(source) = self.skill_context_source.as_ref() {
+            model_port = model_port.with_skill_context_source(source.clone());
+        }
+        model_port
+            .stream_model(request.request)
+            .await
+            .map_err(host_error_to_model_gateway_error)
+    }
+}
+
+fn host_error_to_model_gateway_error(error: AgentLoopHostError) -> LoopModelGatewayError {
+    let diagnostic_ref = error.diagnostic_ref;
+    let mut converted = match LoopModelGatewayError::new(error.kind, error.safe_summary) {
+        Ok(error) => error,
+        Err(_) => LoopModelGatewayError {
+            kind: error.kind,
+            safe_summary: LoopSafeSummary::model_gateway_failed(),
+            diagnostic_ref: None,
+        },
+    };
+    if let Some(diagnostic_ref) = diagnostic_ref {
+        converted = converted.with_diagnostic_ref(diagnostic_ref);
+    }
+    converted
 }
 
 pub struct RebornLoopDriverHost {

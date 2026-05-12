@@ -1550,6 +1550,47 @@ async fn model_port_surfaces_fail_closed_gateway_policy_errors_without_raw_detai
     assert!(!wire.contains("RAW_PROVIDER_SECRET"));
 }
 
+#[tokio::test]
+async fn model_port_replaces_invalid_gateway_safe_summary_with_stable_summary() {
+    let fixture = ThreadFixture::new().await;
+    let gateway = Arc::new(RecordingGateway::deny_with_safe_summary(
+        "RAW_PROVIDER_SECRET invalid api key sk-provider-secret /host/path tool_input",
+    ));
+    let port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway,
+        16,
+    );
+
+    let error = port
+        .stream_model(LoopModelRequest {
+            messages: vec![LoopModelMessage {
+                role: "user".to_string(),
+                content_ref: LoopMessageRef::new(format!("msg:{}", fixture.user_message_id))
+                    .unwrap(),
+            }],
+            surface_version: None,
+            model_preference: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+    assert_eq!(error.safe_summary, "model profile is not permitted");
+    let wire = format!("{}{:?}", serde_json::to_string(&error).unwrap(), error);
+    for forbidden in [
+        "RAW_PROVIDER_SECRET",
+        "invalid api key",
+        "sk-provider-secret",
+        "/host/path",
+        "tool_input",
+    ] {
+        assert!(!wire.contains(forbidden), "model error leaked {forbidden}");
+    }
+}
+
 #[derive(Clone)]
 struct StaticSkillContextSource {
     candidates: Vec<HostSkillContextCandidate>,
@@ -2041,6 +2082,16 @@ impl RecordingGateway {
             response: Err(HostManagedModelError::new(
                 HostManagedModelErrorKind::PolicyDenied,
                 raw_detail,
+            )),
+        }
+    }
+
+    fn deny_with_safe_summary(safe_summary: &str) -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            response: Err(HostManagedModelError::safe(
+                HostManagedModelErrorKind::PolicyDenied,
+                safe_summary,
             )),
         }
     }

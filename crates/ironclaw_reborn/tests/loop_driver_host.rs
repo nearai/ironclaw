@@ -70,9 +70,11 @@ use ironclaw_turns::{
         CapabilitySurfaceVersion, FinalizeAssistantMessage, InMemoryLoopHostMilestoneSink,
         LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
         LoopCheckpointStateRef, LoopContextRequest, LoopDriverId, LoopDriverNoteKind,
-        LoopHostMilestone, LoopInputCursor, LoopInputCursorToken, LoopInputPort, LoopModelRequest,
+        LoopHostMilestone, LoopInputCursor, LoopInputCursorToken, LoopInputPort,
+        LoopModelBudgetAccountant, LoopModelGatewayError, LoopModelPort, LoopModelRequest,
         LoopModelRouteSnapshot, LoopProgressEvent, LoopPromptBundleRequest, LoopPromptPort,
-        LoopRunContext, ParentLoopOutput, PromptMode, SkillVisibility, VisibleCapabilityRequest,
+        LoopRunContext, ModelCallOutcome, ParentLoopOutput, PromptMode, SkillVisibility,
+        VisibleCapabilityRequest,
     },
     runner::ClaimedTurnRun,
 };
@@ -196,6 +198,99 @@ async fn text_only_host_factory_builds_complete_agent_loop_driver_host() {
         ]
     );
     assert_public_milestones_hide_raw_payloads(&fixture.milestones());
+}
+
+#[tokio::test]
+async fn text_only_host_factory_sanitizes_gateway_error_summaries() {
+    let fixture = HostFixture::new(
+        "thread-host-model-error-redaction",
+        "RAW_PROMPT_TEXT_SENTINEL user text",
+    )
+    .await;
+    fixture
+        .gateway
+        .set_response(Err(HostManagedModelError::safe(
+            HostManagedModelErrorKind::PolicyDenied,
+            "RAW_PROVIDER_SECRET invalid api key sk-provider-secret /host/path tool_input",
+        )));
+    let host = fixture.build_host().await;
+    let prompt_bundle = host
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+        })
+        .await
+        .unwrap();
+
+    let error = host
+        .stream_model(LoopModelRequest {
+            messages: prompt_bundle.messages,
+            surface_version: None,
+            model_preference: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+    assert_eq!(error.safe_summary, "model profile is not permitted");
+    let wire = format!(
+        "{}{:?}{}",
+        serde_json::to_string(&error).unwrap(),
+        error,
+        serde_json::to_string(&fixture.milestones()).unwrap()
+    );
+    for forbidden in [
+        "RAW_PROVIDER_SECRET",
+        "RAW_PROMPT_TEXT_SENTINEL",
+        "invalid api key",
+        "sk-provider-secret",
+        "/host/path",
+        "tool_input",
+    ] {
+        assert!(!wire.contains(forbidden), "model error leaked {forbidden}");
+    }
+}
+
+#[tokio::test]
+async fn text_only_host_factory_invokes_model_budget_accountant() {
+    let fixture = HostFixture::new("thread-host-model-accounting", "hello accounting").await;
+    let accountant = Arc::new(RecordingBudgetAccountant::default());
+    let factory = fixture
+        .factory()
+        .with_model_budget_accountant(accountant.clone());
+    let host = factory
+        .build_text_only_host(RebornLoopDriverHostRequest {
+            claimed_run: fixture.claimed.clone(),
+            loop_run_context: fixture.context.clone(),
+        })
+        .await
+        .unwrap();
+    let prompt_bundle = host
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+        })
+        .await
+        .unwrap();
+
+    host.stream_model(LoopModelRequest {
+        messages: prompt_bundle.messages,
+        surface_version: None,
+        model_preference: None,
+    })
+    .await
+    .unwrap();
+
+    assert!(accountant.was_pre_called());
+    assert!(accountant.was_post_called());
+    assert!(!accountant.post_saw_failure());
+    assert_eq!(fixture.gateway.requests().len(), 1);
 }
 
 #[tokio::test]
@@ -3686,6 +3781,10 @@ impl RecordingGateway {
         }
     }
 
+    fn set_response(&self, response: Result<HostManagedModelResponse, HostManagedModelError>) {
+        *self.response.lock().unwrap() = response;
+    }
+
     fn fail_with_model_error(
         &self,
         kind: HostManagedModelErrorKind,
@@ -3720,5 +3819,50 @@ impl HostManagedModelGateway for RecordingGateway {
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         self.requests.lock().unwrap().push(request);
         self.response.lock().unwrap().clone()
+    }
+}
+
+#[derive(Default)]
+struct RecordingBudgetAccountant {
+    pre_calls: Mutex<usize>,
+    post_calls: Mutex<Vec<bool>>,
+}
+
+impl RecordingBudgetAccountant {
+    fn was_pre_called(&self) -> bool {
+        *self.pre_calls.lock().unwrap() > 0
+    }
+
+    fn was_post_called(&self) -> bool {
+        !self.post_calls.lock().unwrap().is_empty()
+    }
+
+    fn post_saw_failure(&self) -> bool {
+        self.post_calls.lock().unwrap().iter().any(|failed| *failed)
+    }
+}
+
+#[async_trait]
+impl LoopModelBudgetAccountant for RecordingBudgetAccountant {
+    async fn pre_model_call(
+        &self,
+        _context: &LoopRunContext,
+        _request: &LoopModelRequest,
+    ) -> Result<(), LoopModelGatewayError> {
+        *self.pre_calls.lock().unwrap() += 1;
+        Ok(())
+    }
+
+    async fn post_model_call(
+        &self,
+        _context: &LoopRunContext,
+        _request: &LoopModelRequest,
+        outcome: ModelCallOutcome<'_>,
+    ) -> Result<(), LoopModelGatewayError> {
+        self.post_calls
+            .lock()
+            .unwrap()
+            .push(matches!(outcome, ModelCallOutcome::Failure(_)));
+        Ok(())
     }
 }
