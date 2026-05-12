@@ -30,7 +30,7 @@ pub use egress::{
     EgressCredentialHandle, EgressHeader, EgressMethod, EgressPath, EgressRequest, EgressResponse,
     OutboundDeliverySink, ProtocolHttpEgress, ProtocolHttpEgressError,
 };
-pub use error::ProductAdapterError;
+pub use error::{ProductAdapterError, ProductWorkflowRejectionKind};
 pub use external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentDescriptor,
     ProductAttachmentKind,

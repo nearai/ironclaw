@@ -21,6 +21,9 @@ pub struct ResolvedBinding {
     pub tenant_id: TenantId,
     pub user_id: UserId,
     pub thread_id: ThreadId,
+    /// Required for user-message turn submission because Reborn `ThreadScope`
+    /// and `TurnScope` are agent-scoped. Product bindings that are only
+    /// user-scoped must be completed before entering `InboundTurnService`.
     pub agent_id: Option<AgentId>,
     pub project_id: Option<ProjectId>,
 }

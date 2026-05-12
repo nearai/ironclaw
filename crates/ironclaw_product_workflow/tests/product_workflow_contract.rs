@@ -3,20 +3,22 @@
 use std::sync::Arc;
 
 use chrono::{Duration, Utc};
+use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
 use ironclaw_product_adapters::{
     AdapterInstallationId, ApprovalDecision, ApprovalResolutionPayload, AuthRequirement,
     AuthResolutionPayload, AuthResolutionResult, ExternalActorRef, ExternalConversationRef,
     ExternalEventId, InboundCommandPayload, LinkedThreadActionPayload, ParsedProductInbound,
-    ProductAdapterId, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
-    ProductTriggerReason, ProductWorkflow, ProtocolAuthEvidence, TrustedInboundContext,
-    UserMessagePayload,
+    ProductAdapterError, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
+    ProductInboundPayload, ProductTriggerReason, ProductWorkflow, ProductWorkflowRejectionKind,
+    ProtocolAuthEvidence, TrustedInboundContext, UserMessagePayload,
 };
 use ironclaw_product_workflow::{
     ActionDispatchKind, ActionFingerprintKey, AuthRequestRef, DefaultProductWorkflow,
     FakeIdempotencyLedger, FakeInboundTurnService, IdempotencyDecision, IdempotencyLedger,
-    LinkedThreadActionId, ProductCommandName, ProductWorkflowError, SourceBindingKey,
+    InboundTurnOutcome, LinkedThreadActionId, ProductCommandName, ProductWorkflowError,
+    ResolvedBinding, SourceBindingKey,
 };
-use ironclaw_turns::LoopGateRef;
+use ironclaw_turns::{AcceptedMessageRef, LoopGateRef, TurnError, TurnRunId};
 
 fn sample_envelope(event_suffix: &str) -> ProductInboundEnvelope {
     let evidence = ProtocolAuthEvidence::test_verified(
@@ -95,6 +97,28 @@ fn action_fingerprint_retains_typed_identifiers() {
 }
 
 #[test]
+fn turn_submission_error_maps_to_stable_product_category() {
+    let err: ProductAdapterError = ProductWorkflowError::TurnSubmissionFailed {
+        error: TurnError::Unauthorized,
+    }
+    .into();
+
+    match err {
+        ProductAdapterError::WorkflowRejected {
+            kind,
+            status_code,
+            retryable,
+            ..
+        } => {
+            assert_eq!(kind, ProductWorkflowRejectionKind::Unauthorized);
+            assert_eq!(status_code, 403);
+            assert!(!retryable);
+        }
+        other => panic!("expected typed workflow rejection, got {other:?}"),
+    }
+}
+
+#[test]
 fn action_dispatch_kind_retains_typed_payload_refs() {
     let command_payload = ProductInboundPayload::Command(
         InboundCommandPayload::new("help", "", ProductTriggerReason::BotCommand).expect("valid"),
@@ -135,6 +159,16 @@ fn action_dispatch_kind_retains_typed_payload_refs() {
             action_id: LinkedThreadActionId::new("open-thread").expect("valid action id")
         }
     );
+}
+
+fn fake_binding() -> ResolvedBinding {
+    ResolvedBinding {
+        tenant_id: TenantId::new("tenant:fake").expect("valid tenant"),
+        user_id: UserId::new("user:fake").expect("valid user"),
+        thread_id: ThreadId::new("thread:fake").expect("valid thread"),
+        agent_id: Some(AgentId::new("agent:fake").expect("valid agent")),
+        project_id: None,
+    }
 }
 
 fn build_workflow() -> (
@@ -218,31 +252,69 @@ async fn settled_user_message_records_actual_submitted_run_id() {
 }
 
 #[tokio::test]
-async fn transient_dispatch_failure_keeps_fingerprint_reserved_until_recovery() {
+async fn retryable_dispatch_failure_releases_fingerprint_for_recovery() {
     let (workflow, inbound, ledger) = build_workflow();
     inbound.force_failure(ProductWorkflowError::Transient {
         reason: "turn coordinator unavailable".into(),
     });
 
-    let envelope = sample_envelope("transient-reserved");
+    let envelope = sample_envelope("transient-released");
     let first_err = workflow
         .accept_inbound(envelope.clone())
         .await
         .expect_err("first attempt should be retryable");
     assert!(first_err.is_retryable());
     assert_eq!(inbound.attempt_count(), 1);
+    assert_eq!(ledger.in_flight_count(), 0);
 
     let second_err = workflow
         .accept_inbound(envelope)
         .await
-        .expect_err("same in-flight fingerprint should be reserved");
+        .expect_err("released fingerprint should retry dispatch");
     assert!(second_err.is_retryable());
-    assert_eq!(
-        inbound.attempt_count(),
-        1,
-        "reserved fingerprint must not dispatch the same action twice before recovery cleanup"
-    );
+    assert_eq!(inbound.attempt_count(), 2);
     assert_eq!(ledger.settled_count(), 0);
+}
+
+#[tokio::test]
+async fn deferred_busy_is_not_settled_and_retry_can_submit_same_message() {
+    let (workflow, inbound, ledger) = build_workflow();
+    let accepted_message_ref = AcceptedMessageRef::new("msg:busy-retry").expect("valid msg ref");
+    let busy_run = TurnRunId::new();
+    inbound.program_outcome(InboundTurnOutcome::DeferredBusy {
+        accepted_message_ref: accepted_message_ref.clone(),
+        active_run_id: busy_run,
+        binding: fake_binding(),
+    });
+
+    let envelope = sample_envelope("busy-retry");
+    let first = workflow
+        .accept_inbound(envelope.clone())
+        .await
+        .expect("busy ack");
+    assert!(matches!(first, ProductInboundAck::DeferredBusy { .. }));
+    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.in_flight_count(), 0);
+
+    let submitted_run_id = TurnRunId::new();
+    inbound.program_outcome(InboundTurnOutcome::Submitted {
+        accepted_message_ref: accepted_message_ref.clone(),
+        submitted_run_id,
+        binding: fake_binding(),
+    });
+    let second = workflow
+        .accept_inbound(envelope)
+        .await
+        .expect("retry submit");
+    assert!(matches!(
+        second,
+        ProductInboundAck::Accepted {
+            submitted_run_id: run_id,
+            ..
+        } if run_id == submitted_run_id
+    ));
+    assert_eq!(inbound.attempt_count(), 2);
+    assert_eq!(ledger.settled_count(), 1);
 }
 
 #[tokio::test]

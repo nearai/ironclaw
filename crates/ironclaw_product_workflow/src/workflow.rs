@@ -83,12 +83,24 @@ impl ProductWorkflow for DefaultProductWorkflow {
                 match result {
                     Ok(ack) => {
                         action.mark_dispatched(dispatch_kind_from_ack(&ack, envelope.payload())?);
-                        action.settle(ack.clone());
-                        self.idempotency_ledger.settle(action).await.map_err(|e| {
-                            ProductAdapterError::from(ProductWorkflowError::Transient {
-                                reason: format!("failed to settle idempotency ledger entry: {e}"),
-                            })
-                        })?;
+                        if is_terminal_success_ack(&ack) {
+                            action.settle(ack.clone());
+                            self.idempotency_ledger.settle(action).await.map_err(|e| {
+                                ProductAdapterError::from(ProductWorkflowError::Transient {
+                                    reason: format!(
+                                        "failed to settle idempotency ledger entry: {e}"
+                                    ),
+                                })
+                            })?;
+                        } else {
+                            self.idempotency_ledger.release(action).await.map_err(|e| {
+                                ProductAdapterError::from(ProductWorkflowError::Transient {
+                                    reason: format!(
+                                        "failed to release non-terminal idempotency ledger entry: {e}"
+                                    ),
+                                })
+                            })?;
+                        }
                         Ok(ack)
                     }
                     Err(e) => {
@@ -101,6 +113,14 @@ impl ProductWorkflow for DefaultProductWorkflow {
                                 ProductAdapterError::from(ProductWorkflowError::Transient {
                                     reason: format!(
                                         "failed to settle rejected idempotency ledger entry: {settle_err}"
+                                    ),
+                                })
+                            })?;
+                        } else {
+                            self.idempotency_ledger.release(action).await.map_err(|release_err| {
+                                ProductAdapterError::from(ProductWorkflowError::Transient {
+                                    reason: format!(
+                                        "failed to release retryable idempotency ledger entry: {release_err}"
                                     ),
                                 })
                             })?;
@@ -181,6 +201,10 @@ fn dispatch_kind_from_ack(
     }
 }
 
+fn is_terminal_success_ack(ack: &ProductInboundAck) -> bool {
+    !matches!(ack, ProductInboundAck::DeferredBusy { .. })
+}
+
 fn terminal_ack_for_error(error: &ProductWorkflowError) -> Option<ProductInboundAck> {
     match error {
         ProductWorkflowError::CommandRoutingUnavailable { command } => {
@@ -197,6 +221,7 @@ fn terminal_ack_for_error(error: &ProductWorkflowError) -> Option<ProductInbound
         }
         ProductWorkflowError::BindingResolutionFailed { .. }
         | ProductWorkflowError::TurnSubmissionRejected { .. }
+        | ProductWorkflowError::TurnSubmissionFailed { .. }
         | ProductWorkflowError::TurnResumeRejected { .. }
         | ProductWorkflowError::Transient { .. }
         | ProductWorkflowError::DuplicateAction { .. } => None,

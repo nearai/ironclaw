@@ -12,10 +12,11 @@ use ironclaw_loop_support::{
     ThreadBackedLoopTranscriptPort,
 };
 use ironclaw_threads::{
-    AcceptInboundMessageRequest, AcceptedInboundMessage, AppendAssistantDraftRequest,
-    ContextMessage, ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest,
-    InMemorySessionThreadService, MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
-    SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
+    AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
+    AppendAssistantDraftRequest, ContextMessage, ContextWindow, CreateSummaryArtifactRequest,
+    EnsureThreadRequest, InMemorySessionThreadService, MessageContent, MessageKind, MessageStatus,
+    RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
+    SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
     ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
     UpdateAssistantDraftRequest,
 };
@@ -985,6 +986,13 @@ impl SessionThreadService for GatedFinalizeThreadService {
         self.inner.accept_inbound_message(request).await
     }
 
+    async fn replay_accepted_inbound_message(
+        &self,
+        request: ReplayAcceptedInboundMessageRequest,
+    ) -> Result<Option<AcceptedInboundMessageReplay>, SessionThreadError> {
+        self.inner.replay_accepted_inbound_message(request).await
+    }
+
     async fn mark_message_submitted(
         &self,
         scope: &ThreadScope,
@@ -1092,6 +1100,13 @@ impl SessionThreadService for StaticContextThreadService {
         _request: AcceptInboundMessageRequest,
     ) -> Result<AcceptedInboundMessage, SessionThreadError> {
         panic!("static context service does not accept inbound messages")
+    }
+
+    async fn replay_accepted_inbound_message(
+        &self,
+        _request: ReplayAcceptedInboundMessageRequest,
+    ) -> Result<Option<AcceptedInboundMessageReplay>, SessionThreadError> {
+        panic!("static context service does not replay inbound messages")
     }
 
     async fn mark_message_submitted(

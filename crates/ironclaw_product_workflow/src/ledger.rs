@@ -48,6 +48,12 @@ pub trait IdempotencyLedger: Send + Sync {
 
     /// Settle an in-progress action with a terminal outcome.
     async fn settle(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError>;
+
+    /// Release a non-terminal reservation after downstream handling produced a
+    /// retryable outcome. The downstream side effect must be independently
+    /// idempotent before callers use this path; for user messages, the thread
+    /// service replays the accepted message before live binding resolution.
+    async fn release(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError>;
 }
 
 /// Result of an idempotency check.

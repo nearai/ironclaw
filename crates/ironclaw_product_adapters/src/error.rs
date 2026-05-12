@@ -6,6 +6,18 @@ use crate::ProtocolAuthFailure;
 use crate::egress::ProtocolHttpEgressError;
 use crate::redaction::RedactedString;
 
+/// Stable workflow rejection category exposed to product adapters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProductWorkflowRejectionKind {
+    ThreadBusy,
+    AdmissionRejected,
+    ScopeNotFound,
+    Unauthorized,
+    InvalidRequest,
+    Unavailable,
+    Conflict,
+}
+
 /// Public error surface for product adapters and the workflow facade.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ProductAdapterError {
@@ -30,6 +42,14 @@ pub enum ProductAdapterError {
     #[error("workflow transient failure: {reason}")]
     WorkflowTransient { reason: RedactedString },
 
+    #[error("workflow rejected request ({kind:?}, status {status_code}): {reason}")]
+    WorkflowRejected {
+        kind: ProductWorkflowRejectionKind,
+        status_code: u16,
+        retryable: bool,
+        reason: RedactedString,
+    },
+
     #[error("internal adapter error: {detail}")]
     Internal { detail: RedactedString },
 }
@@ -42,6 +62,10 @@ impl ProductAdapterError {
             self,
             ProductAdapterError::WorkflowTransient { .. }
                 | ProductAdapterError::EgressTransient { .. }
+                | ProductAdapterError::WorkflowRejected {
+                    retryable: true,
+                    ..
+                }
         )
     }
 

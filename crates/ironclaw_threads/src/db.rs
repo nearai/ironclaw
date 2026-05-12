@@ -6,12 +6,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    AcceptInboundMessageRequest, AcceptedInboundMessage, AppendAssistantDraftRequest,
-    ContextMessage, ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest,
-    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
-    SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact,
-    SummaryArtifactId, ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord,
-    ThreadScope, UpdateAssistantDraftRequest,
+    AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
+    AppendAssistantDraftRequest, ContextMessage, ContextWindow, CreateSummaryArtifactRequest,
+    EnsureThreadRequest, LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
+    RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
+    SessionThreadRecord, SessionThreadService, SummaryArtifact, SummaryArtifactId, ThreadHistory,
+    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
+    UpdateAssistantDraftRequest,
 };
 
 #[cfg(feature = "libsql")]
@@ -204,6 +205,14 @@ impl SessionThreadService for LibSqlSessionThreadService {
             .await
     }
 
+    async fn replay_accepted_inbound_message(
+        &self,
+        request: ReplayAcceptedInboundMessageRequest,
+    ) -> Result<Option<AcceptedInboundMessageReplay>, SessionThreadError> {
+        self.read(|state| state.replay_accepted_inbound_message(&request))
+            .await
+    }
+
     async fn mark_message_submitted(
         &self,
         scope: &ThreadScope,
@@ -366,6 +375,14 @@ impl SessionThreadService for PostgresSessionThreadService {
         request: AcceptInboundMessageRequest,
     ) -> Result<AcceptedInboundMessage, SessionThreadError> {
         self.mutate(|state| state.accept_inbound_message(request))
+            .await
+    }
+
+    async fn replay_accepted_inbound_message(
+        &self,
+        request: ReplayAcceptedInboundMessageRequest,
+    ) -> Result<Option<AcceptedInboundMessageReplay>, SessionThreadError> {
+        self.read(|state| state.replay_accepted_inbound_message(&request))
             .await
     }
 
@@ -611,6 +628,37 @@ impl DurableState {
             sequence,
             idempotent_replay: false,
         })
+    }
+
+    fn replay_accepted_inbound_message(
+        &self,
+        request: &ReplayAcceptedInboundMessageRequest,
+    ) -> Result<Option<AcceptedInboundMessageReplay>, SessionThreadError> {
+        let Some(record) = self.inbound_idempotency.values().find(|record| {
+            record.source_binding_id == request.source_binding_id
+                && record.external_event_id == request.external_event_id
+        }) else {
+            return Ok(None);
+        };
+        let thread = get_thread(self, &record.scope, &record.thread_id)?;
+        let message = thread
+            .messages
+            .iter()
+            .find(|message| message.message_id == record.message_id)
+            .ok_or(SessionThreadError::UnknownMessage {
+                message_id: record.message_id,
+            })?;
+        Ok(Some(AcceptedInboundMessageReplay {
+            scope: record.scope.clone(),
+            thread_id: record.thread_id.clone(),
+            message_id: record.message_id,
+            sequence: message.sequence,
+            status: message.status,
+            actor_id: message.actor_id.clone(),
+            source_binding_id: message.source_binding_id.clone(),
+            reply_target_binding_id: message.reply_target_binding_id.clone(),
+            turn_run_id: message.turn_run_id.clone(),
+        }))
     }
 
     fn mark_message_submitted(
@@ -864,7 +912,12 @@ fn ensure_user_accepted(
     message: &ThreadMessageRecord,
     attempted: &'static str,
 ) -> Result<(), SessionThreadError> {
-    if message.kind == MessageKind::User && message.status == MessageStatus::Accepted {
+    if message.kind == MessageKind::User
+        && matches!(
+            message.status,
+            MessageStatus::Accepted | MessageStatus::DeferredBusy
+        )
+    {
         return Ok(());
     }
     Err(SessionThreadError::InvalidMessageTransition {

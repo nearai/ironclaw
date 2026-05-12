@@ -1,7 +1,7 @@
 //! In-memory fakes for contract tests and downstream integration tests.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -21,8 +21,9 @@ use crate::ledger::{IdempotencyDecision, IdempotencyLedger};
 
 /// In-memory fake that resolves all bindings to a default tenant/user/thread
 /// unless programmed otherwise.
+#[derive(Clone)]
 pub struct FakeConversationBindingService {
-    state: Mutex<FakeBindingState>,
+    state: Arc<Mutex<FakeBindingState>>,
 }
 
 #[derive(Default)]
@@ -35,7 +36,7 @@ struct FakeBindingState {
 impl FakeConversationBindingService {
     pub fn new() -> Self {
         Self {
-            state: Mutex::new(FakeBindingState::default()),
+            state: Arc::new(Mutex::new(FakeBindingState::default())),
         }
     }
 
@@ -214,6 +215,15 @@ impl IdempotencyLedger for FakeIdempotencyLedger {
         }
         state.in_flight.remove(&action.fingerprint);
         state.settled.insert(action.fingerprint.clone(), action);
+        Ok(())
+    }
+
+    async fn release(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError> {
+        let mut state = self.state.lock().expect("fake ledger state lock poisoned"); // safety: test-support fake
+        if let Some(error) = state.fail_with.clone() {
+            return Err(error);
+        }
+        state.in_flight.remove(&action.fingerprint);
         Ok(())
     }
 }

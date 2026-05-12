@@ -6,12 +6,13 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::{
-    AcceptInboundMessageRequest, AcceptedInboundMessage, AppendAssistantDraftRequest,
-    ContextMessage, ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest,
-    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
-    SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact,
-    SummaryArtifactId, ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord,
-    ThreadScope, UpdateAssistantDraftRequest,
+    AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
+    AppendAssistantDraftRequest, ContextMessage, ContextWindow, CreateSummaryArtifactRequest,
+    EnsureThreadRequest, LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
+    RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
+    SessionThreadRecord, SessionThreadService, SummaryArtifact, SummaryArtifactId, ThreadHistory,
+    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
+    UpdateAssistantDraftRequest,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -159,6 +160,38 @@ impl SessionThreadService for InMemorySessionThreadService {
             sequence,
             idempotent_replay: false,
         })
+    }
+
+    async fn replay_accepted_inbound_message(
+        &self,
+        request: ReplayAcceptedInboundMessageRequest,
+    ) -> Result<Option<AcceptedInboundMessageReplay>, SessionThreadError> {
+        let state = self.state.lock().await;
+        let Some((key, record)) = state.inbound_idempotency.iter().find(|(key, _)| {
+            key.source_binding_id == request.source_binding_id
+                && key.external_event_id == request.external_event_id
+        }) else {
+            return Ok(None);
+        };
+        let thread = get_thread(&state, &key.scope, &record.thread_id)?;
+        let message = thread
+            .messages
+            .iter()
+            .find(|message| message.message_id == record.message_id)
+            .ok_or(SessionThreadError::UnknownMessage {
+                message_id: record.message_id,
+            })?;
+        Ok(Some(AcceptedInboundMessageReplay {
+            scope: key.scope.clone(),
+            thread_id: record.thread_id.clone(),
+            message_id: record.message_id,
+            sequence: message.sequence,
+            status: message.status,
+            actor_id: message.actor_id.clone(),
+            source_binding_id: message.source_binding_id.clone(),
+            reply_target_binding_id: message.reply_target_binding_id.clone(),
+            turn_run_id: message.turn_run_id.clone(),
+        }))
     }
 
     async fn mark_message_submitted(
@@ -430,7 +463,12 @@ fn ensure_user_accepted(
     message: &ThreadMessageRecord,
     attempted: &'static str,
 ) -> Result<(), SessionThreadError> {
-    if message.kind == MessageKind::User && message.status == MessageStatus::Accepted {
+    if message.kind == MessageKind::User
+        && matches!(
+            message.status,
+            MessageStatus::Accepted | MessageStatus::DeferredBusy
+        )
+    {
         return Ok(());
     }
     Err(SessionThreadError::InvalidMessageTransition {

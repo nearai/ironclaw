@@ -4,7 +4,10 @@
 //! crate. It converts to [`ProductAdapterError`] at the facade boundary so
 //! adapters never see host-layer details.
 
-use ironclaw_product_adapters::{ProductAdapterError, RedactedString};
+use ironclaw_product_adapters::{
+    ProductAdapterError, ProductWorkflowRejectionKind, RedactedString,
+};
+use ironclaw_turns::{TurnError, TurnErrorCategory};
 use thiserror::Error;
 
 /// Internal error type for the product workflow facade.
@@ -14,9 +17,13 @@ pub enum ProductWorkflowError {
     #[error("binding resolution failed: {reason}")]
     BindingResolutionFailed { reason: String },
 
-    /// Turn coordinator rejected the submission.
+    /// Turn coordinator rejected the submission before typed turn errors were available.
     #[error("turn submission rejected: {reason}")]
     TurnSubmissionRejected { reason: String },
+
+    /// Turn coordinator rejected the submission with typed category/status information.
+    #[error("turn submission failed: {error}")]
+    TurnSubmissionFailed { error: TurnError },
 
     /// Turn coordinator resume rejected.
     #[error("turn resume rejected: {reason}")]
@@ -41,6 +48,18 @@ pub enum ProductWorkflowError {
     UnsupportedActionKind { kind: String },
 }
 
+fn workflow_rejection_kind(category: TurnErrorCategory) -> ProductWorkflowRejectionKind {
+    match category {
+        TurnErrorCategory::ThreadBusy => ProductWorkflowRejectionKind::ThreadBusy,
+        TurnErrorCategory::AdmissionRejected => ProductWorkflowRejectionKind::AdmissionRejected,
+        TurnErrorCategory::ScopeNotFound => ProductWorkflowRejectionKind::ScopeNotFound,
+        TurnErrorCategory::Unauthorized => ProductWorkflowRejectionKind::Unauthorized,
+        TurnErrorCategory::InvalidRequest => ProductWorkflowRejectionKind::InvalidRequest,
+        TurnErrorCategory::Unavailable => ProductWorkflowRejectionKind::Unavailable,
+        TurnErrorCategory::Conflict => ProductWorkflowRejectionKind::Conflict,
+    }
+}
+
 impl From<ProductWorkflowError> for ProductAdapterError {
     fn from(value: ProductWorkflowError) -> Self {
         match value {
@@ -52,6 +71,15 @@ impl From<ProductWorkflowError> for ProductAdapterError {
             ProductWorkflowError::TurnSubmissionRejected { reason } => {
                 ProductAdapterError::Internal {
                     detail: RedactedString::new(reason),
+                }
+            }
+            ProductWorkflowError::TurnSubmissionFailed { error } => {
+                let status_code = error.adapter_status_code();
+                ProductAdapterError::WorkflowRejected {
+                    kind: workflow_rejection_kind(error.category()),
+                    status_code,
+                    retryable: matches!(status_code, 429 | 503),
+                    reason: RedactedString::new(error.to_string()),
                 }
             }
             ProductWorkflowError::TurnResumeRejected { reason } => ProductAdapterError::Internal {
