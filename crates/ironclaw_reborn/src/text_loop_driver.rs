@@ -52,6 +52,7 @@ impl AgentLoopDriver for TextOnlyModelReplyDriver {
             TEXT_ONLY_DRIVER_ID,
             RunProfileVersion::new(TEXT_ONLY_DRIVER_VERSION),
         )
+        .expect("static text-only driver id must be valid") // safety: fixed validated driver id constant
     }
 
     async fn run(
