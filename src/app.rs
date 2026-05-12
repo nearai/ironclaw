@@ -1231,6 +1231,20 @@ impl AppBuilder {
             )
             .await?;
 
+        // Apply DISABLE_TOOLS_LIST after all built-in, builder, dev, WASM, and
+        // MCP tools are registered. Extends ALLOW_LOCAL_TOOLS=false with an
+        // explicit deny-list of tool names that must not be callable regardless
+        // of how they were registered.
+        for name in &self.config.agent.disabled_tools {
+            match tools.unregister(name).await {
+                Some(_) => tracing::info!(tool = %name, "Tool disabled via DISABLE_TOOLS_LIST"),
+                None => tracing::debug!(
+                    tool = %name,
+                    "DISABLE_TOOLS_LIST entry not found in registry (already absent)"
+                ),
+            }
+        }
+
         // Load bootstrap-completed flag from settings so that existing users
         // who already completed onboarding don't re-get bootstrap injection.
         if let Some(ref ws) = workspace {

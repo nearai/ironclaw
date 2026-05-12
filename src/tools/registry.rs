@@ -1163,6 +1163,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn disable_tools_list_loop_removes_named_tools() {
+        // Mirrors the loop in `AppBuilder::build_all` that applies
+        // `config.agent.disabled_tools` after all registration completes.
+        // Verifies named tools are gone and unrelated tools survive.
+        let registry = ToolRegistry::new();
+        registry.register_builtin_tools();
+
+        assert!(registry.has("echo").await, "precondition: echo registered");
+        assert!(registry.has("time").await, "precondition: time registered");
+        assert!(registry.has("json").await, "precondition: json registered");
+
+        let disabled = vec!["echo".to_string(), "json".to_string()];
+        for name in &disabled {
+            registry.unregister(name).await;
+        }
+
+        assert!(!registry.has("echo").await, "echo should be removed");
+        assert!(!registry.has("json").await, "json should be removed");
+        assert!(registry.has("time").await, "time should remain");
+    }
+
+    #[tokio::test]
+    async fn disable_tools_list_missing_name_is_no_op() {
+        // Names not present in the registry must not panic — the loop in
+        // `build_all` logs at debug level and moves on.
+        let registry = ToolRegistry::new();
+        registry.register_builtin_tools();
+
+        let result = registry.unregister("does_not_exist").await;
+        assert!(result.is_none(), "absent tool should yield None");
+        assert!(registry.has("echo").await, "other tools unaffected");
+    }
+
+    #[tokio::test]
     async fn resolve_name_accepts_legacy_hyphen_alias() {
         struct LegacyTool;
 

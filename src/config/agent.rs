@@ -1,10 +1,33 @@
 use std::time::Duration;
 
 use crate::config::helpers::{
-    db_first_bool, db_first_or_default, parse_bool_env, parse_option_env,
+    db_first_bool, db_first_or_default, optional_env, parse_bool_env, parse_option_env,
 };
 use crate::error::ConfigError;
 use crate::settings::Settings;
+
+/// Parse `DISABLE_TOOLS_LIST` into a list of tool names.
+///
+/// Accepts either bare CSV (`secret_delete,memory_write`) or a bracketed
+/// list (`[secret_delete,memory_write]` / `["secret_delete","memory_write"]`).
+/// Strips surrounding `[]`, `"` and `'`, trims whitespace, and drops empty
+/// entries. Returns an empty vector when the var is unset or contains
+/// nothing but separators.
+fn parse_disabled_tools(raw: Option<String>) -> Vec<String> {
+    let Some(s) = raw else { return Vec::new() };
+    let trimmed = s.trim().trim_start_matches('[').trim_end_matches(']');
+    trimmed
+        .split(',')
+        .map(|item| {
+            item.trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .trim()
+                .to_string()
+        })
+        .filter(|item| !item.is_empty())
+        .collect()
+}
 
 /// Agent behavior configuration.
 #[derive(Debug, Clone)]
@@ -21,6 +44,12 @@ pub struct AgentConfig {
     pub session_idle_timeout: Duration,
     /// Allow chat to use filesystem/shell tools directly (bypass sandbox).
     pub allow_local_tools: bool,
+    /// Additional tool names to remove from the registry after all
+    /// registration completes. Extends `allow_local_tools=false` by
+    /// disabling any tool name listed here (e.g. `secret_delete`).
+    /// Parsed from the `DISABLE_TOOLS_LIST` env var as CSV or
+    /// bracketed list. Empty when unset.
+    pub disabled_tools: Vec<String>,
     /// Maximum daily LLM spend in cents (e.g. 10000 = $100). None = unlimited.
     pub max_cost_per_day_cents: Option<u64>,
     /// Maximum LLM/tool actions per hour. None = unlimited.
@@ -63,6 +92,7 @@ impl AgentConfig {
             use_planning: false,
             session_idle_timeout: Duration::from_secs(3600),
             allow_local_tools: true,
+            disabled_tools: Vec::new(),
             max_cost_per_day_cents: None,
             max_actions_per_hour: None,
             max_cost_per_user_per_day_cents: None,
@@ -120,6 +150,7 @@ impl AgentConfig {
                 "SESSION_IDLE_TIMEOUT_SECS",
             )?),
             allow_local_tools: parse_bool_env("ALLOW_LOCAL_TOOLS", false)?,
+            disabled_tools: parse_disabled_tools(optional_env("DISABLE_TOOLS_LIST")?),
             max_cost_per_day_cents: parse_option_env("MAX_COST_PER_DAY_CENTS")?,
             max_actions_per_hour: parse_option_env("MAX_ACTIONS_PER_HOUR")?,
             max_cost_per_user_per_day_cents: parse_option_env("MAX_COST_PER_USER_PER_DAY_CENTS")?,
@@ -164,6 +195,7 @@ impl AgentConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::helpers::lock_env;
 
     #[test]
     fn test_default_timezone_rejects_invalid() {
@@ -179,5 +211,58 @@ mod tests {
         let settings = Settings::default(); // default is "UTC"
         let config = AgentConfig::resolve(&settings).expect("resolve");
         assert_eq!(config.default_timezone, "UTC");
+    }
+
+    #[test]
+    fn parse_disabled_tools_unset_returns_empty() {
+        assert!(parse_disabled_tools(None).is_empty());
+    }
+
+    #[test]
+    fn parse_disabled_tools_csv() {
+        assert_eq!(
+            parse_disabled_tools(Some("secret_delete,memory_write".to_string())),
+            vec!["secret_delete", "memory_write"]
+        );
+    }
+
+    #[test]
+    fn parse_disabled_tools_bracketed_quoted() {
+        assert_eq!(
+            parse_disabled_tools(Some(
+                "[\"secret_delete\", \"memory_write\"]".to_string()
+            )),
+            vec!["secret_delete", "memory_write"]
+        );
+    }
+
+    #[test]
+    fn parse_disabled_tools_skips_empty_and_trims() {
+        assert_eq!(
+            parse_disabled_tools(Some(" secret_delete , , shell ".to_string())),
+            vec!["secret_delete", "shell"]
+        );
+    }
+
+    #[test]
+    fn disabled_tools_resolves_from_env() {
+        let _guard = lock_env();
+        // SAFETY: under ENV_MUTEX
+        unsafe { std::env::set_var("DISABLE_TOOLS_LIST", "secret_delete,shell") };
+
+        let config = AgentConfig::resolve(&Settings::default()).expect("resolve");
+        assert_eq!(config.disabled_tools, vec!["secret_delete", "shell"]);
+
+        unsafe { std::env::remove_var("DISABLE_TOOLS_LIST") };
+    }
+
+    #[test]
+    fn disabled_tools_defaults_to_empty_when_unset() {
+        let _guard = lock_env();
+        // SAFETY: under ENV_MUTEX
+        unsafe { std::env::remove_var("DISABLE_TOOLS_LIST") };
+
+        let config = AgentConfig::resolve(&Settings::default()).expect("resolve");
+        assert!(config.disabled_tools.is_empty());
     }
 }
