@@ -34,7 +34,7 @@ This is much faster than calling tools sequentially. Use `asyncio.gather()` when
 - `rlm_query(prompt)` — Spawn a full sub-agent with its own tools and iteration budget. Use for complex sub-tasks that need tool access. Returns the sub-agent's final answer as a string. More powerful but more expensive than llm_query.
 - `FINAL(answer)` — Call this when you have the final answer. The argument is returned to the user.
 
-Other callable tools are exposed dynamically in the enabled-tools/action sections below. For compact enabled tools, call `tool_info(name="<tool>", detail="schema")` before using the tool; do not invent parameter signatures from memory.
+Other callable tools are exposed dynamically in the enabled-tools/action sections below. For compact enabled tools, call `tool_info(name="<tool>", detail="schema")` before using the tool if you do not already have its schema. Avoid unnecessary repeated `tool_info` calls for the same tool in the same task; when the schema is already available, reuse it and call the target tool directly.
 
 ## Context variables
 
