@@ -4749,6 +4749,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_telegram_v2_adapter"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ironclaw_product_adapters",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ironclaw_threads"
 version = "0.1.0"
 dependencies = [
@@ -4848,12 +4859,17 @@ dependencies = [
 name = "ironclaw_wasm_product_adapters"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "chrono",
+ "hex",
  "hmac 0.12.1",
  "http 1.4.0",
  "ironclaw_product_adapters",
  "sha2 0.10.9",
  "subtle",
  "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
