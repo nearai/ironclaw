@@ -23,13 +23,14 @@ mod libsql_e2e {
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
-    use ironclaw_filesystem::{FilesystemError, FilesystemOperation, RootFilesystem};
+    use ironclaw_filesystem::RootFilesystem;
     use ironclaw_host_api::VirtualPath;
     use ironclaw_memory::{
         LibSqlMemoryDocumentRepository, MemoryBackend, MemoryBackendFilesystemAdapter,
         MemoryContext, MemoryDocumentPath, MemoryDocumentRepository, MemoryDocumentScope,
-        PromptSafetyAllowanceId, PromptSafetyReasonCode, PromptWriteSafetyEvent,
-        PromptWriteSafetyEventKind, PromptWriteSafetyEventSink, RepositoryMemoryBackend,
+        MemoryEventSinkError, PromptSafetyAllowanceId, PromptSafetyReasonCode,
+        PromptWriteSafetyEvent, PromptWriteSafetyEventKind, PromptWriteSafetyEventSink,
+        RepositoryMemoryBackend,
     };
 
     /// Protected paths whose registration is stable across both
@@ -722,7 +723,7 @@ mod libsql_e2e {
         async fn record_prompt_write_safety_event(
             &self,
             event: PromptWriteSafetyEvent,
-        ) -> Result<(), FilesystemError> {
+        ) -> Result<(), MemoryEventSinkError> {
             self.events.lock().unwrap().push(event);
             Ok(())
         }
@@ -735,12 +736,8 @@ mod libsql_e2e {
         async fn record_prompt_write_safety_event(
             &self,
             _event: PromptWriteSafetyEvent,
-        ) -> Result<(), FilesystemError> {
-            Err(FilesystemError::Backend {
-                path: VirtualPath::new("/memory").unwrap(),
-                operation: FilesystemOperation::WriteFile,
-                reason: "event sink unavailable".to_string(),
-            })
+        ) -> Result<(), MemoryEventSinkError> {
+            Err(MemoryEventSinkError::new("event sink unavailable"))
         }
     }
 }
