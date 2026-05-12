@@ -5321,7 +5321,10 @@ impl ExtensionManager {
                 }
 
                 if let Some(ref sse) = sse_manager {
-                    sse.broadcast(ironclaw_common::AppEvent::OnboardingState {
+                    // Scope to the OAuth flow owner — a global broadcast
+                    // would surface this onboarding state to every
+                    // connected tenant tab.
+                    let onboarding_event = ironclaw_common::AppEvent::OnboardingState {
                         extension_name: ironclaw_common::ExtensionName::from_trusted(ext_name),
                         state: if success {
                             ironclaw_common::OnboardingStateDto::Ready
@@ -5335,7 +5338,8 @@ impl ExtensionManager {
                         setup_url: None,
                         onboarding: None,
                         thread_id: None,
-                    });
+                    };
+                    sse.broadcast_for_user(&user_id, onboarding_event); // projection-exempt: channel-lifecycle, WASM extension OAuth completion
                 }
             });
 

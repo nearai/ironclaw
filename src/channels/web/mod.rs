@@ -635,6 +635,58 @@ impl GatewayChannel {
 /// constant, so the value is compile-time-pinned in both places.
 pub const GATEWAY_CHANNEL_NAME: &str = "gateway";
 
+/// Route a status `AppEvent` to the SSE manager based on owner identity.
+///
+/// In multi-tenant deployments an unscoped global broadcast would deliver
+/// the status (Thinking / ToolStarted / ToolResult / ...) to every
+/// connected subscriber, leaking another tenant's tool calls and outputs.
+/// Drop the event in that mode and surface a WARN so the upstream
+/// producer gets fixed. Single-tenant deployments keep the unscoped
+/// fan-out because there is only one subscriber population.
+///
+/// An empty-string `user_id` is treated the same as `None` — empty
+/// values typically come from a producer that lost the field along the
+/// way (default-initialised structs, missing JSON keys converted to
+/// empty strings) and must not collapse into a global broadcast in
+/// multi-tenant mode.
+///
+/// Extracted from `Channel::send_status` so the routing rule can be
+/// asserted by unit tests without standing up a `GatewayChannel`. See
+/// `tests::status_event_isolation`.
+///
+/// **Internal bridge contract.** This is `pub` only so the sandbox
+/// `JobEvent` rx loop in `src/main.rs` can route through the same
+/// drop/WARN/broadcast policy as `Channel::send_status`. It is not part
+/// of a stable public API; downstream consumers must not depend on it.
+/// Callers from inside the `web` slice should use `send_status` rather
+/// than reaching for this directly.
+pub fn dispatch_status_event(
+    sse: &platform::sse::SseManager,
+    multi_tenant_mode: bool,
+    user_id: Option<&str>,
+    event: AppEvent,
+) {
+    match user_id.filter(|uid| !uid.is_empty()) {
+        Some(uid) => sse.broadcast_for_user(uid, event), // projection-exempt: bridge dispatcher, scoped status update
+        None if multi_tenant_mode => {
+            // Log only the wire-stable variant name. `?event` would emit
+            // the full Debug payload, which on variants like
+            // `AppEvent::Response` / `Thinking` / `ToolResult` carries
+            // user-authored content into operator logs in a multi-tenant
+            // deployment. The variant name is enough to chase the
+            // misbehaving producer.
+            tracing::warn!(
+                event_kind = event.event_type(),
+                "dropped unscoped status event in multi-tenant mode — \
+                 producer must include a non-empty user_id in metadata"
+            );
+        }
+        None => {
+            sse.broadcast(event); // projection-exempt: bridge dispatcher, single-tenant unscoped status; multi-tenant-safe: only reached when multi_tenant_mode=false
+        }
+    }
+}
+
 #[async_trait]
 impl Channel for GatewayChannel {
     fn name(&self) -> &str {
@@ -940,15 +992,12 @@ impl Channel for GatewayChannel {
             }
         };
 
-        // Scope events to the user when user_id is available in metadata.
-        // When user_id is missing (heartbeat, routines), events go to all
-        // subscribers. In multi-tenant mode this leaks status across users.
-        if let Some(uid) = metadata.get("user_id").and_then(|v| v.as_str()) {
-            self.state.sse.broadcast_for_user(uid, event);
-        } else {
-            tracing::debug!("Status event missing user_id in metadata; broadcasting globally");
-            self.state.sse.broadcast(event);
-        }
+        dispatch_status_event(
+            &self.state.sse,
+            self.state.multi_tenant_mode,
+            metadata.get("user_id").and_then(|v| v.as_str()),
+            event,
+        );
         Ok(())
     }
 

@@ -1,4 +1,4 @@
-//! Shared types and utilities used across the IronClaw workspace.
+//! Shared types, paths, and platform helpers used across the IronClaw workspace.
 
 pub mod attachment;
 pub mod env_helpers;

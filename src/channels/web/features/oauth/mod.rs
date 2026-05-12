@@ -51,6 +51,83 @@ fn oauth_error_page(label: &str) -> axum::response::Response {
     axum::response::Html(html).into_response()
 }
 
+/// Failure category for the OAuth callback handler. The text is embedded in
+/// `tracing::warn!` so a user-reported correlation ID can be mapped to the
+/// actual cause without having to re-enable verbose tracing on the gateway.
+#[derive(Copy, Clone)]
+enum OauthCallbackFailure {
+    /// `?error=...` returned by the provider (e.g. user denied consent).
+    ProviderError,
+    /// `state` param is missing or empty.
+    MissingState,
+    /// `code` param is missing or empty.
+    MissingCode,
+    /// `state` couldn't be decoded — likely a tampered or stale token.
+    MalformedState,
+    /// No matching pending flow found for the decoded state.
+    UnknownState,
+    /// Pending flow exceeded `OAUTH_FLOW_EXPIRY` before the callback fired.
+    Expired,
+    /// Token exchange (provider or proxy) returned a non-2xx response.
+    Exchange,
+    /// `extension_manager` is unavailable on the gateway state.
+    NoExtensionManager,
+}
+
+impl OauthCallbackFailure {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ProviderError => "provider_error",
+            Self::MissingState => "missing_state",
+            Self::MissingCode => "missing_code",
+            Self::MalformedState => "malformed_state",
+            Self::UnknownState => "unknown_state",
+            Self::Expired => "expired",
+            Self::Exchange => "exchange_failed",
+            Self::NoExtensionManager => "no_extension_manager",
+        }
+    }
+}
+
+/// Generate a short correlation ID from an arbitrary seed plus the current
+/// monotonic-ish timestamp. Emitted on every `tracing::warn!` call in the
+/// OAuth callback failure paths so an operator can map a timestamp /
+/// category / correlation cluster to a single log line.
+///
+/// The seed is whatever caller-side string best identifies the failure —
+/// in practice the raw `state` query parameter (when present) or the
+/// `flow.extension_name` for post-state-resolution failures. The seed is
+/// hashed (SHA-256) before any hex output, so it is never logged or
+/// exposed verbatim through the returned ID; callers that want the seed
+/// itself in logs must pass it separately through
+/// [`redact_oauth_state_for_logs`].
+///
+/// Currently logs-only: the user-facing landing page rendered by
+/// [`oauth_error_page`] uses [`crate::auth::oauth::landing_html`], which has
+/// a fixed failure subtitle and does not embed the correlation. Plumbing
+/// the ID into the HTML is a follow-up — see `landing_html` for the
+/// fixed-subtitle wiring.
+///
+/// 8 hex characters — collision-resistant within a single tracing window
+/// (operators grep recent logs), short enough to read aloud over phone.
+fn oauth_failure_correlation_id(seed: &str) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut hasher = Sha256::new();
+    hasher.update(seed.as_bytes());
+    hasher.update(nanos.to_le_bytes());
+    let digest = hasher.finalize();
+    let mut s = String::with_capacity(8);
+    for byte in digest.iter().take(4) {
+        use std::fmt::Write as _;
+        let _ = write!(&mut s, "{byte:02x}");
+    }
+    s
+}
+
 /// Produce a log-safe fingerprint of an OAuth `state` parameter.
 ///
 /// The raw `state` is a one-time CSRF token linked to an in-flight flow.
@@ -68,6 +145,60 @@ fn redact_oauth_state_for_logs(state: &str) -> String {
         let _ = write!(&mut short_hash, "{byte:02x}");
     }
     format!("sha256:{short_hash}:len={}", state.len())
+}
+
+/// Resolve the IronClaw user who initiated a Slack relay OAuth flow.
+///
+/// `auth_channel_relay` (in `extensions/manager.rs`) stores the
+/// initiating user_id under `relay:{name}:oauth_user`, namespaced by
+/// the *gateway owner* secret-store user (`owner_id`). The callback
+/// handler reads it back here so the completion toast can be
+/// broadcast to the actual tenant who started the flow rather than
+/// the gateway owner — in multi-tenant deployments those differ, and
+/// broadcasting to `owner_id` would deliver the success/failure
+/// toast to the wrong browser tab.
+///
+/// Falls back to `owner_id` when the secret is missing
+/// (single-tenant deployments or flows started before the field was
+/// stored). When `multi_tenant_mode` is true, the fallback emits a
+/// WARN: in a multi-tenant deployment a missing initiator secret
+/// means we have no way to recover the original tenant, and quietly
+/// routing the toast to `owner_id` reintroduces the same misroute
+/// the rest of this PR closes. The completion still proceeds —
+/// the `oauth_user` value is also used to seed the pairing identity,
+/// and aborting the callback would leave a dangling Slack install —
+/// but the WARN surfaces the lost-initiator case for operators.
+///
+/// Returns the resolved user_id as a `String` so the caller owns the
+/// value past the secret store's lifetime.
+///
+/// This helper is the canonical broadcast-target resolver. The
+/// pairing-identity creation path also uses it so the toast and the
+/// new identity always agree on which user just completed the flow.
+async fn resolve_relay_oauth_user(
+    secrets: &(dyn crate::secrets::SecretsStore + Send + Sync),
+    owner_id: &str,
+    extension_name: &str,
+    multi_tenant_mode: bool,
+) -> String {
+    let user_key = format!("relay:{extension_name}:oauth_user");
+    match secrets.get_decrypted(owner_id, &user_key).await.ok() {
+        Some(s) => s.expose().to_string(),
+        None => {
+            if multi_tenant_mode {
+                tracing::warn!(
+                    extension = %extension_name,
+                    owner_id = %owner_id,
+                    "relay OAuth callback: missing `relay:{{ext}}:oauth_user` secret in \
+                     multi-tenant mode — falling back to gateway owner_id for the \
+                     completion broadcast. The original initiator is unrecoverable \
+                     (likely a flow started before the field was stored, or a \
+                     premature secret delete). Toast may reach the wrong tab."
+                );
+            }
+            owner_id.to_string()
+        }
+    }
 }
 
 /// OAuth callback handler for the web gateway.
@@ -92,12 +223,31 @@ pub(crate) async fn oauth_callback_handler(
     // here — otherwise it lingers until `OAUTH_FLOW_EXPIRY` (5 min) and any
     // subsequent auth attempt for the same (extension, user) pair has to
     // dedupe against a ghost entry.
+    //
+    // We also auto-cancel the engine pending auth gate for the same user so
+    // the user's conversation doesn't sit blocked waiting for an OAuth
+    // resume that will never arrive (#3320 — the user reported being unable
+    // to continue the conversation after a failed Gmail OAuth from
+    // Telegram, even after `/clear`).
     if let Some(error) = params.get("error") {
         let description = params
             .get("error_description")
             .cloned()
             .unwrap_or_else(|| error.clone());
-        if let Some(state_param) = params.get("state")
+        let state_seed = params
+            .get("state")
+            .cloned()
+            .unwrap_or_else(|| "no-state".to_string());
+        let correlation = oauth_failure_correlation_id(&state_seed);
+
+        // Pull the full flow out so we can mirror the failure handling of
+        // the exchange-failure and expiry paths: SSE `OnboardingState::Failed`
+        // for the UI, legacy-v1 session `pending_auth` clear, and
+        // credential-scoped engine gate clear. Without all three, an
+        // `?error=access_denied` from the provider would leave the auth
+        // card spinning and a legacy v1 session intercepting the next
+        // user message as a token (Copilot review on PR #3381).
+        let removed_flow = if let Some(state_param) = params.get("state")
             && !state_param.is_empty()
             && let Ok(decoded) = oauth::decode_hosted_oauth_state(state_param)
             && let Some(ext_mgr) = state.extension_manager.as_ref()
@@ -106,14 +256,76 @@ pub(crate) async fn oauth_callback_handler(
                 .pending_oauth_flows()
                 .write()
                 .await
-                .remove(&decoded.flow_id);
+                .remove(&decoded.flow_id)
+        } else {
+            None
+        };
+
+        tracing::warn!(
+            category = OauthCallbackFailure::ProviderError.as_str(),
+            correlation = %correlation,
+            error = %error,
+            description = %description,
+            user_id = removed_flow
+                .as_ref()
+                .map(|f| f.user_id.as_str())
+                .unwrap_or("<unknown>"),
+            "OAuth callback received provider error"
+        );
+
+        if let Some(ref flow) = removed_flow {
+            // Notify the UI so the auth card stops spinning and shows the
+            // error instead. Same shape as the expiry branch.
+            if let Some(ref sse) = flow.sse_manager {
+                sse.broadcast_for_user(
+                    &flow.user_id,
+                    AppEvent::OnboardingState {
+                        extension_name: flow.extension_name.clone(),
+                        state: crate::channels::web::types::OnboardingStateDto::Failed,
+                        request_id: None,
+                        message: Some(description.clone()),
+                        instructions: None,
+                        auth_url: None,
+                        setup_url: None,
+                        onboarding: None,
+                        thread_id: None,
+                    },
+                );
+            }
+            // Discard the pending engine auth gate that was waiting on
+            // *this* OAuth flow (matched by credential name). Without this
+            // the engine sits paused forever (#3320). Scoping by
+            // credential keeps the cleanup from nuking unrelated auth
+            // gates the user may have open in parallel — see PR review
+            // on #3381. The bridge helper takes the credential as `&str`
+            // and parses it backend-side, so the web layer keeps its
+            // string-typed boundary intact.
+            crate::bridge::clear_engine_pending_auth_for_credential(
+                &flow.user_id,
+                &flow.secret_name,
+            )
+            .await;
+            // Legacy v1 session cleanup: drop `pending_auth` so the next
+            // user message goes through to the LLM rather than being
+            // intercepted as a token. Use `clear_session_auth_mode_for_thread`
+            // (not the broader `clear_auth_mode`) because the latter would
+            // re-call the unscoped engine cleanup and undo the credential
+            // scoping above.
+            let _ = clear_session_auth_mode_for_thread(&state, &flow.user_id, None).await;
         }
+
         return oauth_error_page(&description);
     }
 
     let state_param = match params.get("state") {
         Some(s) if !s.is_empty() => s.clone(),
         _ => {
+            let correlation = oauth_failure_correlation_id("missing-state");
+            tracing::warn!(
+                category = OauthCallbackFailure::MissingState.as_str(),
+                correlation = %correlation,
+                "OAuth callback missing or empty state parameter"
+            );
             return oauth_error_page("IronClaw");
         }
     };
@@ -121,6 +333,13 @@ pub(crate) async fn oauth_callback_handler(
     let code = match params.get("code") {
         Some(c) if !c.is_empty() => c.clone(),
         _ => {
+            let correlation = oauth_failure_correlation_id(&state_param);
+            tracing::warn!(
+                category = OauthCallbackFailure::MissingCode.as_str(),
+                correlation = %correlation,
+                state = %redact_oauth_state_for_logs(&state_param),
+                "OAuth callback missing or empty code parameter"
+            );
             return oauth_error_page("IronClaw");
         }
     };
@@ -129,6 +348,12 @@ pub(crate) async fn oauth_callback_handler(
     let ext_mgr = match state.extension_manager.as_ref() {
         Some(mgr) => mgr,
         None => {
+            let correlation = oauth_failure_correlation_id(&state_param);
+            tracing::warn!(
+                category = OauthCallbackFailure::NoExtensionManager.as_str(),
+                correlation = %correlation,
+                "OAuth callback fired but extension manager is not configured"
+            );
             return oauth_error_page("IronClaw");
         }
     };
@@ -137,7 +362,10 @@ pub(crate) async fn oauth_callback_handler(
         Ok(decoded) => decoded,
         Err(error) => {
             let redacted_state = redact_oauth_state_for_logs(&state_param);
+            let correlation = oauth_failure_correlation_id(&state_param);
             tracing::warn!(
+                category = OauthCallbackFailure::MalformedState.as_str(),
+                correlation = %correlation,
                 state = %redacted_state,
                 error = %error,
                 "OAuth callback received with malformed state"
@@ -159,7 +387,10 @@ pub(crate) async fn oauth_callback_handler(
         None => {
             let redacted_state = redact_oauth_state_for_logs(&state_param);
             let redacted_lookup_key = redact_oauth_state_for_logs(&lookup_key);
+            let correlation = oauth_failure_correlation_id(&state_param);
             tracing::warn!(
+                category = OauthCallbackFailure::UnknownState.as_str(),
+                correlation = %correlation,
                 state = %redacted_state,
                 lookup_key = %redacted_lookup_key,
                 "OAuth callback received with unknown or expired state"
@@ -170,8 +401,12 @@ pub(crate) async fn oauth_callback_handler(
 
     // Check flow expiry (5 minutes, matching TCP listener timeout)
     if flow.created_at.elapsed() > oauth::OAUTH_FLOW_EXPIRY {
+        let correlation = oauth_failure_correlation_id(flow.extension_name.as_str());
         tracing::warn!(
+            category = OauthCallbackFailure::Expired.as_str(),
+            correlation = %correlation,
             extension = %flow.extension_name,
+            user_id = %flow.user_id,
             "OAuth flow expired"
         );
         // Notify UI so auth card can show error instead of staying stuck
@@ -191,7 +426,18 @@ pub(crate) async fn oauth_callback_handler(
                 },
             );
         }
-        clear_auth_mode(&state, &flow.user_id).await;
+        // Expiry is a terminal failure path just like provider-error and
+        // exchange-failure: discard the engine pending auth gate so the
+        // conversation isn't blocked on a callback that will never arrive
+        // (#3320). Scoped to this flow's credential so unrelated auth
+        // gates the user has open in parallel survive — review feedback
+        // on #3381. Use `clear_session_auth_mode_for_thread` for the
+        // legacy v1 cleanup; the broader `clear_auth_mode` helper would
+        // re-call `clear_engine_pending_auth(user, None)` and undo the
+        // credential scoping we just applied.
+        crate::bridge::clear_engine_pending_auth_for_credential(&flow.user_id, &flow.secret_name)
+            .await;
+        let _ = clear_session_auth_mode_for_thread(&state, &flow.user_id, None).await;
         return oauth_error_page(&flow.display_name);
     }
 
@@ -322,11 +568,30 @@ pub(crate) async fn oauth_callback_handler(
             );
         }
         Err(e) => {
+            // Token exchange or downstream persistence failed. Tag the log
+            // line with a correlation ID so a user-reported "I saw 400" can
+            // be mapped to this exact failure without re-enabling verbose
+            // tracing on the gateway. Then auto-cancel the engine pending
+            // auth gate for this user so subsequent messages aren't blocked
+            // waiting for an OAuth resume that will never arrive (#3320).
+            //
+            // Scope the cleanup to the failed flow's credential so an
+            // unrelated pending auth gate (e.g. Slack/MCP open in another
+            // thread) survives — review feedback on #3381.
+            let correlation = oauth_failure_correlation_id(flow.extension_name.as_str());
             tracing::warn!(
+                category = OauthCallbackFailure::Exchange.as_str(),
+                correlation = %correlation,
                 extension = %flow.extension_name,
+                user_id = %flow.user_id,
                 error = %e,
                 "OAuth failed via gateway callback"
             );
+            crate::bridge::clear_engine_pending_auth_for_credential(
+                &flow.user_id,
+                &flow.secret_name,
+            )
+            .await;
         }
     }
 
@@ -334,12 +599,16 @@ pub(crate) async fn oauth_callback_handler(
     // user message goes through to the LLM instead of being intercepted
     // as a token.
     //
-    // Do NOT clear the engine pending-auth gate here: the successful
-    // callback path still needs the pending gate so it can resolve and
-    // replay the paused action (preserving the paused_lease), and failed
-    // callbacks should leave the gate visible for retry from the UI.
-    // The gate is cleared by the engine itself when `ExternalCallback`
-    // resolves (success) or when the user explicitly cancels (failure).
+    // Engine-gate handling is scoped per failure mode and done earlier in
+    // each branch — provider-error, expiry, and exchange-failure each
+    // call `clear_engine_pending_auth_for_credential` at their own
+    // failure site (#3320 + PR #3381 review). The successful-callback
+    // path intentionally leaves the gate intact so the `ExternalCallback`
+    // resume below can resolve it and replay the paused action
+    // (preserving the paused_lease). This is why we use the legacy-v1-only
+    // `clear_session_auth_mode_for_thread` here instead of the broader
+    // `clear_auth_mode` helper — `clear_auth_mode` would also discard
+    // the engine gate on the *success* path and undo the resume.
     let _ = clear_session_auth_mode_for_thread(&state, &flow.user_id, None).await;
 
     // After successful OAuth, auto-activate the extension so it moves
@@ -730,6 +999,32 @@ pub(crate) async fn slack_relay_oauth_callback_handler(
         .into_response();
     }
 
+    // Resolve the IronClaw user who initiated this OAuth flow BEFORE the
+    // result block so the completion toast can be routed to that tenant
+    // even on the failure path.
+    let oauth_user = resolve_relay_oauth_user(
+        ext_mgr.secrets().as_ref(),
+        &state.owner_id,
+        &relay_extension_name,
+        state.multi_tenant_mode,
+    )
+    .await;
+
+    // Delete the temporary `relay:{ext}:oauth_user` secret unconditionally
+    // once we've captured its value — regardless of whether the result
+    // block below short-circuits, whether `pairing_store` is wired up,
+    // or whether identity pairing later fails. Leaving it behind would
+    // let a subsequent OAuth callback for the same extension read a
+    // stale initiating user and misroute the toast (Copilot review on
+    // PR #3390 commit d247bde8). The previous cleanup site inside the
+    // `if let Some(pairing_store)` branch was unreachable on three of
+    // those failure paths.
+    let oauth_user_key = format!("relay:{}:oauth_user", relay_extension_name);
+    let _ = ext_mgr
+        .secrets()
+        .delete(&state.owner_id, &oauth_user_key)
+        .await;
+
     let result: Result<(), String> = async {
         let store = state.store.as_ref().ok_or_else(|| {
             "Relay activation requires persistent settings storage; no-db mode is unsupported."
@@ -799,16 +1094,13 @@ pub(crate) async fn slack_relay_oauth_callback_handler(
                     "No connection with authed_user_id found for this team".to_string()
                 })?;
 
-            let user_key = format!("relay:{}:oauth_user", relay_extension_name);
-            let oauth_user = ext_mgr
-                .secrets()
-                .get_decrypted(&state.owner_id, &user_key)
-                .await
-                .ok()
-                .map(|s| s.expose().to_string())
-                .unwrap_or_else(|| state.owner_id.clone());
-            let _ = ext_mgr.secrets().delete(&state.owner_id, &user_key).await;
-
+            // The outer `oauth_user` (resolved by `resolve_relay_oauth_user`
+            // above the result block) is the IronClaw user this OAuth flow
+            // belongs to. Reuse it here so the pairing identity and the
+            // completion toast always agree on the target tenant. The
+            // temporary `relay:{ext}:oauth_user` secret was already
+            // deleted unconditionally above the result block, so we
+            // never reach this branch with a stale credential lingering.
             let user_record = if let Some(ref db) = state.store {
                 db.get_user(&oauth_user).await.ok().flatten()
             } else {
@@ -862,8 +1154,14 @@ pub(crate) async fn slack_relay_oauth_callback_handler(
         }
     };
 
-    // Broadcast event to notify the web UI.
-    state.sse.broadcast(AppEvent::OnboardingState {
+    // Broadcast event to notify the web UI. Scope to the resolved
+    // OAuth flow user (`oauth_user`) rather than `state.owner_id` —
+    // in multi-tenant mode a non-owner can complete a Slack OAuth
+    // flow, and the completion toast must reach THAT user's open
+    // browser tab, not the gateway owner's. Broadcasting to
+    // `state.owner_id` was a cross-tenant misroute even after the
+    // global-broadcast leak was closed.
+    let onboarding_event = AppEvent::OnboardingState {
         extension_name: ironclaw_common::ExtensionName::from_trusted(relay_extension_name.clone()),
         state: if success {
             crate::channels::web::types::OnboardingStateDto::Ready
@@ -877,7 +1175,8 @@ pub(crate) async fn slack_relay_oauth_callback_handler(
         setup_url: None,
         onboarding: None,
         thread_id: None,
-    });
+    };
+    state.sse.broadcast_for_user(&oauth_user, onboarding_event); // projection-exempt: channel-lifecycle, slack relay onboarding state
 
     if success {
         axum::response::Html(
@@ -927,6 +1226,97 @@ mod tests {
     };
 
     use crate::testing::credentials::TEST_GATEWAY_CRYPTO_KEY;
+
+    /// `auth_channel_relay` stores the initiating user_id under
+    /// `relay:{ext}:oauth_user` namespaced by the GATEWAY OWNER's
+    /// secret-store user. The callback must read it back from the same
+    /// namespace and return it — broadcasting the completion toast to
+    /// `state.owner_id` instead would deliver the success/failure
+    /// notification to the wrong tenant in multi-tenant deployments.
+    #[tokio::test]
+    async fn resolve_relay_oauth_user_returns_stored_value() {
+        use crate::secrets::CreateSecretParams;
+
+        let secrets = test_secrets_store();
+        let owner_id = "gateway-owner";
+        let extension_name = DEFAULT_RELAY_NAME;
+        let initiating_user = "alice"; // deliberately != owner_id
+
+        secrets
+            .create(
+                owner_id,
+                CreateSecretParams::new(
+                    format!("relay:{extension_name}:oauth_user"),
+                    initiating_user,
+                ),
+            )
+            .await
+            .expect("seed oauth_user secret"); // safety: cfg(test) fixture
+
+        // Multi-tenant flag is irrelevant when the secret IS present —
+        // the resolved value comes from the stored initiator regardless.
+        let resolved = super::resolve_relay_oauth_user(
+            secrets.as_ref(),
+            owner_id,
+            extension_name,
+            true, // multi_tenant_mode
+        )
+        .await;
+        assert_eq!(
+            resolved, initiating_user,
+            "callback must broadcast to the initiating user, not the gateway owner"
+        );
+    }
+
+    /// Falls back to `owner_id` when the secret was never written —
+    /// covers single-tenant deployments and pre-multi-tenant flows.
+    /// In single-tenant mode the fallback is silent: owner == only user,
+    /// so routing the toast there is correct, not a misroute.
+    #[tokio::test]
+    async fn resolve_relay_oauth_user_falls_back_to_owner_id() {
+        let secrets = test_secrets_store();
+        let owner_id = "single-tenant-owner";
+
+        let resolved = super::resolve_relay_oauth_user(
+            secrets.as_ref(),
+            owner_id,
+            DEFAULT_RELAY_NAME,
+            false, // multi_tenant_mode
+        )
+        .await;
+        assert_eq!(
+            resolved, owner_id,
+            "missing secret must fall back to owner_id, not panic or empty-string"
+        );
+    }
+
+    /// In multi-tenant mode a missing initiator secret means the
+    /// original tenant is unrecoverable. The function still falls back
+    /// to `owner_id` so the OAuth flow doesn't strand a half-installed
+    /// Slack relay, but the WARN documented in `resolve_relay_oauth_user`
+    /// is the operator-visible signal that a toast may have reached the
+    /// wrong tab. We can't easily assert on tracing output without
+    /// pulling in `tracing-test`, so this test pins the behavioral
+    /// contract: even with `multi_tenant_mode=true`, the function does
+    /// not panic, return empty-string, or block the callback.
+    #[tokio::test]
+    async fn resolve_relay_oauth_user_multitenant_fallback_returns_owner_id() {
+        let secrets = test_secrets_store();
+        let owner_id = "gateway-owner";
+
+        let resolved = super::resolve_relay_oauth_user(
+            secrets.as_ref(),
+            owner_id,
+            DEFAULT_RELAY_NAME,
+            true, // multi_tenant_mode
+        )
+        .await;
+        assert_eq!(
+            resolved, owner_id,
+            "multi-tenant fallback must still return owner_id (and emit the WARN); \
+             returning empty would crash the broadcast call site"
+        );
+    }
 
     fn test_oauth_router(state: Arc<GatewayState>) -> Router {
         Router::new()
@@ -1150,6 +1540,126 @@ mod tests {
             .expect("body");
         let html = String::from_utf8_lossy(&body);
         assert!(html.contains("Authorization Failed"));
+    }
+
+    /// Regression test for #3320: when the OAuth provider returns an error,
+    /// the gateway must remove the pending flow associated with the inbound
+    /// `state` so a subsequent auth attempt isn't blocked by a ghost entry
+    /// (the entry would otherwise live until `OAUTH_FLOW_EXPIRY`).
+    ///
+    /// The previous code path did `.remove(&decoded.flow_id)` but threw
+    /// the value away, so we never knew the flow's `user_id` and could not
+    /// auto-cancel the matching engine pending auth gate. After the fix
+    /// we capture the user_id; the engine-gate side of the cleanup is
+    /// covered by integration tests since it requires bringing up the
+    /// engine state.
+    #[tokio::test]
+    async fn test_oauth_callback_provider_error_drains_pending_flow() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
+                crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
+                    TEST_GATEWAY_CRYPTO_KEY.to_string(),
+                ))
+                .expect("crypto"),
+            )));
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets.clone());
+
+        // Insert a pending flow keyed by a known `flow_id`. Encode an
+        // OAuth `state` value that decodes to this flow_id so the
+        // error-branch cleanup actually exercises the lookup, not the
+        // outer "no state param" path.
+        let flow_id = "drain-me-flow-id";
+        let flow = fresh_pending_oauth_flow(secrets.clone(), None, None);
+        ext_mgr
+            .pending_oauth_flows()
+            .write()
+            .await
+            .insert(flow_id.to_string(), flow);
+
+        let state_param = crate::auth::oauth::encode_hosted_oauth_state(flow_id, None);
+
+        let state = test_gateway_state(Some(Arc::clone(&ext_mgr)));
+        let app = test_oauth_router(Arc::clone(&state));
+
+        let req = axum::http::Request::builder()
+            .uri(format!(
+                "/oauth/callback?error=access_denied&error_description=user_denied&state={state_param}"
+            ))
+            .body(Body::empty())
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Pending flow must be drained on provider error so a stale
+        // `state` can't satisfy a later attempt.
+        let flows = ext_mgr.pending_oauth_flows().read().await;
+        assert!(
+            !flows.contains_key(flow_id),
+            "pending OAuth flow should be drained on provider error"
+        );
+    }
+
+    /// Regression for Copilot review on PR #3381: the provider-error
+    /// branch must mirror the exchange-failure / expiry branches —
+    /// broadcast `OnboardingState::Failed` so the UI auth card stops
+    /// spinning, not just drain the pending flow and return an error
+    /// page. Without the SSE emit the legacy v1 web UI gets no signal
+    /// that the OAuth dance has terminated.
+    #[tokio::test]
+    async fn test_oauth_callback_provider_error_broadcasts_onboarding_failed() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(Arc::clone(&secrets));
+        let sse_mgr = Arc::new(SseManager::new());
+        let mut receiver = sse_mgr.sender().subscribe();
+        let flow = fresh_pending_oauth_flow(Arc::clone(&secrets), Some(Arc::clone(&sse_mgr)), None);
+        let flow_id = "provider-error-broadcast-flow";
+        ext_mgr
+            .pending_oauth_flows()
+            .write()
+            .await
+            .insert(flow_id.to_string(), flow);
+
+        let state_param = crate::auth::oauth::encode_hosted_oauth_state(flow_id, None);
+        let state = test_gateway_state(Some(Arc::clone(&ext_mgr)));
+        let app = test_oauth_router(state);
+
+        let req = axum::http::Request::builder()
+            .uri(format!(
+                "/oauth/callback?error=access_denied&error_description=user_denied&state={}",
+                urlencoding::encode(&state_param)
+            ))
+            .body(Body::empty())
+            .expect("request");
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        match receiver.recv().await.expect("onboarding_state event").event {
+            crate::channels::web::types::AppEvent::OnboardingState {
+                extension_name,
+                state,
+                message,
+                ..
+            } => {
+                assert_eq!(extension_name, "test_tool");
+                assert_eq!(
+                    state,
+                    crate::channels::web::types::OnboardingStateDto::Failed
+                );
+                assert_eq!(message.as_deref(), Some("user_denied"));
+            }
+            event => panic!("expected OnboardingState event, got {event:?}"),
+        }
     }
 
     #[tokio::test]
@@ -2152,6 +2662,83 @@ mod tests {
         let state_key = format!("relay:{}:oauth_state", legacy_relay_name);
         let exists = secrets.exists("test", &state_key).await.unwrap_or(true);
         assert!(!exists, "Legacy CSRF nonce should be deleted after use");
+    }
+
+    /// Regression: the `relay:{ext}:oauth_user` secret stores the
+    /// IronClaw user who initiated the OAuth flow. The callback must
+    /// consume it unconditionally once the value is read, regardless of
+    /// whether downstream activation, identity-pairing, or a missing
+    /// `pairing_store` causes the result block to short-circuit. Leaving
+    /// the secret behind would let a subsequent OAuth callback for the
+    /// same extension read a stale initiating user and misroute the
+    /// completion toast.
+    ///
+    /// The test fixture has no real relay service and no `pairing_store`
+    /// wired up, so the result block errors out after the CSRF check
+    /// passes — exactly the failure path Copilot flagged on PR #3390
+    /// (comment id 3211833864) where the previous in-`if-let` cleanup
+    /// site was unreachable.
+    #[tokio::test]
+    async fn test_relay_oauth_callback_consumes_oauth_user_secret_on_failure_path() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let secrets = test_secrets_store();
+        let nonce = "test-nonce-oauth-user-cleanup";
+        let relay_name = crate::extensions::naming::canonicalize_extension_name(DEFAULT_RELAY_NAME)
+            .expect("canonical relay name");
+
+        secrets
+            .create(
+                "test",
+                crate::secrets::CreateSecretParams::new(
+                    format!("relay:{}:oauth_state", relay_name),
+                    nonce,
+                ),
+            )
+            .await
+            .expect("store nonce"); // safety: cfg(test) fixture
+        secrets
+            .create(
+                "test",
+                crate::secrets::CreateSecretParams::new(
+                    format!("relay:{}:oauth_user", relay_name),
+                    "alice", // initiating user, deliberately != owner_id
+                ),
+            )
+            .await
+            .expect("store oauth_user secret"); // safety: cfg(test) fixture
+
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets.clone());
+        let state = test_gateway_state(Some(ext_mgr));
+        let app = test_relay_oauth_router(state);
+
+        let req = axum::http::Request::builder()
+            .uri(format!(
+                "/oauth/slack/callback?team_id=T123&provider=slack&state={}",
+                nonce
+            ))
+            .body(Body::empty())
+            .expect("request");
+
+        let _resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        // We don't assert on the response body — the result block almost
+        // certainly errors (no real relay backend), and that's the point:
+        // the cleanup must still run on the failure path.
+
+        let oauth_user_key = format!("relay:{}:oauth_user", relay_name);
+        let exists = secrets
+            .exists("test", &oauth_user_key)
+            .await
+            .unwrap_or(true);
+        assert!(
+            !exists,
+            "relay:{{ext}}:oauth_user must be deleted unconditionally — \
+             leaving it behind on the failure path lets a subsequent \
+             OAuth callback misroute the completion toast"
+        );
     }
 
     #[tokio::test]

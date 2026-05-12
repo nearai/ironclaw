@@ -7,6 +7,12 @@ const ADAPTER_LABELS = {
   ollama: 'Ollama',
   bedrock: 'AWS Bedrock',
   nearai: 'NEAR AI',
+  openai_codex: 'OpenAI Codex',
+  gemini_oauth: 'Gemini CLI OAuth',
+  github_copilot: 'GitHub Copilot',
+  deep_seek: 'DeepSeek',
+  gemini: 'Google Gemini',
+  open_router: 'OpenRouter',
 };
 
 let _builtinProviders = [];
@@ -62,6 +68,24 @@ function scrollToProviders() {
 
 /** Check whether a provider has all required credentials (API key + base URL if required). */
 function isProviderConfigured(provider) {
+  // ── Non-API-key credential gate ────────────────────────────────────────
+  // Built-ins with `credential_kind` other than `api_key` /
+  // `open_ai_compatible` / `ollama` (NEAR AI session token, Gemini
+  // OAuth creds file, OpenAI Codex device-code session, AWS Bedrock
+  // creds) carry no `api_key_required` signal — the backend ships
+  // `has_credentials` as the authoritative gate so the UI can't show
+  // them as Use-ready on a fresh install and accidentally trigger an
+  // interactive OAuth from a settings request.
+  if (provider.builtin) {
+    const kind = provider.credential_kind;
+    const isApiKeyShaped = kind === 'api_key'
+      || kind === 'open_ai_compatible'
+      || kind === 'ollama'
+      || kind === undefined;
+    if (!isApiKeyShaped && provider.has_credentials !== true) {
+      return false;
+    }
+  }
   // ── API key check ──────────────────────────────────────────────────────
   // Built-in providers carry `api_key_required` from the backend registry.
   // Custom providers don't — derive the requirement from the adapter instead:
@@ -112,6 +136,23 @@ function isProviderConfigured(provider) {
  * isProviderConfigured — keep the two in sync.
  */
 function providerMissingReason(provider) {
+  // Non-api-key gate — matches isProviderConfigured above.
+  if (provider.builtin) {
+    const kind = provider.credential_kind;
+    const isApiKeyShaped = kind === 'api_key'
+      || kind === 'open_ai_compatible'
+      || kind === 'ollama'
+      || kind === undefined;
+    if (!isApiKeyShaped && provider.has_credentials !== true) {
+      // Surface the specific missing credential kind so the toast can
+      // point the user at the right setup flow.
+      if (kind === 'session_token') return 'session_token';
+      if (kind === 'o_auth_device_code') return 'oauth_session';
+      if (kind === 'file_based_credentials') return 'credentials_file';
+      if (kind === 'aws_credentials') return 'aws_credentials';
+      return 'credentials';
+    }
+  }
   // API key check — matches isProviderConfigured above.
   const needsKey = provider.builtin
     ? provider.api_key_required !== false

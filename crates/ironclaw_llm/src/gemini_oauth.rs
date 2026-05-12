@@ -193,6 +193,11 @@ pub struct GeminiCredits {
 }
 
 /// Extended response metadata parsed from Gemini API responses.
+// Fields are unread now that the only consumer (`last_response_meta`) is
+// unused after `gemini_oauth` was made `pub(crate)`. Kept to preserve the
+// move's no-behavior-change guarantee; delete in a follow-up if no caller
+// emerges.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct GeminiResponseMeta {
     /// Model version actually used (from response).
@@ -433,6 +438,10 @@ impl CredentialManager {
         }
     }
 
+    // Unused after `pub mod gemini_oauth` → `pub(crate) mod gemini_oauth`. Kept
+    // in place because the boundary-cleanup move is meant to be behavior-preserving;
+    // delete in a follow-up if there's no future caller.
+    #[allow(dead_code)]
     pub async fn get_valid_access_token(&self) -> Result<String> {
         let cred = self.get_valid_credential().await?;
         Ok(cred.access_token)
@@ -952,6 +961,8 @@ impl GeminiOauthProvider {
     }
 
     /// Returns the latest response metadata from the last API call.
+    // Unused after module privatization; see `get_valid_access_token` above.
+    #[allow(dead_code)]
     pub fn last_response_meta(&self) -> GeminiResponseMeta {
         self.last_response_meta
             .lock()
@@ -1070,6 +1081,8 @@ impl GeminiOauthProvider {
     }
 
     /// Count tokens for the given messages using the Gemini countTokens API.
+    // Unused after module privatization; see `get_valid_access_token` above.
+    #[allow(dead_code)]
     pub async fn count_tokens(&self, messages: &[ChatMessage]) -> Result<u32, LlmError> {
         let sigs = self
             .thought_signatures

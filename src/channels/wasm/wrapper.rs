@@ -6843,7 +6843,14 @@ mod tests {
             .expect("respond should succeed");
 
         let stored_metadata = channel.last_broadcast_metadata.read().await.clone();
-        assert_eq!(stored_metadata.as_deref(), Some(r#"{"chat_id":12345}"#));
+        // `with_metadata` always sets `user_id` from the IncomingMessage
+        // (overwriting any caller-supplied value) so downstream
+        // `send_status` can route SSE events to the owning tenant
+        // unforgeably. The caller-supplied `chat_id` survives alongside it.
+        assert_eq!(
+            stored_metadata.as_deref(),
+            Some(r#"{"chat_id":12345,"user_id":"owner-scope"}"#)
+        );
 
         channel.shutdown().await.expect("Shutdown should succeed");
     }

@@ -108,6 +108,8 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "plan_update",
     // Permission tools
     "tool_permission_set",
+    // Pairing tools
+    "pairing_approve",
     // Aliases (web_fetch is an alias for http in some contexts)
     "web_fetch",
 ];

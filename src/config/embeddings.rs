@@ -8,8 +8,8 @@ use crate::config::helpers::{
 };
 use crate::error::ConfigError;
 use crate::settings::Settings;
-use crate::workspace::EmbeddingProvider;
-use ironclaw_llm::{BedrockConfig, SessionManager};
+use crate::workspace::{BedrockEmbeddingSetup, EmbeddingProvider};
+use ironclaw_llm::SessionManager;
 
 /// Default maximum number of cached embeddings.
 pub const DEFAULT_EMBEDDING_CACHE_SIZE: usize = 10_000;
@@ -164,12 +164,13 @@ impl EmbeddingsConfig {
     ///
     /// Returns `None` if embeddings are disabled or the required credentials
     /// are missing. The `nearai_base_url` and `session` are needed only for
-    /// the NEAR AI provider but must be passed unconditionally.
+    /// the NEAR AI provider but must be passed unconditionally; the
+    /// `bedrock_setup` is consulted only for the `bedrock` provider.
     pub async fn create_provider(
         &self,
         nearai_base_url: &str,
         session: Arc<SessionManager>,
-        bedrock_config: Option<&BedrockConfig>,
+        bedrock_setup: Option<&BedrockEmbeddingSetup>,
     ) -> Option<Arc<dyn EmbeddingProvider>> {
         if !self.enabled {
             tracing::debug!("Embeddings disabled (set EMBEDDING_ENABLED=true to enable)");
@@ -191,9 +192,9 @@ impl EmbeddingsConfig {
             "bedrock" => {
                 #[cfg(feature = "bedrock")]
                 {
-                    let Some(bedrock) = bedrock_config else {
+                    let Some(bedrock) = bedrock_setup else {
                         tracing::warn!(
-                            "Embeddings configured for Bedrock but no Bedrock config is available"
+                            "Embeddings configured for Bedrock but no Bedrock setup is available"
                         );
                         return None;
                     };
@@ -219,7 +220,7 @@ impl EmbeddingsConfig {
                 }
                 #[cfg(not(feature = "bedrock"))]
                 {
-                    let _ = bedrock_config;
+                    let _ = bedrock_setup;
                     tracing::warn!(
                         "Embeddings configured for Bedrock but the `bedrock` feature is disabled"
                     );

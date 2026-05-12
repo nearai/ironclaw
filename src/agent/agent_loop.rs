@@ -1669,6 +1669,11 @@ impl Agent {
                         .await
                         .map(HandleOutcome::from);
                 }
+                Submission::PairingClaim { channel, code } => {
+                    return crate::bridge::handle_pairing_claim(self, message, channel, code)
+                        .await
+                        .map(HandleOutcome::from);
+                }
                 // Undo/Redo/Resume/SwitchThread: v1-only (engine has no undo;
                 // thread switching is implicit via ConversationManager).
                 // Compact/Summarize/Suggest: orthogonal to engine (compaction is internal).
@@ -2197,6 +2202,24 @@ impl Agent {
                     }
 
                     result
+                }
+            }
+            Submission::PairingClaim { channel, code } => {
+                // Pairing approval is independent of engine_v2 — it only
+                // touches the pairing store and the extension manager.
+                // Reuse the bridge handler so v1 and v2 surfaces behave
+                // identically (#3317).
+                match crate::bridge::handle_pairing_claim(self, message, &channel, &code).await {
+                    Ok(crate::bridge::BridgeOutcome::Respond(text)) => {
+                        Ok(SubmissionResult::Response { content: text })
+                    }
+                    Ok(crate::bridge::BridgeOutcome::NoResponse)
+                    | Ok(crate::bridge::BridgeOutcome::Pending) => {
+                        Ok(SubmissionResult::Ok { message: None })
+                    }
+                    Err(e) => Ok(SubmissionResult::Error {
+                        message: format!("Pairing approval failed: {e}"),
+                    }),
                 }
             }
             Submission::Plan { sub } => {
