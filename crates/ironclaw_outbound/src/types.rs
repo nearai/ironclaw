@@ -73,6 +73,29 @@ pub struct OutboundPushPlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadProjectionAccessRequest {
+    pub actor: TurnActor,
+    pub scope: ProjectionScope,
+    pub thread_id: ThreadId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadProjectionAccessGrant {
+    pub actor: TurnActor,
+    pub scope: ProjectionScope,
+    pub thread_id: ThreadId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectionSubscriptionRequest {
+    pub subscription_id: ProjectionSubscriptionId,
+    pub actor: TurnActor,
+    pub scope: ProjectionScope,
+    pub thread_id: ThreadId,
+    pub after_cursor: Option<ProjectionCursor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectionSubscriptionRecord {
     pub subscription_id: ProjectionSubscriptionId,
     pub actor: TurnActor,
@@ -129,6 +152,24 @@ pub enum DeliveryFailureKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplyTargetValidationRequest {
+    pub scope: TurnScope,
+    pub candidate: OutboundPushCandidate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidatedReplyTargetBinding {
+    pub target: ReplyTargetBindingRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrepareOutboundDeliveryRequest {
+    pub scope: TurnScope,
+    pub candidate: OutboundPushCandidate,
+    pub attempted_at: Timestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutboundDeliveryAttempt {
     pub delivery_id: OutboundDeliveryId,
     pub scope: TurnScope,
@@ -136,6 +177,18 @@ pub struct OutboundDeliveryAttempt {
     pub status: OutboundDeliveryStatus,
     pub attempted_at: Timestamp,
     pub failure_kind: Option<DeliveryFailureKind>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutboundDeliveryDecision {
+    Authorized {
+        attempt: OutboundDeliveryAttempt,
+        target: ValidatedReplyTargetBinding,
+    },
+    Rejected {
+        attempt: OutboundDeliveryAttempt,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

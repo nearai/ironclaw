@@ -10,6 +10,8 @@ pub enum OutboundError {
     InvalidRequest { reason: &'static str },
     #[error("subscription cursor scope mismatch")]
     SubscriptionScopeMismatch,
+    #[error("outbound access denied")]
+    AccessDenied,
     #[error("outbound delivery not found")]
     DeliveryNotFound,
 }

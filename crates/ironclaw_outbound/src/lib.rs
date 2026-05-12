@@ -8,6 +8,7 @@
 mod error;
 mod ids;
 mod memory;
+mod service;
 mod store;
 mod types;
 mod validation;
@@ -22,12 +23,18 @@ mod postgres_store;
 pub use error::OutboundError;
 pub use ids::{OutboundDeliveryId, ProjectionSubscriptionId, ProjectionUpdateRef};
 pub use memory::InMemoryOutboundStateStore;
+pub use service::{
+    OutboundPolicyService, ReplyTargetBindingValidator, ThreadProjectionAccessPolicy,
+};
 pub use store::OutboundStateStore;
 pub use types::{
     AdvanceSubscriptionCursorRequest, DeliveryFailureKind, LoadSubscriptionCursorRequest,
-    OutboundDeliveryAttempt, OutboundDeliveryStatus, OutboundPushCandidate, OutboundPushKind,
-    OutboundPushPlan, OutboundPushTargetRequest, ProjectionSubscriptionRecord,
-    ThreadNotificationPolicy, ThreadNotificationTarget, UpdateDeliveryStatusRequest,
+    OutboundDeliveryAttempt, OutboundDeliveryDecision, OutboundDeliveryStatus,
+    OutboundPushCandidate, OutboundPushKind, OutboundPushPlan, OutboundPushTargetRequest,
+    PrepareOutboundDeliveryRequest, ProjectionSubscriptionRecord, ProjectionSubscriptionRequest,
+    ReplyTargetValidationRequest, ThreadNotificationPolicy, ThreadNotificationTarget,
+    ThreadProjectionAccessGrant, ThreadProjectionAccessRequest, UpdateDeliveryStatusRequest,
+    ValidatedReplyTargetBinding,
 };
 
 #[cfg(feature = "libsql")]
