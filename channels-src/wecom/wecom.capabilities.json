@@ -1,6 +1,6 @@
 {
   "version": "0.1.0",
-  "wit_version": "0.3.0",
+  "wit_version": "0.3.1",
   "type": "channel",
   "name": "wecom",
   "description": "WeCom intelligent bot channel with WebSocket inbound, pairing, group-aware sessions, and direct Bot media sends",
