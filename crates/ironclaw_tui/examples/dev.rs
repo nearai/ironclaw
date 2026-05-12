@@ -161,6 +161,7 @@ fn main() {
             .unwrap_or_else(|_| "~/projects/ironclaw".into()),
         memory_count: 42,
         identity_files: vec!["AGENTS.md".into(), "SOUL.md".into(), "USER.md".into()],
+        tui_entry_prompt: None,
         available_models: vec![
             "gpt-4o".into(),
             "gpt-5.3-codex".into(),
