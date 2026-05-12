@@ -22,8 +22,87 @@ fn help_mentions_reborn_commands() {
         "stdout: {stdout}"
     );
     assert!(stdout.contains("completion"), "stdout: {stdout}");
+    assert!(stdout.contains("config"), "stdout: {stdout}");
     assert!(stdout.contains("doctor"), "stdout: {stdout}");
     assert!(stdout.contains("run"), "stdout: {stdout}");
+}
+
+#[test]
+fn config_path_reports_reborn_home_without_touching_v1_state() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let v1_base_dir = temp.path().join("v1-state");
+
+    let output = Command::new(reborn_bin())
+        .arg("config")
+        .arg("path")
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("IRONCLAW_REBORN_PROFILE", "production")
+        .env("IRONCLAW_BASE_DIR", &v1_base_dir)
+        .output()
+        .expect("ironclaw-reborn config path should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("IronClaw Reborn config path"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("reborn_home: {}", reborn_home.display())),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("home_source: IRONCLAW_REBORN_HOME"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("profile: production"), "stdout: {stdout}");
+    assert!(stdout.contains("v1_state: not-used"), "stdout: {stdout}");
+    assert!(
+        !reborn_home.exists(),
+        "config path should not create Reborn state directories"
+    );
+    assert!(
+        !v1_base_dir.exists(),
+        "config path should not create explicit v1 base directories"
+    );
+}
+
+#[test]
+fn config_path_reports_default_reborn_home_without_creating_directories() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join(".ironclaw").join("reborn");
+
+    let output = Command::new(reborn_bin())
+        .arg("config")
+        .arg("path")
+        .env_remove("IRONCLAW_REBORN_HOME")
+        .env("HOME", temp.path())
+        .env_remove("USERPROFILE")
+        .env_remove("IRONCLAW_REBORN_PROFILE")
+        .output()
+        .expect("ironclaw-reborn config path should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(&format!("reborn_home: {}", reborn_home.display())),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("home_source: default"), "stdout: {stdout}");
+    assert!(stdout.contains("profile: local-dev"), "stdout: {stdout}");
+    assert!(
+        !temp.path().join(".ironclaw").exists(),
+        "config path should not create default Reborn or v1 state directories"
+    );
 }
 
 #[test]

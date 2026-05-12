@@ -14,6 +14,7 @@ It currently supports:
 ironclaw-reborn --help
 ironclaw-reborn completion --shell bash
 ironclaw-reborn completion --shell zsh
+ironclaw-reborn config path
 ironclaw-reborn doctor
 ironclaw-reborn run
 ```
@@ -39,6 +40,21 @@ cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- completion --shell 
 ```
 
 The zsh output keeps the v1 CLI guard around `compdef` so the generated script is safe when zsh completion functions are not loaded yet.
+
+### `config path`
+
+Shows the resolved Reborn state root, its source, selected profile, and explicit v1-state status without creating directories.
+
+```bash
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- config path
+```
+
+Expected fields include:
+
+- `reborn_home`
+- `home_source`
+- `profile`
+- `v1_state: not-used`
 
 ### `doctor`
 
@@ -116,6 +132,8 @@ cargo test -p ironclaw_architecture reborn
 cargo clippy -p ironclaw_reborn_cli --all-targets -- -D warnings
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- --help
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- completion --shell zsh >/tmp/ironclaw-reborn.zsh
+IRONCLAW_REBORN_HOME="$(mktemp -d)/reborn-home" \
+  cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- config path
 IRONCLAW_REBORN_HOME="$(mktemp -d)/reborn-home" \
   cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- run
 ```
