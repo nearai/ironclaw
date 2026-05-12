@@ -53,6 +53,16 @@ pub use protocol::{InitializeResult, McpRequest, McpResponse, McpTool};
 pub use session::McpSessionManager;
 pub use transport::McpTransport;
 
+/// Normalize a configured MCP server name to the runtime form used for
+/// client-store keys and tool prefixes.
+///
+/// Persisted configs may still contain legacy hyphenated names, but MCP tool
+/// wrappers and LLM-facing identifiers use underscore-only prefixes so model
+/// tool calls and registry lookups agree.
+pub(crate) fn normalize_server_name(name: &str) -> String {
+    name.replace('-', "_")
+}
+
 fn contains_ascii_word(message: &str, word: &str) -> bool {
     message
         .split(|c: char| !c.is_ascii_alphanumeric())
@@ -70,7 +80,7 @@ pub(crate) fn is_auth_error_message(message: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_auth_error_message;
+    use super::{is_auth_error_message, normalize_server_name};
 
     #[test]
     fn test_is_auth_error_message_matches_whole_words() {
@@ -89,5 +99,11 @@ mod tests {
         assert!(!is_auth_error_message("code 4001 authorization_cache_hit"));
         assert!(!is_auth_error_message("reauthentication required"));
         assert!(!is_auth_error_message("authorizations are cached"));
+    }
+
+    #[test]
+    fn normalize_server_name_folds_hyphens_to_underscores() {
+        assert_eq!(normalize_server_name("my-mcp-server"), "my_mcp_server");
+        assert_eq!(normalize_server_name("nearai"), "nearai");
     }
 }

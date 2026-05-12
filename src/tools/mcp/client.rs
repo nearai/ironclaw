@@ -109,15 +109,12 @@ impl McpClient {
         // values outside the strict allowlist — e.g. the bracketed IPv6
         // host `[::1]` survives `host_str()` and contains the `:`
         // forbidden by `McpServerName`'s rules. Apply the same
-        // hyphen→underscore fold as the other constructors (only when
-        // a hyphen is present, to avoid an unnecessary allocation), then
-        // validate through `McpServerName::new`. If validation fails we
+        // hyphen→underscore fold as the other constructors, then validate
+        // through `McpServerName::new`. If validation fails we
         // fall back to the canonical `"unknown"` value rather than
         // bypassing the allowlist via `from_trusted`.
-        let mut name_str = extract_server_name(&url);
-        if name_str.contains('-') {
-            name_str = name_str.replace('-', "_");
-        }
+        let extracted_name = extract_server_name(&url);
+        let name_str = super::normalize_server_name(&extracted_name);
         let name = McpServerName::new(&name_str).unwrap_or_else(|e| {
             tracing::debug!(
                 extracted = %name_str,
@@ -158,7 +155,8 @@ impl McpClient {
         // re-validate through `McpServerName::new`. Caller-provided input
         // must never reach `from_trusted` — if validation fails we fall
         // back to the canonical `"unknown"` value.
-        let raw: String = server_name.into().replace('-', "_");
+        let raw_input: String = server_name.into();
+        let raw = super::normalize_server_name(&raw_input);
         let name = McpServerName::new(&raw).unwrap_or_else(|e| {
             tracing::debug!(
                 candidate = %raw,
