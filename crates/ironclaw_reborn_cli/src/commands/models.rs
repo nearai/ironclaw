@@ -73,13 +73,15 @@ impl ModelsStatusCommand {
         let slots = ModelSlot::all();
 
         if self.json {
-            let mut slot_status = serde_json::Map::new();
-            for slot in slots {
-                slot_status.insert(
-                    slot.as_str().to_string(),
-                    serde_json::Value::String("not-configured".to_string()),
-                );
-            }
+            let slot_status: serde_json::Map<String, serde_json::Value> = slots
+                .iter()
+                .map(|slot| {
+                    (
+                        slot.as_str().to_string(),
+                        serde_json::Value::from("not-configured"),
+                    )
+                })
+                .collect();
             println!(
                 "{}",
                 serde_json::json!({

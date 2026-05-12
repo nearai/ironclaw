@@ -1,5 +1,12 @@
 use clap::{Args, Subcommand};
 
+const STATUS_NOT_WIRED: &str = "not-wired";
+const V1_STATE_NOT_USED: &str = "not-used";
+const DETAILS: [&str; 2] = [
+    "Reborn channel registry is not wired yet",
+    "v1 channel configuration is intentionally not read",
+];
+
 #[derive(Debug, Args)]
 pub(crate) struct ChannelsCommand {
     #[command(subcommand)]
@@ -33,18 +40,17 @@ impl ChannelsCommand {
 
 impl ChannelsListCommand {
     fn execute(self) -> anyhow::Result<()> {
+        let details = self.verbose.then_some(DETAILS.as_slice());
+
         if self.json {
             let mut output = serde_json::json!({
                 "configured": 0,
                 "channels": [],
-                "status": "not-wired",
-                "v1_state": "not-used",
+                "status": STATUS_NOT_WIRED,
+                "v1_state": V1_STATE_NOT_USED,
             });
-            if self.verbose {
-                output["details"] = serde_json::json!([
-                    "Reborn channel registry is not wired yet",
-                    "v1 channel configuration is intentionally not read"
-                ]);
+            if let Some(details) = details {
+                output["details"] = serde_json::json!(details);
             }
             println!("{}", output);
             return Ok(());
@@ -52,12 +58,13 @@ impl ChannelsListCommand {
 
         println!("IronClaw Reborn channels");
         println!("configured: 0");
-        println!("status: not-wired");
-        println!("v1_state: not-used");
+        println!("status: {STATUS_NOT_WIRED}");
+        println!("v1_state: {V1_STATE_NOT_USED}");
 
-        if self.verbose {
-            println!("detail: Reborn channel registry is not wired yet");
-            println!("detail: v1 channel configuration is intentionally not read");
+        if let Some(details) = details {
+            for detail in details {
+                println!("detail: {detail}");
+            }
         }
 
         Ok(())
