@@ -15,6 +15,9 @@ ironclaw-reborn --help
 ironclaw-reborn completion --shell bash
 ironclaw-reborn completion --shell zsh
 ironclaw-reborn doctor
+ironclaw-reborn logs
+ironclaw-reborn logs --json
+ironclaw-reborn logs --verbose
 ironclaw-reborn run
 ```
 
@@ -55,6 +58,24 @@ Expected fields include:
 - `profile`
 - `v1_state: not-used`
 - `driver_registry: initialized`
+
+### `logs`
+
+Reports Reborn log availability without resolving Reborn home, reading v1 gateway logs, or creating directories.
+
+The Reborn log source is not wired yet, so the command currently reports an explicit empty surface:
+
+```bash
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- logs
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- logs --json
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- logs --verbose
+```
+
+Expected fields include:
+
+- `entries: 0`
+- `status: not-wired`
+- `v1_state: not-used`
 
 ### `run`
 
@@ -116,6 +137,7 @@ cargo test -p ironclaw_architecture reborn
 cargo clippy -p ironclaw_reborn_cli --all-targets -- -D warnings
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- --help
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- completion --shell zsh >/tmp/ironclaw-reborn.zsh
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- logs
 IRONCLAW_REBORN_HOME="$(mktemp -d)/reborn-home" \
   cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- run
 ```

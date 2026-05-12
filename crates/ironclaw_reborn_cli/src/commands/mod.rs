@@ -2,6 +2,7 @@ use clap::Subcommand;
 
 pub(crate) mod completion;
 pub(crate) mod doctor;
+pub(crate) mod logs;
 pub(crate) mod run;
 
 #[derive(Debug, Subcommand)]
@@ -10,6 +11,8 @@ pub(crate) enum Command {
     Completion(completion::CompletionCommand),
     /// Check Reborn binary configuration without creating state.
     Doctor(doctor::DoctorCommand),
+    /// Inspect Reborn logs.
+    Logs(logs::LogsCommand),
     /// Initialize the minimal Reborn runtime shell and exit.
     Run(run::RunCommand),
 }
@@ -21,6 +24,7 @@ impl Command {
             Self::Doctor(command) => {
                 command.execute(crate::context::RebornCliContext::resolve_from_env()?)
             }
+            Self::Logs(command) => command.execute(),
             Self::Run(command) => {
                 command.execute(crate::context::RebornCliContext::resolve_from_env()?)
             }
