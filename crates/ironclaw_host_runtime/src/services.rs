@@ -34,7 +34,7 @@ use ironclaw_host_api::{
     ResourceReservationId, ResourceScope, ResourceUsage, RuntimeDispatchErrorKind,
     RuntimeHttpEgress, RuntimeKind,
 };
-use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutor, McpInvocation};
+use ironclaw_mcp::{McpExecutor, McpRuntimeAdapter};
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::{
     BackgroundFailureStage, ProcessExecutionError, ProcessExecutionRequest, ProcessExecutionResult,
@@ -58,7 +58,7 @@ use ironclaw_run_state::PostgresRunStateApprovalStore;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_run_state::RunStateError;
 use ironclaw_run_state::{ApprovalRequestStore, RunStateApprovalStore, RunStateStore};
-use ironclaw_scripts::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};
+use ironclaw_scripts::{ScriptExecutor, ScriptRuntimeAdapter};
 use ironclaw_secrets::SecretStore;
 use ironclaw_trust::{HostTrustPolicy, TrustPolicy};
 #[cfg(feature = "libsql")]
@@ -1661,106 +1661,6 @@ impl RuntimeBackendHealth for RegisteredRuntimeHealth {
 }
 
 #[derive(Clone)]
-struct ScriptRuntimeAdapter {
-    executor: Arc<dyn ScriptExecutor>,
-}
-
-impl ScriptRuntimeAdapter {
-    pub fn from_executor(executor: Arc<dyn ScriptExecutor>) -> Self {
-        Self { executor }
-    }
-}
-
-#[async_trait]
-impl<F, G> RuntimeAdapter<F, G> for ScriptRuntimeAdapter
-where
-    F: RootFilesystem,
-    G: ResourceGovernor,
-{
-    async fn dispatch_json(
-        &self,
-        request: RuntimeAdapterRequest<'_, F, G>,
-    ) -> Result<RuntimeAdapterResult, DispatchError> {
-        let execution = self
-            .executor
-            .execute_extension_json(
-                request.governor,
-                ScriptExecutionRequest {
-                    package: request.package,
-                    capability_id: request.capability_id,
-                    scope: request.scope,
-                    estimate: request.estimate,
-                    mounts: request.mounts,
-                    resource_reservation: request.resource_reservation,
-                    invocation: ScriptInvocation {
-                        input: request.input,
-                    },
-                },
-            )
-            .map_err(|error| DispatchError::Script {
-                kind: script_error_kind(&error),
-            })?;
-
-        Ok(RuntimeAdapterResult {
-            output: execution.result.output,
-            usage: execution.result.usage,
-            receipt: execution.receipt,
-            output_bytes: execution.result.output_bytes,
-        })
-    }
-}
-
-#[derive(Clone)]
-struct McpRuntimeAdapter {
-    executor: Arc<dyn McpExecutor>,
-}
-
-impl McpRuntimeAdapter {
-    pub fn from_executor(executor: Arc<dyn McpExecutor>) -> Self {
-        Self { executor }
-    }
-}
-
-#[async_trait]
-impl<F, G> RuntimeAdapter<F, G> for McpRuntimeAdapter
-where
-    F: RootFilesystem,
-    G: ResourceGovernor,
-{
-    async fn dispatch_json(
-        &self,
-        request: RuntimeAdapterRequest<'_, F, G>,
-    ) -> Result<RuntimeAdapterResult, DispatchError> {
-        let execution = self
-            .executor
-            .execute_extension_json(
-                request.governor,
-                McpExecutionRequest {
-                    package: request.package,
-                    capability_id: request.capability_id,
-                    scope: request.scope,
-                    estimate: request.estimate,
-                    resource_reservation: request.resource_reservation,
-                    invocation: McpInvocation {
-                        input: request.input,
-                    },
-                },
-            )
-            .await
-            .map_err(|error| DispatchError::Mcp {
-                kind: mcp_error_kind(&error),
-            })?;
-
-        Ok(RuntimeAdapterResult {
-            output: execution.result.output,
-            usage: execution.result.usage,
-            receipt: execution.receipt,
-            output_bytes: execution.result.output_bytes,
-        })
-    }
-}
-
-#[derive(Clone)]
 struct FirstPartyRuntimeAdapter {
     registry: Arc<FirstPartyCapabilityRegistry>,
 }
@@ -2232,41 +2132,6 @@ fn has_accountable_effects(usage: &ResourceUsage) -> bool {
         || usage.output_bytes > 0
         || usage.network_egress_bytes > 0
         || usage.process_count > 0
-}
-
-fn script_error_kind(error: &ScriptError) -> RuntimeDispatchErrorKind {
-    match error {
-        ScriptError::Resource(_) => RuntimeDispatchErrorKind::Resource,
-        ScriptError::Backend { .. } => RuntimeDispatchErrorKind::Backend,
-        ScriptError::UnsupportedRunner { .. } => RuntimeDispatchErrorKind::UnsupportedRunner,
-        ScriptError::ExtensionRuntimeMismatch { .. } => {
-            RuntimeDispatchErrorKind::ExtensionRuntimeMismatch
-        }
-        ScriptError::CapabilityNotDeclared { .. } => RuntimeDispatchErrorKind::UndeclaredCapability,
-        ScriptError::DescriptorMismatch { .. } => RuntimeDispatchErrorKind::Manifest,
-        ScriptError::InvalidInvocation { .. } => RuntimeDispatchErrorKind::InputEncode,
-        ScriptError::ExitFailure { .. } => RuntimeDispatchErrorKind::ExitFailure,
-        ScriptError::OutputLimitExceeded { .. } => RuntimeDispatchErrorKind::OutputTooLarge,
-        ScriptError::Timeout { .. } => RuntimeDispatchErrorKind::Executor,
-        ScriptError::InvalidOutput { .. } => RuntimeDispatchErrorKind::OutputDecode,
-    }
-}
-
-fn mcp_error_kind(error: &McpError) -> RuntimeDispatchErrorKind {
-    match error {
-        McpError::Resource(_) => RuntimeDispatchErrorKind::Resource,
-        McpError::Client { .. } => RuntimeDispatchErrorKind::Client,
-        McpError::UnsupportedTransport { .. } => RuntimeDispatchErrorKind::UnsupportedRunner,
-        McpError::HostHttpEgressRequired { .. } => RuntimeDispatchErrorKind::NetworkDenied,
-        McpError::ExternalStdioTransportUnsupported => RuntimeDispatchErrorKind::UnsupportedRunner,
-        McpError::ExtensionRuntimeMismatch { .. } => {
-            RuntimeDispatchErrorKind::ExtensionRuntimeMismatch
-        }
-        McpError::CapabilityNotDeclared { .. } => RuntimeDispatchErrorKind::UndeclaredCapability,
-        McpError::DescriptorMismatch { .. } => RuntimeDispatchErrorKind::Manifest,
-        McpError::InvalidInvocation { .. } => RuntimeDispatchErrorKind::InputEncode,
-        McpError::OutputLimitExceeded { .. } => RuntimeDispatchErrorKind::OutputTooLarge,
-    }
 }
 
 fn wasm_error_kind(error: &WasmError) -> RuntimeDispatchErrorKind {

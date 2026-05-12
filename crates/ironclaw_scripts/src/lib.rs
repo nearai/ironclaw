@@ -12,11 +12,15 @@ use std::{
     time::{Duration, Instant},
 };
 
+use async_trait::async_trait;
+use ironclaw_dispatcher::{RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult};
 use ironclaw_extensions::{ExtensionPackage, ExtensionRuntime};
+use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, MountView, ResourceEstimate, ResourceReservation,
-    ResourceReservationId, ResourceScope, ResourceUsage, RuntimeHttpEgress, RuntimeHttpEgressError,
-    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind,
+    CapabilityId, DispatchError, ExtensionId, MountView, ResourceEstimate, ResourceReservation,
+    ResourceReservationId, ResourceScope, ResourceUsage, RuntimeDispatchErrorKind,
+    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
+    RuntimeKind,
 };
 use ironclaw_resources::{ResourceError, ResourceGovernor, ResourceReceipt};
 use serde_json::Value;
@@ -251,6 +255,24 @@ impl From<ResourceError> for ScriptError {
     }
 }
 
+pub fn script_error_kind(error: &ScriptError) -> RuntimeDispatchErrorKind {
+    match error {
+        ScriptError::Resource(_) => RuntimeDispatchErrorKind::Resource,
+        ScriptError::Backend { .. } => RuntimeDispatchErrorKind::Backend,
+        ScriptError::UnsupportedRunner { .. } => RuntimeDispatchErrorKind::UnsupportedRunner,
+        ScriptError::ExtensionRuntimeMismatch { .. } => {
+            RuntimeDispatchErrorKind::ExtensionRuntimeMismatch
+        }
+        ScriptError::CapabilityNotDeclared { .. } => RuntimeDispatchErrorKind::UndeclaredCapability,
+        ScriptError::DescriptorMismatch { .. } => RuntimeDispatchErrorKind::Manifest,
+        ScriptError::InvalidInvocation { .. } => RuntimeDispatchErrorKind::InputEncode,
+        ScriptError::ExitFailure { .. } => RuntimeDispatchErrorKind::ExitFailure,
+        ScriptError::OutputLimitExceeded { .. } => RuntimeDispatchErrorKind::OutputTooLarge,
+        ScriptError::Timeout { .. } => RuntimeDispatchErrorKind::Executor,
+        ScriptError::InvalidOutput { .. } => RuntimeDispatchErrorKind::OutputDecode,
+    }
+}
+
 /// Runtime for executing manifest-declared script capabilities.
 #[derive(Debug, Clone)]
 pub struct ScriptRuntime<B> {
@@ -441,6 +463,56 @@ where
         request: ScriptExecutionRequest<'_>,
     ) -> Result<ScriptExecutionResult, ScriptError> {
         ScriptRuntime::execute_extension_json(self, governor, request)
+    }
+}
+
+#[derive(Clone)]
+pub struct ScriptRuntimeAdapter {
+    executor: std::sync::Arc<dyn ScriptExecutor>,
+}
+
+impl ScriptRuntimeAdapter {
+    pub fn from_executor(executor: std::sync::Arc<dyn ScriptExecutor>) -> Self {
+        Self { executor }
+    }
+}
+
+#[async_trait]
+impl<F, G> RuntimeAdapter<F, G> for ScriptRuntimeAdapter
+where
+    F: RootFilesystem,
+    G: ResourceGovernor,
+{
+    async fn dispatch_json(
+        &self,
+        request: RuntimeAdapterRequest<'_, F, G>,
+    ) -> Result<RuntimeAdapterResult, DispatchError> {
+        let execution = self
+            .executor
+            .execute_extension_json(
+                request.governor,
+                ScriptExecutionRequest {
+                    package: request.package,
+                    capability_id: request.capability_id,
+                    scope: request.scope,
+                    estimate: request.estimate,
+                    mounts: request.mounts,
+                    resource_reservation: request.resource_reservation,
+                    invocation: ScriptInvocation {
+                        input: request.input,
+                    },
+                },
+            )
+            .map_err(|error| DispatchError::Script {
+                kind: script_error_kind(&error),
+            })?;
+
+        Ok(RuntimeAdapterResult {
+            output: execution.result.output,
+            usage: execution.result.usage,
+            receipt: execution.receipt,
+            output_bytes: execution.result.output_bytes,
+        })
     }
 }
 

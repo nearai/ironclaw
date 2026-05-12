@@ -1,16 +1,26 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_dispatcher::{
-    RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher,
-};
+use ironclaw_dispatcher::{RuntimeAdapter, RuntimeDispatcher};
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage};
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::*;
+use ironclaw_mcp::McpRuntimeAdapter as LaneMcpRuntimeAdapter;
 use ironclaw_mcp::*;
 use ironclaw_resources::*;
 use serde_json::json;
+
+#[test]
+fn mcp_lane_exports_dispatch_adapter() {
+    let client = RecordingMcpClient::new(Ok(McpClientOutput {
+        output: json!({"items":["issue-1"]}),
+        usage: ResourceUsage::default(),
+        output_bytes: None,
+    }));
+    let runtime = McpRuntime::new(McpRuntimeConfig::for_testing(), client);
+    let _adapter = LaneMcpRuntimeAdapter::from_executor(Arc::new(runtime));
+}
 
 #[tokio::test]
 async fn mcp_lane_dispatches_manifest_transport_and_reconciles_through_dispatcher() {
@@ -22,7 +32,7 @@ async fn mcp_lane_dispatches_manifest_transport_and_reconciles_through_dispatche
         },
         output_bytes: None,
     }));
-    let adapter = Arc::new(McpRuntimeAdapter::new(client.clone()));
+    let adapter = mcp_runtime_adapter(McpRuntimeConfig::for_testing(), client.clone());
     let (dispatcher, governor, events, account) = dispatcher_with_mcp_adapter(adapter);
 
     let result = dispatcher
@@ -62,7 +72,7 @@ async fn mcp_lane_dispatches_manifest_transport_and_reconciles_through_dispatche
 #[tokio::test]
 async fn mcp_lane_client_failure_releases_reservation_and_emits_sanitized_failure() {
     let client = RecordingMcpClient::new(Err("server disconnected with raw stderr".to_string()));
-    let adapter = Arc::new(McpRuntimeAdapter::new(client));
+    let adapter = mcp_runtime_adapter(McpRuntimeConfig::for_testing(), client);
     let (dispatcher, governor, events, account) = dispatcher_with_mcp_adapter(adapter);
 
     let err = dispatcher
@@ -97,12 +107,12 @@ async fn mcp_lane_output_limit_releases_reservation_and_emits_output_too_large_f
         usage: ResourceUsage::default(),
         output_bytes: Some(1_000),
     }));
-    let adapter = Arc::new(McpRuntimeAdapter::with_config(
+    let adapter = mcp_runtime_adapter(
         McpRuntimeConfig {
             max_output_bytes: 8,
         },
         client,
-    ));
+    );
     let (dispatcher, governor, events, account) = dispatcher_with_mcp_adapter(adapter);
 
     let err = dispatcher
@@ -130,62 +140,13 @@ async fn mcp_lane_output_limit_releases_reservation_and_emits_output_too_large_f
     assert_eq!(recorded[2].error_kind.as_deref(), Some("output_too_large"));
 }
 
-#[derive(Clone)]
-struct McpRuntimeAdapter<C> {
-    runtime: McpRuntime<C>,
-}
-
-impl<C> McpRuntimeAdapter<C>
+fn mcp_runtime_adapter<C>(config: McpRuntimeConfig, client: C) -> Arc<LaneMcpRuntimeAdapter>
 where
-    C: McpClient,
+    C: McpClient + 'static,
 {
-    fn new(client: C) -> Self {
-        Self::with_config(McpRuntimeConfig::for_testing(), client)
-    }
-
-    fn with_config(config: McpRuntimeConfig, client: C) -> Self {
-        Self {
-            runtime: McpRuntime::new(config, client),
-        }
-    }
-}
-
-#[async_trait]
-impl<C> RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for McpRuntimeAdapter<C>
-where
-    C: McpClient + Send + Sync,
-{
-    async fn dispatch_json(
-        &self,
-        request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
-    ) -> Result<RuntimeAdapterResult, DispatchError> {
-        let execution = self
-            .runtime
-            .execute_extension_json(
-                request.governor,
-                McpExecutionRequest {
-                    package: request.package,
-                    capability_id: request.capability_id,
-                    scope: request.scope,
-                    estimate: request.estimate,
-                    resource_reservation: request.resource_reservation,
-                    invocation: McpInvocation {
-                        input: request.input,
-                    },
-                },
-            )
-            .await
-            .map_err(|error| DispatchError::Mcp {
-                kind: mcp_error_kind(&error),
-            })?;
-
-        Ok(RuntimeAdapterResult {
-            output: execution.result.output,
-            usage: execution.result.usage,
-            receipt: execution.receipt,
-            output_bytes: execution.result.output_bytes,
-        })
-    }
+    Arc::new(LaneMcpRuntimeAdapter::from_executor(Arc::new(
+        McpRuntime::new(config, client),
+    )))
 }
 
 #[derive(Clone)]
@@ -319,23 +280,6 @@ fn assert_event_kinds(events: &InMemoryEventSink, expected: &[RuntimeEventKind])
         .map(|event| event.kind)
         .collect::<Vec<_>>();
     assert_eq!(actual, expected);
-}
-
-fn mcp_error_kind(error: &McpError) -> RuntimeDispatchErrorKind {
-    match error {
-        McpError::Resource(_) => RuntimeDispatchErrorKind::Resource,
-        McpError::Client { .. } => RuntimeDispatchErrorKind::Client,
-        McpError::UnsupportedTransport { .. } => RuntimeDispatchErrorKind::UnsupportedRunner,
-        McpError::HostHttpEgressRequired { .. } => RuntimeDispatchErrorKind::NetworkDenied,
-        McpError::ExternalStdioTransportUnsupported => RuntimeDispatchErrorKind::UnsupportedRunner,
-        McpError::ExtensionRuntimeMismatch { .. } => {
-            RuntimeDispatchErrorKind::ExtensionRuntimeMismatch
-        }
-        McpError::CapabilityNotDeclared { .. } => RuntimeDispatchErrorKind::UndeclaredCapability,
-        McpError::DescriptorMismatch { .. } => RuntimeDispatchErrorKind::Manifest,
-        McpError::InvalidInvocation { .. } => RuntimeDispatchErrorKind::InputEncode,
-        McpError::OutputLimitExceeded { .. } => RuntimeDispatchErrorKind::OutputTooLarge,
-    }
 }
 
 const MCP_MANIFEST: &str = r#"

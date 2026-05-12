@@ -1,16 +1,26 @@
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
-use ironclaw_dispatcher::{
-    RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher,
-};
+use ironclaw_dispatcher::{RuntimeAdapter, RuntimeDispatcher};
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage};
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::*;
 use ironclaw_resources::*;
+use ironclaw_scripts::ScriptRuntimeAdapter as LaneScriptRuntimeAdapter;
 use ironclaw_scripts::*;
 use serde_json::json;
+
+#[test]
+fn script_lane_exports_dispatch_adapter() {
+    let backend = RecordingScriptBackend::success(ScriptBackendOutput {
+        exit_code: 0,
+        stdout: br#"{\"message\":\"script ok\"}"#.to_vec(),
+        stderr: Vec::new(),
+        wall_clock_ms: 11,
+    });
+    let runtime = ScriptRuntime::new(ScriptRuntimeConfig::for_testing(), backend);
+    let _adapter = LaneScriptRuntimeAdapter::from_executor(Arc::new(runtime));
+}
 
 #[tokio::test]
 async fn script_lane_dispatches_manifest_command_and_reconciles_through_dispatcher() {
@@ -20,7 +30,7 @@ async fn script_lane_dispatches_manifest_command_and_reconciles_through_dispatch
         stderr: Vec::new(),
         wall_clock_ms: 11,
     });
-    let adapter = Arc::new(ScriptRuntimeAdapter::new(backend.clone()));
+    let adapter = script_runtime_adapter(backend.clone());
     let (dispatcher, governor, events, account) = dispatcher_with_script_adapter(adapter);
 
     let result = dispatcher
@@ -65,7 +75,7 @@ async fn script_lane_nonzero_exit_releases_reservation_and_emits_sanitized_failu
         stderr: b"raw backend detail".to_vec(),
         wall_clock_ms: 3,
     });
-    let adapter = Arc::new(ScriptRuntimeAdapter::new(backend));
+    let adapter = script_runtime_adapter(backend);
     let (dispatcher, governor, events, account) = dispatcher_with_script_adapter(adapter);
 
     let err = dispatcher
@@ -101,7 +111,7 @@ async fn script_lane_invalid_json_releases_reservation_and_emits_output_decode_f
         stderr: Vec::new(),
         wall_clock_ms: 3,
     });
-    let adapter = Arc::new(ScriptRuntimeAdapter::new(backend));
+    let adapter = script_runtime_adapter(backend);
     let (dispatcher, governor, events, account) = dispatcher_with_script_adapter(adapter);
 
     let err = dispatcher
@@ -129,58 +139,13 @@ async fn script_lane_invalid_json_releases_reservation_and_emits_output_decode_f
     assert_eq!(recorded[2].error_kind.as_deref(), Some("output_decode"));
 }
 
-#[derive(Clone)]
-struct ScriptRuntimeAdapter<B> {
-    runtime: ScriptRuntime<B>,
-}
-
-impl<B> ScriptRuntimeAdapter<B>
+fn script_runtime_adapter<B>(backend: B) -> Arc<LaneScriptRuntimeAdapter>
 where
-    B: ScriptBackend,
+    B: ScriptBackend + 'static,
 {
-    fn new(backend: B) -> Self {
-        Self {
-            runtime: ScriptRuntime::new(ScriptRuntimeConfig::for_testing(), backend),
-        }
-    }
-}
-
-#[async_trait]
-impl<B> RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for ScriptRuntimeAdapter<B>
-where
-    B: ScriptBackend + Send + Sync,
-{
-    async fn dispatch_json(
-        &self,
-        request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
-    ) -> Result<RuntimeAdapterResult, DispatchError> {
-        let execution = self
-            .runtime
-            .execute_extension_json(
-                request.governor,
-                ScriptExecutionRequest {
-                    package: request.package,
-                    capability_id: request.capability_id,
-                    scope: request.scope,
-                    estimate: request.estimate,
-                    mounts: None,
-                    resource_reservation: request.resource_reservation,
-                    invocation: ScriptInvocation {
-                        input: request.input,
-                    },
-                },
-            )
-            .map_err(|error| DispatchError::Script {
-                kind: script_error_kind(&error),
-            })?;
-
-        Ok(RuntimeAdapterResult {
-            output: execution.result.output,
-            usage: execution.result.usage,
-            receipt: execution.receipt,
-            output_bytes: execution.result.output_bytes,
-        })
-    }
+    Arc::new(LaneScriptRuntimeAdapter::from_executor(Arc::new(
+        ScriptRuntime::new(ScriptRuntimeConfig::for_testing(), backend),
+    )))
 }
 
 #[derive(Clone)]
@@ -309,24 +274,6 @@ fn assert_event_kinds(events: &InMemoryEventSink, expected: &[RuntimeEventKind])
         .map(|event| event.kind)
         .collect::<Vec<_>>();
     assert_eq!(actual, expected);
-}
-
-fn script_error_kind(error: &ScriptError) -> RuntimeDispatchErrorKind {
-    match error {
-        ScriptError::Resource(_) => RuntimeDispatchErrorKind::Resource,
-        ScriptError::Backend { .. } => RuntimeDispatchErrorKind::Backend,
-        ScriptError::UnsupportedRunner { .. } => RuntimeDispatchErrorKind::UnsupportedRunner,
-        ScriptError::ExtensionRuntimeMismatch { .. } => {
-            RuntimeDispatchErrorKind::ExtensionRuntimeMismatch
-        }
-        ScriptError::CapabilityNotDeclared { .. } => RuntimeDispatchErrorKind::UndeclaredCapability,
-        ScriptError::DescriptorMismatch { .. } => RuntimeDispatchErrorKind::Manifest,
-        ScriptError::InvalidInvocation { .. } => RuntimeDispatchErrorKind::InputEncode,
-        ScriptError::ExitFailure { .. } => RuntimeDispatchErrorKind::ExitFailure,
-        ScriptError::OutputLimitExceeded { .. } => RuntimeDispatchErrorKind::OutputTooLarge,
-        ScriptError::Timeout { .. } => RuntimeDispatchErrorKind::Executor,
-        ScriptError::InvalidOutput { .. } => RuntimeDispatchErrorKind::OutputDecode,
-    }
 }
 
 const SCRIPT_MANIFEST: &str = r#"

@@ -14,12 +14,14 @@ use std::{
 };
 
 use async_trait::async_trait;
+use ironclaw_dispatcher::{RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult};
 use ironclaw_extensions::{ExtensionPackage, ExtensionRuntime};
+use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, NetworkMethod, NetworkPolicy, ResourceEstimate, ResourceReservation,
-    ResourceReservationId, ResourceScope, ResourceUsage, RuntimeCredentialInjection,
-    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
-    RuntimeKind,
+    CapabilityId, DispatchError, ExtensionId, NetworkMethod, NetworkPolicy, ResourceEstimate,
+    ResourceReservation, ResourceReservationId, ResourceScope, ResourceUsage,
+    RuntimeCredentialInjection, RuntimeDispatchErrorKind, RuntimeHttpEgress,
+    RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind,
 };
 use ironclaw_resources::{ResourceError, ResourceGovernor, ResourceReceipt};
 use serde_json::Value;
@@ -735,6 +737,23 @@ impl From<ResourceError> for McpError {
     }
 }
 
+pub fn mcp_error_kind(error: &McpError) -> RuntimeDispatchErrorKind {
+    match error {
+        McpError::Resource(_) => RuntimeDispatchErrorKind::Resource,
+        McpError::Client { .. } => RuntimeDispatchErrorKind::Client,
+        McpError::UnsupportedTransport { .. } => RuntimeDispatchErrorKind::UnsupportedRunner,
+        McpError::HostHttpEgressRequired { .. } => RuntimeDispatchErrorKind::NetworkDenied,
+        McpError::ExternalStdioTransportUnsupported => RuntimeDispatchErrorKind::UnsupportedRunner,
+        McpError::ExtensionRuntimeMismatch { .. } => {
+            RuntimeDispatchErrorKind::ExtensionRuntimeMismatch
+        }
+        McpError::CapabilityNotDeclared { .. } => RuntimeDispatchErrorKind::UndeclaredCapability,
+        McpError::DescriptorMismatch { .. } => RuntimeDispatchErrorKind::Manifest,
+        McpError::InvalidInvocation { .. } => RuntimeDispatchErrorKind::InputEncode,
+        McpError::OutputLimitExceeded { .. } => RuntimeDispatchErrorKind::OutputTooLarge,
+    }
+}
+
 /// Runtime for executing manifest-declared MCP capabilities through a host adapter.
 #[derive(Debug, Clone)]
 pub struct McpRuntime<C> {
@@ -921,6 +940,56 @@ where
         request: McpExecutionRequest<'_>,
     ) -> Result<McpExecutionResult, McpError> {
         McpRuntime::execute_extension_json(self, governor, request).await
+    }
+}
+
+#[derive(Clone)]
+pub struct McpRuntimeAdapter {
+    executor: Arc<dyn McpExecutor>,
+}
+
+impl McpRuntimeAdapter {
+    pub fn from_executor(executor: Arc<dyn McpExecutor>) -> Self {
+        Self { executor }
+    }
+}
+
+#[async_trait]
+impl<F, G> RuntimeAdapter<F, G> for McpRuntimeAdapter
+where
+    F: RootFilesystem,
+    G: ResourceGovernor,
+{
+    async fn dispatch_json(
+        &self,
+        request: RuntimeAdapterRequest<'_, F, G>,
+    ) -> Result<RuntimeAdapterResult, DispatchError> {
+        let execution = self
+            .executor
+            .execute_extension_json(
+                request.governor,
+                McpExecutionRequest {
+                    package: request.package,
+                    capability_id: request.capability_id,
+                    scope: request.scope,
+                    estimate: request.estimate,
+                    resource_reservation: request.resource_reservation,
+                    invocation: McpInvocation {
+                        input: request.input,
+                    },
+                },
+            )
+            .await
+            .map_err(|error| DispatchError::Mcp {
+                kind: mcp_error_kind(&error),
+            })?;
+
+        Ok(RuntimeAdapterResult {
+            output: execution.result.output,
+            usage: execution.result.usage,
+            receipt: execution.receipt,
+            output_bytes: execution.result.output_bytes,
+        })
     }
 }
 
