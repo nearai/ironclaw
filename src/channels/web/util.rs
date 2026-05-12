@@ -561,14 +561,15 @@ pub fn extract_user_attachments(user_input: &str) -> Vec<UserAttachmentInfo> {
         // Anchored to end-of-string + tolerates trailing whitespace, mirroring
         // the JS parser in `parseUserMessageContent`.
         regex::Regex::new(r"(?s)<attachments>(.*?)</attachments>\s*$")
-            .expect("static regex compiles")
+            .expect("static regex compiles") // safety: literal pattern, validated at first call
     });
     let item_re = ITEM_RE.get_or_init(|| {
         regex::Regex::new(r"(?s)<attachment\b([^>]*)>(.*?)</attachment>")
-            .expect("static regex compiles")
+            .expect("static regex compiles") // safety: literal pattern, validated at first call
     });
-    let attr_re = ATTR_RE
-        .get_or_init(|| regex::Regex::new(r#"(\w+)="([^"]*)""#).expect("static regex compiles"));
+    let attr_re = ATTR_RE.get_or_init(|| {
+        regex::Regex::new(r#"(\w+)="([^"]*)""#).expect("static regex compiles") // safety: literal pattern, validated at first call
+    });
 
     let Some(caps) = block_re.captures(user_input) else {
         return Vec::new();
