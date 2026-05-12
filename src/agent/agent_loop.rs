@@ -2234,7 +2234,10 @@ impl Agent {
                 // identically (#3317).
                 match crate::bridge::handle_pairing_claim(self, message, &channel, &code).await {
                     Ok(crate::bridge::BridgeOutcome::Respond(text)) => {
-                        Ok(SubmissionResult::Response { content: text })
+                        Ok(SubmissionResult::Response {
+                            content: text,
+                            attachments: Vec::new(),
+                        })
                     }
                     Ok(crate::bridge::BridgeOutcome::NoResponse)
                     | Ok(crate::bridge::BridgeOutcome::Pending) => {
