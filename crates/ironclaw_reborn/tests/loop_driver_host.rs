@@ -304,6 +304,218 @@ async fn turn_runner_worker_completes_queued_run_after_turn_store_reopen() {
     }));
 }
 
+#[cfg(feature = "libsql-restart-tests")]
+#[tokio::test]
+async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let thread_db_path = dir.path().join("threads.db");
+    let turn_db_path = dir.path().join("turns.db");
+    let tenant_id = TenantId::new("tenant-libsql-restart").unwrap();
+    let agent_id = AgentId::new("agent-libsql-restart").unwrap();
+    let project_id = ProjectId::new("project-libsql-restart").unwrap();
+    let user_id = UserId::new("user-libsql-restart").unwrap();
+    let thread_id = ThreadId::new("thread-libsql-restart").unwrap();
+    let thread_scope = ThreadScope {
+        tenant_id: tenant_id.clone(),
+        agent_id: agent_id.clone(),
+        project_id: Some(project_id.clone()),
+        owner_user_id: None,
+        mission_id: None,
+    };
+    let turn_scope = TurnScope::new(
+        tenant_id,
+        Some(agent_id),
+        Some(project_id),
+        thread_id.clone(),
+    );
+    let resolver = InMemoryRunProfileResolver::default();
+    let resolved = resolver
+        .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+        .await
+        .unwrap();
+    let descriptor = resolved.loop_driver.clone();
+
+    let run_id = {
+        let thread_db = Arc::new(
+            libsql::Builder::new_local(&thread_db_path)
+                .build()
+                .await
+                .unwrap(),
+        );
+        let turn_db = Arc::new(
+            libsql::Builder::new_local(&turn_db_path)
+                .build()
+                .await
+                .unwrap(),
+        );
+        let thread_service = ironclaw_threads::LibSqlSessionThreadService::new(thread_db);
+        thread_service.run_migrations().await.unwrap();
+        let turn_store = ironclaw_turns::LibSqlTurnStateStore::new(turn_db);
+        turn_store.run_migrations().await.unwrap();
+        thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: thread_scope.clone(),
+                thread_id: Some(thread_id.clone()),
+                created_by_actor_id: user_id.to_string(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        let accepted = thread_service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: thread_scope.clone(),
+                thread_id: thread_id.clone(),
+                actor_id: user_id.to_string(),
+                source_binding_id: Some("source-web".to_string()),
+                reply_target_binding_id: Some("reply-web".to_string()),
+                external_event_id: Some("event-libsql-restart".to_string()),
+                content: MessageContent::text("hello after libsql restart"),
+            })
+            .await
+            .unwrap();
+        let submit = turn_store
+            .submit_turn(
+                SubmitTurnRequest {
+                    scope: turn_scope.clone(),
+                    actor: TurnActor::new(user_id),
+                    accepted_message_ref: AcceptedMessageRef::new("accepted-libsql-restart")
+                        .unwrap(),
+                    source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
+                    reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
+                    requested_run_profile: None,
+                    idempotency_key: IdempotencyKey::new("idem-libsql-restart").unwrap(),
+                    received_at: Utc::now(),
+                },
+                &ironclaw_turns::AllowAllTurnAdmissionPolicy,
+                &resolver,
+            )
+            .await
+            .unwrap();
+        let SubmitTurnResponse::Accepted {
+            turn_id,
+            run_id,
+            status,
+            ..
+        } = submit;
+        assert_eq!(status, TurnStatus::Queued);
+        thread_service
+            .mark_message_submitted(
+                &thread_scope,
+                &thread_id,
+                accepted.message_id,
+                turn_id.to_string(),
+                run_id.to_string(),
+            )
+            .await
+            .unwrap();
+        run_id
+    };
+
+    let thread_db = Arc::new(
+        libsql::Builder::new_local(&thread_db_path)
+            .build()
+            .await
+            .unwrap(),
+    );
+    let turn_db = Arc::new(
+        libsql::Builder::new_local(&turn_db_path)
+            .build()
+            .await
+            .unwrap(),
+    );
+    let thread_service = Arc::new(ironclaw_threads::LibSqlSessionThreadService::new(thread_db));
+    thread_service.run_migrations().await.unwrap();
+    let turn_store = Arc::new(ironclaw_turns::LibSqlTurnStateStore::new(turn_db));
+    turn_store.run_migrations().await.unwrap();
+    let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
+    let transition_port: Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort> =
+        turn_store.clone();
+    let evidence: Arc<dyn LoopExitEvidencePort> =
+        Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
+            thread_service.clone(),
+            loop_checkpoint_store.clone(),
+        ));
+    let applier = Arc::new(LoopExitApplier::new(transition_port, evidence));
+    let gateway = Arc::new(RecordingGateway::reply("model says hi"));
+    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let factory = RebornLoopDriverHostFactory::new(
+        thread_service.clone(),
+        thread_scope.clone(),
+        gateway.clone(),
+        Arc::new(InMemoryCheckpointStateStore::default()),
+        loop_checkpoint_store,
+        milestone_sink,
+        TextOnlyLoopHostConfig {
+            max_messages: 8,
+            require_model_route_snapshot: false,
+        },
+    );
+    let mut registry = DriverRegistry::new();
+    registry
+        .register_driver(
+            Arc::new(TextOnlyFinalReplyDriver { descriptor }),
+            DriverRequirements::all_required(),
+            DriverKind::Reference,
+        )
+        .unwrap();
+    let (_wake_sender, wake_receiver) = TurnRunnerWakeReceiver::new();
+    let worker = TurnRunnerWorker::new(
+        TurnRunnerWorkerConfig {
+            heartbeat_interval: std::time::Duration::from_millis(20),
+            poll_interval: std::time::Duration::from_millis(10),
+            scope_filter: Some(turn_scope.clone()),
+        },
+        turn_store.clone(),
+        applier,
+        Arc::new(registry),
+        Arc::new(factory),
+        wake_receiver,
+    );
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let cancel_clone = cancel.clone();
+    let handle = tokio::spawn(async move { worker.run(cancel_clone).await });
+    let completed_state = wait_for_run_status(
+        turn_store.as_ref(),
+        &turn_scope,
+        run_id,
+        TurnStatus::Completed,
+        "reopened libSQL turn/thread services should complete queued run",
+    )
+    .await;
+    cancel.cancel();
+    handle.await.unwrap();
+
+    assert_eq!(completed_state.run_id, run_id);
+    assert!(completed_state.failure.is_none());
+    let requests = gateway.requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "restarted worker must not duplicate model calls"
+    );
+    assert_eq!(requests[0].run_id, run_id);
+    assert_eq!(
+        requests[0].messages[0].content,
+        "hello after libsql restart"
+    );
+    let history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: thread_scope,
+            thread_id,
+        })
+        .await
+        .unwrap();
+    let expected_run_id = run_id.to_string();
+    assert!(history.messages.iter().any(|message| {
+        message.kind == MessageKind::Assistant
+            && message.status == MessageStatus::Finalized
+            && message.content.as_deref() == Some("model says hi")
+            && message.turn_run_id.as_deref() == Some(expected_run_id.as_str())
+    }));
+}
+
 #[tokio::test]
 async fn turn_runner_worker_drives_full_text_only_model_transcript_completion_after_missed_wake() {
     let fixture = HostFixture::new_unsubmitted("thread-runner-e2e", "hello full runner").await;
@@ -3590,7 +3802,7 @@ impl LoopExitEvidencePort for AlwaysVerifiedLoopExitEvidence {
 }
 
 async fn wait_for_run_status(
-    store: &InMemoryTurnStateStore,
+    store: &dyn TurnStateStore,
     scope: &TurnScope,
     run_id: TurnRunId,
     expected: TurnStatus,
@@ -3908,7 +4120,7 @@ fn loop_exit_applier_for_fixture(
 
 async fn queue_fixture_turn(
     fixture: &HostFixture,
-    turn_store: &InMemoryTurnStateStore,
+    turn_store: &dyn TurnStateStore,
     resolver: &dyn RunProfileResolver,
     idempotency_key: &str,
 ) -> TurnRunId {
