@@ -1,6 +1,6 @@
 # Reborn Trust-Boundary Stack Note
 
-**Date:** 2026-05-11  
+**Date:** 2026-05-11
 **Issue:** #3492 — Establish trust-boundary hardening baseline
 
 This trust-boundary-stack note maps current open Reborn PRs to the trust-boundary baseline so reviewers and agents can distinguish slice-owned fixes from deferred follow-up work. It is not a claim that every PR below already satisfies every invariant.

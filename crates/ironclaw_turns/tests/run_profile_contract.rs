@@ -1,8 +1,8 @@
 use ironclaw_turns::{
-    AgentLoopDriverDescriptor, CapabilitySurfaceProfileId, InMemoryRunProfileResolver,
-    ModelProfileId, PrivilegedRunProfileDimension, RunProfileId, RunProfileRequest,
-    RunProfileRequestAuthority, RunProfileResolutionError, RunProfileResolutionRequest,
-    RunProfileResolver, RunProfileVersion,
+    AgentLoopDriverDescriptor, CapabilitySurfaceProfileId, CheckpointPolicy,
+    InMemoryRunProfileResolver, ModelProfileId, PrivilegedRunProfileDimension, RunProfileId,
+    RunProfileRequest, RunProfileRequestAuthority, RunProfileResolutionError,
+    RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
 };
 
 #[tokio::test]
@@ -133,6 +133,19 @@ async fn resolution_is_deterministic_and_records_clamped_provenance() {
         unclamped.resource_budget_policy.tier.as_str(),
         "mission_high"
     );
+}
+
+#[test]
+fn checkpoint_policy_missing_final_checkpoint_gate_defaults_to_required() {
+    let policy: CheckpointPolicy = serde_json::from_value(serde_json::json!({
+        "require_before_model": true,
+        "require_before_side_effect": true,
+        "require_before_block": true,
+        "max_checkpoint_bytes": 65536
+    }))
+    .unwrap();
+
+    assert!(policy.require_final_checkpoint);
 }
 
 #[test]

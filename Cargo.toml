@@ -265,6 +265,29 @@ html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
 bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types"]
 tui = ["dep:ironclaw_tui"]
 import = ["dep:json5", "libsql"]
+# Conditional gate for memory-substrate regression tests that anticipate
+# specific guards: `ensure_path_matches_context`/`ensure_scope_matches_context`
+# fail-closed checks, deterministic tie-breaking by path ascending,
+# `.system/engine/orchestrator/*` protected-path registration, and
+# min_score-after-normalization. #3180 as merged delivers the substrate
+# skeleton but NOT these specific behaviors — the followup PR(s) that
+# implement them must enable this feature in their merge commit so the
+# gated tests fire in CI. Mirrors the same-named feature on
+# `ironclaw_memory`.
+#
+# Empirical note (2026-05-12): enabling `pr3180-ready` on the current
+# `reborn-integration` HEAD surfaces 7 gated tests as failing, because
+# the anticipated APIs do not exist in the merged substrate yet. Do not
+# enable in CI until the followup landings.
+pr3180-ready = []
+# Conditional gate for caller-tier (tool-dispatcher → substrate) tests.
+# Distinct from `pr3180-ready` because the substrate-level guards and
+# the tool-routing migration are separate landings: PR 7 routes
+# `memory_write` through `ironclaw_memory`'s `PromptWriteSafetyPolicy`,
+# so until PR 7 lands, tool-layer rejection tests run against the
+# legacy host-workspace path which doesn't consult the substrate.
+# PR 7 must enable this feature in its merge commit.
+pr7-ready = []
 
 [[test]]
 name = "e2e_thread_scheduling"

@@ -22,6 +22,19 @@ pub struct CheckpointPolicy {
     pub require_before_side_effect: bool,
     pub require_before_block: bool,
     pub max_checkpoint_bytes: u64,
+    /// When true, terminal exits (Completed, Cancelled, Failed) require a
+    /// final_checkpoint_id. Missing wire fields default to required; local/test
+    /// profiles must explicitly relax the gate.
+    #[serde(default = "default_require_final_checkpoint")]
+    pub require_final_checkpoint: bool,
+    /// `LoopCompletionKind::NoReply` is trusted only for profiles that
+    /// explicitly permit no-reply completion.
+    #[serde(default)]
+    pub allow_no_reply_completion: bool,
+}
+
+fn default_require_final_checkpoint() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

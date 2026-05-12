@@ -129,37 +129,42 @@ impl UntrustedPromptContent {
     /// The renderer escapes both attributes and body text so retrieved content
     /// cannot close the envelope or inject sibling prompt tags.
     pub fn render_envelope(&self) -> String {
-        let mut rendered = String::new();
+        let id_capacity = self.id.as_ref().map_or(0, |id| id.len() + 6);
+        let mut rendered = String::with_capacity(
+            "<untrusted-content source=\"\" trust=\"\">\n\n</untrusted-content>".len()
+                + self.source.as_str().len()
+                + self.trust.as_str().len()
+                + id_capacity
+                + self.body.len(),
+        );
         rendered.push_str("<untrusted-content source=\"");
-        rendered.push_str(&escape_xmlish(self.source.as_str()));
+        push_xmlish_escaped(&mut rendered, self.source.as_str());
         rendered.push_str("\" trust=\"");
-        rendered.push_str(&escape_xmlish(self.trust.as_str()));
+        push_xmlish_escaped(&mut rendered, self.trust.as_str());
         rendered.push('"');
         if let Some(id) = self.id.as_deref() {
             rendered.push_str(" id=\"");
-            rendered.push_str(&escape_xmlish(id));
+            push_xmlish_escaped(&mut rendered, id);
             rendered.push('"');
         }
         rendered.push_str(">\n");
-        rendered.push_str(&escape_xmlish(&self.body));
+        push_xmlish_escaped(&mut rendered, &self.body);
         rendered.push_str("\n</untrusted-content>");
         rendered
     }
 }
 
-fn escape_xmlish(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
+fn push_xmlish_escaped(output: &mut String, value: &str) {
     for ch in value.chars() {
         match ch {
-            '&' => escaped.push_str("&amp;"),
-            '<' => escaped.push_str("&lt;"),
-            '>' => escaped.push_str("&gt;"),
-            '"' => escaped.push_str("&quot;"),
-            '\'' => escaped.push_str("&apos;"),
-            _ => escaped.push(ch),
+            '&' => output.push_str("&amp;"),
+            '<' => output.push_str("&lt;"),
+            '>' => output.push_str("&gt;"),
+            '"' => output.push_str("&quot;"),
+            '\'' => output.push_str("&apos;"),
+            _ => output.push(ch),
         }
     }
-    escaped
 }
 
 /// Why a hash is being computed or compared.

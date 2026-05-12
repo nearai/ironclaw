@@ -8,7 +8,7 @@
 //! # Architecture boundary
 //!
 //! `ironclaw_turns` owns `TurnRunTransitionPort`, claim/heartbeat/transition
-//! DTOs, state-machine invariants, and the `apply_loop_exit` helper.
+//! DTOs, state-machine invariants, and the trusted `LoopExitApplier`.
 //!
 //! This module owns the concrete worker loop, driver registry lookup, host
 //! factory, readiness/config, and worker lifecycle.
@@ -25,15 +25,17 @@ use tracing::{debug, error, warn};
 
 use ironclaw_turns::{
     AgentLoopDriverError, AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, LoopExit,
-    LoopExitValidationPolicy, SanitizedFailure, TurnError, TurnLeaseToken, TurnRunId, TurnRunnerId,
-    TurnScope, TurnStatus,
+    SanitizedFailure, TurnError, TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope, TurnStatus,
     runner::{
-        ApplyLoopExitRequest, ClaimRunRequest, ClaimedTurnRun, HeartbeatRequest,
+        ClaimRunRequest, ClaimedTurnRun, HeartbeatRequest, RecordModelRouteSnapshotRequest,
         RecordRecoveryRequiredRequest, RecoverExpiredLeasesRequest, TurnRunTransitionPort,
     },
 };
 
-use crate::driver_registry::{DriverRegistry, LoopDriverRegistryKey};
+use crate::{
+    driver_registry::{DriverRegistry, LoopDriverRegistryKey},
+    loop_exit_applier::LoopExitApplier,
+};
 
 /// Create a `SanitizedFailure` from a known-valid static category.
 ///
@@ -67,13 +69,6 @@ pub struct TurnRunnerWorkerConfig {
 
     /// Optional scope filter to restrict which runs this worker claims.
     pub scope_filter: Option<TurnScope>,
-
-    /// Validation policy used when applying driver-returned loop exits.
-    ///
-    /// This is injected here so a durable evidence-backed applier can replace
-    /// the temporary trusted text-only policy without changing worker control
-    /// flow.
-    pub exit_validation_policy: LoopExitValidationPolicy,
 }
 
 impl Default for TurnRunnerWorkerConfig {
@@ -82,7 +77,6 @@ impl Default for TurnRunnerWorkerConfig {
             heartbeat_interval: Duration::from_secs(10),
             poll_interval: Duration::from_secs(5),
             scope_filter: None,
-            exit_validation_policy: default_text_only_exit_validation_policy(),
         }
     }
 }
@@ -187,6 +181,7 @@ pub struct TurnRunnerWorker {
     runner_id: TurnRunnerId,
     config: TurnRunnerWorkerConfig,
     transition_port: Arc<dyn TurnRunTransitionPort>,
+    loop_exit_applier: Arc<LoopExitApplier>,
     driver_registry: Arc<DriverRegistry>,
     host_factory: Arc<dyn HostFactory>,
     wake_receiver: TurnRunnerWakeReceiver,
@@ -196,6 +191,7 @@ impl TurnRunnerWorker {
     pub fn new(
         config: TurnRunnerWorkerConfig,
         transition_port: Arc<dyn TurnRunTransitionPort>,
+        loop_exit_applier: Arc<LoopExitApplier>,
         driver_registry: Arc<DriverRegistry>,
         host_factory: Arc<dyn HostFactory>,
         wake_receiver: TurnRunnerWakeReceiver,
@@ -206,6 +202,7 @@ impl TurnRunnerWorker {
             runner_id,
             config,
             transition_port,
+            loop_exit_applier,
             driver_registry,
             host_factory,
             wake_receiver,
@@ -363,7 +360,7 @@ impl TurnRunnerWorker {
         // Apply the exit or record recovery
         match exit_result {
             Ok(exit) => {
-                self.apply_exit(run_id, runner_id, lease_token, exit).await;
+                self.apply_exit(&claimed, exit).await;
             }
             Err(err) => {
                 warn!(
@@ -405,6 +402,8 @@ impl TurnRunnerWorker {
             .create_host(claimed)
             .await
             .map_err(|err| DriverInvocationError::HostCreationFailed { reason: err.reason })?;
+        self.persist_model_route_snapshot(claimed, host.as_ref())
+            .await?;
 
         let status = claimed.state.status;
         let turn_id = claimed.state.turn_id;
@@ -450,24 +449,37 @@ impl TurnRunnerWorker {
         }
     }
 
-    /// Apply a `LoopExit` through the trusted transition port.
-    async fn apply_exit(
+    /// Persist the host-attached model route before driver invocation can emit side effects.
+    async fn persist_model_route_snapshot(
         &self,
-        run_id: TurnRunId,
-        runner_id: TurnRunnerId,
-        lease_token: TurnLeaseToken,
-        exit: LoopExit,
-    ) {
-        let request = ApplyLoopExitRequest {
-            run_id,
-            runner_id,
-            lease_token,
-            exit,
-            validation_policy: self.config.exit_validation_policy,
+        claimed: &ClaimedTurnRun,
+        host: &(dyn ironclaw_turns::run_profile::AgentLoopDriverHost + Send + Sync),
+    ) -> Result<(), DriverInvocationError> {
+        let Some(snapshot) = host.run_context().resolved_model_route.clone() else {
+            return Ok(());
         };
+        if claimed.state.resolved_model_route.as_ref() == Some(&snapshot) {
+            return Ok(());
+        }
+        self.transition_port
+            .record_model_route_snapshot(RecordModelRouteSnapshotRequest {
+                run_id: claimed.state.run_id,
+                runner_id: claimed.runner_id,
+                lease_token: claimed.lease_token,
+                snapshot,
+            })
+            .await
+            .map(|_| ())
+            .map_err(DriverInvocationError::RouteSnapshotPersistenceFailed)
+    }
 
-        match ironclaw_turns::runner::apply_loop_exit(self.transition_port.as_ref(), request).await
-        {
+    /// Apply a `LoopExit` through the trusted applier.
+    async fn apply_exit(&self, claimed: &ClaimedTurnRun, exit: LoopExit) {
+        let run_id = claimed.state.run_id;
+        let runner_id = claimed.runner_id;
+        let lease_token = claimed.lease_token;
+
+        match self.loop_exit_applier.apply(claimed, exit).await {
             Ok(state) => {
                 debug!(
                     runner_id = ?runner_id,
@@ -520,6 +532,9 @@ impl TurnRunnerWorker {
         let category = match error {
             DriverInvocationError::DriverNotFound { .. } => "driver_not_found",
             DriverInvocationError::HostCreationFailed { .. } => "host_creation_failed",
+            DriverInvocationError::RouteSnapshotPersistenceFailed(_) => {
+                "route_snapshot_persistence_failed"
+            }
             DriverInvocationError::DriverError(AgentLoopDriverError::InvalidRequest { .. }) => {
                 "driver_invalid_request"
             }
@@ -597,20 +612,6 @@ fn recovery_record_rejection_is_expected(error: &TurnError) -> bool {
         )
 }
 
-/// Default text-only validation policy for this narrow worker slice.
-///
-/// Completion refs remain fail-closed until a durable host-issued completion
-/// evidence path is wired into this worker. Blocked, failed, and cancelled exits
-/// also remain fail-closed unless tests inject a narrower trusted policy.
-fn default_text_only_exit_validation_policy() -> LoopExitValidationPolicy {
-    LoopExitValidationPolicy::recovery_required()
-}
-
-#[cfg(test)]
-fn trusted_text_only_exit_validation_policy_for_tests() -> LoopExitValidationPolicy {
-    default_text_only_exit_validation_policy().with_host_verified_completion_refs()
-}
-
 async fn heartbeat_loop(
     port: Arc<dyn TurnRunTransitionPort>,
     run_id: TurnRunId,
@@ -686,6 +687,7 @@ impl std::fmt::Display for TurnRunnerError {
 enum DriverInvocationError {
     DriverNotFound { reason: String },
     HostCreationFailed { reason: String },
+    RouteSnapshotPersistenceFailed(TurnError),
     DriverError(AgentLoopDriverError),
     DriverPanic,
     HeartbeatFailed(TurnError),
@@ -698,6 +700,9 @@ impl std::fmt::Display for DriverInvocationError {
         match self {
             Self::DriverNotFound { reason } => write!(f, "driver not found: {reason}"),
             Self::HostCreationFailed { reason } => write!(f, "host creation failed: {reason}"),
+            Self::RouteSnapshotPersistenceFailed(err) => {
+                write!(f, "route snapshot persistence failed: {err}")
+            }
             Self::DriverError(err) => write!(f, "driver error: {err}"),
             Self::DriverPanic => write!(f, "driver panicked before returning loop exit"),
             Self::HeartbeatFailed(err) => write!(f, "heartbeat failed: {err}"),

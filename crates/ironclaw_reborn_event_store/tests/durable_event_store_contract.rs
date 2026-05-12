@@ -68,6 +68,60 @@ fn audit_record(scope: &ResourceScope, status: &str) -> AuditEnvelope {
     }
 }
 
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_replay_advances_next_cursor_past_trailing_filtered_records() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let scope_a = scope_for("alice", "project-a");
+    let scope_b = scope_for("alice", "project-b");
+    let stream = EventStreamKey::from_scope(&scope_a);
+
+    let stores = build_reborn_event_stores(
+        RebornProfile::LocalDev,
+        RebornEventStoreConfig::Libsql {
+            path_or_url: temp.path().join("events.db").to_string_lossy().to_string(),
+            auth_token: None,
+        },
+    )
+    .await
+    .expect("libsql stores");
+
+    stores
+        .events
+        .append(RuntimeEvent::dispatch_requested(
+            scope_a.clone(),
+            capability_id(),
+        ))
+        .await
+        .expect("append project a");
+    stores
+        .events
+        .append(RuntimeEvent::dispatch_requested(
+            scope_b.clone(),
+            capability_id(),
+        ))
+        .await
+        .expect("append trailing project b");
+
+    let project_a = ReadScope {
+        project_id: scope_a.project_id.clone(),
+        ..ReadScope::default()
+    };
+    let replay = stores
+        .events
+        .read_after_cursor(&stream, &project_a, None, 10)
+        .await
+        .expect("replay project a");
+
+    assert_eq!(replay.entries.len(), 1);
+    assert_eq!(replay.entries[0].cursor, EventCursor::new(1));
+    assert_eq!(
+        replay.next_cursor,
+        EventCursor::new(2),
+        "filtered trailing records must advance SQL replay cursor"
+    );
+}
+
 #[tokio::test]
 async fn jsonl_runtime_log_survives_rebuild_and_preserves_filtered_cursor_semantics() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -361,6 +415,68 @@ async fn libsql_runtime_and_audit_logs_survive_rebuild_with_filtered_cursor_sema
             .unwrap()
             .status,
         Some("project-a".to_string())
+    );
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_replay_advances_next_cursor_past_trailing_filtered_records() {
+    let Ok(url) = std::env::var("IRONCLAW_REBORN_EVENT_STORE_POSTGRES_URL") else {
+        eprintln!(
+            "skipping postgres event-store cursor contract: IRONCLAW_REBORN_EVENT_STORE_POSTGRES_URL not set"
+        );
+        return;
+    };
+    let suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time")
+        .as_nanos();
+    let scope_a = scope_for(&format!("postgres-tail-alice-{suffix}"), "project-a");
+    let scope_b = scope_for(&format!("postgres-tail-alice-{suffix}"), "project-b");
+    let stream = EventStreamKey::from_scope(&scope_a);
+
+    let stores = build_reborn_event_stores(
+        RebornProfile::Production,
+        RebornEventStoreConfig::Postgres {
+            url: SecretString::new(url.into_boxed_str()),
+        },
+    )
+    .await
+    .expect("postgres stores");
+
+    stores
+        .events
+        .append(RuntimeEvent::dispatch_requested(
+            scope_a.clone(),
+            capability_id(),
+        ))
+        .await
+        .expect("append project a");
+    stores
+        .events
+        .append(RuntimeEvent::dispatch_requested(
+            scope_b.clone(),
+            capability_id(),
+        ))
+        .await
+        .expect("append trailing project b");
+
+    let project_a = ReadScope {
+        project_id: scope_a.project_id.clone(),
+        ..ReadScope::default()
+    };
+    let replay = stores
+        .events
+        .read_after_cursor(&stream, &project_a, None, 10)
+        .await
+        .expect("replay project a");
+
+    assert_eq!(replay.entries.len(), 1);
+    assert_eq!(replay.entries[0].cursor, EventCursor::new(1));
+    assert_eq!(
+        replay.next_cursor,
+        EventCursor::new(2),
+        "filtered trailing records must advance Postgres replay cursor"
     );
 }
 

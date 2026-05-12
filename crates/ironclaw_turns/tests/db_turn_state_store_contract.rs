@@ -13,22 +13,22 @@ use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CheckpointSchemaId, DefaultTurnCoordinator,
-    GetLoopCheckpointRequest, IdempotencyKey, InMemoryRunProfileResolver,
-    InMemoryTurnStateStoreLimits, LoopCancelled, LoopCancelledReasonKind, LoopCheckpointStateRef,
-    LoopCheckpointStore, LoopCompleted, LoopCompletionKind, LoopDiagnosticRef, LoopExit,
-    LoopExitId, LoopExitValidationPolicy, LoopFailed, LoopFailureKind, LoopMessageRef,
-    LoopUsageSummaryRef, PutLoopCheckpointRequest, ReplyTargetBindingRef, ResolvedRunProfile,
-    RunProfileRequest, RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver,
-    RunProfileVersion, SanitizedCancelReason, SanitizedFailure, SourceBindingRef,
-    StaticTurnAdmissionLimitProvider, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
-    TurnAdmissionAxisKind, TurnAdmissionCapacityDenial, TurnCoordinator, TurnError, TurnEventKind,
+    GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey, InMemoryRunProfileResolver,
+    InMemoryTurnStateStoreLimits, LoopCheckpointStateRef, LoopCheckpointStore, LoopExitMapping,
+    PutLoopCheckpointRequest, ReplyTargetBindingRef, ResolvedRunProfile, RunProfileRequest,
+    RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
+    SanitizedCancelReason, SanitizedFailure, SourceBindingRef, StaticTurnAdmissionLimitProvider,
+    SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor, TurnAdmissionAxisKind,
+    TurnAdmissionCapacityDenial, TurnCoordinator, TurnError, TurnEventKind,
     TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
     TurnEventProjectionService, TurnEventProjectionSource, TurnId, TurnLeaseToken, TurnRunId,
-    TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
+    TurnRunState, TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
     events::EventCursor,
+    run_profile::LoopModelRouteSnapshot,
     runner::{
-        ApplyLoopExitRequest, ClaimRunRequest, CompleteRunRequest, HeartbeatRequest,
-        RecoverExpiredLeasesRequest, TurnRunTransitionPort, apply_loop_exit,
+        ApplyValidatedLoopExitRequest, ClaimRunRequest, CompleteRunRequest, HeartbeatRequest,
+        RecordModelRouteSnapshotRequest, RecoverExpiredLeasesRequest, TurnRunTransitionPort,
+        TurnRunnerOutcome,
     },
 };
 
@@ -36,6 +36,41 @@ use ironclaw_turns::{
 use ironclaw_turns::LibSqlTurnStateStore;
 #[cfg(feature = "postgres")]
 use ironclaw_turns::PostgresTurnStateStore;
+
+async fn apply_test_loop_exit<P>(
+    port: &P,
+    run_id: TurnRunId,
+    runner_id: TurnRunnerId,
+    lease_token: TurnLeaseToken,
+    mapping: LoopExitMapping,
+) -> Result<TurnRunState, TurnError>
+where
+    P: TurnRunTransitionPort + ?Sized,
+{
+    port.apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+        run_id,
+        runner_id,
+        lease_token,
+        mapping,
+    })
+    .await
+}
+
+fn protocol_recovery_mapping() -> LoopExitMapping {
+    LoopExitMapping::RecoveryRequired {
+        failure: SanitizedFailure::new("driver_protocol_violation").unwrap(),
+    }
+}
+
+fn cancelled_mapping() -> LoopExitMapping {
+    LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Cancelled)
+}
+
+fn failed_mapping(category: &'static str) -> LoopExitMapping {
+    LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Failed {
+        failure: SanitizedFailure::new(category).unwrap(),
+    })
+}
 
 struct BlockingRunProfileResolver {
     started: mpsc::Sender<()>,
@@ -247,6 +282,70 @@ async fn libsql_turn_state_store_persists_submit_and_busy_across_instances() {
         .await
         .unwrap();
     assert_eq!(duplicate, accepted);
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_turn_state_store_persists_model_route_snapshot_across_reopen_and_recovery() {
+    let (db, _dir) = libsql_db().await;
+    let store = Arc::new(LibSqlTurnStateStore::new(db.clone()));
+    store.run_migrations().await.unwrap();
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-route-db", "idem-route-db"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope("thread-route-db")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let route = LoopModelRouteSnapshot::new(
+        "openrouter",
+        "anthropic/claude-sonnet-4",
+        "config:v1",
+        "auth:v1",
+    );
+    store
+        .record_model_route_snapshot(RecordModelRouteSnapshotRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            snapshot: route.clone(),
+        })
+        .await
+        .unwrap();
+
+    let reopened = Arc::new(LibSqlTurnStateStore::new(db));
+    assert_eq!(
+        reopened
+            .get_run_state(GetRunStateRequest {
+                scope: scope("thread-route-db"),
+                run_id,
+            })
+            .await
+            .unwrap()
+            .resolved_model_route,
+        Some(route.clone())
+    );
+
+    let recovered = reopened
+        .recover_expired_leases(RecoverExpiredLeasesRequest {
+            now: Utc::now() + ChronoDuration::hours(1),
+            scope_filter: Some(scope("thread-route-db")),
+        })
+        .await
+        .unwrap();
+    assert_eq!(recovered.recovered.len(), 1);
+    assert_eq!(recovered.recovered[0].resolved_model_route, Some(route));
 }
 
 #[cfg(feature = "libsql")]
@@ -515,15 +614,12 @@ async fn libsql_turn_state_store_persists_apply_loop_exit_recovery_across_instan
         .unwrap();
     assert_eq!(claimed.state.run_id, run_id);
 
-    let recovered = apply_loop_exit(
+    let recovered = apply_test_loop_exit(
         store.as_ref(),
-        ApplyLoopExitRequest {
-            run_id,
-            runner_id,
-            lease_token,
-            exit: completed_exit("exit:unverified-completed"),
-            validation_policy: LoopExitValidationPolicy::recovery_required(),
-        },
+        run_id,
+        runner_id,
+        lease_token,
+        protocol_recovery_mapping(),
     )
     .await
     .unwrap();
@@ -594,18 +690,12 @@ async fn libsql_turn_state_store_persists_cancelled_loop_exit_application() {
         .unwrap();
     assert_eq!(claimed.state.run_id, recovery_run_id);
 
-    let recovered = apply_loop_exit(
+    let recovered = apply_test_loop_exit(
         store.as_ref(),
-        ApplyLoopExitRequest {
-            run_id: recovery_run_id,
-            runner_id: recovery_runner_id,
-            lease_token: recovery_lease_token,
-            exit: LoopExit::cancelled_for_observed_interrupt(
-                ironclaw_turns::LoopExitId::new("exit:cancelled-before-recorded").unwrap(),
-            ),
-            validation_policy: LoopExitValidationPolicy::recovery_required()
-                .with_host_cancellation_observed(),
-        },
+        recovery_run_id,
+        recovery_runner_id,
+        recovery_lease_token,
+        cancelled_mapping(),
     )
     .await
     .unwrap();
@@ -638,18 +728,12 @@ async fn libsql_turn_state_store_persists_cancelled_loop_exit_application() {
         .await
         .unwrap();
 
-    let cancelled = apply_loop_exit(
+    let cancelled = apply_test_loop_exit(
         store.as_ref(),
-        ApplyLoopExitRequest {
-            run_id: cancel_run_id,
-            runner_id: cancel_runner_id,
-            lease_token: cancel_lease_token,
-            exit: LoopExit::cancelled_for_observed_interrupt(
-                ironclaw_turns::LoopExitId::new("exit:cancelled-recorded").unwrap(),
-            ),
-            validation_policy: LoopExitValidationPolicy::recovery_required()
-                .with_host_cancellation_observed(),
-        },
+        cancel_run_id,
+        cancel_runner_id,
+        cancel_lease_token,
+        cancelled_mapping(),
     )
     .await
     .unwrap();
@@ -1020,15 +1104,12 @@ async fn postgres_turn_state_store_persists_apply_loop_exit_recovery_when_config
         .unwrap();
     assert_eq!(claimed.state.run_id, run_id);
 
-    apply_loop_exit(
+    apply_test_loop_exit(
         store.as_ref(),
-        ApplyLoopExitRequest {
-            run_id,
-            runner_id,
-            lease_token,
-            exit: completed_exit(&format!("exit:unverified-{suffix}")),
-            validation_policy: LoopExitValidationPolicy::recovery_required(),
-        },
+        run_id,
+        runner_id,
+        lease_token,
+        protocol_recovery_mapping(),
     )
     .await
     .unwrap();
@@ -1087,19 +1168,12 @@ async fn postgres_turn_state_store_persists_cancelled_loop_exit_application_when
         .unwrap();
     assert_eq!(claimed.state.run_id, recovery_run_id);
 
-    let recovered = apply_loop_exit(
+    let recovered = apply_test_loop_exit(
         store.as_ref(),
-        ApplyLoopExitRequest {
-            run_id: recovery_run_id,
-            runner_id: recovery_runner_id,
-            lease_token: recovery_lease_token,
-            exit: LoopExit::cancelled_for_observed_interrupt(
-                ironclaw_turns::LoopExitId::new(format!("exit:cancelled-before-recorded-{suffix}"))
-                    .unwrap(),
-            ),
-            validation_policy: LoopExitValidationPolicy::recovery_required()
-                .with_host_cancellation_observed(),
-        },
+        recovery_run_id,
+        recovery_runner_id,
+        recovery_lease_token,
+        cancelled_mapping(),
     )
     .await
     .unwrap();
@@ -1135,19 +1209,12 @@ async fn postgres_turn_state_store_persists_cancelled_loop_exit_application_when
         .await
         .unwrap();
 
-    let cancelled = apply_loop_exit(
+    let cancelled = apply_test_loop_exit(
         store.as_ref(),
-        ApplyLoopExitRequest {
-            run_id: cancel_run_id,
-            runner_id: cancel_runner_id,
-            lease_token: cancel_lease_token,
-            exit: LoopExit::cancelled_for_observed_interrupt(
-                ironclaw_turns::LoopExitId::new(format!("exit:cancelled-recorded-{suffix}"))
-                    .unwrap(),
-            ),
-            validation_policy: LoopExitValidationPolicy::recovery_required()
-                .with_host_cancellation_observed(),
-        },
+        cancel_run_id,
+        cancel_runner_id,
+        cancel_lease_token,
+        cancelled_mapping(),
     )
     .await
     .unwrap();
@@ -1233,26 +1300,12 @@ async fn assert_db_turn_event_projection_replays_failed_terminal_after_reopen_wi
         .unwrap()
         .unwrap();
 
-    let failed = apply_loop_exit(
+    let failed = apply_test_loop_exit(
         store.as_ref(),
-        ApplyLoopExitRequest {
-            run_id,
-            runner_id,
-            lease_token,
-            exit: LoopExit::Failed(LoopFailed {
-                reason_kind: LoopFailureKind::DriverBug,
-                checkpoint_id: None,
-                usage_summary_ref: Some(
-                    LoopUsageSummaryRef::new(format!("usage:{usage_marker}")).unwrap(),
-                ),
-                diagnostic_ref: Some(
-                    LoopDiagnosticRef::new(format!("diag:{diagnostic_marker}")).unwrap(),
-                ),
-                exit_id: LoopExitId::new(format!("exit:{exit_marker}")).unwrap(),
-            }),
-            validation_policy: LoopExitValidationPolicy::recovery_required()
-                .with_host_verified_failure_evidence(),
-        },
+        run_id,
+        runner_id,
+        lease_token,
+        failed_mapping("driver_bug"),
     )
     .await
     .unwrap();
@@ -1365,23 +1418,12 @@ async fn assert_db_turn_event_projection_replays_cancelled_terminal_after_reopen
         .unwrap();
     assert_eq!(cancel_requested.status, TurnStatus::CancelRequested);
 
-    let cancelled = apply_loop_exit(
+    let cancelled = apply_test_loop_exit(
         store.as_ref(),
-        ApplyLoopExitRequest {
-            run_id,
-            runner_id,
-            lease_token,
-            exit: LoopExit::Cancelled(LoopCancelled {
-                reason_kind: LoopCancelledReasonKind::HostCancellation,
-                checkpoint_id: None,
-                interrupted_message_refs: vec![
-                    LoopMessageRef::new(format!("msg:{reason_marker}")).unwrap(),
-                ],
-                exit_id: LoopExitId::new(format!("exit:{exit_marker}")).unwrap(),
-            }),
-            validation_policy: LoopExitValidationPolicy::recovery_required()
-                .with_host_cancellation_observed(),
-        },
+        run_id,
+        runner_id,
+        lease_token,
+        cancelled_mapping(),
     )
     .await
     .unwrap();
@@ -1530,17 +1572,6 @@ fn cancel_request(thread: &str, run_id: TurnRunId, idempotency_key: &str) -> Can
 fn accepted_run_id(response: &SubmitTurnResponse) -> TurnRunId {
     let SubmitTurnResponse::Accepted { run_id, .. } = response;
     *run_id
-}
-
-fn completed_exit(exit_id: &str) -> LoopExit {
-    LoopExit::Completed(LoopCompleted {
-        completion_kind: LoopCompletionKind::FinalReply,
-        reply_message_refs: vec![LoopMessageRef::new("msg:assistant-final").unwrap()],
-        result_refs: vec![],
-        final_checkpoint_id: None,
-        usage_summary_ref: None,
-        exit_id: ironclaw_turns::LoopExitId::new(exit_id).unwrap(),
-    })
 }
 
 fn received_at() -> DateTime<Utc> {

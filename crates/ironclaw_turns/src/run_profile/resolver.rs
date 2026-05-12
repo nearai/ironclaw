@@ -237,6 +237,8 @@ fn interactive_profile() -> RunProfileDefinition {
             require_before_side_effect: true,
             require_before_block: true,
             max_checkpoint_bytes: 64 * 1024,
+            require_final_checkpoint: false,
+            allow_no_reply_completion: false,
         },
         resource_budget_policy: ResourceBudgetPolicy {
             tier: ResourceBudgetTier::from_trusted_static("interactive_standard"),
@@ -288,6 +290,8 @@ fn long_running_mission_profile() -> RunProfileDefinition {
             require_before_side_effect: true,
             require_before_block: true,
             max_checkpoint_bytes: 256 * 1024,
+            require_final_checkpoint: true,
+            allow_no_reply_completion: false,
         },
         resource_budget_policy: ResourceBudgetPolicy {
             tier: ResourceBudgetTier::from_trusted_static("mission_high"),
@@ -411,6 +415,14 @@ fn fingerprint_for(
             .max_checkpoint_bytes
             .to_string(),
     );
+    update_bool(
+        definition.checkpoint_policy.require_final_checkpoint,
+        &mut update,
+    );
+    update_bool(
+        definition.checkpoint_policy.allow_no_reply_completion,
+        &mut update,
+    );
     update(resource_budget_policy.tier.as_str());
     update(&resource_budget_policy.max_model_calls.to_string());
     update(
@@ -448,4 +460,41 @@ fn fingerprint_for(
         update(&source.summary);
     }
     RunProfileFingerprint::from_trusted_string(format!("fp:{hash:016x}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_running_mission_profile_requires_final_checkpoint() {
+        assert!(
+            long_running_mission_profile()
+                .checkpoint_policy
+                .require_final_checkpoint
+        );
+    }
+
+    #[test]
+    fn fingerprint_changes_when_final_checkpoint_requirement_changes() {
+        let relaxed = interactive_profile();
+        let mut strict = relaxed.clone();
+        strict.checkpoint_policy.require_final_checkpoint = true;
+
+        let relaxed_provenance = provenance_for(
+            &relaxed,
+            &RunProfileResolutionRequest::interactive_default(),
+        );
+        let strict_provenance =
+            provenance_for(&strict, &RunProfileResolutionRequest::interactive_default());
+
+        assert_ne!(
+            fingerprint_for(
+                &relaxed,
+                &relaxed.resource_budget_policy,
+                &relaxed_provenance
+            ),
+            fingerprint_for(&strict, &strict.resource_budget_policy, &strict_provenance),
+        );
+    }
 }

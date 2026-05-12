@@ -537,9 +537,14 @@ mod tests {
         let indexer = ChunkingMemoryDocumentIndexer::new(repo.clone())
             .with_embedding_provider(Arc::new(RejectingEmbeddingProvider));
         let err = indexer.reindex_document(&doc_path()).await.unwrap_err();
+        let displayed = err.to_string();
         assert!(
-            err.to_string().contains("synthetic failure"),
-            "embedding error must still surface to callers for observability; got: {err}"
+            displayed.contains("embedding provider unavailable"),
+            "embedding error category must still surface to callers for observability; got: {err}"
+        );
+        assert!(
+            !displayed.contains("synthetic failure"),
+            "embedding backend details must not leak through public filesystem errors; got: {err}"
         );
         let calls = repo.calls.lock().unwrap();
         assert_eq!(calls.len(), 1, "expected exactly one indexer call");
