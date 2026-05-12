@@ -3734,6 +3734,120 @@ pub async fn handle_expected(
     }
 }
 
+/// Handle `approve <channel> <code>` — claim a pairing code from any chat
+/// surface (TUI, CLI, web, or Telegram itself). Mirrors what the web
+/// `POST /api/pairing/{channel}/approve` handler does, so the same approval
+/// works regardless of where the user typed it. This closes #3317, where
+/// the Telegram bot's pairing reply pointed users at "IronClaw" without
+/// naming a surface and the agent rejected the resulting chat input.
+pub async fn handle_pairing_claim(
+    agent: &Agent,
+    message: &IncomingMessage,
+    channel: &str,
+    code: &str,
+) -> Result<BridgeOutcome, Error> {
+    use ironclaw_common::ExtensionName;
+
+    // Validate the channel name at the boundary, mirroring
+    // `web::features::pairing::parse_channel`. We discard the canonical
+    // form and carry the lowercased raw string forward because the pairing
+    // store keys off the un-folded name (see `pairing/mod.rs`
+    // `normalize_channel_name`).
+    let lowered = channel.to_ascii_lowercase();
+    if ExtensionName::new(&lowered).is_err() {
+        // The raw `channel` token comes from chat input and is unbounded.
+        // Cap the echo at 32 characters and strip non-printable / non-
+        // alphanumeric characters before rendering, so a hostile or
+        // accidentally-pasted blob can't blow up the chat reply or smuggle
+        // control characters / Markdown through to the SSE / Telegram /
+        // TUI surface. The underlying `IdentityError` variants also carry
+        // the raw input verbatim, so we render a fixed category message
+        // rather than `{e}` to keep the reply size bounded by the echo.
+        let preview: String = channel
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+            .take(32)
+            .collect();
+        let preview = if preview.is_empty() {
+            "<empty>".to_string()
+        } else {
+            preview
+        };
+        return Ok(BridgeOutcome::Respond(format!(
+            "Invalid channel name `{preview}` — channel names must be \
+             lowercase letters, digits, hyphens, or underscores (e.g. \
+             `telegram`, `slack-relay`)."
+        )));
+    }
+
+    let Some(ext_mgr) = agent.deps.extension_manager.as_ref() else {
+        return Ok(BridgeOutcome::Respond(
+            "Pairing is not available — extension manager is not configured.".into(),
+        ));
+    };
+    let Some(pairing_store) = ext_mgr.pairing_store() else {
+        return Ok(BridgeOutcome::Respond(
+            "Pairing is not available — pairing store is not configured.".into(),
+        ));
+    };
+
+    // Bind the pairing to the message's user_id. `from_trusted` matches the
+    // web handler's pattern: the user identity is sourced from the inbound
+    // channel auth, not user-controlled chat content. Role is irrelevant
+    // for self-service approval — only the id is recorded on the pairing
+    // row.
+    let owner_id = crate::ownership::UserId::from_trusted(
+        message.user_id.clone(),
+        crate::ownership::UserRole::Regular,
+    );
+
+    let approval = match pairing_store.approve(&lowered, code, &owner_id).await {
+        Ok(approval) => approval,
+        Err(crate::error::DatabaseError::NotFound { .. }) => {
+            return Ok(BridgeOutcome::Respond(
+                "Invalid or expired pairing code.".into(),
+            ));
+        }
+        Err(e) => {
+            debug!(channel = %lowered, error = %e, "pairing approval failed");
+            return Ok(BridgeOutcome::Respond(
+                "Internal error processing pairing approval.".into(),
+            ));
+        }
+    };
+
+    // Propagate to the running channel so the WASM channel picks up the new
+    // owner binding without a restart. Same shape as the web handler — on
+    // propagation failure, revert the DB approval so the user can retry.
+    match ext_mgr
+        .complete_pairing_approval(&lowered, &approval.external_id)
+        .await
+    {
+        Ok(()) => Ok(BridgeOutcome::Respond(format!(
+            "Pairing approved — `{lowered}` is now linked to your account."
+        ))),
+        Err(e) => {
+            tracing::warn!(
+                channel = %lowered,
+                error = %e,
+                "pairing approval propagation to running channel failed"
+            );
+            if let Err(revert_err) = pairing_store.revert_approval(&approval).await {
+                tracing::warn!(
+                    channel = %lowered,
+                    error = %revert_err,
+                    "failed to revert pairing approval after propagation failure"
+                );
+            }
+            Ok(BridgeOutcome::Respond(
+                "Pairing was approved, but the running channel could not be updated. \
+                 Please retry or restart the channel."
+                    .into(),
+            ))
+        }
+    }
+}
+
 /// Find the most recent thread in a conversation (checks active threads first,
 /// then falls back to the last completed thread visible in conversation entries).
 async fn find_most_recent_thread(
@@ -3797,6 +3911,29 @@ async fn clear_engine_conversation(agent: &Agent, message: &IncomingMessage) -> 
             // Discard all pending gates for this thread regardless of user,
             // preventing orphaned gates that can never be resolved (#2323).
             state.pending_gates.discard_for_thread(*tid).await;
+        }
+    }
+
+    // Drain in-flight OAuth flows for this user (#3320).
+    //
+    // Pending flows otherwise live until `OAUTH_FLOW_EXPIRY` (5 min). On a
+    // user-initiated `/clear`, the user expects a clean slate — leaving a
+    // ghost flow can: (a) match a stale `state` from a never-completed
+    // browser tab, (b) fool a fresh auth attempt's CSRF dedupe, or
+    // (c) cause the next `extension_manager::pending_oauth_flows()` lookup
+    // to find an entry whose corresponding engine gate has already been
+    // discarded above. Drain all flows owned by the clearing user.
+    if let Some(ext_mgr) = agent.deps.extension_manager.as_ref() {
+        let mut flows = ext_mgr.pending_oauth_flows().write().await;
+        let before = flows.len();
+        flows.retain(|_state, flow| flow.user_id != message.user_id);
+        let removed = before.saturating_sub(flows.len());
+        if removed > 0 {
+            debug!(
+                user_id = %message.user_id,
+                removed,
+                "engine v2: drained pending OAuth flows on /clear"
+            );
         }
     }
 
@@ -3875,6 +4012,45 @@ pub async fn clear_engine_pending_auth(user_id: &str, thread_id: Option<&str>) {
             gate.resume_kind,
             ironclaw_engine::ResumeKind::Authentication { .. }
         ) {
+            let _ = state.pending_gates.discard(&gate.key()).await;
+        }
+    }
+}
+
+/// Clear pending auth gates for a user that match a specific credential.
+///
+/// Used by OAuth failure paths where we need to release the gate that
+/// was waiting on *this* OAuth flow without disturbing unrelated
+/// authentication gates. A bare `clear_engine_pending_auth(user, None)`
+/// would discard every pending Authentication gate for the user — e.g. a
+/// failed Gmail callback would also nuke an in-flight Slack/MCP gate
+/// running on a different thread.
+///
+/// `credential_name` is taken as `&str` so callers in
+/// `src/channels/web/**` don't have to construct an
+/// `ironclaw_common::CredentialName` at the web boundary (per
+/// `web/CLAUDE.md` — credential identity stays backend-side). Invalid
+/// credential strings silently no-op rather than erroring; the gate
+/// simply stays open and the user retries.
+pub async fn clear_engine_pending_auth_for_credential(user_id: &str, credential_name: &str) {
+    let Ok(target) = ironclaw_common::CredentialName::new(credential_name) else {
+        return;
+    };
+    let Some(lock) = ENGINE_STATE.get() else {
+        return;
+    };
+    let guard = lock.read().await;
+    let Some(state) = guard.as_ref() else {
+        return;
+    };
+
+    for gate in state.pending_gates.list_for_user(user_id).await {
+        if let ironclaw_engine::ResumeKind::Authentication {
+            credential_name: gate_credential,
+            ..
+        } = &gate.resume_kind
+            && gate_credential == &target
+        {
             let _ = state.pending_gates.discard(&gate.key()).await;
         }
     }
@@ -9313,6 +9489,212 @@ mod tests {
         *lock.write().await = None;
     }
 
+    /// Regression for review on #3381: the OAuth failure cleanup must
+    /// scope to the credential of the failed flow, not nuke every
+    /// pending auth gate the user has open. Concrete failure mode this
+    /// covers — Gmail OAuth fails while a Slack auth gate is in flight
+    /// on a different thread; only the Gmail gate should clear.
+    #[tokio::test]
+    async fn clear_engine_pending_auth_for_credential_only_clears_matching_credential() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let store = Arc::new(TestStore::new());
+        let state = make_expected_test_state(store);
+        let thread_gmail = ironclaw_engine::ThreadId::new();
+        let thread_slack = ironclaw_engine::ThreadId::new();
+
+        state
+            .pending_gates
+            .insert(sample_pending_gate(
+                "alice",
+                thread_gmail,
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name: ironclaw_common::CredentialName::new("google_oauth_token")
+                        .unwrap(),
+                    instructions: "complete OAuth".into(),
+                    auth_url: None,
+                },
+            ))
+            .await
+            .unwrap();
+        state
+            .pending_gates
+            .insert(sample_pending_gate(
+                "alice",
+                thread_slack,
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name: ironclaw_common::CredentialName::new("slack_oauth_token")
+                        .unwrap(),
+                    instructions: "complete OAuth".into(),
+                    auth_url: None,
+                },
+            ))
+            .await
+            .unwrap();
+
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+        *lock.write().await = Some(state);
+
+        clear_engine_pending_auth_for_credential("alice", "google_oauth_token").await;
+
+        let guard = lock.read().await;
+        let state = guard.as_ref().unwrap();
+        let remaining = state.pending_gates.list_for_user("alice").await;
+        assert_eq!(
+            remaining.len(),
+            1,
+            "only the Gmail gate should be discarded; Slack must remain"
+        );
+        assert!(
+            remaining.iter().any(|gate| gate.thread_id == thread_slack),
+            "Slack gate must survive Gmail OAuth failure"
+        );
+        drop(guard);
+        *lock.write().await = None;
+    }
+
+    /// Regression for review on PR #3381: an OAuth callback that arrives
+    /// after the 5-minute flow expiry is a terminal failure — the engine
+    /// pending auth gate must be cleared, otherwise the conversation
+    /// sits paused forever waiting on a callback that will never arrive
+    /// (#3320). Cleanup must stay scoped to the failed flow's credential
+    /// so an unrelated auth gate (Slack/MCP) running on a different
+    /// thread for the same user survives.
+    #[tokio::test]
+    async fn oauth_callback_expired_flow_clears_credential_scoped_engine_gate() {
+        use crate::channels::web::features::oauth::oauth_callback_handler;
+        use crate::channels::web::test_helpers::{test_ext_mgr, test_gateway_state};
+        use crate::testing::credentials::TEST_GATEWAY_CRYPTO_KEY;
+        use axum::body::Body;
+        use axum::routing::get;
+        use tower::ServiceExt;
+
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+
+        // Two pending auth gates for the same user, on different threads
+        // and different credentials. The OAuth callback will be for the
+        // Gmail flow; the Slack gate must survive.
+        let store = Arc::new(TestStore::new());
+        let engine_state = make_expected_test_state(store);
+        let thread_gmail = ironclaw_engine::ThreadId::new();
+        let thread_slack = ironclaw_engine::ThreadId::new();
+        engine_state
+            .pending_gates
+            .insert(sample_pending_gate(
+                "expiry-user",
+                thread_gmail,
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name: ironclaw_common::CredentialName::new("google_oauth_token")
+                        .unwrap(),
+                    instructions: "complete OAuth".into(),
+                    auth_url: None,
+                },
+            ))
+            .await
+            .unwrap();
+        engine_state
+            .pending_gates
+            .insert(sample_pending_gate(
+                "expiry-user",
+                thread_slack,
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name: ironclaw_common::CredentialName::new("slack_oauth_token")
+                        .unwrap(),
+                    instructions: "complete OAuth".into(),
+                    auth_url: None,
+                },
+            ))
+            .await
+            .unwrap();
+
+        let lock = ENGINE_STATE.get_or_init(|| TokioRwLock::new(None));
+        *lock.write().await = None;
+        *lock.write().await = Some(engine_state);
+
+        // GatewayState with an ext_mgr holding an expired pending flow
+        // for the Gmail credential. The `state` query parameter we send
+        // below must round-trip through `decode_hosted_oauth_state`, so
+        // we mint it via the matching encoder.
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
+                crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
+                    TEST_GATEWAY_CRYPTO_KEY.to_string(),
+                ))
+                .expect("crypto"),
+            )));
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets.clone());
+
+        let flow_id = "expiry-flow".to_string();
+        let encoded_state = crate::auth::oauth::encode_hosted_oauth_state(&flow_id, None);
+        let expired_created_at = std::time::Instant::now()
+            .checked_sub(crate::auth::oauth::OAUTH_FLOW_EXPIRY + Duration::from_secs(1))
+            .expect("monotonic clock");
+        let flow = crate::auth::oauth::PendingOAuthFlow {
+            extension_name: ironclaw_common::ExtensionName::new("gmail").unwrap(),
+            display_name: "Gmail".to_string(),
+            token_url: "https://example.com/token".to_string(),
+            client_id: "client123".to_string(),
+            client_secret: None,
+            redirect_uri: "https://example.com/oauth/callback".to_string(),
+            code_verifier: None,
+            access_token_field: "access_token".to_string(),
+            secret_name: "google_oauth_token".to_string(),
+            provider: None,
+            validation_endpoint: None,
+            scopes: vec![],
+            user_id: "expiry-user".to_string(),
+            secrets,
+            sse_manager: None,
+            gateway_token: None,
+            token_exchange_extra_params: std::collections::HashMap::new(),
+            client_id_secret_name: None,
+            client_secret_secret_name: None,
+            client_secret_expires_at: None,
+            created_at: expired_created_at,
+            auto_activate_extension: true,
+        };
+        ext_mgr
+            .pending_oauth_flows()
+            .write()
+            .await
+            .insert(flow_id, flow);
+
+        let gateway_state = test_gateway_state(Some(ext_mgr));
+        let app = axum::Router::new()
+            .route("/oauth/callback", get(oauth_callback_handler))
+            .with_state(gateway_state);
+
+        let req = axum::http::Request::builder()
+            .uri(format!(
+                "/oauth/callback?code=test_code&state={}",
+                encoded_state
+            ))
+            .body(Body::empty())
+            .expect("request");
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        // The Gmail gate (matching credential) must be gone; the Slack
+        // gate (different credential) must survive.
+        let guard = lock.read().await;
+        let state = guard.as_ref().unwrap();
+        let remaining = state.pending_gates.list_for_user("expiry-user").await;
+        assert_eq!(
+            remaining.len(),
+            1,
+            "expired OAuth callback must clear the matching auth gate; \
+             unrelated gate must survive. Remaining: {remaining:?}"
+        );
+        assert!(
+            remaining.iter().any(|gate| gate.thread_id == thread_slack),
+            "Slack gate must survive Gmail flow expiry"
+        );
+        drop(guard);
+        *lock.write().await = None;
+    }
+
     #[tokio::test]
     async fn discard_engine_pending_auth_request_discards_only_matching_auth_gate() {
         let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
@@ -12300,6 +12682,124 @@ mod tests {
         );
         let info = thread_to_info(&thread);
         assert_eq!(info.title.as_deref(), Some("Short first line"));
+    }
+
+    /// Regression test for #3317: when a user types a pairing claim into a
+    /// chat surface but the gateway has no `ExtensionManager` wired up, the
+    /// handler must produce a clear, user-facing message instead of
+    /// panicking or returning an internal error. The corresponding
+    /// happy-path test (with a real `ExtensionManager`) lives in the
+    /// telegram pairing chat-claim integration test (gated on libsql).
+    #[tokio::test]
+    async fn handle_pairing_claim_without_ext_mgr_responds_with_unavailable_message() {
+        let (agent, _statuses) = make_router_test_agent(None).await;
+        let message = IncomingMessage::new("tui", "alice", "approve telegram ABC12345");
+
+        let outcome = handle_pairing_claim(&agent, &message, "telegram", "ABC12345")
+            .await
+            .expect("handle_pairing_claim should not error");
+
+        match outcome {
+            BridgeOutcome::Respond(text) => {
+                assert!(
+                    text.contains("Pairing is not available"),
+                    "expected unavailable-message, got: {text}"
+                );
+            }
+            other => panic!("expected Respond, got {other:?}"),
+        }
+    }
+
+    /// Regression test for #3317: malformed channel slugs (path traversal,
+    /// empty, oversize) must reject at the boundary rather than reaching
+    /// the pairing store. Mirrors `web::features::pairing::parse_channel`'s
+    /// `ExtensionName::new` validation.
+    #[tokio::test]
+    async fn handle_pairing_claim_rejects_invalid_channel_name() {
+        let (agent, _statuses) = make_router_test_agent(None).await;
+        let message = IncomingMessage::new("tui", "alice", "approve ../etc/passwd ABC");
+
+        let outcome = handle_pairing_claim(&agent, &message, "../etc/passwd", "ABC")
+            .await
+            .expect("handle_pairing_claim should not error");
+
+        match outcome {
+            BridgeOutcome::Respond(text) => {
+                assert!(
+                    text.contains("Invalid channel name"),
+                    "expected invalid-channel message, got: {text}"
+                );
+            }
+            other => panic!("expected Respond, got {other:?}"),
+        }
+    }
+
+    /// The invalid-channel reply echoes a slice of what the user typed so
+    /// they know which token was rejected, but the echo must be bounded
+    /// and printable: an attacker-controlled chat input shouldn't be able
+    /// to inject backticks, control characters, or kilobytes of payload
+    /// into the SSE / Telegram / TUI reply through this path.
+    #[tokio::test]
+    async fn handle_pairing_claim_invalid_channel_echo_is_bounded_and_sanitized() {
+        let (agent, _statuses) = make_router_test_agent(None).await;
+        let message = IncomingMessage::new("tui", "alice", "approve x ABC");
+
+        // 200-character payload mixing control chars, backticks, and
+        // markdown — well beyond any real channel slug.
+        let hostile = format!(
+            "{}`malicious`\x07\x1b[31m{}",
+            "A".repeat(80),
+            "B".repeat(120)
+        );
+        let outcome = handle_pairing_claim(&agent, &message, &hostile, "ABC")
+            .await
+            .expect("handle_pairing_claim should not error");
+
+        let text = match outcome {
+            BridgeOutcome::Respond(text) => text,
+            other => panic!("expected Respond, got {other:?}"),
+        };
+
+        assert!(
+            text.contains("Invalid channel name"),
+            "expected invalid-channel message, got: {text}"
+        );
+        // Pull the echoed preview out from between the first two backticks
+        // — the message also embeds backtick-quoted examples
+        // (`telegram`, `slack-relay`), so a global backtick count is
+        // fragile and not what the user-controlled-input invariant cares
+        // about. What matters is that whatever the user typed doesn't
+        // smuggle anything into the *preview* region.
+        let mut parts = text.splitn(3, '`');
+        parts.next();
+        let preview = parts.next().expect("preview region delimited by backticks");
+        assert!(
+            !preview.contains('`'),
+            "preview must not contain user-injected backticks: {preview:?}"
+        );
+        assert!(
+            preview
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+                || preview == "<empty>",
+            "preview must be alphanumeric (with - / _) or the explicit \
+             <empty> placeholder, got {preview:?}"
+        );
+        assert!(
+            !text.contains('\x07') && !text.contains('\x1b'),
+            "echo must strip control characters: {text:?}"
+        );
+        assert!(
+            !text.contains("malicious"),
+            "non-alphanumeric markup must be stripped from the echo: {text}"
+        );
+        // Cap the rendered length to "Invalid channel name `<≤32 chars>`: <err>"
+        // — generous upper bound here just confirms the echo isn't unbounded.
+        assert!(
+            text.len() < 256,
+            "rendered reply must be bounded, got {} chars: {text}",
+            text.len()
+        );
     }
 
     /// Regression: when an Approval gate is parked in

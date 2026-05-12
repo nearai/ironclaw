@@ -212,10 +212,11 @@ def _write_google_skill(skills_dir: str, mock_api_host: str) -> None:
             f"""---
 name: google_auth_matrix
 version: "1.0.0"
-keywords:
-  - google
-  - drive
-  - gmail
+activation:
+  keywords:
+    - google
+    - drive
+    - gmail
 credentials:
   - name: google_oauth_token
     provider: google
@@ -799,6 +800,18 @@ async def _read_repl_until_any(
         if re.search(pattern, output, re.IGNORECASE):
             return output, pattern
     raise AssertionError(f"Matched union {union!r} but no individual pattern matched")
+
+
+async def _try_read_repl_until_any(
+    repl: dict,
+    patterns: list[str],
+    *,
+    timeout: float = 30.0,
+) -> tuple[str, str] | None:
+    try:
+        return await _read_repl_until_any(repl, patterns, timeout=timeout)
+    except AssertionError:
+        return None
 
 
 async def _drain_repl_output(repl: dict, *, idle_secs: float = 0.4) -> str:
@@ -2018,16 +2031,29 @@ async def test_repl_http_auth_prompt_accepts_token_and_retries(auth_matrix_repl)
             "OAuth callback paths are covered by other auth-matrix tests."
         )
 
-    await _drain_repl_output(repl)
-    await _send_repl_line(repl, prompt)
-    output, matched = await _read_repl_until_any(
-        repl,
-        [
-            r"The http tool returned:|Budget Q1\.xlsx|Roadmap\.md",
-            r"requires approval|Reply .*yes.*approve",
-        ],
-        timeout=60.0,
-    )
+    result_patterns = [
+        r"The http tool returned:|Budget Q1\.xlsx|Roadmap\.md",
+        r"requires approval|Reply .*yes.*approve",
+    ]
+
+    # Token entry resolves the inline auth gate and the suspended CodeAct turn
+    # resumes asynchronously. Under coverage CI that resume can still be
+    # processing after the secret row appears; sending a duplicate prompt at
+    # that point races the active REPL turn and can leave the test waiting on
+    # the duplicate while the original turn owns the spinner. Prefer the
+    # resumed original output, and only fall back to a manual retry if no
+    # output appears.
+    resumed = await _try_read_repl_until_any(repl, result_patterns, timeout=60.0)
+    if resumed is None:
+        await _drain_repl_output(repl)
+        await _send_repl_line(repl, prompt)
+        output, matched = await _read_repl_until_any(
+            repl,
+            result_patterns,
+            timeout=60.0,
+        )
+    else:
+        output, matched = resumed
     if "requires approval" in matched.lower() or "reply" in matched.lower():
         output += await _drain_repl_output(repl)
         await _send_repl_line(repl, "yes")

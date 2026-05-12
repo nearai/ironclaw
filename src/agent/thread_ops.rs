@@ -1430,6 +1430,26 @@ impl Agent {
         let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
         undo_mgr.lock().await.clear();
 
+        // Drain in-flight OAuth flows for this user (#3320). Mirror of the
+        // engine-v2 cleanup in `bridge::router::clear_engine_conversation` so
+        // both code paths give `/clear` a consistent "clean slate" contract.
+        // Pending flows otherwise live until `OAUTH_FLOW_EXPIRY` (5 min) and
+        // can fool a fresh auth attempt's CSRF dedupe or leave a ghost entry
+        // in `pending_oauth_flows()` after the user already moved on.
+        if let Some(ext_mgr) = self.deps.extension_manager.as_ref() {
+            let mut flows = ext_mgr.pending_oauth_flows().write().await;
+            let before = flows.len();
+            flows.retain(|_state, flow| flow.user_id != user_id);
+            let removed = before.saturating_sub(flows.len());
+            if removed > 0 {
+                tracing::debug!(
+                    user_id = %user_id,
+                    removed,
+                    "engine v1: drained pending OAuth flows on /clear"
+                );
+            }
+        }
+
         Ok(SubmissionResult::ok_with_message("Thread cleared."))
     }
 

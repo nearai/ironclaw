@@ -404,42 +404,13 @@ fn build_llm_providers(nearai_has_session_token: bool) -> serde_json::Value {
 
     let mut providers = Vec::new();
 
-    // NEAR AI is not in the registry — add it as a special case.
-    {
-        let mut entry = serde_json::Map::new();
-        entry.insert("id".into(), "nearai".into());
-        entry.insert("name".into(), "NEAR AI".into());
-        entry.insert("adapter".into(), "nearai".into());
-        entry.insert("base_url".into(), "https://cloud-api.near.ai/v1".into());
-        entry.insert("builtin".into(), true.into());
-        entry.insert(
-            "default_model".into(),
-            serde_json::Value::String(ironclaw_llm::DEFAULT_MODEL.to_string()),
-        );
-        entry.insert("api_key_required".into(), true.into());
-        entry.insert("base_url_required".into(), false.into());
-        entry.insert("can_list_models".into(), true.into());
-        // Env defaults — true if either an env API key OR a loaded session
-        // token is present; the frontend treats either as "credentials
-        // configured" because both reach NEAR AI as `Bearer <token>`.
-        entry.insert(
-            "has_api_key".into(),
-            (read_env("NEARAI_API_KEY").is_some() || nearai_has_session_token).into(),
-        );
-        if let Some(model) = read_env("NEARAI_MODEL") {
-            entry.insert("env_model".into(), serde_json::Value::String(model));
-        }
-        if let Some(url) = read_env("NEARAI_BASE_URL") {
-            entry.insert("env_base_url".into(), serde_json::Value::String(url));
-        }
-        providers.push(serde_json::Value::Object(entry));
-    }
-
-    // Registry-based providers
+    // Single registry-driven loop. NEAR AI / Bedrock / OpenAI Codex /
+    // Gemini OAuth are now first-class registry entries (Layer B), so
+    // the synthetic per-backend blocks that used to live here are gone.
     for def in registry.all() {
         let mut entry = serde_json::Map::new();
         entry.insert("id".into(), serde_json::Value::String(def.id.clone()));
-        // Use display_name from setup hint, falling back to titlecased id.
+        // Use display_name from setup hint, falling back to the id.
         let name = def
             .setup
             .as_ref()
@@ -465,10 +436,38 @@ fn build_llm_providers(nearai_has_session_token: bool) -> serde_json::Value {
         entry.insert("base_url_required".into(), def.base_url_required.into());
         let can_list = def.setup.as_ref().is_some_and(|s| s.can_list_models());
         entry.insert("can_list_models".into(), can_list.into());
-        // Env defaults
-        if let Some(ref api_key_env) = def.api_key_env {
-            entry.insert("has_api_key".into(), read_env(api_key_env).is_some().into());
+
+        // Env defaults / has_api_key. NEAR AI is "configured" if either
+        // its API key env is set OR a session token has been loaded —
+        // both reach the API as `Bearer <token>`.
+        let mut has_api_key = def
+            .api_key_env
+            .as_ref()
+            .is_some_and(|env| read_env(env).is_some());
+        if def.id == "nearai" && nearai_has_session_token {
+            has_api_key = true;
         }
+        entry.insert("has_api_key".into(), has_api_key.into());
+
+        // Wire-stable credential discriminator + backend-authoritative
+        // "configured" flag. For backends with `api_key_required: false`
+        // (nearai session token, gemini oauth creds file, openai codex
+        // device-code session, AWS Bedrock profile), `api_key_required`
+        // alone tells the frontend nothing — it would render the Use
+        // button on a fresh install with no credentials and a click
+        // could trigger an interactive OAuth from a settings request.
+        // The frontend now gates non-`api_key` kinds on
+        // `has_credentials`.
+        let credential_kind = def.setup.as_ref().map_or("none", |s| s.kind());
+        entry.insert(
+            "credential_kind".into(),
+            serde_json::Value::String(credential_kind.to_string()),
+        );
+        entry.insert(
+            "has_credentials".into(),
+            backend_has_credentials(def, has_api_key, &read_env).into(),
+        );
+
         if let Some(model) = read_env(&def.model_env) {
             entry.insert("env_model".into(), serde_json::Value::String(model));
         }
@@ -480,25 +479,80 @@ fn build_llm_providers(nearai_has_session_token: bool) -> serde_json::Value {
         providers.push(serde_json::Value::Object(entry));
     }
 
-    // Bedrock is not in the registry — add it as a special case.
-    {
-        let mut entry = serde_json::Map::new();
-        entry.insert("id".into(), "bedrock".into());
-        entry.insert("name".into(), "AWS Bedrock".into());
-        entry.insert("adapter".into(), "bedrock".into());
-        entry.insert("base_url".into(), "".into());
-        entry.insert("builtin".into(), true.into());
-        entry.insert(
-            "default_model".into(),
-            "anthropic.claude-3-sonnet-20240229-v1:0".into(),
-        );
-        entry.insert("api_key_required".into(), false.into());
-        entry.insert("base_url_required".into(), false.into());
-        entry.insert("can_list_models".into(), false.into());
-        providers.push(serde_json::Value::Object(entry));
-    }
-
     serde_json::Value::Array(providers)
+}
+
+/// Best-effort "are credentials available for this backend?" check.
+///
+/// The answer is informational — the settings UI uses it to gate the
+/// Use button and avoid kicking off an interactive OAuth flow from a
+/// settings GET. It does not replace the resolver's own validation
+/// when the chain actually rebuilds.
+fn backend_has_credentials(
+    def: &ironclaw_llm::registry::ProviderDefinition,
+    has_api_key: bool,
+    read_env: &dyn Fn(&str) -> Option<String>,
+) -> bool {
+    use ironclaw_llm::registry::SetupHint;
+    match def.setup.as_ref() {
+        // No setup hint at all = nothing to configure (Tinfoil, Groq,
+        // etc. — they all carry SetupHint::ApiKey today, so this arm is
+        // future-proofing). Treat as configured to keep current
+        // behaviour where the frontend already shows them as usable.
+        None => true,
+        // Ollama is local; no credentials are needed at all.
+        Some(SetupHint::Ollama { .. }) => true,
+        // API-key flows: the existing `has_api_key` covers both env
+        // vars and the per-host session token NEAR AI accepts.
+        Some(SetupHint::ApiKey { .. })
+        | Some(SetupHint::OpenAiCompatible { .. })
+        | Some(SetupHint::SessionToken { .. }) => has_api_key,
+        // Bedrock takes either an AWS profile or env-style credentials.
+        // Settings-stored `extras.profile` is read by the resolver, but
+        // this status path is keyed off env + ambient AWS config only
+        // (matching the old behaviour where `has_api_key: false`
+        // permanently advertised the backend as configured).
+        // `AWS_ACCESS_KEY_ID` alone is insufficient — the AWS SDK needs
+        // both the access key and secret to sign requests, and
+        // `AWS_SESSION_TOKEN` is supplemental to that pair (temporary
+        // credentials), never a substitute on its own.
+        Some(SetupHint::AwsCredentials { .. }) => {
+            read_env("AWS_PROFILE").is_some()
+                || (read_env("AWS_ACCESS_KEY_ID").is_some()
+                    && read_env("AWS_SECRET_ACCESS_KEY").is_some())
+        }
+        // OpenAI Codex device-code login persists a session file. The
+        // resolver reads `OpenAiCodexConfig::session_path`, which can
+        // be overridden via `OPENAI_CODEX_SESSION_PATH`; honour the env
+        // override here so the UI doesn't falsely report "not
+        // configured" when the session lives at a custom path.
+        Some(SetupHint::OAuthDeviceCode { .. }) => read_env("OPENAI_CODEX_SESSION_PATH")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| ironclaw_llm::OpenAiCodexConfig::default().session_path)
+            .exists(),
+        // Gemini OAuth + similar file-based flows. Expand `~` in the
+        // hint, then test for file existence.
+        Some(SetupHint::FileBasedCredentials {
+            default_path_hint, ..
+        }) => default_path_hint
+            .as_deref()
+            .and_then(expand_tilde)
+            .is_some_and(|p| p.exists()),
+    }
+}
+
+/// Expand a leading `~` to the user's home directory. Returns `None`
+/// for empty paths; returns the original path verbatim if it doesn't
+/// start with `~/`.
+fn expand_tilde(path: &str) -> Option<std::path::PathBuf> {
+    if path.is_empty() {
+        return None;
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        dirs::home_dir().map(|home| home.join(rest))
+    } else {
+        Some(std::path::PathBuf::from(path))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -772,6 +826,197 @@ mod tests {
                 p.get("base_url_required").is_some(),
                 "{id} missing base_url_required"
             );
+        }
+    }
+
+    /// Regression: the three "dedicated auth" backends ship with
+    /// `api_key_required: false` because they don't authenticate via a
+    /// bearer-token API key. The frontend previously read that as
+    /// "needs no credentials" and rendered the Use button on a fresh
+    /// install, where clicking it could trigger an interactive
+    /// device-code OAuth from inside a settings request. The backend
+    /// now ships `credential_kind` + `has_credentials` for every
+    /// provider so the frontend can gate non-api-key kinds on actual
+    /// credential availability.
+    #[tokio::test]
+    async fn test_llm_providers_expose_credential_kind_and_has_credentials() {
+        // Hold an env-mutex guard for the full test so no other test
+        // can race the env reads in `backend_has_credentials`.
+        let _env_lock = crate::config::helpers::lock_env();
+        // SAFETY: scoped to this test via lock_env(); restored below.
+        unsafe {
+            std::env::remove_var("AWS_PROFILE");
+            std::env::remove_var("AWS_ACCESS_KEY_ID");
+            std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+            std::env::remove_var("AWS_SESSION_TOKEN");
+            std::env::remove_var("OPENAI_CODEX_SESSION_PATH");
+            std::env::remove_var("NEARAI_API_KEY");
+        }
+
+        let result = build_llm_providers(false);
+        let arr = result.as_array().expect("should be an array");
+
+        // nearai (SessionToken kind): no session token loaded and no
+        // API key set => has_credentials must be false.
+        let nearai = find_provider(arr, "nearai").expect("nearai");
+        assert_eq!(
+            nearai.get("credential_kind").and_then(|v| v.as_str()),
+            Some("session_token")
+        );
+        assert_eq!(
+            nearai.get("has_credentials").and_then(|v| v.as_bool()),
+            Some(false),
+            "nearai with no session/key must report has_credentials=false"
+        );
+
+        // gemini_oauth (FileBasedCredentials kind): default path
+        // probably doesn't exist on the test machine; has_credentials
+        // reflects that. We don't assert on the value because the path
+        // may legitimately exist for a local dev — just on the kind.
+        let gemini = find_provider(arr, "gemini_oauth").expect("gemini_oauth");
+        assert_eq!(
+            gemini.get("credential_kind").and_then(|v| v.as_str()),
+            Some("file_based_credentials")
+        );
+        assert!(gemini.get("has_credentials").is_some());
+
+        // openai_codex (OAuthDeviceCode kind): same — kind must be
+        // surfaced; has_credentials presence is asserted.
+        let codex = find_provider(arr, "openai_codex").expect("openai_codex");
+        assert_eq!(
+            codex.get("credential_kind").and_then(|v| v.as_str()),
+            Some("o_auth_device_code")
+        );
+        assert!(codex.get("has_credentials").is_some());
+
+        // bedrock (AwsCredentials kind): no AWS env vars set =>
+        // has_credentials=false.
+        let bedrock = find_provider(arr, "bedrock").expect("bedrock");
+        assert_eq!(
+            bedrock.get("credential_kind").and_then(|v| v.as_str()),
+            Some("aws_credentials")
+        );
+        assert_eq!(
+            bedrock.get("has_credentials").and_then(|v| v.as_bool()),
+            Some(false),
+            "bedrock with no AWS env must report has_credentials=false"
+        );
+
+        // Ollama (no credentials needed) must report true.
+        let ollama = find_provider(arr, "ollama").expect("ollama");
+        assert_eq!(
+            ollama.get("credential_kind").and_then(|v| v.as_str()),
+            Some("ollama")
+        );
+        assert_eq!(
+            ollama.get("has_credentials").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+
+        // Every entry must carry both fields so the frontend gate is
+        // never undefined.
+        for p in arr {
+            let id = p.get("id").and_then(|v| v.as_str()).unwrap_or("<missing>");
+            assert!(
+                p.get("credential_kind").is_some(),
+                "{id} missing credential_kind"
+            );
+            assert!(
+                p.get("has_credentials").is_some(),
+                "{id} missing has_credentials"
+            );
+        }
+    }
+
+    /// nearai with a loaded session token must report
+    /// `has_credentials: true` so the frontend lets the user activate it.
+    #[tokio::test]
+    async fn test_nearai_has_credentials_true_when_session_token_loaded() {
+        let _env_lock = crate::config::helpers::lock_env();
+        // SAFETY: scoped to this test via lock_env(); restored below.
+        unsafe {
+            std::env::remove_var("NEARAI_API_KEY");
+        }
+        let result = build_llm_providers(true);
+        let nearai = find_provider(result.as_array().unwrap(), "nearai").expect("nearai");
+        assert_eq!(
+            nearai.get("has_credentials").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+    }
+
+    /// Regression: a host with only `AWS_ACCESS_KEY_ID` set (no
+    /// `AWS_SECRET_ACCESS_KEY`) cannot actually sign requests — the
+    /// AWS SDK needs the pair. Previously `has_credentials` returned
+    /// true on the access key alone (and also on a bare
+    /// `AWS_SESSION_TOKEN`), so the frontend would show Bedrock as
+    /// configured and a click would fail at first call.
+    #[tokio::test]
+    async fn test_bedrock_partial_aws_env_reports_not_configured() {
+        let _env_lock = crate::config::helpers::lock_env();
+        // SAFETY: scoped to this test via lock_env(); restored below.
+        unsafe {
+            std::env::remove_var("AWS_PROFILE");
+            std::env::remove_var("AWS_SESSION_TOKEN");
+            std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+            std::env::set_var("AWS_ACCESS_KEY_ID", "AKIA-test-only");
+        }
+        let arr_partial = build_llm_providers(false);
+        let bedrock = find_provider(arr_partial.as_array().unwrap(), "bedrock").expect("bedrock");
+        assert_eq!(
+            bedrock.get("has_credentials").and_then(|v| v.as_bool()),
+            Some(false),
+            "AWS_ACCESS_KEY_ID alone must not flip has_credentials true"
+        );
+
+        // SAFETY: scoped via lock_env().
+        unsafe {
+            std::env::set_var("AWS_SECRET_ACCESS_KEY", "secret-test-only");
+        }
+        let arr_full = build_llm_providers(false);
+        let bedrock_full =
+            find_provider(arr_full.as_array().unwrap(), "bedrock").expect("bedrock full");
+        assert_eq!(
+            bedrock_full
+                .get("has_credentials")
+                .and_then(|v| v.as_bool()),
+            Some(true),
+            "AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY must flip has_credentials true"
+        );
+
+        // SAFETY: clean up so neighbouring tests see a pristine env.
+        unsafe {
+            std::env::remove_var("AWS_ACCESS_KEY_ID");
+            std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+        }
+    }
+
+    /// Regression: Codex stores its session at a custom path when
+    /// `OPENAI_CODEX_SESSION_PATH` is set. The status helper used to
+    /// only probe the built-in default, so a user with the env
+    /// override saw "not configured" even when logged in.
+    #[tokio::test]
+    async fn test_openai_codex_honours_session_path_env() {
+        let _env_lock = crate::config::helpers::lock_env();
+        let tmp = tempfile::tempdir().expect("tmp");
+        let session_path = tmp.path().join("openai_codex_session.json");
+        std::fs::write(&session_path, "{}").expect("write session stub");
+
+        // SAFETY: scoped via lock_env(); restored below.
+        unsafe {
+            std::env::set_var("OPENAI_CODEX_SESSION_PATH", &session_path);
+        }
+        let arr = build_llm_providers(false);
+        let codex = find_provider(arr.as_array().unwrap(), "openai_codex").expect("codex");
+        assert_eq!(
+            codex.get("has_credentials").and_then(|v| v.as_bool()),
+            Some(true),
+            "Codex must honour OPENAI_CODEX_SESSION_PATH when probing has_credentials"
+        );
+
+        // SAFETY: scoped via lock_env().
+        unsafe {
+            std::env::remove_var("OPENAI_CODEX_SESSION_PATH");
         }
     }
 

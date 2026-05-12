@@ -974,6 +974,7 @@ mod tests {
                         api_key: None, // stripped during write
                         model: Some("gpt-4o".to_string()),
                         base_url: None,
+                        extras: Default::default(),
                     },
                 );
                 m
@@ -1407,6 +1408,7 @@ mod tests {
                         api_key: Some("sk-existing".to_string()),
                         model: None,
                         base_url: None,
+                        extras: Default::default(),
                     },
                 );
                 m

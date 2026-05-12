@@ -14,6 +14,11 @@ import time
 import uuid
 from aiohttp import web
 
+DENIAL_PATTERN = re.compile(
+    r"user denied action|user denied tool|denied:\s*",
+    re.IGNORECASE,
+)
+
 CANNED_RESPONSES = [
     (re.compile(r"empty routine response", re.IGNORECASE), ""),
     (re.compile(r"\bhello\b|\bhi\b|\bhey\b", re.IGNORECASE), "Hello! How can I help you today?"),
@@ -866,6 +871,24 @@ def _conversation_has_active_skill(messages: list[dict], skill_name: str) -> boo
     return False
 
 
+def _conversation_uses_codeact(messages: list[dict]) -> bool:
+    for msg in messages:
+        if msg.get("role") != "system":
+            continue
+        text = _message_text(msg)
+        if "Python REPL environment" in text and "```repl" in text:
+            return True
+    return False
+
+
+def _conversation_includes_denial(messages: list[dict]) -> bool:
+    for msg in messages:
+        text = f"{_message_text(msg)}\n{_message_payload_text(msg)}"
+        if DENIAL_PATTERN.search(text):
+            return True
+    return False
+
+
 def _active_skill_names(messages: list[dict]) -> set[str]:
     names = set()
     for msg in messages:
@@ -1036,9 +1059,20 @@ def match_response(messages: list[dict]) -> str:
     resumed = _resumed_action_summary(messages)
     if resumed:
         return resumed
-    if "user denied action" in content.lower():
-        action_match = re.search(r"User denied action '([^']+)'", content)
-        action_name = action_match.group(1) if action_match else "that action"
+    denial_text = f"{content}\n{payload_text}"
+    if DENIAL_PATTERN.search(denial_text):
+        action_match = re.search(
+            r"User denied action '([^']+)'", denial_text, re.IGNORECASE
+        )
+        tool_match = re.search(
+            r"user denied tool '([^']+)'", denial_text, re.IGNORECASE
+        )
+        if action_match:
+            action_name = action_match.group(1)
+        elif tool_match:
+            action_name = tool_match.group(1)
+        else:
+            action_name = "that action"
         return (
             f"The request for {action_name} was denied. "
             "No installation or setup was performed."
@@ -1310,6 +1344,10 @@ def _find_tool_result(messages: list[dict]) -> dict | None:
     """Backward-compat single-result helper used by the special-response path."""
     results = _find_tool_results(messages)
     return results[0] if results else None
+
+
+def _tool_results_include_denial(tool_results: list[dict]) -> bool:
+    return any(DENIAL_PATTERN.search(tr.get("content", "")) for tr in tool_results)
 
 
 def _recent_tool_names(messages: list[dict]) -> set[str]:
@@ -1801,9 +1839,36 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
         if special and _conversation_has_user_trigger(messages, lifecycle_trigger):
             return await _dispatch_special_response(request, cid, stream, special)
 
-    # Tool result(s) in messages -> text summary covering every fresh result
     tool_results = _find_tool_results(messages)
+    if (
+        not tool_results
+        and _conversation_uses_codeact(messages)
+        and re.search(
+            r"list.*(?:google|drive).*files|show.*drive",
+            _last_user_content(messages),
+            re.IGNORECASE,
+        )
+    ):
+        text = (
+            "```repl\n"
+            f"result = await http(method=\"GET\", url=\"{_github_api_url}/drive/v3/files\")\n"
+            "FINAL(str(result))\n"
+            "```"
+        )
+        if not stream:
+            return _text_response(cid, text)
+        return await _stream_text(request, cid, text)
+
+    # Tool result(s) in messages -> text summary covering every fresh result
     if _conversation_has_active_skill(messages, "pikastream-video-meeting"):
+        if _conversation_includes_denial(messages) or _tool_results_include_denial(tool_results):
+            text = (
+                "The request for shell was denied. "
+                "No installation or setup was performed."
+            )
+            if not stream:
+                return _text_response(cid, text)
+            return await _stream_text(request, cid, text)
         recent_tool_names = _recent_tool_names(messages)
         if "shell" in recent_tool_names:
             text = (
@@ -1816,6 +1881,14 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
             return await _stream_text(request, cid, text)
     if tool_results:
         if _conversation_has_active_skill(messages, "pikastream-video-meeting"):
+            if _tool_results_include_denial(tool_results):
+                text = (
+                    "The request for shell was denied. "
+                    "No installation or setup was performed."
+                )
+                if not stream:
+                    return _text_response(cid, text)
+                return await _stream_text(request, cid, text)
             if any(tr["name"] == "shell" for tr in tool_results):
                 text = (
                     "Python dependencies are prepared for the Pika video-meeting skill. "

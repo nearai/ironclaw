@@ -6,6 +6,17 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+/// AWS Bedrock parameters needed by the embedding provider.
+///
+/// Defined here rather than re-using `ironclaw_llm::BedrockConfig` so the
+/// embeddings layer does not depend on LLM-side config types. Callers
+/// (which already hold an `LlmConfig`) translate at the boundary.
+#[derive(Debug, Clone)]
+pub struct BedrockEmbeddingSetup {
+    pub region: String,
+    pub profile: Option<String>,
+}
+
 /// Error type for embedding operations.
 #[derive(Debug, thiserror::Error)]
 pub enum EmbeddingError {
@@ -398,13 +409,13 @@ pub struct BedrockEmbeddings {
 impl BedrockEmbeddings {
     /// Create a new Bedrock embedding provider.
     pub async fn new(
-        config: &ironclaw_llm::BedrockConfig,
+        setup: &BedrockEmbeddingSetup,
         model: impl Into<String>,
         dimension: usize,
     ) -> Result<Self, EmbeddingError> {
         let mut builder = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .region(aws_config::Region::new(config.region.clone()));
-        if let Some(ref profile) = config.profile {
+            .region(aws_config::Region::new(setup.region.clone()));
+        if let Some(ref profile) = setup.profile {
             builder = builder.profile_name(profile);
         }
 
