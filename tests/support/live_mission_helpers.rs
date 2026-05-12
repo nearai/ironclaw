@@ -1,8 +1,14 @@
 //! Shared helpers for live tests that drive engine v2 missions/routines.
 //!
 //! Extracted from `tests/e2e_live_routine.rs` so additional scenarios
-//! (`tests/e2e_live_mission_gmail.rs`, etc.) can reuse the same approval
-//! responder and notification heuristics without copy-paste drift.
+//! that drive engine v2 missions through a live LLM can reuse the same
+//! approval responder and notification heuristics without copy-paste
+//! drift.
+//!
+//! Note: the matching Playwright/HTTP coverage for #3133 lives at
+//! `tests/e2e/scenarios/test_mission_gmail_3133.py` and uses the mock
+//! LLM. The Rust live equivalent was removed when the auto-resume
+//! coverage moved fully to the Python tier.
 
 #![allow(dead_code)] // shared API; not every test uses every helper
 

@@ -1,26 +1,55 @@
 // IronClaw Reborn ProductAdapter v2 WIT contract (issue #3285).
 //
 // This WIT file documents the constrained capability boundary the v2 host
-// runtime will expose to ProductAdapter WASM components. The first-slice
-// landing ships the Rust contract types in `ironclaw_product_adapters` and a
-// Rust-native implementation of the Telegram v2 adapter. wasmtime
-// component-model bindgen is intentionally NOT wired up yet — the WIT below
-// is the agreed shape for the eventual component build.
+// runtime will expose to ProductAdapter WASM components. wasmtime component
+// bindgen is intentionally NOT wired up yet — the WIT below is the agreed
+// shape for the eventual component build.
 //
 // Host-imposed invariants (enforced regardless of the component-model glue):
 //
 // - The host MUST verify webhook/protocol authentication before invoking
 //   `parse-inbound`. Components cannot mint a `verified` auth-evidence value
 //   and the host's seal mechanism is unreachable from WASM.
+// - `parse-inbound` returns the adapter's parsed DTO only. The host stamps
+//   trusted adapter/install/received/auth context after parsing and before
+//   entering product workflow code.
+// - Ignored-but-authenticated events are represented in the parsed DTO as the
+//   contract's no-op payload variant. They are not represented by an absent
+//   parse result.
 // - `http-egress` is the only network capability. Components declare a fixed
-//   list of egress hosts via `declared-egress-hosts`; the host rejects
-//   requests to any other host. Credential handles are opaque ids; the host
-//   resolves and applies the underlying secret material at request time.
+//   list of egress TARGETS via `declared-egress-targets`, where each target
+//   is the paired `(host, optional credential_handle)` shape the host's
+//   `EgressPolicy` enforces. The host rejects requests to any undeclared
+//   pair — including the cross-pair leak case (a credential declared for a
+//   different host) and the unauthenticated-bypass case (a bare request to
+//   a host declared only with credentialed pairs). Credential handles are
+//   opaque ids; the host resolves and applies the underlying secret
+//   material at request time.
 // - Response bodies returned to WASM via `http-egress` are scanned for
 //   leak-pattern matches by the host before the WASM instance can observe
-//   them.
+//   them. Raw response headers remain host-only and are not exposed here.
 // - `log` and `now-millis` are the only general-purpose host imports. WASM
 //   gets no filesystem, no env, no random, no raw clock outside `now-millis`.
+//
+// TEMPORARY: JSON-string payload shim
+// ===================================
+// The `parsed-inbound`, `auth-evidence`, `outbound-envelope`,
+// `outbound-render`, and `adapter-manifest.capabilities-json` records
+// carry their payloads as `string` (JSON-encoded) instead of typed
+// component-model records. This is a deliberate temporary shim so the
+// host-side Rust DTOs in `ironclaw_product_adapters` can evolve without
+// rev'ing the WIT signature on every field addition. The host still
+// type-checks every JSON crossing back into Rust via serde, so it
+// cannot fabricate verified evidence or smuggle host-only fields —
+// the seal mechanism is enforced on the Rust side.
+//
+// Follow-up: replace these `*-json: string` fields with typed records
+// once the DTOs in `ironclaw_product_adapters` stabilize. The boundary
+// test `wasm_product_adapter_wit_pins_json_shim_shape` in
+// `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs`
+// pins the current shape so future changes are deliberate — removing
+// any of the JSON-shim fields without also updating that test (and
+// landing the corresponding typed record) will fail boundary checks.
 
 package near:product-adapter@0.1.0;
 
@@ -35,20 +64,23 @@ interface product-adapter-host {
     }
 
     record egress-request {
-        // Index into `declared-egress-hosts()` exported by the component.
-        host-index: u32,
+        // Index into the manifest's `declared-egress-targets`. The host
+        // reads BOTH the target host AND the (optional) credential
+        // handle from this single pair — components cannot mix a
+        // credential from one declared pair with the host of another.
+        // This is the WIT-side of the `EgressPolicy::check` pair
+        // contract: an attempt to send `slack_token` against
+        // `api.telegram.org` is impossible to express because there's
+        // no separate handle index to mismatch the host with.
+        egress-target-index: u32,
         method: string,
         path: string,
         headers: egress-headers,
         body: list<u8>,
-        // Index into the credential handles enumerated in the manifest;
-        // none = unauthenticated request.
-        credential-handle-index: option<u32>,
     }
 
     record egress-response {
         status: u16,
-        headers: egress-headers,
         body: list<u8>,
     }
 
@@ -71,18 +103,20 @@ interface product-adapter-host {
 }
 
 interface product-adapter {
-    use product-adapter-host.{egress-headers};
-
-    record parsed-envelope {
-        envelope-json: string,
+    record parsed-inbound {
+        parsed-json: string,
     }
 
     record auth-evidence {
+        // Host-serialized sealed auth evidence. Components treat this as
+        // opaque input; component-supplied JSON cannot impersonate a
+        // `verified` claim because the host-side Deserialize impl rejects
+        // unsealed verified variants.
         evidence-json: string,
     }
 
     record outbound-envelope {
-        envelope-json: string,
+        outbound-json: string,
     }
 
     record outbound-render {
@@ -105,12 +139,33 @@ interface product-adapter {
         cookie-name: option<string>,
     }
 
+    /// A single declared `(host, optional credential_handle)` pair. The
+    /// host's `EgressPolicy` authorizes requests against the EXACT pair
+    /// — an adapter that wants to be reachable both with and without a
+    /// credential for the same host must declare two targets (one with
+    /// `credential-handle = none`, one with `credential-handle = some`).
+    /// Mirrors `ironclaw_product_adapters::DeclaredEgressTarget` on the
+    /// Rust side.
+    record declared-egress-target {
+        host: string,
+        // Opaque id of the credential the host applies for this target.
+        // `none` declares an unauthenticated egress target — components
+        // sending bare requests to a credential-only host are rejected
+        // by the host's `EgressPolicy::check`.
+        credential-handle: option<string>,
+    }
+
     record adapter-manifest {
         adapter-id: string,
         installation-id: string,
         capabilities-json: string,
-        declared-egress-hosts: list<string>,
-        declared-credential-handles: list<string>,
+        // Paired egress declarations. Replaces the prior independent
+        // `declared-egress-hosts` + `declared-credential-handles` lists,
+        // which could not express "Slack token only for Slack" and
+        // would have forced the host glue to either reintroduce the
+        // cross-pair leak the Rust policy closes, or invent pair
+        // metadata the manifest did not carry.
+        declared-egress-targets: list<declared-egress-target>,
         declared-auth-requirements: list<auth-requirement>,
     }
 
@@ -118,14 +173,14 @@ interface product-adapter {
     /// snapshotted by the host.
     manifest: func() -> adapter-manifest;
 
-    /// Parse a verified protocol payload into a `ProductInboundEnvelope`.
-    /// Returns `none` for ambient group messages and other no-op events.
-    /// Returns `error` only when the payload is malformed beyond what the
-    /// adapter chooses to silently drop.
+    /// Parse a verified protocol payload into a ParsedProductInbound JSON DTO.
+    /// Authenticated ambient group messages and other ignored events are
+    /// represented by the DTO's no-op payload variant. Returns `error` only
+    /// when the payload is malformed beyond what the adapter chooses to ignore.
     parse-inbound: func(
         raw-payload: list<u8>,
         evidence: auth-evidence,
-    ) -> result<option<parsed-envelope>, string>;
+    ) -> result<parsed-inbound, string>;
 
     /// Render an outbound envelope into an HTTP egress request that the host
     /// will execute via `http-egress`. The host re-validates the egress

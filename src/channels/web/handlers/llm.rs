@@ -393,7 +393,7 @@ pub async fn llm_providers_handler(
 
 fn build_llm_providers(nearai_has_session_token: bool) -> serde_json::Value {
     use crate::config::helpers::optional_env;
-    use crate::llm::registry::ProviderRegistry;
+    use ironclaw_llm::registry::ProviderRegistry;
 
     let registry = ProviderRegistry::load();
 
@@ -414,7 +414,7 @@ fn build_llm_providers(nearai_has_session_token: bool) -> serde_json::Value {
         entry.insert("builtin".into(), true.into());
         entry.insert(
             "default_model".into(),
-            serde_json::Value::String(crate::llm::DEFAULT_MODEL.to_string()),
+            serde_json::Value::String(ironclaw_llm::DEFAULT_MODEL.to_string()),
         );
         entry.insert("api_key_required".into(), true.into());
         entry.insert("base_url_required".into(), false.into());
@@ -586,7 +586,7 @@ fn builtin_api_key_env_var(provider_id: &str) -> Option<String> {
     if provider_id == "nearai" {
         return Some("NEARAI_API_KEY".to_string());
     }
-    crate::llm::registry::ProviderRegistry::load()
+    ironclaw_llm::registry::ProviderRegistry::load()
         .find(provider_id)
         .and_then(|def| def.api_key_env.clone())
 }
@@ -1236,7 +1236,7 @@ mod tests {
 
         // Build a `SessionManager` with a token seeded directly — same shape
         // as `~/.ironclaw/session.json` having been loaded at startup.
-        let session = crate::llm::SessionManager::new_async(crate::llm::SessionConfig {
+        let session = ironclaw_llm::SessionManager::new_async(ironclaw_llm::SessionConfig {
             auth_base_url: "https://private.near.ai".to_string(),
             session_path: std::env::temp_dir().join("ironclaw-test-no-such-file.json"),
         })

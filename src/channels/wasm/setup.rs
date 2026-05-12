@@ -5,10 +5,9 @@
 //!
 //! # Ownership model
 //!
-//! Boot-time secret lookups use `config.owner_id` because channels are
-//! **instance-level resources** — they run as the instance operator, not as
-//! individual users. This is intentional and distinct from tool-level
-//! credential resolution, which is scoped to the calling user's `user_id`.
+//! Boot-time secret lookups use `config.owner_id` for instance-level channels.
+//! Single-login channels such as WeChat may carry a persisted bound user and
+//! use that user only for their active channel credentials.
 //!
 //! See `docs/superpowers/specs/2026-04-01-ownership-model-design.md`.
 
@@ -24,6 +23,9 @@ use crate::channels::wasm::{
 use crate::config::Config;
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
+use crate::extensions::wechat_login::{
+    WECHAT_BASE_URL_SETTING_PATH, WECHAT_BOUND_USER_SETTING_PATH, WECHAT_CHANNEL_NAME,
+};
 use crate::pairing::PairingStore;
 use crate::secrets::SecretsStore;
 
@@ -66,7 +68,7 @@ pub async fn setup_wasm_channels(
     extension_manager: Option<&Arc<ExtensionManager>>,
     database: Option<&Arc<dyn Database>>,
     registered_channel_names: &[String],
-    startup_active_channel_names: Option<&HashSet<String>>,
+    startup_active_channel_names: &HashSet<String>,
     ownership_cache: Arc<crate::ownership::OwnershipCache>,
 ) -> Option<WasmChannelSetup> {
     let runtime = match WasmChannelRuntime::new(WasmChannelRuntimeConfig::default()) {
@@ -108,9 +110,11 @@ pub async fn setup_wasm_channels(
         discovered_channels
             .into_iter()
             .filter_map(|(name, discovered)| {
-                startup_active_channel_names
-                    .is_none_or(|active_names| active_names.contains(&name))
-                    .then_some((name, discovered.wasm_path, discovered.capabilities_path))
+                startup_active_channel_names.contains(&name).then_some((
+                    name,
+                    discovered.wasm_path,
+                    discovered.capabilities_path,
+                ))
             })
             .collect();
 
@@ -120,11 +124,6 @@ pub async fn setup_wasm_channels(
     let load_results = futures::future::join_all(load_futures).await;
 
     let mut loaded_channels = Vec::new();
-    let startup_load_error_message = if startup_active_channel_names.is_some() {
-        "Failed to load persisted-active WASM channel at startup"
-    } else {
-        "Failed to load WASM channel at startup"
-    };
     for ((name, wasm_path, _), result) in startup_entries.into_iter().zip(load_results) {
         match result {
             Ok(loaded) => loaded_channels.push(loaded),
@@ -133,7 +132,7 @@ pub async fn setup_wasm_channels(
                     channel = %name,
                     path = %wasm_path.display(),
                     error = %err,
-                    "{startup_load_error_message}"
+                    "Failed to load active WASM channel at startup"
                 );
             }
         }
@@ -314,6 +313,13 @@ async fn register_channel(
         // The credential injection system only replaces placeholders in URLs
         // and headers, so channels like Feishu that exchange app_id + app_secret
         // for a tenant token need the raw values in their config.
+        inject_channel_settings_into_config(
+            &channel_name,
+            &config.owner_id,
+            settings_store,
+            &mut config_updates,
+        )
+        .await;
         if let Some(secrets) = secrets_store {
             inject_wasm_channel_secret_config_mappings(
                 &channel_name,
@@ -383,6 +389,9 @@ async fn register_channel(
         tracing::info!(channel = %channel_name, "Registered HMAC signing secret");
     }
 
+    let credential_scope_id =
+        channel_credential_scope_id(&channel_name, &config.owner_id, settings_store).await;
+
     // Inject credentials from secrets store / environment.
     match inject_channel_credentials(
         &channel_arc,
@@ -390,7 +399,7 @@ async fn register_channel(
             .as_ref()
             .map(|s| s.as_ref() as &dyn SecretsStore),
         &channel_name,
-        &config.owner_id,
+        &credential_scope_id,
     )
     .await
     {
@@ -648,6 +657,95 @@ pub(crate) async fn inject_wasm_channel_secret_config_mappings(
     }
 }
 
+async fn channel_credential_scope_id(
+    channel_name: &str,
+    owner_id: &str,
+    settings_store: Option<&Arc<dyn crate::db::SettingsStore>>,
+) -> String {
+    if channel_name != WECHAT_CHANNEL_NAME {
+        return owner_id.to_string();
+    }
+
+    let Some(store) = settings_store else {
+        return owner_id.to_string();
+    };
+
+    wechat_bound_user_id(owner_id, store)
+        .await
+        .unwrap_or_else(|| owner_id.to_string())
+}
+
+async fn wechat_bound_user_id(
+    owner_id: &str,
+    store: &Arc<dyn crate::db::SettingsStore>,
+) -> Option<String> {
+    if let Ok(Some(serde_json::Value::String(value))) = store
+        .get_setting(owner_id, WECHAT_BOUND_USER_SETTING_PATH)
+        .await
+    {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    None
+}
+
+/// Inject channel-specific settings into config for channels that persist
+/// runtime-discovered values (for example a custom API base URL after login).
+async fn inject_channel_settings_into_config(
+    channel_name: &str,
+    owner_id: &str,
+    settings_store: Option<&Arc<dyn crate::db::SettingsStore>>,
+    config_updates: &mut std::collections::HashMap<String, serde_json::Value>,
+) {
+    let Some(store) = settings_store else {
+        return;
+    };
+
+    let setting_mappings: &[(&str, &str)] = match channel_name {
+        WECHAT_CHANNEL_NAME => &[("base_url", WECHAT_BASE_URL_SETTING_PATH)],
+        _ => return,
+    };
+
+    let bound_user_id = if channel_name == WECHAT_CHANNEL_NAME {
+        wechat_bound_user_id(owner_id, store).await
+    } else {
+        None
+    };
+    let setting_scope_id = bound_user_id
+        .clone()
+        .unwrap_or_else(|| owner_id.to_string());
+    if let Some(bound_user_id) = bound_user_id {
+        config_updates.insert(
+            "bound_user_id".to_string(),
+            serde_json::Value::String(bound_user_id),
+        );
+    }
+
+    for &(config_key, setting_path) in setting_mappings {
+        if let Ok(Some(serde_json::Value::String(value))) =
+            store.get_setting(&setting_scope_id, setting_path).await
+        {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            config_updates.insert(
+                config_key.to_string(),
+                serde_json::Value::String(trimmed.to_string()),
+            );
+            tracing::debug!(
+                channel = %channel_name,
+                config_key = %config_key,
+                setting_path = %setting_path,
+                "Injected setting into channel config"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -661,11 +759,14 @@ mod tests {
         WasmChannel, WasmChannelRouter, WasmChannelRuntime, WasmChannelRuntimeConfig,
     };
     use crate::config::Config;
+    use crate::db::{Database, SettingsStore};
+    use crate::extensions::wechat_login::{
+        WECHAT_BASE_URL_SETTING_PATH, WECHAT_BOUND_USER_SETTING_PATH,
+    };
     use crate::pairing::PairingStore;
-    use crate::secrets::{CreateSecretParams, InMemorySecretsStore, SecretsCrypto, SecretsStore};
-    use crate::testing::credentials::TEST_CRYPTO_KEY;
+    use crate::secrets::{CreateSecretParams, SecretsStore};
+    use crate::testing::credentials::test_secrets_store;
     use crate::tools::wasm::ResourceLimits;
-    use secrecy::SecretString;
 
     /// Build the same reserved-name list that `setup_wasm_channels` uses.
     fn reserved_names() -> Vec<&'static str> {
@@ -745,8 +846,6 @@ mod tests {
 
     #[test]
     fn reserved_names_reject_case_insensitive() {
-        // The setup logic lowercases the WASM channel name before checking.
-        // Verify that "Web" or "GATEWAY" would be caught.
         let reserved = reserved_names();
         let test_cases = ["Web", "GATEWAY", "CLI", "Repl", "__BOOTSTRAP__"];
         for name in test_cases {
@@ -1019,47 +1118,85 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inject_channel_secrets_uses_owner_scope() {
-        let crypto =
-            Arc::new(SecretsCrypto::new(SecretString::from(TEST_CRYPTO_KEY.to_string())).unwrap());
-        let secrets: Arc<dyn SecretsStore + Send + Sync> =
-            Arc::new(InMemorySecretsStore::new(crypto));
-        secrets
-            .create(
-                "owner-123",
-                CreateSecretParams {
-                    name: "feishu_app_id".to_string(),
-                    value: SecretString::from("owner-app-id".to_string()),
-                    provider: None,
-                    expires_at: None,
-                },
-            )
+    async fn test_inject_channel_settings_uses_wechat_bound_user_scope() -> Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|e| format!("tempdir failed: {e}"))?;
+        let db_path = dir.path().join("wechat-settings.db");
+        let db = Arc::new(
+            crate::db::libsql::LibSqlBackend::new_local(&db_path)
+                .await
+                .map_err(|e| format!("create local libsql backend failed: {e}"))?,
+        );
+        db.run_migrations()
             .await
-            .unwrap();
-        secrets
-            .create(
-                "owner-123",
-                CreateSecretParams {
-                    name: "feishu_app_secret".to_string(),
-                    value: SecretString::from("owner-app-secret".to_string()),
-                    provider: None,
-                    expires_at: None,
-                },
-            )
-            .await
-            .unwrap();
+            .map_err(|e| format!("run libsql migrations failed: {e}"))?;
+
+        db.set_setting(
+            "default",
+            WECHAT_BOUND_USER_SETTING_PATH,
+            &serde_json::json!("owner-123"),
+        )
+        .await
+        .map_err(|e| format!("persist bound user setting failed: {e}"))?;
+        db.set_setting(
+            "default",
+            WECHAT_BASE_URL_SETTING_PATH,
+            &serde_json::json!("https://default.example"),
+        )
+        .await
+        .map_err(|e| format!("persist default setting failed: {e}"))?;
+        db.set_setting(
+            "owner-123",
+            WECHAT_BASE_URL_SETTING_PATH,
+            &serde_json::json!("https://owner.example"),
+        )
+        .await
+        .map_err(|e| format!("persist owner setting failed: {e}"))?;
+
+        let settings_store: Arc<dyn crate::db::SettingsStore> = db;
+        let mut config_updates = std::collections::HashMap::new();
+        super::inject_channel_settings_into_config(
+            "wechat",
+            "default",
+            Some(&settings_store),
+            &mut config_updates,
+        )
+        .await;
+
+        assert_eq!(
+            config_updates.get("base_url"),
+            Some(&serde_json::json!("https://owner.example"))
+        );
+        assert_eq!(
+            config_updates.get("bound_user_id"),
+            Some(&serde_json::json!("owner-123"))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_inject_channel_secrets_uses_owner_scope_for_feishu() -> Result<(), String> {
+        let secrets = test_secrets_store();
         secrets
             .create(
                 "default",
-                CreateSecretParams {
-                    name: "feishu_app_id".to_string(),
-                    value: SecretString::from("default-app-id".to_string()),
-                    provider: None,
-                    expires_at: None,
-                },
+                CreateSecretParams::new("feishu_app_id", "default-app-id"),
             )
             .await
-            .unwrap();
+            .map_err(|e| format!("persist default feishu_app_id failed: {e}"))?;
+        secrets
+            .create(
+                "owner-123",
+                CreateSecretParams::new("feishu_app_id", "owner-app-id"),
+            )
+            .await
+            .map_err(|e| format!("persist owner feishu_app_id failed: {e}"))?;
+        secrets
+            .create(
+                "owner-123",
+                CreateSecretParams::new("feishu_app_secret", "owner-app-secret"),
+            )
+            .await
+            .map_err(|e| format!("persist owner feishu_app_secret failed: {e}"))?;
 
         let mut config_updates = HashMap::new();
         let secret_config_mappings = vec![
@@ -1079,7 +1216,7 @@ mod tests {
         super::inject_wasm_channel_secret_config_mappings(
             "feishu",
             "owner-123",
-            secrets.as_ref(),
+            &secrets,
             &secret_config_mappings,
             &mut config_updates,
         )
@@ -1092,6 +1229,109 @@ mod tests {
         assert_eq!(
             config_updates.get("app_secret"),
             Some(&serde_json::json!("owner-app-secret"))
+        );
+        Ok(())
+    }
+
+    /// Stage the real `telegram.wasm` + `telegram.capabilities.json` from
+    /// `channels-src/telegram/` into the given directory so a test can drive
+    /// `setup_wasm_channels` through the full discover -> load -> register
+    /// path. Returns `None` if the source artifacts aren't present (e.g. a
+    /// release tarball without `channels-src/`), in which case the caller
+    /// should skip the test rather than fail.
+    fn stage_real_telegram_channel(dir: &std::path::Path) -> Option<()> {
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let wasm_src = manifest_dir.join("channels-src/telegram/telegram.wasm");
+        let caps_src = manifest_dir.join("channels-src/telegram/telegram.capabilities.json");
+        if !wasm_src.exists() || !caps_src.exists() {
+            return None;
+        }
+        std::fs::copy(&wasm_src, dir.join("telegram.wasm")).ok()?;
+        std::fs::copy(&caps_src, dir.join("telegram.capabilities.json")).ok()?;
+        Some(())
+    }
+
+    /// Headless-startup regression: with `database = None`, `extension_manager = None`,
+    /// and `secrets_store = None`, `setup_wasm_channels` must still load and register
+    /// channels named in `startup_active_channel_names`. This pins down the linkage
+    /// from the `main.rs` config-fallback resolution to the actual filter inside
+    /// `setup_wasm_channels`. Pairs with the empty-set test below.
+    #[tokio::test]
+    async fn setup_wasm_channels_registers_configured_channel_in_headless_mode() {
+        let temp = tempfile::tempdir().unwrap();
+        let channels_dir = temp.path().join("channels");
+        std::fs::create_dir_all(&channels_dir).unwrap();
+        if stage_real_telegram_channel(&channels_dir).is_none() {
+            eprintln!("skipping: channels-src/telegram artifacts not present in this checkout");
+            return;
+        }
+
+        let (mut config, _config_temp) = test_config();
+        config.channels.wasm_channels_dir = channels_dir;
+        config.channels.wasm_channels_enabled = true;
+        config.channels.configured_wasm_channels = vec!["telegram".to_string()];
+
+        let mut active = std::collections::HashSet::new();
+        active.insert("telegram".to_string());
+
+        let setup = super::setup_wasm_channels(
+            &config,
+            &None,
+            None,
+            None,
+            &[],
+            &active,
+            Arc::new(crate::ownership::OwnershipCache::new()),
+        )
+        .await
+        .expect("setup_wasm_channels should return Some when a channel loads");
+
+        assert!(
+            setup.channel_names.iter().any(|n| n == "telegram"),
+            "headless config-fallback path must register telegram, got {:?}",
+            setup.channel_names
+        );
+        assert!(
+            setup.webhook_routes.is_some(),
+            "webhook_routes are always created so hot-activation works post-startup"
+        );
+    }
+
+    /// Empty `startup_active_channel_names` must register zero channels even
+    /// when discoverable channels exist on disk. This is the regression test
+    /// for the "empty set lets everything through" bug class — the previous
+    /// `Option<&HashSet>` filter signature treated `None` as "load all"; the
+    /// current `&HashSet` signature with an explicit empty set is the fix.
+    #[tokio::test]
+    async fn setup_wasm_channels_with_empty_active_set_registers_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let channels_dir = temp.path().join("channels");
+        std::fs::create_dir_all(&channels_dir).unwrap();
+        if stage_real_telegram_channel(&channels_dir).is_none() {
+            eprintln!("skipping: channels-src/telegram artifacts not present in this checkout");
+            return;
+        }
+
+        let (mut config, _config_temp) = test_config();
+        config.channels.wasm_channels_dir = channels_dir;
+        config.channels.wasm_channels_enabled = true;
+
+        let setup = super::setup_wasm_channels(
+            &config,
+            &None,
+            None,
+            None,
+            &[],
+            &std::collections::HashSet::new(),
+            Arc::new(crate::ownership::OwnershipCache::new()),
+        )
+        .await
+        .expect("setup_wasm_channels returns Some even with no channels to load");
+
+        assert!(
+            setup.channel_names.is_empty(),
+            "empty active set must register zero channels, got {:?}",
+            setup.channel_names
         );
     }
 }

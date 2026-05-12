@@ -6,6 +6,11 @@ on:
         description: Commit SHA or ref to test
         required: false
         type: string
+      include_docker:
+        description: Include Docker image build in this reusable test run
+        required: false
+        type: boolean
+        default: true
   pull_request:
     branches:
       - main
@@ -50,8 +55,9 @@ jobs:
             echo "has_engine_replay_risk=false" >> "$GITHUB_OUTPUT"
           fi
           echo "has_runtime_heavy_risk=true" >> "$GITHUB_OUTPUT"
-          # Keep full browser E2E outside the workflow-call / push path for now;
-          # merge_group runs cover the full browser suite before queued merges land.
+          # Keep deterministic full browser E2E in its own scheduled/manual
+          # workflow. The merge queue runs only smoke coverage for web-risk
+          # changes so queued merges remain fast.
           echo "has_web_risk=false" >> "$GITHUB_OUTPUT"
           echo "has_wasm_abi_risk=true" >> "$GITHUB_OUTPUT"
           echo "has_telegram_risk=true" >> "$GITHUB_OUTPUT"
@@ -85,43 +91,43 @@ jobs:
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if has_match '^(src/|crates/|channels-src/|tools-src/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|build\.rs$|\.github/workflows/(test|e2e|replay-gate|code_style|docker|release|release-plz|rebuild-release-image|coverage|live-canary|pr-label-classify|pr-label-scope|claude-review)\.yml$|\.github/actions/install-cargo-component/|\.github/(dependabot|labeler)\.yml$)'; then
+          if has_match '^(src/|crates/|channels-src/|tools-src/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|build\.rs$|\.github/workflows/(test|nightly-deep-ci|e2e|replay-gate|code_style|docker|release|release-plz|rebuild-release-image|coverage|live-canary|pr-label-classify|pr-label-scope|claude-review)\.yml$|\.github/actions/install-cargo-component/|\.github/(dependabot|labeler)\.yml$)'; then
             echo "has_core_code=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_core_code=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if has_match '^(crates/ironclaw_(common|engine|skills)/|src/(agent|auth|bridge|context|extensions|llm|orchestrator|secrets|skills|tools|worker|workspace)/|tests/fixtures/llm_traces/|tests/snapshots/|tests/support/replay_outcome\.rs$|tests/e2e_engine_v2\.rs$|tests/e2e_live\.rs$|tests/e2e_recorded_trace\.rs$|tests/e2e_advanced_traces\.rs$|tests/e2e_trace_.*\.rs$|Cargo\.toml$|\.github/workflows/(replay-gate|test)\.yml$)'; then
+          if has_match '^(crates/ironclaw_(common|engine|skills)/|src/(agent|auth|bridge|context|extensions|llm|orchestrator|secrets|skills|tools|worker|workspace)/|tests/fixtures/llm_traces/|tests/snapshots/|tests/support/replay_outcome\.rs$|tests/e2e_engine_v2\.rs$|tests/e2e_live\.rs$|tests/e2e_recorded_trace\.rs$|tests/e2e_advanced_traces\.rs$|tests/e2e_trace_.*\.rs$|Cargo\.toml$|\.github/workflows/(replay-gate|test|nightly-deep-ci)\.yml$)'; then
             echo "has_engine_replay_risk=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_engine_replay_risk=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if has_match '^(crates/ironclaw_(common|safety|skills)/|src/(agent|auth|bridge|config|context|db|extensions|gate|history|hooks|orchestrator|ownership|pairing|safety|sandbox|secrets|setup|skills|tools|webhooks|worker|workspace)/|src/channels/channel\.rs$|src/channels/manager\.rs$|src/channels/relay/|src/channels/wasm/|channels-src/telegram/|migrations/|src/app\.rs$|src/main\.rs$|src/lib\.rs$|tests/telegram_auth_integration\.rs$|tests/e2e_thread_scheduling\.rs$|\.github/workflows/test\.yml$)'; then
+          if has_match '^(crates/ironclaw_(common|safety|skills)/|src/(agent|auth|bridge|config|context|db|extensions|gate|history|hooks|orchestrator|ownership|pairing|safety|sandbox|secrets|setup|skills|tools|webhooks|worker|workspace)/|src/channels/channel\.rs$|src/channels/manager\.rs$|src/channels/relay/|src/channels/wasm/|channels-src/telegram/|migrations/|src/app\.rs$|src/main\.rs$|src/lib\.rs$|tests/telegram_auth_integration\.rs$|tests/e2e_thread_scheduling\.rs$|\.github/workflows/(test|nightly-deep-ci)\.yml$)'; then
             echo "has_runtime_heavy_risk=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_runtime_heavy_risk=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if has_match '^(src/(auth|bridge|extensions|ownership|pairing|secrets|webhooks|workspace)/|src/channels/web/|crates/ironclaw_gateway/|src/channels/attachments\.rs$|tests/e2e/|tests/fixtures/gateway_traces/|tests/test-pages/|scripts/check_gateway_boundaries\.py$|\.github/workflows/(e2e|test)\.yml$)'; then
+          if has_match '^(src/(auth|bridge|extensions|ownership|pairing|secrets|webhooks|workspace)/|src/channels/web/|crates/ironclaw_gateway/|src/channels/attachments\.rs$|tests/e2e/|tests/fixtures/gateway_traces/|tests/test-pages/|scripts/check_gateway_boundaries\.py$|\.github/workflows/(e2e|test|nightly-deep-ci)\.yml$)'; then
             echo "has_web_risk=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_web_risk=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if has_match '^(wit/|crates/ironclaw_common/|src/(channels/wasm|extensions|registry|tools/mcp|tools/wasm)/|channels-src/|tools-src/|registry/|scripts/build-wasm-extensions\.sh$|scripts/check-version-bumps\.sh$|tests/wit_compat\.rs$|tests/wasm_channel_integration\.rs$|tests/e2e_wasm_.*|Cargo\.toml$|Cargo\.lock$|\.github/workflows/test\.yml$)'; then
+          if has_match '^(wit/|crates/ironclaw_common/|src/(channels/wasm|extensions|registry|tools/mcp|tools/wasm)/|channels-src/|tools-src/|registry/|scripts/build-wasm-extensions\.sh$|scripts/check-version-bumps\.sh$|tests/wit_compat\.rs$|tests/wasm_channel_integration\.rs$|tests/e2e_wasm_.*|Cargo\.toml$|Cargo\.lock$|\.github/workflows/(test|nightly-deep-ci)\.yml$)'; then
             echo "has_wasm_abi_risk=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_wasm_abi_risk=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if has_match '^(channels-src/telegram/|src/channels/wasm/|tests/telegram_auth_integration\.rs$|tests/e2e_telegram_message_routing\.rs$|tests/e2e/scenarios/test_telegram_.*|\.github/workflows/test\.yml$)'; then
+          if has_match '^(channels-src/telegram/|src/channels/wasm/|tests/telegram_auth_integration\.rs$|tests/e2e_telegram_message_routing\.rs$|tests/e2e/scenarios/test_telegram_.*|\.github/workflows/(test|nightly-deep-ci)\.yml$)'; then
             echo "has_telegram_risk=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_telegram_risk=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if has_match '^(channels-src/slack/|src/channels/wasm/|tests/slack_auth_integration\.rs$|\.github/workflows/test\.yml$)'; then
+          if has_match '^(channels-src/slack/|src/channels/wasm/|tests/slack_auth_integration\.rs$|\.github/workflows/(test|nightly-deep-ci)\.yml$)'; then
             echo "has_slack_risk=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_slack_risk=false" >> "$GITHUB_OUTPUT"
@@ -139,7 +145,7 @@ jobs:
           FULL='[{"name":"all-features","flags":"--no-default-features --features postgres,libsql,html-to-markdown,bedrock,import"},{"name":"default","flags":""},{"name":"libsql-only","flags":"--no-default-features --features libsql"}]'
           SLIM='[{"name":"all-features","flags":"--no-default-features --features postgres,libsql,html-to-markdown,bedrock,import"}]'
 
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
+          if [ "${{ github.event_name }}" = "pull_request" ] || [ "${{ github.event_name }}" = "merge_group" ]; then
             echo "test_matrix=${SLIM}" >> "$GITHUB_OUTPUT"
             echo "windows_matrix=${SLIM}" >> "$GITHUB_OUTPUT"
           else
@@ -187,11 +193,63 @@ jobs:
         run: |
           timeout --signal=INT --kill-after=30s 40m \
             cargo test ${{ matrix.flags }} -- --nocapture
+      # The root cargo test invocation above runs only the `ironclaw`
+      # package's tests. Reborn memory regression coverage lives in
+      # `crates/ironclaw_memory/tests/*` and must be explicitly invoked
+      # with `-p ironclaw_memory` (or `--workspace`) — otherwise the
+      # Tier A guards for PR #3180 invariants compile but never run.
+      - name: Run ironclaw_memory tests
+        run: |
+          timeout --signal=INT --kill-after=30s 15m \
+            cargo test -p ironclaw_memory --features libsql --tests -- --nocapture
+
+  credential-store-postgres-tests:
+    name: Credential Store Postgres Tests
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_core_code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ironclaw_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      DATABASE_URL: postgres://postgres:postgres@localhost/ironclaw_test
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: credential-store-postgres
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Run credential store Postgres contract
+        run: |
+          timeout --signal=INT --kill-after=30s 10m \
+            cargo test -p ironclaw_secrets --no-default-features --features postgres --test db_credential_store_contract -- --nocapture
 
   heavy-integration-tests:
     name: Heavy Integration Tests
     needs: changes
-    if: needs.changes.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || needs.changes.outputs.has_runtime_heavy_risk == 'true')
+    if: >
+      needs.changes.outputs.docs_only != 'true' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_call' || needs.changes.outputs.has_runtime_heavy_risk == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -218,7 +276,9 @@ jobs:
   telegram-integration-tests:
     name: Telegram Integration Tests (${{ matrix.partition }})
     needs: changes
-    if: needs.changes.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || needs.changes.outputs.has_runtime_heavy_risk == 'true')
+    if: >
+      needs.changes.outputs.docs_only != 'true' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_call' || needs.changes.outputs.has_runtime_heavy_risk == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -276,18 +336,20 @@ jobs:
       mode: smoke
 
   web-e2e-full:
-    name: Web E2E Full
+    name: Web E2E Smoke (merge queue)
     needs: changes
     if: needs.changes.outputs.docs_only != 'true' && github.event_name == 'merge_group' && needs.changes.outputs.has_web_risk == 'true'
     uses: ./.github/workflows/e2e.yml
     with:
       ref: ${{ inputs.ref || github.sha }}
-      mode: full
+      mode: smoke
 
   telegram-tests:
     name: Telegram Channel Tests
     needs: changes
-    if: needs.changes.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || needs.changes.outputs.has_telegram_risk == 'true')
+    if: >
+      needs.changes.outputs.docs_only != 'true' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_call' || needs.changes.outputs.has_telegram_risk == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -309,7 +371,9 @@ jobs:
   slack-tests:
     name: Slack Channel Tests
     needs: changes
-    if: needs.changes.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || needs.changes.outputs.has_slack_risk == 'true')
+    if: >
+      needs.changes.outputs.docs_only != 'true' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_call' || needs.changes.outputs.has_slack_risk == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -336,7 +400,7 @@ jobs:
   windows-build:
     name: Windows Build (${{ matrix.name }})
     needs: [changes, matrix-config]
-    if: needs.changes.outputs.docs_only != 'true' && github.event_name != 'pull_request'
+    if: needs.changes.outputs.docs_only != 'true' && (github.event_name == 'push' || github.event_name == 'workflow_call')
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -360,7 +424,9 @@ jobs:
   wasm-wit-compat:
     name: WASM WIT Compatibility
     needs: changes
-    if: needs.changes.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || needs.changes.outputs.has_wasm_abi_risk == 'true')
+    if: >
+      needs.changes.outputs.docs_only != 'true' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_call' || needs.changes.outputs.has_wasm_abi_risk == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -397,7 +463,10 @@ jobs:
   bench-compile:
     name: Benchmark Compilation
     needs: changes
-    if: needs.changes.outputs.docs_only != 'true' && github.event_name != 'pull_request' && needs.changes.outputs.has_core_code == 'true'
+    if: >
+      needs.changes.outputs.docs_only != 'true' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_call') &&
+      needs.changes.outputs.has_core_code == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -417,7 +486,9 @@ jobs:
   docker-build:
     name: Docker Build
     needs: changes
-    if: needs.changes.outputs.docs_only != 'true' && github.event_name != 'pull_request'
+    if: >
+      needs.changes.outputs.docs_only != 'true' &&
+      (github.event_name == 'push' || (github.event_name == 'workflow_call' && inputs.include_docker))
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -549,7 +620,7 @@ jobs:
             require_success "tests" "${{ needs.tests.result }}"
           fi
 
-          if [[ "$event" != "pull_request" || "${{ needs.changes.outputs.has_runtime_heavy_risk }}" == "true" ]]; then
+          if [[ "$event" == "push" || "$event" == "workflow_call" || "${{ needs.changes.outputs.has_runtime_heavy_risk }}" == "true" ]]; then
             require_success "heavy-integration-tests" "${{ needs.heavy-integration-tests.result }}"
             require_success "telegram-integration-tests" "${{ needs.telegram-integration-tests.result }}"
           fi
@@ -566,27 +637,27 @@ jobs:
             require_success "web-e2e-full" "${{ needs.web-e2e-full.result }}"
           fi
 
-          if [[ "$event" != "pull_request" || "${{ needs.changes.outputs.has_telegram_risk }}" == "true" ]]; then
+          if [[ "$event" == "push" || "$event" == "workflow_call" || "${{ needs.changes.outputs.has_telegram_risk }}" == "true" ]]; then
             require_success "telegram-tests" "${{ needs.telegram-tests.result }}"
           fi
 
-          if [[ "$event" != "pull_request" || "${{ needs.changes.outputs.has_slack_risk }}" == "true" ]]; then
+          if [[ "$event" == "push" || "$event" == "workflow_call" || "${{ needs.changes.outputs.has_slack_risk }}" == "true" ]]; then
             require_success "slack-tests" "${{ needs.slack-tests.result }}"
           fi
 
-          if [[ "$event" != "pull_request" || "${{ needs.changes.outputs.has_wasm_abi_risk }}" == "true" ]]; then
+          if [[ "$event" == "push" || "$event" == "workflow_call" || "${{ needs.changes.outputs.has_wasm_abi_risk }}" == "true" ]]; then
             require_success "wasm-wit-compat" "${{ needs.wasm-wit-compat.result }}"
           fi
 
-          if [[ "$event" != "pull_request" ]]; then
+          if [[ "$event" == "push" || ( "$event" == "workflow_call" && "${{ inputs.include_docker }}" == "true" ) ]]; then
             require_success "docker-build" "${{ needs.docker-build.result }}"
           fi
 
-          if [[ "$event" != "pull_request" ]]; then
+          if [[ "$event" == "push" || "$event" == "workflow_call" ]]; then
             require_success "windows-build" "${{ needs.windows-build.result }}"
           fi
 
-          if [[ "$event" != "pull_request" && "${{ needs.changes.outputs.has_core_code }}" == "true" ]]; then
+          if [[ ( "$event" == "push" || "$event" == "workflow_call" ) && "${{ needs.changes.outputs.has_core_code }}" == "true" ]]; then
             require_success "bench-compile" "${{ needs.bench-compile.result }}"
           fi
 

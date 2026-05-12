@@ -4,9 +4,16 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[features]
+default = []
+postgres = ["dep:deadpool-postgres", "ironclaw_filesystem/postgres", "ironclaw_resources/postgres", "ironclaw_run_state/postgres", "ironclaw_turns/postgres"]
+libsql = ["dep:libsql", "ironclaw_filesystem/libsql", "ironclaw_resources/libsql", "ironclaw_run_state/libsql", "ironclaw_turns/libsql"]
+
 [dependencies]
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+deadpool-postgres = { version = "0.14", optional = true }
+futures-util = "0.3"
 ironclaw_approvals = { path = "../ironclaw_approvals" }
 ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_capabilities = { path = "../ironclaw_capabilities" }
@@ -15,6 +22,7 @@ ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_memory = { path = "../ironclaw_memory" }
 ironclaw_mcp = { path = "../ironclaw_mcp" }
 ironclaw_network = { path = "../ironclaw_network" }
 ironclaw_processes = { path = "../ironclaw_processes" }
@@ -26,19 +34,22 @@ ironclaw_safety = { path = "../ironclaw_safety" }
 ironclaw_scripts = { path = "../ironclaw_scripts" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
 ironclaw_trust = { path = "../ironclaw_trust" }
+ironclaw_turns = { path = "../ironclaw_turns" }
 ironclaw_wasm = { path = "../ironclaw_wasm" }
+libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 secrecy = "0.10"
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["rt", "time"] }
+tokio = { version = "1", features = ["rt", "sync", "time"] }
 tracing = "0.1"
 url = "2"
 
 [dev-dependencies]
 ironclaw_event_projections = { path = "../ironclaw_event_projections" }
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt", "time"] }
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+tokio-postgres = "0.7"
 wat = "1.245.1"
 wit-component = "0.245.1"
 wit-parser = "0.245.1"

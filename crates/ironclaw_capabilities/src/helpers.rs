@@ -202,5 +202,6 @@ pub(crate) fn run_state_error_kind(error: &RunStateError) -> &'static str {
         RunStateError::Filesystem(_) => "Filesystem",
         RunStateError::Serialization(_) => "Serialization",
         RunStateError::Deserialization(_) => "Deserialization",
+        RunStateError::Backend(_) => "Backend",
     }
 }

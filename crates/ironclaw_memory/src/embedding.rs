@@ -73,7 +73,16 @@ pub(crate) fn embedding_filesystem_error(
     operation: FilesystemOperation,
     error: EmbeddingError,
 ) -> FilesystemError {
-    memory_error(path, operation, error.to_string())
+    let reason = match error {
+        EmbeddingError::ProviderUnavailable { .. } => "embedding provider unavailable".to_string(),
+        EmbeddingError::InvalidVector { expected, actual } => {
+            format!("embedding vector dimension mismatch: expected {expected}, got {actual}")
+        }
+        EmbeddingError::TextTooLong { length, max } => {
+            format!("embedding input too long: {length} > {max}")
+        }
+    };
+    memory_error(path, operation, reason)
 }
 
 pub(crate) async fn embed_text(

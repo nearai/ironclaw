@@ -5,6 +5,8 @@
 //! binding/session layer. Trusted workers use [`runner`] explicitly; runner
 //! transition APIs are intentionally not re-exported from this crate prelude.
 
+pub mod admission;
+pub mod checkpoint_state;
 pub mod coordinator;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub mod db;
@@ -20,6 +22,18 @@ pub mod scope;
 pub mod status;
 pub mod store;
 
+pub use admission::{
+    AllowAllTurnAdmissionLimitProvider, StaticTurnAdmissionLimitProvider, TurnAdmissionAxisKind,
+    TurnAdmissionBucket, TurnAdmissionBucketKind, TurnAdmissionBucketScope,
+    TurnAdmissionCapacityDenial, TurnAdmissionClass, TurnAdmissionLimit,
+    TurnAdmissionLimitProvider, TurnAdmissionLimitUnavailable, TurnAdmissionReservationRecord,
+};
+pub use checkpoint_state::{
+    CheckpointStateRecord, CheckpointStateStore, GetCheckpointStateRequest,
+    GetLoopCheckpointRequest, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
+    LoopCheckpointRecord, LoopCheckpointStore, MAX_CHECKPOINT_STATE_PAYLOAD_BYTES,
+    PutCheckpointStateRequest, PutLoopCheckpointRequest, RedactedCheckpointPayload,
+};
 pub use coordinator::{
     AllowAllTurnAdmissionPolicy, DefaultTurnCoordinator, NoopTurnRunWakeNotifier,
     TurnAdmissionPolicy, TurnCoordinator, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
@@ -28,7 +42,11 @@ pub use coordinator::{
 pub use db::LibSqlTurnStateStore;
 #[cfg(feature = "postgres")]
 pub use db::PostgresTurnStateStore;
-pub use events::{InMemoryTurnEventSink, TurnEventKind, TurnEventSink, TurnLifecycleEvent};
+pub use events::{
+    EventCursor, InMemoryTurnEventSink, TurnEventKind, TurnEventPage, TurnEventProjectionCursor,
+    TurnEventProjectionError, TurnEventProjectionRequest, TurnEventProjectionService,
+    TurnEventProjectionSnapshot, TurnEventProjectionSource, TurnEventSink, TurnLifecycleEvent,
+};
 pub use ids::{
     AcceptedMessageRef, GateRef, IdempotencyKey, LoopDiagnosticRef, LoopExitId, LoopGateRef,
     LoopMessageRef, LoopResultRef, LoopUsageSummaryRef, ReplyTargetBindingRef, RunProfileId,
@@ -36,10 +54,11 @@ pub use ids::{
     TurnLeaseToken, TurnRunId, TurnRunnerId,
 };
 pub use loop_exit::{
-    LoopBlocked, LoopBlockedKind, LoopCancelled, LoopCancelledReasonKind, LoopCompleted,
-    LoopCompletionKind, LoopExit, LoopExitInvalidHandling, LoopExitMapping,
-    LoopExitValidationDecision, LoopExitValidationPolicy, LoopExitViolation, LoopExitViolationKind,
-    LoopFailed, LoopFailureKind,
+    BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
+    FinalCheckpointEvidenceRequest, LoopBlocked, LoopBlockedKind, LoopCancelled,
+    LoopCancelledReasonKind, LoopCompleted, LoopCompletionKind, LoopExit, LoopExitApplier,
+    LoopExitEvidencePort, LoopExitInvalidHandling, LoopExitMapping, LoopExitValidationDecision,
+    LoopExitViolation, LoopExitViolationKind, LoopFailed, LoopFailureKind,
 };
 pub use memory::{InMemoryTurnStateStore, InMemoryTurnStateStoreLimits};
 pub use request::{
@@ -47,10 +66,11 @@ pub use request::{
 };
 pub use response::{CancelRunResponse, ResumeTurnResponse, SubmitTurnResponse, ThreadBusy};
 pub use run_profile::{
-    AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverHost,
-    AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, CancellationPolicy,
-    CapabilitySurfaceProfileId, CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass,
-    ContextProfileId, InMemoryRunProfileRegistry, InMemoryRunProfileResolver, LoopDriverId,
+    AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverResumeRequest,
+    AgentLoopDriverRunRequest, CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy,
+    CheckpointSchemaId, ConcurrencyClass, ContextProfileId, EmptyMemoryPromptContextService,
+    InMemoryRunProfileRegistry, InMemoryRunProfileResolver, LoopCheckpointKind,
+    LoopCheckpointStateRef, LoopDriverId, MemoryPromptContextRequest, MemoryPromptContextService,
     ModelProfileId, PrivilegedRunProfileDimension, RedactedRunProfileProvenance,
     RedactedRunProfileSource, ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier,
     RunClassId, RunProfileFingerprint, RunProfileRequestAuthority, RunProfileResolutionError,

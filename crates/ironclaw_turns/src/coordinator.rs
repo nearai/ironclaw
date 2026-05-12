@@ -7,9 +7,10 @@ use std::{
 use tracing::debug;
 
 use crate::{
-    AdmissionRejection, CancelRunRequest, CancelRunResponse, GetRunStateRequest, ResumeTurnRequest,
-    ResumeTurnResponse, SubmitTurnRequest, SubmitTurnResponse, TurnError, TurnRunId, TurnRunState,
-    TurnScope, TurnStateStore, TurnStatus, events::EventCursor,
+    AdmissionRejection, CancelRunRequest, CancelRunResponse, GetRunStateRequest,
+    InMemoryRunProfileResolver, ResumeTurnRequest, ResumeTurnResponse, RunProfileResolver,
+    SubmitTurnRequest, SubmitTurnResponse, TurnError, TurnRunId, TurnRunState, TurnScope,
+    TurnStateStore, TurnStatus, events::EventCursor,
 };
 
 pub trait TurnAdmissionPolicy: Send + Sync {
@@ -79,26 +80,33 @@ pub trait TurnCoordinator: Send + Sync {
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError>;
 }
 
-pub struct DefaultTurnCoordinator<S> {
+pub struct DefaultTurnCoordinator<S: ?Sized> {
     store: Arc<S>,
     admission_policy: Arc<dyn TurnAdmissionPolicy>,
+    run_profile_resolver: Arc<dyn RunProfileResolver>,
     wake_notifier: Arc<dyn TurnRunWakeNotifier>,
 }
 
 impl<S> DefaultTurnCoordinator<S>
 where
-    S: TurnStateStore,
+    S: TurnStateStore + ?Sized,
 {
     pub fn new(store: Arc<S>) -> Self {
         Self {
             store,
             admission_policy: Arc::new(AllowAllTurnAdmissionPolicy),
+            run_profile_resolver: Arc::new(InMemoryRunProfileResolver::default()),
             wake_notifier: Arc::new(NoopTurnRunWakeNotifier),
         }
     }
 
     pub fn with_admission_policy(mut self, policy: Arc<dyn TurnAdmissionPolicy>) -> Self {
         self.admission_policy = policy;
+        self
+    }
+
+    pub fn with_run_profile_resolver(mut self, resolver: Arc<dyn RunProfileResolver>) -> Self {
+        self.run_profile_resolver = resolver;
         self
     }
 
@@ -143,7 +151,7 @@ fn notify_queued_run_best_effort(notifier: &dyn TurnRunWakeNotifier, wake: TurnR
 #[async_trait]
 impl<S> TurnCoordinator for DefaultTurnCoordinator<S>
 where
-    S: TurnStateStore + 'static,
+    S: TurnStateStore + ?Sized + 'static,
 {
     async fn submit_turn(
         &self,
@@ -152,7 +160,11 @@ where
         let scope = request.scope.clone();
         let response = self
             .store
-            .submit_turn(request, self.admission_policy.as_ref())
+            .submit_turn(
+                request,
+                self.admission_policy.as_ref(),
+                self.run_profile_resolver.as_ref(),
+            )
             .await?;
         notify_queued_run_best_effort(self.wake_notifier.as_ref(), submit_wake(scope, &response));
         Ok(response)

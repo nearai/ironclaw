@@ -41,4 +41,10 @@ pub enum SessionThreadError {
     },
     #[error("failed to create generated thread id: {0}")]
     GeneratedThreadId(String),
+    #[error("serialization error: {0}")]
+    Serialization(String),
+    #[error("deserialization error: {0}")]
+    Deserialization(String),
+    #[error("thread backend error: {0}")]
+    Backend(String),
 }

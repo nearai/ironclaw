@@ -25,9 +25,8 @@
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityDescriptor, CapabilityId, CorrelationId, ExecutionContext,
-    NetworkPolicy, ProcessId, ResourceEstimate, ResourceScope, ResourceUsage, RuntimeKind,
-    SecretHandle,
+    ApprovalRequestId, CapabilityId, CorrelationId, ExecutionContext, ExtensionId, NetworkPolicy,
+    ProcessId, ResourceEstimate, ResourceScope, ResourceUsage, RuntimeKind, SecretHandle,
 };
 use ironclaw_host_api::{
     RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
@@ -42,14 +41,22 @@ use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStoreError};
 use ironclaw_trust::TrustDecision;
 use secrecy::ExposeSecret;
 use serde_json::Value;
-use std::{fmt, sync::Arc};
+use std::{collections::BTreeMap, fmt, sync::Arc};
 use thiserror::Error;
 
+mod first_party;
+pub mod memory_context;
 mod obligations;
 mod planner;
 mod production;
 mod services;
+mod surface;
+mod turn_scheduler;
 
+pub use first_party::{
+    FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
+    FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
+};
 pub use obligations::{
     BuiltinObligationHandler, BuiltinObligationServices, NetworkObligationPolicyStore,
     ProcessObligationLifecycleStore, RuntimeSecretInjectionStore, RuntimeSecretInjectionStoreError,
@@ -59,6 +66,11 @@ pub use production::DefaultHostRuntime;
 pub use services::{
     HostRuntimeServices, ProductionWiringComponent, ProductionWiringConfig, ProductionWiringIssue,
     ProductionWiringIssueKind, ProductionWiringReport, RegisteredRuntimeHealth,
+};
+pub use surface::{CapabilitySurfacePolicy, VisibleCapability, VisibleCapabilityAccess};
+pub use turn_scheduler::{
+    SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
+    TurnRunSchedulerConfig, TurnRunSchedulerHandle,
 };
 
 /// Stable, validated idempotency key supplied by upper turn/loop services.
@@ -348,34 +360,63 @@ impl RuntimeCapabilityResumeRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct VisibleCapabilityRequest {
-    pub scope: ResourceScope,
-    pub correlation_id: CorrelationId,
+    /// Authority envelope used for the same grant/trust checks as invocation.
+    pub context: ExecutionContext,
     /// Projection surface selection only; this is not authority and must not
     /// grant or bypass authorization. The host treats this as an opaque
     /// cache/version dimension; deciding which surface labels a given caller
     /// may request is an upper-layer concern.
     pub surface_kind: SurfaceKind,
+    /// Caller/host-supplied trust decisions keyed by capability provider.
+    ///
+    /// `DefaultHostRuntime` does not evaluate trust while computing visibility;
+    /// missing provider trust fails closed by omitting that provider's
+    /// capabilities from the surface.
+    pub provider_trust: BTreeMap<ExtensionId, TrustDecision>,
+    /// Upper/profile-supplied visibility ceiling. This only narrows what is
+    /// shown; it never grants authority or bypasses invocation authorization.
+    pub policy: CapabilitySurfacePolicy,
 }
 
 impl VisibleCapabilityRequest {
-    pub fn new(
-        scope: ResourceScope,
-        correlation_id: CorrelationId,
-        surface_kind: SurfaceKind,
-    ) -> Self {
+    pub fn new(context: ExecutionContext, surface_kind: SurfaceKind) -> Self {
         Self {
-            scope,
-            correlation_id,
+            context,
             surface_kind,
+            provider_trust: BTreeMap::new(),
+            policy: CapabilitySurfacePolicy::default(),
         }
+    }
+
+    pub fn with_provider_trust(
+        mut self,
+        provider_trust: BTreeMap<ExtensionId, TrustDecision>,
+    ) -> Self {
+        self.provider_trust = provider_trust;
+        self
+    }
+
+    pub fn with_policy(mut self, policy: CapabilitySurfacePolicy) -> Self {
+        self.policy = policy;
+        self
     }
 }
 
 /// Host-filtered visible capability surface.
+///
+/// Entries are returned in filtered registry order for deterministic rendering.
+/// The version fingerprint canonicalizes unordered inputs (policy allow-lists
+/// and visible capability set) so semantically equivalent projections do not
+/// churn when callers permute allow-list values or registry insertion order
+/// changes. Visibility remains informational only; invocation authority is
+/// re-checked by [`HostRuntime::invoke_capability`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct VisibleCapabilitySurface {
+    /// Stable token for the semantic visible surface under this request policy.
     pub version: CapabilitySurfaceVersion,
-    pub descriptors: Vec<CapabilityDescriptor>,
+    /// Typed visible capabilities, including access status and selected
+    /// resource estimate.
+    pub capabilities: Vec<VisibleCapability>,
 }
 
 /// Successful capability completion.
@@ -427,9 +468,19 @@ pub struct RuntimeCapabilityFailure {
     pub message: Option<String>,
 }
 
+/// Explicit fallback for outcome categories that the loop adapter cannot handle
+/// yet. New first-class outcome variants should be added to
+/// [`RuntimeCapabilityOutcome`] and exhaustively mapped by consumers instead of
+/// being hidden behind wildcard matches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeCapabilityUnknown {
+    pub capability_id: CapabilityId,
+    pub kind: String,
+    pub message: Option<String>,
+}
+
 /// Outcomes returned by capability invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum RuntimeCapabilityOutcome {
     Completed(Box<RuntimeCapabilityCompleted>),
     ApprovalRequired(RuntimeApprovalGate),
@@ -437,6 +488,7 @@ pub enum RuntimeCapabilityOutcome {
     ResourceBlocked(RuntimeResourceGate),
     SpawnedProcess(RuntimeProcessHandle),
     Failed(RuntimeCapabilityFailure),
+    Unknown(RuntimeCapabilityUnknown),
 }
 
 impl RuntimeCapabilityOutcome {
@@ -448,13 +500,13 @@ impl RuntimeCapabilityOutcome {
             Self::ResourceBlocked(_) => "resource_blocked",
             Self::SpawnedProcess(_) => "spawned_process",
             Self::Failed(_) => "failed",
+            Self::Unknown(_) => "unknown",
         }
     }
 }
 
 /// Stable reasons for capability suspension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub enum RuntimeBlockedReason {
     ApprovalRequired,
     AuthRequired,
@@ -630,7 +682,6 @@ pub trait HostRuntime: Send + Sync {
 
 /// Sanitized host runtime infrastructure/contract errors.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum HostRuntimeError {
     #[error("invalid host runtime request: {reason}")]
     InvalidRequest { reason: String },
@@ -999,6 +1050,12 @@ fn sanitized_secret_error(error: &SecretStoreError) -> String {
         SecretStoreError::UnknownLease { .. } => "credential lease is unavailable".to_string(),
         SecretStoreError::LeaseConsumed { .. } => "credential lease was already used".to_string(),
         SecretStoreError::LeaseRevoked { .. } => "credential lease was revoked".to_string(),
+        SecretStoreError::LeaseExpired { .. } | SecretStoreError::SecretExpired => {
+            "credential expired".to_string()
+        }
+        SecretStoreError::BackendMisconfigured { .. } => {
+            "credential store is misconfigured".to_string()
+        }
         SecretStoreError::StoreUnavailable { .. } => "credential store unavailable".to_string(),
     }
 }

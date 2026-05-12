@@ -275,7 +275,7 @@ fn check_settings_file() -> CheckResult {
 
 async fn check_nearai_session(settings: &Settings) -> CheckResult {
     // Skip entirely when the configured backend is not NEAR AI.
-    let llm_config = match crate::config::LlmConfig::resolve(settings) {
+    let llm_config = match crate::config::llm::resolve(settings) {
         Ok(config) => config,
         Err(e) => {
             // check_llm_config will report the full error; just skip here.
@@ -315,7 +315,7 @@ async fn check_nearai_session(settings: &Settings) -> CheckResult {
 // ── LLM configuration ──────────────────────────────────────
 
 fn check_llm_config(settings: &Settings) -> CheckResult {
-    match crate::llm::LlmConfig::resolve(settings) {
+    match crate::config::llm::resolve(settings) {
         Ok(config) => {
             // Show the model for the active backend, not always nearai.model.
             let model = if let Some(ref bedrock) = config.bedrock {

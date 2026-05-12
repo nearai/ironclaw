@@ -242,7 +242,7 @@ pub enum ResourceAccount {
 }
 
 pub trait ResourceGovernor {
-    fn set_limit(&self, account: ResourceAccount, limits: ResourceLimits);
+    fn set_limit(&self, account: ResourceAccount, limits: ResourceLimits) -> Result<(), ResourceError>;
     fn reserve(
         &self,
         scope: ResourceScope,
@@ -263,7 +263,9 @@ pub trait ResourceGovernor {
 }
 ```
 
-The V1 crate should start with an in-memory implementation for contract tests. Persistence, PostgreSQL/libSQL backends, and distributed locks can come later.
+The V1 crate started with an in-memory implementation for contract tests. The production seam now also includes `PersistentResourceGovernor`, backed by transactional `ResourceGovernorStore` implementations. `JsonFileResourceGovernorStore` uses an exclusive OS file lock for single-node durability; `LibSqlResourceGovernorStore` and `PostgresResourceGovernorStore` persist the same account-wide snapshot through database transactions/locks so active holds and reconciled usage survive restart and are shared across governors.
+
+Persistent implementations add a storage failure mode to every governor operation that touches durable state, including `set_limit`. Lock, read, write, serialization, deserialization, or snapshot schema validation failures return `ResourceError::Storage` and must fail closed: callers must not start costed or quota-limited work when storage state cannot be trusted. Durable snapshots are versioned with `schema_version`; unknown top-level fields, partial snapshots, malformed JSON, and unsupported future schema versions are rejected instead of being silently ignored.
 
 ---
 
@@ -275,6 +277,8 @@ Local contract tests should prove:
 - reservation denies when USD would exceed limit
 - reservation denies when runtime quota would exceed limit even with zero USD
 - active reservations consume concurrency slots
+- persistent snapshots reload limits, active holds, and reconciled usage across governor instances
+- persistent snapshots reject malformed JSON, unknown fields, partial snapshots, and unsupported schema versions with `ResourceError::Storage`
 - concurrent reservations cannot oversubscribe a scope
 - release frees reserved-but-unused capacity and records no spend
 - reconcile records actual usage and releases active reservation
@@ -291,7 +295,6 @@ Do not add in `ironclaw_resources` V1:
 - payment processing
 - subscription plans
 - provider-specific LLM price catalogs
-- database schema/migrations
 - Docker/WASM/MCP execution
 - approval UI
 - auth/secret storage

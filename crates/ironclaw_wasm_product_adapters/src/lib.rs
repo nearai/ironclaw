@@ -1,5 +1,11 @@
 //! Stub host runtime for IronClaw Reborn WASM v2 product adapters.
 //!
+//! # Trust-model warning
+//!
+//! The native runner in this crate executes `Arc<dyn ProductAdapter>` in the
+//! host process. It is not a WASM sandbox. Only run trusted native adapters here;
+//! untrusted adapters must wait for the wasmtime component-model path.
+//!
 //! This crate is the boundary where the trusted host (Rust) verifies protocol
 //! authentication, normalizes egress to declared hosts, and exposes a small
 //! constrained capability set to WASM v2 components. The first-slice
@@ -14,9 +20,8 @@
 //!   verification. Production hosts use these to mint
 //!   [`ironclaw_product_adapters::ProtocolAuthEvidence::Verified`] before any
 //!   adapter parse step.
-//! * `WebhookAuthEvidenceMint` — bridge that returns a `Verified` evidence
-//!   constructed via the public `mark_*_verified` helpers in
-//!   `ironclaw_product_adapters::auth`.
+//! * `WebhookAuth` — bridge that returns a `Verified` evidence constructed via
+//!   the public `mark_*_verified` helpers in `ironclaw_product_adapters::auth`.
 //! * `EgressPolicy` — declared-host + credential-handle enforcement that the
 //!   wasmtime component-model glue will compose with at later landings.
 //! * Native `ProductAdapter` runner that wires a Rust adapter implementation
@@ -34,4 +39,8 @@ pub use auth_verifier::{
     HmacWebhookAuth, SharedSecretHeaderAuth, VerificationOutcome, WebhookAuthVerifier,
 };
 pub use egress_policy::{EgressPolicy, EgressPolicyError, EgressPolicyTarget};
-pub use runner::{NativeProductAdapterRunner, RunnerError, WebhookProcessOutcome};
+pub use runner::{
+    DEFAULT_MAX_IN_FLIGHT_WEBHOOKS, DEFAULT_WEBHOOK_WORKFLOW_TIMEOUT, NativeProductAdapterRunner,
+    NativeProductAdapterRunnerConfig, RunnerError, WebhookAuth, WebhookProcessOutcome,
+    evidence_from_bearer_subject, evidence_from_session_subject,
+};

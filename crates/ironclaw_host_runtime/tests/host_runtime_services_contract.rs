@@ -1,4 +1,11 @@
-use std::{sync::Arc, thread, time::Duration};
+use std::{
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    thread,
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
@@ -20,6 +27,8 @@ use ironclaw_events::{
     InMemoryDurableEventLog, InMemoryEventSink, ReadScope, RuntimeEventKind,
 };
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry};
+#[cfg(feature = "libsql")]
+use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
@@ -43,11 +52,17 @@ use ironclaw_processes::{
 use ironclaw_reborn_event_store::{
     RebornEventStoreConfig, RebornEventStoreError, RebornProfile, build_reborn_event_stores,
 };
+#[cfg(feature = "libsql")]
+use ironclaw_resources::ResourceTally;
 use ironclaw_resources::{
-    InMemoryResourceGovernor, ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits,
+    InMemoryResourceGovernor, JsonFileResourceGovernorStore, PersistentResourceGovernor,
+    ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits,
 };
+#[cfg(feature = "libsql")]
+use ironclaw_run_state::LibSqlRunStateApprovalStore;
 use ironclaw_run_state::{
-    InMemoryApprovalRequestStore, InMemoryRunStateStore, RunStateStore, RunStatus,
+    ApprovalRecord, ApprovalRequestStore, InMemoryApprovalRequestStore, InMemoryRunStateStore,
+    RunRecord, RunStart, RunStateApprovalStore, RunStateError, RunStateStore, RunStatus,
 };
 use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptExecutionRequest,
@@ -58,6 +73,14 @@ use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
     HostTrustPolicy, TrustDecision, TrustProvenance,
 };
+#[cfg(feature = "libsql")]
+use ironclaw_turns::LibSqlTurnStateStore;
+#[cfg(feature = "libsql")]
+use ironclaw_turns::{
+    AcceptedMessageRef, IdempotencyKey, ReplyTargetBindingRef, RunProfileRequest, SourceBindingRef,
+    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnScope, TurnStateStore,
+};
+use ironclaw_turns::{NoopTurnRunWakeNotifier, TurnRunWake, TurnRunWakeNotifier};
 use ironclaw_wasm::{
     RecordingWasmHostHttp, WasmHostError, WasmHostHttp, WasmHttpRequest, WasmHttpResponse,
     WasmStagedRuntimeCredential, WasmStagedRuntimeCredentials, WitToolHost, WitToolRuntimeConfig,
@@ -112,6 +135,20 @@ fn production_wiring_validation_rejects_missing_components_and_local_only_defaul
     );
     assert!(
         report.contains(
+            ProductionWiringComponent::TurnState,
+            ProductionWiringIssueKind::Missing
+        ),
+        "missing turn-state store should be reported: {report:?}"
+    );
+    assert!(
+        report.contains(
+            ProductionWiringComponent::TurnRunWakeNotifier,
+            ProductionWiringIssueKind::Missing
+        ),
+        "missing turn wake notifier should be reported: {report:?}"
+    );
+    assert!(
+        report.contains(
             ProductionWiringComponent::EventSink,
             ProductionWiringIssueKind::Missing
         ),
@@ -162,6 +199,299 @@ fn production_wiring_validation_rejects_missing_components_and_local_only_defaul
 }
 
 #[test]
+fn production_wiring_validation_accepts_persistent_resource_governor_component() {
+    let dir = tempfile::tempdir().unwrap();
+    let governor = Arc::new(PersistentResourceGovernor::new(
+        JsonFileResourceGovernorStore::new(dir.path().join("resource-governor.json")),
+    ));
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        governor,
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    );
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]))
+        .expect_err("other local/test defaults still prevent production validation");
+
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::ResourceGovernor,
+            ProductionWiringIssueKind::LocalOnlyImplementation,
+        ),
+        "persistent resource governor should satisfy resource guardrail: {report:?}"
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn with_libsql_resource_governor_runs_migrations_before_first_reserve() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(
+        libsql::Builder::new_local(dir.path().join("resources.db"))
+            .build()
+            .await
+            .unwrap(),
+    );
+
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_libsql_resource_governor(Arc::clone(&db))
+    .await
+    .unwrap();
+
+    let governor = services.resource_governor();
+    let scope = sample_scope(InvocationId::new());
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_concurrency_slots: Some(1),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+    let reservation = governor
+        .reserve(
+            scope,
+            ResourceEstimate {
+                concurrency_slots: Some(1),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+    governor.release(reservation.id).unwrap();
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn with_libsql_resource_governor_closes_process_reservations_on_cancel() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(
+        libsql::Builder::new_local(dir.path().join("resources.db"))
+            .build()
+            .await
+            .unwrap(),
+    );
+    let process_services = ProcessServices::new(
+        Arc::new(InMemoryProcessStore::new()),
+        Arc::new(InMemoryProcessResultStore::new()),
+    );
+    let process_store = process_services.process_store();
+
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        process_services,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_libsql_resource_governor(Arc::clone(&db))
+    .await
+    .unwrap();
+    let governor = services.resource_governor();
+    let scope = sample_scope(InvocationId::new());
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    let reservation_id = ResourceReservationId::new();
+    let estimate = ResourceEstimate {
+        concurrency_slots: Some(1),
+        ..ResourceEstimate::default()
+    };
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_concurrency_slots: Some(1),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+    governor
+        .reserve_with_id(scope.clone(), estimate.clone(), reservation_id)
+        .unwrap();
+    let process_id = ProcessId::new();
+    let mut start = process_start(process_id, scope.invocation_id, scope.clone());
+    start.estimated_resources = estimate;
+    start.resource_reservation_id = Some(reservation_id);
+    process_store.start(start).await.unwrap();
+
+    let runtime = services.host_runtime_for_local_testing();
+    let outcome = runtime
+        .cancel_work(CancelRuntimeWorkRequest::new(
+            scope.clone(),
+            CorrelationId::new(),
+            CancelReason::UserRequested,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.cancelled, vec![RuntimeWorkId::Process(process_id)]);
+    assert_eq!(
+        governor.reserved_for(&account).unwrap(),
+        ResourceTally::default()
+    );
+    assert!(matches!(
+        governor.release(reservation_id).unwrap_err(),
+        ResourceError::ReservationClosed {
+            status: ReservationStatus::Released,
+            ..
+        }
+    ));
+}
+
+#[cfg(feature = "postgres")]
+const POSTGRES_SKIP_ENV: &str = "IRONCLAW_SKIP_POSTGRES_TESTS";
+
+#[cfg(feature = "postgres")]
+fn postgres_skip_requested() -> bool {
+    std::env::var(POSTGRES_SKIP_ENV).is_ok_and(|value| value == "1" || value == "true")
+}
+
+#[cfg(feature = "postgres")]
+async fn postgres_pool_or_skip() -> Option<deadpool_postgres::Pool> {
+    let database_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://localhost/ironclaw_test".to_string());
+    let config: tokio_postgres::Config = database_url
+        .parse()
+        .expect("DATABASE_URL must be a valid Postgres URL");
+    let mgr = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
+    let pool = deadpool_postgres::Pool::builder(mgr)
+        .max_size(2)
+        .build()
+        .expect("build deadpool");
+    match pool.get().await {
+        Ok(_) => Some(pool),
+        Err(error) => {
+            if postgres_skip_requested() {
+                eprintln!(
+                    "skipping host-runtime Postgres resource governor test ({POSTGRES_SKIP_ENV}=1): {error}"
+                );
+                None
+            } else {
+                panic!(
+                    "host-runtime Postgres resource governor test could not reach Postgres ({error}); \
+                     set DATABASE_URL to a reachable Postgres test database, or set \
+                     {POSTGRES_SKIP_ENV}=1 to explicitly skip."
+                );
+            }
+        }
+    }
+}
+
+#[cfg(feature = "postgres")]
+async fn drop_postgres_resource_governor_table(pool: &deadpool_postgres::Pool) {
+    let client = pool.get().await.expect("cleanup client");
+    client
+        .batch_execute("DROP TABLE IF EXISTS ironclaw_resource_governor_snapshots")
+        .await
+        .expect("drop resource governor snapshots table");
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn with_postgres_resource_governor_runs_migrations_before_first_reserve() {
+    let Some(pool) = postgres_pool_or_skip().await else {
+        return;
+    };
+    drop_postgres_resource_governor_table(&pool).await;
+
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_postgres_resource_governor(pool.clone())
+    .await
+    .unwrap();
+
+    let governor = services.resource_governor();
+    let scope = sample_scope(InvocationId::new());
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_concurrency_slots: Some(1),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+    let reservation = governor
+        .reserve(
+            scope,
+            ResourceEstimate {
+                concurrency_slots: Some(1),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+    governor.release(reservation.id).unwrap();
+    drop_postgres_resource_governor_table(&pool).await;
+}
+
+#[test]
+fn production_wiring_validation_classifies_combined_store_as_run_state_and_approvals() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_run_state_approval_store(Arc::new(
+        InMemoryRecordingCombinedRunStateApprovalStore::new(),
+    ));
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]))
+        .expect_err("local/test combined store must not pass production validation");
+
+    assert!(
+        report.contains(
+            ProductionWiringComponent::RunState,
+            ProductionWiringIssueKind::LocalOnlyImplementation,
+        ),
+        "combined store should be classified for run-state guardrails: {report:?}"
+    );
+    assert!(
+        report.contains(
+            ProductionWiringComponent::ApprovalRequests,
+            ProductionWiringIssueKind::LocalOnlyImplementation,
+        ),
+        "combined store should be classified for approval guardrails: {report:?}"
+    );
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::RunState,
+            ProductionWiringIssueKind::Missing,
+        ),
+        "combined store should satisfy run-state presence: {report:?}"
+    );
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::ApprovalRequests,
+            ProductionWiringIssueKind::Missing,
+        ),
+        "combined store should satisfy approval-store presence: {report:?}"
+    );
+}
+
+#[test]
 fn production_wiring_validation_rejects_unsupported_runtime_requirements() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -173,8 +503,8 @@ fn production_wiring_validation_rejects_unsupported_runtime_requirements() {
     );
 
     let report = services
-        .validate_production_wiring(&ProductionWiringConfig::new([RuntimeKind::FirstParty]))
-        .expect_err("first-party runtime requirements are not dispatcher backend requirements");
+        .validate_production_wiring(&ProductionWiringConfig::new([RuntimeKind::System]))
+        .expect_err("system runtime requirements are not dispatcher backend requirements");
 
     assert!(
         report.contains(
@@ -182,6 +512,313 @@ fn production_wiring_validation_rejects_unsupported_runtime_requirements() {
             ProductionWiringIssueKind::UnsupportedRequirement
         ),
         "unsupported runtime backend requirement should be reported: {report:?}"
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_run_state_store_selection_satisfies_production_run_state_guardrails() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let db_path = db_dir.path().join("run-state-selection.db");
+    let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_libsql_run_state_approval_store(Arc::clone(&db))
+    .await
+    .unwrap();
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]))
+        .expect_err("other local services remain intentionally unready");
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::RunState,
+            ProductionWiringIssueKind::Missing
+        ),
+        "LibSqlRunStateApprovalStore must satisfy run-state presence: {report:?}"
+    );
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::ApprovalRequests,
+            ProductionWiringIssueKind::Missing
+        ),
+        "LibSqlRunStateApprovalStore must satisfy approval-store presence: {report:?}"
+    );
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::RunState,
+            ProductionWiringIssueKind::LocalOnlyImplementation
+        ),
+        "LibSqlRunStateApprovalStore must not be classified local-only: {report:?}"
+    );
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::ApprovalRequests,
+            ProductionWiringIssueKind::LocalOnlyImplementation
+        ),
+        "LibSqlRunStateApprovalStore must not be classified local-only: {report:?}"
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_run_state_store_selection_persists_runtime_approval_block() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let db_path = db_dir.path().join("run-state-runtime-approval.db");
+    let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenGrantAuthorizer),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_libsql_run_state_approval_store(Arc::clone(&db))
+    .await
+    .unwrap()
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability],
+    )))
+    .with_script_runtime(Arc::new(ScriptRuntime::new(
+        ScriptRuntimeConfig::for_testing(),
+        EchoScriptBackend,
+    )));
+
+    let runtime = services.host_runtime_for_local_testing();
+    let context = execution_context_without_grants();
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context.clone(),
+            script_capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "durable approval"}),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    let RuntimeCapabilityOutcome::ApprovalRequired(gate) = outcome else {
+        panic!("expected approval gate, got {outcome:?}");
+    };
+    let store = LibSqlRunStateApprovalStore::new(db);
+    let run_record = RunStateStore::get(&store, &context.resource_scope, context.invocation_id)
+        .await
+        .unwrap()
+        .expect("run record persisted");
+    assert_eq!(run_record.status, RunStatus::BlockedApproval);
+    assert_eq!(
+        run_record.approval_request_id,
+        Some(gate.approval_request_id)
+    );
+    let approval_record =
+        ApprovalRequestStore::get(&store, &context.resource_scope, gate.approval_request_id)
+            .await
+            .unwrap()
+            .expect("approval record persisted");
+    assert_eq!(
+        approval_record.status,
+        ironclaw_run_state::ApprovalStatus::Pending
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn production_root_filesystem_selection_accepts_libsql_root_filesystem() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let db_path = db_dir.path().join("root-filesystem.db");
+    let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+    let filesystem = Arc::new(LibSqlRootFilesystem::new(db));
+    filesystem.run_migrations().await.unwrap();
+
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_libsql_root_filesystem(Arc::clone(&filesystem));
+
+    let path = VirtualPath::new("/engine/tenants/t1/users/u1/root-selection.txt").unwrap();
+    filesystem.write_file(&path, b"selected").await.unwrap();
+    assert_eq!(filesystem.read_file(&path).await.unwrap(), b"selected");
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]))
+        .expect_err("other local services remain intentionally unready");
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::Filesystem,
+            ProductionWiringIssueKind::LocalOnlyImplementation
+        ),
+        "LibSqlRootFilesystem must satisfy production filesystem selection: {report:?}"
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn production_turn_state_selection_accepts_libsql_turn_state_store() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let db_path = db_dir.path().join("turn-state.db");
+    let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+    let turn_state = Arc::new(LibSqlTurnStateStore::new(Arc::clone(&db)));
+    turn_state.run_migrations().await.unwrap();
+
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_libsql_turn_state_store(Arc::clone(&db))
+    .await
+    .unwrap();
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]))
+        .expect_err("other local services remain intentionally unready");
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::TurnState,
+            ProductionWiringIssueKind::Missing
+        ),
+        "LibSqlTurnStateStore must satisfy production turn-state presence: {report:?}"
+    );
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::TurnState,
+            ProductionWiringIssueKind::LocalOnlyImplementation
+        ),
+        "LibSqlTurnStateStore must not be classified local-only: {report:?}"
+    );
+}
+
+#[derive(Debug, Default)]
+struct RecordingTurnRunWakeNotifier {
+    wakes: Mutex<Vec<TurnRunWake>>,
+}
+
+impl RecordingTurnRunWakeNotifier {
+    #[cfg(feature = "libsql")]
+    fn wakes(&self) -> Vec<TurnRunWake> {
+        self.wakes.lock().unwrap().clone()
+    }
+}
+
+impl TurnRunWakeNotifier for RecordingTurnRunWakeNotifier {
+    fn notify_queued_run(
+        &self,
+        wake: TurnRunWake,
+    ) -> Result<(), ironclaw_turns::TurnRunWakeNotifyError> {
+        self.wakes.lock().unwrap().push(wake);
+        Ok(())
+    }
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn production_turn_coordinator_uses_configured_store_and_notifier() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let db_path = db_dir.path().join("turn-coordinator.db");
+    let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+    let notifier = Arc::new(RecordingTurnRunWakeNotifier::default());
+
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_libsql_turn_state_store(Arc::clone(&db))
+    .await
+    .unwrap()
+    .with_turn_run_wake_notifier(Arc::clone(&notifier));
+
+    let coordinator = services
+        .turn_coordinator_for_production()
+        .expect("production-ready turn wiring should build coordinator");
+    let request = submit_turn_request("thread-production-turn-coordinator", "idem-production-turn");
+    let response = coordinator.submit_turn(request.clone()).await.unwrap();
+    let SubmitTurnResponse::Accepted { run_id, .. } = response;
+
+    let reopened = LibSqlTurnStateStore::new(Arc::clone(&db));
+    let state = reopened
+        .get_run_state(ironclaw_turns::GetRunStateRequest {
+            scope: request.scope,
+            run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(state.run_id, run_id);
+    assert_eq!(notifier.wakes().len(), 1);
+    assert_eq!(notifier.wakes()[0].run_id, run_id);
+}
+
+#[test]
+fn production_wiring_validation_rejects_noop_turn_wake_notifier() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_turn_run_wake_notifier(Arc::new(NoopTurnRunWakeNotifier));
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]))
+        .expect_err("other local services remain intentionally unready");
+    assert!(
+        report.contains(
+            ProductionWiringComponent::TurnRunWakeNotifier,
+            ProductionWiringIssueKind::LocalOnlyImplementation
+        ),
+        "NoopTurnRunWakeNotifier must not satisfy production turn wake wiring: {report:?}"
+    );
+}
+
+#[test]
+fn production_wiring_validation_accepts_configured_turn_wake_notifier() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_turn_run_wake_notifier(Arc::new(RecordingTurnRunWakeNotifier::default()));
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]))
+        .expect_err("other local services remain intentionally unready");
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::TurnRunWakeNotifier,
+            ProductionWiringIssueKind::Missing
+        ),
+        "configured turn wake notifier must satisfy production presence: {report:?}"
+    );
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::TurnRunWakeNotifier,
+            ProductionWiringIssueKind::LocalOnlyImplementation
+        ),
+        "configured turn wake notifier must not be classified local-only: {report:?}"
     );
 }
 
@@ -687,6 +1324,117 @@ async fn host_runtime_services_builds_dispatcher_runtime_and_health_from_registe
             RuntimeEventKind::DispatchSucceeded,
         ]
     );
+}
+
+#[tokio::test]
+async fn host_runtime_services_wires_combined_store_for_atomic_approval_block() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenGrantAuthorizer),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    );
+
+    assert_services_use_combined_store_for_atomic_approval_block(
+        services,
+        "approval from services",
+    )
+    .await;
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn host_runtime_services_preserves_combined_store_after_root_filesystem_selection() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let db_path = db_dir
+        .path()
+        .join("root-filesystem-preserves-combined-store.db");
+    let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+    let filesystem = Arc::new(LibSqlRootFilesystem::new(db));
+    filesystem.run_migrations().await.unwrap();
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenGrantAuthorizer),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_libsql_root_filesystem(filesystem);
+
+    assert_services_use_combined_store_for_atomic_approval_block(
+        services,
+        "approval after root filesystem selection",
+    )
+    .await;
+}
+
+async fn assert_services_use_combined_store_for_atomic_approval_block<
+    F: RootFilesystem + 'static,
+    G: ResourceGovernor + 'static,
+    S: ProcessStore + 'static,
+    R: ProcessResultStore + 'static,
+>(
+    services: HostRuntimeServices<F, G, S, R>,
+    message: &str,
+) {
+    let combined_store = Arc::new(InMemoryRecordingCombinedRunStateApprovalStore::new());
+    let services = services
+        .with_trust_policy(Arc::new(local_manifest_trust_policy(
+            "script",
+            vec![EffectKind::DispatchCapability],
+        )))
+        .with_run_state_approval_store(Arc::clone(&combined_store))
+        .with_script_runtime(Arc::new(ScriptRuntime::new(
+            ScriptRuntimeConfig::for_testing(),
+            EchoScriptBackend,
+        )));
+
+    let runtime = services.host_runtime_for_local_testing();
+    let context = execution_context_without_grants();
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context.clone(),
+            script_capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": message}),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::ApprovalRequired(gate) => {
+            assert_eq!(combined_store.combined_calls(), 1);
+            assert_eq!(combined_store.separate_save_calls(), 0);
+            let run_record = RunStateStore::get(
+                combined_store.as_ref(),
+                &context.resource_scope,
+                context.invocation_id,
+            )
+            .await
+            .unwrap()
+            .expect("run record persisted");
+            assert_eq!(run_record.status, RunStatus::BlockedApproval);
+            assert_eq!(
+                run_record.approval_request_id,
+                Some(gate.approval_request_id)
+            );
+            assert!(
+                ApprovalRequestStore::get(
+                    combined_store.as_ref(),
+                    &context.resource_scope,
+                    gate.approval_request_id,
+                )
+                .await
+                .unwrap()
+                .is_some()
+            );
+        }
+        other => panic!("expected approval gate, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -2443,14 +3191,16 @@ async fn host_runtime_services_enforces_output_limit_and_reconciles_resource_usa
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let scope = sample_scope(InvocationId::new());
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
-    governor.set_limit(
-        account.clone(),
-        ResourceLimits {
-            max_concurrency_slots: Some(1),
-            max_output_bytes: Some(10_000),
-            ..ResourceLimits::default()
-        },
-    );
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_concurrency_slots: Some(1),
+                max_output_bytes: Some(10_000),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let reservation_id = ResourceReservationId::new();
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
@@ -2515,13 +3265,15 @@ async fn host_runtime_services_releases_reservation_when_dispatch_preflight_fail
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let scope = sample_scope(InvocationId::new());
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
-    governor.set_limit(
-        account.clone(),
-        ResourceLimits {
-            max_concurrency_slots: Some(1),
-            ..ResourceLimits::default()
-        },
-    );
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_concurrency_slots: Some(1),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let reservation_id = ResourceReservationId::new();
     let services = HostRuntimeServices::new(
@@ -3943,6 +4695,160 @@ type InMemoryHostRuntimeServices = HostRuntimeServices<
     InMemoryProcessResultStore,
 >;
 
+struct InMemoryRecordingCombinedRunStateApprovalStore {
+    runs: InMemoryRunStateStore,
+    approvals: InMemoryApprovalRequestStore,
+    combined_calls: AtomicUsize,
+    separate_save_calls: AtomicUsize,
+}
+
+impl InMemoryRecordingCombinedRunStateApprovalStore {
+    fn new() -> Self {
+        Self {
+            runs: InMemoryRunStateStore::new(),
+            approvals: InMemoryApprovalRequestStore::new(),
+            combined_calls: AtomicUsize::new(0),
+            separate_save_calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn combined_calls(&self) -> usize {
+        self.combined_calls.load(Ordering::SeqCst)
+    }
+
+    fn separate_save_calls(&self) -> usize {
+        self.separate_save_calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl RunStateStore for InMemoryRecordingCombinedRunStateApprovalStore {
+    async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError> {
+        self.runs.start(start).await
+    }
+
+    async fn block_approval(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        approval: ApprovalRequest,
+    ) -> Result<RunRecord, RunStateError> {
+        self.runs
+            .block_approval(scope, invocation_id, approval)
+            .await
+    }
+
+    async fn block_auth(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        error_kind: String,
+    ) -> Result<RunRecord, RunStateError> {
+        self.runs.block_auth(scope, invocation_id, error_kind).await
+    }
+
+    async fn complete(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<RunRecord, RunStateError> {
+        self.runs.complete(scope, invocation_id).await
+    }
+
+    async fn fail(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        error_kind: String,
+    ) -> Result<RunRecord, RunStateError> {
+        self.runs.fail(scope, invocation_id, error_kind).await
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<Option<RunRecord>, RunStateError> {
+        self.runs.get(scope, invocation_id).await
+    }
+
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<RunRecord>, RunStateError> {
+        self.runs.records_for_scope(scope).await
+    }
+}
+
+#[async_trait]
+impl ApprovalRequestStore for InMemoryRecordingCombinedRunStateApprovalStore {
+    async fn save_pending(
+        &self,
+        scope: ResourceScope,
+        request: ApprovalRequest,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.separate_save_calls.fetch_add(1, Ordering::SeqCst);
+        self.approvals.save_pending(scope, request).await
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<Option<ApprovalRecord>, RunStateError> {
+        self.approvals.get(scope, request_id).await
+    }
+
+    async fn approve(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.approvals.approve(scope, request_id).await
+    }
+
+    async fn deny(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.approvals.deny(scope, request_id).await
+    }
+
+    async fn discard_pending(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.approvals.discard_pending(scope, request_id).await
+    }
+
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<ApprovalRecord>, RunStateError> {
+        self.approvals.records_for_scope(scope).await
+    }
+}
+
+#[async_trait]
+impl RunStateApprovalStore for InMemoryRecordingCombinedRunStateApprovalStore {
+    async fn save_pending_and_block_approval(
+        &self,
+        scope: ResourceScope,
+        invocation_id: InvocationId,
+        approval: ApprovalRequest,
+    ) -> Result<RunRecord, RunStateError> {
+        self.combined_calls.fetch_add(1, Ordering::SeqCst);
+        self.approvals
+            .save_pending(scope.clone(), approval.clone())
+            .await?;
+        self.runs
+            .block_approval(&scope, invocation_id, approval)
+            .await
+    }
+}
+
 struct ApprovalResumeFixture {
     services: InMemoryHostRuntimeServices,
     run_state: Arc<InMemoryRunStateStore>,
@@ -4465,7 +5371,13 @@ struct FailingProcessResultStore {
 struct FailingCleanupResourceGovernor;
 
 impl ResourceGovernor for FailingCleanupResourceGovernor {
-    fn set_limit(&self, _account: ResourceAccount, _limits: ResourceLimits) {}
+    fn set_limit(
+        &self,
+        _account: ResourceAccount,
+        _limits: ResourceLimits,
+    ) -> Result<(), ResourceError> {
+        Ok(())
+    }
 
     fn reserve(
         &self,
@@ -5219,15 +6131,17 @@ fn mounted_empty_extension_root() -> LocalFilesystem {
 
 fn governor_with_default_limit(account: ResourceAccount) -> InMemoryResourceGovernor {
     let governor = InMemoryResourceGovernor::new();
-    governor.set_limit(
-        account,
-        ResourceLimits {
-            max_concurrency_slots: Some(10),
-            max_network_egress_bytes: Some(10_000),
-            max_output_bytes: Some(100_000),
-            ..ResourceLimits::default()
-        },
-    );
+    governor
+        .set_limit(
+            account,
+            ResourceLimits {
+                max_concurrency_slots: Some(10),
+                max_network_egress_bytes: Some(10_000),
+                max_output_bytes: Some(100_000),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
     governor
 }
 
@@ -5322,6 +6236,25 @@ fn http_without_body_then_guest_error_wat() -> String {
         "i32.const 1\n    i32.const 256\n    i32.const 5",
         "i32.const 0\n    i32.const 0\n    i32.const 0",
     )
+}
+
+#[cfg(feature = "libsql")]
+fn submit_turn_request(thread: &str, idempotency_key: &str) -> SubmitTurnRequest {
+    SubmitTurnRequest {
+        scope: TurnScope::new(
+            TenantId::new("tenant1").unwrap(),
+            Some(AgentId::new("agent1").unwrap()),
+            Some(ProjectId::new("project1").unwrap()),
+            ThreadId::new(thread).unwrap(),
+        ),
+        actor: TurnActor::new(UserId::new("user1").unwrap()),
+        accepted_message_ref: AcceptedMessageRef::new(format!("message-{thread}")).unwrap(),
+        source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
+        requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
+        idempotency_key: IdempotencyKey::new(idempotency_key).unwrap(),
+        received_at: Utc::now(),
+    }
 }
 
 const SCRIPT_MANIFEST: &str = r#"

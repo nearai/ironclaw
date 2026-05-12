@@ -24,8 +24,8 @@ mod tests {
     use std::time::Duration;
 
     use ironclaw::channels::IncomingMessage;
-    use ironclaw::llm::Role;
     use ironclaw::workspace::Workspace;
+    use ironclaw_llm::Role;
 
     use crate::support::test_rig::TestRigBuilder;
     use crate::support::trace_llm::{LlmTrace, TraceResponse, TraceStep};
@@ -82,7 +82,7 @@ mod tests {
     ///
     /// The system prompt is the first message with role=System in the first
     /// LLM request for a given turn.
-    fn extract_system_prompt(requests: &[Vec<ironclaw::llm::ChatMessage>]) -> Option<String> {
+    fn extract_system_prompt(requests: &[Vec<ironclaw_llm::ChatMessage>]) -> Option<String> {
         requests.last().and_then(|msgs| {
             msgs.iter()
                 .find(|m| matches!(m.role, Role::System))

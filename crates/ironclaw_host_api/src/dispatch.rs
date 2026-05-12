@@ -149,6 +149,8 @@ pub enum DispatchError {
     Script { kind: RuntimeDispatchErrorKind },
     #[error("WASM dispatch failed: {kind}")]
     Wasm { kind: RuntimeDispatchErrorKind },
+    #[error("first-party dispatch failed: {kind}")]
+    FirstParty { kind: RuntimeDispatchErrorKind },
 }
 
 /// Interface for already-authorized runtime dispatch.

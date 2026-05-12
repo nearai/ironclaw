@@ -122,6 +122,15 @@ client reconnects with last_event_id
 -> transport resumes live tail
 ```
 
+`EventStreamManager` is the transport-agnostic facade over domain projection
+services. It routes scoped runtime and audit replay requests through their
+owning projection services and preserves their domain-specific DTOs/cursors;
+it must not flatten runtime, audit, transcript, or future memory facts into a
+single generic event payload. Resume helpers return domain-specific updates
+when a cursor is valid, or an explicit snapshot/rebase response when retention
+has made replay impossible. A cursor minted under a different scope remains an
+authority failure and must not be silently converted into a snapshot.
+
 Rules:
 
 - event ids are scoped; a user cannot replay another user's stream
@@ -252,3 +261,13 @@ Durable backends must match `InMemoryDurableEventLog` cursor behavior:
 ### Projection boundary
 
 Product-facing timeline, status, approval, auth, tool-call, process, resource, and memory views should be projections over durable logs, not a second source of truth. Projection services must tolerate replay gaps with explicit snapshot/rebase behavior and must not mutate control-plane state while deriving read models.
+
+### Outbound egress and subscription state
+
+`ironclaw_outbound` owns the metadata-only state needed around projection delivery:
+
+- per-thread notification policy for explicit external fanout and progress opt-in;
+- durable projection subscription cursor checkpoints scoped to actor, thread, and `ProjectionScope`;
+- outbound delivery attempt/status rows for support-visible retry/dead-letter workflows.
+
+This state is not canonical transcript or projection content. Rows store refs, cursors, status enums, timestamps, and sanitized failure kinds only. Product adapters still revalidate reply-target binding authorization before every external push, and delivery failure must not mutate canonical transcript/projection state or mark turns/runs failed.

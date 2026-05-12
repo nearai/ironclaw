@@ -3,12 +3,16 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use tokio::sync::Mutex as AsyncMutex;
+
 use async_trait::async_trait;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
     AcceptedMessageRef, IdempotencyKey, ReplyTargetBindingRef, SourceBindingRef,
     SubmitTurnResponse, TurnActor, TurnScope,
 };
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
@@ -21,12 +25,87 @@ use crate::{
     ThreadMessageRecord, ValidateReplyTargetRequest,
 };
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct InMemoryConversationServices {
     state: Arc<Mutex<InMemoryState>>,
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    state_repository: Option<Arc<dyn crate::state_store::ConversationStateRepository>>,
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    mutation_lock: Arc<AsyncMutex<()>>,
+}
+
+impl Default for InMemoryConversationServices {
+    fn default() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(InMemoryState::default())),
+            #[cfg(any(feature = "libsql", feature = "postgres"))]
+            state_repository: None,
+            #[cfg(any(feature = "libsql", feature = "postgres"))]
+            mutation_lock: Arc::new(AsyncMutex::new(())),
+        }
+    }
 }
 
 impl InMemoryConversationServices {
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    pub(crate) async fn with_state_repository(
+        state_repository: Arc<dyn crate::state_store::ConversationStateRepository>,
+    ) -> Result<Self, InboundTurnError> {
+        let persisted = state_repository.load_state().await?;
+        let mut state = persisted.state;
+        state.persistence_revision = persisted.revision;
+        Ok(Self {
+            state: Arc::new(Mutex::new(state)),
+            state_repository: Some(state_repository),
+            mutation_lock: Arc::new(AsyncMutex::new(())),
+        })
+    }
+
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    async fn refresh_state_from_repository(&self) -> Result<(), InboundTurnError> {
+        let Some(state_repository) = &self.state_repository else {
+            return Ok(());
+        };
+        let persisted = state_repository.load_state().await?;
+        let mut state = persisted.state;
+        state.persistence_revision = persisted.revision;
+        *self.lock_state()? = state;
+        Ok(())
+    }
+
+    async fn persist_state(
+        &self,
+        old_state: InMemoryState,
+        new_state: InMemoryState,
+    ) -> Result<(), InboundTurnError> {
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        {
+            let mut new_state = new_state;
+            let Some(state_repository) = &self.state_repository else {
+                return Ok(());
+            };
+            match state_repository
+                .save_state(new_state.persistence_revision, &new_state)
+                .await
+            {
+                Ok(revision) => {
+                    new_state.persistence_revision = revision;
+                    *self.lock_state()? = new_state;
+                    Ok(())
+                }
+                Err(error) => {
+                    *self.lock_state()? = old_state;
+                    Err(error)
+                }
+            }
+        }
+        #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+        {
+            let _ = old_state;
+            let _ = new_state;
+            Ok(())
+        }
+    }
     pub async fn pair_external_actor(
         &self,
         tenant_id: TenantId,
@@ -35,7 +114,32 @@ impl InMemoryConversationServices {
         external_actor_ref: ExternalActorRef,
         user_id: UserId,
     ) {
-        if let Ok(mut state) = self.state.lock() {
+        let _ = self
+            .try_pair_external_actor(
+                tenant_id,
+                adapter_kind,
+                adapter_installation_id,
+                external_actor_ref,
+                user_id,
+            )
+            .await;
+    }
+
+    pub async fn try_pair_external_actor(
+        &self,
+        tenant_id: TenantId,
+        adapter_kind: AdapterKind,
+        adapter_installation_id: AdapterInstallationId,
+        external_actor_ref: ExternalActorRef,
+        user_id: UserId,
+    ) -> Result<(), InboundTurnError> {
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        let _mutation = self.mutation_lock.lock().await;
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        self.refresh_state_from_repository().await?;
+        let old_state = self.lock_state()?.clone();
+        let snapshot = {
+            let mut state = self.lock_state()?;
             state.pairings.insert(
                 ActorKey::new(
                     &tenant_id,
@@ -45,7 +149,9 @@ impl InMemoryConversationServices {
                 ),
                 user_id,
             );
-        }
+            state.clone()
+        };
+        self.persist_state(old_state, snapshot).await
     }
 
     pub async fn accepted_messages(&self) -> Vec<ThreadMessageRecord> {
@@ -62,14 +168,39 @@ impl InMemoryConversationServices {
         adapter_installation_id: &AdapterInstallationId,
         external_actor_ref: &ExternalActorRef,
     ) {
-        if let Ok(mut state) = self.state.lock() {
+        let _ = self
+            .try_unpair_external_actor(
+                tenant_id,
+                adapter_kind,
+                adapter_installation_id,
+                external_actor_ref,
+            )
+            .await;
+    }
+
+    pub async fn try_unpair_external_actor(
+        &self,
+        tenant_id: &TenantId,
+        adapter_kind: &AdapterKind,
+        adapter_installation_id: &AdapterInstallationId,
+        external_actor_ref: &ExternalActorRef,
+    ) -> Result<(), InboundTurnError> {
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        let _mutation = self.mutation_lock.lock().await;
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        self.refresh_state_from_repository().await?;
+        let old_state = self.lock_state()?.clone();
+        let snapshot = {
+            let mut state = self.lock_state()?;
             state.pairings.remove(&ActorKey::new(
                 tenant_id,
                 adapter_kind,
                 adapter_installation_id,
                 external_actor_ref,
             ));
-        }
+            state.clone()
+        };
+        self.persist_state(old_state, snapshot).await
     }
 
     pub async fn add_thread_participant(
@@ -78,13 +209,22 @@ impl InMemoryConversationServices {
         thread_id: &ThreadId,
         user_id: UserId,
     ) -> Result<(), InboundTurnError> {
-        let mut state = self.lock_state()?;
-        let Some(thread) = state.threads.get_mut(&ThreadKey::new(tenant_id, thread_id)) else {
-            return Err(InboundTurnError::ThreadNotFound {
-                thread_id: thread_id.to_string(),
-            });
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        let _mutation = self.mutation_lock.lock().await;
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        self.refresh_state_from_repository().await?;
+        let old_state = self.lock_state()?.clone();
+        let snapshot = {
+            let mut state = self.lock_state()?;
+            let Some(thread) = state.threads.get_mut(&ThreadKey::new(tenant_id, thread_id)) else {
+                return Err(InboundTurnError::ThreadNotFound {
+                    thread_id: thread_id.to_string(),
+                });
+            };
+            thread.participants.insert(user_id);
+            state.clone()
         };
-        thread.participants.insert(user_id);
+        self.persist_state(old_state, snapshot).await?;
         Ok(())
     }
 }
@@ -95,76 +235,107 @@ impl ConversationBindingService for InMemoryConversationServices {
         &self,
         request: ResolveConversationRequest,
     ) -> Result<ConversationBindingResolution, InboundTurnError> {
-        let mut state = self.lock_state()?;
-        let actor_user_id = state.resolve_actor(
-            &request.tenant_id,
-            &request.adapter_kind,
-            &request.adapter_installation_id,
-            &request.external_actor_ref,
-        )?;
-        let binding_key = BindingKey::from_request(&request);
-        state.record_external_event_route(
-            &request.tenant_id,
-            &request.adapter_kind,
-            &request.adapter_installation_id,
-            &request.external_event_id,
-            &request.external_conversation_ref.identity(),
-            &actor_user_id,
-        )?;
-        let route_actor_key = ActorKey::new(
-            &request.tenant_id,
-            &request.adapter_kind,
-            &request.adapter_installation_id,
-            &request.external_actor_ref,
-        );
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        let _mutation = self.mutation_lock.lock().await;
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        self.refresh_state_from_repository().await?;
+        let old_state = self.lock_state()?.clone();
+        let (resolution, snapshot) = {
+            let mut state = self.lock_state()?;
+            let actor_user_id = state.resolve_actor(
+                &request.tenant_id,
+                &request.adapter_kind,
+                &request.adapter_installation_id,
+                &request.external_actor_ref,
+            )?;
+            let binding_key = BindingKey::from_request(&request);
+            let external_conversation_identity = request.external_conversation_ref.identity();
+            state.ensure_external_event_route(
+                &request.tenant_id,
+                &request.adapter_kind,
+                &request.adapter_installation_id,
+                &request.external_event_id,
+                &external_conversation_identity,
+                &actor_user_id,
+            )?;
+            let route_actor_key = ActorKey::new(
+                &request.tenant_id,
+                &request.adapter_kind,
+                &request.adapter_installation_id,
+                &request.external_actor_ref,
+            );
 
-        if state.bindings.contains_key(&binding_key) {
-            let binding = state
-                .bindings
-                .get(&binding_key)
-                .cloned()
-                .ok_or(InboundTurnError::StatePoisoned)?;
-            state.ensure_participant(&request.tenant_id, &actor_user_id, &binding.thread_id)?;
-            if !binding.route_access.allows(&route_actor_key) {
-                return Err(InboundTurnError::AccessDenied {
-                    actor_id: actor_user_id.to_string(),
-                    thread_id: binding.thread_id.to_string(),
-                });
+            if state.bindings.contains_key(&binding_key) {
+                let binding = state
+                    .bindings
+                    .get(&binding_key)
+                    .cloned()
+                    .ok_or(InboundTurnError::StatePoisoned)?;
+                state.ensure_participant(&request.tenant_id, &actor_user_id, &binding.thread_id)?;
+                if !binding
+                    .route_access
+                    .allows(&route_actor_key, request.route_kind)
+                {
+                    return Err(InboundTurnError::AccessDenied {
+                        actor_id: actor_user_id.to_string(),
+                        thread_id: binding.thread_id.to_string(),
+                    });
+                }
+                if request.route_kind == ConversationRouteKind::Shared {
+                    state.widen_binding_route_access(&binding_key)?;
+                }
+                state.record_external_event_route(
+                    &request.tenant_id,
+                    &request.adapter_kind,
+                    &request.adapter_installation_id,
+                    &request.external_event_id,
+                    &external_conversation_identity,
+                    &actor_user_id,
+                )?;
+                let binding = state
+                    .bindings
+                    .get(&binding_key)
+                    .cloned()
+                    .ok_or(InboundTurnError::StatePoisoned)?;
+                let resolution = binding.resolution(actor_user_id, request.tenant_id);
+                (resolution, state.clone())
+            } else {
+                let thread_id = ThreadId::new(Uuid::new_v4().to_string()).map_err(|error| {
+                    InboundTurnError::InvalidCanonicalRef {
+                        reason: error.to_string(),
+                    }
+                })?;
+                let thread = ThreadRecord {
+                    agent_id: None,
+                    project_id: None,
+                    participants: HashSet::from([actor_user_id.clone()]),
+                };
+                state
+                    .threads
+                    .insert(ThreadKey::new(&request.tenant_id, &thread_id), thread);
+                let binding = BindingRecord::new(
+                    request.tenant_id.clone(),
+                    request.adapter_kind.clone(),
+                    request.adapter_installation_id.clone(),
+                    request.external_conversation_ref,
+                    ReplyRouteAccess::new(route_actor_key, request.route_kind),
+                    BindingTarget::new(thread_id, None, None),
+                )?;
+                let resolution =
+                    binding.resolution(actor_user_id.clone(), request.tenant_id.clone());
+                state.store_binding(binding_key, binding);
+                state.record_external_event_route(
+                    &request.tenant_id,
+                    &request.adapter_kind,
+                    &request.adapter_installation_id,
+                    &request.external_event_id,
+                    &external_conversation_identity,
+                    &actor_user_id,
+                )?;
+                (resolution, state.clone())
             }
-            if request.route_kind == ConversationRouteKind::Shared {
-                state.widen_binding_route_access(&binding_key)?;
-            }
-            let binding = state
-                .bindings
-                .get(&binding_key)
-                .cloned()
-                .ok_or(InboundTurnError::StatePoisoned)?;
-            return Ok(binding.resolution(actor_user_id, request.tenant_id));
-        }
-
-        let thread_id = ThreadId::new(Uuid::new_v4().to_string()).map_err(|error| {
-            InboundTurnError::InvalidCanonicalRef {
-                reason: error.to_string(),
-            }
-        })?;
-        let thread = ThreadRecord {
-            agent_id: None,
-            project_id: None,
-            participants: HashSet::from([actor_user_id.clone()]),
         };
-        state
-            .threads
-            .insert(ThreadKey::new(&request.tenant_id, &thread_id), thread);
-        let binding = BindingRecord::new(
-            request.tenant_id.clone(),
-            request.adapter_kind,
-            request.adapter_installation_id,
-            request.external_conversation_ref,
-            ReplyRouteAccess::new(route_actor_key, request.route_kind),
-            BindingTarget::new(thread_id, None, None),
-        )?;
-        let resolution = binding.resolution(actor_user_id, request.tenant_id.clone());
-        state.store_binding(binding_key, binding);
+        self.persist_state(old_state, snapshot).await?;
         Ok(resolution)
     }
 
@@ -172,85 +343,100 @@ impl ConversationBindingService for InMemoryConversationServices {
         &self,
         request: LinkConversationRequest,
     ) -> Result<LinkedConversationBinding, InboundTurnError> {
-        let mut state = self.lock_state()?;
-        let actor_user_id = state.resolve_actor(
-            &request.tenant_id,
-            &request.adapter_kind,
-            &request.adapter_installation_id,
-            &request.external_actor_ref,
-        )?;
-        let target_thread = state.thread_for_participant(
-            &request.tenant_id,
-            &actor_user_id,
-            &request.target_thread_id,
-        )?;
-        let binding_key = BindingKey {
-            tenant_id: request.tenant_id.clone(),
-            adapter_kind: request.adapter_kind.clone(),
-            adapter_installation_id: request.adapter_installation_id.clone(),
-            external_conversation_identity: request.external_conversation_ref.identity(),
-        };
-        if state.bindings.contains_key(&binding_key) {
-            let existing = state
-                .bindings
-                .get(&binding_key)
-                .cloned()
-                .ok_or(InboundTurnError::StatePoisoned)?;
-            if existing.thread_id == request.target_thread_id {
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        let _mutation = self.mutation_lock.lock().await;
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        self.refresh_state_from_repository().await?;
+        let old_state = self.lock_state()?.clone();
+        let (linked, snapshot) = {
+            let mut state = self.lock_state()?;
+            let actor_user_id = state.resolve_actor(
+                &request.tenant_id,
+                &request.adapter_kind,
+                &request.adapter_installation_id,
+                &request.external_actor_ref,
+            )?;
+            let target_thread = state.thread_for_participant(
+                &request.tenant_id,
+                &actor_user_id,
+                &request.target_thread_id,
+            )?;
+            let binding_key = BindingKey {
+                tenant_id: request.tenant_id.clone(),
+                adapter_kind: request.adapter_kind.clone(),
+                adapter_installation_id: request.adapter_installation_id.clone(),
+                external_conversation_identity: request.external_conversation_ref.identity(),
+            };
+            if state.bindings.contains_key(&binding_key) {
+                let existing = state
+                    .bindings
+                    .get(&binding_key)
+                    .cloned()
+                    .ok_or(InboundTurnError::StatePoisoned)?;
+                if existing.thread_id == request.target_thread_id {
+                    let route_actor_key = ActorKey::new(
+                        &request.tenant_id,
+                        &request.adapter_kind,
+                        &request.adapter_installation_id,
+                        &request.external_actor_ref,
+                    );
+                    if !existing
+                        .route_access
+                        .allows(&route_actor_key, request.route_kind)
+                    {
+                        return Err(InboundTurnError::AccessDenied {
+                            actor_id: actor_user_id.to_string(),
+                            thread_id: existing.thread_id.to_string(),
+                        });
+                    }
+                    if request.route_kind == ConversationRouteKind::Shared {
+                        state.widen_binding_route_access(&binding_key)?;
+                    }
+                    let existing = state
+                        .bindings
+                        .get(&binding_key)
+                        .cloned()
+                        .ok_or(InboundTurnError::StatePoisoned)?;
+                    let linked = LinkedConversationBinding {
+                        thread_id: existing.thread_id,
+                        source_binding_ref: existing.source_binding_ref,
+                        reply_target_binding_ref: existing.reply_target_binding_ref,
+                    };
+                    (linked, state.clone())
+                } else {
+                    return Err(InboundTurnError::BindingConflict {
+                        thread_id: existing.thread_id.to_string(),
+                    });
+                }
+            } else {
                 let route_actor_key = ActorKey::new(
                     &request.tenant_id,
                     &request.adapter_kind,
                     &request.adapter_installation_id,
                     &request.external_actor_ref,
                 );
-                if !existing.route_access.allows(&route_actor_key) {
-                    return Err(InboundTurnError::AccessDenied {
-                        actor_id: actor_user_id.to_string(),
-                        thread_id: existing.thread_id.to_string(),
-                    });
-                }
-                if request.route_kind == ConversationRouteKind::Shared {
-                    state.widen_binding_route_access(&binding_key)?;
-                }
-                let existing = state
-                    .bindings
-                    .get(&binding_key)
-                    .cloned()
-                    .ok_or(InboundTurnError::StatePoisoned)?;
-                return Ok(LinkedConversationBinding {
-                    thread_id: existing.thread_id,
-                    source_binding_ref: existing.source_binding_ref,
-                    reply_target_binding_ref: existing.reply_target_binding_ref,
-                });
+                let binding = BindingRecord::new(
+                    request.tenant_id,
+                    request.adapter_kind,
+                    request.adapter_installation_id,
+                    request.external_conversation_ref,
+                    ReplyRouteAccess::new(route_actor_key, request.route_kind),
+                    BindingTarget::new(
+                        request.target_thread_id,
+                        target_thread.agent_id,
+                        target_thread.project_id,
+                    ),
+                )?;
+                let linked = LinkedConversationBinding {
+                    thread_id: binding.thread_id.clone(),
+                    source_binding_ref: binding.source_binding_ref.clone(),
+                    reply_target_binding_ref: binding.reply_target_binding_ref.clone(),
+                };
+                state.store_binding(binding_key, binding);
+                (linked, state.clone())
             }
-            return Err(InboundTurnError::BindingConflict {
-                thread_id: existing.thread_id.to_string(),
-            });
-        }
-        let route_actor_key = ActorKey::new(
-            &request.tenant_id,
-            &request.adapter_kind,
-            &request.adapter_installation_id,
-            &request.external_actor_ref,
-        );
-        let binding = BindingRecord::new(
-            request.tenant_id,
-            request.adapter_kind,
-            request.adapter_installation_id,
-            request.external_conversation_ref,
-            ReplyRouteAccess::new(route_actor_key, request.route_kind),
-            BindingTarget::new(
-                request.target_thread_id,
-                target_thread.agent_id,
-                target_thread.project_id,
-            ),
-        )?;
-        let linked = LinkedConversationBinding {
-            thread_id: binding.thread_id.clone(),
-            source_binding_ref: binding.source_binding_ref.clone(),
-            reply_target_binding_ref: binding.reply_target_binding_ref.clone(),
         };
-        state.store_binding(binding_key, binding);
+        self.persist_state(old_state, snapshot).await?;
         Ok(linked)
     }
 
@@ -258,6 +444,10 @@ impl ConversationBindingService for InMemoryConversationServices {
         &self,
         request: ValidateReplyTargetRequest,
     ) -> Result<ReplyTargetBinding, InboundTurnError> {
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        let _mutation = self.mutation_lock.lock().await;
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        self.refresh_state_from_repository().await?;
         let state = self.lock_state()?;
         let Some(binding) = state
             .reply_targets
@@ -278,7 +468,9 @@ impl ConversationBindingService for InMemoryConversationServices {
             || binding.thread_id != request.current_thread_id
             || binding.adapter_kind != request.adapter_kind
             || binding.adapter_installation_id != request.adapter_installation_id
-            || !binding.route_access.allows(&route_actor_key)
+            || !binding
+                .route_access
+                .allows(&route_actor_key, ConversationRouteKind::Shared)
         {
             return Err(InboundTurnError::AccessDenied {
                 actor_id: request.actor_user_id.to_string(),
@@ -315,124 +507,144 @@ impl SessionThreadService for InMemoryConversationServices {
         &self,
         request: AcceptInboundMessageRequest,
     ) -> Result<AcceptedInboundMessage, InboundTurnError> {
-        let mut state = self.lock_state()?;
-        let paired_user_id = state.resolve_actor(
-            &request.tenant_id,
-            &request.adapter_kind,
-            &request.adapter_installation_id,
-            &request.external_actor_ref,
-        )?;
-        if paired_user_id != request.actor.user_id {
-            return Err(InboundTurnError::AccessDenied {
-                actor_id: request.actor.user_id.to_string(),
-                thread_id: request.thread_id.to_string(),
-            });
-        }
-        state.ensure_participant(&request.tenant_id, &paired_user_id, &request.thread_id)?;
-        state.ensure_binding_refs_match(
-            &request.tenant_id,
-            &request.thread_id,
-            request.source_binding_ref.as_str(),
-            request.reply_target_binding_ref.as_str(),
-            &request.actor.user_id,
-            &ActorKey::new(
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        let _mutation = self.mutation_lock.lock().await;
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        self.refresh_state_from_repository().await?;
+        let old_state = self.lock_state()?.clone();
+        let (accepted, snapshot) = {
+            let mut state = self.lock_state()?;
+            let paired_user_id = state.resolve_actor(
                 &request.tenant_id,
                 &request.adapter_kind,
                 &request.adapter_installation_id,
                 &request.external_actor_ref,
-            ),
-        )?;
-        let source_binding = state
-            .source_bindings
-            .get(request.source_binding_ref.as_str())
-            .cloned()
-            .ok_or_else(|| InboundTurnError::ThreadNotFound {
-                thread_id: request.source_binding_ref.as_str().to_string(),
+            )?;
+            if paired_user_id != request.actor.user_id {
+                return Err(InboundTurnError::AccessDenied {
+                    actor_id: request.actor.user_id.to_string(),
+                    thread_id: request.thread_id.to_string(),
+                });
+            }
+            state.ensure_participant(&request.tenant_id, &paired_user_id, &request.thread_id)?;
+            state.ensure_binding_refs_match(BindingRefValidation {
+                tenant_id: &request.tenant_id,
+                thread_id: &request.thread_id,
+                source_binding_ref: request.source_binding_ref.as_str(),
+                reply_target_binding_ref: request.reply_target_binding_ref.as_str(),
+                actor_user_id: &request.actor.user_id,
+                route_actor_key: &ActorKey::new(
+                    &request.tenant_id,
+                    &request.adapter_kind,
+                    &request.adapter_installation_id,
+                    &request.external_actor_ref,
+                ),
+                route_kind: request.route_kind,
             })?;
-        let external_conversation_identity = request.external_conversation_ref.identity();
-        if source_binding.external_conversation_identity != external_conversation_identity {
-            return Err(InboundTurnError::AccessDenied {
-                actor_id: request.actor.user_id.to_string(),
-                thread_id: request.thread_id.to_string(),
-            });
-        }
-        state.record_external_event_route(
-            &request.tenant_id,
-            &source_binding.adapter_kind,
-            &source_binding.adapter_installation_id,
-            &request.external_event_id,
-            &external_conversation_identity,
-            &request.actor.user_id,
-        )?;
-        let replay_key = AcceptedMessageReplayKey::new(
-            &request.tenant_id,
-            &request.adapter_kind,
-            &request.adapter_installation_id,
-            &request.external_actor_ref,
-            &request.external_event_id,
-        );
-        let idempotency_key = MessageIdempotencyKey {
-            tenant_id: request.tenant_id.clone(),
-            source_binding_ref: request.source_binding_ref.as_str().to_string(),
-            external_event_id: request.external_event_id.clone(),
+            let source_binding = state
+                .source_bindings
+                .get(request.source_binding_ref.as_str())
+                .cloned()
+                .ok_or_else(|| InboundTurnError::ThreadNotFound {
+                    thread_id: request.source_binding_ref.as_str().to_string(),
+                })?;
+            let external_conversation_identity = request.external_conversation_ref.identity();
+            if source_binding.external_conversation_identity != external_conversation_identity {
+                return Err(InboundTurnError::AccessDenied {
+                    actor_id: request.actor.user_id.to_string(),
+                    thread_id: request.thread_id.to_string(),
+                });
+            }
+            state.ensure_external_event_route(
+                &request.tenant_id,
+                &source_binding.adapter_kind,
+                &source_binding.adapter_installation_id,
+                &request.external_event_id,
+                &external_conversation_identity,
+                &request.actor.user_id,
+            )?;
+            let replay_key = AcceptedMessageReplayKey::new(
+                &request.tenant_id,
+                &request.adapter_kind,
+                &request.adapter_installation_id,
+                &request.external_actor_ref,
+                &request.external_event_id,
+            );
+            let idempotency_key = MessageIdempotencyKey {
+                tenant_id: request.tenant_id.clone(),
+                source_binding_ref: request.source_binding_ref.as_str().to_string(),
+                external_event_id: request.external_event_id.clone(),
+            };
+            if let Some(existing) = state.message_idempotency.get(&idempotency_key) {
+                let mut duplicate = existing.clone();
+                duplicate.idempotency = MessageIdempotencyStatus::Duplicate;
+                (duplicate, state.clone())
+            } else {
+                let message_ref = AcceptedMessageRef::new(format!("message:{}", Uuid::new_v4()))
+                    .map_err(|reason| InboundTurnError::InvalidCanonicalRef { reason })?;
+                let reply_target_record = state
+                    .reply_targets
+                    .get(request.reply_target_binding_ref.as_str())
+                    .cloned()
+                    .ok_or_else(|| InboundTurnError::ThreadNotFound {
+                        thread_id: request.reply_target_binding_ref.as_str().to_string(),
+                    })?;
+                state.record_external_event_route(
+                    &request.tenant_id,
+                    &source_binding.adapter_kind,
+                    &source_binding.adapter_installation_id,
+                    &request.external_event_id,
+                    &external_conversation_identity,
+                    &request.actor.user_id,
+                )?;
+                let message_reply_target_binding_ref =
+                    ReplyTargetBindingRef::new(format!("reply:{}", Uuid::new_v4()))
+                        .map_err(|reason| InboundTurnError::InvalidCanonicalRef { reason })?;
+                state.reply_targets.insert(
+                    message_reply_target_binding_ref.as_str().to_string(),
+                    reply_target_record.with_reply_target(
+                        message_reply_target_binding_ref.clone(),
+                        request.external_conversation_ref.clone(),
+                    ),
+                );
+                let accepted = AcceptedInboundMessage {
+                    tenant_id: request.tenant_id,
+                    thread_id: request.thread_id,
+                    actor: request.actor.clone(),
+                    message_ref,
+                    source_binding_ref: request.source_binding_ref,
+                    reply_target_binding_ref: message_reply_target_binding_ref,
+                    received_at: request.received_at,
+                    requested_run_profile: request.requested_run_profile,
+                    idempotency: MessageIdempotencyStatus::Inserted,
+                };
+                state
+                    .message_idempotency
+                    .insert(idempotency_key, accepted.clone());
+                state.message_replays.insert(
+                    replay_key,
+                    StoredAcceptedMessageReplay {
+                        external_conversation_identity,
+                        replay: AcceptedInboundMessageReplay {
+                            resolution: source_binding.resolution(
+                                accepted.actor.user_id.clone(),
+                                accepted.tenant_id.clone(),
+                            ),
+                            accepted_message: accepted.clone(),
+                        },
+                    },
+                );
+                state.messages.push(ThreadMessageRecord {
+                    accepted: accepted.clone(),
+                    actor: request.actor,
+                    external_event_id: request.external_event_id,
+                    content_ref: request.content_ref,
+                    received_at: request.received_at,
+                });
+                (accepted, state.clone())
+            }
         };
-        if let Some(existing) = state.message_idempotency.get(&idempotency_key) {
-            let mut duplicate = existing.clone();
-            duplicate.idempotency = MessageIdempotencyStatus::Duplicate;
-            return Ok(duplicate);
-        }
-
-        let message_ref = AcceptedMessageRef::new(format!("message:{}", Uuid::new_v4()))
-            .map_err(|reason| InboundTurnError::InvalidCanonicalRef { reason })?;
-        let reply_target_record = state
-            .reply_targets
-            .get(request.reply_target_binding_ref.as_str())
-            .cloned()
-            .ok_or_else(|| InboundTurnError::ThreadNotFound {
-                thread_id: request.reply_target_binding_ref.as_str().to_string(),
-            })?;
-        let message_reply_target_binding_ref =
-            ReplyTargetBindingRef::new(format!("reply:{}", Uuid::new_v4()))
-                .map_err(|reason| InboundTurnError::InvalidCanonicalRef { reason })?;
-        state.reply_targets.insert(
-            message_reply_target_binding_ref.as_str().to_string(),
-            reply_target_record.with_reply_target(
-                message_reply_target_binding_ref.clone(),
-                request.external_conversation_ref.clone(),
-            ),
-        );
-        let accepted = AcceptedInboundMessage {
-            tenant_id: request.tenant_id,
-            thread_id: request.thread_id,
-            actor: request.actor.clone(),
-            message_ref,
-            source_binding_ref: request.source_binding_ref,
-            reply_target_binding_ref: message_reply_target_binding_ref,
-            received_at: request.received_at,
-            requested_run_profile: request.requested_run_profile,
-            idempotency: MessageIdempotencyStatus::Inserted,
-        };
-        state
-            .message_idempotency
-            .insert(idempotency_key, accepted.clone());
-        state.message_replays.insert(
-            replay_key,
-            StoredAcceptedMessageReplay {
-                external_conversation_identity,
-                replay: AcceptedInboundMessageReplay {
-                    resolution: source_binding
-                        .resolution(accepted.actor.user_id.clone(), accepted.tenant_id.clone()),
-                    accepted_message: accepted.clone(),
-                },
-            },
-        );
-        state.messages.push(ThreadMessageRecord {
-            accepted: accepted.clone(),
-            actor: request.actor,
-            external_event_id: request.external_event_id,
-            content_ref: request.content_ref,
-            received_at: request.received_at,
-        });
+        self.persist_state(old_state, snapshot).await?;
         Ok(accepted)
     }
 
@@ -440,6 +652,10 @@ impl SessionThreadService for InMemoryConversationServices {
         &self,
         lookup: AcceptedInboundMessageLookup,
     ) -> Result<Option<AcceptedInboundMessageReplay>, InboundTurnError> {
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        let _mutation = self.mutation_lock.lock().await;
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        self.refresh_state_from_repository().await?;
         let state = self.lock_state()?;
         let key = AcceptedMessageReplayKey::new(
             &lookup.tenant_id,
@@ -466,6 +682,10 @@ impl SessionThreadService for InMemoryConversationServices {
         &self,
         message_ref: &AcceptedMessageRef,
     ) -> Result<Option<SubmitTurnResponse>, InboundTurnError> {
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        let _mutation = self.mutation_lock.lock().await;
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        self.refresh_state_from_repository().await?;
         let state = self.lock_state()?;
         Ok(state.submitted_message_responses.get(message_ref).cloned())
     }
@@ -474,26 +694,45 @@ impl SessionThreadService for InMemoryConversationServices {
         &self,
         message_ref: &AcceptedMessageRef,
     ) -> Result<IdempotencyKey, InboundTurnError> {
-        let mut state = self.lock_state()?;
-        if let Some(key) = state.submission_keys.get(message_ref).cloned() {
-            return Ok(key);
-        }
-        let key = IdempotencyKey::new(message_ref.as_str().to_string())
-            .map_err(|reason| InboundTurnError::InvalidCanonicalRef { reason })?;
-        state
-            .submission_keys
-            .insert(message_ref.clone(), key.clone());
-        Ok(key)
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        let _mutation = self.mutation_lock.lock().await;
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        self.refresh_state_from_repository().await?;
+        let old_state = self.lock_state()?.clone();
+        let maybe_key_and_snapshot = {
+            let mut state = self.lock_state()?;
+            if let Some(key) = state.submission_keys.get(message_ref).cloned() {
+                return Ok(key);
+            }
+            let key = IdempotencyKey::new(message_ref.as_str().to_string())
+                .map_err(|reason| InboundTurnError::InvalidCanonicalRef { reason })?;
+            state
+                .submission_keys
+                .insert(message_ref.clone(), key.clone());
+            (key, state.clone())
+        };
+        self.persist_state(old_state, maybe_key_and_snapshot.1)
+            .await?;
+        Ok(maybe_key_and_snapshot.0)
     }
 
     async fn rotate_inbound_message_turn_submission_key(
         &self,
         message_ref: &AcceptedMessageRef,
     ) -> Result<(), InboundTurnError> {
-        let mut state = self.lock_state()?;
-        state
-            .submission_keys
-            .insert(message_ref.clone(), state_generated_submission_key()?);
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        let _mutation = self.mutation_lock.lock().await;
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        self.refresh_state_from_repository().await?;
+        let old_state = self.lock_state()?.clone();
+        let snapshot = {
+            let mut state = self.lock_state()?;
+            state
+                .submission_keys
+                .insert(message_ref.clone(), state_generated_submission_key()?);
+            state.clone()
+        };
+        self.persist_state(old_state, snapshot).await?;
         Ok(())
     }
 
@@ -502,10 +741,19 @@ impl SessionThreadService for InMemoryConversationServices {
         message_ref: &AcceptedMessageRef,
         response: SubmitTurnResponse,
     ) -> Result<(), InboundTurnError> {
-        let mut state = self.lock_state()?;
-        state
-            .submitted_message_responses
-            .insert(message_ref.clone(), response);
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        let _mutation = self.mutation_lock.lock().await;
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        self.refresh_state_from_repository().await?;
+        let old_state = self.lock_state()?.clone();
+        let snapshot = {
+            let mut state = self.lock_state()?;
+            state
+                .submitted_message_responses
+                .insert(message_ref.clone(), response);
+            state.clone()
+        };
+        self.persist_state(old_state, snapshot).await?;
         Ok(())
     }
 }
@@ -523,19 +771,22 @@ impl InMemoryConversationServices {
     }
 }
 
-#[derive(Default)]
-struct InMemoryState {
-    pairings: HashMap<ActorKey, UserId>,
-    bindings: HashMap<BindingKey, BindingRecord>,
-    source_bindings: HashMap<String, BindingRecord>,
-    reply_targets: HashMap<String, ReplyTargetRecord>,
-    threads: HashMap<ThreadKey, ThreadRecord>,
-    external_event_routes: HashMap<ExternalEventRouteKey, ExternalConversationIdentity>,
-    message_idempotency: HashMap<MessageIdempotencyKey, AcceptedInboundMessage>,
-    message_replays: HashMap<AcceptedMessageReplayKey, StoredAcceptedMessageReplay>,
-    submission_keys: HashMap<AcceptedMessageRef, IdempotencyKey>,
-    submitted_message_responses: HashMap<AcceptedMessageRef, SubmitTurnResponse>,
-    messages: Vec<ThreadMessageRecord>,
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct InMemoryState {
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    #[serde(default, skip)]
+    pub(crate) persistence_revision: i64,
+    pub(crate) pairings: HashMap<ActorKey, UserId>,
+    pub(crate) bindings: HashMap<BindingKey, BindingRecord>,
+    pub(crate) source_bindings: HashMap<String, BindingRecord>,
+    pub(crate) reply_targets: HashMap<String, ReplyTargetRecord>,
+    pub(crate) threads: HashMap<ThreadKey, ThreadRecord>,
+    pub(crate) external_event_routes: HashMap<ExternalEventRouteKey, ExternalConversationIdentity>,
+    pub(crate) message_idempotency: HashMap<MessageIdempotencyKey, AcceptedInboundMessage>,
+    pub(crate) message_replays: HashMap<AcceptedMessageReplayKey, StoredAcceptedMessageReplay>,
+    pub(crate) submission_keys: HashMap<AcceptedMessageRef, IdempotencyKey>,
+    pub(crate) submitted_message_responses: HashMap<AcceptedMessageRef, SubmitTurnResponse>,
+    pub(crate) messages: Vec<ThreadMessageRecord>,
 }
 
 impl InMemoryState {
@@ -577,40 +828,42 @@ impl InMemoryState {
 
     fn ensure_binding_refs_match(
         &self,
-        tenant_id: &TenantId,
-        thread_id: &ThreadId,
-        source_binding_ref: &str,
-        reply_target_binding_ref: &str,
-        actor_user_id: &UserId,
-        route_actor_key: &ActorKey,
+        validation: BindingRefValidation<'_>,
     ) -> Result<(), InboundTurnError> {
-        let Some(source_binding) = self.source_bindings.get(source_binding_ref) else {
+        let Some(source_binding) = self.source_bindings.get(validation.source_binding_ref) else {
             return Err(InboundTurnError::ThreadNotFound {
-                thread_id: source_binding_ref.to_string(),
+                thread_id: validation.source_binding_ref.to_string(),
             });
         };
-        let Some(reply_binding) = self.reply_targets.get(reply_target_binding_ref) else {
+        let Some(reply_binding) = self.reply_targets.get(validation.reply_target_binding_ref)
+        else {
             return Err(InboundTurnError::ThreadNotFound {
-                thread_id: reply_target_binding_ref.to_string(),
+                thread_id: validation.reply_target_binding_ref.to_string(),
             });
         };
-        if source_binding.tenant_id != *tenant_id
-            || reply_binding.tenant_id != *tenant_id
-            || source_binding.thread_id != *thread_id
-            || reply_binding.thread_id != *thread_id
-            || source_binding.adapter_kind != route_actor_key.adapter_kind
-            || reply_binding.adapter_kind != route_actor_key.adapter_kind
-            || source_binding.adapter_installation_id != route_actor_key.adapter_installation_id
-            || reply_binding.adapter_installation_id != route_actor_key.adapter_installation_id
-            || source_binding.source_binding_ref.as_str() != source_binding_ref
-            || source_binding.reply_target_binding_ref.as_str() != reply_target_binding_ref
-            || reply_binding.reply_target_binding_ref.as_str() != reply_target_binding_ref
+        if source_binding.tenant_id != *validation.tenant_id
+            || reply_binding.tenant_id != *validation.tenant_id
+            || source_binding.thread_id != *validation.thread_id
+            || reply_binding.thread_id != *validation.thread_id
+            || source_binding.adapter_kind != validation.route_actor_key.adapter_kind
+            || reply_binding.adapter_kind != validation.route_actor_key.adapter_kind
+            || source_binding.adapter_installation_id
+                != validation.route_actor_key.adapter_installation_id
+            || reply_binding.adapter_installation_id
+                != validation.route_actor_key.adapter_installation_id
+            || source_binding.source_binding_ref.as_str() != validation.source_binding_ref
+            || source_binding.reply_target_binding_ref.as_str()
+                != validation.reply_target_binding_ref
+            || reply_binding.reply_target_binding_ref.as_str()
+                != validation.reply_target_binding_ref
             || source_binding.source_binding_ref != reply_binding.source_binding_ref
-            || !reply_binding.route_access.allows(route_actor_key)
+            || !reply_binding
+                .route_access
+                .allows(validation.route_actor_key, validation.route_kind)
         {
             return Err(InboundTurnError::AccessDenied {
-                actor_id: actor_user_id.to_string(),
-                thread_id: thread_id.to_string(),
+                actor_id: validation.actor_user_id.to_string(),
+                thread_id: validation.thread_id.to_string(),
             });
         }
         Ok(())
@@ -723,16 +976,26 @@ impl InMemoryState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ActorKey {
-    tenant_id: TenantId,
-    adapter_kind: AdapterKind,
-    adapter_installation_id: AdapterInstallationId,
-    external_actor_ref: ExternalActorRef,
+struct BindingRefValidation<'a> {
+    tenant_id: &'a TenantId,
+    thread_id: &'a ThreadId,
+    source_binding_ref: &'a str,
+    reply_target_binding_ref: &'a str,
+    actor_user_id: &'a UserId,
+    route_actor_key: &'a ActorKey,
+    route_kind: ConversationRouteKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) struct ActorKey {
+    pub(crate) tenant_id: TenantId,
+    pub(crate) adapter_kind: AdapterKind,
+    pub(crate) adapter_installation_id: AdapterInstallationId,
+    pub(crate) external_actor_ref: ExternalActorRef,
 }
 
 impl ActorKey {
-    fn new(
+    pub(crate) fn new(
         tenant_id: &TenantId,
         adapter_kind: &AdapterKind,
         adapter_installation_id: &AdapterInstallationId,
@@ -747,16 +1010,16 @@ impl ActorKey {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct BindingKey {
-    tenant_id: TenantId,
-    adapter_kind: AdapterKind,
-    adapter_installation_id: AdapterInstallationId,
-    external_conversation_identity: ExternalConversationIdentity,
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) struct BindingKey {
+    pub(crate) tenant_id: TenantId,
+    pub(crate) adapter_kind: AdapterKind,
+    pub(crate) adapter_installation_id: AdapterInstallationId,
+    pub(crate) external_conversation_identity: ExternalConversationIdentity,
 }
 
 impl BindingKey {
-    fn from_request(request: &ResolveConversationRequest) -> Self {
+    pub(crate) fn from_request(request: &ResolveConversationRequest) -> Self {
         Self {
             tenant_id: request.tenant_id.clone(),
             adapter_kind: request.adapter_kind.clone(),
@@ -766,16 +1029,16 @@ impl BindingKey {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ExternalEventRouteKey {
-    tenant_id: TenantId,
-    adapter_kind: AdapterKind,
-    adapter_installation_id: AdapterInstallationId,
-    external_event_id: crate::ExternalEventId,
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) struct ExternalEventRouteKey {
+    pub(crate) tenant_id: TenantId,
+    pub(crate) adapter_kind: AdapterKind,
+    pub(crate) adapter_installation_id: AdapterInstallationId,
+    pub(crate) external_event_id: crate::ExternalEventId,
 }
 
 impl ExternalEventRouteKey {
-    fn new(
+    pub(crate) fn new(
         tenant_id: &TenantId,
         adapter_kind: &AdapterKind,
         adapter_installation_id: &AdapterInstallationId,
@@ -790,14 +1053,14 @@ impl ExternalEventRouteKey {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ThreadKey {
-    tenant_id: TenantId,
-    thread_id: ThreadId,
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) struct ThreadKey {
+    pub(crate) tenant_id: TenantId,
+    pub(crate) thread_id: ThreadId,
 }
 
 impl ThreadKey {
-    fn new(tenant_id: &TenantId, thread_id: &ThreadId) -> Self {
+    pub(crate) fn new(tenant_id: &TenantId, thread_id: &ThreadId) -> Self {
         Self {
             tenant_id: tenant_id.clone(),
             thread_id: thread_id.clone(),
@@ -805,21 +1068,21 @@ impl ThreadKey {
     }
 }
 
-#[derive(Debug, Clone)]
-struct ThreadRecord {
-    agent_id: Option<AgentId>,
-    project_id: Option<ProjectId>,
-    participants: HashSet<UserId>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ThreadRecord {
+    pub(crate) agent_id: Option<AgentId>,
+    pub(crate) project_id: Option<ProjectId>,
+    pub(crate) participants: HashSet<UserId>,
 }
 
-#[derive(Debug, Clone)]
-struct ReplyRouteAccess {
-    owner_actor_key: ActorKey,
-    shared: bool,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ReplyRouteAccess {
+    pub(crate) owner_actor_key: ActorKey,
+    pub(crate) shared: bool,
 }
 
 impl ReplyRouteAccess {
-    fn new(owner_actor_key: ActorKey, route_kind: ConversationRouteKind) -> Self {
+    pub(crate) fn new(owner_actor_key: ActorKey, route_kind: ConversationRouteKind) -> Self {
         Self {
             owner_actor_key,
             shared: route_kind == ConversationRouteKind::Shared,
@@ -830,21 +1093,22 @@ impl ReplyRouteAccess {
         self.shared = true;
     }
 
-    fn allows(&self, actor_key: &ActorKey) -> bool {
-        self.shared || self.owner_actor_key == *actor_key
+    fn allows(&self, actor_key: &ActorKey, route_kind: ConversationRouteKind) -> bool {
+        self.owner_actor_key == *actor_key
+            || (self.shared && route_kind == ConversationRouteKind::Shared)
     }
 }
 
-#[derive(Debug, Clone)]
-struct ReplyTargetRecord {
-    tenant_id: TenantId,
-    adapter_kind: AdapterKind,
-    adapter_installation_id: AdapterInstallationId,
-    external_conversation_ref: ExternalConversationRef,
-    thread_id: ThreadId,
-    source_binding_ref: SourceBindingRef,
-    reply_target_binding_ref: ReplyTargetBindingRef,
-    route_access: ReplyRouteAccess,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ReplyTargetRecord {
+    pub(crate) tenant_id: TenantId,
+    pub(crate) adapter_kind: AdapterKind,
+    pub(crate) adapter_installation_id: AdapterInstallationId,
+    pub(crate) external_conversation_ref: ExternalConversationRef,
+    pub(crate) thread_id: ThreadId,
+    pub(crate) source_binding_ref: SourceBindingRef,
+    pub(crate) reply_target_binding_ref: ReplyTargetBindingRef,
+    pub(crate) route_access: ReplyRouteAccess,
 }
 
 impl ReplyTargetRecord {
@@ -882,15 +1146,19 @@ impl ReplyTargetRecord {
     }
 }
 
-#[derive(Debug, Clone)]
-struct BindingTarget {
-    thread_id: ThreadId,
-    agent_id: Option<AgentId>,
-    project_id: Option<ProjectId>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct BindingTarget {
+    pub(crate) thread_id: ThreadId,
+    pub(crate) agent_id: Option<AgentId>,
+    pub(crate) project_id: Option<ProjectId>,
 }
 
 impl BindingTarget {
-    fn new(thread_id: ThreadId, agent_id: Option<AgentId>, project_id: Option<ProjectId>) -> Self {
+    pub(crate) fn new(
+        thread_id: ThreadId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+    ) -> Self {
         Self {
             thread_id,
             agent_id,
@@ -899,23 +1167,23 @@ impl BindingTarget {
     }
 }
 
-#[derive(Debug, Clone)]
-struct BindingRecord {
-    tenant_id: TenantId,
-    adapter_kind: AdapterKind,
-    adapter_installation_id: AdapterInstallationId,
-    external_conversation_ref: ExternalConversationRef,
-    external_conversation_identity: ExternalConversationIdentity,
-    thread_id: ThreadId,
-    agent_id: Option<AgentId>,
-    project_id: Option<ProjectId>,
-    route_access: ReplyRouteAccess,
-    source_binding_ref: SourceBindingRef,
-    reply_target_binding_ref: ReplyTargetBindingRef,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct BindingRecord {
+    pub(crate) tenant_id: TenantId,
+    pub(crate) adapter_kind: AdapterKind,
+    pub(crate) adapter_installation_id: AdapterInstallationId,
+    pub(crate) external_conversation_ref: ExternalConversationRef,
+    pub(crate) external_conversation_identity: ExternalConversationIdentity,
+    pub(crate) thread_id: ThreadId,
+    pub(crate) agent_id: Option<AgentId>,
+    pub(crate) project_id: Option<ProjectId>,
+    pub(crate) route_access: ReplyRouteAccess,
+    pub(crate) source_binding_ref: SourceBindingRef,
+    pub(crate) reply_target_binding_ref: ReplyTargetBindingRef,
 }
 
 impl BindingRecord {
-    fn new(
+    pub(crate) fn new(
         tenant_id: TenantId,
         adapter_kind: AdapterKind,
         adapter_installation_id: AdapterInstallationId,
@@ -965,23 +1233,23 @@ impl BindingRecord {
     }
 }
 
-#[derive(Debug, Clone)]
-struct StoredAcceptedMessageReplay {
-    external_conversation_identity: ExternalConversationIdentity,
-    replay: AcceptedInboundMessageReplay,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct StoredAcceptedMessageReplay {
+    pub(crate) external_conversation_identity: ExternalConversationIdentity,
+    pub(crate) replay: AcceptedInboundMessageReplay,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct AcceptedMessageReplayKey {
-    tenant_id: TenantId,
-    adapter_kind: AdapterKind,
-    adapter_installation_id: AdapterInstallationId,
-    external_actor_ref: ExternalActorRef,
-    external_event_id: crate::ExternalEventId,
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) struct AcceptedMessageReplayKey {
+    pub(crate) tenant_id: TenantId,
+    pub(crate) adapter_kind: AdapterKind,
+    pub(crate) adapter_installation_id: AdapterInstallationId,
+    pub(crate) external_actor_ref: ExternalActorRef,
+    pub(crate) external_event_id: crate::ExternalEventId,
 }
 
 impl AcceptedMessageReplayKey {
-    fn new(
+    pub(crate) fn new(
         tenant_id: &TenantId,
         adapter_kind: &AdapterKind,
         adapter_installation_id: &AdapterInstallationId,
@@ -998,9 +1266,9 @@ impl AcceptedMessageReplayKey {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct MessageIdempotencyKey {
-    tenant_id: TenantId,
-    source_binding_ref: String,
-    external_event_id: crate::ExternalEventId,
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) struct MessageIdempotencyKey {
+    pub(crate) tenant_id: TenantId,
+    pub(crate) source_binding_ref: String,
+    pub(crate) external_event_id: crate::ExternalEventId,
 }

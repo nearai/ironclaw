@@ -23,4 +23,6 @@ pub enum InboundTurnError {
     InvalidCanonicalRef { reason: String },
     #[error("turn submission failed: {error}")]
     TurnSubmissionFailed { error: TurnError },
+    #[error("durable conversation state failed: {reason}")]
+    DurableState { reason: String },
 }

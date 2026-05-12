@@ -19,7 +19,7 @@ Product adapters must continue to use `TurnCoordinator`. Runner transition APIs 
 - `submit_turn` creates a queued `TurnRunId` and active-thread lock, but no model/tool side effects may run before a runner claim succeeds.
 - `claim_next_run` atomically moves one matching `Queued` run to `Running`.
 - A successful claim stores `runner_id`, `lease_token`, `last_heartbeat_at`, `lease_expires_at`, increments `claim_count`, updates the active lock, and emits `RunnerClaimed`.
-- `heartbeat` requires the matching `runner_id` and `lease_token` and rejects leases whose `lease_expires_at` has already passed; on success it refreshes `last_heartbeat_at`, extends `lease_expires_at`, touches the active lock, and emits `RunnerHeartbeat`.
+- `heartbeat` requires the matching `runner_id` and `lease_token`, only refreshes actively `Running` work, and rejects leases whose `lease_expires_at` has already passed. Once cancellation is requested, heartbeats no longer extend the lease; the runner must complete cancellation before the existing lease expires or the reconciler moves the run to recovery. On success, heartbeat refreshes `last_heartbeat_at`, extends `lease_expires_at`, touches the active lock, and emits `RunnerHeartbeat`.
 - Pull-based claims are authoritative. Wake notifications are optimization hints only.
 - After `TurnCoordinator` durably accepts a submitted run or requeues a resumed run, it may emit a redacted queued-run wake hint containing only the canonical scope, `TurnRunId`, queued status, and event cursor. Wake delivery is best-effort, is not a source of truth, must not fail the durable adapter call, and duplicate hints must be harmless.
 
@@ -49,11 +49,11 @@ Agent-loop drivers return `LoopExit` claims. `TurnRunner` validates those claims
 
 - valid completed exits require host-verified durable reply/result refs and map to `TurnRunnerOutcome::Completed`;
 - valid blocked exits require host-verified checkpoint + gate refs and map to `TurnRunnerOutcome::Blocked`;
-- valid cancelled exits require observed host cancellation/interrupt and map to `TurnRunnerOutcome::Cancelled`; runner-side application then consults durable run state in one transition-port operation, terminalizing only recorded `CancelRequested` runs and mapping observed interrupts that race ahead of recorded cancellation to recovery instead of terminal cancellation;
+- valid cancelled exits require observed host cancellation/interrupt and map to `TurnRunnerOutcome::Cancelled`; a missing final checkpoint is allowed for host-initiated cancellation because the host can preempt the driver before checkpointing; runner-side application then consults durable run state in one transition-port operation, terminalizing only recorded `CancelRequested` runs and mapping observed interrupts that race ahead of recorded cancellation to recovery instead of terminal cancellation;
 - valid failed exits require host-verified evidence that the failure is safe to terminalize, then map stable sanitized failure kinds to `TurnRunnerOutcome::Failed`;
 - invalid exits map either to sanitized terminal failure or runner/system-derived `RecoveryRequired` depending on side-effect safety evidence;
 - runner-side loop-exit application must call trusted transition-port methods, not mutate durable run state directly.
 
 ## 6. Deferred work
 
-The current `ironclaw_turns` slices define the core lease/recovery state machine, initial PostgreSQL/libSQL persistence adapters, pure `LoopExit` validation/mapping types, and runner-side `apply_loop_exit` transition application. AgentLoopHost/AgentLoopDriver integration, durable exit-id replay storage, transcript draft validation, side-effect boundary checkpoint cadence inside the loop, production service-graph wiring, and safe explicit retry/fork UX remain follow-up slices.
+The current slices define the core lease/recovery state machine, initial PostgreSQL/libSQL persistence adapters, pure `LoopExit` validation/mapping types, trusted `LoopExitApplier` policy derivation from host-owned evidence, and host-runtime production scheduler wiring. Durable exit-id replay storage, transcript draft validation, side-effect boundary checkpoint cadence inside the loop, and safe explicit retry/fork UX remain follow-up slices.

@@ -2,9 +2,10 @@ use async_trait::async_trait;
 use ironclaw_host_api::ThreadId;
 
 use crate::{
-    AcceptInboundMessageRequest, AcceptedInboundMessage, AppendAssistantDraftRequest,
-    ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest, LoadContextWindowRequest,
-    MessageContent, RedactMessageRequest, SessionThreadError, SessionThreadRecord, SummaryArtifact,
+    AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
+    AppendAssistantDraftRequest, ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest,
+    LoadContextWindowRequest, MessageContent, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord, SummaryArtifact,
     ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
     UpdateAssistantDraftRequest,
 };
@@ -21,6 +22,11 @@ pub trait SessionThreadService: Send + Sync {
         &self,
         request: AcceptInboundMessageRequest,
     ) -> Result<AcceptedInboundMessage, SessionThreadError>;
+
+    async fn replay_accepted_inbound_message(
+        &self,
+        request: ReplayAcceptedInboundMessageRequest,
+    ) -> Result<Option<AcceptedInboundMessageReplay>, SessionThreadError>;
 
     async fn mark_message_submitted(
         &self,

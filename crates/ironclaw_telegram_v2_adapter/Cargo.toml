@@ -16,3 +16,9 @@ ironclaw_product_adapters = { path = "../ironclaw_product_adapters", version = "
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+
+[dev-dependencies]
+# `mark_*_verified` host-auth helpers used by payload tests live behind
+# the `host-auth-mint` feature on `ironclaw_product_adapters` (sealed
+# evidence — only the host can mint, and tests stand in for the host).
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters", features = ["host-auth-mint"] }

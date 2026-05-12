@@ -25,8 +25,8 @@ mod tool_info;
 
 pub use echo::EchoTool;
 pub use extension_tools::{
-    ExtensionInfoTool, ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool,
-    ToolPermissionSetTool, ToolRemoveTool, ToolSearchTool, ToolUpgradeTool,
+    ExtensionInfoTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolPermissionSetTool,
+    ToolRemoveTool, ToolSearchTool, ToolUpgradeTool,
 };
 pub use file::{ApplyPatchTool, ListDirTool, ReadFileTool, WriteFileTool};
 pub use file_edit_guard::{SharedReadFileState, shared_read_file_state};

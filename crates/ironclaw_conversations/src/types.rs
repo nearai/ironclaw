@@ -121,6 +121,7 @@ pub struct AcceptInboundMessageRequest {
     pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub external_conversation_ref: ExternalConversationRef,
     pub external_event_id: ExternalEventId,
+    pub route_kind: ConversationRouteKind,
     pub content_ref: InboundMessageContentRef,
     pub received_at: DateTime<Utc>,
     pub requested_run_profile: Option<RunProfileRequest>,

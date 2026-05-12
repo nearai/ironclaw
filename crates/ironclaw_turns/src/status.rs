@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    AcceptedMessageRef, GateRef, ReplyTargetBindingRef, RunProfileId, RunProfileRequest,
-    RunProfileVersion, SourceBindingRef, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
-    events::EventCursor, request::TurnTimestamp,
+    AcceptedMessageRef, GateRef, ReplyTargetBindingRef, ResolvedRunProfile, RunProfileId,
+    RunProfileVersion, SourceBindingRef, TurnAdmissionClass, TurnCheckpointId, TurnId, TurnRunId,
+    TurnScope, events::EventCursor, request::TurnTimestamp, run_profile::LoopModelRouteSnapshot,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,22 +31,71 @@ impl TurnStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TurnRunProfile {
     pub id: RunProfileId,
     pub version: RunProfileVersion,
+    #[serde(default = "TurnAdmissionClass::interactive")]
+    pub admission_class: TurnAdmissionClass,
     pub allow_steering: bool,
     pub auto_queue_followups: bool,
+    pub resolved: ResolvedRunProfile,
 }
 
 impl TurnRunProfile {
-    pub fn resolve(_request: Option<&RunProfileRequest>) -> Self {
+    pub fn from_resolved(resolved: ResolvedRunProfile) -> Self {
+        let id = compatibility_profile_id(&resolved);
         Self {
-            id: RunProfileId::default_profile(),
-            version: RunProfileVersion::new(1),
-            allow_steering: false,
+            id,
+            version: resolved.profile_version,
+            admission_class: TurnAdmissionClass::interactive(),
+            allow_steering: resolved.steering_policy.allow_steering,
             auto_queue_followups: false,
+            resolved,
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for TurnRunProfile {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireProfile {
+            id: RunProfileId,
+            version: RunProfileVersion,
+            #[serde(default = "TurnAdmissionClass::interactive")]
+            admission_class: TurnAdmissionClass,
+            allow_steering: bool,
+            auto_queue_followups: bool,
+            resolved: Option<ResolvedRunProfile>,
+        }
+
+        let wire = WireProfile::deserialize(deserializer)?;
+        let resolved = wire.resolved.unwrap_or_else(|| {
+            ResolvedRunProfile::legacy_compatibility(
+                wire.id.clone(),
+                wire.version,
+                wire.allow_steering,
+            )
+        });
+        Ok(Self {
+            id: wire.id,
+            version: wire.version,
+            admission_class: wire.admission_class,
+            allow_steering: wire.allow_steering,
+            auto_queue_followups: wire.auto_queue_followups,
+            resolved,
+        })
+    }
+}
+
+fn compatibility_profile_id(resolved: &ResolvedRunProfile) -> RunProfileId {
+    if resolved.profile_id.is_interactive_default() {
+        RunProfileId::default_profile()
+    } else {
+        resolved.profile_id.clone()
     }
 }
 
@@ -186,6 +235,8 @@ impl AdmissionRejectionReason {
 pub struct AdmissionRejection {
     pub reason: AdmissionRejectionReason,
     pub retry_after_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_denial: Option<crate::TurnAdmissionCapacityDenial>,
 }
 
 impl AdmissionRejection {
@@ -193,11 +244,18 @@ impl AdmissionRejection {
         Self {
             reason,
             retry_after_ms: None,
+            capacity_denial: None,
         }
     }
 
     pub fn with_retry_after_ms(mut self, retry_after_ms: u64) -> Self {
         self.retry_after_ms = Some(retry_after_ms);
+        self
+    }
+
+    pub fn with_capacity_denial(mut self, denial: crate::TurnAdmissionCapacityDenial) -> Self {
+        self.retry_after_ms = denial.retry_after_ms;
+        self.capacity_denial = Some(denial);
         self
     }
 }
@@ -213,6 +271,8 @@ pub struct TurnRunState {
     pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub resolved_run_profile_id: RunProfileId,
     pub resolved_run_profile_version: RunProfileVersion,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_model_route: Option<LoopModelRouteSnapshot>,
     pub received_at: TurnTimestamp,
     pub checkpoint_id: Option<TurnCheckpointId>,
     pub gate_ref: Option<GateRef>,

@@ -33,7 +33,6 @@ use crate::bridge::sandbox::{InterceptOutcome, maybe_intercept};
 use crate::bridge::tool_permissions::{ToolPermissionResolution, ToolPermissionSnapshot};
 use crate::context::JobContext;
 use crate::extensions::InstalledExtension;
-use crate::extensions::naming::extension_name_candidates;
 use crate::hooks::{HookEvent, HookOutcome, HookRegistry};
 use crate::tools::ToolRegistry;
 use crate::tools::permissions::PermissionState;
@@ -67,7 +66,7 @@ pub struct EffectBridgeAdapter {
     /// outbound requests through the interceptor. Without this, engine v2 tool
     /// calls bypass the recorder entirely — recorded traces end up with zero
     /// `http_exchanges` and replay can't substitute responses.
-    http_interceptor: RwLock<Option<Arc<dyn crate::llm::recording::HttpInterceptor>>>,
+    http_interceptor: RwLock<Option<Arc<dyn ironclaw_llm::recording::HttpInterceptor>>>,
     /// Engine v2 store used to mirror live-installed v1 skills into `DocType::Skill`.
     engine_store: RwLock<Option<Arc<dyn Store>>>,
     /// V1 skill registry used to load the just-installed skill for v2 sync.
@@ -154,7 +153,7 @@ impl EffectBridgeAdapter {
     /// interceptor, so http-aware tools will record/replay through it.
     pub async fn set_http_interceptor(
         &self,
-        interceptor: Arc<dyn crate::llm::recording::HttpInterceptor>,
+        interceptor: Arc<dyn ironclaw_llm::recording::HttpInterceptor>,
     ) {
         *self.http_interceptor.write().await = Some(interceptor);
     }
@@ -274,49 +273,6 @@ impl EffectBridgeAdapter {
             .resolve_permission(lookup_name)
     }
 
-    async fn tool_activate_requires_install_approval(
-        &self,
-        lookup_name: &str,
-        parameters: &serde_json::Value,
-        context: &ThreadExecutionContext,
-    ) -> bool {
-        if !matches!(lookup_name, "tool_activate" | "tool-activate") {
-            return false;
-        }
-
-        let Some(requested_name) = parameters
-            .get("name")
-            .and_then(|value| value.as_str())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        else {
-            return false;
-        };
-
-        let auth_manager = self.auth_manager.read().await;
-        let Some(auth_manager) = auth_manager.as_ref() else {
-            return true;
-        };
-
-        let extensions = match auth_manager
-            .list_capability_extensions(&context.user_id)
-            .await
-        {
-            Ok(extensions) => extensions,
-            Err(error) => {
-                debug!(
-                    user_id = %context.user_id,
-                    extension_name = requested_name,
-                    error = %error,
-                    "failed to load extension inventory for tool_activate approval; requiring approval"
-                );
-                return true;
-            }
-        };
-
-        matching_extension_requires_install_approval(requested_name, &extensions).unwrap_or(false)
-    }
-
     fn ensure_tool_not_disabled(
         action_name: &str,
         user_permission: ToolPermissionResolution,
@@ -346,31 +302,18 @@ impl EffectBridgeAdapter {
             return Ok(());
         }
 
-        if matches!(
-            tool.requires_approval(approval.parameters),
-            ApprovalRequirement::Always
-        ) {
-            return Err(Self::gate_paused(
-                "approval",
-                approval.action_name,
-                approval.context.current_call_id.as_deref(),
-                approval.parameters.clone(),
-                ironclaw_engine::ResumeKind::Approval {
-                    allow_always: false,
-                },
-                None,
-                Some(approval.lease.clone()),
-            ));
+        let approval_requirement = tool.requires_approval(approval.parameters);
+        // `skill_install` is parameter-sensitive: duplicate installs are a
+        // guaranteed no-op and deliberately return `ApprovalRequirement::Never`.
+        // Preserve that v1 contract even though the tool's default permission is
+        // ask-each-time for real installs.
+        if matches!(approval.lookup_name, "skill_install" | "skill-install")
+            && matches!(approval_requirement, ApprovalRequirement::Never)
+        {
+            return Ok(());
         }
 
-        if self
-            .tool_activate_requires_install_approval(
-                approval.lookup_name,
-                approval.parameters,
-                approval.context,
-            )
-            .await
-        {
+        if matches!(approval_requirement, ApprovalRequirement::Always) {
             return Err(Self::gate_paused(
                 "approval",
                 approval.action_name,
@@ -1226,6 +1169,35 @@ impl EffectBridgeAdapter {
             .unwrap_or(canonical_action_name)
             .to_string();
 
+        // ── Schema-guided parameter coercion ──
+        //
+        // Engine actions (`mission_*`, routine aliases, `tool_info`) and
+        // host tools both declare JSON Schemas for their parameters. Run
+        // both kinds through the same coercion that `prepare_tool_params`
+        // applies for the v1 path so the LLM can pass stringified scalars
+        // (`"120"` for an integer field) without breaking the handler.
+        // Schema sources, in order: orchestrator-populated action
+        // snapshot, bridge-known engine action defs, host tool registry
+        // (via `discovery_schema()` to match `prepare_tool_params`).
+        // Once this runs, downstream sites in this method (sandbox-path
+        // validator, `execute_tool_with_safety`'s second `prepare_tool_params`)
+        // see already-coerced input — the second pass is idempotent.
+        let action_schema = context
+            .available_actions_snapshot
+            .as_ref()
+            .and_then(|snapshot| {
+                ActionDiscovery::resolve(snapshot.as_ref(), canonical_action_name)
+                    .map(|action| action.discovery_schema().clone())
+            })
+            .or_else(|| engine_action_schema(canonical_action_name));
+        let parameters = if let Some(schema) = action_schema {
+            crate::tools::prepare_params_for_schema(&parameters, &schema)
+        } else if let Some(tool) = self.tools.get(&lookup_name).await {
+            crate::tools::prepare_params_for_schema(&parameters, &tool.discovery_schema())
+        } else {
+            parameters
+        };
+
         // ── Per-step call limit (prevent amplification loops) ──
         const MAX_CALLS_PER_STEP: u32 = 50;
         let count = self
@@ -1394,7 +1366,7 @@ impl EffectBridgeAdapter {
                         credential = %cred.credential_name,
                         tool = %lookup_name,
                         user = %context.user_id,
-                        "Pre-flight auth: credential missing — blocking tool call"
+                        "Pre-flight auth: credential missing — raising Authentication gate"
                     );
                     return Err(Self::gate_paused(
                         "authentication",
@@ -1538,15 +1510,10 @@ impl EffectBridgeAdapter {
         // prompt-injection / param validation must run).
         let mounts_snapshot = self.workspace_mounts.read().await.as_ref().map(Arc::clone);
         let sandbox_result = if let Some(mounts) = mounts_snapshot {
-            // Normalize parameters the same way the host path does
-            // (`execute_tool_with_safety` → `prepare_tool_params`) so
-            // validation sees consistent types (e.g. string "true" → bool).
-            let normalized = if let Some(tool) = self.tools.get(&lookup_name).await {
-                crate::tools::prepare_tool_params(tool.as_ref(), &parameters)
-            } else {
-                parameters.clone()
-            };
-            let validation = self.safety.validator().validate_tool_params(&normalized);
+            // `parameters` was already coerced by the schema-guided
+            // pre-amble above; both the validator and the mount backend
+            // see the same shape that `execute_tool_with_safety` would.
+            let validation = self.safety.validator().validate_tool_params(&parameters);
             if !validation.is_valid {
                 let details = validation
                     .errors
@@ -1561,7 +1528,7 @@ impl EffectBridgeAdapter {
                     },
                 )))
             } else {
-                match maybe_intercept(&lookup_name, &normalized, context.project_id, &mounts).await
+                match maybe_intercept(&lookup_name, &parameters, context.project_id, &mounts).await
                 {
                     Ok(InterceptOutcome::Handled(s)) => Some(Ok(s)),
                     Ok(InterceptOutcome::FellThrough) => None,
@@ -1617,8 +1584,7 @@ impl EffectBridgeAdapter {
                 let output_value = serde_json::from_str::<serde_json::Value>(&output)
                     .unwrap_or(serde_json::Value::String(wrapped));
 
-                if (lookup_name == "tool_activate"
-                    || lookup_name == "tool_auth"
+                if (lookup_name == "tool_auth"
                     || lookup_name == "tool_install"
                     || lookup_name == "tool-install")
                     && let Some(err) = Self::auth_gate_from_extension_result(
@@ -1804,34 +1770,6 @@ impl EffectBridgeAdapter {
     }
 }
 
-fn extension_name_matches(extension_name: &str, requested_name: &str) -> bool {
-    let requested_candidates = extension_name_candidates(requested_name)
-        .into_iter()
-        .collect::<HashSet<_>>();
-    extension_name_candidates(extension_name)
-        .into_iter()
-        .any(|candidate| requested_candidates.contains(&candidate))
-}
-
-fn matching_extension_requires_install_approval(
-    requested_name: &str,
-    extensions: &[InstalledExtension],
-) -> Option<bool> {
-    let mut saw_match = false;
-
-    for extension in extensions {
-        if !extension_name_matches(&extension.name, requested_name) {
-            continue;
-        }
-        if extension.installed {
-            return Some(false);
-        }
-        saw_match = true;
-    }
-
-    saw_match.then_some(true)
-}
-
 #[async_trait::async_trait]
 impl EffectExecutor for EffectBridgeAdapter {
     async fn execute_action(
@@ -1841,8 +1779,20 @@ impl EffectExecutor for EffectBridgeAdapter {
         lease: &CapabilityLease,
         context: &ThreadExecutionContext,
     ) -> Result<ActionResult, EngineError> {
-        self.execute_action_internal(action_name, parameters, lease, context, false)
-            .await
+        // Honor the engine's one-shot approval flag. Set by inline
+        // gate-await retry paths after the user resolves the gate;
+        // mirrors the legacy `execute_resolved_pending_action` path
+        // that passes `approval_already_granted=true` to skip the
+        // per-call approval check that would otherwise re-fire.
+        let approval_already_granted = context.call_approval_granted;
+        self.execute_action_internal(
+            action_name,
+            parameters,
+            lease,
+            context,
+            approval_already_granted,
+        )
+        .await
     }
 
     async fn available_actions(
@@ -2714,6 +2664,31 @@ fn extract_credential_name(error_msg: &str) -> Option<String> {
     None
 }
 
+/// Look up the bridge-canonical schema for `mission_*` actions, the only
+/// engine-native action category that has no corresponding host `Tool`
+/// registration. `routine_*` (legacy v1 host tools, intercepted by the
+/// alias path before they execute) and `tool_info` (a v1/v2 host tool)
+/// are present in the host `ToolRegistry`, so they reach
+/// `execute_action_internal`'s registry branch directly and don't need
+/// this helper. Used in two places:
+///
+/// 1. As a fallback in `execute_action_internal` when the orchestrator
+///    has not populated `available_actions_snapshot` — primarily tests
+///    that drive `execute_action` without setting up the snapshot.
+/// 2. To stay coupled to the `mission_capability_actions()` definitions
+///    so coercion in #1 always uses the same JSON Schema the engine
+///    advertises to the LLM.
+///
+/// In production paths the orchestrator always populates the snapshot,
+/// so the snapshot branch wins and this helper is a defense-in-depth
+/// fallback.
+fn engine_action_schema(action_name: &str) -> Option<serde_json::Value> {
+    crate::bridge::engine_actions::mission_capability_actions()
+        .into_iter()
+        .find(|action| action.matches_name(action_name))
+        .map(|action| action.parameters_schema)
+}
+
 pub(crate) fn is_v1_only_tool(name: &str) -> bool {
     // routine_* tools are surfaced in v2 too, but are intercepted by
     // `handle_mission_call`'s routine alias path *before* this check fires —
@@ -3025,24 +3000,9 @@ mod tests {
             thread_goal: Some("test goal".to_string()),
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
-        }
-    }
-
-    fn installed_extension(name: &str) -> InstalledExtension {
-        InstalledExtension {
-            name: name.to_string(),
-            kind: crate::extensions::ExtensionKind::McpServer,
-            display_name: Some(name.to_string()),
-            description: Some(format!("{name} description")),
-            url: None,
-            authenticated: true,
-            active: true,
-            tools: vec![format!("{name}_search")],
-            needs_setup: false,
-            has_auth: true,
-            installed: true,
-            activation_error: None,
-            version: None,
+            gate_controller: ironclaw_engine::CancellingGateController::arc(),
+            call_approval_granted: false,
+            conversation_id: None,
         }
     }
 
@@ -4161,7 +4121,7 @@ mod tests {
         );
     }
 
-    /// Regression for nearai/ironclaw#2206: a `tool_activate`/`tool_auth`
+    /// Regression for nearai/ironclaw#2206: a `tool_install`/`tool_auth`
     /// extension result containing a non-https `auth_url` (e.g.
     /// `javascript:alert(1)`) must be sanitized to `None` before it reaches
     /// `ResumeKind::Authentication` and is forwarded onto the gate stream.
@@ -4171,7 +4131,7 @@ mod tests {
     /// isolation, per the "Test Through the Caller, Not Just the Helper"
     /// rule in `.claude/rules/testing.md`.
     #[tokio::test]
-    async fn auth_gate_strips_non_https_auth_url_from_tool_activate_output() {
+    async fn auth_gate_strips_non_https_auth_url_from_tool_install_output() {
         use ironclaw_safety::SafetyConfig;
 
         struct OAuthPromptTool;
@@ -4179,11 +4139,11 @@ mod tests {
         #[async_trait]
         impl Tool for OAuthPromptTool {
             fn name(&self) -> &str {
-                "tool_activate"
+                "tool_install"
             }
 
             fn description(&self) -> &str {
-                "Test stub for tool_activate that returns a malicious auth_url"
+                "Test stub for tool_install that returns a malicious auth_url"
             }
 
             fn parameters_schema(&self) -> serde_json::Value {
@@ -4214,6 +4174,9 @@ mod tests {
         let tools = Arc::new(ToolRegistry::new());
         tools.register(Arc::new(OAuthPromptTool)).await;
 
+        // tool_install normally pauses on UnlessAutoApproved before
+        // reaching the auth-gate path. Skip that approval gate so the
+        // test exercises only the auth_url sanitization path.
         let adapter = EffectBridgeAdapter::new(
             tools,
             Arc::new(SafetyLayer::new(&SafetyConfig {
@@ -4221,11 +4184,12 @@ mod tests {
                 injection_check_enabled: false,
             })),
             Arc::new(HookRegistry::default()),
-        );
+        )
+        .with_global_auto_approve(true);
 
         let result = adapter
             .execute_action(
-                "tool_activate",
+                "tool_install",
                 serde_json::json!({}),
                 &lease(),
                 &exec_ctx(
@@ -4261,7 +4225,7 @@ mod tests {
     /// Sibling regression: a well-formed `https://` auth_url must still
     /// flow through unmodified. Guards against an over-eager sanitizer.
     #[tokio::test]
-    async fn auth_gate_preserves_https_auth_url_from_tool_activate_output() {
+    async fn auth_gate_preserves_https_auth_url_from_tool_install_output() {
         use ironclaw_safety::SafetyConfig;
 
         struct OAuthPromptTool;
@@ -4269,11 +4233,11 @@ mod tests {
         #[async_trait]
         impl Tool for OAuthPromptTool {
             fn name(&self) -> &str {
-                "tool_activate"
+                "tool_install"
             }
 
             fn description(&self) -> &str {
-                "Test stub for tool_activate that returns a valid auth_url"
+                "Test stub for tool_install that returns a valid auth_url"
             }
 
             fn parameters_schema(&self) -> serde_json::Value {
@@ -4304,6 +4268,9 @@ mod tests {
         let tools = Arc::new(ToolRegistry::new());
         tools.register(Arc::new(OAuthPromptTool)).await;
 
+        // tool_install normally pauses on UnlessAutoApproved before
+        // reaching the auth-gate path. Skip that approval gate so the
+        // test exercises only the auth_url sanitization path.
         let adapter = EffectBridgeAdapter::new(
             tools,
             Arc::new(SafetyLayer::new(&SafetyConfig {
@@ -4311,11 +4278,12 @@ mod tests {
                 injection_check_enabled: false,
             })),
             Arc::new(HookRegistry::default()),
-        );
+        )
+        .with_global_auto_approve(true);
 
         let result = adapter
             .execute_action(
-                "tool_activate",
+                "tool_install",
                 serde_json::json!({}),
                 &lease(),
                 &exec_ctx(
@@ -4687,9 +4655,14 @@ mod tests {
 
     #[test]
     fn extract_guardrails_rejects_string_typed_integers() {
-        // Regression: LLMs pass numeric params as strings (e.g. cooldown_secs="0").
-        // The old code silently ignored the wrong type, so mission_update
-        // returned {"status":"updated"} but changed nothing in the database.
+        // Defense-in-depth: this helper is called directly on the raw
+        // params object and is the last line of defense if some future
+        // code path bypasses the schema-guided coercion that
+        // `execute_action_internal` now runs. A string-typed integer
+        // here means coercion didn't happen — fail loudly rather than
+        // silently dropping the value (the bug shape from before #2630).
+        // End-to-end coercion of `cooldown_secs="120"` is covered by
+        // `mission_create_string_guardrails_coerced_via_execute_action`.
         let params = serde_json::json!({"cooldown_secs": "0", "max_concurrent": "2"});
         let mut updates = ironclaw_engine::MissionUpdate::default();
         let err = extract_guardrails(&params, &mut updates).unwrap_err();
@@ -4791,6 +4764,9 @@ mod tests {
             ),
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            gate_controller: ironclaw_engine::CancellingGateController::arc(),
+            call_approval_granted: false,
+            conversation_id: None,
         };
 
         assert!(should_reject_immediate_mission_create(&ctx));
@@ -4812,6 +4788,9 @@ mod tests {
             ),
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            gate_controller: ironclaw_engine::CancellingGateController::arc(),
+            call_approval_granted: false,
+            conversation_id: None,
         };
 
         assert!(!should_reject_immediate_mission_create(&ctx));
@@ -4831,6 +4810,9 @@ mod tests {
             thread_goal: Some("Summarize every product feedback item right now.".to_string()),
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            gate_controller: ironclaw_engine::CancellingGateController::arc(),
+            call_approval_granted: false,
+            conversation_id: None,
         };
 
         assert!(should_reject_immediate_mission_create(&ctx));
@@ -4850,6 +4832,9 @@ mod tests {
             thread_goal: Some("Set up the product feedback summary right now.".to_string()),
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            gate_controller: ironclaw_engine::CancellingGateController::arc(),
+            call_approval_granted: false,
+            conversation_id: None,
         };
 
         assert!(should_reject_immediate_mission_create(&ctx));
@@ -4872,6 +4857,9 @@ mod tests {
             thread_goal: Some("Set up monitoring now.".to_string()),
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            gate_controller: ironclaw_engine::CancellingGateController::arc(),
+            call_approval_granted: false,
+            conversation_id: None,
         };
 
         // Should NOT be rejected — "monitoring" implies scheduling intent.
@@ -4892,6 +4880,9 @@ mod tests {
             thread_goal: Some("Summarize feedback immediately.".to_string()),
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            gate_controller: ironclaw_engine::CancellingGateController::arc(),
+            call_approval_granted: false,
+            conversation_id: None,
         };
 
         assert!(!should_reject_immediate_mission_create(&ctx));
@@ -5116,6 +5107,9 @@ mod tests {
                 thread_goal: Some(goal.to_string()),
                 available_actions_snapshot: None,
                 available_action_inventory_snapshot: None,
+                gate_controller: ironclaw_engine::CancellingGateController::arc(),
+                call_approval_granted: false,
+                conversation_id: None,
             }
         }
 
@@ -5308,8 +5302,6 @@ mod tests {
     fn auth_tools_are_v1_auth() {
         assert!(is_v1_auth_tool("tool_auth"));
         assert!(is_v1_auth_tool("tool-auth"));
-        assert!(!is_v1_auth_tool("tool_activate"));
-        assert!(!is_v1_auth_tool("tool-activate"));
     }
 
     #[test]
@@ -5319,52 +5311,6 @@ mod tests {
         assert!(!is_v1_auth_tool("http"));
         assert!(!is_v1_auth_tool("tool_search"));
         assert!(!is_v1_auth_tool("tool_list"));
-    }
-
-    #[test]
-    fn install_approval_prefers_installed_alias_over_registry_only_match() {
-        let installed = installed_extension("linear-server");
-        let registry_only = InstalledExtension {
-            installed: false,
-            active: false,
-            authenticated: false,
-            has_auth: true,
-            tools: Vec::new(),
-            ..installed_extension("linear_server")
-        };
-
-        let decision = matching_extension_requires_install_approval(
-            "linear_server",
-            &[registry_only, installed],
-        );
-
-        assert_eq!(decision, Some(false));
-    }
-
-    #[test]
-    fn install_approval_requires_confirmation_for_uninstalled_match() {
-        let registry_only = InstalledExtension {
-            installed: false,
-            active: false,
-            authenticated: false,
-            has_auth: true,
-            tools: Vec::new(),
-            ..installed_extension("web_search")
-        };
-
-        let decision = matching_extension_requires_install_approval("web_search", &[registry_only]);
-
-        assert_eq!(decision, Some(true));
-    }
-
-    #[test]
-    fn install_approval_ignores_unknown_extension_names() {
-        let decision = matching_extension_requires_install_approval(
-            "missing_tool",
-            &[installed_extension("web_search")],
-        );
-
-        assert_eq!(decision, None);
     }
 
     // ── Pre-flight auth gate integration test ─────────────────
@@ -5445,6 +5391,9 @@ mod tests {
             thread_goal: None,
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            gate_controller: ironclaw_engine::CancellingGateController::arc(),
+            call_approval_granted: false,
+            conversation_id: None,
         };
 
         let result = adapter.execute_action("http", params, &lease, &ctx).await;
@@ -5465,334 +5414,6 @@ mod tests {
             other => {
                 panic!("Expected GatePaused for authentication preflight, got: {other:?}");
             }
-        }
-    }
-
-    #[tokio::test]
-    async fn tool_activate_seeded_always_allow_reaches_auth_gate() {
-        use crate::secrets::InMemorySecretsStore;
-        use crate::secrets::SecretsCrypto;
-
-        struct ActivateTool;
-
-        #[async_trait]
-        impl Tool for ActivateTool {
-            fn name(&self) -> &str {
-                "tool_activate"
-            }
-
-            fn description(&self) -> &str {
-                "activate"
-            }
-
-            fn parameters_schema(&self) -> serde_json::Value {
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"}
-                    }
-                })
-            }
-
-            async fn execute(
-                &self,
-                _params: serde_json::Value,
-                _ctx: &crate::context::JobContext,
-            ) -> Result<ToolOutput, ToolError> {
-                Ok(ToolOutput::success(
-                    serde_json::json!({
-                        "name": "notion",
-                        "status": "awaiting_authorization",
-                        "auth_url": "https://example.com/oauth",
-                    }),
-                    std::time::Duration::from_millis(1),
-                ))
-            }
-        }
-
-        let tools = Arc::new(ToolRegistry::new());
-        tools.register(Arc::new(ActivateTool)).await;
-
-        let adapter = EffectBridgeAdapter::new(
-            Arc::clone(&tools),
-            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
-                max_output_length: 10_000,
-                injection_check_enabled: false,
-            })),
-            Arc::new(HookRegistry::default()),
-        );
-        let key = secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
-        let crypto = Arc::new(SecretsCrypto::new(key).expect("crypto"));
-        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
-            Arc::new(InMemorySecretsStore::new(crypto));
-        adapter
-            .set_auth_manager(Arc::new(AuthManager::new(
-                secrets,
-                None,
-                None,
-                Some(Arc::clone(&tools)),
-            )))
-            .await;
-
-        let lease = ironclaw_engine::CapabilityLease {
-            id: ironclaw_engine::types::capability::LeaseId::new(),
-            thread_id: ironclaw_engine::ThreadId::new(),
-            capability_name: "tools".into(),
-            granted_actions: ironclaw_engine::GrantedActions::All,
-            granted_at: chrono::Utc::now(),
-            expires_at: None,
-            max_uses: None,
-            uses_remaining: None,
-            revoked: false,
-            revoked_reason: None,
-        };
-        let ctx = ironclaw_engine::ThreadExecutionContext {
-            thread_id: ironclaw_engine::ThreadId::new(),
-            thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
-            project_id: ironclaw_engine::ProjectId::new(),
-            user_id: "test_user".to_string(),
-            step_id: ironclaw_engine::StepId::new(),
-            current_call_id: Some("call_123".to_string()),
-            source_channel: None,
-            user_timezone: None,
-            thread_goal: None,
-            available_actions_snapshot: None,
-            available_action_inventory_snapshot: None,
-        };
-
-        let result = adapter
-            .execute_action(
-                "tool_activate",
-                serde_json::json!({"name": "notion"}),
-                &lease,
-                &ctx,
-            )
-            .await;
-
-        match result {
-            Err(EngineError::GatePaused {
-                gate_name,
-                action_name,
-                resume_kind,
-                ..
-            }) => {
-                assert_eq!(gate_name, "authentication");
-                assert_eq!(action_name, "tool_activate");
-                match *resume_kind {
-                    ironclaw_engine::ResumeKind::Authentication {
-                        credential_name,
-                        auth_url,
-                        ..
-                    } => {
-                        assert_eq!(credential_name, "notion");
-                        assert_eq!(auth_url.as_deref(), Some("https://example.com/oauth"));
-                    }
-                    other => panic!("expected authentication resume kind, got {other:?}"),
-                }
-            }
-            other => panic!("expected auth gate pause, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn tool_activate_requires_install_approval_before_auto_installing_integration() {
-        use crate::extensions::{AuthHint, ExtensionKind, ExtensionSource, RegistryEntry};
-        use crate::secrets::InMemorySecretsStore;
-        use crate::secrets::SecretsCrypto;
-        use crate::tools::builtin::extension_tools::ToolActivateTool;
-        use crate::tools::mcp::process::McpProcessManager;
-        use crate::tools::mcp::session::McpSessionManager;
-
-        let dir = tempfile::tempdir().expect("temp dir");
-
-        let key = secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
-        let crypto = Arc::new(SecretsCrypto::new(key).expect("crypto"));
-        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
-            Arc::new(InMemorySecretsStore::new(crypto));
-
-        let tools = Arc::new(ToolRegistry::new());
-        let ext_mgr = Arc::new(crate::extensions::ExtensionManager::new(
-            Arc::new(McpSessionManager::new()),
-            Arc::new(McpProcessManager::new()),
-            Arc::clone(&secrets),
-            Arc::clone(&tools),
-            None,
-            None,
-            dir.path().join("tools"),
-            dir.path().join("channels"),
-            None,
-            "test_user".to_string(),
-            None,
-            vec![RegistryEntry {
-                name: "web_search".to_string(),
-                display_name: "Web Search".to_string(),
-                kind: ExtensionKind::WasmTool,
-                description: "Search the web".to_string(),
-                keywords: vec!["search".into(), "web".into()],
-                source: ExtensionSource::WasmDownload {
-                    wasm_url: "https://example.com/web_search.wasm".to_string(),
-                    capabilities_url: None,
-                },
-                fallback_source: None,
-                auth_hint: AuthHint::CapabilitiesAuth,
-                version: None,
-            }],
-        ));
-        tools
-            .register(Arc::new(ToolActivateTool::new(Arc::clone(&ext_mgr))))
-            .await;
-
-        let adapter = EffectBridgeAdapter::new(
-            Arc::clone(&tools),
-            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
-                max_output_length: 10_000,
-                injection_check_enabled: false,
-            })),
-            Arc::new(HookRegistry::default()),
-        );
-        adapter
-            .set_auth_manager(Arc::new(AuthManager::new(
-                secrets,
-                None,
-                Some(ext_mgr),
-                Some(Arc::clone(&tools)),
-            )))
-            .await;
-
-        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("call_activate"));
-        let result = adapter
-            .execute_action(
-                "tool_activate",
-                serde_json::json!({"name": "web_search"}),
-                &lease(),
-                &ctx,
-            )
-            .await;
-
-        match result {
-            Err(EngineError::GatePaused {
-                gate_name,
-                action_name,
-                resume_kind,
-                ..
-            }) => {
-                assert_eq!(gate_name, "approval");
-                assert_eq!(action_name, "tool_activate");
-                match *resume_kind {
-                    ironclaw_engine::ResumeKind::Approval { allow_always } => {
-                        assert!(!allow_always);
-                    }
-                    other => panic!("expected approval resume kind, got {other:?}"),
-                }
-            }
-            other => panic!("expected approval gate pause, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn tool_activate_respects_ask_each_time_when_install_state_is_unavailable() {
-        use crate::extensions::{AuthHint, ExtensionKind, ExtensionSource, RegistryEntry};
-        use crate::secrets::InMemorySecretsStore;
-        use crate::secrets::SecretsCrypto;
-        use crate::tools::builtin::extension_tools::ToolActivateTool;
-        use crate::tools::mcp::process::McpProcessManager;
-        use crate::tools::mcp::session::McpSessionManager;
-        use crate::tools::permissions::PermissionState;
-
-        let dir = tempfile::tempdir().expect("temp dir");
-
-        let key = secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
-        let crypto = Arc::new(SecretsCrypto::new(key).expect("crypto"));
-        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
-            Arc::new(InMemorySecretsStore::new(crypto));
-
-        let db_path = std::env::temp_dir().join(format!(
-            "ironclaw-tool-activate-permissions-{}.db",
-            uuid::Uuid::new_v4()
-        ));
-        let db = crate::db::connect_from_config(&crate::config::DatabaseConfig::from_libsql_path(
-            db_path.to_str().expect("db path"),
-            None,
-            None,
-        ))
-        .await
-        .expect("db");
-        db.set_setting(
-            "test_user",
-            "tool_permissions.tool_activate",
-            &serde_json::to_value(PermissionState::AskEachTime).expect("serialize permission"),
-        )
-        .await
-        .expect("save tool permission");
-
-        let tools = Arc::new(ToolRegistry::new().with_database(db));
-        let ext_mgr = Arc::new(crate::extensions::ExtensionManager::new(
-            Arc::new(McpSessionManager::new()),
-            Arc::new(McpProcessManager::new()),
-            Arc::clone(&secrets),
-            Arc::clone(&tools),
-            None,
-            None,
-            dir.path().join("tools"),
-            dir.path().join("channels"),
-            None,
-            "test_user".to_string(),
-            None,
-            vec![RegistryEntry {
-                name: "web_search".to_string(),
-                display_name: "Web Search".to_string(),
-                kind: ExtensionKind::WasmTool,
-                description: "Search the web".to_string(),
-                keywords: vec!["search".into(), "web".into()],
-                source: ExtensionSource::WasmDownload {
-                    wasm_url: "https://example.com/web_search.wasm".to_string(),
-                    capabilities_url: None,
-                },
-                fallback_source: None,
-                auth_hint: AuthHint::CapabilitiesAuth,
-                version: None,
-            }],
-        ));
-        tools
-            .register(Arc::new(ToolActivateTool::new(Arc::clone(&ext_mgr))))
-            .await;
-
-        let adapter = EffectBridgeAdapter::new(
-            Arc::clone(&tools),
-            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
-                max_output_length: 10_000,
-                injection_check_enabled: false,
-            })),
-            Arc::new(HookRegistry::default()),
-        );
-
-        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("call_activate"));
-        let result = adapter
-            .execute_action(
-                "tool_activate",
-                serde_json::json!({"name": "web_search"}),
-                &lease(),
-                &ctx,
-            )
-            .await;
-
-        match result {
-            Err(EngineError::GatePaused {
-                gate_name,
-                action_name,
-                resume_kind,
-                ..
-            }) => {
-                assert_eq!(gate_name, "approval");
-                assert_eq!(action_name, "tool_activate");
-                match *resume_kind {
-                    ironclaw_engine::ResumeKind::Approval { allow_always } => {
-                        assert!(!allow_always);
-                    }
-                    other => panic!("expected approval resume kind, got {other:?}"),
-                }
-            }
-            other => panic!("expected approval gate pause, got {other:?}"),
         }
     }
 
@@ -5873,6 +5494,9 @@ mod tests {
             thread_goal: None,
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            gate_controller: ironclaw_engine::CancellingGateController::arc(),
+            call_approval_granted: false,
+            conversation_id: None,
         };
 
         let result = adapter
@@ -6264,7 +5888,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn available_actions_omit_installed_needs_auth_provider_action() {
+    async fn available_actions_keep_installed_needs_auth_provider_action() {
+        // Post-#3133/#3166: an installed-but-unauthenticated provider
+        // tool (e.g. gmail) STAYS on the callable surface. The engine
+        // raises an Authentication gate at execute time when the
+        // declared credential is missing and the inline-await
+        // machinery resumes the action after OAuth completes. The
+        // model can call the tool directly with no separate enablement
+        // step. Pre-#3133 the action was hidden until auth completed.
         let fixture = make_adapter_with_installed_provider_fixture(
             "gmail",
             "gmail_send",
@@ -6295,7 +5926,11 @@ mod tests {
             .available_actions(&[], &exec_ctx(ironclaw_engine::ThreadId::new(), None))
             .await
             .expect("actions");
-        assert!(!actions.iter().any(|action| action.name == "gmail_send"));
+        assert!(
+            actions.iter().any(|action| action.name == "gmail_send"),
+            "NeedsAuth provider tool should be callable; auth resolves at \
+             execute time via inline-await. actions={actions:?}"
+        );
     }
 
     #[tokio::test]
@@ -6470,6 +6105,9 @@ mod tests {
             thread_goal: None,
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            gate_controller: ironclaw_engine::CancellingGateController::arc(),
+            call_approval_granted: false,
+            conversation_id: None,
         };
 
         let capabilities = adapter
@@ -7303,10 +6941,57 @@ Use this skill to set up a Pika meeting.
         );
     }
 
-    /// Regression: mission_create with string-typed guardrails (e.g.
-    /// cooldown_secs="0") must be caught before creating the mission.
+    /// Regression for #3132: string-typed guardrails (e.g.
+    /// `cooldown_secs="120"`) must be coerced to integers per the action's
+    /// JSON Schema before reaching the handler. Previously rejected with
+    /// `'cooldown_secs' must be an integer, got "120"`.
     #[tokio::test]
-    async fn mission_create_string_guardrails_rejected_via_execute_action() {
+    async fn mission_create_string_guardrails_coerced_via_execute_action() {
+        let (adapter, _store, dyn_store) =
+            make_adapter_with_missions_and_store(Arc::new(ToolRegistry::new())).await;
+        let result = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "test",
+                    "goal": "do stuff",
+                    "cadence": "manual",
+                    "cooldown_secs": "120",
+                    "max_concurrent": "2",
+                    "dedup_window_secs": "30",
+                    "max_threads_per_day": "5",
+                }),
+                &lease(),
+                &exec_ctx(ironclaw_engine::ThreadId::new(), Some("c3")),
+            )
+            .await
+            .expect("string-typed guardrails should be coerced and succeed");
+
+        assert!(!result.is_error, "got error: {}", result.output);
+        let mission_id_str = result
+            .output
+            .get("mission_id")
+            .and_then(|v| v.as_str())
+            .expect("should have mission_id");
+        let mission_id =
+            ironclaw_engine::MissionId(uuid::Uuid::parse_str(mission_id_str).expect("uuid"));
+        let mission = dyn_store
+            .load_mission(mission_id)
+            .await
+            .expect("load_mission")
+            .expect("mission persisted");
+        assert_eq!(mission.cooldown_secs, 120);
+        assert_eq!(mission.max_concurrent, 2);
+        assert_eq!(mission.dedup_window_secs, 30);
+        assert_eq!(mission.max_threads_per_day, 5);
+    }
+
+    /// Non-coercible strings (e.g. `cooldown_secs="abc"`) still surface as
+    /// a clean error rather than being silently dropped. Coercion leaves
+    /// the value unchanged when it can't parse to the target type, and
+    /// `extract_guardrails`'s strict check then rejects loudly.
+    #[tokio::test]
+    async fn mission_create_non_coercible_string_guardrail_returns_error() {
         let adapter = make_adapter_with_missions().await;
         let result = adapter
             .execute_action(
@@ -7315,10 +7000,10 @@ Use this skill to set up a Pika meeting.
                     "name": "test",
                     "goal": "do stuff",
                     "cadence": "manual",
-                    "cooldown_secs": "300"
+                    "cooldown_secs": "abc",
                 }),
                 &lease(),
-                &exec_ctx(ironclaw_engine::ThreadId::new(), Some("c3")),
+                &exec_ctx(ironclaw_engine::ThreadId::new(), Some("c3b")),
             )
             .await
             .expect("should return Ok with is_error=true");
@@ -7367,11 +7052,13 @@ Use this skill to set up a Pika meeting.
         );
     }
 
-    /// Regression: mission_update with string-typed guardrails must be
-    /// caught at the execute_action level, not silently ignored.
+    /// Regression for #3132: `mission_update` with string-typed guardrails
+    /// must be coerced (not rejected) so LLM calls passing `"5"` for an
+    /// integer parameter succeed and persist the new value.
     #[tokio::test]
-    async fn mission_update_string_guardrails_rejected_via_execute_action() {
-        let adapter = make_adapter_with_missions().await;
+    async fn mission_update_string_guardrails_coerced_via_execute_action() {
+        let (adapter, _store, dyn_store) =
+            make_adapter_with_missions_and_store(Arc::new(ToolRegistry::new())).await;
         let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("u1"));
 
         // First create a mission to get an ID.
@@ -7389,40 +7076,39 @@ Use this skill to set up a Pika meeting.
             .await
             .expect("create should succeed");
         assert!(!create_result.is_error);
-        let mission_id = create_result
+        let mission_id_str = create_result
             .output
             .get("mission_id")
             .and_then(|v| v.as_str())
             .expect("should have mission_id");
 
-        // Now update with string-typed guardrails — should fail.
+        // Update with a string-typed integer — should be coerced and applied.
         let update_result = adapter
             .execute_action(
                 "mission_update",
                 serde_json::json!({
-                    "id": mission_id,
+                    "id": mission_id_str,
                     "max_concurrent": "5"
                 }),
                 &lease(),
                 &ctx,
             )
             .await
-            .expect("should return Ok with is_error=true");
+            .expect("string-typed guardrails should be coerced and succeed");
 
         assert!(
-            update_result.is_error,
-            "string guardrails should fail: {}",
+            !update_result.is_error,
+            "update should succeed after coercion: {}",
             update_result.output
         );
-        assert!(
-            update_result
-                .output
-                .get("error")
-                .and_then(|v| v.as_str())
-                .is_some_and(|s| s.contains("must be an integer")),
-            "got: {}",
-            update_result.output
-        );
+        let mission_id =
+            ironclaw_engine::MissionId(uuid::Uuid::parse_str(mission_id_str).expect("uuid"));
+        let mission = dyn_store
+            .load_mission(mission_id)
+            .await
+            .expect("load_mission")
+            .expect("mission persisted");
+        assert_eq!(mission.max_concurrent, 5);
     }
 
     /// Verify system_event cadence round-trips through mission_list.

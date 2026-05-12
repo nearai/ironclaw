@@ -131,6 +131,25 @@ pub struct AcceptedInboundMessage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedInboundMessageReplay {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    pub message_id: ThreadMessageId,
+    pub sequence: u64,
+    pub status: MessageStatus,
+    pub actor_id: Option<String>,
+    pub source_binding_id: Option<String>,
+    pub reply_target_binding_id: Option<String>,
+    pub turn_run_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayAcceptedInboundMessageRequest {
+    pub source_binding_id: String,
+    pub external_event_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppendAssistantDraftRequest {
     pub scope: ThreadScope,
     pub thread_id: ThreadId,

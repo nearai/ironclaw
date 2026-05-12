@@ -2,27 +2,33 @@ use async_trait::async_trait;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     hash::Hash,
-    sync::{Condvar, Mutex, MutexGuard},
+    sync::{Arc, Condvar, Mutex, MutexGuard},
 };
 
 use chrono::{Duration as ChronoDuration, Utc};
 
 use crate::{
-    AcceptedMessageRef, BlockedReason, CancelRunRequest, CancelRunResponse, GetRunStateRequest,
-    IdempotencyKey, LoopExitMapping, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse,
-    SanitizedFailure, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
-    TurnActiveLockKey, TurnActiveLockRecord, TurnActor, TurnAdmissionPolicy, TurnCheckpointId,
-    TurnCheckpointRecord, TurnError, TurnEventKind, TurnIdempotencyErrorReplay,
+    AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason,
+    AllowAllTurnAdmissionLimitProvider, BlockedReason, CancelRunRequest, CancelRunResponse,
+    GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey, LoopCheckpointRecord,
+    LoopCheckpointStore, LoopExitMapping, PutLoopCheckpointRequest, ReplyTargetBindingRef,
+    ResumeTurnRequest, ResumeTurnResponse, RunProfileResolutionError, RunProfileResolutionRequest,
+    RunProfileResolver, SanitizedFailure, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
+    ThreadBusy, TurnActiveLockKey, TurnActiveLockRecord, TurnActor, TurnAdmissionClass,
+    TurnAdmissionLimitProvider, TurnAdmissionPolicy, TurnAdmissionReservationRecord,
+    TurnCheckpointId, TurnCheckpointRecord, TurnError, TurnEventKind, TurnIdempotencyErrorReplay,
     TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnIdempotencyRecord,
     TurnIdempotencyReplay, TurnLifecycleEvent, TurnLockVersion, TurnPersistenceSnapshot,
     TurnRecord, TurnRunId, TurnRunProfile, TurnRunRecord, TurnRunState, TurnScope, TurnStateStore,
     TurnStatus,
-    events::EventCursor,
+    admission::{TurnAdmissionBucket, admission_buckets},
+    events::{EventCursor, TurnEventPage, TurnEventProjectionSource, project_turn_events},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordRecoveryRequiredRequest, RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse,
-        TurnRunTransitionPort, TurnRunnerOutcome,
+        RecordModelRouteSnapshotRequest, RecordRecoveryRequiredRequest,
+        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, TurnRunTransitionPort,
+        TurnRunnerOutcome,
     },
 };
 
@@ -53,6 +59,7 @@ impl Default for InMemoryTurnStateStoreLimits {
 pub struct InMemoryTurnStateStore {
     inner: Mutex<Inner>,
     submit_idempotency_ready: Condvar,
+    admission_limit_provider: Arc<dyn TurnAdmissionLimitProvider>,
 }
 
 impl Default for InMemoryTurnStateStore {
@@ -70,6 +77,7 @@ struct Inner {
     terminal_runs: VecDeque<TurnRunId>,
     active_locks: HashMap<TurnActiveLockKey, TurnActiveLockRecord>,
     checkpoints: Vec<TurnCheckpointRecord>,
+    loop_checkpoints: HashMap<TurnCheckpointId, LoopCheckpointRecord>,
     submit_idempotency: HashMap<SubmitIdempotencyKey, Result<SubmitTurnResponse, TurnError>>,
     submit_idempotency_in_flight: HashSet<SubmitIdempotencyKey>,
     resume_idempotency: HashMap<RunIdempotencyKey, Result<ResumeTurnResponse, TurnError>>,
@@ -80,6 +88,8 @@ struct Inner {
     cancel_idempotency_order: VecDeque<RunIdempotencyKey>,
     idempotency_record_order: VecDeque<PersistedIdempotencyKey>,
     events: Vec<TurnLifecycleEvent>,
+    event_retention_floor: EventCursor,
+    admission_reservations: HashMap<TurnRunId, TurnAdmissionReservationRecord>,
     limits: InMemoryTurnStateStoreLimits,
 }
 
@@ -103,6 +113,7 @@ struct RunRecord {
     run_id: TurnRunId,
     status: TurnStatus,
     profile: TurnRunProfile,
+    resolved_model_route: Option<crate::run_profile::LoopModelRouteSnapshot>,
     accepted_message_ref: AcceptedMessageRef,
     source_binding_ref: SourceBindingRef,
     reply_target_binding_ref: ReplyTargetBindingRef,
@@ -139,6 +150,44 @@ struct PersistedIdempotencyKey {
     key: IdempotencyKey,
 }
 
+fn profile_resolution_error_to_turn_error(error: RunProfileResolutionError) -> TurnError {
+    let reason = match error {
+        RunProfileResolutionError::Unauthorized { .. } => AdmissionRejectionReason::Unauthorized,
+        RunProfileResolutionError::ProfileUnavailable { .. }
+        | RunProfileResolutionError::InvalidRequest { .. } => {
+            AdmissionRejectionReason::ProfileRejected
+        }
+    };
+    TurnError::AdmissionRejected(AdmissionRejection::new(reason))
+}
+
+struct SubmitInFlightGuard<'a> {
+    inner: &'a Mutex<Inner>,
+    ready: &'a Condvar,
+    key: SubmitIdempotencyKey,
+}
+
+impl<'a> SubmitInFlightGuard<'a> {
+    fn new(inner: &'a Mutex<Inner>, ready: &'a Condvar, key: SubmitIdempotencyKey) -> Self {
+        Self { inner, ready, key }
+    }
+}
+
+impl Drop for SubmitInFlightGuard<'_> {
+    fn drop(&mut self) {
+        let removed = match self.inner.lock() {
+            Ok(mut inner) => inner.submit_idempotency_in_flight.remove(&self.key),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .submit_idempotency_in_flight
+                .remove(&self.key),
+        };
+        if removed {
+            self.ready.notify_all();
+        }
+    }
+}
+
 impl InMemoryTurnStateStore {
     pub fn with_limits(limits: InMemoryTurnStateStoreLimits) -> Self {
         Self {
@@ -147,6 +196,37 @@ impl InMemoryTurnStateStore {
                 ..Inner::default()
             }),
             submit_idempotency_ready: Condvar::new(),
+            admission_limit_provider: Arc::new(AllowAllTurnAdmissionLimitProvider),
+        }
+    }
+
+    pub fn with_admission_limit_provider(
+        admission_limit_provider: Arc<dyn TurnAdmissionLimitProvider>,
+    ) -> Self {
+        Self::with_limits_and_admission_limit_provider(
+            InMemoryTurnStateStoreLimits::default(),
+            admission_limit_provider,
+        )
+    }
+
+    pub fn with_limits_and_admission_limit_provider(
+        limits: InMemoryTurnStateStoreLimits,
+        admission_limit_provider: Arc<dyn TurnAdmissionLimitProvider>,
+    ) -> Self {
+        Self {
+            inner: Mutex::new(Inner {
+                limits,
+                ..Inner::default()
+            }),
+            submit_idempotency_ready: Condvar::new(),
+            admission_limit_provider,
+        }
+    }
+
+    pub fn active_admission_reservations(&self) -> Vec<TurnAdmissionReservationRecord> {
+        match self.inner.lock() {
+            Ok(inner) => inner.active_admission_reservations(),
+            Err(poisoned) => poisoned.into_inner().active_admission_reservations(),
         }
     }
 
@@ -161,9 +241,22 @@ impl InMemoryTurnStateStore {
         snapshot: TurnPersistenceSnapshot,
         limits: InMemoryTurnStateStoreLimits,
     ) -> Result<Self, TurnError> {
+        Self::from_persistence_snapshot_with_admission_limit_provider(
+            snapshot,
+            limits,
+            Arc::new(AllowAllTurnAdmissionLimitProvider),
+        )
+    }
+
+    pub fn from_persistence_snapshot_with_admission_limit_provider(
+        snapshot: TurnPersistenceSnapshot,
+        limits: InMemoryTurnStateStoreLimits,
+        admission_limit_provider: Arc<dyn TurnAdmissionLimitProvider>,
+    ) -> Result<Self, TurnError> {
         Ok(Self {
             inner: Mutex::new(Inner::from_persistence_snapshot(snapshot, limits)?),
             submit_idempotency_ready: Condvar::new(),
+            admission_limit_provider,
         })
     }
 
@@ -193,32 +286,129 @@ impl InMemoryTurnStateStore {
 }
 
 #[async_trait]
+impl TurnEventProjectionSource for InMemoryTurnStateStore {
+    async fn read_turn_events_after(
+        &self,
+        scope: &TurnScope,
+        after: Option<EventCursor>,
+        limit: usize,
+    ) -> Result<TurnEventPage, TurnError> {
+        let inner = self.lock_inner()?;
+        Ok(project_turn_events(
+            &inner.events,
+            scope,
+            after,
+            limit,
+            inner.event_retention_floor,
+        ))
+    }
+}
+
+#[async_trait]
+impl LoopCheckpointStore for InMemoryTurnStateStore {
+    async fn put_loop_checkpoint(
+        &self,
+        request: PutLoopCheckpointRequest,
+    ) -> Result<LoopCheckpointRecord, TurnError> {
+        let checkpoint_id = TurnCheckpointId::new();
+        let record = LoopCheckpointRecord {
+            checkpoint_id,
+            scope: request.scope,
+            turn_id: request.turn_id,
+            run_id: request.run_id,
+            state_ref: request.state_ref,
+            schema_id: request.schema_id,
+            schema_version: request.schema_version,
+            kind: request.kind,
+            created_at: Utc::now(),
+        };
+        let mut inner = self.lock_inner()?;
+        inner.loop_checkpoints.insert(checkpoint_id, record.clone());
+        Ok(record)
+    }
+
+    async fn get_loop_checkpoint(
+        &self,
+        request: GetLoopCheckpointRequest,
+    ) -> Result<Option<LoopCheckpointRecord>, TurnError> {
+        let inner = self.lock_inner()?;
+        let Some(record) = inner.loop_checkpoints.get(&request.checkpoint_id) else {
+            return Ok(None);
+        };
+        if record.scope == request.scope
+            && record.turn_id == request.turn_id
+            && record.run_id == request.run_id
+            && record.checkpoint_id == request.checkpoint_id
+        {
+            Ok(Some(record.clone()))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+#[async_trait]
 impl TurnStateStore for InMemoryTurnStateStore {
     async fn submit_turn(
         &self,
         request: SubmitTurnRequest,
         admission_policy: &dyn TurnAdmissionPolicy,
+        run_profile_resolver: &dyn RunProfileResolver,
     ) -> Result<SubmitTurnResponse, TurnError> {
         let idempotency_key = SubmitIdempotencyKey {
             scope: request.scope.clone(),
             key: request.idempotency_key.clone(),
         };
-        let mut inner = self.lock_inner()?;
-        loop {
-            if let Some(result) = inner.submit_idempotency.get(&idempotency_key) {
-                return result.clone();
+        {
+            let mut inner = self.lock_inner()?;
+            loop {
+                if let Some(result) = inner.submit_idempotency.get(&idempotency_key) {
+                    return result.clone();
+                }
+                if inner
+                    .submit_idempotency_in_flight
+                    .insert(idempotency_key.clone())
+                {
+                    break;
+                }
+                inner = self.wait_for_submit_idempotency(inner)?;
             }
-            if inner
-                .submit_idempotency_in_flight
-                .insert(idempotency_key.clone())
-            {
-                break;
-            }
-            inner = self.wait_for_submit_idempotency(inner)?;
         }
-        drop(inner);
+        let _in_flight_guard = SubmitInFlightGuard::new(
+            &self.inner,
+            &self.submit_idempotency_ready,
+            idempotency_key.clone(),
+        );
 
         let admission_result = admission_policy.check_submit(&request);
+
+        {
+            let mut inner = self.lock_inner()?;
+            if let Some(result) = inner.submit_idempotency.get(&idempotency_key).cloned() {
+                inner.submit_idempotency_in_flight.remove(&idempotency_key);
+                self.submit_idempotency_ready.notify_all();
+                return result;
+            }
+
+            if let Err(rejection) = admission_result {
+                let response = Err(TurnError::AdmissionRejected(rejection));
+                inner.remember_submit_idempotency(
+                    idempotency_key.clone(),
+                    response.clone(),
+                    request.received_at,
+                );
+                inner.submit_idempotency_in_flight.remove(&idempotency_key);
+                self.submit_idempotency_ready.notify_all();
+                return response;
+            }
+        }
+
+        let profile_resolution = run_profile_resolver
+            .resolve_run_profile(RunProfileResolutionRequest {
+                requested_run_profile: request.requested_run_profile.clone(),
+                ..RunProfileResolutionRequest::interactive_default()
+            })
+            .await;
 
         let mut inner = self.lock_inner()?;
         if let Some(result) = inner.submit_idempotency.get(&idempotency_key).cloned() {
@@ -226,8 +416,38 @@ impl TurnStateStore for InMemoryTurnStateStore {
             self.submit_idempotency_ready.notify_all();
             return result;
         }
+        let profile = match profile_resolution {
+            Ok(resolved) => TurnRunProfile::from_resolved(resolved),
+            Err(error) => {
+                let response = Err(profile_resolution_error_to_turn_error(error));
+                inner.remember_submit_idempotency(
+                    idempotency_key.clone(),
+                    response.clone(),
+                    request.received_at,
+                );
+                inner.submit_idempotency_in_flight.remove(&idempotency_key);
+                self.submit_idempotency_ready.notify_all();
+                return response;
+            }
+        };
 
-        if let Err(rejection) = admission_result {
+        let lock_key = TurnActiveLockKey::from(&request.scope);
+        if let Some(response) = inner.thread_busy(&lock_key) {
+            inner.submit_idempotency_in_flight.remove(&idempotency_key);
+            self.submit_idempotency_ready.notify_all();
+            return Err(TurnError::ThreadBusy(response));
+        }
+
+        let turn_id = crate::TurnId::new();
+        let run_id = TurnRunId::new();
+        let admission_class = profile.admission_class.clone();
+        if let Err(rejection) = inner.reserve_admission(
+            run_id,
+            admission_class.clone(),
+            &request.scope,
+            &request.actor,
+            self.admission_limit_provider.as_ref(),
+        ) {
             let response = Err(TurnError::AdmissionRejected(rejection));
             inner.remember_submit_idempotency(
                 idempotency_key.clone(),
@@ -238,31 +458,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
             self.submit_idempotency_ready.notify_all();
             return response;
         }
-
-        let lock_key = TurnActiveLockKey::from(&request.scope);
-        if let Some(active_lock) = inner.active_locks.get(&lock_key)
-            && let Some(record) = inner.records.get(&active_lock.run_id)
-            && record.status.keeps_active_lock()
-        {
-            let response = Err(TurnError::ThreadBusy(ThreadBusy {
-                active_run_id: active_lock.run_id,
-                status: record.status,
-                event_cursor: record.event_cursor,
-            }));
-            inner.remember_submit_idempotency(
-                idempotency_key.clone(),
-                response.clone(),
-                request.received_at,
-            );
-            inner.submit_idempotency_in_flight.remove(&idempotency_key);
-            self.submit_idempotency_ready.notify_all();
-            return response;
-        }
-
-        let turn_id = crate::TurnId::new();
-        let run_id = TurnRunId::new();
         let cursor = inner.next_cursor();
-        let profile = TurnRunProfile::resolve(request.requested_run_profile.as_ref());
         let turn_record = TurnRecord {
             turn_id,
             scope: request.scope.clone(),
@@ -279,6 +475,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
             run_id,
             status: TurnStatus::Queued,
             profile: profile.clone(),
+            resolved_model_route: None,
             accepted_message_ref: request.accepted_message_ref.clone(),
             source_binding_ref: request.source_binding_ref.clone(),
             reply_target_binding_ref: request.reply_target_binding_ref.clone(),
@@ -398,6 +595,7 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
         inner.update_active_lock(&record, now);
         let claimed = ClaimedTurnRun {
             state: record.state(),
+            resolved_run_profile: record.profile.resolved.clone(),
             runner_id: request.runner_id,
             lease_token: request.lease_token,
         };
@@ -412,6 +610,12 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
         let result = (|| {
             let now = Utc::now();
             ensure_active_lease(&record, request.runner_id, request.lease_token, now)?;
+            if record.status != TurnStatus::Running {
+                return Err(TurnError::InvalidTransition {
+                    from: record.status,
+                    to: TurnStatus::Running,
+                });
+            }
             record.last_heartbeat_at = Some(now);
             record.lease_expires_at = Some(inner.next_lease_expiry(now));
             record.event_cursor = inner.next_cursor();
@@ -429,6 +633,41 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
     ) -> Result<RecoverExpiredLeasesResponse, TurnError> {
         let mut inner = self.lock_inner()?;
         Ok(inner.recover_expired_leases(request))
+    }
+
+    async fn record_model_route_snapshot(
+        &self,
+        request: RecordModelRouteSnapshotRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        let mut inner = self.lock_inner()?;
+        let mut record = inner.take_record(request.run_id)?;
+        let result = (|| {
+            let now = Utc::now();
+            ensure_active_lease(&record, request.runner_id, request.lease_token, now)?;
+            if record.status != TurnStatus::Running {
+                return Err(TurnError::InvalidTransition {
+                    from: record.status,
+                    to: TurnStatus::Running,
+                });
+            }
+            request
+                .snapshot
+                .validate()
+                .map_err(|reason| TurnError::InvalidRequest { reason })?;
+            if let Some(existing) = &record.resolved_model_route {
+                if existing != &request.snapshot {
+                    return Err(TurnError::Conflict {
+                        reason: "run already has a different resolved model route".to_string(),
+                    });
+                }
+                return Ok(record.state());
+            }
+            record.resolved_model_route = Some(request.snapshot);
+            inner.touch_active_lock(&record, now);
+            Ok(record.state())
+        })();
+        inner.records.insert(record.run_id, record);
+        result
     }
 
     async fn block_run(&self, request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
@@ -453,6 +692,7 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
             inner.record_checkpoint(
                 &record,
                 request.checkpoint_id,
+                request.state_ref,
                 request.reason.gate_ref().clone(),
                 now,
             );
@@ -561,6 +801,7 @@ impl Inner {
                     run_id: run.run_id,
                     status: run.status,
                     profile: run.profile,
+                    resolved_model_route: run.resolved_model_route,
                     accepted_message_ref: run.accepted_message_ref,
                     source_binding_ref: run.source_binding_ref,
                     reply_target_binding_ref: run.reply_target_binding_ref,
@@ -633,6 +874,50 @@ impl Inner {
             }
         }
 
+        let loop_checkpoints = snapshot
+            .loop_checkpoints
+            .into_iter()
+            .map(|record| (record.checkpoint_id, record))
+            .collect::<HashMap<_, _>>();
+
+        let events = snapshot.events;
+        cursor = cursor.max(events.iter().map(|event| event.cursor.0).max().unwrap_or(0));
+        cursor = cursor.max(snapshot.event_retention_floor.0);
+        let mut admission_reservations = HashMap::new();
+        for mut reservation in snapshot.admission_reservations {
+            let Some(record) = records.get(&reservation.run_id) else {
+                continue;
+            };
+            if record.status.is_terminal() {
+                reservation.released = true;
+            }
+            admission_reservations.insert(reservation.run_id, reservation);
+        }
+        for record in records.values() {
+            if record.status.keeps_active_lock() {
+                let admission_class = record.profile.admission_class.clone();
+                let buckets = admission_buckets(&record.scope, &record.actor, &admission_class);
+                let needs_canonical_reservation = admission_reservations
+                    .get(&record.run_id)
+                    .is_none_or(|reservation| {
+                        reservation.released
+                            || reservation.admission_class != admission_class
+                            || reservation.buckets != buckets
+                    });
+                if needs_canonical_reservation {
+                    admission_reservations.insert(
+                        record.run_id,
+                        TurnAdmissionReservationRecord {
+                            run_id: record.run_id,
+                            admission_class,
+                            buckets,
+                            released: false,
+                        },
+                    );
+                }
+            }
+        }
+
         Ok(Self {
             cursor,
             turns,
@@ -641,6 +926,7 @@ impl Inner {
             terminal_runs,
             active_locks,
             checkpoints: snapshot.checkpoints,
+            loop_checkpoints,
             submit_idempotency,
             submit_idempotency_in_flight: HashSet::new(),
             resume_idempotency,
@@ -650,7 +936,9 @@ impl Inner {
             resume_idempotency_order,
             cancel_idempotency_order,
             idempotency_record_order,
-            events: Vec::new(),
+            events,
+            event_retention_floor: snapshot.event_retention_floor,
+            admission_reservations,
             limits,
         })
     }
@@ -681,6 +969,9 @@ impl Inner {
         });
         if self.events.len() > self.limits.max_events {
             let excess = self.events.len() - self.limits.max_events;
+            if let Some(last_pruned) = self.events.get(excess.saturating_sub(1)) {
+                self.event_retention_floor = self.event_retention_floor.max(last_pruned.cursor);
+            }
             self.events.drain(0..excess);
         }
     }
@@ -702,18 +993,34 @@ impl Inner {
                 .cmp(&b.created_at)
                 .then_with(|| a.sequence.cmp(&b.sequence))
         });
+        let mut loop_checkpoints = self.loop_checkpoints.values().cloned().collect::<Vec<_>>();
+        loop_checkpoints.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.checkpoint_id.as_uuid().cmp(&b.checkpoint_id.as_uuid()))
+        });
         let mut idempotency_records = self
             .idempotency_records
             .values()
             .cloned()
             .collect::<Vec<_>>();
         idempotency_records.sort_by_key(|record| record.created_at);
+        let mut admission_reservations = self
+            .admission_reservations
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        admission_reservations.sort_by_key(|reservation| reservation.run_id.to_string());
         TurnPersistenceSnapshot {
             turns,
             runs,
             active_locks,
             checkpoints,
+            loop_checkpoints,
             idempotency_records,
+            events: self.events.clone(),
+            event_retention_floor: self.event_retention_floor,
+            admission_reservations,
         }
     }
 
@@ -1105,8 +1412,9 @@ impl Inner {
                 }
                 LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Blocked {
                     checkpoint_id,
+                    state_ref,
                     reason,
-                }) => self.block_claimed_record(record, checkpoint_id, reason),
+                }) => self.block_claimed_record(record, checkpoint_id, state_ref, reason),
                 LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Failed { failure }) => {
                     self.fail_claimed_record(record, failure)
                 }
@@ -1196,6 +1504,7 @@ impl Inner {
         &mut self,
         mut record: RunRecord,
         checkpoint_id: TurnCheckpointId,
+        state_ref: crate::run_profile::LoopCheckpointStateRef,
         reason: BlockedReason,
     ) -> AppliedLoopTransition {
         if record.status != TurnStatus::Running {
@@ -1216,7 +1525,13 @@ impl Inner {
         record.lease_token = None;
         record.lease_expires_at = None;
         record.event_cursor = self.next_cursor();
-        self.record_checkpoint(&record, checkpoint_id, reason.gate_ref().clone(), now);
+        self.record_checkpoint(
+            &record,
+            checkpoint_id,
+            state_ref,
+            reason.gate_ref().clone(),
+            now,
+        );
         self.update_active_lock(&record, now);
         let state = record.state();
         self.push_event(&record, TurnEventKind::Blocked, None);
@@ -1360,10 +1675,90 @@ impl Inner {
         }
     }
 
+    fn thread_busy(&self, lock_key: &TurnActiveLockKey) -> Option<ThreadBusy> {
+        let active_lock = self.active_locks.get(lock_key)?;
+        let record = self.records.get(&active_lock.run_id)?;
+        record.status.keeps_active_lock().then_some(ThreadBusy {
+            active_run_id: active_lock.run_id,
+            status: record.status,
+            event_cursor: record.event_cursor,
+        })
+    }
+
+    fn reserve_admission(
+        &mut self,
+        run_id: TurnRunId,
+        admission_class: TurnAdmissionClass,
+        scope: &TurnScope,
+        actor: &TurnActor,
+        limit_provider: &dyn TurnAdmissionLimitProvider,
+    ) -> Result<(), AdmissionRejection> {
+        let buckets = admission_buckets(scope, actor, &admission_class);
+        for bucket in &buckets {
+            let limit = limit_provider
+                .limit_for(bucket)
+                .map_err(|_| AdmissionRejection::new(AdmissionRejectionReason::Unavailable))?;
+            if let Some(max_active) = limit.max_active {
+                let active_count = self.active_admission_count(bucket);
+                if active_count >= max_active {
+                    return Err(
+                        AdmissionRejection::new(AdmissionRejectionReason::TenantLimit)
+                            .with_capacity_denial(crate::TurnAdmissionCapacityDenial {
+                                axis_kind: bucket.axis_kind,
+                                bucket_kind: bucket.bucket_kind,
+                                admission_class: bucket.admission_class.clone(),
+                                limit: max_active,
+                                active_count,
+                                retry_after_ms: limit.retry_after_ms,
+                            }),
+                    );
+                }
+            }
+        }
+        self.admission_reservations.insert(
+            run_id,
+            TurnAdmissionReservationRecord {
+                run_id,
+                admission_class,
+                buckets,
+                released: false,
+            },
+        );
+        Ok(())
+    }
+
+    fn active_admission_count(&self, bucket: &TurnAdmissionBucket) -> u64 {
+        self.admission_reservations
+            .values()
+            .filter(|reservation| {
+                !reservation.released
+                    && reservation
+                        .buckets
+                        .iter()
+                        .any(|reserved| reserved == bucket)
+            })
+            .count() as u64
+    }
+
+    fn active_admission_reservations(&self) -> Vec<TurnAdmissionReservationRecord> {
+        self.admission_reservations
+            .values()
+            .filter(|reservation| !reservation.released)
+            .cloned()
+            .collect()
+    }
+
+    fn release_admission(&mut self, run_id: TurnRunId) {
+        if let Some(reservation) = self.admission_reservations.get_mut(&run_id) {
+            reservation.released = true;
+        }
+    }
+
     fn record_checkpoint(
         &mut self,
         record: &RunRecord,
         checkpoint_id: TurnCheckpointId,
+        state_ref: crate::run_profile::LoopCheckpointStateRef,
         gate_ref: crate::GateRef,
         created_at: crate::TurnTimestamp,
     ) {
@@ -1376,9 +1771,12 @@ impl Inner {
         self.checkpoints.push(TurnCheckpointRecord {
             checkpoint_id,
             run_id: record.run_id,
+            scope: Some(record.scope.clone()),
             sequence,
             status: record.status,
             gate_ref,
+            kind: crate::run_profile::LoopCheckpointKind::BeforeBlock,
+            state_ref,
             created_at,
         });
     }
@@ -1395,6 +1793,7 @@ impl Inner {
     }
 
     fn mark_terminal(&mut self, run_id: TurnRunId) {
+        self.release_admission(run_id);
         self.terminal_runs.push_back(run_id);
     }
 
@@ -1409,6 +1808,7 @@ impl Inner {
                 .is_some_and(|record| record.status.is_terminal())
             {
                 self.records.remove(&run_id);
+                self.admission_reservations.remove(&run_id);
             }
         }
     }
@@ -1425,6 +1825,7 @@ impl RunRecord {
             reply_target_binding_ref: self.reply_target_binding_ref.clone(),
             status: self.status,
             profile: self.profile.clone(),
+            resolved_model_route: self.resolved_model_route.clone(),
             checkpoint_id: self.checkpoint_id,
             gate_ref: self.gate_ref.clone(),
             failure: self.failure.clone(),
@@ -1450,6 +1851,7 @@ impl RunRecord {
             reply_target_binding_ref: self.reply_target_binding_ref.clone(),
             resolved_run_profile_id: self.profile.id.clone(),
             resolved_run_profile_version: self.profile.version,
+            resolved_model_route: self.resolved_model_route.clone(),
             received_at: self.received_at,
             checkpoint_id: self.checkpoint_id,
             gate_ref: self.gate_ref.clone(),

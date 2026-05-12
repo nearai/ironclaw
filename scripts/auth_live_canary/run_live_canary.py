@@ -325,6 +325,17 @@ async def seed_non_oauth_credentials(
             value=github_token,
             provider="github",
         )
+        # Companion scopes record — without it, needs_scope_expansion() in
+        # src/extensions/manager.rs treats the seeded PAT as a legacy token
+        # and forces re-auth, leaving the extension stuck at
+        # authenticated=False. Match the github tool's merged_scopes.
+        await put_secret(
+            base_url, token,
+            user_id=owner_user_id,
+            name="github_token_scopes",
+            value="read:org repo workflow",
+            provider="github",
+        )
 
     notion_access = env_str("AUTH_LIVE_NOTION_ACCESS_TOKEN")
     notion_refresh = env_str("AUTH_LIVE_NOTION_REFRESH_TOKEN")

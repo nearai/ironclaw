@@ -706,13 +706,15 @@ async fn resource_managed_store_denies_before_process_record_creation() {
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
-    governor.set_limit(
-        ResourceAccount::tenant(scope.tenant_id.clone()),
-        ResourceLimits {
-            max_process_count: Some(0),
-            ..ResourceLimits::default()
-        },
-    );
+    governor
+        .set_limit(
+            ResourceAccount::tenant(scope.tenant_id.clone()),
+            ResourceLimits {
+                max_process_count: Some(0),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
     let store = ResourceManagedProcessStore::new(InMemoryProcessStore::new(), governor.clone());
 
     let err = store
@@ -1534,13 +1536,15 @@ async fn assert_unowned_process_reservation_rejected(transition: UnownedTransiti
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
-    governor.set_limit(
-        account.clone(),
-        ResourceLimits {
-            max_process_count: Some(2),
-            ..ResourceLimits::default()
-        },
-    );
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_process_count: Some(2),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
     let estimate = ResourceEstimate {
         process_count: Some(1),
         ..ResourceEstimate::default()
@@ -1762,8 +1766,12 @@ struct ReleaseFailingGovernor {
 }
 
 impl ResourceGovernor for ReleaseFailingGovernor {
-    fn set_limit(&self, account: ResourceAccount, limits: ResourceLimits) {
-        self.inner.set_limit(account, limits);
+    fn set_limit(
+        &self,
+        account: ResourceAccount,
+        limits: ResourceLimits,
+    ) -> Result<(), ResourceError> {
+        self.inner.set_limit(account, limits)
     }
 
     fn reserve(
@@ -1805,8 +1813,12 @@ struct ReconcileFailingGovernor {
 }
 
 impl ResourceGovernor for ReconcileFailingGovernor {
-    fn set_limit(&self, account: ResourceAccount, limits: ResourceLimits) {
-        self.inner.set_limit(account, limits);
+    fn set_limit(
+        &self,
+        account: ResourceAccount,
+        limits: ResourceLimits,
+    ) -> Result<(), ResourceError> {
+        self.inner.set_limit(account, limits)
     }
 
     fn reserve(

@@ -187,6 +187,74 @@ pub(crate) async fn chat_approval_handler(
         )
     })?;
 
+    // Inline fast-path: when an Approval gate parks the live engine VM
+    // via `BridgeGateController::pause`, the per-user agent loop is
+    // blocked at `handle_message` awaiting the bridge call, so an
+    // ExecApproval submission posted to msg_tx would queue indefinitely
+    // behind the parked execution. Bypass the mpsc and call into the
+    // gate controller's in-memory delivery channel directly. On
+    // `NoLiveVm` we fall through to the legacy mpsc path so engine v1
+    // approvals (and any post-restart Approval gates without a parked
+    // future) still resolve correctly.
+    //
+    // The fast path looks the gate up by `request_id` rather than by
+    // the wire `thread_id`: web's `req.thread_id` is the channel-visible
+    // identifier (the per-conversation UUID returned by
+    // `/api/chat/thread/new`) and is recorded on the pending gate as
+    // `scope_thread_id`, not as the internal engine `ThreadId` that
+    // keys `PendingGateStore`. Mixing them up would miss every gate
+    // whose channel scope differs from its engine thread.
+    let resolution = if approved {
+        ironclaw_engine::GateResolution::Approved { always }
+    } else {
+        ironclaw_engine::GateResolution::Denied { reason: None }
+    };
+    // Match the legacy mpsc path's settings precedence (cache → raw DB)
+    // so an `action="always"` approval still persists
+    // `tool_permissions.<tool>=always_allow` whenever any DB-backed
+    // SettingsStore is configured. Falling back to the raw `state.store`
+    // covers gateways that wire a database without the cache layer.
+    let settings_store =
+        crate::channels::web::features::settings::resolve_settings_store(&state).ok();
+    match crate::bridge::try_resolve_inline_approval_gate(
+        &user.user_id,
+        "gateway",
+        request_id,
+        resolution,
+        settings_store,
+    )
+    .await
+    {
+        Ok(crate::bridge::InlineGateOutcome::Delivered) => {
+            return Ok((
+                StatusCode::ACCEPTED,
+                Json(SendMessageResponse {
+                    message_id: Uuid::new_v4(),
+                    status: "accepted",
+                }),
+            ));
+        }
+        Ok(crate::bridge::InlineGateOutcome::NoLiveVm) => {
+            // Fall through to the legacy mpsc dispatch below.
+        }
+        Err(e) => {
+            // Map typed verification failures to specific 4xx /
+            // 5xx codes. Matching on the variant — not a substring
+            // of the rendered message — keeps the HTTP contract
+            // tied to the typed surface so a future change to the
+            // error message can't silently flip a 403 → 500.
+            use crate::bridge::InlineGateError;
+            let status = match &e {
+                InlineGateError::ChannelMismatch { .. } | InlineGateError::Unauthorized => {
+                    StatusCode::FORBIDDEN
+                }
+                InlineGateError::Stale | InlineGateError::Expired => StatusCode::CONFLICT,
+                InlineGateError::Other(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            return Err((status, e.to_string()));
+        }
+    }
+
     // Build a structured ExecApproval submission as JSON, sent through the
     // existing message pipeline so the agent loop picks it up.
     let approval = crate::agent::submission::Submission::ExecApproval {
@@ -238,16 +306,48 @@ pub(crate) async fn chat_gate_resolve_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     Json(req): Json<GateResolveRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    match req.resolution {
+    // Half-2 of #3133: a paused background mission may be waiting on
+    // this same `request_id`. After the foreground gate is resolved we
+    // fan the disposition out to the mission auto-resume path so a
+    // paused mission re-fires (Approved / CredentialProvided) or gets
+    // marked Failed (Denied / Cancelled). For OAuth flows the
+    // credential-write path also triggers
+    // `resume_paused_missions_for_credential` from the OAuth callback
+    // handler — both hooks landing on the same mission are idempotent
+    // since `resume_paused_for_request_id` and
+    // `resume_paused_for_credential` re-check `paused_gate` atomically.
+    // Best-effort dispatch — failures inside the helper are logged and
+    // never surfaced as a gate-resolve error.
+    // Validate the request id once up front so every arm — including
+    // the Approved / Denied paths that delegate to chat_approval_handler
+    // — surfaces a uniform 400 on malformed UUIDs, and the mission
+    // auto-resume hook below isn't silently skipped on bad input.
+    let gate_request_id = Uuid::parse_str(&req.request_id).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Invalid request_id (expected UUID)".to_string(),
+        )
+    })?;
+    let mission_outcome = match req.resolution {
+        GateResolutionPayload::Approved { .. }
+        | GateResolutionPayload::CredentialProvided { .. } => {
+            Some(ironclaw_engine::GateResolutionOutcome::Approved)
+        }
+        GateResolutionPayload::Denied => Some(ironclaw_engine::GateResolutionOutcome::Denied),
+        GateResolutionPayload::Cancelled => Some(ironclaw_engine::GateResolutionOutcome::Cancelled),
+    };
+    let mission_resume = mission_outcome.map(|outcome| (outcome, gate_request_id));
+
+    let response: Result<Json<ActionResponse>, (StatusCode, String)> = match req.resolution {
         GateResolutionPayload::Approved { always } => {
             let action = if always { "always" } else { "approve" }.to_string();
             let _ = chat_approval_handler(
-                State(state),
-                AuthenticatedUser(user),
+                State(state.clone()),
+                AuthenticatedUser(user.clone()),
                 Json(ApprovalRequest {
-                    request_id: req.request_id,
+                    request_id: req.request_id.clone(),
                     action,
-                    thread_id: req.thread_id,
+                    thread_id: req.thread_id.clone(),
                 }),
             )
             .await?;
@@ -255,12 +355,12 @@ pub(crate) async fn chat_gate_resolve_handler(
         }
         GateResolutionPayload::Denied => {
             let _ = chat_approval_handler(
-                State(state),
-                AuthenticatedUser(user),
+                State(state.clone()),
+                AuthenticatedUser(user.clone()),
                 Json(ApprovalRequest {
-                    request_id: req.request_id,
+                    request_id: req.request_id.clone(),
                     action: "deny".into(),
-                    thread_id: req.thread_id,
+                    thread_id: req.thread_id.clone(),
                 }),
             )
             .await?;
@@ -271,14 +371,8 @@ pub(crate) async fn chat_gate_resolve_handler(
                 StatusCode::BAD_REQUEST,
                 "thread_id is required for credential resolution".to_string(),
             ))?;
-            let request_id = Uuid::parse_str(&req.request_id).map_err(|_| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    "Invalid request_id (expected UUID)".to_string(),
-                )
-            })?;
             let submission = crate::agent::submission::Submission::GateAuthResolution {
-                request_id,
+                request_id: gate_request_id,
                 resolution: crate::agent::submission::AuthGateResolution::CredentialProvided {
                     token,
                 },
@@ -296,30 +390,57 @@ pub(crate) async fn chat_gate_resolve_handler(
             Ok(Json(ActionResponse::ok("Credential submitted.")))
         }
         GateResolutionPayload::Cancelled => {
-            let thread_id = req.thread_id.ok_or((
-                StatusCode::BAD_REQUEST,
-                "thread_id is required for cancellation".to_string(),
-            ))?;
-            let request_id = Uuid::parse_str(&req.request_id).map_err(|_| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    "Invalid request_id (expected UUID)".to_string(),
-                )
-            })?;
-            let submission = crate::agent::submission::Submission::GateAuthResolution {
-                request_id,
-                resolution: crate::agent::submission::AuthGateResolution::Cancelled,
+            // Mission-only gates have no foreground `thread_id` — the
+            // gate is owned by a background mission's child thread, and
+            // the gate-card UI doesn't surface a `thread_id` in the
+            // resolution payload. For foreground inline-await gates,
+            // dispatch the structured cancellation so the parked VM
+            // unwinds promptly. The mission auto-resume path
+            // (`resume_paused_missions_for_gate_request`, fired below)
+            // independently carries the Cancelled outcome to the
+            // mission state machine.
+            //
+            // If the client omits `thread_id` for a foreground gate
+            // (regression from PR #3366 review: gate-card UI without
+            // foreground thread context), recover the owning thread
+            // from `PendingGateStore` so the parked VM is not stranded.
+            // Lookup is scoped to the requesting user via the store's
+            // own ownership check.
+            let dispatch_thread_id = match req.thread_id.clone() {
+                Some(t) => Some(t),
+                None => {
+                    crate::bridge::get_pending_gate_by_request_id(&user.user_id, gate_request_id)
+                        .await
+                        .map(|gate| gate.thread_id)
+                }
             };
-            crate::channels::web::platform::engine_dispatch::dispatch_engine_submission(
-                &state,
-                &user.user_id,
-                &thread_id,
-                submission,
-            )
-            .await?;
+            if let Some(thread_id) = dispatch_thread_id {
+                let submission = crate::agent::submission::Submission::GateAuthResolution {
+                    request_id: gate_request_id,
+                    resolution: crate::agent::submission::AuthGateResolution::Cancelled,
+                };
+                crate::channels::web::platform::engine_dispatch::dispatch_engine_submission(
+                    &state,
+                    &user.user_id,
+                    &thread_id,
+                    submission,
+                )
+                .await?;
+            }
             Ok(Json(ActionResponse::ok("Gate cancelled.")))
         }
+    };
+
+    if let Some((outcome, gate_request_id)) = mission_resume {
+        let _ = crate::bridge::resume_paused_missions_for_gate_request(
+            &user.user_id,
+            gate_request_id,
+            outcome,
+        )
+        .await;
     }
+
+    response
 }
 
 pub(crate) async fn chat_auth_token_handler(
@@ -2640,13 +2761,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_gate_extension_name_uses_install_parameters_for_hyphenated_activate_tool() {
+    async fn pending_gate_extension_name_uses_install_parameters_for_hyphenated_install_tool() {
         let state = test_gateway_state(None);
 
         let extension_name = pending_gate_extension_name(
             &state,
             "test-user",
-            "tool-activate",
+            "tool-install",
             r#"{"name":"telegram"}"#,
             &ironclaw_engine::ResumeKind::Authentication {
                 credential_name: ironclaw_common::CredentialName::from_trusted(

@@ -15,15 +15,15 @@ use ironclaw::channels::web::log_layer::LogBroadcaster;
 use ironclaw::channels::{OutgoingResponse, StatusUpdate};
 use ironclaw::config::Config;
 use ironclaw::db::Database;
-use ironclaw::llm::{LlmProvider, SessionConfig, SessionManager};
 use ironclaw::tools::Tool;
+use ironclaw_llm::{LlmProvider, SessionConfig, SessionManager};
 
 use crate::support::instrumented_llm::InstrumentedLlm;
 use crate::support::metrics::{ToolInvocation, TraceMetrics};
 use crate::support::test_channel::{CapturedEvent, TestChannel, TestChannelHandle};
 use crate::support::trace_llm::{LlmTrace, TraceLlm};
 
-use ironclaw::llm::recording::{HttpExchange, HttpInterceptor, ReplayingHttpInterceptor};
+use ironclaw_llm::recording::{HttpExchange, HttpInterceptor, ReplayingHttpInterceptor};
 
 // ---------------------------------------------------------------------------
 // TestRig
@@ -222,6 +222,15 @@ pub struct TestRig {
     /// per-user secret rows.
     #[cfg(feature = "libsql")]
     owner_id: String,
+    /// User identity the agent sees as the effective channel user when
+    /// tools dispatch from a trace turn. Differs from `owner_id` in the
+    /// historical default-rig case (channel user = `"test-user"`, owner
+    /// = config `owner_id`). Caller-tier security tests that assert
+    /// non-persistence must query under this identity, not `owner_id`,
+    /// to avoid false negatives where a regression persists rows under
+    /// the channel user that the owner-keyed lookup never sees.
+    #[cfg(feature = "libsql")]
+    channel_user_id: String,
     /// Temp directory guard -- keeps the libSQL database file alive.
     #[cfg(feature = "libsql")]
     _temp_dir: tempfile::TempDir,
@@ -312,7 +321,7 @@ impl TestRig {
     /// Return all message lists that were sent to the LLM provider.
     ///
     /// Only available when the rig was built with a `TraceLlm` (i.e., via `.with_trace()`).
-    pub fn captured_llm_requests(&self) -> Vec<Vec<ironclaw::llm::ChatMessage>> {
+    pub fn captured_llm_requests(&self) -> Vec<Vec<ironclaw_llm::ChatMessage>> {
         self.trace_llm
             .as_ref()
             .map(|t| t.captured_requests())
@@ -370,6 +379,17 @@ impl TestRig {
     #[cfg(feature = "libsql")]
     pub fn owner_id(&self) -> &str {
         &self.owner_id
+    }
+
+    /// The effective channel user identity — the `user_id` the agent sees
+    /// when tools dispatch from a trace turn. May differ from
+    /// [`Self::owner_id`] (see the `channel_user_id` field doc). Caller-tier
+    /// security tests that check workspace persistence MUST query under
+    /// this identity, not `owner_id`, to catch regressions that persist
+    /// rows scoped to the channel user.
+    #[cfg(feature = "libsql")]
+    pub fn channel_user_id(&self) -> &str {
+        &self.channel_user_id
     }
 
     /// Wait until at least `n` non-bootstrap responses have been captured, or
@@ -949,7 +969,7 @@ impl TestRigBuilder {
     /// Unlike `with_extra_tools`, these overrides are applied at the end of
     /// `build()` via `ToolRegistry::register_sync`, so a probe stub can
     /// intentionally replace an earlier built-in registration (e.g.
-    /// `tool_activate`, `tool_auth`) for gate testing.
+    /// `tool_install`, `tool_auth`) for gate testing.
     pub fn with_test_tool_override(mut self, tool: Arc<dyn Tool>) -> Self {
         self.test_tool_overrides.push(tool);
         self
@@ -1497,6 +1517,12 @@ impl TestRigBuilder {
         } else {
             "test-user".to_string()
         };
+        // Keep a copy for the rig accessor — `TestChannel::with_user_id`
+        // takes the string by value, so without this clone the test rig
+        // would lose the identity it constructed the channel with and
+        // tests asserting against `rig.channel_user_id()` would have to
+        // re-derive it from rig state.
+        let channel_user_id_for_rig = channel_user_id.clone();
         let test_channel = if let Some(ref name) = channel_name_override {
             Arc::new(TestChannel::with_user_id(channel_user_id).with_name(name.clone()))
         } else if keep_bootstrap {
@@ -1568,6 +1594,7 @@ impl TestRigBuilder {
             session_manager: session_manager_ref,
             secrets_store: secrets_store_ref,
             owner_id: owner_id_ref,
+            channel_user_id: channel_user_id_for_rig,
             _temp_dir: temp_dir,
             bootstrap_greetings_to_keep: if keep_bootstrap { 1 } else { 0 },
         }

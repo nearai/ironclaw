@@ -10,6 +10,7 @@ The `reborn-integration` branch currently exposes Reborn structure primarily thr
 
 | Need | Start with |
 | --- | --- |
+| Standalone Reborn binary | `docs/reborn-binary.md` |
 | Host API vocabulary | `crates/ironclaw_host_api/` |
 | Host API local rules | `crates/ironclaw_host_api/CLAUDE.md` |
 | Host/runtime composition and shared runtime HTTP egress | `crates/ironclaw_host_runtime/` |

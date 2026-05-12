@@ -22,12 +22,12 @@ use ironclaw::channels::web::ws::WsConnectionTracker;
 use ironclaw::config::{Config, RegistryProviderConfig, RoutineConfig};
 use ironclaw::db::Database;
 use ironclaw::db::libsql::LibSqlBackend;
-use ironclaw::llm::registry::ProviderProtocol;
-use ironclaw::llm::{
-    SessionConfig as LlmSessionConfig, SessionManager as LlmSessionManager, create_llm_provider,
-};
 use ironclaw::secrets::SecretsStore;
 use ironclaw::tools::{Tool, ToolError, ToolOutput};
+use ironclaw_llm::registry::ProviderProtocol;
+use ironclaw_llm::{
+    SessionConfig as LlmSessionConfig, SessionManager as LlmSessionManager, create_llm_provider,
+};
 
 use crate::support::test_channel::{TestChannel, TestChannelHandle};
 

@@ -3,11 +3,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AcceptedMessageRef, AdmissionRejection, CancelRunRequest, CancelRunResponse, GateRef,
-    GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef, ResumeTurnRequest,
-    ResumeTurnResponse, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
-    TurnActor, TurnAdmissionPolicy, TurnCheckpointId, TurnError, TurnErrorCategory, TurnId,
-    TurnLeaseToken, TurnRunId, TurnRunProfile, TurnRunState, TurnRunnerId, TurnScope, TurnStatus,
-    TurnTimestamp, events::EventCursor,
+    GetRunStateRequest, IdempotencyKey, LoopCheckpointRecord, ReplyTargetBindingRef,
+    ResumeTurnRequest, ResumeTurnResponse, RunProfileResolver, SourceBindingRef, SubmitTurnRequest,
+    SubmitTurnResponse, ThreadBusy, TurnActor, TurnAdmissionPolicy, TurnAdmissionReservationRecord,
+    TurnCheckpointId, TurnError, TurnErrorCategory, TurnId, TurnLeaseToken, TurnLifecycleEvent,
+    TurnRunId, TurnRunProfile, TurnRunState, TurnRunnerId, TurnScope, TurnStatus, TurnTimestamp,
+    events::EventCursor,
+    run_profile::{LoopCheckpointKind, LoopCheckpointStateRef, LoopModelRouteSnapshot},
 };
 
 #[async_trait]
@@ -16,6 +18,7 @@ pub trait TurnStateStore: Send + Sync {
         &self,
         request: SubmitTurnRequest,
         admission_policy: &dyn TurnAdmissionPolicy,
+        run_profile_resolver: &dyn RunProfileResolver,
     ) -> Result<SubmitTurnResponse, TurnError>;
 
     async fn resume_turn(
@@ -83,6 +86,8 @@ pub struct TurnRunRecord {
     pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub status: TurnStatus,
     pub profile: TurnRunProfile,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_model_route: Option<LoopModelRouteSnapshot>,
     pub checkpoint_id: Option<TurnCheckpointId>,
     pub gate_ref: Option<GateRef>,
     pub failure: Option<crate::SanitizedFailure>,
@@ -105,13 +110,35 @@ pub struct TurnActiveLockRecord {
     pub updated_at: TurnTimestamp,
 }
 
+/// Serde default for `LoopCheckpointKind` — used when deserializing old
+/// persisted data that predates the `kind` field.
+fn default_checkpoint_kind() -> LoopCheckpointKind {
+    LoopCheckpointKind::BeforeBlock
+}
+
+/// Serde default for `LoopCheckpointStateRef` — legacy sentinel used only when
+/// deserializing old persisted data that predates the `state_ref` field.
+fn default_checkpoint_state_ref() -> LoopCheckpointStateRef {
+    LoopCheckpointStateRef::legacy_unknown()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnCheckpointRecord {
     pub checkpoint_id: TurnCheckpointId,
     pub run_id: TurnRunId,
+    /// Scope of the run that created this checkpoint. `None` for legacy records
+    /// persisted before scope was added to checkpoints.
+    #[serde(default)]
+    pub scope: Option<TurnScope>,
     pub sequence: u64,
     pub status: TurnStatus,
     pub gate_ref: GateRef,
+    /// The semantic kind of checkpoint (before model, side-effect, block, final).
+    #[serde(default = "default_checkpoint_kind")]
+    pub kind: LoopCheckpointKind,
+    /// An opaque ref describing the loop state at the time of this checkpoint.
+    #[serde(default = "default_checkpoint_state_ref")]
+    pub state_ref: LoopCheckpointStateRef,
     pub created_at: TurnTimestamp,
 }
 
@@ -221,9 +248,9 @@ impl TurnIdempotencyRecord {
         }
         match &self.replay {
             TurnIdempotencyReplay::SubmitAccepted(response) => Some(Ok(response.clone())),
-            TurnIdempotencyReplay::SubmitThreadBusy(busy) => {
-                Some(Err(TurnError::ThreadBusy(busy.clone())))
-            }
+            // Legacy persisted busy submit records are intentionally not replayable.
+            // Same-thread busy is a transient lock state, not an idempotent submit outcome.
+            TurnIdempotencyReplay::SubmitThreadBusy(_) => None,
             TurnIdempotencyReplay::SubmitAdmissionRejected(rejection) => {
                 Some(Err(TurnError::AdmissionRejected(rejection.clone())))
             }
@@ -273,5 +300,13 @@ pub struct TurnPersistenceSnapshot {
     pub runs: Vec<TurnRunRecord>,
     pub active_locks: Vec<TurnActiveLockRecord>,
     pub checkpoints: Vec<TurnCheckpointRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loop_checkpoints: Vec<LoopCheckpointRecord>,
     pub idempotency_records: Vec<TurnIdempotencyRecord>,
+    #[serde(default)]
+    pub events: Vec<TurnLifecycleEvent>,
+    #[serde(default)]
+    pub event_retention_floor: EventCursor,
+    #[serde(default)]
+    pub admission_reservations: Vec<TurnAdmissionReservationRecord>,
 }

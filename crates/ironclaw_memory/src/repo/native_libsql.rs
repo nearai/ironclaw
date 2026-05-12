@@ -17,7 +17,7 @@ use ironclaw_host_api::VirtualPath;
 
 use crate::chunking::{MemoryChunkWrite, content_sha256};
 use crate::embedding::{cosine_similarity, decode_embedding_blob, encode_embedding_blob};
-use crate::indexer::MemoryDocumentIndexRepository;
+use crate::indexer::{MemoryChunkReplaceOutcome, MemoryDocumentIndexRepository};
 use crate::metadata::{DocumentMetadata, MemoryWriteOptions, find_nearest_config, is_config_path};
 use crate::path::{MemoryDocumentPath, MemoryDocumentScope, memory_error, valid_memory_path};
 use crate::search::{
@@ -602,7 +602,7 @@ impl MemoryDocumentIndexRepository for RebornLibSqlMemoryDocumentRepository {
         path: &MemoryDocumentPath,
         expected_content_hash: &str,
         chunks: &[MemoryChunkWrite],
-    ) -> Result<(), FilesystemError> {
+    ) -> Result<MemoryChunkReplaceOutcome, FilesystemError> {
         let virtual_path = path.virtual_path().unwrap_or_else(|_| valid_memory_path());
         let conn = self
             .connect(virtual_path.clone(), FilesystemOperation::WriteFile)
@@ -627,12 +627,12 @@ impl MemoryDocumentIndexRepository for RebornLibSqlMemoryDocumentRepository {
         )
         .await?
         else {
-            return Ok(());
+            return Ok(MemoryChunkReplaceOutcome::SkippedMissingDocument);
         };
         if current_hash != expected_content_hash {
             // Document was rewritten between the read and the index refresh;
             // the next reindex will pick it up. Do not corrupt the index.
-            return Ok(());
+            return Ok(MemoryChunkReplaceOutcome::SkippedStaleContentHash);
         }
         tx.execute(
             "DELETE FROM reborn_memory_chunks WHERE document_id = ?1",
@@ -681,7 +681,7 @@ impl MemoryDocumentIndexRepository for RebornLibSqlMemoryDocumentRepository {
                 error.to_string(),
             )
         })?;
-        Ok(())
+        Ok(MemoryChunkReplaceOutcome::Replaced)
     }
 }
 

@@ -1,62 +1,100 @@
 //! Inbound envelope, payload, and acknowledgement types.
 
 use chrono::{DateTime, Utc};
-use ironclaw_turns::TurnRunId;
-use serde::{Deserialize, Serialize};
+use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
+use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::auth::VerifiedAuthClaim;
+use crate::auth::{ProtocolAuthEvidence, VerifiedAuthClaim};
+use crate::error::ProductAdapterError;
 use crate::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentDescriptor,
 };
 use crate::identity::{AdapterInstallationId, ProductAdapterId};
+use crate::outbound::ProjectionCursor;
+use crate::redaction::RedactedString;
+
+const USER_MESSAGE_TEXT_MAX_BYTES: usize = 64 * 1024;
+const COMMAND_MAX_BYTES: usize = 256;
+const COMMAND_ARGUMENTS_MAX_BYTES: usize = 64 * 1024;
+const THREAD_HINT_MAX_BYTES: usize = 512;
+const ACTION_ID_MAX_BYTES: usize = 512;
+const ACTION_DATA_MAX_BYTES: usize = 16 * 1024;
+const INTERACTION_REF_MAX_BYTES: usize = 512;
+const CREDENTIAL_REF_MAX_BYTES: usize = 512;
+
+fn malformed(reason: impl Into<String>) -> ProductAdapterError {
+    ProductAdapterError::MalformedInboundPayload {
+        reason: RedactedString::new(reason.into()),
+    }
+}
+
+fn validate_payload_string(
+    kind: &'static str,
+    value: &str,
+    max: usize,
+) -> Result<(), ProductAdapterError> {
+    validate_bounded_string(kind, value, max, true, true)
+}
+
+fn validate_token_string(
+    kind: &'static str,
+    value: &str,
+    max: usize,
+) -> Result<(), ProductAdapterError> {
+    validate_bounded_string(kind, value, max, false, false)
+}
+
+fn validate_bounded_string(
+    kind: &'static str,
+    value: &str,
+    max: usize,
+    allow_empty: bool,
+    allow_newline_tab: bool,
+) -> Result<(), ProductAdapterError> {
+    if !allow_empty && value.is_empty() {
+        return Err(malformed(format!("{kind} must not be empty")));
+    }
+    if value.len() > max {
+        return Err(malformed(format!("{kind} exceeds {max}-byte limit")));
+    }
+    if value
+        .chars()
+        .any(|c| c == '\0' || c.is_control() && !(allow_newline_tab && (c == '\n' || c == '\t')))
+    {
+        return Err(malformed(format!(
+            "{kind} contains unsupported control characters"
+        )));
+    }
+    Ok(())
+}
 
 /// Why an adapter is forwarding a group/supergroup/channel message into the
-/// canonical pipeline. Group ambient messages must NOT be forwarded; only
-/// explicit triggers create envelopes.
+/// canonical pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProductTriggerReason {
-    /// Direct/private chat — the participant always receives messages.
     DirectChat,
-    /// Explicit @mention of the bot.
     BotMention,
-    /// Reply to a message authored by the bot.
     ReplyToBot,
-    /// Recognized bot command (e.g. `/start`).
     BotCommand,
-    /// Explicit linked-thread action (e.g. an inline button referencing a
-    /// known thread).
     LinkedThreadAction,
 }
 
-/// Wrapped user-message inbound payload.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UserMessagePayload {
-    /// Plain-text content. Adapters MUST strip protocol formatting (HTML,
-    /// MarkdownV2, mention prefixes) before populating this field. Length is
-    /// bounded by the workflow's content policy; this struct enforces a hard
-    /// upper bound to prevent unbounded growth.
     pub text: String,
     pub attachments: Vec<ProductAttachmentDescriptor>,
     pub trigger: ProductTriggerReason,
 }
-
-const USER_MESSAGE_TEXT_MAX_BYTES: usize = 64 * 1024;
 
 impl UserMessagePayload {
     pub fn new(
         text: impl Into<String>,
         attachments: Vec<ProductAttachmentDescriptor>,
         trigger: ProductTriggerReason,
-    ) -> Result<Self, crate::error::ProductAdapterError> {
+    ) -> Result<Self, ProductAdapterError> {
         let text = text.into();
-        if text.len() > USER_MESSAGE_TEXT_MAX_BYTES {
-            return Err(crate::error::ProductAdapterError::MalformedInboundPayload {
-                reason: format!(
-                    "user message text exceeds {USER_MESSAGE_TEXT_MAX_BYTES}-byte limit"
-                ),
-            });
-        }
+        validate_payload_string("user message text", &text, USER_MESSAGE_TEXT_MAX_BYTES)?;
         Ok(Self {
             text,
             attachments,
@@ -65,154 +103,521 @@ impl UserMessagePayload {
     }
 }
 
-/// Wrapped command inbound payload (e.g. `/help`, `/configure`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Deserialize)]
+struct UserMessagePayloadWire {
+    text: String,
+    attachments: Vec<ProductAttachmentDescriptor>,
+    trigger: ProductTriggerReason,
+}
+
+impl<'de> Deserialize<'de> for UserMessagePayload {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = UserMessagePayloadWire::deserialize(deserializer)?;
+        Self::new(wire.text, wire.attachments, wire.trigger).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct InboundCommandPayload {
     pub command: String,
     pub arguments: String,
     pub trigger: ProductTriggerReason,
 }
 
-/// All supported inbound payload kinds. Approval/auth resolutions and
-/// projection subscriptions are tracked here so the adapter contract has
-/// space to grow into #3094 without a breaking change.
+impl InboundCommandPayload {
+    pub fn new(
+        command: impl Into<String>,
+        arguments: impl Into<String>,
+        trigger: ProductTriggerReason,
+    ) -> Result<Self, ProductAdapterError> {
+        let command = command.into();
+        let arguments = arguments.into();
+        validate_token_string("command", &command, COMMAND_MAX_BYTES)?;
+        validate_payload_string("command arguments", &arguments, COMMAND_ARGUMENTS_MAX_BYTES)?;
+        Ok(Self {
+            command,
+            arguments,
+            trigger,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct InboundCommandPayloadWire {
+    command: String,
+    arguments: String,
+    trigger: ProductTriggerReason,
+}
+
+impl<'de> Deserialize<'de> for InboundCommandPayload {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = InboundCommandPayloadWire::deserialize(deserializer)?;
+        Self::new(wire.command, wire.arguments, wire.trigger).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDecision {
+    ApproveOnce,
+    Deny,
+    AlwaysAllow,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ApprovalResolutionPayload {
+    pub gate_ref: String,
+    pub decision: ApprovalDecision,
+}
+
+impl ApprovalResolutionPayload {
+    pub fn new(
+        gate_ref: impl Into<String>,
+        decision: ApprovalDecision,
+    ) -> Result<Self, ProductAdapterError> {
+        let gate_ref = gate_ref.into();
+        validate_token_string("gate ref", &gate_ref, INTERACTION_REF_MAX_BYTES)?;
+        Ok(Self { gate_ref, decision })
+    }
+}
+
+#[derive(Deserialize)]
+struct ApprovalResolutionPayloadWire {
+    gate_ref: String,
+    decision: ApprovalDecision,
+}
+
+impl<'de> Deserialize<'de> for ApprovalResolutionPayload {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = ApprovalResolutionPayloadWire::deserialize(deserializer)?;
+        Self::new(wire.gate_ref, wire.decision).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthResolutionResult {
+    CredentialProvided { credential_ref: String },
+    CallbackCompleted { callback_ref: String },
+    Denied,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AuthResolutionPayload {
+    pub auth_request_ref: String,
+    pub result: AuthResolutionResult,
+}
+
+impl AuthResolutionPayload {
+    pub fn new(
+        auth_request_ref: impl Into<String>,
+        result: AuthResolutionResult,
+    ) -> Result<Self, ProductAdapterError> {
+        let auth_request_ref = auth_request_ref.into();
+        validate_token_string(
+            "auth request ref",
+            &auth_request_ref,
+            INTERACTION_REF_MAX_BYTES,
+        )?;
+        validate_auth_resolution_result(&result)?;
+        Ok(Self {
+            auth_request_ref,
+            result,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct AuthResolutionPayloadWire {
+    auth_request_ref: String,
+    result: AuthResolutionResult,
+}
+
+impl<'de> Deserialize<'de> for AuthResolutionPayload {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = AuthResolutionPayloadWire::deserialize(deserializer)?;
+        Self::new(wire.auth_request_ref, wire.result).map_err(serde::de::Error::custom)
+    }
+}
+
+fn validate_auth_resolution_result(
+    result: &AuthResolutionResult,
+) -> Result<(), ProductAdapterError> {
+    match result {
+        AuthResolutionResult::CredentialProvided { credential_ref } => {
+            validate_token_string("credential ref", credential_ref, CREDENTIAL_REF_MAX_BYTES)
+        }
+        AuthResolutionResult::CallbackCompleted { callback_ref } => {
+            validate_token_string("callback ref", callback_ref, INTERACTION_REF_MAX_BYTES)
+        }
+        AuthResolutionResult::Denied => Ok(()),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProjectionSubscriptionPayload {
+    pub thread_id_hint: Option<String>,
+    pub after_cursor: Option<ProjectionCursor>,
+}
+
+impl ProjectionSubscriptionPayload {
+    pub fn new(
+        thread_id_hint: Option<String>,
+        after_cursor: Option<ProjectionCursor>,
+    ) -> Result<Self, ProductAdapterError> {
+        if let Some(hint) = &thread_id_hint {
+            validate_token_string("thread id hint", hint, THREAD_HINT_MAX_BYTES)?;
+        }
+        Ok(Self {
+            thread_id_hint,
+            after_cursor,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct ProjectionSubscriptionPayloadWire {
+    thread_id_hint: Option<String>,
+    after_cursor: Option<ProjectionCursor>,
+}
+
+impl<'de> Deserialize<'de> for ProjectionSubscriptionPayload {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = ProjectionSubscriptionPayloadWire::deserialize(deserializer)?;
+        Self::new(wire.thread_id_hint, wire.after_cursor).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LinkedThreadActionPayload {
+    pub action_id: String,
+    pub data: Option<String>,
+    pub reply_target_message_id: Option<String>,
+}
+
+impl LinkedThreadActionPayload {
+    pub fn new(
+        action_id: impl Into<String>,
+        data: Option<String>,
+        reply_target_message_id: Option<String>,
+    ) -> Result<Self, ProductAdapterError> {
+        let action_id = action_id.into();
+        validate_token_string("linked action id", &action_id, ACTION_ID_MAX_BYTES)?;
+        if let Some(data) = &data {
+            validate_payload_string("linked action data", data, ACTION_DATA_MAX_BYTES)?;
+        }
+        if let Some(reply_target_message_id) = &reply_target_message_id {
+            validate_token_string(
+                "linked action reply target",
+                reply_target_message_id,
+                INTERACTION_REF_MAX_BYTES,
+            )?;
+        }
+        Ok(Self {
+            action_id,
+            data,
+            reply_target_message_id,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct LinkedThreadActionPayloadWire {
+    action_id: String,
+    data: Option<String>,
+    reply_target_message_id: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for LinkedThreadActionPayload {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = LinkedThreadActionPayloadWire::deserialize(deserializer)?;
+        Self::new(wire.action_id, wire.data, wire.reply_target_message_id)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProductInboundPayload {
     UserMessage(UserMessagePayload),
     Command(InboundCommandPayload),
-    /// Placeholder for #3094. Contract tests render fake gate payloads;
-    /// production resolution flows live in the interaction services.
-    ApprovalResolution {
-        gate_ref: String,
-    },
-    /// Placeholder for #3094 (auth flow).
-    AuthResolution {
-        auth_request_ref: String,
-    },
-    /// Subscription request for a projection cursor (Web/CLI/API).
-    SubscriptionRequest {
-        thread_id_hint: Option<String>,
-    },
-    /// Explicit no-op acknowledgement — for ambient group messages, edited
-    /// messages we choose not to act on, etc. Workflow returns
-    /// [`ProductInboundAck::NoOp`] in response.
+    ApprovalResolution(ApprovalResolutionPayload),
+    AuthResolution(AuthResolutionPayload),
+    SubscriptionRequest(ProjectionSubscriptionPayload),
+    LinkedThreadAction(LinkedThreadActionPayload),
     NoOp,
 }
 
-/// Inbound envelope. Constructed by the adapter from a verified protocol
-/// event, then handed to the workflow facade.
+/// Adapter-produced parse result. It deliberately excludes host-trusted fields
+/// (adapter id, installation id, verified auth claim, and received_at).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProductInboundEnvelope {
-    pub adapter_id: ProductAdapterId,
-    pub installation_id: AdapterInstallationId,
+pub struct ParsedProductInbound {
     pub external_event_id: ExternalEventId,
     pub external_actor_ref: ExternalActorRef,
     pub external_conversation_ref: ExternalConversationRef,
-    /// Sanitized verified-claim attestation. Envelopes only exist after
-    /// the host has produced a `ProtocolAuthEvidence::Verified`; we carry
-    /// only the [`VerifiedAuthClaim`] payload here so the envelope
-    /// round-trips cleanly through audit logs and projections without
-    /// re-opening the forgery loophole that lived on the full
-    /// `ProtocolAuthEvidence` enum.
-    pub auth_claim: VerifiedAuthClaim,
-    pub received_at: DateTime<Utc>,
     pub payload: ProductInboundPayload,
 }
 
-/// Why a [`ProductInboundAck::Rejected`] outcome was returned.
+impl ParsedProductInbound {
+    pub fn new(
+        external_event_id: ExternalEventId,
+        external_actor_ref: ExternalActorRef,
+        external_conversation_ref: ExternalConversationRef,
+        payload: ProductInboundPayload,
+    ) -> Result<Self, ProductAdapterError> {
+        Ok(Self {
+            external_event_id,
+            external_actor_ref,
+            external_conversation_ref,
+            payload,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustedInboundContext {
+    adapter_id: ProductAdapterId,
+    installation_id: AdapterInstallationId,
+    received_at: DateTime<Utc>,
+    auth_claim: VerifiedAuthClaim,
+}
+
+impl TrustedInboundContext {
+    pub fn from_verified_evidence(
+        adapter_id: ProductAdapterId,
+        installation_id: AdapterInstallationId,
+        received_at: DateTime<Utc>,
+        auth_evidence: &ProtocolAuthEvidence,
+    ) -> Result<Self, ProductAdapterError> {
+        let auth_claim =
+            auth_evidence
+                .claim()
+                .cloned()
+                .ok_or(ProductAdapterError::Authentication(
+                    crate::ProtocolAuthFailure::Missing,
+                ))?;
+        Ok(Self {
+            adapter_id,
+            installation_id,
+            received_at,
+            auth_claim,
+        })
+    }
+}
+
+/// Trusted inbound envelope handed to the workflow facade.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProductInboundEnvelope {
+    adapter_id: ProductAdapterId,
+    installation_id: AdapterInstallationId,
+    external_event_id: ExternalEventId,
+    external_actor_ref: ExternalActorRef,
+    external_conversation_ref: ExternalConversationRef,
+    auth_claim: VerifiedAuthClaim,
+    received_at: DateTime<Utc>,
+    payload: ProductInboundPayload,
+}
+
+impl ProductInboundEnvelope {
+    pub fn from_trusted_parse(
+        context: TrustedInboundContext,
+        parsed: ParsedProductInbound,
+    ) -> Result<Self, ProductAdapterError> {
+        Ok(Self {
+            adapter_id: context.adapter_id,
+            installation_id: context.installation_id,
+            external_event_id: parsed.external_event_id,
+            external_actor_ref: parsed.external_actor_ref,
+            external_conversation_ref: parsed.external_conversation_ref,
+            auth_claim: context.auth_claim,
+            received_at: context.received_at,
+            payload: parsed.payload,
+        })
+    }
+
+    pub fn adapter_id(&self) -> &ProductAdapterId {
+        &self.adapter_id
+    }
+
+    pub fn installation_id(&self) -> &AdapterInstallationId {
+        &self.installation_id
+    }
+
+    pub fn external_event_id(&self) -> &ExternalEventId {
+        &self.external_event_id
+    }
+
+    pub fn external_actor_ref(&self) -> &ExternalActorRef {
+        &self.external_actor_ref
+    }
+
+    pub fn external_conversation_ref(&self) -> &ExternalConversationRef {
+        &self.external_conversation_ref
+    }
+
+    pub fn auth_claim(&self) -> &VerifiedAuthClaim {
+        &self.auth_claim
+    }
+
+    pub fn received_at(&self) -> DateTime<Utc> {
+        self.received_at
+    }
+
+    pub fn payload(&self) -> &ProductInboundPayload {
+        &self.payload
+    }
+
+    pub fn source_binding_key(&self) -> String {
+        self.external_conversation_ref.conversation_fingerprint()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProductRejectionKind {
-    /// External actor is not paired/bound to a canonical user.
     BindingRequired,
-    /// Authenticated actor is not allowed to access the resolved thread.
     AccessDenied,
-    /// Adapter installation is unknown to the workflow.
     UnknownInstallation,
-    /// Workflow-level policy rejected the message (rate limit, content
-    /// policy, etc.).
     PolicyDenied,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductRejectionDisposition {
+    Permanent,
+    Retryable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProductRejection {
     pub kind: ProductRejectionKind,
-    /// User-safe explanation. Must not contain raw secrets, host paths,
-    /// raw provider/runtime internals, or backend diagnostics.
-    pub reason: String,
+    pub reason: RedactedString,
+    pub disposition: ProductRejectionDisposition,
 }
 
-/// Pipeline outcome of an inbound envelope. Adapters use this to choose the
-/// protocol-level response status code:
-///
-/// * `Accepted` / `DeferredBusy` / `NoOp` / `Duplicate` -> 200
-/// * `Rejected { BindingRequired | AccessDenied | UnknownInstallation }` -> 403
-/// * `Rejected { PolicyDenied }` -> 403/422 depending on protocol convention
+impl ProductRejection {
+    pub fn permanent(kind: ProductRejectionKind, reason: impl Into<String>) -> Self {
+        Self {
+            kind,
+            reason: RedactedString::new(reason.into()),
+            disposition: ProductRejectionDisposition::Permanent,
+        }
+    }
+
+    pub fn retryable(kind: ProductRejectionKind, reason: impl Into<String>) -> Self {
+        Self {
+            kind,
+            reason: RedactedString::new(reason.into()),
+            disposition: ProductRejectionDisposition::Retryable,
+        }
+    }
+
+    pub fn disposition(&self) -> ProductRejectionDisposition {
+        self.disposition
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundRetryDisposition {
+    DoNotRetry,
+    Retry,
+    ReplayPrior,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProductInboundAck {
-    /// Message accepted and a turn was submitted.
     Accepted {
-        accepted_message_ref: String,
-        submitted_run_id: Option<TurnRunId>,
+        accepted_message_ref: AcceptedMessageRef,
+        submitted_run_id: TurnRunId,
     },
-    /// Message accepted but submission was deferred because another run is
-    /// already active on the same canonical thread.
     DeferredBusy {
-        accepted_message_ref: String,
+        accepted_message_ref: AcceptedMessageRef,
         active_run_id: TurnRunId,
     },
-    /// Message was rejected; do not retry.
     Rejected(ProductRejection),
-    /// Duplicate external_event_id. Carries the prior outcome so the adapter
-    /// can choose an idempotent protocol response.
-    Duplicate { prior: Box<ProductInboundAck> },
-    /// Successful no-op (ambient group message, ignored edit, etc.).
+    Duplicate {
+        prior: Box<ProductInboundAck>,
+    },
     NoOp,
 }
 
 impl ProductInboundAck {
     pub fn is_durable_outcome(&self) -> bool {
-        matches!(
-            self,
+        match self {
             Self::Accepted { .. }
-                | Self::DeferredBusy { .. }
-                | Self::Rejected(_)
-                | Self::Duplicate { .. }
-                | Self::NoOp
-        )
+            | Self::DeferredBusy { .. }
+            | Self::Duplicate { .. }
+            | Self::NoOp => true,
+            Self::Rejected(rejection) => {
+                rejection.disposition == ProductRejectionDisposition::Permanent
+            }
+        }
+    }
+
+    pub fn retry_disposition(&self) -> InboundRetryDisposition {
+        match self {
+            Self::Rejected(rejection)
+                if rejection.disposition == ProductRejectionDisposition::Retryable =>
+            {
+                InboundRetryDisposition::Retry
+            }
+            Self::Duplicate { .. } => InboundRetryDisposition::ReplayPrior,
+            _ => InboundRetryDisposition::DoNotRetry,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::AuthRequirement;
     use crate::external::{ExternalActorRef, ExternalConversationRef, ExternalEventId};
-    use crate::identity::{AdapterInstallationId, ProductAdapterId};
 
-    fn sample_envelope(payload: ProductInboundPayload) -> ProductInboundEnvelope {
-        ProductInboundEnvelope {
-            adapter_id: ProductAdapterId::new("telegram_v2").expect("valid"),
-            installation_id: AdapterInstallationId::new("install_alpha").expect("valid"),
-            external_event_id: ExternalEventId::new("update:42").expect("valid"),
-            external_actor_ref: ExternalActorRef::new("telegram_user", "777", None).expect("valid"),
-            external_conversation_ref: ExternalConversationRef::new(
-                None,
-                "12345",
-                Some("topic-7"),
-                Some("msg-100"),
-            )
-            .expect("valid"),
-            auth_claim: VerifiedAuthClaim {
-                requirement: crate::AuthRequirement::SharedSecretHeader {
-                    header_name: "X-Telegram-Bot-Api-Secret-Token".into(),
-                },
-                subject: "telegram_install_alpha".into(),
+    fn sample_context() -> TrustedInboundContext {
+        let evidence = ProtocolAuthEvidence::test_verified(
+            AuthRequirement::SharedSecretHeader {
+                header_name: "X-Telegram-Bot-Api-Secret-Token".into(),
             },
-            received_at: Utc::now(),
+            "telegram_install_alpha",
+        );
+        TrustedInboundContext::from_verified_evidence(
+            ProductAdapterId::new("telegram_v2").expect("valid"),
+            AdapterInstallationId::new("install_alpha").expect("valid"),
+            Utc::now(),
+            &evidence,
+        )
+        .expect("verified")
+    }
+
+    fn sample_parsed(payload: ProductInboundPayload) -> ParsedProductInbound {
+        ParsedProductInbound::new(
+            ExternalEventId::new("update:42").expect("valid"),
+            ExternalActorRef::new("telegram_user", "777", Option::<String>::None).expect("valid"),
+            ExternalConversationRef::new(None, "12345", Some("topic-7"), Some("msg-100"))
+                .expect("valid"),
             payload,
-        }
+        )
+        .expect("parsed")
     }
 
     #[test]
@@ -224,50 +629,78 @@ mod tests {
     }
 
     #[test]
-    fn envelope_round_trips() {
-        let envelope = sample_envelope(ProductInboundPayload::NoOp);
-        let json = serde_json::to_string(&envelope).expect("serialize");
-        let parsed: ProductInboundEnvelope = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(parsed, envelope);
+    fn command_payload_bounds_are_enforced_through_serde() {
+        assert!(
+            InboundCommandPayload::new(
+                "h".repeat(COMMAND_MAX_BYTES + 1),
+                "",
+                ProductTriggerReason::BotCommand
+            )
+            .is_err()
+        );
+        let forged = serde_json::json!({
+            "command": "h".repeat(COMMAND_MAX_BYTES + 1),
+            "arguments": "",
+            "trigger": "bot_command"
+        });
+        assert!(serde_json::from_value::<InboundCommandPayload>(forged).is_err());
+    }
+
+    #[test]
+    fn envelope_is_built_from_trusted_context() {
+        let envelope = ProductInboundEnvelope::from_trusted_parse(
+            sample_context(),
+            sample_parsed(ProductInboundPayload::NoOp),
+        )
+        .expect("envelope");
+        assert_eq!(envelope.adapter_id().as_str(), "telegram_v2");
+        assert_eq!(envelope.payload(), &ProductInboundPayload::NoOp);
+    }
+
+    #[test]
+    fn failed_auth_cannot_build_context() {
+        let evidence = ProtocolAuthEvidence::failed(crate::ProtocolAuthFailure::Missing);
+        assert!(
+            TrustedInboundContext::from_verified_evidence(
+                ProductAdapterId::new("telegram_v2").expect("valid"),
+                AdapterInstallationId::new("install_alpha").expect("valid"),
+                Utc::now(),
+                &evidence,
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn ack_durable_outcomes_classify_correctly() {
         assert!(
             ProductInboundAck::Accepted {
-                accepted_message_ref: "msg".into(),
-                submitted_run_id: None,
+                accepted_message_ref: AcceptedMessageRef::new("msg").expect("valid"),
+                submitted_run_id: TurnRunId::new(),
             }
             .is_durable_outcome()
         );
         assert!(ProductInboundAck::NoOp.is_durable_outcome());
         assert!(
+            ProductInboundAck::Rejected(ProductRejection::permanent(
+                ProductRejectionKind::PolicyDenied,
+                "policy denied",
+            ))
+            .is_durable_outcome()
+        );
+        assert!(
+            !ProductInboundAck::Rejected(ProductRejection::retryable(
+                ProductRejectionKind::PolicyDenied,
+                "rate limited",
+            ))
+            .is_durable_outcome()
+        );
+        assert_eq!(
             ProductInboundAck::Duplicate {
                 prior: Box::new(ProductInboundAck::NoOp),
             }
-            .is_durable_outcome()
+            .retry_disposition(),
+            InboundRetryDisposition::ReplayPrior
         );
-    }
-
-    #[test]
-    fn user_message_payload_bounds_attachments_implicitly() {
-        // The payload itself has no attachment count cap (the workflow
-        // applies one via policy). This test pins the contract so any future
-        // change is intentional.
-        let attachments = (0..16)
-            .map(|i| {
-                ProductAttachmentDescriptor::new(
-                    format!("file_{i}"),
-                    "image/jpeg",
-                    None,
-                    Some(2048),
-                    crate::external::ProductAttachmentKind::Image,
-                )
-                .expect("valid")
-            })
-            .collect();
-        let payload = UserMessagePayload::new("hi", attachments, ProductTriggerReason::DirectChat)
-            .expect("valid");
-        assert_eq!(payload.attachments.len(), 16);
     }
 }

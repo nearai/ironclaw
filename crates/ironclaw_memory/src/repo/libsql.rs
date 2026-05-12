@@ -8,7 +8,7 @@ use ironclaw_host_api::VirtualPath;
 
 use crate::chunking::{MemoryChunkWrite, content_bytes_sha256, content_sha256};
 use crate::embedding::{cosine_similarity, decode_embedding_blob, encode_embedding_blob};
-use crate::indexer::MemoryDocumentIndexRepository;
+use crate::indexer::{MemoryChunkReplaceOutcome, MemoryDocumentIndexRepository};
 use crate::metadata::MemoryWriteOptions;
 use crate::path::{MemoryDocumentPath, MemoryDocumentScope, memory_error, valid_memory_path};
 use crate::search::{
@@ -821,7 +821,7 @@ impl MemoryDocumentIndexRepository for LibSqlMemoryDocumentRepository {
         path: &MemoryDocumentPath,
         expected_content_hash: &str,
         chunks: &[MemoryChunkWrite],
-    ) -> Result<(), FilesystemError> {
+    ) -> Result<MemoryChunkReplaceOutcome, FilesystemError> {
         let virtual_path = path.virtual_path().unwrap_or_else(|_| valid_memory_path());
         let conn = self
             .connect(virtual_path.clone(), FilesystemOperation::WriteFile)
@@ -870,10 +870,10 @@ impl MemoryDocumentIndexRepository for LibSqlMemoryDocumentRepository {
                     )
                 })?
         }) else {
-            return Ok(());
+            return Ok(MemoryChunkReplaceOutcome::SkippedMissingDocument);
         };
         if content_sha256(&content) != expected_content_hash {
-            return Ok(());
+            return Ok(MemoryChunkReplaceOutcome::SkippedStaleContentHash);
         }
         tx.execute(
             "DELETE FROM memory_chunks WHERE document_id = ?1",
@@ -921,7 +921,7 @@ impl MemoryDocumentIndexRepository for LibSqlMemoryDocumentRepository {
                 error.to_string(),
             )
         })?;
-        Ok(())
+        Ok(MemoryChunkReplaceOutcome::Replaced)
     }
 }
 

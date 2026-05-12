@@ -720,6 +720,9 @@ impl WorkspaceStore for LibSqlBackend {
         document_id: Uuid,
         chunks: &[ChunkWrite],
     ) -> Result<(), WorkspaceError> {
+        #[cfg(test)]
+        let _test_write_guard = crate::db::libsql::TEST_WRITE_LOCK.lock().await;
+        let _write_guard = self.write_lock.lock().await;
         let conn = self
             .connect()
             .await
@@ -1067,6 +1070,8 @@ impl WorkspaceStore for LibSqlBackend {
         content_hash: &str,
         changed_by: Option<&str>,
     ) -> Result<i32, WorkspaceError> {
+        #[cfg(test)]
+        let _test_write_guard = crate::db::libsql::TEST_WRITE_LOCK.lock().await;
         let conn = self
             .connect()
             .await

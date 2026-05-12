@@ -49,8 +49,8 @@ The driver-facing variants are fixed for the MVP:
 
 - `Completed` requires at least one durable reply-message ref or result ref, and the host/runner must verify those refs exist before mapping to a trusted completed outcome. Raw reply text is rejected by the wire shape and by strict loop-ref grammar.
 - `Completed` requires `final_checkpoint_id` only when the resolved run profile/checkpoint policy requires a terminal checkpoint.
-- `Blocked` requires all of: blocked kind, durable `gate_ref`, and `checkpoint_id`, and the host/runner must verify the gate/checkpoint evidence before mapping to a trusted blocked outcome. The blocked kind is limited to approval, auth, and resource for MVP.
-- `Cancelled` is accepted only when the host cancellation/interrupt input was observed by the runner/host policy. During application, terminal cancellation is still gated by durable run state in one transition-port operation: if the run is already `CancelRequested`, it becomes `Cancelled`; if an interrupt is observed before that durable state exists, the exit maps to recovery instead of terminal cancellation.
+- `Blocked` requires all of: blocked kind, durable `gate_ref`, `checkpoint_id`, and opaque `state_ref`, and the host/runner must verify the gate/checkpoint evidence before mapping to a trusted blocked outcome. The blocked kind is limited to approval, auth, and resource for MVP.
+- `Cancelled` is accepted only when the host cancellation/interrupt input was observed by the runner/host policy. Host-initiated cancellation may preempt the driver before a final checkpoint exists, so cancellation validation does not require a missing final checkpoint to become a protocol violation. During application, terminal cancellation is still gated by durable run state in one transition-port operation: if the run is already `CancelRequested`, it becomes `Cancelled`; if an interrupt is observed before that durable state exists, the exit maps to recovery instead of terminal cancellation.
 - `Failed` uses stable sanitized failure kinds such as `iteration_limit`, `model_error`, `context_build_failed`, or `driver_bug`, and the host/runner must verify the failure evidence is safe to terminalize before mapping to a trusted failed outcome.
 - Ref lists are bounded and duplicate-free so a driver cannot force unbounded evidence verification work.
 - Usage/cost truth remains in host accounting/projection stores; `LoopExit` may carry only usage-summary refs.
@@ -79,12 +79,15 @@ Later slices may add validation against transcript draft state, checkpoint fresh
 
 ## 6. Implemented slice
 
-`ironclaw_turns` currently provides contract types, a deterministic validator, and a trusted runner-side applicator:
+`ironclaw_turns` currently provides contract types, a crate-private validator policy, and a trusted runner-side applicator:
 
 - `LoopExit`, `LoopCompleted`, `LoopBlocked`, `LoopCancelled`, `LoopFailed`;
 - bounded durable reference types for loop exit/message/result/usage/diagnostic refs;
-- `LoopExitValidationPolicy` and `LoopExitValidationDecision`;
+- `LoopExitEvidencePort` and evidence request DTOs for host-owned validation inputs;
+- crate-private `LoopExitValidationPolicy` construction plus public `LoopExitValidationDecision`;
 - one-way mapping to `TurnRunnerOutcome` or `LoopExitMapping::RecoveryRequired`;
-- `apply_loop_exit`, which validates a driver exit and invokes the trusted `TurnRunTransitionPort` to complete, block, cancel, fail, or record recovery-required state.
+- `LoopExitApplier`, which derives validation policy from host-owned evidence and invokes the trusted `TurnRunTransitionPort` with an already-validated `LoopExitMapping`.
 
-This slice deliberately does not wire a production `AgentLoopDriver`, durable exit-id idempotency storage, transcript draft validation, or product service-graph integration.
+`ApplyValidatedLoopExitRequest` remains the transition-port DTO for already-validated mappings. Driver-facing code must not be able to supply `LoopExitValidationPolicy` directly.
+
+This slice deliberately does not wire durable exit-id idempotency storage, transcript draft validation, or product service-graph integration.

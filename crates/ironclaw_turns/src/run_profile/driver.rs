@@ -5,6 +5,7 @@ use thiserror::Error;
 use crate::{LoopExit, RunProfileVersion, TurnCheckpointId, TurnId, TurnRunId};
 
 use super::{
+    host::AgentLoopDriverHost,
     refs::{CheckpointSchemaId, LoopDriverId},
     snapshot::ResolvedRunProfile,
 };
@@ -27,6 +28,18 @@ impl AgentLoopDriverDescriptor {
         })
     }
 
+    pub fn from_trusted_static(
+        id: &'static str,
+        version: RunProfileVersion,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            id: LoopDriverId::new(id)?,
+            version,
+            checkpoint_schema_id: None,
+            checkpoint_schema_version: None,
+        })
+    }
+
     pub fn with_checkpoint_schema(
         mut self,
         checkpoint_schema_id: impl Into<String>,
@@ -37,14 +50,6 @@ impl AgentLoopDriverDescriptor {
         Ok(self)
     }
 }
-
-/// Minimal host marker for the driver contract.
-///
-/// The concrete per-run host facade is owned by the AgentLoopHost work. This
-/// marker keeps this crate's driver contract loop-neutral: drivers receive a
-/// host capability boundary, not raw runtime, provider, process, filesystem,
-/// network, secret, approval, grant, or lease handles.
-pub trait AgentLoopDriverHost: Send + Sync {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentLoopDriverRunRequest {

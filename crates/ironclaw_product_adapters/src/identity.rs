@@ -1,6 +1,6 @@
 //! Product-adapter identity types.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::error::ProductAdapterError;
 
@@ -30,7 +30,7 @@ fn validate_id(kind: &'static str, value: &str) -> Result<(), ProductAdapterErro
 
 macro_rules! string_id {
     ($name:ident, $kind:literal) => {
-        #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
         #[serde(transparent)]
         pub struct $name(String);
 
@@ -43,6 +43,16 @@ macro_rules! string_id {
 
             pub fn as_str(&self) -> &str {
                 &self.0
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                let value = String::deserialize(deserializer)?;
+                Self::new(value).map_err(serde::de::Error::custom)
             }
         }
 
@@ -72,6 +82,16 @@ pub enum ProductSurfaceKind {
     SynchronousApi,
 }
 
+impl ProductSurfaceKind {
+    pub fn uses_push_delivery(self) -> bool {
+        matches!(self, Self::ExternalChannel)
+    }
+
+    pub fn supports_synchronous_response(self) -> bool {
+        matches!(self, Self::Web | Self::Cli | Self::SynchronousApi)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,6 +114,11 @@ mod tests {
     fn rejects_control_characters() {
         assert!(ProductAdapterId::new("hello\0world").is_err());
         assert!(ProductAdapterId::new("hello\nworld").is_err());
+    }
+
+    #[test]
+    fn serde_rejects_invalid_identifier() {
+        assert!(serde_json::from_str::<ProductAdapterId>("\"hello\\nworld\"").is_err());
     }
 
     #[test]

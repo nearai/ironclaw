@@ -8,8 +8,9 @@
 use chrono::{DateTime, TimeZone, Utc};
 use ironclaw_product_adapters::{
     AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ExternalEventId,
-    InboundCommandPayload, ProductAdapterId, ProductAttachmentDescriptor, ProductAttachmentKind,
-    ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason, ProtocolAuthEvidence,
+    InboundCommandPayload, ParsedProductInbound, ProductAdapterError, ProductAdapterId,
+    ProductAttachmentDescriptor, ProductAttachmentKind, ProductInboundEnvelope,
+    ProductInboundPayload, ProductTriggerReason, ProtocolAuthEvidence, TrustedInboundContext,
     UserMessagePayload,
 };
 use serde::Deserialize;
@@ -73,12 +74,16 @@ pub fn parse_telegram_update(
     installation_id: &AdapterInstallationId,
     group_trigger_policy: &GroupTriggerPolicy,
 ) -> Result<TelegramParsedInbound, PayloadParseError> {
-    let auth_claim = match auth_evidence {
-        ProtocolAuthEvidence::Verified { claim, .. } => claim,
-        ProtocolAuthEvidence::Failed { .. } => {
-            return Err(PayloadParseError::UnauthenticatedPayload);
-        }
-    };
+    // `ProtocolAuthEvidence` is a sealed struct (formerly an enum) — the
+    // host mints verified evidence via `host_verified`, components cannot
+    // fabricate one. Bare-bones verification check up front so a clearly
+    // unauthenticated payload gets the distinct `UnauthenticatedPayload`
+    // error before any parsing work; `TrustedInboundContext::from_verified_
+    // evidence` below would also reject it, but the explicit shape here
+    // preserves the existing diagnostic.
+    if !auth_evidence.is_verified() {
+        return Err(PayloadParseError::UnauthenticatedPayload);
+    }
 
     let update: TelegramUpdate =
         serde_json::from_slice(raw_payload).map_err(|err| PayloadParseError::InvalidJson {
@@ -110,17 +115,31 @@ pub fn parse_telegram_update(
 
     let payload = build_payload(message, trigger, group_trigger_policy)?;
 
-    let envelope = ProductInboundEnvelope {
-        adapter_id: adapter_id.clone(),
-        installation_id: installation_id.clone(),
-        external_event_id: event_id,
-        external_actor_ref: actor_ref,
-        external_conversation_ref: conversation_ref,
-        auth_claim,
+    // `ProductInboundEnvelope` fields are sealed; the host stamps the
+    // trusted context (adapter id, installation id, verified auth claim,
+    // received-at timestamp) onto a `ParsedProductInbound` via
+    // `from_trusted_parse`. Adapters cannot construct the envelope
+    // directly — that's the host trust boundary.
+    let parsed = ParsedProductInbound::new(event_id, actor_ref, conversation_ref, payload)
+        .map_err(adapter_error_to_payload_error)?;
+    let context = TrustedInboundContext::from_verified_evidence(
+        adapter_id.clone(),
+        installation_id.clone(),
         received_at,
-        payload,
-    };
+        &auth_evidence,
+    )
+    .map_err(adapter_error_to_payload_error)?;
+    let envelope = ProductInboundEnvelope::from_trusted_parse(context, parsed)
+        .map_err(adapter_error_to_payload_error)?;
     Ok(TelegramParsedInbound::Envelope(Box::new(envelope)))
+}
+
+fn adapter_error_to_payload_error(err: ProductAdapterError) -> PayloadParseError {
+    // Surface the renderable message; the underlying error variants are
+    // already host-redacted by `ProductAdapterError`.
+    PayloadParseError::InvalidJson {
+        reason: err.to_string(),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,6 +176,15 @@ fn classify_trigger(
     policy: &GroupTriggerPolicy,
 ) -> Option<ProductTriggerReason> {
     if chat_kind == TelegramChatKind::Private {
+        // Recognized bot commands in DMs MUST classify as `BotCommand` so
+        // `build_payload` emits `ProductInboundPayload::Command`. Previously
+        // the private-chat branch returned `DirectChat` immediately and
+        // every DM — including `/help` — fell into the `UserMessage` arm,
+        // contradicting the adapter advertising `InboundCommands`.
+        // Non-command private messages still classify as `DirectChat`.
+        if recognized_bot_command(message, policy) {
+            return Some(ProductTriggerReason::BotCommand);
+        }
         return Some(ProductTriggerReason::DirectChat);
     }
 
@@ -762,12 +790,80 @@ mod tests {
     #[test]
     fn unauthenticated_payload_fails_closed() {
         let payload = br#"{"update_id":1}"#;
-        let evidence = ProtocolAuthEvidence::Failed {
-            failure: ironclaw_product_adapters::ProtocolAuthFailure::SharedSecretMismatch,
-        };
+        // `ProtocolAuthEvidence` is now a sealed struct, not an enum;
+        // `failed(failure)` constructs an unverified evidence.
+        let evidence = ProtocolAuthEvidence::failed(
+            ironclaw_product_adapters::ProtocolAuthFailure::SharedSecretMismatch,
+        );
         let err = parse_telegram_update(payload, evidence, &adapter_id(), &install_id(), &policy())
             .expect_err("unauthenticated must error");
         assert!(matches!(err, PayloadParseError::UnauthenticatedPayload));
+    }
+
+    #[test]
+    fn private_chat_recognized_bot_command_classifies_as_command() {
+        // Henry's review (PR #3354): `/help` in a DM was previously
+        // downgraded to `UserMessage` because the private-chat arm in
+        // `classify_trigger` returned `DirectChat` before checking
+        // `bot_command` entities. The adapter advertises
+        // `InboundCommands`, so this contradicted the manifest. The fix
+        // recognizes commands before the private-chat early return.
+        let payload = br#"{
+            "update_id": 110,
+            "message": {
+                "message_id": 11,
+                "date": 1700000000,
+                "from": {"id": 777, "is_bot": false, "first_name": "Alice", "username": "alice"},
+                "chat": {"id": 777, "type": "private"},
+                "text": "/help",
+                "entities": [{"type": "bot_command", "offset": 0, "length": 5}]
+            }
+        }"#;
+        let parsed =
+            parse_telegram_update(payload, evidence(), &adapter_id(), &install_id(), &policy())
+                .expect("parse");
+        let TelegramParsedInbound::Envelope(envelope) = parsed else {
+            panic!("expected envelope");
+        };
+        match envelope.payload() {
+            ProductInboundPayload::Command(cmd) => {
+                assert_eq!(cmd.command, "help");
+                assert_eq!(cmd.arguments, "");
+                assert_eq!(cmd.trigger, ProductTriggerReason::BotCommand);
+            }
+            other => panic!("expected Command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn private_chat_unknown_command_still_classifies_as_direct_chat() {
+        // Defense-in-depth for the fix above: an UNRECOGNIZED command
+        // (`/nope` is not in the policy's `recognized_commands`) must
+        // still fall through to `DirectChat`, not silently become a
+        // `Command` for a command the adapter doesn't know about.
+        let payload = br#"{
+            "update_id": 111,
+            "message": {
+                "message_id": 12,
+                "date": 1700000000,
+                "from": {"id": 777, "is_bot": false, "first_name": "Alice"},
+                "chat": {"id": 777, "type": "private"},
+                "text": "/nope",
+                "entities": [{"type": "bot_command", "offset": 0, "length": 5}]
+            }
+        }"#;
+        let parsed =
+            parse_telegram_update(payload, evidence(), &adapter_id(), &install_id(), &policy())
+                .expect("parse");
+        let TelegramParsedInbound::Envelope(envelope) = parsed else {
+            panic!("expected envelope");
+        };
+        match envelope.payload() {
+            ProductInboundPayload::UserMessage(user) => {
+                assert_eq!(user.trigger, ProductTriggerReason::DirectChat);
+            }
+            other => panic!("expected UserMessage with DirectChat trigger, got {other:?}"),
+        }
     }
 
     #[test]
@@ -788,14 +884,22 @@ mod tests {
         let TelegramParsedInbound::Envelope(envelope) = parsed else {
             panic!("expected envelope");
         };
-        assert_eq!(envelope.external_event_id.as_str(), "tg-install_alpha-100");
-        assert_eq!(envelope.external_actor_ref.id(), "777");
-        assert_eq!(envelope.external_conversation_ref.conversation_id(), "777");
         assert_eq!(
-            envelope.external_conversation_ref.reply_target_message_id(),
+            envelope.external_event_id().as_str(),
+            "tg-install_alpha-100"
+        );
+        assert_eq!(envelope.external_actor_ref().id(), "777");
+        assert_eq!(
+            envelope.external_conversation_ref().conversation_id(),
+            "777"
+        );
+        assert_eq!(
+            envelope
+                .external_conversation_ref()
+                .reply_target_message_id(),
             Some("11")
         );
-        match envelope.payload {
+        match envelope.payload() {
             ProductInboundPayload::UserMessage(user) => {
                 assert_eq!(user.text, "hello");
                 assert_eq!(user.trigger, ProductTriggerReason::DirectChat);
@@ -841,7 +945,7 @@ mod tests {
         let TelegramParsedInbound::Envelope(envelope) = parsed else {
             panic!("expected envelope");
         };
-        match envelope.payload {
+        match envelope.payload() {
             ProductInboundPayload::UserMessage(user) => {
                 assert_eq!(user.trigger, ProductTriggerReason::BotMention);
                 assert_eq!(user.text, "please help");
@@ -875,7 +979,7 @@ mod tests {
         let TelegramParsedInbound::Envelope(envelope) = parsed else {
             panic!("expected envelope");
         };
-        match envelope.payload {
+        match envelope.payload() {
             ProductInboundPayload::UserMessage(user) => {
                 assert_eq!(user.trigger, ProductTriggerReason::ReplyToBot);
             }
@@ -902,7 +1006,7 @@ mod tests {
         let TelegramParsedInbound::Envelope(envelope) = parsed else {
             panic!("expected envelope");
         };
-        match envelope.payload {
+        match envelope.payload() {
             ProductInboundPayload::Command(cmd) => {
                 assert_eq!(cmd.command, "help");
                 assert_eq!(cmd.arguments, "args here");
@@ -953,12 +1057,14 @@ mod tests {
             panic!("expected envelope");
         };
         assert_eq!(
-            envelope.external_conversation_ref.topic_id(),
+            envelope.external_conversation_ref().topic_id(),
             Some("7"),
             "topic must be carried in conversation key"
         );
         assert_eq!(
-            envelope.external_conversation_ref.reply_target_message_id(),
+            envelope
+                .external_conversation_ref()
+                .reply_target_message_id(),
             Some("50"),
             "reply target must come from message_id"
         );
@@ -988,17 +1094,19 @@ mod tests {
         };
         assert_eq!(
             envelope
-                .external_conversation_ref
+                .external_conversation_ref()
                 .conversation_fingerprint(),
             envelope2
-                .external_conversation_ref
+                .external_conversation_ref()
                 .conversation_fingerprint(),
         );
         // Reply targets differ.
         assert_ne!(
-            envelope.external_conversation_ref.reply_target_message_id(),
+            envelope
+                .external_conversation_ref()
+                .reply_target_message_id(),
             envelope2
-                .external_conversation_ref
+                .external_conversation_ref()
                 .reply_target_message_id(),
         );
     }
@@ -1025,7 +1133,7 @@ mod tests {
         let TelegramParsedInbound::Envelope(envelope) = parsed else {
             panic!("expected envelope");
         };
-        match envelope.payload {
+        match envelope.payload() {
             ProductInboundPayload::UserMessage(user) => {
                 assert_eq!(user.attachments.len(), 1);
                 assert_eq!(user.attachments[0].external_file_id, "BBBB");

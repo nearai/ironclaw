@@ -11,7 +11,7 @@ use ironclaw_engine::{
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 
-use crate::llm::{
+use ironclaw_llm::{
     ChatMessage, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolDefinition,
     clean_response, recover_tool_calls_from_content, sanitize_tool_messages,
 };
@@ -126,7 +126,7 @@ impl LlmBackend for LlmBridgeAdapter {
 
         if tools.is_empty() {
             // No tools: use plain completion (matches existing no-tools path)
-            let mut request = crate::llm::CompletionRequest::new(chat_messages)
+            let mut request = ironclaw_llm::CompletionRequest::new(chat_messages)
                 .with_max_tokens(max_tokens)
                 .with_temperature(temperature);
             request.metadata = config.metadata.clone();
@@ -403,6 +403,7 @@ fn thread_msg_to_chat(msg: &ThreadMessage) -> ChatMessage {
         tool_call_id: msg.action_call_id.clone(),
         name: msg.action_name.clone(),
         tool_calls: None,
+        reasoning: None,
     };
 
     // Convert action calls if present (assistant message with tool calls)
@@ -415,6 +416,7 @@ fn thread_msg_to_chat(msg: &ThreadMessage) -> ChatMessage {
                     name: c.action_name.clone(),
                     arguments: c.parameters.clone(),
                     reasoning: None,
+                    signature: None,
                 })
                 .collect(),
         );
@@ -620,7 +622,7 @@ mod tests {
     use ironclaw_engine::{ActionCall, ActionDef, EffectType, LlmResponse, ThreadMessage};
 
     use crate::error::LlmError;
-    use crate::llm::ToolCompletionResponse;
+    use ironclaw_llm::ToolCompletionResponse;
 
     #[derive(Default)]
     struct CapturingProviderState {
@@ -646,8 +648,8 @@ mod tests {
 
         async fn complete(
             &self,
-            req: crate::llm::CompletionRequest,
-        ) -> Result<crate::llm::CompletionResponse, LlmError> {
+            req: ironclaw_llm::CompletionRequest,
+        ) -> Result<ironclaw_llm::CompletionResponse, LlmError> {
             self.state.models.lock().await.push(req.model.clone());
             self.state
                 .completion_requests
@@ -655,11 +657,11 @@ mod tests {
                 .await
                 .push(req.messages);
 
-            Ok(crate::llm::CompletionResponse {
+            Ok(ironclaw_llm::CompletionResponse {
                 content: "ok".to_string(),
                 input_tokens: 1,
                 output_tokens: 1,
-                finish_reason: crate::llm::FinishReason::Stop,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })
@@ -682,9 +684,10 @@ mod tests {
                 tool_calls: Vec::new(),
                 input_tokens: 1,
                 output_tokens: 1,
-                finish_reason: crate::llm::FinishReason::Stop,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
     }
@@ -834,8 +837,8 @@ mod tests {
 
         async fn complete(
             &self,
-            _req: crate::llm::CompletionRequest,
-        ) -> Result<crate::llm::CompletionResponse, LlmError> {
+            _req: ironclaw_llm::CompletionRequest,
+        ) -> Result<ironclaw_llm::CompletionResponse, LlmError> {
             unreachable!("test only uses complete_with_tools")
         }
 
@@ -848,9 +851,10 @@ mod tests {
                 tool_calls: Vec::new(),
                 input_tokens: 1,
                 output_tokens: 1,
-                finish_reason: crate::llm::FinishReason::Stop,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
     }
@@ -966,13 +970,13 @@ mod tests {
 
         async fn complete(
             &self,
-            _req: crate::llm::CompletionRequest,
-        ) -> Result<crate::llm::CompletionResponse, LlmError> {
-            Ok(crate::llm::CompletionResponse {
+            _req: ironclaw_llm::CompletionRequest,
+        ) -> Result<ironclaw_llm::CompletionResponse, LlmError> {
+            Ok(ironclaw_llm::CompletionResponse {
                 content: self.content.clone(),
                 input_tokens: 1,
                 output_tokens: 1,
-                finish_reason: crate::llm::FinishReason::Stop,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })
@@ -1555,8 +1559,8 @@ And also check the token price:\n\
         }
         async fn complete(
             &self,
-            _req: crate::llm::CompletionRequest,
-        ) -> Result<crate::llm::CompletionResponse, LlmError> {
+            _req: ironclaw_llm::CompletionRequest,
+        ) -> Result<ironclaw_llm::CompletionResponse, LlmError> {
             unreachable!("should use complete_with_tools")
         }
         async fn complete_with_tools(
@@ -1567,7 +1571,7 @@ And also check the token price:\n\
             // a prior tool result's project_id via template ref.
             Ok(ToolCompletionResponse {
                 content: Some("Creating mission in the new project".to_string()),
-                tool_calls: vec![crate::llm::ToolCall {
+                tool_calls: vec![ironclaw_llm::ToolCall {
                     id: "call-2".to_string(),
                     name: "mission_create".to_string(),
                     arguments: serde_json::json!({
@@ -1576,12 +1580,14 @@ And also check the token price:\n\
                         "project_id": "{{call-1.project_id}}"
                     }),
                     reasoning: None,
+                    signature: None,
                 }],
                 input_tokens: 10,
                 output_tokens: 10,
-                finish_reason: crate::llm::FinishReason::ToolUse,
+                finish_reason: ironclaw_llm::FinishReason::ToolUse,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
     }
@@ -1663,13 +1669,13 @@ And also check the token price:\n\
         }
         async fn complete(
             &self,
-            _req: crate::llm::CompletionRequest,
-        ) -> Result<crate::llm::CompletionResponse, LlmError> {
-            Ok(crate::llm::CompletionResponse {
+            _req: ironclaw_llm::CompletionRequest,
+        ) -> Result<ironclaw_llm::CompletionResponse, LlmError> {
+            Ok(ironclaw_llm::CompletionResponse {
                 content: "hello".to_string(),
                 input_tokens: 1000,
                 output_tokens: 500,
-                finish_reason: crate::llm::FinishReason::Stop,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })
@@ -1683,9 +1689,10 @@ And also check the token price:\n\
                 tool_calls: Vec::new(),
                 input_tokens: 1000,
                 output_tokens: 500,
-                finish_reason: crate::llm::FinishReason::Stop,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
     }
@@ -1752,13 +1759,13 @@ And also check the token price:\n\
             }
             async fn complete(
                 &self,
-                _req: crate::llm::CompletionRequest,
-            ) -> Result<crate::llm::CompletionResponse, LlmError> {
-                Ok(crate::llm::CompletionResponse {
+                _req: ironclaw_llm::CompletionRequest,
+            ) -> Result<ironclaw_llm::CompletionResponse, LlmError> {
+                Ok(ironclaw_llm::CompletionResponse {
                     content: "ok".into(),
                     input_tokens: 1000,
                     output_tokens: 500,
-                    finish_reason: crate::llm::FinishReason::Stop,
+                    finish_reason: ironclaw_llm::FinishReason::Stop,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                 })
@@ -1811,13 +1818,13 @@ And also check the token price:\n\
             }
             async fn complete(
                 &self,
-                _req: crate::llm::CompletionRequest,
-            ) -> Result<crate::llm::CompletionResponse, LlmError> {
-                Ok(crate::llm::CompletionResponse {
+                _req: ironclaw_llm::CompletionRequest,
+            ) -> Result<ironclaw_llm::CompletionResponse, LlmError> {
+                Ok(ironclaw_llm::CompletionResponse {
                     content: "ok".into(),
                     input_tokens: 10_000,
                     output_tokens: 5_000,
-                    finish_reason: crate::llm::FinishReason::Stop,
+                    finish_reason: ironclaw_llm::FinishReason::Stop,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                 })
@@ -1879,15 +1886,15 @@ And also check the token price:\n\
             }
             async fn complete(
                 &self,
-                _req: crate::llm::CompletionRequest,
-            ) -> Result<crate::llm::CompletionResponse, LlmError> {
+                _req: ironclaw_llm::CompletionRequest,
+            ) -> Result<ironclaw_llm::CompletionResponse, LlmError> {
                 // Total input = 10_000; 2_000 cache-read, 1_000 cache-write,
                 // 7_000 uncached. Output = 500.
-                Ok(crate::llm::CompletionResponse {
+                Ok(ironclaw_llm::CompletionResponse {
                     content: "ok".into(),
                     input_tokens: 10_000,
                     output_tokens: 500,
-                    finish_reason: crate::llm::FinishReason::Stop,
+                    finish_reason: ironclaw_llm::FinishReason::Stop,
                     cache_read_input_tokens: 2_000,
                     cache_creation_input_tokens: 1_000,
                 })

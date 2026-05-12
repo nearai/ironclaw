@@ -1,0 +1,27 @@
+[package]
+name = "ironclaw_loop_support"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Loop support services for IronClaw Reborn AgentLoopHost implementations"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+tracing = "0.1"
+tokio = { version = "1", features = ["sync"] }
+ironclaw_skills = { path = "../ironclaw_skills", version = "0.3.0", default-features = false }
+ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
+ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+[dev-dependencies]
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt"] }
+tracing-test = { version = "0.2", features = ["no-env-filter"] }

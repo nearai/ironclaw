@@ -17,6 +17,10 @@ default = []
 # production binaries don't carry the fake state machinery; downstream
 # crates enable it from `[dev-dependencies]`.
 test-support = []
+# Host runtimes enable this feature to mint verified protocol-auth evidence
+# after they have performed real protocol verification. Adapter crates should
+# not enable it.
+host-auth-mint = []
 
 [dependencies]
 async-trait = "0.1"

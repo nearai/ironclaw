@@ -1,0 +1,35 @@
+[package]
+name = "ironclaw_product_workflow"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Product-facing workflow facade for IronClaw Reborn (#3280)"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[features]
+default = []
+# Compile in-memory fakes (FakeInboundTurnService, FakeConversationBindingService,
+# FakeIdempotencyLedger, etc.). Off by default so production binaries don't carry
+# the fake state machinery; downstream crates enable it from `[dev-dependencies]`.
+test-support = ["ironclaw_product_adapters/test-support"]
+
+[dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters", version = "0.1.0" }
+ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
+ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+
+[dev-dependencies]
+ironclaw_product_workflow = { path = ".", features = ["test-support"] }
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters", features = ["test-support", "host-auth-mint"] }
+tokio = { version = "1", features = ["macros", "rt", "sync"] }
