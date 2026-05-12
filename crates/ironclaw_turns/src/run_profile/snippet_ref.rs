@@ -14,10 +14,39 @@ const FIELD_SEPARATOR: u8 = 0xFF;
 /// not security. Field separators prevent simple concatenation drift between
 /// independent call sites.
 pub fn stable_snippet_display_hash<'a>(fields: impl IntoIterator<Item = &'a str>) -> u64 {
+    stable_snippet_display_hash_with_layout(fields, SeparatorLayout::Trailing)
+}
+
+/// Compute legacy skill-snippet display hash semantics.
+///
+/// Skill refs existed before the shared helper. Their field separator appeared
+/// only between fields, so centralization must preserve those model-visible
+/// refs instead of rotating them.
+pub fn stable_skill_snippet_display_hash<'a>(fields: impl IntoIterator<Item = &'a str>) -> u64 {
+    stable_snippet_display_hash_with_layout(fields, SeparatorLayout::BetweenFields)
+}
+
+#[derive(Clone, Copy)]
+enum SeparatorLayout {
+    Trailing,
+    BetweenFields,
+}
+
+fn stable_snippet_display_hash_with_layout<'a>(
+    fields: impl IntoIterator<Item = &'a str>,
+    layout: SeparatorLayout,
+) -> u64 {
+    let fields: Vec<&str> = fields.into_iter().collect();
     let mut hash = FNV_OFFSET;
-    for field in fields {
+    for (index, field) in fields.iter().enumerate() {
         feed_hash(&mut hash, field.as_bytes());
-        feed_hash(&mut hash, &[FIELD_SEPARATOR]);
+        let should_append_separator = match layout {
+            SeparatorLayout::Trailing => true,
+            SeparatorLayout::BetweenFields => index + 1 < fields.len(),
+        };
+        if should_append_separator {
+            feed_hash(&mut hash, &[FIELD_SEPARATOR]);
+        }
     }
     hash
 }
@@ -48,6 +77,22 @@ mod tests {
         assert_ne!(
             stable_snippet_display_hash(["ab", "c"]),
             stable_snippet_display_hash(["a", "bc"]),
+        );
+    }
+
+    #[test]
+    fn skill_display_hash_preserves_existing_model_visible_refs() {
+        assert_eq!(
+            stable_skill_snippet_display_hash(["skill:alpha", "summary", "0"]),
+            0x6e54cb74d742607c
+        );
+    }
+
+    #[test]
+    fn memory_display_hash_preserves_trailing_separator_layout() {
+        assert_eq!(
+            stable_snippet_display_hash(["skill:alpha", "summary", "0"]),
+            0xbc763a89c5c9fe99
         );
     }
 }
