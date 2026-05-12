@@ -505,7 +505,8 @@ impl fmt::Debug for BuiltinObligationServices {
     }
 }
 
-struct SharedSecretStore(Arc<dyn SecretStore>);
+#[derive(Clone)]
+pub(crate) struct SharedSecretStore(pub(crate) Arc<dyn SecretStore>);
 
 #[async_trait]
 impl SecretStore for SharedSecretStore {

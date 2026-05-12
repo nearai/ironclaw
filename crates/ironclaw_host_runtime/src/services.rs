@@ -76,7 +76,9 @@ use ironclaw_wasm::{
 
 use thiserror::Error;
 
-use crate::obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
+use crate::obligations::{
+    NetworkObligationPolicyStore, RuntimeSecretInjectionStore, SharedSecretStore,
+};
 use crate::{
     BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime,
     FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, HostRuntimeError,
@@ -915,20 +917,26 @@ where
     }
 
     /// Builds and attaches production-shaped host HTTP egress using this
-    /// service graph's private network-policy and secret-injection handoff
-    /// stores. Callers provide concrete network and secret adapters, but never
-    /// receive the mutable handoff stores themselves.
-    pub fn with_host_http_egress<N, SecretBackend>(self, network: N, secrets: SecretBackend) -> Self
+    /// service graph's private network-policy, secret-injection, and secret-store
+    /// handles. Callers provide concrete network transport, but never receive the
+    /// mutable handoff stores or choose a separate secret backend.
+    pub fn try_with_host_http_egress<N>(self, network: N) -> Result<Self, ProductionWiringReport>
     where
         N: NetworkHttpEgress + 'static,
-        SecretBackend: SecretStore + 'static,
     {
+        let Some(secret_store) = self.secret_store.clone() else {
+            return Err(production_wiring_report(
+                ProductionWiringComponent::SecretStore,
+                ProductionWiringIssueKind::Missing,
+                None,
+            ));
+        };
         let runtime_http_egress = Arc::new(
-            crate::HostHttpEgressService::new(network, secrets)
+            crate::HostHttpEgressService::new(network, SharedSecretStore(secret_store))
                 .with_network_policy_store(Arc::clone(&self.network_policy_store))
                 .with_secret_injection_store(Arc::clone(&self.secret_injection_store)),
         );
-        self.with_host_http_egress_service(runtime_http_egress)
+        Ok(self.with_host_http_egress_service(runtime_http_egress))
     }
 
     pub fn with_script_runtime<T>(mut self, runtime: Arc<T>) -> Self

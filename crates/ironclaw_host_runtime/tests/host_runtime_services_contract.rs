@@ -86,7 +86,8 @@ use ironclaw_turns::{
 use ironclaw_turns::{NoopTurnRunWakeNotifier, TurnRunWake, TurnRunWakeNotifier};
 use ironclaw_wasm::{
     RecordingWasmHostHttp, WasmHostError, WasmHostHttp, WasmHttpRequest, WasmHttpResponse,
-    WasmStagedRuntimeCredential, WasmStagedRuntimeCredentials, WitToolHost, WitToolRuntimeConfig,
+    WasmRuntimeCredentialProvider, WasmRuntimeCredentialRequest, WasmStagedRuntimeCredential,
+    WasmStagedRuntimeCredentials, WitToolHost, WitToolRuntimeConfig,
 };
 use serde_json::json;
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
@@ -1074,11 +1075,11 @@ fn production_wiring_validation_accepts_verified_host_http_egress_shape() {
         Arc::new(GrantAuthorizer::new()),
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
-    );
-    let services = services.with_host_http_egress(
-        RecordingNetworkHttpEgress::new(),
-        InMemorySecretStore::new(),
-    );
+    )
+    .with_secret_store(Arc::new(InMemorySecretStore::new()));
+    let services = services
+        .try_with_host_http_egress(RecordingNetworkHttpEgress::new())
+        .unwrap();
 
     let report = services
         .validate_production_wiring(&ProductionWiringConfig::new([]).require_runtime_http_egress());
@@ -1090,6 +1091,28 @@ fn production_wiring_validation_accepts_verified_host_http_egress_shape() {
         )),
         "verified host HTTP egress should satisfy the runtime egress guardrail: {report:?}"
     );
+}
+
+#[test]
+fn host_http_egress_helper_requires_graph_secret_store() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    );
+
+    let report = match services.try_with_host_http_egress(RecordingNetworkHttpEgress::new()) {
+        Ok(_) => panic!("host HTTP egress helper must use configured graph secret store"),
+        Err(report) => report,
+    };
+
+    assert!(report.contains(
+        ProductionWiringComponent::SecretStore,
+        ProductionWiringIssueKind::Missing
+    ));
 }
 
 #[test]
@@ -3512,7 +3535,8 @@ async fn host_runtime_services_wasm_http_uses_production_staged_network_and_secr
         ),
     ])));
     let services = services
-        .with_host_http_egress(network.clone(), InMemorySecretStore::new())
+        .try_with_host_http_egress(network.clone())
+        .unwrap()
         .try_with_wasm_runtime(WitToolRuntimeConfig::for_testing(), WitToolHost::deny_all())
         .unwrap();
     let capability_id = CapabilityId::new("wasm-http.success").unwrap();
@@ -3554,6 +3578,83 @@ async fn host_runtime_services_wasm_http_uses_production_staged_network_and_secr
 }
 
 #[tokio::test]
+async fn host_runtime_services_wasm_http_secret_store_lease_uses_graph_secret_store() {
+    let parsed_manifest = ExtensionManifest::parse(WASM_HTTP_SUCCESS_MANIFEST).unwrap();
+    let component = tool_component(HTTP_TOOL_WAT);
+    let filesystem = Arc::new(
+        filesystem_with_wasm_component(
+            parsed_manifest.id.as_str(),
+            "wasm/http-success.wasm",
+            &component,
+        )
+        .await,
+    );
+    let governor = Arc::new(governor_with_default_limit(sample_account()));
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_handle = SecretHandle::new("api-token").unwrap();
+    let policy = wasm_http_policy();
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
+        Arc::new(ObligatingAuthorizer::new(vec![
+            Obligation::ApplyNetworkPolicy {
+                policy: policy.clone(),
+            },
+        ]));
+    let network = RecordingNetworkHttpEgress::new();
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(WASM_HTTP_SUCCESS_MANIFEST)),
+        filesystem,
+        governor,
+        authorizer,
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_secret_store(Arc::clone(&secret_store))
+    .with_wasm_runtime_credential_provider(Arc::new(SecretStoreLeaseCredentials {
+        handle: secret_handle.clone(),
+    }));
+    let services = services
+        .try_with_host_http_egress(network.clone())
+        .unwrap()
+        .try_with_wasm_runtime(WitToolRuntimeConfig::for_testing(), WitToolHost::deny_all())
+        .unwrap();
+    let capability_id = CapabilityId::new("wasm-http.success").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    secret_store
+        .put(
+            scope.clone(),
+            secret_handle,
+            SecretMaterial::from("sk-graph-store-secret"),
+        )
+        .await
+        .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"call": "http-success-with-secret-store-lease"}),
+        ))
+        .await
+        .unwrap();
+
+    assert_completed_outcome(outcome, &capability_id);
+    let requests = network.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].policy, policy);
+    assert_eq!(
+        requests[0]
+            .headers
+            .iter()
+            .find(|(name, _)| name == "authorization"),
+        Some(&(
+            "authorization".to_string(),
+            "Bearer sk-graph-store-secret".to_string(),
+        ))
+    );
+}
+
+#[tokio::test]
 async fn host_runtime_services_wasm_http_missing_staged_secret_stays_before_transport() {
     let parsed_manifest = ExtensionManifest::parse(WASM_HTTP_SUCCESS_MANIFEST).unwrap();
     let component = tool_component(HTTP_TOOL_WAT);
@@ -3581,6 +3682,7 @@ async fn host_runtime_services_wasm_http_missing_staged_secret_stays_before_tran
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
+    .with_secret_store(Arc::new(InMemorySecretStore::new()))
     .with_wasm_runtime_credential_provider(Arc::new(WasmStagedRuntimeCredentials::new(vec![
         WasmStagedRuntimeCredential::for_exact_url(
             secret_handle,
@@ -3593,7 +3695,8 @@ async fn host_runtime_services_wasm_http_missing_staged_secret_stays_before_tran
         ),
     ])));
     let services = services
-        .with_host_http_egress(network.clone(), InMemorySecretStore::new())
+        .try_with_host_http_egress(network.clone())
+        .unwrap()
         .try_with_wasm_runtime(WitToolRuntimeConfig::for_testing(), WitToolHost::deny_all())
         .unwrap();
     let capability_id = CapabilityId::new("wasm-http.success").unwrap();
@@ -5122,6 +5225,28 @@ impl NetworkHttpEgress for RecordingNetworkHttpEgress {
                 resolved_ip: None,
             },
         })
+    }
+}
+
+#[derive(Debug)]
+struct SecretStoreLeaseCredentials {
+    handle: SecretHandle,
+}
+
+impl WasmRuntimeCredentialProvider for SecretStoreLeaseCredentials {
+    fn credential_injections(
+        &self,
+        _request: &WasmRuntimeCredentialRequest,
+    ) -> Result<Vec<RuntimeCredentialInjection>, WasmHostError> {
+        Ok(vec![RuntimeCredentialInjection {
+            handle: self.handle.clone(),
+            source: RuntimeCredentialSource::SecretStoreLease,
+            target: RuntimeCredentialTarget::Header {
+                name: "authorization".to_string(),
+                prefix: Some("Bearer ".to_string()),
+            },
+            required: true,
+        }])
     }
 }
 

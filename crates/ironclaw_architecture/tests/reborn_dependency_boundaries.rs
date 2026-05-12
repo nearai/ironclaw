@@ -149,6 +149,9 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
     let obligations =
         std::fs::read_to_string(root.join("crates/ironclaw_host_runtime/src/obligations.rs"))
             .expect("host runtime obligations.rs must be readable");
+    let host_runtime_contract =
+        std::fs::read_to_string(root.join("docs/reborn/contracts/host-runtime.md"))
+            .expect("host runtime contract must be readable");
 
     let forbidden_lib_exports = [
         "RuntimeDispatchProcessExecutor",
@@ -202,6 +205,7 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
         "pub fn capability_host",
         "pub fn secret_injection_store(",
         "pub fn network_policy_store(",
+        "pub fn with_host_http_egress<N, SecretBackend>",
         "pub struct RuntimeDispatchProcessExecutor",
         "pub struct ScriptRuntimeAdapter",
         "pub struct McpRuntimeAdapter",
@@ -231,6 +235,17 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
         assert!(
             !obligations.contains(pattern),
             "BuiltinObligationServices and lower handoff stores must not expose lower substrate escape hatch `{pattern}`; keep secret/network handoff stores private to host-runtime composition"
+        );
+    }
+
+    for required_phrase in [
+        "try_with_host_http_egress",
+        "low-level host-runtime/test harness escape hatches",
+        "upper Reborn crates must not use them",
+    ] {
+        assert!(
+            host_runtime_contract.contains(required_phrase),
+            "host-runtime contract should document `{required_phrase}` so raw handoff store seams are not mistaken for upper Reborn APIs"
         );
     }
 }
