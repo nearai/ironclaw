@@ -76,6 +76,10 @@ async fn memory_prompt_safety_rejection_projects_metadata_only_from_durable_audi
     assert_eq!(snapshot.entries.len(), 1);
     let entry = &snapshot.entries[0];
     assert_eq!(entry.stage, AuditProjectionStage::Denied);
+    assert_eq!(
+        entry.extension_id.as_ref().map(|id| id.as_str()),
+        Some("memory.prompt_safety")
+    );
     assert_eq!(entry.action_kind, "write_file");
     assert_eq!(entry.action_target, None);
     assert_eq!(entry.decision_kind, "prompt_high_risk");

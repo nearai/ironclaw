@@ -6,7 +6,7 @@
 //! so it stays independent of concrete JSONL/PostgreSQL/libSQL adapters.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -45,14 +45,8 @@ const STATE_REPLAY_PAGE_LIMIT: usize = 256;
 /// run-state view.
 const STATE_REPLAY_MAX_EVENTS: usize = 100_000;
 
-static MEMORY_EVENTS_EXTENSION_ID: LazyLock<ExtensionId> = LazyLock::new(|| {
-    ExtensionId::new("memory.events").expect("static memory events extension id is valid")
-});
-
-static MEMORY_PROMPT_SAFETY_EXTENSION_ID: LazyLock<ExtensionId> = LazyLock::new(|| {
-    ExtensionId::new("memory.prompt_safety")
-        .expect("static memory prompt-safety extension id is valid")
-});
+const MEMORY_EVENTS_EXTENSION_ID: &str = "memory.events";
+const MEMORY_PROMPT_SAFETY_EXTENSION_ID: &str = "memory.prompt_safety";
 
 /// Maximum page size accepted by the projection service.
 ///
@@ -455,7 +449,7 @@ fn memory_significant_audit(
         invocation_id: resource_scope.invocation_id,
         process_id: None,
         approval_request_id: None,
-        extension_id: Some((*MEMORY_EVENTS_EXTENSION_ID).clone()),
+        extension_id: Some(memory_events_extension_id()?),
         action: ActionSummary {
             kind: memory_significant_action_kind(event.kind).to_string(),
             target: None,
@@ -496,7 +490,7 @@ fn prompt_write_safety_audit(
         invocation_id: resource_scope.invocation_id,
         process_id: None,
         approval_request_id: None,
-        extension_id: Some((*MEMORY_PROMPT_SAFETY_EXTENSION_ID).clone()),
+        extension_id: Some(memory_prompt_safety_extension_id()?),
         action: ActionSummary {
             kind: prompt_write_action_kind(event.operation).to_string(),
             target: None,
@@ -582,6 +576,19 @@ fn memory_significant_action_kind(kind: MemorySignificantEventKind) -> &'static 
         MemorySignificantEventKind::SearchPerformed => "memory_search_performed",
         MemorySignificantEventKind::LayerRedirected => "memory_layer_redirected",
     }
+}
+
+fn memory_events_extension_id() -> Result<ExtensionId, MemoryEventSinkError> {
+    ExtensionId::new(MEMORY_EVENTS_EXTENSION_ID)
+        .map_err(|error| memory_audit_error(format!("invalid memory events extension id: {error}")))
+}
+
+fn memory_prompt_safety_extension_id() -> Result<ExtensionId, MemoryEventSinkError> {
+    ExtensionId::new(MEMORY_PROMPT_SAFETY_EXTENSION_ID).map_err(|error| {
+        memory_audit_error(format!(
+            "invalid memory prompt-safety extension id: {error}"
+        ))
+    })
 }
 
 fn memory_significant_effects(kind: MemorySignificantEventKind) -> Vec<EffectKind> {

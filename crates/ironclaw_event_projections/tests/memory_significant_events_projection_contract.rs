@@ -125,6 +125,13 @@ async fn memory_write_index_and_search_project_metadata_only_from_jsonl_audit_lo
         assert_eq!(entry.decision_kind, "memory_event_recorded");
     }
     assert_eq!(
+        snapshot.entries[0]
+            .extension_id
+            .as_ref()
+            .map(|id| id.as_str()),
+        Some("memory.events")
+    );
+    assert_eq!(
         snapshot.entries[0].output_bytes,
         Some(raw_content.len() as u64)
     );
