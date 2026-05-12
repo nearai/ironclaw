@@ -26,7 +26,15 @@ Derived data such as chunks, search indexes, embeddings, and projections
 This prevents two failure modes:
 
 1. forcing every durable record into ad hoc JSON files;
-2. hiding file-shaped content behind unrelated typed APIs.
+2. hiding file-shaped content behind unrelated typed APIs;
+3. creating a single omniscient data-store crate that owns unrelated domain semantics.
+
+A shared storage substrate may own common mechanics such as backend identity,
+redacted storage errors, migration descriptors, pagination helpers, JSON
+encoding/decoding helpers, connection/transaction conventions, and encrypted
+record/blob primitives. It must not own domain operations such as “claim turn”,
+“accept inbound message”, “advance outbound cursor”, or “issue credential
+session”. Those remain in the typed service/domain crates.
 
 ---
 
@@ -49,7 +57,74 @@ invocation_id optional effect/request scope
 
 ---
 
-## 3. Canonical namespace/source-of-truth map
+## 3. Ownership versus mechanics
+
+Storage design decisions must answer two separate questions:
+
+```text
+Ownership: which domain owns schema meaning, invariants, validation, and operations?
+Mechanics: which shared layer owns repeated DB/runtime plumbing?
+```
+
+Domain crates own typed traits and semantics:
+
+```text
+ironclaw_turns::TurnStateStore
+ironclaw_threads::SessionThreadService
+ironclaw_outbound::OutboundStateStore
+ironclaw_secrets::CredentialAccountStore / CredentialSessionStore / future SecretStore
+```
+
+The shared storage substrate may provide reusable mechanics:
+
+```text
+ironclaw_storage::StorageBackendKind
+ironclaw_storage::StorageError
+ironclaw_storage::StorageMigration
+ironclaw_storage::encode_json / decode_json
+ironclaw_storage::PageLimit
+ironclaw_storage::BlobStore / RecordStore primitives
+```
+
+Primitive substrate families should stay small and mechanics-only:
+
+```text
+BlobStore          binary/object bytes, including future encrypted blobs
+RecordStore        keyed structured records with CAS/version preconditions
+AppendLog          ordered event/audit/projection streams with cursors
+LockStore          leases, heartbeats, fencing tokens
+TransactionalStore backend transaction boundary for multi-record operations
+```
+
+These primitives are not replacements for domain APIs. For example, callers
+should still use `TurnStateStore::claim_next_run`,
+`SessionThreadService::accept_inbound_message`,
+`OutboundStateStore::advance_subscription_cursor`, and the secret-store APIs
+instead of reaching into primitive stores directly.
+
+Rules:
+
+- domain adapters may depend on shared storage mechanics;
+- shared storage must not depend on domain crates;
+- filesystem may implement file-shaped or raw encrypted blob backends, but must not become the owner of structured control-plane semantics;
+- a future adapter crate may collect concrete SQL implementations, but the owning domain contracts still define allowed operations and invariants.
+
+Filesystem-like views over structured state are allowed when useful for
+operators, import/export, diagnostics, or AI-readable inspection:
+
+```text
+/reborn/threads/{thread}/messages/{message}.json
+/reborn/turns/{turn}/runs/{run}.json
+/reborn/outbound/subscriptions/{subscription}.json
+/reborn/events/{stream}/{cursor}.json
+/secrets/... redacted metadata projection only
+```
+
+Default rule: these views are projections, not the source of truth. If a view
+allows writes, the write must validate and call the typed domain API; it must
+not bypass domain invariants by mutating primitive storage rows directly.
+
+## 4. Canonical namespace/source-of-truth map
 
 | Virtual area | Source of truth | Access surface | Indexed? | Notes |
 | --- | --- | --- | --- | --- |
@@ -66,9 +141,9 @@ invocation_id optional effect/request scope
 
 ---
 
-## 4. Placement rules by content type
+## 5. Placement rules by content type
 
-### 4.1 File-shaped user/project content
+### 5.1 File-shaped user/project content
 
 Examples:
 
@@ -85,7 +160,7 @@ Rules:
 - raw host paths never appear in runtime-visible paths, errors, events, or audit;
 - indexing is explicit and owned by a project/artifact indexer, not by `RootFilesystem`.
 
-### 4.2 Memory documents
+### 5.2 Memory documents
 
 Examples:
 
@@ -101,7 +176,7 @@ Rules:
 - memory path grammar, metadata inheritance, versioning, search, prompt context, and layer rules live in `ironclaw_memory`;
 - `ironclaw_filesystem` may route/mount memory backends but must not encode memory semantics.
 
-### 4.3 Structured control-plane state
+### 5.3 Structured control-plane state
 
 Examples:
 
@@ -124,7 +199,7 @@ Rules:
 - projections must not become the hidden source of truth unless the contract explicitly says so;
 - projection writes, if allowed, validate schema and then call the typed repository.
 
-### 4.4 High-churn runtime state
+### 5.4 High-churn runtime state
 
 Examples from current production:
 
@@ -144,7 +219,27 @@ Rules:
 
 ---
 
-## 5. Filesystem catalog requirements
+## 6. Secrets and encrypted raw storage
+
+Secrets use a dedicated semantic boundary above raw persistence:
+
+```text
+SecretStore / Credential*Store
+  -> authorizes and validates secret operations
+  -> encrypts plaintext before persistence
+  -> decrypts only after the caller has crossed the secret-store boundary
+
+RawSecretRecordStore / EncryptedBlobStore / filesystem/object/SQL backend
+  -> stores ciphertext and metadata only
+  -> has no plaintext API and no secret-domain semantics
+```
+
+`ironclaw_filesystem` may be one implementation of raw encrypted blob storage.
+It must not expose secret material through generic file listing, file reads,
+errors, events, or projections. Secret APIs own listing semantics, redaction,
+key rotation, expiry, use-counts, and audit obligations.
+
+## 7. Filesystem catalog requirements
 
 Every mounted filesystem backend should expose a `MountDescriptor` containing:
 
@@ -170,7 +265,7 @@ ScopedPath -> MountView -> permission check -> VirtualPath -> backend
 
 ---
 
-## 6. Backend support policy
+## 8. Backend support policy
 
 Backend capability fields are support declarations, not extension capability declarations and not authority grants.
 
@@ -201,7 +296,7 @@ A future implementation cleanup may rename these backend fields/types to `*Suppo
 
 ---
 
-## 7. Engineer task implications
+## 9. Engineer task implications
 
 Before implementing a persistence task, engineers must identify:
 
@@ -212,13 +307,14 @@ Before implementing a persistence task, engineers must identify:
 5. indexing policy;
 6. delete/versioning behavior;
 7. PostgreSQL/libSQL parity requirement;
-8. migration/backfill impact.
+8. migration/backfill impact;
+9. whether shared storage mechanics should be reused or extended.
 
 If the answer is not in this document or the owning domain contract, the task is not ready for implementation.
 
 ---
 
-## 8. Acceptance tests for placement changes
+## 10. Acceptance tests for placement changes
 
 Any new storage placement must include:
 

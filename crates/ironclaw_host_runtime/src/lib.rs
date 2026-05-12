@@ -44,6 +44,8 @@ use serde_json::Value;
 use std::{collections::BTreeMap, fmt, sync::Arc};
 use thiserror::Error;
 
+mod first_party;
+pub mod memory_context;
 mod obligations;
 mod planner;
 mod production;
@@ -51,6 +53,10 @@ mod services;
 mod surface;
 mod turn_scheduler;
 
+pub use first_party::{
+    FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
+    FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
+};
 pub use obligations::{
     BuiltinObligationHandler, BuiltinObligationServices, NetworkObligationPolicyStore,
     ProcessObligationLifecycleStore, RuntimeSecretInjectionStore, RuntimeSecretInjectionStoreError,
@@ -462,9 +468,19 @@ pub struct RuntimeCapabilityFailure {
     pub message: Option<String>,
 }
 
+/// Explicit fallback for outcome categories that the loop adapter cannot handle
+/// yet. New first-class outcome variants should be added to
+/// [`RuntimeCapabilityOutcome`] and exhaustively mapped by consumers instead of
+/// being hidden behind wildcard matches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeCapabilityUnknown {
+    pub capability_id: CapabilityId,
+    pub kind: String,
+    pub message: Option<String>,
+}
+
 /// Outcomes returned by capability invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum RuntimeCapabilityOutcome {
     Completed(Box<RuntimeCapabilityCompleted>),
     ApprovalRequired(RuntimeApprovalGate),
@@ -472,6 +488,7 @@ pub enum RuntimeCapabilityOutcome {
     ResourceBlocked(RuntimeResourceGate),
     SpawnedProcess(RuntimeProcessHandle),
     Failed(RuntimeCapabilityFailure),
+    Unknown(RuntimeCapabilityUnknown),
 }
 
 impl RuntimeCapabilityOutcome {
@@ -483,6 +500,7 @@ impl RuntimeCapabilityOutcome {
             Self::ResourceBlocked(_) => "resource_blocked",
             Self::SpawnedProcess(_) => "spawned_process",
             Self::Failed(_) => "failed",
+            Self::Unknown(_) => "unknown",
         }
     }
 }
@@ -665,7 +683,6 @@ pub trait HostRuntime: Send + Sync {
 
 /// Sanitized host runtime infrastructure/contract errors.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum HostRuntimeError {
     #[error("invalid host runtime request: {reason}")]
     InvalidRequest { reason: String },

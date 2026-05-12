@@ -4318,6 +4318,7 @@ dependencies = [
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_mcp",
+ "ironclaw_memory",
  "ironclaw_network",
  "ironclaw_processes",
  "ironclaw_reborn_event_store",
@@ -4390,6 +4391,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "ironclaw_host_api",
+ "ironclaw_skills",
  "ironclaw_threads",
  "ironclaw_turns",
  "serde",
@@ -4461,6 +4463,7 @@ dependencies = [
  "ironclaw_event_projections",
  "ironclaw_events",
  "ironclaw_host_api",
+ "ironclaw_storage",
  "ironclaw_turns",
  "libsql",
  "serde",
@@ -4469,6 +4472,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-postgres",
+ "tracing",
  "uuid",
 ]
 
@@ -4514,18 +4518,31 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "futures-util",
+ "ironclaw_authorization",
+ "ironclaw_extensions",
+ "ironclaw_filesystem",
  "ironclaw_host_api",
+ "ironclaw_host_runtime",
  "ironclaw_llm",
  "ironclaw_loop_support",
+ "ironclaw_processes",
+ "ironclaw_resources",
+ "ironclaw_scripts",
  "ironclaw_secrets",
+ "ironclaw_skills",
  "ironclaw_threads",
+ "ironclaw_trust",
  "ironclaw_turns",
  "libsql",
  "rust_decimal",
  "secrecy",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -4534,7 +4551,16 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "clap_complete",
  "ironclaw_reborn",
+ "ironclaw_reborn_config",
+ "tempfile",
+]
+
+[[package]]
+name = "ironclaw_reborn_config"
+version = "0.1.0"
+dependencies = [
  "tempfile",
 ]
 
@@ -4689,6 +4715,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_storage"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ironclaw_threads"
 version = "0.1.0"
 dependencies = [
@@ -4746,10 +4784,12 @@ dependencies = [
  "async-trait",
  "chrono",
  "deadpool-postgres",
+ "hex",
  "ironclaw_host_api",
  "libsql",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "static_assertions",
  "tempfile",
  "thiserror 2.0.18",
@@ -8799,6 +8839,7 @@ dependencies = [
  "futures-core",
  "futures-io",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

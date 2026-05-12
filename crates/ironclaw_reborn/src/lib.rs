@@ -6,6 +6,9 @@
 
 pub mod driver_registry;
 pub mod loop_driver_host;
+pub mod loop_exit_applier;
+pub mod model_routes;
+pub mod turn_runner;
 
 #[cfg(feature = "root-llm-provider")]
 pub mod model_gateway;
@@ -13,11 +16,18 @@ pub mod model_gateway;
 pub mod secrets;
 
 pub use loop_driver_host::{
-    HostManagedLoopCheckpointPort, HostManagedLoopProgressPort, NoExtraLoopInputPort,
+    HostManagedLoopCheckpointPort, HostManagedLoopProgressPort, HostRuntimeLoopCapabilityPort,
+    LoopCapabilityInputResolver, LoopCapabilityResultWriter, NoExtraLoopInputPort,
     RebornLoopDriverHost, RebornLoopDriverHostError, RebornLoopDriverHostFactory,
     RebornLoopDriverHostRequest, TextOnlyLoopHostConfig,
 };
 #[cfg(feature = "root-llm-provider")]
 pub use model_gateway::{
-    LlmModelProfilePolicy, LlmProviderModelGateway, ThreadBackedLoopModelGateway,
+    LlmModelProfilePolicy, LlmProviderModelGateway, ModelRouteProviderPool,
+    RoutedLlmProviderModelGateway, StaticModelRouteProviderPool, ThreadBackedLoopModelGateway,
+};
+pub use model_routes::{
+    ActiveModelRouteSettings, ModelRoute, ModelRouteError, ModelRoutePolicy, ModelRouteProviderKey,
+    ModelRouteResolver, ModelRouteSource, ModelSelectionMode, ModelSlot,
+    ResolvedModelRouteSnapshot, StaticModelRouteResolver,
 };

@@ -549,7 +549,7 @@ async fn builtin_obligation_handler_fails_closed_when_redacted_object_keys_colli
         &capability_id,
         json!({
             leaked: "secret-key",
-            "[REDACTED].aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": "existing",
+            "[REDACTED]": "existing",
         }),
     );
 

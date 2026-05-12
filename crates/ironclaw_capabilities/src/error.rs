@@ -121,7 +121,8 @@ fn dispatch_error_kind(error: &DispatchError) -> String {
         DispatchError::UnsupportedRuntime { .. } => "UnsupportedRuntime".to_string(),
         DispatchError::Mcp { kind }
         | DispatchError::Script { kind }
-        | DispatchError::Wasm { kind } => kind.as_str().to_string(),
+        | DispatchError::Wasm { kind }
+        | DispatchError::FirstParty { kind } => kind.as_str().to_string(),
     }
 }
 
@@ -202,6 +203,14 @@ mod tests {
             kind: RuntimeDispatchErrorKind::Memory,
         });
         assert_eq!(kind, "Memory");
+    }
+
+    #[test]
+    fn dispatch_error_kind_forwards_first_party_runtime_kind_as_str() {
+        let kind = dispatch_error_kind(&DispatchError::FirstParty {
+            kind: RuntimeDispatchErrorKind::UndeclaredCapability,
+        });
+        assert_eq!(kind, "UndeclaredCapability");
     }
 
     #[test]

@@ -72,6 +72,10 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
         .iter()
         .filter_map(package_dependencies)
         .collect::<HashMap<_, _>>();
+    let dependencies_all_kinds = packages
+        .iter()
+        .filter_map(package_dependencies_all_kinds)
+        .collect::<HashMap<_, _>>();
 
     let root = workspace_root();
     let manifest_path = root.join("crates/ironclaw_reborn_cli/Cargo.toml");
@@ -91,18 +95,46 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
         manifest.contains("[[bin]]") && manifest.contains("name = \"ironclaw-reborn\""),
         "Reborn CLI crate must declare the ironclaw-reborn binary explicitly"
     );
-    let actual_workspace_deps = dependencies
-        .get("ironclaw_reborn_cli")
-        .expect("ironclaw_reborn_cli must be in cargo metadata")
-        .iter()
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>();
-    let expected_workspace_deps = ["ironclaw_reborn".to_string()]
-        .into_iter()
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(
-        actual_workspace_deps, expected_workspace_deps,
-        "ironclaw_reborn_cli should enter Reborn through ironclaw_reborn only; add explicit architectural justification before depending on other workspace crates"
+
+    let command_module_paths = [
+        "crates/ironclaw_reborn_cli/AGENTS.md",
+        "crates/ironclaw_reborn_cli/src/commands/mod.rs",
+        "crates/ironclaw_reborn_cli/src/commands/completion.rs",
+        "crates/ironclaw_reborn_cli/src/commands/doctor.rs",
+        "crates/ironclaw_reborn_cli/src/commands/run.rs",
+        "crates/ironclaw_reborn_cli/src/context.rs",
+    ];
+    for path in command_module_paths {
+        assert!(
+            root.join(path).exists(),
+            "Reborn CLI commands should use an agent-friendly one-command-per-file layout; missing {path}"
+        );
+    }
+
+    let agent_contract = std::fs::read_to_string(root.join("crates/ironclaw_reborn_cli/AGENTS.md"))
+        .expect("Reborn CLI crate-local AGENTS.md must be readable");
+    for required_phrase in [
+        "one command per file",
+        "RebornCliContext",
+        "no v1 runtime imports",
+    ] {
+        assert!(
+            agent_contract.contains(required_phrase),
+            "Reborn CLI AGENTS.md should document `{required_phrase}` for future command agents"
+        );
+    }
+
+    assert_workspace_deps_exactly(
+        &dependencies,
+        "ironclaw_reborn_cli",
+        ["ironclaw_reborn", "ironclaw_reborn_config"],
+        "ironclaw_reborn_cli should enter Reborn through ironclaw_reborn and ironclaw_reborn_config only; add explicit architectural justification before depending on other workspace crates",
+    );
+    assert_workspace_deps_exactly(
+        &dependencies_all_kinds,
+        "ironclaw_reborn_config",
+        [],
+        "ironclaw_reborn_config must remain a standalone boot contract crate with no IronClaw workspace dependencies of any dependency kind",
     );
 }
 
@@ -410,6 +442,91 @@ struct BoundaryRule {
 
 fn boundary_rules() -> Vec<BoundaryRule> {
     vec![
+        BoundaryRule {
+            crate_name: "ironclaw_storage",
+            forbidden: vec![
+                "ironclaw",
+                "ironclaw_approvals",
+                "ironclaw_architecture",
+                "ironclaw_authorization",
+                "ironclaw_capabilities",
+                "ironclaw_common",
+                "ironclaw_conversations",
+                "ironclaw_dispatcher",
+                "ironclaw_engine",
+                "ironclaw_event_projections",
+                "ironclaw_events",
+                "ironclaw_extensions",
+                "ironclaw_filesystem",
+                "ironclaw_gateway",
+                "ironclaw_host_api",
+                "ironclaw_host_runtime",
+                "ironclaw_llm",
+                "ironclaw_loop_support",
+                "ironclaw_mcp",
+                "ironclaw_memory",
+                "ironclaw_network",
+                "ironclaw_outbound",
+                "ironclaw_processes",
+                "ironclaw_product_adapters",
+                "ironclaw_reborn",
+                "ironclaw_reborn_cli",
+                "ironclaw_reborn_config",
+                "ironclaw_reborn_event_store",
+                "ironclaw_resources",
+                "ironclaw_run_state",
+                "ironclaw_runtime_policy",
+                "ironclaw_safety",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
+                "ironclaw_skills",
+                "ironclaw_threads",
+                "ironclaw_trust",
+                "ironclaw_tui",
+                "ironclaw_turns",
+                "ironclaw_wasm",
+            ],
+        },
+        BoundaryRule {
+            crate_name: "ironclaw_reborn_config",
+            forbidden: vec![
+                "ironclaw",
+                "ironclaw_approvals",
+                "ironclaw_authorization",
+                "ironclaw_capabilities",
+                "ironclaw_conversations",
+                "ironclaw_dispatcher",
+                "ironclaw_engine",
+                "ironclaw_events",
+                "ironclaw_extensions",
+                "ironclaw_filesystem",
+                "ironclaw_gateway",
+                "ironclaw_host_api",
+                "ironclaw_host_runtime",
+                "ironclaw_llm",
+                "ironclaw_loop_support",
+                "ironclaw_mcp",
+                "ironclaw_memory",
+                "ironclaw_network",
+                "ironclaw_outbound",
+                "ironclaw_processes",
+                "ironclaw_product_adapters",
+                "ironclaw_reborn",
+                "ironclaw_reborn_event_store",
+                "ironclaw_resources",
+                "ironclaw_run_state",
+                "ironclaw_runtime_policy",
+                "ironclaw_safety",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
+                "ironclaw_skills",
+                "ironclaw_threads",
+                "ironclaw_trust",
+                "ironclaw_tui",
+                "ironclaw_turns",
+                "ironclaw_wasm",
+            ],
+        },
         BoundaryRule {
             crate_name: "ironclaw_reborn_cli",
             forbidden: vec![
@@ -862,16 +979,33 @@ fn workspace_root() -> PathBuf {
 
 fn package_dependencies(package: &Value) -> Option<(String, Vec<String>)> {
     let name = package["name"].as_str()?.to_string();
-    let dependencies = package["dependencies"]
-        .as_array()
-        .into_iter()
-        .flatten()
+    let dependencies = workspace_dependency_names(package)
         .filter(|dependency| is_normal_dependency(dependency))
         .filter_map(|dependency| dependency["name"].as_str())
-        .filter(|name| *name == "ironclaw" || name.starts_with("ironclaw_"))
         .map(ToString::to_string)
         .collect::<Vec<_>>();
     Some((name, dependencies))
+}
+
+fn package_dependencies_all_kinds(package: &Value) -> Option<(String, Vec<String>)> {
+    let name = package["name"].as_str()?.to_string();
+    let dependencies = workspace_dependency_names(package)
+        .filter_map(|dependency| dependency["name"].as_str())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    Some((name, dependencies))
+}
+
+fn workspace_dependency_names(package: &Value) -> impl Iterator<Item = &Value> {
+    package["dependencies"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|dependency| {
+            dependency["name"]
+                .as_str()
+                .is_some_and(|name| name == "ironclaw" || name.starts_with("ironclaw_"))
+        })
 }
 
 fn is_normal_dependency(dependency: &Value) -> bool {
@@ -888,6 +1022,25 @@ fn workspace_ironclaw_crates(dependencies: &HashMap<String, Vec<String>>) -> Vec
             (name == "ironclaw" || name.starts_with("ironclaw_")).then_some(name.as_str())
         })
         .collect()
+}
+
+fn assert_workspace_deps_exactly<'a>(
+    dependencies: &HashMap<String, Vec<String>>,
+    crate_name: &str,
+    expected: impl IntoIterator<Item = &'a str>,
+    message: &str,
+) {
+    let actual = dependencies
+        .get(crate_name)
+        .unwrap_or_else(|| panic!("{crate_name} must be in cargo metadata"))
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected = expected
+        .into_iter()
+        .map(ToString::to_string)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(actual, expected, "{message}");
 }
 
 fn assert_no_normal_workspace_deps<'a>(

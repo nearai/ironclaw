@@ -4,6 +4,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -16,7 +17,8 @@ use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_resources::*;
 use ironclaw_wasm::{
-    PreparedWitTool, WasmRuntimeHttpAdapter, WitToolHost, WitToolRequest, WitToolRuntime,
+    PreparedWitTool, WasmRuntimeHttpAdapter, WitToolHost, WitToolLimits, WitToolRequest,
+    WitToolRuntime, WitToolRuntimeConfig,
 };
 use serde_json::{Value, json};
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
@@ -339,6 +341,191 @@ async fn wasm_lane_invalid_output_json_returns_sanitized_output_error() {
     assert_eq!(recorded[2].error_kind.as_deref(), Some("output_decode"));
 }
 
+#[tokio::test]
+async fn wasm_lane_rejects_unsupported_import_through_dispatcher_without_reservation_leak() {
+    let raw_unsupported_import = wat::parse_str(UNSUPPORTED_IMPORT_MODULE_WAT).unwrap();
+    let fs =
+        filesystem_with_wasm_component("wasm-smoke", "wasm/counter.wasm", &raw_unsupported_import)
+            .await;
+    let registry = Arc::new(registry_with_package(WASM_MANIFEST));
+    let governor = Arc::new(governor_with_default_limit(sample_account()));
+    let events = InMemoryEventSink::new();
+    let adapter = Arc::new(WasmRuntimeAdapter::new());
+    let dispatcher = RuntimeDispatcher::from_arcs(registry, Arc::new(fs), Arc::clone(&governor))
+        .with_runtime_adapter_arc(RuntimeKind::Wasm, Arc::clone(&adapter))
+        .with_event_sink_arc(Arc::new(events.clone()));
+
+    let err = dispatcher
+        .dispatch_json(dispatch_request(
+            "wasm-smoke.count",
+            json!({"sentinel":"UNSUPPORTED_IMPORT_SENTINEL_3067"}),
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        DispatchError::Wasm {
+            kind: RuntimeDispatchErrorKind::Manifest
+                | RuntimeDispatchErrorKind::MethodMissing
+                | RuntimeDispatchErrorKind::Executor
+        }
+    ));
+    assert_eq!(adapter.prepare_count(), 0);
+    assert_eq!(
+        governor.reserved_for(&sample_account()),
+        ResourceTally::default()
+    );
+    assert_eq!(
+        governor.usage_for(&sample_account()),
+        ResourceTally::default()
+    );
+    assert_event_kinds(
+        &events,
+        &[
+            RuntimeEventKind::DispatchRequested,
+            RuntimeEventKind::RuntimeSelected,
+            RuntimeEventKind::DispatchFailed,
+        ],
+    );
+    let serialized_events = serde_json::to_string(&events.events()).unwrap();
+    assert!(!serialized_events.contains("UNSUPPORTED_IMPORT_SENTINEL_3067"));
+}
+
+#[tokio::test]
+async fn wasm_lane_enforces_memory_growth_budget_through_dispatcher() {
+    let memory_growth = COUNTER_TOOL_WAT.replace(
+        "global.get $count\n    i32.const 1\n    i32.add",
+        "i32.const 1\n    memory.grow\n    i32.const -1\n    i32.eq\n    if\n      unreachable\n    end\n\n    global.get $count\n    i32.const 1\n    i32.add",
+    );
+    assert_ne!(memory_growth, COUNTER_TOOL_WAT);
+    let component = tool_component(&memory_growth);
+    let fs = filesystem_with_wasm_component("wasm-smoke", "wasm/counter.wasm", &component).await;
+    let registry = Arc::new(registry_with_package(WASM_MANIFEST));
+    let governor = Arc::new(governor_with_default_limit(sample_account()));
+    let events = InMemoryEventSink::new();
+    let adapter = WasmRuntimeAdapter::with_config(WitToolRuntimeConfig {
+        default_limits: WitToolLimits::default()
+            .with_memory_bytes(64 * 1024)
+            .with_fuel(100_000)
+            .with_timeout(Duration::from_secs(5)),
+    });
+    let dispatcher = RuntimeDispatcher::from_arcs(registry, Arc::new(fs), Arc::clone(&governor))
+        .with_runtime_adapter_arc(RuntimeKind::Wasm, Arc::new(adapter))
+        .with_event_sink_arc(Arc::new(events.clone()));
+
+    let err = dispatcher
+        .dispatch_json(dispatch_request(
+            "wasm-smoke.count",
+            json!({"sentinel":"MEMORY_BOUND_SENTINEL_3067"}),
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            DispatchError::Wasm {
+                kind: RuntimeDispatchErrorKind::Guest | RuntimeDispatchErrorKind::Memory
+            }
+        ),
+        "unexpected memory-growth-bound dispatch error: {err:?}"
+    );
+    assert_eq!(
+        governor.reserved_for(&sample_account()),
+        ResourceTally::default()
+    );
+    assert_eq!(
+        governor.usage_for(&sample_account()),
+        ResourceTally::default()
+    );
+    assert_event_kinds(
+        &events,
+        &[
+            RuntimeEventKind::DispatchRequested,
+            RuntimeEventKind::RuntimeSelected,
+            RuntimeEventKind::DispatchFailed,
+        ],
+    );
+    let serialized_events = serde_json::to_string(&events.events()).unwrap();
+    assert!(!serialized_events.contains("MEMORY_BOUND_SENTINEL_3067"));
+}
+
+#[tokio::test]
+async fn wasm_lane_caps_overdue_host_import_at_dispatch_execution_deadline() {
+    let component = tool_component(&trap_after_http_wat());
+    let fs = filesystem_with_wasm_component("wasm-smoke", "wasm/http-trap.wasm", &component).await;
+    let registry = Arc::new(registry_with_package(WASM_HTTP_TRAP_MANIFEST));
+    let governor = Arc::new(governor_with_default_limit(sample_account()));
+    let events = InMemoryEventSink::new();
+    let http = Arc::new(SlowRuntimeEgress::new(RuntimeHttpEgressResponse {
+        status: 200,
+        headers: vec![],
+        body: Vec::new(),
+        request_bytes: 5,
+        response_bytes: 0,
+        redaction_applied: false,
+    }));
+    let wasm_http = Arc::new(
+        WasmRuntimeHttpAdapter::new(
+            Arc::clone(&http),
+            sample_scope(),
+            CapabilityId::new("wasm-smoke.httptrap").unwrap(),
+            wasm_http_policy(),
+        )
+        .with_response_body_limit(Some(4096)),
+    );
+    let adapter = WasmRuntimeAdapter::with_host_and_config(
+        WitToolHost::deny_all().with_http(wasm_http),
+        WitToolRuntimeConfig {
+            default_limits: WitToolLimits::default()
+                .with_memory_bytes(1024 * 1024)
+                .with_fuel(100_000)
+                .with_timeout(Duration::from_millis(20)),
+        },
+    );
+    let dispatcher = RuntimeDispatcher::from_arcs(registry, Arc::new(fs), Arc::clone(&governor))
+        .with_runtime_adapter_arc(RuntimeKind::Wasm, Arc::new(adapter))
+        .with_event_sink_arc(Arc::new(events.clone()));
+
+    let err = dispatcher
+        .dispatch_json(dispatch_request(
+            "wasm-smoke.httptrap",
+            json!({"sentinel":"DEADLINE_SENTINEL_3067"}),
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        DispatchError::Wasm {
+            kind: RuntimeDispatchErrorKind::Guest
+        }
+    ));
+    assert_eq!(http.requests.lock().unwrap().len(), 1);
+    assert_eq!(
+        governor.reserved_for(&sample_account()),
+        ResourceTally::default()
+    );
+    assert_eq!(
+        governor.usage_for(&sample_account()).network_egress_bytes,
+        5,
+        "overdue host import should preserve accountable request egress through dispatcher"
+    );
+    assert_event_kinds(
+        &events,
+        &[
+            RuntimeEventKind::DispatchRequested,
+            RuntimeEventKind::RuntimeSelected,
+            RuntimeEventKind::DispatchFailed,
+        ],
+    );
+    let recorded = events.events();
+    assert_eq!(recorded[2].error_kind.as_deref(), Some("guest"));
+    let serialized_events = serde_json::to_string(&recorded).unwrap();
+    assert!(!serialized_events.contains("DEADLINE_SENTINEL_3067"));
+}
+
 #[derive(Clone)]
 struct RecordingRuntimeEgress {
     response: Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError>,
@@ -364,6 +551,32 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
     }
 }
 
+#[derive(Clone)]
+struct SlowRuntimeEgress {
+    response: RuntimeHttpEgressResponse,
+    requests: Arc<Mutex<Vec<RuntimeHttpEgressRequest>>>,
+}
+
+impl SlowRuntimeEgress {
+    fn new(response: RuntimeHttpEgressResponse) -> Self {
+        Self {
+            response,
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+impl RuntimeHttpEgress for SlowRuntimeEgress {
+    fn execute(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        std::thread::sleep(Duration::from_millis(50));
+        self.requests.lock().unwrap().push(request);
+        Ok(self.response.clone())
+    }
+}
+
 struct WasmRuntimeAdapter {
     runtime: WitToolRuntime,
     host: WitToolHost,
@@ -377,9 +590,16 @@ impl WasmRuntimeAdapter {
     }
 
     fn with_host(host: WitToolHost) -> Self {
+        Self::with_host_and_config(host, WitToolRuntimeConfig::for_testing())
+    }
+
+    fn with_config(config: WitToolRuntimeConfig) -> Self {
+        Self::with_host_and_config(WitToolHost::deny_all(), config)
+    }
+
+    fn with_host_and_config(host: WitToolHost, config: WitToolRuntimeConfig) -> Self {
         Self {
-            runtime: WitToolRuntime::new(ironclaw_wasm::WitToolRuntimeConfig::for_testing())
-                .unwrap(),
+            runtime: WitToolRuntime::new(config).unwrap(),
             host,
             prepared: Mutex::new(HashMap::new()),
             prepare_count: AtomicUsize::new(0),
@@ -688,6 +908,14 @@ fn tool_component(wat_src: &str) -> Vec<u8> {
         .validate(true);
     encoder.encode().expect("component must encode")
 }
+
+const UNSUPPORTED_IMPORT_MODULE_WAT: &str = r#"
+(module
+  (import "near:agent/unsupported@0.3.0" "do-secret-thing" (func $unsupported))
+  (func (export "run")
+    call $unsupported)
+)
+"#;
 
 const COUNTER_TOOL_WAT: &str = r#"
 (module

@@ -9,10 +9,12 @@
 use std::{
     any::type_name,
     collections::HashMap,
+    panic::AssertUnwindSafe,
     sync::{Arc, Mutex, MutexGuard},
 };
 
 use async_trait::async_trait;
+use futures_util::FutureExt;
 use ironclaw_approvals::ApprovalResolver;
 use ironclaw_authorization::{CapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_dispatcher::{
@@ -75,7 +77,8 @@ use ironclaw_wasm::{
 use thiserror::Error;
 
 use crate::{
-    BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntimeError,
+    BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime,
+    FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, HostRuntimeError,
     NetworkObligationPolicyStore, ProcessObligationLifecycleStore, RuntimeBackendHealth,
     RuntimeSecretInjectionStore, TurnRunExecutor, TurnRunScheduler, TurnRunSchedulerConfig,
 };
@@ -152,6 +155,7 @@ pub enum ProductionWiringComponent {
     ScriptRuntime,
     McpRuntime,
     WasmRuntime,
+    FirstPartyRuntime,
     TurnState,
     TurnRunWakeNotifier,
 }
@@ -176,6 +180,7 @@ impl ProductionWiringComponent {
             Self::ScriptRuntime => "script_runtime",
             Self::McpRuntime => "mcp_runtime",
             Self::WasmRuntime => "wasm_runtime",
+            Self::FirstPartyRuntime => "first_party_runtime",
             Self::TurnState => "turn_state",
             Self::TurnRunWakeNotifier => "turn_run_wake_notifier",
         }
@@ -256,6 +261,7 @@ struct ProductionComponentTypes {
     wasm_runtime_credential_provider_captured: bool,
     script_runtime: Option<&'static str>,
     mcp_runtime: Option<&'static str>,
+    first_party_runtime: Option<&'static str>,
     turn_state: Option<&'static str>,
     turn_run_transition_port: Option<&'static str>,
     turn_run_transition_port_verified: bool,
@@ -311,6 +317,7 @@ where
     runtime_health: Option<Arc<dyn RuntimeBackendHealth>>,
     script_runtime: Option<Arc<dyn ScriptExecutor>>,
     mcp_runtime: Option<Arc<dyn McpExecutor>>,
+    first_party_runtime: Option<Arc<FirstPartyCapabilityRegistry>>,
     wasm_runtime: Option<Arc<WasmRuntimeAdapter>>,
     turn_state: Option<Arc<dyn TurnStateStore>>,
     turn_run_transition_port: Option<Arc<dyn TurnRunTransitionPort>>,
@@ -365,6 +372,7 @@ where
             runtime_health: None,
             script_runtime: None,
             mcp_runtime: None,
+            first_party_runtime: None,
             wasm_runtime: None,
             turn_state: None,
             turn_run_transition_port: None,
@@ -389,6 +397,7 @@ where
                 wasm_runtime_credential_provider_captured: false,
                 script_runtime: None,
                 mcp_runtime: None,
+                first_party_runtime: None,
                 turn_state: None,
                 turn_run_transition_port: None,
                 turn_run_transition_port_verified: false,
@@ -426,6 +435,7 @@ where
             runtime_health,
             script_runtime,
             mcp_runtime,
+            first_party_runtime,
             wasm_runtime,
             turn_state,
             turn_run_transition_port,
@@ -457,6 +467,7 @@ where
             runtime_health,
             script_runtime,
             mcp_runtime,
+            first_party_runtime,
             wasm_runtime,
             turn_state,
             turn_run_transition_port,
@@ -510,6 +521,7 @@ where
             runtime_health,
             script_runtime,
             mcp_runtime,
+            first_party_runtime,
             wasm_runtime,
             turn_state,
             turn_run_transition_port,
@@ -551,6 +563,7 @@ where
             runtime_health,
             script_runtime,
             mcp_runtime,
+            first_party_runtime,
             wasm_runtime,
             turn_state,
             turn_run_transition_port,
@@ -926,6 +939,16 @@ where
         self
     }
 
+    pub fn with_first_party_capabilities(
+        mut self,
+        registry: Arc<FirstPartyCapabilityRegistry>,
+    ) -> Self {
+        self.component_types.first_party_runtime =
+            Some(type_name::<FirstPartyCapabilityRegistry>());
+        self.first_party_runtime = Some(registry);
+        self
+    }
+
     fn with_wasm_runtime(mut self, runtime: Arc<WasmRuntimeAdapter>) -> Self {
         self.component_types
             .wasm_runtime_credential_provider_captured = self.wasm_credential_provider.is_some();
@@ -1052,8 +1075,11 @@ where
         }
         for runtime in &config.required_runtime_backends {
             match runtime {
-                RuntimeKind::Script | RuntimeKind::Mcp | RuntimeKind::Wasm => {}
-                RuntimeKind::FirstParty | RuntimeKind::System => self.push_issue(
+                RuntimeKind::Script
+                | RuntimeKind::Mcp
+                | RuntimeKind::Wasm
+                | RuntimeKind::FirstParty => {}
+                RuntimeKind::System => self.push_issue(
                     &mut issues,
                     ProductionWiringComponent::RuntimeBackend,
                     ProductionWiringIssueKind::UnsupportedRequirement,
@@ -1080,6 +1106,13 @@ where
                 &mut issues,
                 ProductionWiringComponent::WasmRuntime,
                 self.wasm_runtime.is_some(),
+            );
+        }
+        if config.requires_runtime(RuntimeKind::FirstParty) {
+            self.push_missing(
+                &mut issues,
+                ProductionWiringComponent::FirstPartyRuntime,
+                self.first_party_runtime_covers_declared_capabilities(),
             );
         }
 
@@ -1393,6 +1426,12 @@ where
                 Arc::new(McpRuntimeAdapter::from_executor(Arc::clone(runtime))),
             );
         }
+        if let Some(runtime) = &self.first_party_runtime {
+            dispatcher = dispatcher.with_runtime_adapter_arc(
+                RuntimeKind::FirstParty,
+                Arc::new(FirstPartyRuntimeAdapter::from_registry(Arc::clone(runtime))),
+            );
+        }
         if let Some(runtime) = &self.wasm_runtime {
             dispatcher =
                 dispatcher.with_runtime_adapter_arc(RuntimeKind::Wasm, Arc::clone(runtime));
@@ -1531,7 +1570,25 @@ where
         if self.script_runtime.is_some() {
             backends.push(RuntimeKind::Script);
         }
+        if self.first_party_runtime_covers_declared_capabilities() {
+            backends.push(RuntimeKind::FirstParty);
+        }
         backends
+    }
+
+    fn first_party_runtime_covers_declared_capabilities(&self) -> bool {
+        let Some(first_party_runtime) = &self.first_party_runtime else {
+            return false;
+        };
+        let mut declared = self
+            .registry
+            .capabilities()
+            .filter(|descriptor| descriptor.runtime == RuntimeKind::FirstParty)
+            .peekable();
+        if declared.peek().is_none() {
+            return false;
+        }
+        declared.all(|descriptor| first_party_runtime.contains_handler(&descriptor.id))
     }
 }
 
@@ -1699,6 +1756,111 @@ where
             usage: execution.result.usage,
             receipt: execution.receipt,
             output_bytes: execution.result.output_bytes,
+        })
+    }
+}
+
+#[derive(Clone)]
+struct FirstPartyRuntimeAdapter {
+    registry: Arc<FirstPartyCapabilityRegistry>,
+}
+
+impl FirstPartyRuntimeAdapter {
+    pub fn from_registry(registry: Arc<FirstPartyCapabilityRegistry>) -> Self {
+        Self { registry }
+    }
+}
+
+#[async_trait]
+impl<F, G> RuntimeAdapter<F, G> for FirstPartyRuntimeAdapter
+where
+    F: RootFilesystem,
+    G: ResourceGovernor,
+{
+    async fn dispatch_json(
+        &self,
+        request: RuntimeAdapterRequest<'_, F, G>,
+    ) -> Result<RuntimeAdapterResult, DispatchError> {
+        let Some(handler) = self.registry.get(request.capability_id) else {
+            if let Some(reservation) = request.resource_reservation
+                && let Err(error) = request.governor.release(reservation.id)
+            {
+                tracing::warn!(
+                    reservation_id = %reservation.id,
+                    error = %error,
+                    "failed to release prepared resource reservation after missing first-party handler"
+                );
+            }
+            return Err(DispatchError::FirstParty {
+                kind: RuntimeDispatchErrorKind::UndeclaredCapability,
+            });
+        };
+
+        let reservation = match request.resource_reservation {
+            Some(reservation) => reservation,
+            None => request
+                .governor
+                .reserve(request.scope.clone(), request.estimate.clone())
+                .map_err(|_| DispatchError::FirstParty {
+                    kind: RuntimeDispatchErrorKind::Resource,
+                })?,
+        };
+
+        let result = match AssertUnwindSafe(handler.dispatch(FirstPartyCapabilityRequest {
+            capability_id: request.capability_id.clone(),
+            scope: request.scope.clone(),
+            estimate: request.estimate,
+            mounts: request.mounts,
+            input: request.input,
+        }))
+        .catch_unwind()
+        .await
+        {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => {
+                account_or_release_failed_first_party_execution(
+                    request.governor,
+                    reservation.id,
+                    error.usage(),
+                )?;
+                return Err(DispatchError::FirstParty { kind: error.kind() });
+            }
+            Err(_) => {
+                release_first_party_reservation(request.governor, reservation.id);
+                return Err(DispatchError::FirstParty {
+                    kind: RuntimeDispatchErrorKind::Backend,
+                });
+            }
+        };
+
+        let output_bytes = serde_json::to_vec(&result.output)
+            .map(|bytes| bytes.len() as u64)
+            .map_err(|_| DispatchError::FirstParty {
+                kind: RuntimeDispatchErrorKind::OutputDecode,
+            })?;
+        let mut usage = result.usage;
+        usage.output_bytes = usage.output_bytes.max(output_bytes);
+        let receipt = match request.governor.reconcile(reservation.id, usage.clone()) {
+            Ok(receipt) => receipt,
+            Err(_) => {
+                if let Err(release_error) = request.governor.release(reservation.id) {
+                    tracing::warn!(
+                        reservation_id = %reservation.id,
+                        error = %release_error,
+                        "failed to release first-party resource reservation after reconcile failure"
+                    );
+                }
+                return Err(DispatchError::FirstParty {
+                    kind: RuntimeDispatchErrorKind::Resource,
+                });
+            }
+        };
+
+        Ok(RuntimeAdapterResult {
+            output: result.output,
+            usage,
+            receipt,
+            output_bytes,
         })
     }
 }
@@ -1988,6 +2150,40 @@ where
     })
 }
 
+fn account_or_release_failed_first_party_execution<G>(
+    governor: &G,
+    reservation_id: ResourceReservationId,
+    usage: Option<&ResourceUsage>,
+) -> Result<(), DispatchError>
+where
+    G: ResourceGovernor + ?Sized,
+{
+    let Some(usage) = usage else {
+        release_first_party_reservation(governor, reservation_id);
+        return Ok(());
+    };
+    if !has_accountable_effects(usage) {
+        release_first_party_reservation(governor, reservation_id);
+        return Ok(());
+    }
+
+    if governor.reconcile(reservation_id, usage.clone()).is_err() {
+        release_first_party_reservation(governor, reservation_id);
+        return Err(DispatchError::FirstParty {
+            kind: RuntimeDispatchErrorKind::Resource,
+        });
+    }
+
+    Ok(())
+}
+
+fn release_first_party_reservation<G>(governor: &G, reservation_id: ResourceReservationId)
+where
+    G: ResourceGovernor + ?Sized,
+{
+    let _ = governor.release(reservation_id);
+}
+
 fn account_or_release_failed_wasm_execution<G>(
     governor: &G,
     reservation_id: ResourceReservationId,
@@ -2094,7 +2290,8 @@ fn dispatch_error_kind(error: &DispatchError) -> &'static str {
         DispatchError::UnsupportedRuntime { .. } => "unsupported_runtime",
         DispatchError::Mcp { kind }
         | DispatchError::Script { kind }
-        | DispatchError::Wasm { kind } => kind.event_kind(),
+        | DispatchError::Wasm { kind }
+        | DispatchError::FirstParty { kind } => kind.event_kind(),
     }
 }
 
