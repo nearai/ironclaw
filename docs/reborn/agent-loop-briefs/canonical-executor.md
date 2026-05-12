@@ -111,6 +111,15 @@ impl AgentLoopExecutor for CanonicalAgentLoopExecutor {
         mut state: LoopExecutionState,
     ) -> Result<ironclaw_turns::LoopExit, AgentLoopExecutorError> {
         loop {
+            // 0. Iteration cap check at the TOP of the loop, BEFORE the body.
+            // This way a resumed executor with state.iteration == limit exits
+            // immediately instead of running one extra body. With state.iteration
+            // starting at 0 and limit = N, the body runs for iterations 0..N-1
+            // and the check at iteration N triggers the exit — exactly N bodies.
+            if state.iteration >= planner.budget().iteration_limit(&state) {
+                return Ok(/* LoopExit::Failed { IterationLimit, … } */);
+            }
+
             // 1. Cancellation observation
             state = self.checkpoint_and_exit_if_cancelled(host, state).await?;
 
@@ -146,10 +155,23 @@ impl AgentLoopExecutor for CanonicalAgentLoopExecutor {
             // 6. Branch on model output
             match model_resp.output {
                 ParentLoopOutput::AssistantReply(reply) => {
-                    // Check stop condition
+                    // Finalize FIRST, before any stop-condition branch, so every
+                    // exit path (Completed or Failed) carries the assistant ref.
+                    // LoopExit validation rejects a non-NoReply Completed without
+                    // a reply_message_ref, so the prior "finalize only on
+                    // GracefulStop" shape would silently lose the message on
+                    // Continue→Completed and on NoProgressDetected paths.
+                    let reply_ref = host
+                        .finalize_assistant_message(/* reply */)
+                        .await
+                        .map_err(|_| AgentLoopExecutorError::HostUnavailable {
+                            stage: HostStage::Transcript,
+                        })?;
+                    state.assistant_refs.push(reply_ref.clone());
+
                     let summary = TurnSummary {
                         kind: TurnEndKind::ReplyOnly,
-                        assistant_message_ref: None,  // not yet finalized
+                        assistant_message_ref: Some(reply_ref),
                         batch_result_refs: Vec::new(),
                     };
                     let stop = planner.stop().should_stop_after_turn(&state, &summary).await;
@@ -157,15 +179,8 @@ impl AgentLoopExecutor for CanonicalAgentLoopExecutor {
                     match stop {
                         StopOutcome::Stop { control, kind: StopKind::GracefulStop } => {
                             state.control_state = control;
-                            let reply_ref = host
-                                .finalize_assistant_message(/* reply */)
-                                .await
-                                .map_err(|_| AgentLoopExecutorError::HostUnavailable {
-                                    stage: HostStage::Transcript,
-                                })?;
-                            state.assistant_refs.push(reply_ref);
                             state = self.checkpoint(host, state, CheckpointKind::Final).await?;
-                            return Ok(/* LoopExit::Completed { GracefulStop, … } */);
+                            return Ok(/* LoopExit::Completed { GracefulStop, reply_message_refs: … } */);
                         }
                         StopOutcome::Stop { control, kind: StopKind::NoProgressDetected } => {
                             state.control_state = control;
@@ -178,21 +193,32 @@ impl AgentLoopExecutor for CanonicalAgentLoopExecutor {
                         }
                         StopOutcome::Continue { control } => {
                             state.control_state = control;
-                            // Continue path: drain followup if planner wants
-                            if planner.drain().drain_followup(&state).await {
-                                let any_drained = self.drain_followup_into(host, &mut state).await?;
-                                if !any_drained {
-                                    return Ok(/* LoopExit::Completed { … } */);
-                                }
-                                // else: fall through to next iteration
+                            // Continue path: drain followup if planner wants;
+                            // either way, every exit here is Completed and the
+                            // reply ref is already in state.assistant_refs.
+                            let drained = if planner.drain().drain_followup(&state).await {
+                                let (next, any) = self.drain_followup_into(host, state).await?;
+                                state = next;
+                                any
                             } else {
-                                return Ok(/* LoopExit::Completed { … } */);
+                                false
+                            };
+                            if !drained {
+                                state = self.checkpoint(host, state, CheckpointKind::Final).await?;
+                                return Ok(/* LoopExit::Completed { reply_message_refs: state.assistant_refs.clone(), … } */);
                             }
+                            // else: fall through to next iteration with appended inputs
                         }
                     }
                 }
                 ParentLoopOutput::CapabilityCalls(calls) => {
-                    state = self.execute_capability_batch(planner, host, state, calls).await?;
+                    // Snapshot the result-refs index before invoking the batch
+                    // so the post-batch TurnSummary can slice exactly THIS
+                    // batch's refs (not by call count, which would over-include
+                    // refs from prior iterations whenever this batch had any
+                    // non-completing outcome).
+                    let result_refs_start = state.result_refs.len();
+                    state = self.execute_capability_batch(planner, host, state, &surface, calls).await?;
 
                     // Capability batches must consult the stop strategy too, otherwise
                     // terminate-hint detection and no-progress escapes would only fire
@@ -201,9 +227,12 @@ impl AgentLoopExecutor for CanonicalAgentLoopExecutor {
                     let summary = TurnSummary {
                         kind: TurnEndKind::AfterCapabilityBatch,
                         assistant_message_ref: None,
-                        batch_result_refs: state.result_refs.iter().rev()
-                            .take(state.control_state.last_batch_total as usize)
-                            .cloned().rev().collect(),
+                        // Slice from the snapshot index — only refs pushed by
+                        // THIS batch. (Both `execute_capability_batch` and
+                        // this caller compute the same snapshot for symmetry;
+                        // the snapshot here is the one observed before invoking
+                        // the helper.)
+                        batch_result_refs: state.result_refs[result_refs_start..].to_vec(),
                     };
                     let stop = planner.stop().should_stop_after_turn(&state, &summary).await;
                     match stop {
@@ -229,15 +258,10 @@ impl AgentLoopExecutor for CanonicalAgentLoopExecutor {
                 }
             }
 
-            // 7. Iteration / wall-clock budget. Use `>=` so a documented limit of N
-            // permits exactly N iterations, not N+1. (state.iteration starts at 0
-            // and is incremented at the end of each iteration, so after the Nth
-            // iteration state.iteration == N — and `>=` catches it before an
-            // (N+1)th body runs.)
+            // 7. Increment iteration counter for the budget check at top of
+            // the next iteration. Wall-clock cap (if set) is also evaluated
+            // at the top of the next iteration, alongside iteration_limit.
             state.iteration = state.iteration.saturating_add(1);
-            if state.iteration >= planner.budget().iteration_limit(&state) {
-                return Ok(/* LoopExit::Failed { IterationLimit } */);
-            }
         }
     }
 }
@@ -252,14 +276,31 @@ impl CanonicalAgentLoopExecutor {
         planner: &dyn AgentLoopPlanner,
         host: &(dyn AgentLoopDriverHost + Send + Sync),
         mut state: LoopExecutionState,
+        surface: &VisibleCapabilitySurface,    // for `summary_of(...)` concurrency hints
         calls: Vec<CapabilityCall>,
     ) -> Result<LoopExecutionState, AgentLoopExecutorError> {
-        // Reset per-batch counters in control_state
+        // Reset per-batch counters in control_state.
         state.control_state.last_batch_total = calls.len() as u32;
         state.control_state.terminate_hints_in_last_batch = 0;
 
-        // Project to summaries for batch policy
-        let summaries: Vec<CapabilityCallSummary> = calls.iter().map(summary_of).collect();
+        // Snapshot the result-refs index BEFORE the batch. Only refs pushed
+        // by THIS batch are included in the post-batch TurnSummary.
+        // (last_batch_total counts CALLS — slicing from the tail by call count
+        // includes refs from prior iterations whenever this batch had any
+        // non-completing outcome like Skip/Block/Failed-with-no-retry.)
+        let result_refs_start = state.result_refs.len();
+
+        // Per-iteration signature dedup set (master doc §10 + WS-0 §3.4): a
+        // signature is pushed AT MOST ONCE per iteration regardless of how
+        // many calls or retries reference it. Without this, three identical
+        // calls in one batch would trip NoProgressDetected immediately.
+        let mut iteration_signatures: std::collections::HashSet<CapabilityCallSignature> =
+            std::collections::HashSet::new();
+
+        // Project to summaries for batch policy. summary_of needs the visible
+        // capability surface to look up per-capability concurrency hints.
+        let summaries: Vec<CapabilityCallSummary> =
+            calls.iter().map(|c| summary_of(c, surface)).collect();
         let policy = planner.batch().policy(&state, &summaries);
 
         state = self.checkpoint(host, state, CheckpointKind::BeforeSideEffect).await?;
@@ -272,10 +313,11 @@ impl CanonicalAgentLoopExecutor {
             .map_err(|_| AgentLoopExecutorError::HostUnavailable { stage: HostStage::Capability })?;
 
         for (call, outcome) in calls.iter().zip(outcomes.into_iter()) {
-            state.recent_call_signatures.push(CapabilityCallSignature::from_call(
-                call.name.clone(),
-                &call.args,
-            ));
+            // Per-iteration dedup: push at most once per distinct signature.
+            let sig = CapabilityCallSignature::from_call(call.name.clone(), &call.args);
+            if iteration_signatures.insert(sig.clone()) {
+                state.recent_call_signatures.push(sig);
+            }
 
             match outcome {
                 CapabilityOutcome::Completed(result) => {
@@ -305,16 +347,57 @@ impl CanonicalAgentLoopExecutor {
                         }
                     }
                 }
+                CapabilityOutcome::Denied(reason) => {
+                    // EmptyLoopCapabilityPort returns Denied today (until WS-9
+                    // wires the real impl), and capability policy can deny
+                    // legitimately at any time. Treat as a non-recoverable
+                    // failure for THIS call, but consult Recovery to decide
+                    // whether to skip-and-continue or abort the batch.
+                    state.recent_failure_kinds.push(LoopFailureKind::PolicyDenied);
+                    let summary = sanitize_denial(&reason);
+                    let recovery = planner.recovery()
+                        .on_capability_error(&state, &summary).await;
+                    match recovery {
+                        RecoveryOutcome::SkipResult { recovery } => {
+                            state.recovery_state = recovery;
+                        }
+                        RecoveryOutcome::Abort { recovery, failure_kind } => {
+                            state.recovery_state = recovery;
+                            return Ok(/* propagate to top-level Failed */);
+                        }
+                        RecoveryOutcome::Retry { .. } => {
+                            // Retrying a Denied call without state change would
+                            // hit the same denial; the executor treats Retry on
+                            // Denied as Abort. Document loud so loop families
+                            // can override Recovery to do something smarter.
+                            return Ok(/* propagate Failed { PolicyDenied } */);
+                        }
+                    }
+                }
+                CapabilityOutcome::SpawnedProcess(handle) => {
+                    // The host has spawned a long-running process whose
+                    // completion will arrive asynchronously via LoopInputPort
+                    // (`CapabilitySurfaceChanged` or `GateResolved` kinds).
+                    // The loop checkpoints and surfaces a Blocked exit so
+                    // TurnRunner can park the run; resume picks up when the
+                    // process emits its completion event.
+                    state.last_gate = Some(handle.gate_ref());
+                    state = self.checkpoint(host, state, CheckpointKind::BeforeBlock).await?;
+                    return Ok(/* propagate Blocked { kind: ResourceWaitingForProcess, … } */);
+                }
                 CapabilityOutcome::Failed(err) => {
-                    // Inner retry loop: planner.recovery() can return Retry repeatedly
-                    // until its own budget says Abort. Each Retry actually re-issues
-                    // the failed call via the host's single-call invocation API
-                    // (see §3.6). State updates and backoff are honored between
-                    // attempts; the resolved outcome (success, skip, abort) leaves
-                    // the inner loop and is handled by the outer batch loop.
+                    // Push the originating failure kind ONCE per call (not once
+                    // per retry attempt). Retries of the same call within a
+                    // single iteration must not re-fill the failure-kind ring,
+                    // or three retries would falsely trip NoProgressDetected
+                    // (failure-run-length escape).
+                    state.recent_failure_kinds.push(err.failure_kind);
+
+                    // Inner retry loop: planner.recovery() can return Retry
+                    // until its own budget says Abort. Each Retry re-issues the
+                    // failed call via the existing single-call API (§3.6).
                     let mut current_failure = err;
                     loop {
-                        state.recent_failure_kinds.push(current_failure.failure_kind);
                         let summary = sanitize(&current_failure);
                         let recovery = planner.recovery()
                             .on_capability_error(&state, &summary).await;
@@ -322,9 +405,6 @@ impl CanonicalAgentLoopExecutor {
                             RecoveryOutcome::Retry { recovery, alter } => {
                                 state.recovery_state = recovery;
                                 self.honor_alteration(&alter)?;  // backoff sleep, reject AdvanceFallback in skeleton
-                                // Re-issue THIS call. Uses the existing
-                                // LoopCapabilityPort::invoke_capability (single-call) method
-                                // — see §3.6.
                                 let retry_outcome = host
                                     .invoke_capability(CapabilityInvocation::from_call(call.clone()))
                                     .await
@@ -340,17 +420,21 @@ impl CanonicalAgentLoopExecutor {
                                         break;  // resolved — leave inner retry loop
                                     }
                                     CapabilityOutcome::Failed(next_err) => {
-                                        current_failure = next_err;  // try recovery again
+                                        // DO NOT push next_err.failure_kind to
+                                        // recent_failure_kinds — already pushed
+                                        // for the originating call above.
+                                        current_failure = next_err;
                                         continue;
                                     }
                                     CapabilityOutcome::ApprovalRequired(_)
                                     | CapabilityOutcome::AuthRequired(_)
-                                    | CapabilityOutcome::ResourceBlocked(_) => {
-                                        // Gate appeared on retry — re-run the gate
-                                        // path. Promote the outcome and reuse the
-                                        // same gate-handling logic above. (Implementation
-                                        // factors gate handling into a helper.)
-                                        return self.handle_gate_outcome(
+                                    | CapabilityOutcome::ResourceBlocked(_)
+                                    | CapabilityOutcome::Denied(_)
+                                    | CapabilityOutcome::SpawnedProcess(_) => {
+                                        // Promotion: a non-Failed outcome
+                                        // appeared on retry. Re-route through
+                                        // the matching outer arm via a helper.
+                                        return self.handle_promoted_outcome(
                                             planner, host, state, call, retry_outcome
                                         ).await;
                                     }
@@ -382,8 +466,17 @@ The early-return-via-wrapper pattern (where `execute_capability_batch` needs to 
 ```rust
 impl CanonicalAgentLoopExecutor {
     /// Drain the steering queue once. Calls `LoopInputPort::poll_inputs(after,
-    /// limit)` followed by `ack_inputs(cursor)` if any messages came back.
-    /// Updates `state.input_cursor` on success.
+    /// limit)` followed by `ack_inputs(cursor)` if any user-facing messages
+    /// came back. Updates `state.input_cursor` on success.
+    ///
+    /// IMPORTANT: `LoopInputPort` carries multiple kinds — `UserMessage`,
+    /// `Cancel`, `Interrupt`, `GateResolved`, `CapabilitySurfaceChanged`, etc.
+    /// This drain ONLY consumes user-facing message kinds for the steering
+    /// channel; control events (Cancel, Interrupt, GateResolved,
+    /// CapabilitySurfaceChanged) are NOT consumed here — they're handled by
+    /// dedicated executor paths (cancellation observation in §3.5; surface
+    /// version invalidation by re-checking `state.surface_version` next tick).
+    /// `ack_inputs` is called only with the cursor of consumed messages.
     async fn drain_steering_into(
         &self,
         host: &(dyn AgentLoopDriverHost + Send + Sync),
@@ -393,37 +486,45 @@ impl CanonicalAgentLoopExecutor {
             .poll_inputs(state.input_cursor.clone(), MAX_PER_DRAIN)
             .await
             .map_err(|_| AgentLoopExecutorError::HostUnavailable { stage: HostStage::Input })?;
-        if !batch.messages.is_empty() {
-            host.ack_inputs(batch.cursor.clone())
+        let (steering_msgs, last_consumed_cursor) =
+            partition_steering_kinds(&batch);  // filters to UserMessage; tracks furthest cursor consumed
+        if !steering_msgs.is_empty() {
+            host.ack_inputs(last_consumed_cursor.clone())
                 .await
                 .map_err(|_| AgentLoopExecutorError::HostUnavailable { stage: HostStage::Input })?;
-            state.input_cursor = batch.cursor;
-            // Append batch.messages into transcript-bound state — concrete shape
+            state.input_cursor = last_consumed_cursor;
+            // Append steering_msgs into transcript-bound state — concrete shape
             // depends on how messages flow into the next prompt bundle (host-owned
             // projection per master doc §6).
         }
         Ok(state)
     }
 
-    /// Drain the followup queue. Returns `(state, drained_any)`. If `drained_any`
-    /// is false the executor returns `LoopExit::Completed`.
+    /// Drain the followup queue. Returns `(state, drained_any)`. If
+    /// `drained_any` is false the executor returns `LoopExit::Completed`.
+    /// Same control-event filtering as `drain_steering_into`: only
+    /// user-facing message kinds count toward "any drained."
+    ///
+    /// Returns owned state to honor the value-immutable contract (master doc
+    /// §8 property 3 — no `&mut LoopExecutionState` across helper boundaries).
     async fn drain_followup_into(
         &self,
         host: &(dyn AgentLoopDriverHost + Send + Sync),
-        state: &mut LoopExecutionState,
-    ) -> Result<bool, AgentLoopExecutorError> {
+        mut state: LoopExecutionState,
+    ) -> Result<(LoopExecutionState, bool), AgentLoopExecutorError> {
         let batch = host
             .poll_inputs(state.input_cursor.clone(), MAX_PER_DRAIN)
             .await
             .map_err(|_| AgentLoopExecutorError::HostUnavailable { stage: HostStage::Input })?;
-        if batch.messages.is_empty() {
-            return Ok(false);
+        let (followup_msgs, last_consumed_cursor) = partition_steering_kinds(&batch);
+        if followup_msgs.is_empty() {
+            return Ok((state, false));
         }
-        host.ack_inputs(batch.cursor.clone())
+        host.ack_inputs(last_consumed_cursor.clone())
             .await
             .map_err(|_| AgentLoopExecutorError::HostUnavailable { stage: HostStage::Input })?;
-        state.input_cursor = batch.cursor;
-        Ok(true)
+        state.input_cursor = last_consumed_cursor;
+        Ok((state, true))
     }
 
     /// Cancellation observation. Host exposes a cancellation accessor (added in

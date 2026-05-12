@@ -61,7 +61,19 @@ pub trait StopConditionStrategy: Send + Sync {
 }
 
 /// Loop-side projection of what just happened in the turn the executor is
-/// asking about. Refs only — never raw content.
+/// asking about. **Refs only — never raw content.**
+///
+/// This is intentional: pi-mono's `shouldStopAfterTurn` receives the actual
+/// assistant message because pi has no host abstraction. Reborn's framework
+/// stores refs only (per `turns-agent-loop.md` §6 — no raw model output in
+/// loop state). A strategy that needs to inspect reply content reads it via
+/// the host using `assistant_message_ref` (host applies redaction/scope per
+/// the trust-boundary contract).
+///
+/// In other words: the framework intentionally does NOT pass content into
+/// strategy decisions, because doing so would create a second source of truth
+/// that bypasses host-side content policy. Strategies that need content read
+/// it through the host port; the host decides what's safe to expose.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TurnSummary {
     pub kind: TurnEndKind,

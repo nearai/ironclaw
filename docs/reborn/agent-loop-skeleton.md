@@ -203,16 +203,25 @@ Pseudocode of `CanonicalAgentLoopExecutor::execute`:
 state = LoopExecutionState::initial(host.run_context())  // OR ::from_checkpoint on resume
 
 loop:
+  // 0. Iteration cap at TOP of loop (not bottom). Resume with state.iteration
+  //    already at limit must exit immediately, not run one more body.
+  if state.iteration >= planner.budget().iteration_limit(&state):
+    return LoopExit::Failed { reason_kind: IterationLimit, ... }
+
+  // 1. Cancellation observation — checkpoint + Ok(LoopExit::Cancelled(...)) if fired.
   observe_cancellation_then_checkpoint_and_exit_if_set()
 
-  // Steering drain: the LoopInputPort surface is poll_inputs(after, limit) +
-  // ack_inputs(cursor) — not a single take_pending_inputs call. Executor wraps:
+  // 2. Steering drain. LoopInputPort surface is poll_inputs(after, limit) +
+  //    ack_inputs(cursor). Filter to user-facing kinds only — control kinds
+  //    (Cancel, Interrupt, GateResolved, CapabilitySurfaceChanged) are NOT
+  //    consumed here.
   if planner.drain().drain_steering(&state):
     pending = host.poll_inputs(state.input_cursor, MAX_PER_DRAIN)
-    if !pending.is_empty():
-      state.append_inputs(pending)
-      host.ack_inputs(pending.cursor)
-      state.input_cursor = pending.cursor
+    (steering_msgs, last_consumed) = filter_steering_kinds(pending)
+    if !steering_msgs.is_empty():
+      state.append_inputs(steering_msgs)
+      host.ack_inputs(last_consumed)
+      state.input_cursor = last_consumed
 
   ctx_req   = planner.context().plan_context_request(&state)
   bundle    = host.build_prompt_bundle(ctx_req)
@@ -228,25 +237,45 @@ loop:
 
   match model_resp.output:
     ParentLoopOutput::AssistantReply(reply):
-      stop = planner.stop().should_stop_after_turn(&state, &reply, &[])
+      // Finalize FIRST, before stop-condition branching, so EVERY exit path
+      // (Completed or Failed) carries the assistant ref. LoopExit validation
+      // rejects a non-NoReply Completed without reply_message_refs.
+      reply_ref = host.finalize_assistant_message(FinalizeAssistantMessage { reply })
+      state.assistant_refs.push(reply_ref.clone())
+
+      summary = TurnSummary { kind: ReplyOnly, assistant_message_ref: Some(reply_ref) }
+      stop = planner.stop().should_stop_after_turn(&state, &summary)
       match stop:
-        StopOutcome::Stop { control, kind: GracefulStop }:
-          reply_ref = host.finalize_assistant_message(FinalizeAssistantMessage { reply })
+        Stop { control, GracefulStop }:
+          state.control_state = control
           checkpoint(Final, &state)
-          return LoopExit::Completed { ... }
-        StopOutcome::Stop { control, kind: NoProgressDetected }:
+          return LoopExit::Completed { reply_message_refs: state.assistant_refs.clone(), ... }
+        Stop { control, NoProgressDetected }:
+          state.control_state = control
           checkpoint(Final, &state)
           return LoopExit::Failed { reason_kind: NoProgressDetected, ... }
-        StopOutcome::Continue { control }:
+        Stop { control, Aborted(fk) }:
           state.control_state = control
-          // followup-queue path
-          drain_followup_or_complete(&mut state)
+          return LoopExit::Failed { reason_kind: fk, ... }
+        Continue { control }:
+          state.control_state = control
+          // Followup drain: even on Continue→Completed, the reply ref is
+          // already finalized and in state.assistant_refs.
+          if planner.drain().drain_followup(&state):
+            (state, drained) = drain_followup_into(state)
+            if !drained:
+              checkpoint(Final, &state)
+              return LoopExit::Completed { reply_message_refs: state.assistant_refs.clone(), ... }
+          else:
+            checkpoint(Final, &state)
+            return LoopExit::Completed { reply_message_refs: state.assistant_refs.clone(), ... }
 
     ParentLoopOutput::CapabilityCalls(calls):
       checkpoint(BeforeSideEffect, &state)
-      policy   = planner.batch().policy(&calls)
+      result_refs_start = state.result_refs.len()  // snapshot for batch summary
+      policy   = planner.batch().policy(&state, &calls.summaries(&surface))
       outcomes = host.invoke_capability_batch(calls, policy)
-      iteration_signatures = HashSet::new()  // dedupe per-iteration (see §10 + WS-0 §3.4)
+      iteration_signatures = HashSet::new()  // per-iteration dedupe (§10 + WS-0 §3.4)
       for (call, outcome) in calls.zip(outcomes):
         sig = signature_of(call)
         if iteration_signatures.insert(sig.clone()):
@@ -255,59 +284,52 @@ loop:
           Completed(result):
             state.append_result(result)
           ApprovalRequired(g) | AuthRequired(g) | ResourceBlocked(g):
-            gate_outcome = planner.gate().handle(&state, &g)
-            match gate_outcome:
-              GateOutcome::Block { control }:
-                state.control_state = control
-                state.last_gate = Some(g.ref);
-                checkpoint(BeforeBlock, &state)
-                return LoopExit::Blocked { gate_ref: g.ref, ... }
-              GateOutcome::SkipAndContinue { control }:
-                state.control_state = control
-              GateOutcome::Abort { control, failure_kind }:
-                state.control_state = control
-                return LoopExit::Failed { reason_kind: failure_kind, ... }
+            // Gate handling — Block/SkipAndContinue/Abort per planner.gate().
+            // (See WS-6 §3.3 for full match.)
+          Denied(reason):
+            // EmptyLoopCapabilityPort returns Denied; capability policy can
+            // also deny at any time. Treat as a non-recoverable failure for
+            // THIS call; consult Recovery to skip-and-continue or abort batch.
+          SpawnedProcess(handle):
+            // Long-running async process. Checkpoint + return Blocked; resume
+            // when the process emits its completion event via LoopInputPort.
+            state.last_gate = Some(handle.gate_ref())
+            checkpoint(BeforeBlock, &state)
+            return LoopExit::Blocked { kind: ResourceWaitingForProcess, ... }
           Failed(err):
+            // Push failure kind ONCE per call (not per retry attempt) —
+            // otherwise three retries of one call would falsely satisfy
+            // failure-run-length detection.
             state.recent_failure_kinds.push(err.kind)
-            // Inner retry loop — RecoveryOutcome::Retry actually re-issues
-            // the failed call via host.invoke_capability (see WS-6 §3.6).
-            // Retried invocations do NOT re-push the signature.
             loop:
               recovery = planner.recovery().on_capability_error(&state, &err.summary)
               match recovery:
                 Retry { recovery, alter }:
                   state.recovery_state = recovery
-                  honor_alteration(alter)  // backoff sleep, etc.
-                  retry_outcome = host.invoke_capability(call, policy)
+                  honor_alteration(alter)
+                  retry_outcome = host.invoke_capability(call)
                   match retry_outcome:
-                    Completed(result):
-                      state.append_result(result); break
-                    Failed(next_err):
-                      err = next_err; continue
-                    gate-variants:
-                      // re-route through the gate path above
-                SkipResult { recovery }:
-                  state.recovery_state = recovery; break
-                Abort { recovery, failure_kind }:
-                  state.recovery_state = recovery
-                  return LoopExit::Failed { reason_kind: failure_kind, ... }
+                    Completed(result): state.append_result(result); break
+                    Failed(next_err):  err = next_err; continue  // do NOT re-push kind
+                    other:             promote to outer arm via helper
+                SkipResult { recovery }: state.recovery_state = recovery; break
+                Abort { recovery, fk }:  return LoopExit::Failed { reason_kind: fk, ... }
 
-      // Capability batches must consult the stop strategy too — terminate-hint
-      // detection and no-progress escapes only fire if asked.
-      summary = TurnSummary { kind: AfterCapabilityBatch, batch_result_refs: ... }
+      // Post-batch stop check — slice exactly THIS batch's refs from the
+      // snapshot index (not by call count, which would over-include refs
+      // from prior iterations on Skip/Block/Failed-with-no-retry batches).
+      summary = TurnSummary {
+        kind: AfterCapabilityBatch,
+        batch_result_refs: state.result_refs[result_refs_start..].to_vec(),
+      }
       stop = planner.stop().should_stop_after_turn(&state, &summary)
       match stop:
-        Stop { kind: GracefulStop }:    checkpoint(Final, &state); return LoopExit::Completed { ... }
-        Stop { kind: NoProgressDetected }: checkpoint(Final, &state); return LoopExit::Failed { NoProgressDetected, ... }
-        Stop { kind: Aborted(fk) }:     return LoopExit::Failed { reason_kind: fk, ... }
-        Continue { control }:           state.control_state = control  // fall through
+        Stop { GracefulStop }:    checkpoint(Final, &state); return LoopExit::Completed { ... }
+        Stop { NoProgressDetected }: checkpoint(Final, &state); return LoopExit::Failed { NoProgressDetected, ... }
+        Stop { Aborted(fk) }:     return LoopExit::Failed { reason_kind: fk, ... }
+        Continue { control }:     state.control_state = control  // fall through
 
-  state.iteration += 1
-  // `>=` so a documented limit of N permits exactly N iterations, not N+1.
-  // BudgetStrategy.iteration_limit takes &state per WS-3 (lets families tighten
-  // the cap on resume scenarios).
-  if state.iteration >= planner.budget().iteration_limit(&state):
-    return LoopExit::Failed { reason_kind: IterationLimit, ... }
+  state.iteration += 1   // increment for next iteration's top-of-loop budget check
 ```
 
 Three properties the canonical executor must guarantee, regardless of strategy choices:

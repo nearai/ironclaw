@@ -168,8 +168,14 @@ fn validate_resume_request(
     // matches the schema this descriptor was constructed with. Mismatched
     // schema = framework version drift; reject as InvalidRequest so the runner
     // can route the run to a recovery path instead of resuming with stale data.
+    //
+    // `AgentLoopDriverResumeRequest` does NOT carry a checkpoint_schema_id
+    // field directly (today its fields are turn_id, run_id, checkpoint_id,
+    // resolved_run_profile). The schema id lives on the resolved profile's
+    // loop_driver descriptor — that's what the runner pinned at submit time
+    // and what the checkpoint payload was tagged with.
     let want = descriptor.checkpoint_schema_id.as_ref();
-    let have = request.checkpoint_schema_id.as_ref();
+    let have = request.resolved_run_profile.loop_driver.checkpoint_schema_id.as_ref();
     if want != have {
         return Err(AgentLoopDriverError::InvalidRequest {
             reason: "checkpoint schema id does not match driver descriptor".to_string(),
