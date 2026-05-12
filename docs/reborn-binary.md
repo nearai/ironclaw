@@ -12,6 +12,8 @@ It currently supports:
 
 ```bash
 ironclaw-reborn --help
+ironclaw-reborn completion --shell bash
+ironclaw-reborn completion --shell zsh
 ironclaw-reborn doctor
 ironclaw-reborn run
 ```
@@ -26,6 +28,17 @@ It intentionally does not yet support:
 - long-lived Reborn runtime services.
 
 ## Commands
+
+### `completion`
+
+Generates shell completion scripts without resolving Reborn home, reading v1 state, or creating directories.
+
+```bash
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- completion --shell zsh > ironclaw-reborn.zsh
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- completion --shell bash > ironclaw-reborn.bash
+```
+
+The zsh output keeps the v1 CLI guard around `compdef` so the generated script is safe when zsh completion functions are not loaded yet.
 
 ### `doctor`
 
@@ -102,6 +115,7 @@ cargo test -p ironclaw_reborn_config
 cargo test -p ironclaw_architecture reborn
 cargo clippy -p ironclaw_reborn_cli --all-targets -- -D warnings
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- --help
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- completion --shell zsh >/tmp/ironclaw-reborn.zsh
 IRONCLAW_REBORN_HOME="$(mktemp -d)/reborn-home" \
   cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- run
 ```
@@ -118,9 +132,10 @@ Short version:
 
 1. add one command module under `crates/ironclaw_reborn_cli/src/commands/`;
 2. register it in `commands::Command`;
-3. receive the already-resolved `RebornCliContext` from dispatch;
-4. add a binary smoke test through `env!("CARGO_BIN_EXE_ironclaw-reborn")`;
-5. avoid v1 runtime imports and v1 state mutation unless explicitly scoped and guarded.
+3. resolve and pass `RebornCliContext` from dispatch only when the command needs boot config;
+4. keep pure commands independent from Reborn home resolution;
+5. add a binary smoke test through `env!("CARGO_BIN_EXE_ironclaw-reborn")`;
+6. avoid v1 runtime imports and v1 state mutation unless explicitly scoped and guarded.
 
 Do not port the current `src/cli/*` command tree wholesale. Port commands one at a time, starting with Reborn-owned or read-only surfaces.
 

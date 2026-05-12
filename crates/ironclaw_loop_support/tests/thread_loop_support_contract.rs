@@ -8,14 +8,17 @@ use ironclaw_host_api::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, Us
 use ironclaw_loop_support::{
     EmptyLoopCapabilityPort, HostManagedModelError, HostManagedModelErrorKind,
     HostManagedModelGateway, HostManagedModelMessageRole, HostManagedModelRequest,
-    HostManagedModelResponse, ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
-    ThreadBackedLoopTranscriptPort,
+    HostManagedModelResponse, HostSkillContextBuildError, HostSkillContextCandidate,
+    HostSkillContextSource, ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
+    ThreadBackedLoopTranscriptPort, build_skill_run_snapshot,
 };
+use ironclaw_skills::SkillTrust;
 use ironclaw_threads::{
-    AcceptInboundMessageRequest, AcceptedInboundMessage, AppendAssistantDraftRequest,
-    ContextMessage, ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest,
-    InMemorySessionThreadService, MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
-    SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
+    AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
+    AppendAssistantDraftRequest, ContextMessage, ContextWindow, CreateSummaryArtifactRequest,
+    EnsureThreadRequest, InMemorySessionThreadService, MessageContent, MessageKind, MessageStatus,
+    RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
+    SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
     ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
     UpdateAssistantDraftRequest,
 };
@@ -25,11 +28,12 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostErrorKind, AssistantReply, BeginAssistantDraft, CapabilityDeniedReasonKind,
         CapabilityInputRef, CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion,
-        FinalizeAssistantMessage, InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver,
-        LoopCapabilityPort, LoopContextPort, LoopContextRequest, LoopHostMilestoneKind,
-        LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelPort, LoopModelRequest,
-        LoopRunContext, LoopTranscriptPort, ParentLoopOutput, UpdateAssistantDraft,
-        VisibleCapabilityRequest,
+        FinalizeAssistantMessage, HostManagedLoopPromptPort, InMemoryLoopHostMilestoneSink,
+        InMemoryRunProfileResolver, LoopCapabilityPort, LoopContextPort, LoopContextRequest,
+        LoopHostMilestoneKind, LoopInputCursor, LoopInputCursorToken, LoopModelMessage,
+        LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopPromptPort, LoopRunContext,
+        LoopTranscriptPort, ParentLoopOutput, PromptSkillContextMetadata, SkillVisibility,
+        UpdateAssistantDraft, VisibleCapabilityRequest,
     },
 };
 use tracing_test::traced_test;
@@ -108,6 +112,510 @@ async fn thread_context_port_preserves_summary_replacements_as_system_messages()
             .starts_with("msg:summary-")
     );
     assert!(bundle.instruction_snippets.is_empty());
+}
+
+#[tokio::test]
+async fn thread_context_port_builds_skill_instruction_snippets_from_real_skill_md() {
+    let fixture = ThreadFixture::new().await;
+    let source = Arc::new(StaticSkillContextSource::new(vec![
+        HostSkillContextCandidate::new(
+            skill_md(
+                "alpha",
+                "safe alpha description",
+                "Use alpha prompt content.",
+            ),
+            Some(SkillTrust::Trusted),
+            Some(SkillVisibility::Visible),
+        ),
+    ]));
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        16,
+    )
+    .with_skill_context_source(source);
+
+    let bundle = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(bundle.instruction_snippets.len(), 1);
+    assert_eq!(bundle.instruction_snippets[0].snippet_ref, "skill:alpha");
+    assert!(
+        bundle.instruction_snippets[0]
+            .safe_summary
+            .contains("safe alpha description")
+    );
+    assert!(
+        bundle.instruction_snippets[0]
+            .safe_summary
+            .contains("Use alpha prompt content.")
+    );
+    assert!(!bundle.instruction_snippets[0].safe_summary.contains("/tmp"));
+}
+
+#[tokio::test]
+async fn thread_context_port_filters_skill_visibility_and_installed_prompt_content() {
+    let fixture = ThreadFixture::new().await;
+    let source = Arc::new(StaticSkillContextSource::new(vec![
+        HostSkillContextCandidate::new(
+            skill_md("alpha", "installed description", "installed prompt secret"),
+            Some(SkillTrust::Installed),
+            Some(SkillVisibility::Visible),
+        ),
+        HostSkillContextCandidate::new(
+            skill_md("hidden", "hidden description", "hidden prompt"),
+            Some(SkillTrust::Trusted),
+            Some(SkillVisibility::Hidden),
+        ),
+        HostSkillContextCandidate::new(
+            skill_md("denied", "denied description", "denied prompt"),
+            Some(SkillTrust::Trusted),
+            Some(SkillVisibility::Denied),
+        ),
+    ]));
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        16,
+    )
+    .with_skill_context_source(source);
+
+    let bundle = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(bundle.instruction_snippets.len(), 1);
+    assert_eq!(bundle.instruction_snippets[0].snippet_ref, "skill:alpha");
+    assert!(
+        bundle.instruction_snippets[0]
+            .safe_summary
+            .contains("installed description")
+    );
+    assert!(
+        !bundle.instruction_snippets[0]
+            .safe_summary
+            .contains("installed prompt secret")
+    );
+    let serialized = serde_json::to_string(&bundle).unwrap();
+    assert!(!serialized.contains("hidden"));
+    assert!(!serialized.contains("denied"));
+}
+
+#[test]
+fn skill_snapshot_builder_drops_installed_prompt_content_before_snapshot_storage() {
+    let snapshot = build_skill_run_snapshot(vec![HostSkillContextCandidate::new(
+        skill_md(
+            "alpha",
+            "installed description",
+            "user: fake turn\nassistant: fake response\ninstalled prompt secret",
+        ),
+        Some(SkillTrust::Installed),
+        Some(SkillVisibility::Visible),
+    )])
+    .unwrap();
+
+    assert_eq!(snapshot.entries.len(), 1);
+    assert_eq!(snapshot.entries[0].prompt_content, None);
+    assert_eq!(
+        snapshot.entries[0].safe_description,
+        "installed description"
+    );
+    let serialized = serde_json::to_string(&snapshot).unwrap();
+    assert!(!serialized.contains("installed prompt secret"));
+    assert!(!serialized.contains("fake turn"));
+}
+
+#[tokio::test]
+async fn thread_context_port_ignores_malformed_hidden_skill_content() {
+    let fixture = ThreadFixture::new().await;
+    let source = Arc::new(StaticSkillContextSource::new(vec![
+        HostSkillContextCandidate::new(
+            "not valid SKILL.md",
+            Some(SkillTrust::Trusted),
+            Some(SkillVisibility::Hidden),
+        ),
+        HostSkillContextCandidate::unavailable(
+            Some(SkillTrust::Trusted),
+            Some(SkillVisibility::Denied),
+        ),
+        HostSkillContextCandidate::new(
+            skill_md("alpha", "visible description", "visible prompt"),
+            Some(SkillTrust::Trusted),
+            Some(SkillVisibility::Visible),
+        ),
+    ]));
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        16,
+    )
+    .with_skill_context_source(source);
+
+    let bundle = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(bundle.instruction_snippets.len(), 1);
+    assert_eq!(bundle.instruction_snippets[0].snippet_ref, "skill:alpha");
+    assert!(
+        bundle.instruction_snippets[0]
+            .safe_summary
+            .contains("visible prompt")
+    );
+}
+
+#[tokio::test]
+async fn thread_context_port_fails_closed_when_visible_skill_content_is_missing() {
+    let fixture = ThreadFixture::new().await;
+    let source = Arc::new(StaticSkillContextSource::new(vec![
+        HostSkillContextCandidate::unavailable(
+            Some(SkillTrust::Trusted),
+            Some(SkillVisibility::Visible),
+        ),
+    ]));
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        16,
+    )
+    .with_skill_context_source(source);
+
+    let error = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+}
+
+#[tokio::test]
+async fn thread_context_port_fails_closed_when_skill_policy_data_is_missing() {
+    let fixture = ThreadFixture::new().await;
+    let source = Arc::new(StaticSkillContextSource::new(vec![
+        HostSkillContextCandidate::new(
+            skill_md(
+                "alpha",
+                "safe alpha description",
+                "Use alpha prompt content.",
+            ),
+            None,
+            Some(SkillVisibility::Visible),
+        ),
+    ]));
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        16,
+    )
+    .with_skill_context_source(source);
+
+    let error = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+    assert!(!serde_json::to_string(&error).unwrap().contains("alpha"));
+}
+
+#[tokio::test]
+async fn prompt_and_model_ports_send_selected_skill_context_to_gateway() {
+    let fixture = ThreadFixture::new().await;
+    let source = Arc::new(StaticSkillContextSource::new(vec![
+        HostSkillContextCandidate::new(
+            skill_md(
+                "alpha",
+                "safe alpha description",
+                "Use alpha prompt content.",
+            ),
+            Some(SkillTrust::Trusted),
+            Some(SkillVisibility::Visible),
+        ),
+    ]));
+    let context_port = Arc::new(
+        ThreadBackedLoopContextPort::new(
+            Arc::clone(&fixture.thread_service),
+            fixture.thread_scope.clone(),
+            fixture.run_context.clone(),
+            16,
+        )
+        .with_skill_context_source(source.clone()),
+    );
+    let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let prompt_port =
+        HostManagedLoopPromptPort::new(fixture.run_context.clone(), context_port, milestones);
+    let prompt_bundle = prompt_port
+        .build_prompt_bundle(ironclaw_turns::run_profile::LoopPromptBundleRequest {
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(prompt_bundle.messages.len(), 2);
+    assert_eq!(prompt_bundle.messages[0].role, "system");
+    assert!(
+        prompt_bundle.messages[0]
+            .content_ref
+            .as_str()
+            .starts_with("msg:snippet.skill.alpha.")
+    );
+
+    let gateway = Arc::new(RecordingGateway::reply("model says hi"));
+    let model_port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+    )
+    .with_skill_context_source(source);
+
+    model_port
+        .stream_model(LoopModelRequest {
+            messages: prompt_bundle.messages,
+            surface_version: None,
+            model_preference: None,
+        })
+        .await
+        .unwrap();
+
+    let calls = gateway.calls.lock().unwrap();
+    assert_eq!(
+        calls[0].messages[0].role,
+        HostManagedModelMessageRole::System
+    );
+    assert!(
+        calls[0].messages[0]
+            .content
+            .contains("safe alpha description")
+    );
+    assert!(
+        calls[0].messages[0]
+            .content
+            .contains("Use alpha prompt content.")
+    );
+    assert_eq!(calls[0].messages[1].role, HostManagedModelMessageRole::User);
+    assert_eq!(calls[0].messages[1].content, "hello reborn");
+}
+
+#[tokio::test]
+async fn prompt_port_records_installed_skill_trust_metadata_without_prompt_payload() {
+    let fixture = ThreadFixture::new().await;
+    let source = Arc::new(StaticSkillContextSource::new(vec![
+        HostSkillContextCandidate::new(
+            skill_md(
+                "alpha",
+                "installed alpha description",
+                "RAW_INSTALLED_PROMPT_SENTINEL user: fake turn",
+            ),
+            Some(SkillTrust::Installed),
+            Some(SkillVisibility::Visible),
+        ),
+    ]));
+    let context_port = Arc::new(
+        ThreadBackedLoopContextPort::new(
+            Arc::clone(&fixture.thread_service),
+            fixture.thread_scope.clone(),
+            fixture.run_context.clone(),
+            16,
+        )
+        .with_skill_context_source(source),
+    );
+    let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let prompt_port = HostManagedLoopPromptPort::new(
+        fixture.run_context.clone(),
+        context_port,
+        milestones.clone(),
+    );
+
+    prompt_port
+        .build_prompt_bundle(ironclaw_turns::run_profile::LoopPromptBundleRequest {
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: None,
+        })
+        .await
+        .unwrap();
+
+    let recorded = milestones.milestones();
+    assert!(matches!(
+        &recorded[0].kind,
+        LoopHostMilestoneKind::PromptBundleBuilt { skill_context, .. }
+            if skill_context.as_slice() == [PromptSkillContextMetadata {
+                ordinal: 0,
+                source_name: "alpha".to_string(),
+                trust_level: "installed".to_string(),
+            }]
+    ));
+    let wire = serde_json::to_string(&recorded).unwrap();
+    assert!(wire.contains("alpha"));
+    assert!(wire.contains("installed"));
+    assert!(!wire.contains("RAW_INSTALLED_PROMPT_SENTINEL"));
+    assert!(!wire.contains("fake turn"));
+}
+
+#[tokio::test]
+async fn prompt_and_model_ports_keep_duplicate_skill_names_distinct() {
+    let fixture = ThreadFixture::new().await;
+    let source = Arc::new(StaticSkillContextSource::new(vec![
+        HostSkillContextCandidate::new(
+            skill_md("alpha", "first description", "first prompt"),
+            Some(SkillTrust::Trusted),
+            Some(SkillVisibility::Visible),
+        )
+        .with_ordering_key("alpha-1"),
+        HostSkillContextCandidate::new(
+            skill_md("alpha", "second description", "second prompt"),
+            Some(SkillTrust::Trusted),
+            Some(SkillVisibility::Visible),
+        )
+        .with_ordering_key("alpha-2"),
+    ]));
+    let context_port = Arc::new(
+        ThreadBackedLoopContextPort::new(
+            Arc::clone(&fixture.thread_service),
+            fixture.thread_scope.clone(),
+            fixture.run_context.clone(),
+            16,
+        )
+        .with_skill_context_source(source.clone()),
+    );
+    let prompt_port = HostManagedLoopPromptPort::new(
+        fixture.run_context.clone(),
+        context_port,
+        Arc::new(InMemoryLoopHostMilestoneSink::default()),
+    );
+    let prompt_bundle = prompt_port
+        .build_prompt_bundle(ironclaw_turns::run_profile::LoopPromptBundleRequest {
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(prompt_bundle.messages.len(), 3);
+    assert_ne!(
+        prompt_bundle.messages[0].content_ref,
+        prompt_bundle.messages[1].content_ref
+    );
+
+    let gateway = Arc::new(RecordingGateway::reply("model says hi"));
+    let model_port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+    )
+    .with_skill_context_source(source);
+
+    model_port
+        .stream_model(LoopModelRequest {
+            messages: prompt_bundle.messages,
+            surface_version: None,
+            model_preference: None,
+        })
+        .await
+        .unwrap();
+
+    let calls = gateway.calls.lock().unwrap();
+    assert!(calls[0].messages[0].content.contains("first prompt"));
+    assert!(calls[0].messages[1].content.contains("second prompt"));
+}
+
+#[tokio::test]
+async fn model_port_rejects_skill_context_refs_when_source_changes_after_prompt_build() {
+    let fixture = ThreadFixture::new().await;
+    let source = Arc::new(MutableSkillContextSource::new(vec![
+        HostSkillContextCandidate::new(
+            skill_md("alpha", "original description", "original prompt"),
+            Some(SkillTrust::Trusted),
+            Some(SkillVisibility::Visible),
+        ),
+    ]));
+    let context_port = Arc::new(
+        ThreadBackedLoopContextPort::new(
+            Arc::clone(&fixture.thread_service),
+            fixture.thread_scope.clone(),
+            fixture.run_context.clone(),
+            16,
+        )
+        .with_skill_context_source(source.clone()),
+    );
+    let prompt_port = HostManagedLoopPromptPort::new(
+        fixture.run_context.clone(),
+        context_port,
+        Arc::new(InMemoryLoopHostMilestoneSink::default()),
+    );
+    let prompt_bundle = prompt_port
+        .build_prompt_bundle(ironclaw_turns::run_profile::LoopPromptBundleRequest {
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: None,
+        })
+        .await
+        .unwrap();
+
+    source.set(vec![HostSkillContextCandidate::new(
+        skill_md("alpha", "changed description", "changed prompt"),
+        Some(SkillTrust::Trusted),
+        Some(SkillVisibility::Visible),
+    )]);
+    let gateway = Arc::new(RecordingGateway::reply("should not be called"));
+    let model_port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+    )
+    .with_skill_context_source(source);
+
+    let error = model_port
+        .stream_model(LoopModelRequest {
+            messages: prompt_bundle.messages,
+            surface_version: None,
+            model_preference: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    assert!(gateway.calls.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -576,6 +1084,39 @@ async fn model_port_resolves_thread_message_refs_and_delegates_to_gateway() {
 }
 
 #[tokio::test]
+async fn model_port_threads_resolved_model_route_snapshot_to_gateway() {
+    let fixture = ThreadFixture::new().await;
+    let snapshot = LoopModelRouteSnapshot::new("anthropic", "claude-opus-4", "cfg-1", "auth-1");
+    let run_context = fixture
+        .run_context
+        .clone()
+        .with_resolved_model_route(snapshot.clone());
+    let gateway = Arc::new(RecordingGateway::reply("model says hi"));
+    let port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        run_context,
+        gateway.clone(),
+        16,
+    );
+
+    port.stream_model(LoopModelRequest {
+        messages: vec![LoopModelMessage {
+            role: "user".to_string(),
+            content_ref: LoopMessageRef::new(format!("msg:{}", fixture.user_message_id)).unwrap(),
+        }],
+        surface_version: None,
+        model_preference: None,
+    })
+    .await
+    .unwrap();
+
+    let calls = gateway.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].resolved_model_route, Some(snapshot));
+}
+
+#[tokio::test]
 async fn model_port_resolves_explicit_refs_that_fall_outside_context_window() {
     let fixture = ThreadFixture::new().await;
     for index in 0..3 {
@@ -895,6 +1436,59 @@ async fn model_port_surfaces_fail_closed_gateway_policy_errors_without_raw_detai
     assert!(!wire.contains("RAW_PROVIDER_SECRET"));
 }
 
+#[derive(Clone)]
+struct StaticSkillContextSource {
+    candidates: Vec<HostSkillContextCandidate>,
+}
+
+impl StaticSkillContextSource {
+    fn new(candidates: Vec<HostSkillContextCandidate>) -> Self {
+        Self { candidates }
+    }
+}
+
+#[async_trait]
+impl HostSkillContextSource for StaticSkillContextSource {
+    async fn load_skill_context_candidates(
+        &self,
+        _run_context: &LoopRunContext,
+    ) -> Result<Vec<HostSkillContextCandidate>, HostSkillContextBuildError> {
+        Ok(self.candidates.clone())
+    }
+}
+
+struct MutableSkillContextSource {
+    candidates: Mutex<Vec<HostSkillContextCandidate>>,
+}
+
+impl MutableSkillContextSource {
+    fn new(candidates: Vec<HostSkillContextCandidate>) -> Self {
+        Self {
+            candidates: Mutex::new(candidates),
+        }
+    }
+
+    fn set(&self, candidates: Vec<HostSkillContextCandidate>) {
+        *self.candidates.lock().unwrap() = candidates;
+    }
+}
+
+#[async_trait]
+impl HostSkillContextSource for MutableSkillContextSource {
+    async fn load_skill_context_candidates(
+        &self,
+        _run_context: &LoopRunContext,
+    ) -> Result<Vec<HostSkillContextCandidate>, HostSkillContextBuildError> {
+        Ok(self.candidates.lock().unwrap().clone())
+    }
+}
+
+fn skill_md(name: &str, description: &str, prompt: &str) -> String {
+    format!(
+        "---\nname: {name}\ndescription: {description}\nactivation:\n  keywords: [{name}]\n---\n\n{prompt}\n"
+    )
+}
+
 struct ThreadFixture {
     thread_service: Arc<InMemorySessionThreadService>,
     thread_scope: ThreadScope,
@@ -1011,6 +1605,13 @@ impl SessionThreadService for GatedFinalizeThreadService {
         self.inner.accept_inbound_message(request).await
     }
 
+    async fn replay_accepted_inbound_message(
+        &self,
+        request: ReplayAcceptedInboundMessageRequest,
+    ) -> Result<Option<AcceptedInboundMessageReplay>, SessionThreadError> {
+        self.inner.replay_accepted_inbound_message(request).await
+    }
+
     async fn mark_message_submitted(
         &self,
         scope: &ThreadScope,
@@ -1118,6 +1719,13 @@ impl SessionThreadService for StaticContextThreadService {
         _request: AcceptInboundMessageRequest,
     ) -> Result<AcceptedInboundMessage, SessionThreadError> {
         panic!("static context service does not accept inbound messages")
+    }
+
+    async fn replay_accepted_inbound_message(
+        &self,
+        _request: ReplayAcceptedInboundMessageRequest,
+    ) -> Result<Option<AcceptedInboundMessageReplay>, SessionThreadError> {
+        panic!("static context service does not replay inbound messages")
     }
 
     async fn mark_message_submitted(

@@ -54,10 +54,11 @@ pub use ids::{
     TurnLeaseToken, TurnRunId, TurnRunnerId,
 };
 pub use loop_exit::{
-    LoopBlocked, LoopBlockedKind, LoopCancelled, LoopCancelledReasonKind, LoopCompleted,
-    LoopCompletionKind, LoopExit, LoopExitInvalidHandling, LoopExitMapping,
-    LoopExitValidationDecision, LoopExitValidationPolicy, LoopExitViolation, LoopExitViolationKind,
-    LoopFailed, LoopFailureKind,
+    BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
+    FinalCheckpointEvidenceRequest, LoopBlocked, LoopBlockedKind, LoopCancelled,
+    LoopCancelledReasonKind, LoopCompleted, LoopCompletionKind, LoopExit, LoopExitApplier,
+    LoopExitEvidencePort, LoopExitInvalidHandling, LoopExitMapping, LoopExitValidationDecision,
+    LoopExitViolation, LoopExitViolationKind, LoopFailed, LoopFailureKind,
 };
 pub use memory::{InMemoryTurnStateStore, InMemoryTurnStateStoreLimits};
 pub use request::{
@@ -67,8 +68,9 @@ pub use response::{CancelRunResponse, ResumeTurnResponse, SubmitTurnResponse, Th
 pub use run_profile::{
     AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverResumeRequest,
     AgentLoopDriverRunRequest, CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy,
-    CheckpointSchemaId, ConcurrencyClass, ContextProfileId, InMemoryRunProfileRegistry,
-    InMemoryRunProfileResolver, LoopCheckpointKind, LoopCheckpointStateRef, LoopDriverId,
+    CheckpointSchemaId, ConcurrencyClass, ContextProfileId, EmptyMemoryPromptContextService,
+    InMemoryRunProfileRegistry, InMemoryRunProfileResolver, LoopCheckpointKind,
+    LoopCheckpointStateRef, LoopDriverId, MemoryPromptContextRequest, MemoryPromptContextService,
     ModelProfileId, PrivilegedRunProfileDimension, RedactedRunProfileProvenance,
     RedactedRunProfileSource, ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier,
     RunClassId, RunProfileFingerprint, RunProfileRequestAuthority, RunProfileResolutionError,

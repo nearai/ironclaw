@@ -37,6 +37,28 @@ async fn fresh_repository() -> Fixture {
 }
 
 #[tokio::test]
+async fn schema_failure_error_is_sanitized_at_public_boundary() {
+    let f = fresh_repository().await;
+    let conn = f.db.connect().expect("connect");
+    conn.execute("DROP TABLE reborn_memory_documents", ())
+        .await
+        .expect("drop table to force backend failure");
+
+    let path = MemoryDocumentPath::new("tenant-a", "alice", None, "sentinel.md").expect("path");
+    let err = f.repo.write_document(&path, b"body").await.unwrap_err();
+    let displayed = err.to_string();
+
+    assert!(displayed.contains("memory backend operation failed"));
+    assert!(
+        !displayed.contains("reborn_memory_documents")
+            && !displayed.contains("DROP TABLE")
+            && !displayed.contains("SQL")
+            && !displayed.contains("sqlite"),
+        "public memory error leaked backend details: {displayed}"
+    );
+}
+
+#[tokio::test]
 async fn round_trips_a_document_within_full_scope() {
     let f = fresh_repository().await;
     let path = MemoryDocumentPath::new("tenant-a", "alice", None, "MEMORY.md").expect("path");

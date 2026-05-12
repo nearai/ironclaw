@@ -9,14 +9,23 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use ironclaw_events::{
-    DurableAuditLog, DurableEventLog, EventCursor, EventError, EventLogEntry, EventStreamKey,
-    ReadScope, RuntimeEvent, RuntimeEventKind, UNCLASSIFIED_ERROR_KIND, sanitize_error_kind,
+    AuditSink, DurableAuditLog, DurableEventLog, EventCursor, EventError, EventLogEntry,
+    EventStreamKey, ReadScope, RuntimeEvent, RuntimeEventKind, UNCLASSIFIED_ERROR_KIND,
+    sanitize_error_kind,
 };
 use ironclaw_host_api::{
-    ApprovalRequestId, AuditEnvelope, AuditEventId, AuditStage, CapabilityId, ExtensionId,
-    InvocationId, OBLIGATION_EVALUATION_ORDER, ObligationKind, ProcessId, ResourceScope,
-    RuntimeKind, ThreadId, Timestamp,
+    ActionResultSummary, ActionSummary, AgentId, ApprovalRequestId, AuditEnvelope, AuditEventId,
+    AuditStage, CapabilityId, CorrelationId, DecisionSummary, EffectKind, ExtensionId,
+    InvocationId, OBLIGATION_EVALUATION_ORDER, ObligationKind, ProcessId, ProjectId, ResourceScope,
+    RuntimeKind, TenantId, ThreadId, Timestamp, UserId,
+};
+use ironclaw_memory::{
+    MemoryAuditContext, MemoryDocumentScope, MemoryEventSinkError, MemorySignificantEvent,
+    MemorySignificantEventKind, MemorySignificantEventSink, PromptSafetyReasonCode,
+    PromptWriteOperation, PromptWriteSafetyEvent, PromptWriteSafetyEventKind,
+    PromptWriteSafetyEventSink,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -35,6 +44,9 @@ const STATE_REPLAY_PAGE_LIMIT: usize = 256;
 /// caller knows it must re-snapshot rather than silently see a partial
 /// run-state view.
 const STATE_REPLAY_MAX_EVENTS: usize = 100_000;
+
+const MEMORY_EVENTS_EXTENSION_ID: &str = "memory.events";
+const MEMORY_PROMPT_SAFETY_EXTENSION_ID: &str = "memory.prompt_safety";
 
 /// Maximum page size accepted by the projection service.
 ///
@@ -285,6 +297,7 @@ pub struct AuditProjectionEntry {
     pub event_id: AuditEventId,
     pub timestamp: Timestamp,
     pub stage: AuditProjectionStage,
+    pub correlation_id: CorrelationId,
     pub invocation_id: InvocationId,
     pub thread_id: Option<ThreadId>,
     pub process_id: Option<ProcessId>,
@@ -295,6 +308,34 @@ pub struct AuditProjectionEntry {
     pub decision_kind: String,
     pub result_status: Option<String>,
     pub output_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemoryAuditProjectionMetadata>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryAuditProjectionMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relative_path_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub byte_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_text: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protected_path_class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finding_count: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -338,6 +379,343 @@ pub enum AuditProjectionError {
     },
     #[error("audit projection source failed during {operation}")]
     Source { operation: &'static str },
+}
+
+/// Durable audit adapter for memory-owned redacted event seams.
+#[derive(Clone)]
+pub struct DurableMemoryAuditSink {
+    audit: Arc<dyn AuditSink>,
+}
+
+impl DurableMemoryAuditSink {
+    pub fn new(audit: Arc<dyn AuditSink>) -> Self {
+        Self { audit }
+    }
+}
+
+impl std::fmt::Debug for DurableMemoryAuditSink {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DurableMemoryAuditSink")
+            .field("audit", &"<audit_sink>")
+            .finish()
+    }
+}
+
+#[async_trait]
+impl MemorySignificantEventSink for DurableMemoryAuditSink {
+    async fn record_memory_significant_event(
+        &self,
+        event: MemorySignificantEvent,
+    ) -> Result<(), MemoryEventSinkError> {
+        let record = memory_significant_audit(event)?;
+        self.audit
+            .emit_audit(record)
+            .await
+            .map_err(|error| memory_audit_error(error.to_string()))
+    }
+}
+
+#[async_trait]
+impl PromptWriteSafetyEventSink for DurableMemoryAuditSink {
+    async fn record_prompt_write_safety_event(
+        &self,
+        event: PromptWriteSafetyEvent,
+    ) -> Result<(), MemoryEventSinkError> {
+        let record = prompt_write_safety_audit(event)?;
+        self.audit
+            .emit_audit(record)
+            .await
+            .map_err(|error| memory_audit_error(error.to_string()))
+    }
+}
+
+fn memory_significant_audit(
+    event: MemorySignificantEvent,
+) -> Result<AuditEnvelope, MemoryEventSinkError> {
+    let audit_context = resolve_memory_audit_context(&event.scope, event.audit_context.as_ref())?;
+    let resource_scope = audit_context.resource_scope;
+    Ok(AuditEnvelope {
+        event_id: AuditEventId::new(),
+        correlation_id: audit_context.correlation_id,
+        stage: AuditStage::After,
+        timestamp: Utc::now(),
+        tenant_id: resource_scope.tenant_id,
+        user_id: resource_scope.user_id,
+        agent_id: resource_scope.agent_id,
+        project_id: resource_scope.project_id,
+        mission_id: resource_scope.mission_id,
+        thread_id: resource_scope.thread_id,
+        invocation_id: resource_scope.invocation_id,
+        process_id: None,
+        approval_request_id: None,
+        extension_id: Some(memory_events_extension_id()?),
+        action: ActionSummary {
+            kind: memory_significant_action_kind(event.kind).to_string(),
+            target: None,
+            effects: memory_significant_effects(event.kind),
+        },
+        decision: DecisionSummary {
+            kind: "memory_event_recorded".to_string(),
+            reason: None,
+            actor: None,
+        },
+        result: Some(ActionResultSummary {
+            success: true,
+            status: Some(encode_memory_significant_metadata(&event)),
+            output_bytes: event.byte_count,
+        }),
+    })
+}
+
+fn prompt_write_safety_audit(
+    event: PromptWriteSafetyEvent,
+) -> Result<AuditEnvelope, MemoryEventSinkError> {
+    let audit_context = resolve_memory_audit_context(&event.scope, event.audit_context.as_ref())?;
+    let resource_scope = audit_context.resource_scope;
+    Ok(AuditEnvelope {
+        event_id: AuditEventId::new(),
+        correlation_id: audit_context.correlation_id,
+        stage: match event.kind {
+            PromptWriteSafetyEventKind::Rejected => AuditStage::Denied,
+            _ => AuditStage::After,
+        },
+        timestamp: Utc::now(),
+        tenant_id: resource_scope.tenant_id,
+        user_id: resource_scope.user_id,
+        agent_id: resource_scope.agent_id,
+        project_id: resource_scope.project_id,
+        mission_id: resource_scope.mission_id,
+        thread_id: resource_scope.thread_id,
+        invocation_id: resource_scope.invocation_id,
+        process_id: None,
+        approval_request_id: None,
+        extension_id: Some(memory_prompt_safety_extension_id()?),
+        action: ActionSummary {
+            kind: prompt_write_action_kind(event.operation).to_string(),
+            target: None,
+            effects: vec![EffectKind::WriteFilesystem],
+        },
+        decision: DecisionSummary {
+            kind: event
+                .reason_code
+                .map(prompt_safety_reason_projection_kind)
+                .unwrap_or_else(|| prompt_safety_event_kind_label(event.kind))
+                .to_string(),
+            reason: None,
+            actor: None,
+        },
+        result: Some(prompt_safety_result(&event)),
+    })
+}
+
+#[derive(Clone)]
+struct ResolvedMemoryAuditContext {
+    resource_scope: ResourceScope,
+    correlation_id: CorrelationId,
+}
+
+fn resolve_memory_audit_context(
+    scope: &MemoryDocumentScope,
+    audit_context: Option<&MemoryAuditContext>,
+) -> Result<ResolvedMemoryAuditContext, MemoryEventSinkError> {
+    if let Some(audit_context) = audit_context {
+        if !resource_scope_matches_memory_scope(&audit_context.resource_scope, scope) {
+            return Err(memory_audit_error(
+                "memory audit context scope does not match memory event scope",
+            ));
+        }
+        return Ok(ResolvedMemoryAuditContext {
+            resource_scope: audit_context.resource_scope.clone(),
+            correlation_id: audit_context.correlation_id,
+        });
+    }
+
+    Ok(ResolvedMemoryAuditContext {
+        resource_scope: ResourceScope {
+            tenant_id: TenantId::new(scope.tenant_id()).map_err(|error| {
+                memory_audit_error(format!("invalid memory tenant id: {error}"))
+            })?,
+            user_id: UserId::new(scope.user_id())
+                .map_err(|error| memory_audit_error(format!("invalid memory user id: {error}")))?,
+            agent_id: scope
+                .agent_id()
+                .map(AgentId::new)
+                .transpose()
+                .map_err(|error| memory_audit_error(format!("invalid memory agent id: {error}")))?,
+            project_id: scope
+                .project_id()
+                .map(ProjectId::new)
+                .transpose()
+                .map_err(|error| {
+                    memory_audit_error(format!("invalid memory project id: {error}"))
+                })?,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        },
+        correlation_id: CorrelationId::new(),
+    })
+}
+
+fn resource_scope_matches_memory_scope(
+    resource_scope: &ResourceScope,
+    memory_scope: &MemoryDocumentScope,
+) -> bool {
+    resource_scope.tenant_id.as_str() == memory_scope.tenant_id()
+        && resource_scope.user_id.as_str() == memory_scope.user_id()
+        && resource_scope.agent_id.as_ref().map(AgentId::as_str) == memory_scope.agent_id()
+        && resource_scope.project_id.as_ref().map(ProjectId::as_str) == memory_scope.project_id()
+}
+
+fn memory_significant_action_kind(kind: MemorySignificantEventKind) -> &'static str {
+    match kind {
+        MemorySignificantEventKind::DocumentWritten => "memory_document_written",
+        MemorySignificantEventKind::DocumentDeleted => "memory_document_deleted",
+        MemorySignificantEventKind::DocumentIndexed => "memory_document_indexed",
+        MemorySignificantEventKind::SearchPerformed => "memory_search_performed",
+        MemorySignificantEventKind::LayerRedirected => "memory_layer_redirected",
+    }
+}
+
+fn memory_events_extension_id() -> Result<ExtensionId, MemoryEventSinkError> {
+    ExtensionId::new(MEMORY_EVENTS_EXTENSION_ID)
+        .map_err(|error| memory_audit_error(format!("invalid memory events extension id: {error}")))
+}
+
+fn memory_prompt_safety_extension_id() -> Result<ExtensionId, MemoryEventSinkError> {
+    ExtensionId::new(MEMORY_PROMPT_SAFETY_EXTENSION_ID).map_err(|error| {
+        memory_audit_error(format!(
+            "invalid memory prompt-safety extension id: {error}"
+        ))
+    })
+}
+
+fn memory_significant_effects(kind: MemorySignificantEventKind) -> Vec<EffectKind> {
+    match kind {
+        MemorySignificantEventKind::DocumentWritten
+        | MemorySignificantEventKind::DocumentIndexed => {
+            vec![EffectKind::WriteFilesystem]
+        }
+        MemorySignificantEventKind::DocumentDeleted => vec![EffectKind::DeleteFilesystem],
+        MemorySignificantEventKind::SearchPerformed => vec![EffectKind::ReadFilesystem],
+        MemorySignificantEventKind::LayerRedirected => vec![EffectKind::WriteFilesystem],
+    }
+}
+
+fn prompt_write_action_kind(operation: PromptWriteOperation) -> &'static str {
+    match operation {
+        PromptWriteOperation::Write => "write_file",
+        PromptWriteOperation::Append => "append_file",
+        PromptWriteOperation::Patch => "patch_file",
+        PromptWriteOperation::Import => "memory_import",
+        PromptWriteOperation::Seed => "memory_seed",
+        PromptWriteOperation::ProfileUpdate => "profile_update",
+        PromptWriteOperation::AdminSystemPromptUpdate => "admin_system_prompt_update",
+    }
+}
+
+fn prompt_safety_reason_projection_kind(reason: PromptSafetyReasonCode) -> &'static str {
+    match reason {
+        PromptSafetyReasonCode::HighRiskPromptInjection => "prompt_high_risk",
+        PromptSafetyReasonCode::CriticalPromptInjection => "prompt_critical",
+        PromptSafetyReasonCode::PromptWritePolicyUnavailable => "prompt_policy_unavailable",
+        PromptSafetyReasonCode::PromptWritePolicyMisconfigured => "prompt_policy_misconfigured",
+        PromptSafetyReasonCode::ProtectedPathRegistryUnavailable => "protected_registry_missing",
+        PromptSafetyReasonCode::PromptWriteBypassNotAllowed => "prompt_bypass_denied",
+        PromptSafetyReasonCode::PromptWriteSafetyEventUnavailable => "prompt_event_unavailable",
+    }
+}
+
+fn prompt_safety_event_kind_label(kind: PromptWriteSafetyEventKind) -> &'static str {
+    match kind {
+        PromptWriteSafetyEventKind::Checked => "prompt_write_safety_checked",
+        PromptWriteSafetyEventKind::Warned => "prompt_write_safety_warned",
+        PromptWriteSafetyEventKind::Rejected => "prompt_write_safety_rejected",
+        PromptWriteSafetyEventKind::BypassAllowed => "prompt_write_safety_bypass_allowed",
+    }
+}
+
+fn prompt_safety_metadata_status(kind: PromptWriteSafetyEventKind) -> &'static str {
+    match kind {
+        PromptWriteSafetyEventKind::Checked => "checked",
+        PromptWriteSafetyEventKind::Warned => "warned",
+        PromptWriteSafetyEventKind::Rejected => "rejected",
+        PromptWriteSafetyEventKind::BypassAllowed => "bypass_allowed",
+    }
+}
+
+fn prompt_safety_result(event: &PromptWriteSafetyEvent) -> ActionResultSummary {
+    ActionResultSummary {
+        success: event.kind != PromptWriteSafetyEventKind::Rejected,
+        status: Some(encode_prompt_safety_metadata(event)),
+        output_bytes: None,
+    }
+}
+
+fn encode_memory_significant_metadata(event: &MemorySignificantEvent) -> String {
+    let mut pairs = Vec::new();
+    push_metadata_pair(&mut pairs, "status", event.status.as_str().to_string());
+    if let Some(path_hash) = &event.relative_path_hash {
+        push_metadata_pair(&mut pairs, "path_hash", path_hash.clone());
+    }
+    if let Some(chunk_count) = event.chunk_count {
+        push_metadata_pair(&mut pairs, "chunks", chunk_count.to_string());
+    }
+    if let Some(result_count) = event.result_count {
+        push_metadata_pair(&mut pairs, "results", result_count.to_string());
+    }
+    if let Some(full_text) = event.full_text {
+        push_metadata_pair(&mut pairs, "full_text", full_text.to_string());
+    }
+    if let Some(vector) = event.vector {
+        push_metadata_pair(&mut pairs, "vector", vector.to_string());
+    }
+    encode_metadata_pairs("memory_event:v1", pairs)
+}
+
+fn encode_prompt_safety_metadata(event: &PromptWriteSafetyEvent) -> String {
+    let mut pairs = Vec::new();
+    push_metadata_pair(
+        &mut pairs,
+        "status",
+        prompt_safety_metadata_status(event.kind).to_string(),
+    );
+    if let Some(path_hash) = &event.relative_path_hash {
+        push_metadata_pair(&mut pairs, "path_hash", path_hash.clone());
+    }
+    if let Some(path_class) = &event.protected_path_class {
+        push_metadata_pair(
+            &mut pairs,
+            "protected_path_class",
+            path_class.as_str().to_string(),
+        );
+    }
+    if let Some(reason) = event.reason_code {
+        push_metadata_pair(&mut pairs, "reason", reason.as_str().to_string());
+    }
+    if let Some(severity) = event.severity {
+        push_metadata_pair(&mut pairs, "severity", severity.as_str().to_string());
+    }
+    if event.finding_count > 0 {
+        push_metadata_pair(&mut pairs, "findings", event.finding_count.to_string());
+    }
+    encode_metadata_pairs("memory_prompt_safety:v1", pairs)
+}
+
+fn push_metadata_pair(pairs: &mut Vec<String>, key: &str, value: String) {
+    pairs.push(format!("{key}={value}"));
+}
+
+fn encode_metadata_pairs(prefix: &str, pairs: Vec<String>) -> String {
+    if pairs.is_empty() {
+        return prefix.to_string();
+    }
+    format!("{prefix};{}", pairs.join(";"))
+}
+
+fn memory_audit_error(reason: impl Into<String>) -> MemoryEventSinkError {
+    MemoryEventSinkError::new(reason)
 }
 
 #[async_trait]
@@ -963,11 +1341,27 @@ fn project_audit_entries(entries: &[EventLogEntry<AuditEnvelope>]) -> Vec<AuditP
 fn project_audit_entry(entry: &EventLogEntry<AuditEnvelope>) -> AuditProjectionEntry {
     let audit = &entry.record;
     let action_kind = sanitize_error_kind(audit.action.kind.clone());
+    let output_bytes = audit.result.as_ref().and_then(|result| result.output_bytes);
+    let memory = audit
+        .result
+        .as_ref()
+        .and_then(|result| result.status.as_deref())
+        .and_then(|status| parse_memory_audit_metadata(status, output_bytes));
+    let result_status = if let Some(memory) = &memory {
+        memory.status.clone()
+    } else {
+        audit
+            .result
+            .as_ref()
+            .and_then(|result| result.status.as_deref())
+            .map(sanitize_audit_status)
+    };
     AuditProjectionEntry {
         cursor: entry.cursor,
         event_id: audit.event_id,
         timestamp: audit.timestamp,
         stage: audit.stage.into(),
+        correlation_id: audit.correlation_id,
         invocation_id: audit.invocation_id,
         thread_id: audit.thread_id.clone(),
         process_id: audit.process_id,
@@ -976,12 +1370,73 @@ fn project_audit_entry(entry: &EventLogEntry<AuditEnvelope>) -> AuditProjectionE
         action_target: safe_audit_action_target(&action_kind, audit.action.target.as_ref()),
         action_kind,
         decision_kind: sanitize_error_kind(audit.decision.kind.clone()),
-        result_status: audit
-            .result
-            .as_ref()
-            .and_then(|result| result.status.as_deref())
-            .map(sanitize_audit_status),
-        output_bytes: audit.result.as_ref().and_then(|result| result.output_bytes),
+        result_status,
+        output_bytes,
+        memory,
+    }
+}
+
+fn parse_memory_audit_metadata(
+    status: &str,
+    output_bytes: Option<u64>,
+) -> Option<MemoryAuditProjectionMetadata> {
+    let mut segments = status.split(';');
+    let prefix = segments.next()?;
+    if prefix != "memory_event:v1" && prefix != "memory_prompt_safety:v1" {
+        return None;
+    }
+
+    let mut metadata = MemoryAuditProjectionMetadata {
+        byte_count: output_bytes,
+        ..MemoryAuditProjectionMetadata::default()
+    };
+    for segment in segments {
+        let (key, value) = segment.split_once('=')?;
+        match key {
+            "status" => metadata.status = sanitize_memory_metadata_label(value),
+            "path_hash" => metadata.relative_path_hash = sanitize_memory_path_hash(value),
+            "chunks" => metadata.chunk_count = sanitize_memory_metadata_u64(value),
+            "results" => metadata.result_count = sanitize_memory_metadata_u64(value),
+            "full_text" => metadata.full_text = sanitize_memory_metadata_bool(value),
+            "vector" => metadata.vector = sanitize_memory_metadata_bool(value),
+            "protected_path_class" => {
+                metadata.protected_path_class = sanitize_memory_metadata_label(value)
+            }
+            "reason" => metadata.reason_code = sanitize_memory_metadata_label(value),
+            "severity" => metadata.severity = sanitize_memory_metadata_label(value),
+            "findings" => metadata.finding_count = sanitize_memory_metadata_u64(value),
+            _ => return None,
+        }
+    }
+    metadata.status.as_ref()?;
+    Some(metadata)
+}
+
+fn sanitize_memory_metadata_label(value: &str) -> Option<String> {
+    if value.is_empty() || value.len() > 128 {
+        return None;
+    }
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        .then(|| value.to_string())
+}
+
+fn sanitize_memory_path_hash(value: &str) -> Option<String> {
+    let hash = value.strip_prefix("sha256:").unwrap_or(value);
+    (hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| value.to_ascii_lowercase())
+}
+
+fn sanitize_memory_metadata_u64(value: &str) -> Option<u64> {
+    value.parse::<u64>().ok()
+}
+
+fn sanitize_memory_metadata_bool(value: &str) -> Option<bool> {
+    match value {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
     }
 }
 

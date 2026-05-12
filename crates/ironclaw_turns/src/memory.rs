@@ -26,8 +26,9 @@ use crate::{
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordRecoveryRequiredRequest, RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse,
-        TurnRunTransitionPort, TurnRunnerOutcome,
+        RecordModelRouteSnapshotRequest, RecordRecoveryRequiredRequest,
+        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, TurnRunTransitionPort,
+        TurnRunnerOutcome,
     },
 };
 
@@ -112,6 +113,7 @@ struct RunRecord {
     run_id: TurnRunId,
     status: TurnStatus,
     profile: TurnRunProfile,
+    resolved_model_route: Option<crate::run_profile::LoopModelRouteSnapshot>,
     accepted_message_ref: AcceptedMessageRef,
     source_binding_ref: SourceBindingRef,
     reply_target_binding_ref: ReplyTargetBindingRef,
@@ -473,6 +475,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
             run_id,
             status: TurnStatus::Queued,
             profile: profile.clone(),
+            resolved_model_route: None,
             accepted_message_ref: request.accepted_message_ref.clone(),
             source_binding_ref: request.source_binding_ref.clone(),
             reply_target_binding_ref: request.reply_target_binding_ref.clone(),
@@ -632,6 +635,41 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
         Ok(inner.recover_expired_leases(request))
     }
 
+    async fn record_model_route_snapshot(
+        &self,
+        request: RecordModelRouteSnapshotRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        let mut inner = self.lock_inner()?;
+        let mut record = inner.take_record(request.run_id)?;
+        let result = (|| {
+            let now = Utc::now();
+            ensure_active_lease(&record, request.runner_id, request.lease_token, now)?;
+            if record.status != TurnStatus::Running {
+                return Err(TurnError::InvalidTransition {
+                    from: record.status,
+                    to: TurnStatus::Running,
+                });
+            }
+            request
+                .snapshot
+                .validate()
+                .map_err(|reason| TurnError::InvalidRequest { reason })?;
+            if let Some(existing) = &record.resolved_model_route {
+                if existing != &request.snapshot {
+                    return Err(TurnError::Conflict {
+                        reason: "run already has a different resolved model route".to_string(),
+                    });
+                }
+                return Ok(record.state());
+            }
+            record.resolved_model_route = Some(request.snapshot);
+            inner.touch_active_lock(&record, now);
+            Ok(record.state())
+        })();
+        inner.records.insert(record.run_id, record);
+        result
+    }
+
     async fn block_run(&self, request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
         let mut inner = self.lock_inner()?;
         let mut record = inner.take_record(request.run_id)?;
@@ -654,6 +692,7 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
             inner.record_checkpoint(
                 &record,
                 request.checkpoint_id,
+                request.state_ref,
                 request.reason.gate_ref().clone(),
                 now,
             );
@@ -762,6 +801,7 @@ impl Inner {
                     run_id: run.run_id,
                     status: run.status,
                     profile: run.profile,
+                    resolved_model_route: run.resolved_model_route,
                     accepted_message_ref: run.accepted_message_ref,
                     source_binding_ref: run.source_binding_ref,
                     reply_target_binding_ref: run.reply_target_binding_ref,
@@ -1372,8 +1412,9 @@ impl Inner {
                 }
                 LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Blocked {
                     checkpoint_id,
+                    state_ref,
                     reason,
-                }) => self.block_claimed_record(record, checkpoint_id, reason),
+                }) => self.block_claimed_record(record, checkpoint_id, state_ref, reason),
                 LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Failed { failure }) => {
                     self.fail_claimed_record(record, failure)
                 }
@@ -1463,6 +1504,7 @@ impl Inner {
         &mut self,
         mut record: RunRecord,
         checkpoint_id: TurnCheckpointId,
+        state_ref: crate::run_profile::LoopCheckpointStateRef,
         reason: BlockedReason,
     ) -> AppliedLoopTransition {
         if record.status != TurnStatus::Running {
@@ -1483,7 +1525,13 @@ impl Inner {
         record.lease_token = None;
         record.lease_expires_at = None;
         record.event_cursor = self.next_cursor();
-        self.record_checkpoint(&record, checkpoint_id, reason.gate_ref().clone(), now);
+        self.record_checkpoint(
+            &record,
+            checkpoint_id,
+            state_ref,
+            reason.gate_ref().clone(),
+            now,
+        );
         self.update_active_lock(&record, now);
         let state = record.state();
         self.push_event(&record, TurnEventKind::Blocked, None);
@@ -1710,6 +1758,7 @@ impl Inner {
         &mut self,
         record: &RunRecord,
         checkpoint_id: TurnCheckpointId,
+        state_ref: crate::run_profile::LoopCheckpointStateRef,
         gate_ref: crate::GateRef,
         created_at: crate::TurnTimestamp,
     ) {
@@ -1722,9 +1771,12 @@ impl Inner {
         self.checkpoints.push(TurnCheckpointRecord {
             checkpoint_id,
             run_id: record.run_id,
+            scope: Some(record.scope.clone()),
             sequence,
             status: record.status,
             gate_ref,
+            kind: crate::run_profile::LoopCheckpointKind::BeforeBlock,
+            state_ref,
             created_at,
         });
     }
@@ -1773,6 +1825,7 @@ impl RunRecord {
             reply_target_binding_ref: self.reply_target_binding_ref.clone(),
             status: self.status,
             profile: self.profile.clone(),
+            resolved_model_route: self.resolved_model_route.clone(),
             checkpoint_id: self.checkpoint_id,
             gate_ref: self.gate_ref.clone(),
             failure: self.failure.clone(),
@@ -1798,6 +1851,7 @@ impl RunRecord {
             reply_target_binding_ref: self.reply_target_binding_ref.clone(),
             resolved_run_profile_id: self.profile.id.clone(),
             resolved_run_profile_version: self.profile.version,
+            resolved_model_route: self.resolved_model_route.clone(),
             received_at: self.received_at,
             checkpoint_id: self.checkpoint_id,
             gate_ref: self.gate_ref.clone(),

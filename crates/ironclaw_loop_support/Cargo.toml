@@ -14,6 +14,7 @@ publish = false
 async-trait = "0.1"
 tracing = "0.1"
 tokio = { version = "1", features = ["sync"] }
+ironclaw_skills = { path = "../ironclaw_skills", version = "0.3.0", default-features = false }
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
