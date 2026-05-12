@@ -12,11 +12,29 @@ It currently supports:
 
 ```bash
 ironclaw-reborn --help
+ironclaw-reborn channels list
+ironclaw-reborn channels list --json
+ironclaw-reborn channels list --verbose
 ironclaw-reborn completion --shell bash
 ironclaw-reborn completion --shell zsh
 ironclaw-reborn config path
 ironclaw-reborn doctor
+ironclaw-reborn hooks list
+ironclaw-reborn hooks list --json
+ironclaw-reborn hooks list --verbose
+ironclaw-reborn logs
+ironclaw-reborn logs --json
+ironclaw-reborn logs --verbose
+ironclaw-reborn models list
+ironclaw-reborn models list --json
+ironclaw-reborn models status
+ironclaw-reborn models status --json
+ironclaw-reborn profile list
+ironclaw-reborn profile list --json
 ironclaw-reborn run
+ironclaw-reborn skills list
+ironclaw-reborn skills list --json
+ironclaw-reborn skills list --verbose
 ```
 
 It intentionally does not yet support:
@@ -29,6 +47,24 @@ It intentionally does not yet support:
 - long-lived Reborn runtime services.
 
 ## Commands
+
+### `channels list`
+
+Reports configured Reborn channels without resolving Reborn home, reading v1 channel config, or creating directories.
+
+The Reborn channel registry is not wired yet, so the command currently reports an explicit empty surface:
+
+```bash
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- channels list
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- channels list --json
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- channels list --verbose
+```
+
+Expected fields include:
+
+- `configured: 0`
+- `status: not-wired`
+- `v1_state: not-used`
 
 ### `completion`
 
@@ -72,6 +108,79 @@ Expected fields include:
 - `v1_state: not-used`
 - `driver_registry: initialized`
 
+### `hooks list`
+
+Reports configured Reborn hooks without resolving Reborn home, reading v1 hook config, or creating directories.
+
+The Reborn hook registry is not wired yet, so the command currently reports an explicit empty surface:
+
+```bash
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- hooks list
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- hooks list --json
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- hooks list --verbose
+```
+
+Expected fields include:
+
+- `configured: 0`
+- `status: not-wired`
+- `v1_state: not-used`
+
+### `logs`
+
+Reports Reborn log availability without resolving Reborn home, reading v1 gateway logs, or creating directories.
+
+The Reborn log source is not wired yet, so the command currently reports an explicit empty surface:
+
+```bash
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- logs
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- logs --json
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- logs --verbose
+```
+
+Expected fields include:
+
+- `entries: 0`
+- `status: not-wired`
+- `v1_state: not-used`
+
+### `models list` / `models status`
+
+Shows Reborn model purpose slots and route status without resolving Reborn home, reading v1 provider settings, or creating directories.
+
+Routes are not configurable through Reborn CLI yet, so the command currently reports `not-configured` routes for built-in slots:
+
+```bash
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- models list
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- models list --json
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- models status
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- models status --json
+```
+
+Expected fields include:
+
+- `default`
+- `mission`
+- `routes: not-configured`
+- `v1_state: not-used`
+
+### `profile list`
+
+Lists the supported Reborn boot profiles without resolving Reborn home, reading v1 state, or creating directories.
+
+```bash
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- profile list
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- profile list --json
+```
+
+Supported profiles:
+
+- `local-dev` (default)
+- `production`
+- `migration-dry-run`
+
+Select a profile with `IRONCLAW_REBORN_PROFILE=<profile>`.
+
 ### `run`
 
 Initializes the minimal Reborn runtime shell and exits successfully. This is a smokeable composition shell, not full agent execution.
@@ -90,6 +199,24 @@ Expected fields include:
 - `v1_state: not-used`
 - `driver_registry: initialized`
 - `runtime_shell: initialized`
+
+### `skills list`
+
+Reports configured Reborn skills without resolving Reborn home, reading v1 skill discovery paths, or creating directories.
+
+The Reborn skill catalog is not wired yet, so the command currently reports an explicit empty surface:
+
+```bash
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- skills list
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- skills list --json
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- skills list --verbose
+```
+
+Expected fields include:
+
+- `configured: 0`
+- `status: not-wired`
+- `v1_state: not-used`
 
 ## State and config root
 
@@ -128,14 +255,21 @@ Run these before changing Reborn CLI behavior:
 cargo fmt --all -- --check
 cargo test -p ironclaw_reborn_cli
 cargo test -p ironclaw_reborn_config
+cargo test -p ironclaw_reborn model_slots_are_exposed_in_cli_display_order
 cargo test -p ironclaw_architecture reborn
 cargo clippy -p ironclaw_reborn_cli --all-targets -- -D warnings
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- --help
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- channels list
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- completion --shell zsh >/tmp/ironclaw-reborn.zsh
 IRONCLAW_REBORN_HOME="$(mktemp -d)/reborn-home" \
   cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- config path
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- hooks list
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- logs
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- models status
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- profile list
 IRONCLAW_REBORN_HOME="$(mktemp -d)/reborn-home" \
   cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- run
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- skills list
 ```
 
 ## Adding commands

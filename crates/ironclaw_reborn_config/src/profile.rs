@@ -21,6 +21,12 @@ pub enum RebornProfile {
 }
 
 impl RebornProfile {
+    const ALL: [Self; 3] = [Self::LocalDev, Self::Production, Self::MigrationDryRun];
+
+    pub fn all() -> &'static [Self] {
+        &Self::ALL
+    }
+
     pub fn from_env_value(value: Option<OsString>) -> Result<Self, RebornConfigError> {
         let Some(value) = value else {
             return Ok(Self::default());

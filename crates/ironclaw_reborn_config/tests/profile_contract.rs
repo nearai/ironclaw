@@ -12,6 +12,18 @@ fn profile_wire_values_are_stable() {
 }
 
 #[test]
+fn all_profiles_are_exposed_in_display_order() {
+    assert_eq!(
+        RebornProfile::all(),
+        &[
+            RebornProfile::LocalDev,
+            RebornProfile::Production,
+            RebornProfile::MigrationDryRun,
+        ]
+    );
+}
+
+#[test]
 fn profile_parsing_accepts_expected_values() {
     assert_eq!(
         RebornProfile::from_str("local-dev"),
