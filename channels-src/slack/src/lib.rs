@@ -974,6 +974,155 @@ fn send_pairing_reply(channel_id: &str, code: &str) -> Result<(), String> {
     }
 }
 
+fn markdown_to_mrkdwn(input: &str) -> String {
+    if input.is_empty() {
+        return String::new();
+    }
+
+    const PROTECT_START: char = '\u{E000}';
+    const PROTECT_END: char = '\u{E001}';
+
+    let mut protected: Vec<String> = Vec::new();
+    let mut tmp = String::with_capacity(input.len());
+
+    // Protect Slack-native <...> constructs so we don't rewrite inside them.
+    //
+    // NOTE: We must not index `input` by byte offsets that are not UTF-8
+    // character boundaries. Slack's special constructs are ASCII-only, but
+    // messages can contain arbitrary Unicode elsewhere.
+    let mut i = 0;
+    while i < input.len() {
+        let ch = input[i..].chars().next().unwrap();
+        if ch == '<' {
+            let start = i;
+            i += ch.len_utf8();
+
+            // Scan forward to the next '>' (ASCII) without assuming anything
+            // about intervening UTF-8.
+            let mut j = i;
+            let mut found_end = None;
+            while j < input.len() {
+                let c = input[j..].chars().next().unwrap();
+                if c == '>' {
+                    found_end = Some(j + c.len_utf8());
+                    break;
+                }
+                j += c.len_utf8();
+            }
+
+            if let Some(end) = found_end {
+                let span = &input[start..end];
+                let idx = protected.len();
+                protected.push(span.to_string());
+                tmp.push(PROTECT_START);
+                tmp.push_str(&idx.to_string());
+                tmp.push(PROTECT_END);
+                i = end;
+                continue;
+            }
+
+            // Unmatched '<' — treat as a literal.
+            tmp.push('<');
+            continue;
+        }
+
+        tmp.push(ch);
+        i += ch.len_utf8();
+    }
+
+    // Convert headings per-line.
+    let mut out = String::with_capacity(tmp.len());
+    for (line_idx, line) in tmp.split('\n').enumerate() {
+        if line_idx > 0 {
+            out.push('\n');
+        }
+
+        if let Some(rest) = line.strip_prefix("# ") {
+            out.push('*');
+            out.push_str(rest);
+            out.push('*');
+        } else {
+            out.push_str(line);
+        }
+    }
+
+    // Convert [text](url) -> <url|text>.
+    let mut link_out = String::with_capacity(out.len());
+    let mut s = out.as_str();
+    while let Some(open_bracket) = s.find('[') {
+        link_out.push_str(&s[..open_bracket]);
+        s = &s[open_bracket..];
+
+        let Some(close_bracket) = s.find(']') else {
+            link_out.push_str(s);
+            s = "";
+            break;
+        };
+        let text = &s[1..close_bracket];
+
+        let after_bracket = &s[close_bracket + 1..];
+        if !after_bracket.starts_with('(') {
+            link_out.push_str(&s[..close_bracket + 1]);
+            s = after_bracket;
+            continue;
+        }
+
+        let Some(close_paren) = after_bracket.find(')') else {
+            link_out.push_str(&s[..close_bracket + 1]);
+            s = after_bracket;
+            continue;
+        };
+        let url = &after_bracket[1..close_paren];
+
+        link_out.push('<');
+        link_out.push_str(url);
+        link_out.push('|');
+        link_out.push_str(text);
+        link_out.push('>');
+
+        s = &after_bracket[close_paren + 1..];
+    }
+    link_out.push_str(s);
+
+    // Convert **bold** -> *bold* and ~~strike~~ -> ~strike~.
+    // This is intentionally minimal and does not attempt full Markdown parsing.
+    let out = link_out.replace("**", "*").replace("~~", "~");
+
+    // Restore protected <...> spans.
+    let mut restored = String::with_capacity(out.len());
+    let mut rest = out.as_str();
+    loop {
+        let Some(start) = rest.find(PROTECT_START) else {
+            restored.push_str(rest);
+            break;
+        };
+        restored.push_str(&rest[..start]);
+        let after_start = &rest[start + PROTECT_START.len_utf8()..];
+        let Some(end) = after_start.find(PROTECT_END) else {
+            restored.push_str(rest);
+            break;
+        };
+        let idx_str = &after_start[..end];
+        if let Ok(idx) = idx_str.parse::<usize>() {
+            if let Some(span) = protected.get(idx) {
+                restored.push_str(span);
+            } else {
+                restored.push(PROTECT_START);
+                restored.push_str(idx_str);
+                restored.push(PROTECT_END);
+            }
+        } else {
+            restored.push(PROTECT_START);
+            restored.push_str(idx_str);
+            restored.push(PROTECT_END);
+        }
+
+        rest = &after_start[end + PROTECT_END.len_utf8()..];
+    }
+
+    restored
+}
+
 /// Interpret a Slack `chat.postMessage` response body (returned with HTTP 200)
 /// as either success or a scoped failure. Extracted so the parsing logic can
 /// be unit-tested without the `channel_host` extern — see #1839.
@@ -1006,7 +1155,8 @@ fn post_slack_message(
     text: &str,
     thread_ts: Option<&str>,
 ) -> Result<Option<String>, String> {
-    let payload = build_broadcast_payload(channel, text, thread_ts);
+    let converted = markdown_to_mrkdwn(text);
+    let payload = build_broadcast_payload(channel, &converted, thread_ts);
     let payload_bytes = serde_json::to_vec(&payload)
         .map_err(|e| format!("Failed to serialize payload: {}", e))?;
 
@@ -1596,5 +1746,35 @@ mod tests {
         let target = resolve_broadcast_target("#C0123ABC");
         assert!(looks_like_slack_id(target));
         assert_eq!(target, "C0123ABC");
+    }
+
+    #[test]
+    fn test_markdown_to_mrkdwn_bold() {
+        assert_eq!(markdown_to_mrkdwn("a **b** c"), "a *b* c");
+    }
+
+    #[test]
+    fn test_markdown_to_mrkdwn_strike() {
+        assert_eq!(markdown_to_mrkdwn("~~x~~"), "~x~");
+    }
+
+    #[test]
+    fn test_markdown_to_mrkdwn_heading_multiline() {
+        assert_eq!(markdown_to_mrkdwn("# Title\nbody"), "*Title*\nbody");
+    }
+
+    #[test]
+    fn test_markdown_to_mrkdwn_link() {
+        assert_eq!(
+            markdown_to_mrkdwn("[near](https://example.com)"),
+            "<https://example.com|near>"
+        );
+    }
+
+
+    #[test]
+    fn test_markdown_to_mrkdwn_preserves_slack_native_formatting() {
+        let input = "<@U123> <https://e.com|e> <#C123|chan>";
+        assert_eq!(markdown_to_mrkdwn(input), input);
     }
 }
