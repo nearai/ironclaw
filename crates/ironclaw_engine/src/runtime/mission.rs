@@ -25,7 +25,8 @@ use crate::traits::workspace::WorkspaceReader;
 use crate::types::error::EngineError;
 use crate::types::memory::{DocId, DocType, MemoryDoc};
 use crate::types::mission::{
-    Mission, MissionCadence, MissionId, MissionStatus, next_cron_fire, next_cron_fire_required,
+    Mission, MissionCadence, MissionGateInfo, MissionId, MissionStatus, next_cron_fire,
+    next_cron_fire_required,
 };
 use crate::types::project::ProjectId;
 use crate::types::shared_owner_id;
@@ -114,47 +115,23 @@ pub struct MissionNotification {
     pub gate: Option<MissionGateInfo>,
 }
 
-/// Gate metadata carried alongside a `MissionNotification` when the
-/// mission's child thread paused on an unresolved gate.
+/// Outcome of a gate resolution as far as the mission auto-resume path
+/// cares. Approved → resume + maybe immediate fire. Denied or Cancelled
+/// → transition to Failed so the user has to explicitly fix-and-resume.
 ///
-/// The bridge translates this into a `StatusUpdate::AuthRequired`
-/// (or `ApprovalNeeded`) so the user-facing auth tray (gateway UI) /
-/// chat-channel auth prompt fires for the mission, the same way it
-/// fires for foreground threads. The mission itself is moved to
-/// `MissionStatus::Paused` so the cron scheduler stops re-firing
-/// until the gate is resolved.
-#[derive(Debug, Clone)]
-pub struct MissionGateInfo {
-    /// Engine-side gate name (e.g., `auth_required`, `approval_required`).
-    pub gate_name: String,
-    /// Action that paused (e.g., `tool_activate`, `gmail`, `http`).
-    pub action_name: String,
-    /// Original action parameters at the time of the pause. The bridge
-    /// needs these to run the canonical extension-name resolver
-    /// (`AuthManager::resolve_extension_name_for_auth_flow`) — for
-    /// `tool_activate(name="gmail")` the resolver reads the explicit
-    /// `name` param, which has higher precedence than the credential
-    /// fallback.
-    pub parameters: serde_json::Value,
-    /// Engine-side LLM tool-call id (e.g. `call_657a9167...`). This is
-    /// the identifier the engine needs to inject the resolved action
-    /// result back onto a paused thread when half-2 of #3133 wires up
-    /// auto-resume. **Not** what the user-facing auth tray sees — that
-    /// is `gate_request_id` below. (Per Copilot review on #3155: the
-    /// gateway parses the channel-side `request_id` as a UUID, so
-    /// forwarding the LLM call_id there would 400 every resolve POST.)
-    pub call_id: String,
-    /// Freshly-generated UUID identifying this surfaced gate to the
-    /// user. Forwarded by the bridge into
-    /// `StatusUpdate::AuthRequired.request_id` /
-    /// `StatusUpdate::ApprovalNeeded.request_id` so the gateway UI
-    /// can render the auth-tray entry and the resolve POST handler
-    /// (which `Uuid::parse_str`'s its input) accepts the response.
-    /// Mapping back to the engine `call_id` for half-2 auto-resume is
-    /// out of scope for this PR (#3166).
-    pub gate_request_id: uuid::Uuid,
-    /// What kind of resolution unblocks this gate.
-    pub resume_kind: crate::gate::ResumeKind,
+/// Kept as a small standalone enum (rather than reusing
+/// [`crate::gate::GateResolution`]) because the auto-resume path doesn't
+/// need the resolution payload (token, callback body, allow-always
+/// flag) — only the success/deny disposition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateResolutionOutcome {
+    /// User approved the gate — resume the mission.
+    Approved,
+    /// User denied the gate — mark the mission Failed.
+    Denied,
+    /// Gate was cancelled (timeout, shutdown, explicit cancel) — same
+    /// terminal outcome as Denied.
+    Cancelled,
 }
 
 /// Optional updates to apply to a mission via [`MissionManager::update_mission`].
@@ -642,6 +619,11 @@ impl MissionManager {
         // `update_mission`/`fire_mission` could modify other fields that the
         // second save would then silently overwrite with the stale reload.
         mission.status = MissionStatus::Active;
+        // Clear the paused_gate marker; the gate is no longer pending. If the
+        // user resumed manually before the gate was actually resolved, the
+        // mission will simply re-pause on its next fire and write a fresh
+        // marker.
+        mission.paused_gate = None;
         if let MissionCadence::Cron {
             ref expression,
             ref timezone,
@@ -1083,6 +1065,261 @@ impl MissionManager {
             .list_missions_with_shared(project_id, user_id)
             .await?;
         Ok(missions.into_iter().find(|m| m.name == name))
+    }
+
+    /// Resume every paused mission belonging to `user_id` whose
+    /// `paused_gate` was waiting for the credential named `credential_name`.
+    ///
+    /// Half-2 of #3133. When the user completes OAuth or stores a token
+    /// under a known credential name, every paused mission whose child
+    /// thread tripped the matching `Authentication` gate is transitioned
+    /// `Paused → Active`, scheduled for an immediate fire if it is
+    /// cron-driven, and has its `paused_gate` cleared.
+    ///
+    /// Returns the ids of the missions that were resumed.
+    ///
+    /// Multiple paused missions can share a credential — for example two
+    /// different Gmail-based missions both stalled on `google_oauth_token`
+    /// — so the result is a `Vec`, not an `Option`.
+    pub async fn resume_paused_for_credential(
+        &self,
+        credential_name: &ironclaw_common::CredentialName,
+        user_id: &str,
+    ) -> Result<Vec<MissionId>, EngineError> {
+        let candidates = self.list_paused_missions_for_user(user_id).await?;
+        let target = credential_name.as_str();
+        let mut resumed = Vec::new();
+        for mission in candidates {
+            let matches = match mission.paused_gate.as_ref().map(|g| &g.resume_kind) {
+                Some(crate::gate::ResumeKind::Authentication {
+                    credential_name: cred,
+                    ..
+                }) => cred.as_str() == target,
+                _ => false,
+            };
+            if !matches {
+                continue;
+            }
+            // Resume scoping:
+            // - `resume_mission` itself enforces ownership: shared
+            //   missions accept a shared-owner caller, user-owned
+            //   missions accept only their owner. Pass `mission.user_id`
+            //   so the access check matches.
+            // - `fire_mission` runs the work — for shared missions it
+            //   should run under the requesting user (who just wrote
+            //   the credential that unblocked it), not under the
+            //   `__shared__` placeholder, because the spawned child
+            //   thread needs the requesting user's project / secret
+            //   scope.
+            let resume_owner = mission.user_id.clone();
+            let fire_owner = if mission.owner_id().is_shared() {
+                user_id.to_string()
+            } else {
+                resume_owner.clone()
+            };
+            match self.resume_mission(mission.id, &resume_owner).await {
+                Ok(()) => {
+                    debug!(
+                        mission_id = %mission.id,
+                        credential = %target,
+                        "auto-resumed paused mission after credential write"
+                    );
+                    resumed.push(mission.id);
+                    // Cron-driven and event-driven missions get an
+                    // immediate fire so the user sees follow-through. A
+                    // mission paused mid-manual-fire still re-fires here:
+                    // the user already initiated the action, completing
+                    // OAuth was their continuation. Best-effort — a
+                    // failure to spawn the immediate thread does not
+                    // unwind the resume.
+                    //
+                    // Event-driven missions (`OnEvent`, `OnSystemEvent`,
+                    // `Webhook`) auto-fire here with `trigger_payload =
+                    // None`. The original triggering payload is gone by
+                    // the time OAuth lands — best-effort continuation
+                    // matches the legacy behavior. A future improvement
+                    // is to preserve the trigger payload on
+                    // `paused_gate` and replay it here; tracked as a
+                    // follow-up.
+                    if !matches!(mission.cadence, MissionCadence::Manual)
+                        && let Err(e) = self.fire_mission(mission.id, &fire_owner, None).await
+                    {
+                        debug!(
+                            mission_id = %mission.id,
+                            error = %e,
+                            "post-resume immediate fire failed; will retry on next tick"
+                        );
+                    }
+                }
+                Err(e) => {
+                    debug!(
+                        mission_id = %mission.id,
+                        error = %e,
+                        "failed to auto-resume paused mission"
+                    );
+                }
+            }
+        }
+        Ok(resumed)
+    }
+
+    /// Resume the paused mission whose `paused_gate.gate_request_id`
+    /// matches `gate_request_id`. Used by the gate-resolve path
+    /// (`/api/chat/gate/resolve`) for `Approval` and `External` gates.
+    ///
+    /// On `Approved`: transitions the mission `Paused → Active` and
+    /// kicks an immediate fire (same as the credential path).
+    /// On `Denied` / `Cancelled`: marks the mission `Failed` instead, so
+    /// the user has to explicitly resume after fixing the underlying
+    /// disagreement.
+    pub async fn resume_paused_for_request_id(
+        &self,
+        gate_request_id: uuid::Uuid,
+        resolution: GateResolutionOutcome,
+        user_id: &str,
+    ) -> Result<Option<MissionId>, EngineError> {
+        let candidates = self.list_paused_missions_for_user(user_id).await?;
+        let Some(snapshot) = candidates.into_iter().find(|m| {
+            m.paused_gate
+                .as_ref()
+                .is_some_and(|g| g.gate_request_id == gate_request_id)
+        }) else {
+            return Ok(None);
+        };
+        let mission_id = snapshot.id;
+        // Re-load the mission and re-check that the same
+        // `paused_gate.gate_request_id` is still pending in a single
+        // mutate-and-save round-trip. Without this, between the
+        // snapshot scan above and `resume_mission`, the mission could
+        // have been manually resumed (or paused again on a different
+        // gate) — `resume_mission` itself accepts both `Paused` and
+        // `Failed`, so it would transition a freshly re-paused mission
+        // back to Active and silently clear the new gate.
+        let mut mission =
+            self.store
+                .load_mission(mission_id)
+                .await?
+                .ok_or_else(|| EngineError::Store {
+                    reason: format!("mission {mission_id} not found"),
+                })?;
+        // Ownership check (mirror of `resume_mission`).
+        let allowed = if mission.owner_id().is_shared() {
+            crate::types::is_shared_owner(user_id)
+        } else {
+            mission.is_owned_by(user_id)
+        };
+        if !allowed {
+            return Err(EngineError::AccessDenied {
+                user_id: user_id.to_string(),
+                entity: format!("mission {mission_id}"),
+            });
+        }
+        // Atomic gate-request-id match. If the live mission is no
+        // longer paused on this exact gate, return `None` instead of
+        // mutating — the caller can interpret that as "someone else
+        // already handled it".
+        let still_matches = mission.status == MissionStatus::Paused
+            && mission
+                .paused_gate
+                .as_ref()
+                .is_some_and(|g| g.gate_request_id == gate_request_id);
+        if !still_matches {
+            debug!(
+                mission_id = %mission_id,
+                %gate_request_id,
+                live_status = ?mission.status,
+                "mission no longer paused on this gate at resume time; skipping"
+            );
+            return Ok(None);
+        }
+        let cadence_for_fire = mission.cadence.clone();
+        // Resume scoping mirror of `resume_paused_for_credential`:
+        // ownership-check uses `mission.user_id`, fire uses the
+        // requesting user for shared missions so the spawned thread
+        // sees the requesting user's project / secret scope.
+        let fire_owner = if mission.owner_id().is_shared() {
+            user_id.to_string()
+        } else {
+            mission.user_id.clone()
+        };
+        match resolution {
+            GateResolutionOutcome::Approved => {
+                mission.status = MissionStatus::Active;
+                mission.paused_gate = None;
+                if let MissionCadence::Cron {
+                    ref expression,
+                    ref timezone,
+                } = mission.cadence
+                {
+                    mission.next_fire_at =
+                        Some(next_cron_fire_required(expression, timezone.as_ref())?);
+                }
+                mission.updated_at = chrono::Utc::now();
+                self.store.save_mission(&mission).await?;
+                {
+                    let mut active = self.active.write().await;
+                    if !active.contains(&mission_id) {
+                        active.push(mission_id);
+                    }
+                }
+                debug!(
+                    mission_id = %mission_id,
+                    %gate_request_id,
+                    "auto-resumed paused mission after approval gate resolved"
+                );
+                if !matches!(cadence_for_fire, MissionCadence::Manual)
+                    && let Err(e) = self.fire_mission(mission_id, &fire_owner, None).await
+                {
+                    debug!(
+                        mission_id = %mission_id,
+                        error = %e,
+                        "post-resume immediate fire failed; will retry on next tick"
+                    );
+                }
+                Ok(Some(mission_id))
+            }
+            GateResolutionOutcome::Denied | GateResolutionOutcome::Cancelled => {
+                mission.status = MissionStatus::Failed;
+                mission.paused_gate = None;
+                mission.approach_history.push(format!(
+                    "FAILED: gate {gate_request_id} denied or cancelled"
+                ));
+                mission.updated_at = chrono::Utc::now();
+                self.store.save_mission(&mission).await?;
+                self.active.write().await.retain(|mid| *mid != mission_id);
+                debug!(
+                    mission_id = %mission_id,
+                    %gate_request_id,
+                    "marked paused mission Failed after gate denial/cancel"
+                );
+                Ok(Some(mission_id))
+            }
+        }
+    }
+
+    /// Helper: list every paused mission visible to `user_id` across all
+    /// projects. Walks `Store::list_all_projects` + per-project
+    /// `list_missions_with_shared` because the engine has no "paused
+    /// mission index" today; the cardinality is small (paused missions
+    /// are rare) so the linear scan is fine.
+    async fn list_paused_missions_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<Mission>, EngineError> {
+        let projects = self.store.list_all_projects().await?;
+        let mut paused = Vec::new();
+        for project in projects {
+            let missions = self
+                .store
+                .list_missions_with_shared(project.id, user_id)
+                .await?;
+            paused.extend(
+                missions
+                    .into_iter()
+                    .filter(|m| m.status == MissionStatus::Paused && m.paused_gate.is_some()),
+            );
+        }
+        Ok(paused)
     }
 
     /// Fire all active `OnSystemEvent` missions whose source and event_type match.
@@ -2456,14 +2693,20 @@ async fn process_mission_outcome_and_notify(
                 kind = resume_kind.kind_name()
             ));
             notify_response = Some(nudge);
-            gate_info = Some(MissionGateInfo {
+            let info = MissionGateInfo {
                 gate_name: gate_name.clone(),
                 action_name: action_name.clone(),
                 parameters: parameters.clone(),
                 call_id: call_id.clone(),
                 gate_request_id: uuid::Uuid::new_v4(),
                 resume_kind: resume_kind.clone(),
-            });
+            };
+            // Persist the gate metadata on the mission itself so the
+            // credential-write / gate-resolve auto-resume paths (#3166)
+            // can match a paused mission back to the gate it's waiting
+            // on without keeping a parallel in-memory map.
+            mission.paused_gate = Some(info.clone());
+            gate_info = Some(info);
         }
         _ => {}
     }
@@ -3348,6 +3591,7 @@ mod tests {
         threads: tokio::sync::RwLock<HashMap<ThreadId, Thread>>,
         missions: tokio::sync::RwLock<HashMap<MissionId, Mission>>,
         docs: tokio::sync::RwLock<Vec<MemoryDoc>>,
+        projects: tokio::sync::RwLock<HashMap<ProjectId, Project>>,
         /// Optional gate that blocks the next `save_mission` call until
         /// the test releases it. Used by `fire_mission_arms_cooldown_before_save`
         /// to deterministically observe the in-flight save state.
@@ -3363,6 +3607,7 @@ mod tests {
                 threads: tokio::sync::RwLock::new(HashMap::new()),
                 missions: tokio::sync::RwLock::new(HashMap::new()),
                 docs: tokio::sync::RwLock::new(Vec::new()),
+                projects: tokio::sync::RwLock::new(HashMap::new()),
                 save_mission_gate: tokio::sync::Mutex::new(None),
                 save_mission_started: tokio::sync::Notify::new(),
             }
@@ -3444,12 +3689,19 @@ mod tests {
             Ok(vec![])
         }
 
-        // ── Project (noop) ──
-        async fn save_project(&self, _: &Project) -> Result<(), EngineError> {
+        // ── Project ──
+        async fn save_project(&self, project: &Project) -> Result<(), EngineError> {
+            self.projects
+                .write()
+                .await
+                .insert(project.id, project.clone());
             Ok(())
         }
-        async fn load_project(&self, _: ProjectId) -> Result<Option<Project>, EngineError> {
-            Ok(None)
+        async fn load_project(&self, id: ProjectId) -> Result<Option<Project>, EngineError> {
+            Ok(self.projects.read().await.get(&id).cloned())
+        }
+        async fn list_all_projects(&self) -> Result<Vec<Project>, EngineError> {
+            Ok(self.projects.read().await.values().cloned().collect())
         }
 
         // ── MemoryDoc ──
@@ -4170,8 +4422,8 @@ mod tests {
     }
 
     /// Regression for #3133. When a mission's child thread emits
-    /// `ThreadOutcome::GatePaused` (e.g. the inner `tool_activate(gmail)`
-    /// triggered an OAuth gate), the previous `_ => {}` arm in
+    /// `ThreadOutcome::GatePaused` (e.g. a direct `gmail` call triggered
+    /// the engine's auth preflight gate), the previous `_ => {}` arm in
     /// `process_mission_outcome_and_notify` swallowed it: the mission
     /// stayed `Active` and the cron scheduler kept re-firing the same
     /// broken mission every tick without surfacing anything to the user.
@@ -4219,7 +4471,7 @@ mod tests {
 
         let outcome = ThreadOutcome::GatePaused {
             gate_name: "auth_required".into(),
-            action_name: "tool_activate".into(),
+            action_name: "gmail".into(),
             call_id: "call-gmail-1".into(),
             parameters: serde_json::json!({"name": "gmail"}),
             resume_kind: ResumeKind::Authentication {
@@ -4260,7 +4512,7 @@ mod tests {
             .gate
             .as_ref()
             .expect("notification must carry MissionGateInfo for GatePaused");
-        assert_eq!(gate.action_name, "tool_activate");
+        assert_eq!(gate.action_name, "gmail");
         // call_id round-trips the engine's LLM tool-call id verbatim —
         // the bridge keeps it for half-2 auto-resume but does NOT
         // surface it to the channel.
@@ -4330,6 +4582,326 @@ mod tests {
             MissionStatus::Active,
             "cron tick filters by Active; pausing on a gate must take \
              the mission off the active path"
+        );
+
+        // (5) The mission carries persistent gate metadata so the
+        // credential-write / gate-resolve auto-resume paths (#3166)
+        // can find it without a parallel index.
+        let pg = mission
+            .paused_gate
+            .as_ref()
+            .expect("paused_gate must be persisted on the mission for auto-resume to work");
+        assert_eq!(pg.gate_request_id, gate.gate_request_id);
+        assert_eq!(pg.call_id, gate.call_id);
+    }
+
+    /// Half-2 of #3133. After a mission paused on an Authentication
+    /// gate and the user completes OAuth (writing the credential),
+    /// the auto-resume path must transition the mission Paused → Active
+    /// and clear `paused_gate`.
+    #[tokio::test]
+    async fn oauth_completion_resumes_paused_mission() {
+        use crate::gate::ResumeKind;
+        use ironclaw_common::CredentialName;
+
+        let store = Arc::new(TestStore::new());
+        let store_dyn = Arc::clone(&store) as Arc<dyn Store>;
+        let mgr = make_mission_manager(Arc::clone(&store_dyn));
+        let project = Project::new("test-user", "test-project", "");
+        let project_id = project.id;
+        store.save_project(&project).await.unwrap();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "Gmail Drafter",
+                "Create a Gmail draft on every tick",
+                MissionCadence::Cron {
+                    expression: "*/3 * * * *".into(),
+                    timezone: None,
+                },
+                vec!["gateway".to_string()],
+            )
+            .await
+            .unwrap();
+
+        // Drive the mission into a Paused state via a GatePaused outcome.
+        let (notification_tx, _rx) = tokio::sync::broadcast::channel::<MissionNotification>(8);
+        let outcome = ThreadOutcome::GatePaused {
+            gate_name: "auth_required".into(),
+            action_name: "gmail".into(),
+            call_id: "call-gmail-1".into(),
+            parameters: serde_json::json!({"name": "gmail"}),
+            resume_kind: ResumeKind::Authentication {
+                credential_name: CredentialName::new("google_oauth_token").unwrap(),
+                instructions: "Sign in with Google.".into(),
+                auth_url: None,
+            },
+            resume_output: None,
+            paused_lease: None,
+        };
+        process_mission_outcome_and_notify(
+            &store_dyn,
+            None,
+            id,
+            ThreadId::new(),
+            &outcome,
+            &notification_tx,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            mgr.get_mission(id).await.unwrap().unwrap().status,
+            MissionStatus::Paused
+        );
+
+        // OAuth completes — the mission should auto-resume.
+        let cred = CredentialName::new("google_oauth_token").unwrap();
+        let resumed = mgr
+            .resume_paused_for_credential(&cred, "test-user")
+            .await
+            .unwrap();
+        assert!(
+            resumed.contains(&id),
+            "auto-resume must include the matching paused mission; got {resumed:?}"
+        );
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(
+            mission.status,
+            MissionStatus::Active,
+            "credential write must transition Paused → Active"
+        );
+        assert!(
+            mission.paused_gate.is_none(),
+            "paused_gate must be cleared after auto-resume"
+        );
+    }
+
+    /// Half-2 of #3133. A credential write under an unrelated name must
+    /// not resume a mission that was waiting on a different credential.
+    #[tokio::test]
+    async fn unrelated_credential_write_does_not_resume_paused_mission() {
+        use crate::gate::ResumeKind;
+        use ironclaw_common::CredentialName;
+
+        let store = Arc::new(TestStore::new());
+        let store_dyn = Arc::clone(&store) as Arc<dyn Store>;
+        let mgr = make_mission_manager(Arc::clone(&store_dyn));
+        let project = Project::new("test-user", "test-project", "");
+        let project_id = project.id;
+        store.save_project(&project).await.unwrap();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "Gmail Drafter",
+                "Create a Gmail draft on every tick",
+                MissionCadence::Cron {
+                    expression: "*/3 * * * *".into(),
+                    timezone: None,
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        let (notification_tx, _rx) = tokio::sync::broadcast::channel::<MissionNotification>(8);
+        let outcome = ThreadOutcome::GatePaused {
+            gate_name: "auth_required".into(),
+            action_name: "gmail".into(),
+            call_id: "call-gmail-2".into(),
+            parameters: serde_json::json!({"name": "gmail"}),
+            resume_kind: ResumeKind::Authentication {
+                credential_name: CredentialName::new("google_oauth_token").unwrap(),
+                instructions: "Sign in with Google.".into(),
+                auth_url: None,
+            },
+            resume_output: None,
+            paused_lease: None,
+        };
+        process_mission_outcome_and_notify(
+            &store_dyn,
+            None,
+            id,
+            ThreadId::new(),
+            &outcome,
+            &notification_tx,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // A *different* credential name lands — must NOT resume the Gmail mission.
+        let unrelated = CredentialName::new("notion_api_token").unwrap();
+        let resumed = mgr
+            .resume_paused_for_credential(&unrelated, "test-user")
+            .await
+            .unwrap();
+        assert!(
+            resumed.is_empty(),
+            "unrelated credential write must not resume; got {resumed:?}"
+        );
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(
+            mission.status,
+            MissionStatus::Paused,
+            "Paused mission must stay Paused when an unrelated credential is written"
+        );
+        assert!(
+            mission.paused_gate.is_some(),
+            "paused_gate must remain so the matching credential write can still resume later"
+        );
+    }
+
+    /// Half-2 of #3133. An approval gate resolved via
+    /// `/api/chat/gate/resolve` with `Approved` resumes the matching
+    /// paused mission keyed by `gate_request_id`.
+    #[tokio::test]
+    async fn gate_resolution_approved_resumes_matching_paused_mission() {
+        use crate::gate::ResumeKind;
+
+        let store = Arc::new(TestStore::new());
+        let store_dyn = Arc::clone(&store) as Arc<dyn Store>;
+        let mgr = make_mission_manager(Arc::clone(&store_dyn));
+        let project = Project::new("test-user", "test-project", "");
+        let project_id = project.id;
+        store.save_project(&project).await.unwrap();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "Risky Sender",
+                "Send the daily summary email",
+                MissionCadence::Cron {
+                    expression: "*/3 * * * *".into(),
+                    timezone: None,
+                },
+                vec!["gateway".to_string()],
+            )
+            .await
+            .unwrap();
+
+        let (notification_tx, mut rx) = tokio::sync::broadcast::channel::<MissionNotification>(8);
+        let outcome = ThreadOutcome::GatePaused {
+            gate_name: "approval_required".into(),
+            action_name: "gmail".into(),
+            call_id: "call-send-1".into(),
+            parameters: serde_json::json!({"action": "send_message"}),
+            resume_kind: ResumeKind::Approval { allow_always: true },
+            resume_output: None,
+            paused_lease: None,
+        };
+        process_mission_outcome_and_notify(
+            &store_dyn,
+            None,
+            id,
+            ThreadId::new(),
+            &outcome,
+            &notification_tx,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let notif = rx.try_recv().unwrap();
+        let request_id = notif.gate.unwrap().gate_request_id;
+
+        let resumed = mgr
+            .resume_paused_for_request_id(request_id, GateResolutionOutcome::Approved, "test-user")
+            .await
+            .unwrap();
+        assert_eq!(resumed, Some(id));
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(mission.status, MissionStatus::Active);
+        assert!(mission.paused_gate.is_none());
+    }
+
+    /// Half-2 of #3133. A `Denied` (or `Cancelled`) gate-resolve marks
+    /// the paused mission Failed — the user has to explicitly resume
+    /// after fixing whatever caused the denial.
+    #[tokio::test]
+    async fn gate_resolution_denied_marks_paused_mission_failed() {
+        use crate::gate::ResumeKind;
+
+        let store = Arc::new(TestStore::new());
+        let store_dyn = Arc::clone(&store) as Arc<dyn Store>;
+        let mgr = make_mission_manager(Arc::clone(&store_dyn));
+        let project = Project::new("test-user", "test-project", "");
+        let project_id = project.id;
+        store.save_project(&project).await.unwrap();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "Risky Sender",
+                "Send the daily summary email",
+                MissionCadence::Cron {
+                    expression: "*/3 * * * *".into(),
+                    timezone: None,
+                },
+                vec!["gateway".to_string()],
+            )
+            .await
+            .unwrap();
+
+        let (notification_tx, mut rx) = tokio::sync::broadcast::channel::<MissionNotification>(8);
+        let outcome = ThreadOutcome::GatePaused {
+            gate_name: "approval_required".into(),
+            action_name: "gmail".into(),
+            call_id: "call-send-2".into(),
+            parameters: serde_json::json!({}),
+            resume_kind: ResumeKind::Approval {
+                allow_always: false,
+            },
+            resume_output: None,
+            paused_lease: None,
+        };
+        process_mission_outcome_and_notify(
+            &store_dyn,
+            None,
+            id,
+            ThreadId::new(),
+            &outcome,
+            &notification_tx,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let notif = rx.try_recv().unwrap();
+        let request_id = notif.gate.unwrap().gate_request_id;
+
+        let resumed = mgr
+            .resume_paused_for_request_id(request_id, GateResolutionOutcome::Denied, "test-user")
+            .await
+            .unwrap();
+        assert_eq!(resumed, Some(id));
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(
+            mission.status,
+            MissionStatus::Failed,
+            "Denied gate must transition the mission to Failed, not Active"
+        );
+        assert!(
+            mission.paused_gate.is_none(),
+            "Failed mission must not retain stale paused_gate metadata"
+        );
+        assert!(
+            mission
+                .approach_history
+                .iter()
+                .any(|e| e.contains("denied") || e.contains("cancelled")),
+            "approach_history should record the gate denial: {:?}",
+            mission.approach_history
         );
     }
 

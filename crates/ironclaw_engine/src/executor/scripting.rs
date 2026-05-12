@@ -16,9 +16,42 @@
 //! - Output truncated to configurable limit with variable listing
 //! - `asyncio.gather()` for parallel tool execution (via ResolveFutures)
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+tokio::task_local! {
+    /// Side-channel between `drive_inline_gate`'s `Cancelled+Authentication`
+    /// fallback and `execute_code`'s exit. When the inline-await for an
+    /// Authentication gate cancels (e.g. because the controller has no
+    /// `PerExecutionContext` registered — the typical case for mission
+    /// child threads), the fallback writes the original `ThreadOutcome::GatePaused`
+    /// here before raising the legacy `RuntimeError("execution paused by
+    /// gate ...")`. `execute_code` reads it on the way out and surfaces
+    /// it as `CodeExecutionResult::need_approval`, which the orchestrator
+    /// then converts to `ThreadOutcome::GatePaused` so the mission flow
+    /// (#3133 half-1) transitions the mission to Paused.
+    ///
+    /// Without this, Tier 1 mission child threads would silently swallow
+    /// the gate, the mission would stay Active, and the cron would keep
+    /// re-firing — the original #3133 ghost-fire pattern.
+    static PENDING_GATE_STASH:
+        RefCell<Option<crate::runtime::messaging::ThreadOutcome>>;
+}
+
+/// Drain the per-execution `PENDING_GATE_STASH`. Called at every
+/// script-error exit in `execute_code_with_skills_inner` so that a
+/// `Cancelled+Authentication` gate raised during a Monty `call.resume`
+/// surfaces as `CodeExecutionResult::need_approval` regardless of which
+/// resume path the script error propagates through. Returns `None` when
+/// the task-local isn't in scope (only happens outside `execute_code`).
+fn take_pending_gate_stash() -> Option<crate::runtime::messaging::ThreadOutcome> {
+    PENDING_GATE_STASH
+        .try_with(|cell| cell.borrow_mut().take())
+        .ok()
+        .flatten()
+}
 
 use monty::{
     ExcType, ExtFunctionResult, LimitedTracker, MontyDate, MontyDateTime, MontyException,
@@ -525,6 +558,43 @@ pub async fn execute_code_with_skills(
     persisted_state: &serde_json::Value,
     skill_snippet_names: &[String],
 ) -> Result<CodeExecutionResult, EngineError> {
+    // Scope the per-execution PENDING_GATE_STASH task-local so the
+    // inline-await Cancelled+Authentication fallback (deeper inside
+    // `drive_inline_gate`) has a side channel to surface the original
+    // gate as `need_approval` on the way out. See the static's
+    // doc-comment for why this exists.
+    PENDING_GATE_STASH
+        .scope(RefCell::new(None), async move {
+            execute_code_with_skills_inner(
+                code,
+                thread,
+                llm,
+                effects,
+                leases,
+                policy,
+                context,
+                capability_policies,
+                persisted_state,
+                skill_snippet_names,
+            )
+            .await
+        })
+        .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_code_with_skills_inner(
+    code: &str,
+    thread: &Thread,
+    llm: &Arc<dyn LlmBackend>,
+    effects: &Arc<dyn EffectExecutor>,
+    leases: &LeaseManager,
+    policy: &PolicyEngine,
+    context: &ThreadExecutionContext,
+    capability_policies: &[crate::types::capability::PolicyRule],
+    persisted_state: &serde_json::Value,
+    skill_snippet_names: &[String],
+) -> Result<CodeExecutionResult, EngineError> {
     let mut stdout = String::new();
     let mut action_results = Vec::new();
     let mut events = Vec::new();
@@ -617,14 +687,22 @@ pub async fn execute_code_with_skills(
     let mut progress = match run_result {
         Ok(Ok(p)) => p,
         Ok(Err(e)) => {
-            // Runtime error flows back to LLM
+            // Runtime error flows back to LLM. Before classifying it,
+            // check the inline-await fallback stash: if a Cancelled+
+            // Authentication gate fired and surfaced as a
+            // `RuntimeError("execution paused by gate ...")`, surface
+            // it as `need_approval` so the orchestrator can produce
+            // `ThreadOutcome::GatePaused` and mission flows transition
+            // to Paused. Without this, Tier 1 mission threads silently
+            // swallow the gate (the original #3133 ghost-fire shape).
+            let pending_gate = take_pending_gate_stash();
             let category = classify_runtime_error(&e.to_string());
             return Ok(CodeExecutionResult {
                 return_value: serde_json::Value::Null,
                 stdout: format!("{stdout}\nError: {e}"),
                 action_results,
                 events,
-                need_approval: None,
+                need_approval: pending_gate,
                 recursive_tokens,
                 final_answer: None,
                 failure: Some(category),
@@ -759,13 +837,16 @@ pub async fn execute_code_with_skills(
                     })) {
                         Ok(Ok(p)) => progress = p,
                         Ok(Err(e)) => {
+                            // Read the inline-await stash before the
+                            // runtime-error exit. See `take_pending_gate_stash`.
+                            let pending_gate = take_pending_gate_stash();
                             stdout.push_str(&format!("\nError: {e}"));
                             return Ok(CodeExecutionResult {
                                 return_value: serde_json::Value::Null,
                                 stdout,
                                 action_results,
                                 events,
-                                need_approval: None,
+                                need_approval: pending_gate,
                                 recursive_tokens,
                                 final_answer,
                                 failure: Some(classify_runtime_error(&e.to_string())),
@@ -797,13 +878,14 @@ pub async fn execute_code_with_skills(
                     })) {
                         Ok(Ok(p)) => progress = p,
                         Ok(Err(e)) => {
+                            let pending_gate = take_pending_gate_stash();
                             stdout.push_str(&format!("\nError: {e}"));
                             return Ok(CodeExecutionResult {
                                 return_value: serde_json::Value::Null,
                                 stdout,
                                 action_results,
                                 events,
-                                need_approval: None,
+                                need_approval: pending_gate,
                                 recursive_tokens,
                                 final_answer,
                                 failure: Some(classify_runtime_error(&e.to_string())),
@@ -1247,13 +1329,14 @@ pub async fn execute_code_with_skills(
                 })) {
                     Ok(Ok(p)) => progress = p,
                     Ok(Err(e)) => {
+                        let pending_gate = take_pending_gate_stash();
                         stdout.push_str(&format!("\nError: {e}"));
                         return Ok(CodeExecutionResult {
                             return_value: serde_json::Value::Null,
                             stdout,
                             action_results,
                             events,
-                            need_approval: None,
+                            need_approval: pending_gate,
                             recursive_tokens,
                             final_answer,
                             failure: Some(classify_runtime_error(&e.to_string())),
@@ -2085,6 +2168,44 @@ async fn drive_inline_gate(
             .await;
 
         if let Some(outcome) = denial_outcome_for_resolution(&resolution) {
+            // Cancelled+Authentication → unwind via the legacy
+            // `RuntimeError("execution paused by gate ...")` so the
+            // outer orchestrator can produce `ThreadOutcome::GatePaused`
+            // and missions can transition to Paused. Cancelled here
+            // means the controller can't resolve the auth inline (no
+            // OAuth wiring) — the legacy unwind path is the right
+            // fallback. Denied / explicit user-cancel remain failures.
+            if matches!(resolution, crate::gate::GateResolution::Cancelled)
+                && matches!(
+                    gate.resume_kind,
+                    crate::gate::ResumeKind::Authentication { .. }
+                )
+            {
+                // Stash the original gate so `execute_code`'s exit can
+                // surface it as `need_approval`. Without this, Tier 1
+                // mission child threads silently swallow the gate and
+                // the cron keeps re-firing the mission (#3133 ghost
+                // fire). Best-effort — if the task-local isn't in
+                // scope (theoretically impossible since we always run
+                // inside `execute_code_with_skills`'s scope, but
+                // defensive), `try_with` no-ops.
+                let _ = PENDING_GATE_STASH.try_with(|cell| {
+                    *cell.borrow_mut() =
+                        Some(crate::runtime::messaging::ThreadOutcome::GatePaused {
+                            gate_name: gate.gate_name.clone(),
+                            action_name: gate.action_name.clone(),
+                            call_id: gate.call_id.clone(),
+                            parameters: gate.parameters.clone(),
+                            resume_kind: gate.resume_kind.clone(),
+                            resume_output: None,
+                            paused_lease: None,
+                        });
+                });
+                return ExtFunctionResult::Error(MontyException::new(
+                    ExcType::RuntimeError,
+                    Some(format!("execution paused by gate '{}'", gate.gate_name)),
+                ));
+            }
             events.push(EventKind::ActionFailed {
                 step_id: context.step_id,
                 action_name: gate.action_name.clone(),
@@ -2182,9 +2303,14 @@ async fn drive_inline_gate(
                 parameters,
                 resume_kind,
                 ..
-            }) if matches!(*resume_kind, crate::gate::ResumeKind::Approval { .. }) => {
+            }) if matches!(
+                *resume_kind,
+                crate::gate::ResumeKind::Approval { .. }
+                    | crate::gate::ResumeKind::Authentication { .. }
+            ) =>
+            {
                 // Refund the use we just consumed — the next loop
-                // iteration will pause and re-consume on approval.
+                // iteration will pause and re-consume on resolution.
                 let _ = leases.refund_use(lease.id).await;
                 events.push(EventKind::ApprovalRequested {
                     action_name: action_name.clone(),
@@ -2332,14 +2458,25 @@ async fn resolve_tool_future(
                 params_summary: params_summary.clone(),
             });
 
-            // Authentication / External resume kinds keep the legacy
-            // re-entry path: their resolution installs new state
-            // (credentials, callback payloads) that only takes effect
-            // on the next thread run-through, not via direct hand-back
-            // to a suspended call. Surface as the historical
-            // `RuntimeError` so the orchestrator unwinds and the
-            // bridge's `ThreadOutcome::GatePaused` arm handles it.
-            if !matches!(*resume_kind, crate::gate::ResumeKind::Approval { .. }) {
+            // External resume kinds keep the legacy re-entry path —
+            // their resolution installs callback-payload state that
+            // can't be handed back to a suspended call. Approval and
+            // Authentication both go through `drive_inline_gate`:
+            // Approval resolves on user click, Authentication resolves
+            // when `bridge::resolve_inline_gates_for_credential` (the
+            // OAuth-callback hook from #3133 half-2) delivers
+            // `GateResolution::Approved` to the parked controller.
+            // (Mission-scoped resumes go through
+            // `bridge::resume_paused_missions_for_credential` — that's
+            // a separate path for background missions whose child
+            // threads were paused on the same gate.) In both
+            // inline-await cases the action retries inline and the
+            // script continues without unwinding.
+            if !matches!(
+                *resume_kind,
+                crate::gate::ResumeKind::Approval { .. }
+                    | crate::gate::ResumeKind::Authentication { .. }
+            ) {
                 return ExtFunctionResult::Error(MontyException::new(
                     ExcType::RuntimeError,
                     Some(format!("execution paused by gate '{gate_name}'")),

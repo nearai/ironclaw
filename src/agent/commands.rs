@@ -353,8 +353,8 @@ impl Agent {
     }
 
     /// Trigger a manual heartbeat check.
-    pub(super) async fn process_heartbeat(&self) -> Result<SubmissionResult, Error> {
-        let Some(workspace) = self.workspace() else {
+    pub(super) async fn process_heartbeat(&self, user_id: &str) -> Result<SubmissionResult, Error> {
+        let Some(workspace) = self.workspace_for_user(user_id) else {
             return Ok(SubmissionResult::error(
                 "Heartbeat requires a workspace (database must be connected).",
             ));
@@ -1163,6 +1163,157 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::format_vertical_list;
+    use crate::agent::agent_loop::{Agent, AgentDeps};
+    use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
+    use crate::agent::submission::SubmissionResult;
+    use crate::config::{AgentConfig, SafetyConfig, SkillsConfig};
+    use crate::hooks::HookRegistry;
+    use crate::tools::ToolRegistry;
+    use ironclaw_llm::{
+        CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ToolCompletionRequest,
+        ToolCompletionResponse,
+    };
+    use ironclaw_safety::SafetyLayer;
+    use rust_decimal::Decimal;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    struct StaticLlmProvider;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for StaticLlmProvider {
+        fn model_name(&self) -> &str {
+            "static-mock"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, crate::error::LlmError> {
+            Ok(CompletionResponse {
+                content: "owner heartbeat content leaked".to_string(),
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, crate::error::LlmError> {
+            Ok(ToolCompletionResponse {
+                content: Some("owner heartbeat content leaked".to_string()),
+                tool_calls: Vec::new(),
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                reasoning: None,
+            })
+        }
+    }
+
+    fn make_commands_test_agent() -> Agent {
+        let deps = AgentDeps {
+            owner_id: "default".to_string(),
+            store: None,
+            settings_store: None,
+            llm: Arc::new(StaticLlmProvider),
+            cheap_llm: None,
+            safety: Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 100_000,
+                injection_check_enabled: true,
+            })),
+            tools: Arc::new(ToolRegistry::new()),
+            workspace: None,
+            extension_manager: None,
+            skill_registry: None,
+            skill_catalog: None,
+            skills_config: SkillsConfig::default(),
+            hooks: Arc::new(HookRegistry::new()),
+            auth_manager: None,
+            cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
+            sse_tx: None,
+            http_interceptor: None,
+            transcription: None,
+            document_extraction: None,
+            sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
+            builder: None,
+            llm_backend: "nearai".to_string(),
+            tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+        };
+
+        Agent::new(
+            AgentConfig {
+                name: "commands-test-agent".to_string(),
+                max_parallel_jobs: 1,
+                job_timeout: Duration::from_secs(60),
+                stuck_threshold: Duration::from_secs(60),
+                repair_check_interval: Duration::from_secs(30),
+                max_repair_attempts: 1,
+                use_planning: false,
+                session_idle_timeout: Duration::from_secs(300),
+                allow_local_tools: false,
+                max_cost_per_day_cents: None,
+                max_actions_per_hour: None,
+                max_cost_per_user_per_day_cents: None,
+                max_tool_iterations: 50,
+                auto_approve_tools: false,
+                default_timezone: "UTC".to_string(),
+                max_jobs_per_user: None,
+                max_tokens_per_job: 0,
+                multi_tenant: false,
+                max_llm_concurrent_per_user: None,
+                max_jobs_concurrent_per_user: None,
+                engine_v2: false,
+            },
+            deps,
+            Arc::new(crate::channels::ChannelManager::new()),
+            None,
+            None,
+            None,
+            Some(Arc::new(crate::context::ContextManager::new(1))),
+            None,
+        )
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn process_heartbeat_uses_requesting_user_workspace() {
+        let (db, _dir) = crate::agent::test_support::make_libsql_test_db().await;
+        let owner_workspace = Arc::new(crate::workspace::Workspace::new_with_db(
+            "owner-scope",
+            Arc::clone(&db),
+        ));
+        owner_workspace
+            .write(
+                crate::workspace::paths::HEARTBEAT,
+                "- [ ] owner-only private heartbeat check",
+            )
+            .await
+            .expect("seed owner heartbeat checklist");
+
+        let mut agent = make_commands_test_agent();
+        agent.deps.workspace = Some(owner_workspace);
+
+        let result = agent
+            .process_heartbeat("alice")
+            .await
+            .expect("heartbeat command should run");
+
+        assert!(
+            matches!(&result, SubmissionResult::Ok { message: Some(msg) } if msg.contains("Heartbeat skipped")),
+            "manual heartbeat should use alice's empty workspace, not owner private checklist: {result:?}"
+        );
+    }
 
     #[test]
     fn format_vertical_list_renders_one_item_per_line() {

@@ -20,7 +20,7 @@ bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types
 testing = []
 
 [dependencies]
-ironclaw_common = { path = "../ironclaw_common", version = "0.4.1" }
+ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
 ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.2" }
 
 async-trait = "0.1"

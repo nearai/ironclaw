@@ -20,6 +20,14 @@ telegram = [
     "telethon>=1.40",
 ]
 
+# `fixtures/` (live-LLM record/replay JSON, no Python) sits alongside
+# `scenarios/` after #3133 landed. Setuptools auto-discovery refuses a
+# flat layout with multiple top-level packages, so scope discovery to
+# the actual Python package and exclude data-only directories.
+[tool.setuptools.packages.find]
+include = ["scenarios*"]
+exclude = ["fixtures*", "screenshots*", "test-pages*"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"

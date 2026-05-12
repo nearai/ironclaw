@@ -2,6 +2,21 @@
 
 use std::time::Duration;
 
+/// Errors that occur while assembling LLM configuration from settings/env.
+///
+/// Distinct from [`LlmError`] (runtime / request errors): these fire before
+/// any provider is constructed, when a per-backend config struct is being
+/// built. The binary's `crate::error::ConfigError` carries a
+/// `From<LlmConfigError>` impl so callers can `?` through both layers.
+#[derive(Debug, thiserror::Error)]
+pub enum LlmConfigError {
+    #[error("Missing required configuration: {key}. {hint}")]
+    MissingRequired { key: String, hint: String },
+
+    #[error("Invalid configuration value for {key}: {message}")]
+    InvalidValue { key: String, message: String },
+}
+
 /// LLM provider errors.
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {

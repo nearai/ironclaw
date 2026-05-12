@@ -2031,17 +2031,24 @@ async fn execute_single_action_with_inline_retry(
             return (result_json, accumulated_events, output, current_lease.id);
         }
 
-        // Gate paused. Only `Approval` resume kinds get the inline-await
-        // treatment; Auth/External fall through to the legacy
-        // `gate_paused` sentinel + re-entry path so the bridge can
-        // install credentials / wait for callbacks.
+        // Gate paused. Approval and Authentication get the inline-await
+        // treatment (#3133 / #3166): host controller resolves them in
+        // place, the suspended call retries, and the orchestrator
+        // continues without unwinding. External keeps the legacy
+        // `gate_paused` sentinel + re-entry path because its resolution
+        // payload (callback body) can't be handed back to a suspended
+        // call.
         let resume_kind: crate::gate::ResumeKind = result_json
             .get("resume_kind")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or(crate::gate::ResumeKind::Approval {
                 allow_always: false,
             });
-        if !matches!(resume_kind, crate::gate::ResumeKind::Approval { .. }) {
+        if !matches!(
+            resume_kind,
+            crate::gate::ResumeKind::Approval { .. }
+                | crate::gate::ResumeKind::Authentication { .. }
+        ) {
             accumulated_events.push(event);
             return (result_json, accumulated_events, output, current_lease.id);
         }
@@ -2077,7 +2084,7 @@ async fn execute_single_action_with_inline_retry(
                 action_name: name.to_string(),
                 call_id: call_id.to_string(),
                 parameters: gate_parameters,
-                resume_kind,
+                resume_kind: resume_kind.clone(),
                 conversation_id: exec_ctx.conversation_id,
             })
             .await;
@@ -2085,6 +2092,19 @@ async fn execute_single_action_with_inline_retry(
         if let Some(outcome) =
             crate::executor::scripting::denial_outcome_for_resolution(&resolution)
         {
+            // Cancelled+Authentication → fall through to legacy
+            // `gate_paused` sentinel so missions / non-inline-aware
+            // controllers can still surface a Paused state. See the
+            // matching branch in
+            // `structured::execute_with_inline_gate_retry`. The
+            // already-accumulated `ApprovalRequested` event was
+            // pushed before the pause; we re-emit it on the new
+            // result_json carrying the original gate metadata.
+            if matches!(resolution, crate::gate::GateResolution::Cancelled)
+                && matches!(resume_kind, crate::gate::ResumeKind::Authentication { .. })
+            {
+                return (result_json, accumulated_events, output, current_lease.id);
+            }
             let error_msg = outcome.event_error();
             let denial = serde_json::json!({"error": &error_msg});
             let denial_event = EventKind::ActionFailed {

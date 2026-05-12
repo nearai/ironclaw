@@ -42,9 +42,9 @@ pub fn seeded_default_permission(tool_name: &str) -> Option<PermissionState> {
 fn seeded_default_permission_canonical(canonical_tool_name: &str) -> Option<PermissionState> {
     match canonical_tool_name {
         "echo" | "time" | "json" | "memory_search" | "memory_read" | "memory_write"
-        | "memory_tree" | "tool_list" | "tool_info" | "tool_search" | "tool_activate"
-        | "skill_list" | "skill_search" | "http" | "list_jobs" | "job_status" | "job_events"
-        | "image_analyze" | "message" => Some(PermissionState::AlwaysAllow),
+        | "memory_tree" | "tool_list" | "tool_info" | "tool_search" | "skill_list"
+        | "skill_search" | "http" | "list_jobs" | "job_status" | "job_events" | "image_analyze"
+        | "message" => Some(PermissionState::AlwaysAllow),
         "shell"
         | "read_file"
         | "write_file"
@@ -421,19 +421,19 @@ mod tests {
     #[test]
     fn test_effective_permission_checks_tool_name_aliases() {
         let mut overrides = HashMap::new();
-        overrides.insert("tool-activate".to_string(), PermissionState::Disabled);
+        overrides.insert("tool-install".to_string(), PermissionState::Disabled);
 
         assert_eq!(
-            effective_permission("tool_activate", &overrides),
+            effective_permission("tool_install", &overrides),
             PermissionState::Disabled,
             "hyphenated saved override should apply to underscore runtime lookup"
         );
 
         overrides.clear();
-        overrides.insert("tool_activate".to_string(), PermissionState::AskEachTime);
+        overrides.insert("tool_install".to_string(), PermissionState::AskEachTime);
 
         assert_eq!(
-            effective_permission("tool-activate", &overrides),
+            effective_permission("tool-install", &overrides),
             PermissionState::AskEachTime,
             "underscore saved override should apply to hyphenated runtime lookup"
         );

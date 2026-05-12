@@ -262,33 +262,36 @@ async fn async_main() -> anyhow::Result<()> {
         Some(Command::Login { openai_codex }) => {
             init_cli_tracing();
             if *openai_codex {
-                // Resolve codex config so OPENAI_CODEX_* env overrides are
-                // honoured even when LLM_BACKEND isn't set to openai_codex.
-                let codex_config = {
-                    let config = Config::from_env()
-                        .await
-                        .map_err(|e| anyhow::anyhow!("{}", e))?;
-                    config.llm.openai_codex.unwrap_or_else(|| {
-                        use ironclaw_llm::OpenAiCodexConfig;
-                        let mut cfg = OpenAiCodexConfig::default();
-                        if let Ok(v) = std::env::var("OPENAI_CODEX_AUTH_URL") {
-                            cfg.auth_endpoint = v;
-                        }
-                        if let Ok(v) = std::env::var("OPENAI_CODEX_API_URL") {
-                            cfg.api_base_url = v;
-                        }
-                        if let Ok(v) = std::env::var("OPENAI_CODEX_CLIENT_ID") {
-                            cfg.client_id = v;
-                        }
-                        if let Ok(v) = std::env::var("OPENAI_CODEX_SESSION_PATH") {
-                            cfg.session_path = std::path::PathBuf::from(v);
-                        }
-                        cfg
-                    })
+                use ironclaw_llm::auth::{
+                    AuthPrompt, LoginRequest, OpenAiCodexLoginOptions, start_login,
                 };
-                let mgr = ironclaw_llm::OpenAiCodexSessionManager::new(codex_config)
-                    .map_err(|e| anyhow::anyhow!("{}", e))?;
-                mgr.device_code_login()
+
+                struct CliPrompt;
+                impl AuthPrompt for CliPrompt {
+                    fn show_device_code(&self, verification_uri: &str, user_code: &str) {
+                        println!("Visit {verification_uri} and enter the code: {user_code}");
+                    }
+                }
+
+                // Resolve the full config so codex endpoints / client-id /
+                // session-path overrides committed to TOML or DB are
+                // honoured, not just env vars. `Config::from_env` runs the
+                // standard precedence pipeline (TOML < env < DB), and any
+                // resolved codex config wins over the env-only fallback.
+                let opts = match Config::from_env().await {
+                    Ok(cfg) => cfg
+                        .llm
+                        .openai_codex
+                        .as_ref()
+                        .map(OpenAiCodexLoginOptions::from_resolved_config)
+                        .unwrap_or_else(OpenAiCodexLoginOptions::from_env),
+                    // Login should still work on a fresh machine where
+                    // `Config::from_env` would fail (e.g. no DB). Fall
+                    // back to env-only options in that case.
+                    Err(_) => OpenAiCodexLoginOptions::from_env(),
+                };
+
+                start_login(LoginRequest::OpenAiCodex(opts), &CliPrompt)
                     .await
                     .map_err(|e| anyhow::anyhow!("{}", e))?;
                 println!(
@@ -994,11 +997,18 @@ async fn async_main() -> anyhow::Result<()> {
                 let gw_state = Arc::clone(gw.state());
                 tokio::spawn(async move {
                     while let Ok((_job_id, user_id, event)) = rx.recv().await {
-                        if user_id.is_empty() {
-                            gw_state.sse.broadcast(event);
-                        } else {
-                            gw_state.sse.broadcast_for_user(&user_id, event);
-                        }
+                        // Reuse the gateway's central status-event router so
+                        // the sandbox dispatch path inherits the same drop /
+                        // WARN / broadcast policy as `Channel::send_status`.
+                        // Empty `user_id` collapses into the None arm via
+                        // `dispatch_status_event`'s `!is_empty()` filter.
+                        let user_id_opt = (!user_id.is_empty()).then_some(user_id.as_str());
+                        ironclaw::channels::web::dispatch_status_event(
+                            &gw_state.sse,
+                            gw_state.multi_tenant_mode,
+                            user_id_opt,
+                            event,
+                        );
                     }
                 });
             }

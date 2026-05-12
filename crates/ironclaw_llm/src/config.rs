@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 use secrecy::SecretString;
 
+use crate::error::LlmConfigError;
 use crate::registry::ProviderProtocol;
 use crate::session::SessionConfig;
 use ironclaw_common::paths::ironclaw_base_dir;
@@ -133,6 +134,32 @@ impl Default for OpenAiCodexConfig {
     }
 }
 
+impl OpenAiCodexConfig {
+    /// Build a Codex config from already-resolved overrides, falling back to
+    /// crate defaults for any field the caller leaves as `None`. Callers
+    /// (the binary) own env / settings precedence and SSRF validation; this
+    /// helper centralises the default values inside the crate.
+    pub fn build(
+        model: Option<String>,
+        auth_endpoint: Option<String>,
+        api_base_url: Option<String>,
+        client_id: Option<String>,
+        session_path: Option<PathBuf>,
+        token_refresh_margin_secs: Option<u64>,
+    ) -> Self {
+        let defaults = Self::default();
+        Self {
+            model: model.unwrap_or(defaults.model),
+            auth_endpoint: auth_endpoint.unwrap_or(defaults.auth_endpoint),
+            api_base_url: api_base_url.unwrap_or(defaults.api_base_url),
+            client_id: client_id.unwrap_or(defaults.client_id),
+            session_path: session_path.unwrap_or(defaults.session_path),
+            token_refresh_margin_secs: token_refresh_margin_secs
+                .unwrap_or(defaults.token_refresh_margin_secs),
+        }
+    }
+}
+
 /// Configuration for AWS Bedrock (native Converse API).
 #[derive(Debug, Clone)]
 pub struct BedrockConfig {
@@ -144,6 +171,52 @@ pub struct BedrockConfig {
     pub cross_region: Option<String>,
     /// AWS named profile (for SSO / assume-role workflows).
     pub profile: Option<String>,
+}
+
+impl BedrockConfig {
+    /// Default region used when none is configured.
+    pub const DEFAULT_REGION: &'static str = "us-east-1";
+
+    /// Valid cross-region inference prefixes accepted by Bedrock.
+    pub const VALID_CROSS_REGION_PREFIXES: &'static [&'static str] =
+        &["us", "eu", "apac", "global"];
+
+    /// Build a Bedrock config from already-resolved overrides.
+    ///
+    /// - `region` falls back to [`Self::DEFAULT_REGION`] when `None`.
+    /// - `model` is required (returns [`LlmConfigError::MissingRequired`] when `None`).
+    /// - `cross_region`, when set, is validated against
+    ///   [`Self::VALID_CROSS_REGION_PREFIXES`].
+    pub fn build(
+        region: Option<String>,
+        model: Option<String>,
+        cross_region: Option<String>,
+        profile: Option<String>,
+    ) -> Result<Self, LlmConfigError> {
+        let region = region.unwrap_or_else(|| Self::DEFAULT_REGION.to_string());
+        let model = model.ok_or_else(|| LlmConfigError::MissingRequired {
+            key: "BEDROCK_MODEL".to_string(),
+            hint: "Set BEDROCK_MODEL or selected_model when LLM_BACKEND=bedrock".to_string(),
+        })?;
+        if let Some(ref cr) = cross_region
+            && !Self::VALID_CROSS_REGION_PREFIXES.contains(&cr.as_str())
+        {
+            return Err(LlmConfigError::InvalidValue {
+                key: "BEDROCK_CROSS_REGION".to_string(),
+                message: format!(
+                    "'{}' is not valid, expected one of: {}",
+                    cr,
+                    Self::VALID_CROSS_REGION_PREFIXES.join(", ")
+                ),
+            });
+        }
+        Ok(Self {
+            region,
+            model,
+            cross_region,
+            profile,
+        })
+    }
 }
 
 /// LLM provider configuration.
@@ -343,10 +416,117 @@ pub struct GeminiOauthConfig {
 }
 
 impl GeminiOauthConfig {
+    /// Default model used when none is configured.
+    pub const DEFAULT_MODEL: &'static str = "gemini-2.5-flash";
+
     pub fn default_credentials_path() -> PathBuf {
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".gemini")
             .join("oauth_creds.json")
+    }
+
+    /// Build a Gemini OAuth config from already-resolved overrides.
+    ///
+    /// Falls back to [`Self::DEFAULT_MODEL`] and
+    /// [`Self::default_credentials_path`] when their respective overrides
+    /// are absent.
+    pub fn build(model: Option<String>, credentials_path: Option<PathBuf>) -> Self {
+        Self {
+            model: model.unwrap_or_else(|| Self::DEFAULT_MODEL.to_string()),
+            credentials_path: credentials_path.unwrap_or_else(Self::default_credentials_path),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bedrock_build_applies_default_region() {
+        let cfg = BedrockConfig::build(None, Some("model-x".to_string()), None, None)
+            .expect("model is set");
+        assert_eq!(cfg.region, BedrockConfig::DEFAULT_REGION);
+        assert_eq!(cfg.model, "model-x");
+        assert!(cfg.cross_region.is_none());
+        assert!(cfg.profile.is_none());
+    }
+
+    #[test]
+    fn bedrock_build_requires_model() {
+        let err = BedrockConfig::build(Some("us-west-2".into()), None, None, None)
+            .expect_err("model is required");
+        assert!(matches!(
+            err,
+            LlmConfigError::MissingRequired { ref key, .. } if key == "BEDROCK_MODEL"
+        ));
+    }
+
+    #[test]
+    fn bedrock_build_validates_cross_region() {
+        for ok in BedrockConfig::VALID_CROSS_REGION_PREFIXES {
+            let cfg =
+                BedrockConfig::build(None, Some("model".into()), Some((*ok).to_string()), None)
+                    .expect("valid prefix");
+            assert_eq!(cfg.cross_region.as_deref(), Some(*ok));
+        }
+
+        let err = BedrockConfig::build(None, Some("model".into()), Some("ap".to_string()), None)
+            .expect_err("'ap' is not a valid prefix");
+        assert!(matches!(
+            err,
+            LlmConfigError::InvalidValue { ref key, .. } if key == "BEDROCK_CROSS_REGION"
+        ));
+    }
+
+    #[test]
+    fn gemini_oauth_build_applies_defaults() {
+        let cfg = GeminiOauthConfig::build(None, None);
+        assert_eq!(cfg.model, GeminiOauthConfig::DEFAULT_MODEL);
+        assert_eq!(
+            cfg.credentials_path,
+            GeminiOauthConfig::default_credentials_path()
+        );
+
+        let cfg = GeminiOauthConfig::build(
+            Some("gemini-foo".into()),
+            Some(PathBuf::from("/tmp/creds.json")),
+        );
+        assert_eq!(cfg.model, "gemini-foo");
+        assert_eq!(cfg.credentials_path, PathBuf::from("/tmp/creds.json"));
+    }
+
+    #[test]
+    fn openai_codex_build_applies_defaults() {
+        let cfg = OpenAiCodexConfig::build(None, None, None, None, None, None);
+        let defaults = OpenAiCodexConfig::default();
+        assert_eq!(cfg.model, defaults.model);
+        assert_eq!(cfg.auth_endpoint, defaults.auth_endpoint);
+        assert_eq!(cfg.api_base_url, defaults.api_base_url);
+        assert_eq!(cfg.client_id, defaults.client_id);
+        assert_eq!(cfg.session_path, defaults.session_path);
+        assert_eq!(
+            cfg.token_refresh_margin_secs,
+            defaults.token_refresh_margin_secs
+        );
+    }
+
+    #[test]
+    fn openai_codex_build_overrides_take_precedence() {
+        let cfg = OpenAiCodexConfig::build(
+            Some("gpt-overridden".into()),
+            Some("https://auth.example".into()),
+            Some("https://api.example".into()),
+            Some("client-z".into()),
+            Some(PathBuf::from("/tmp/sess.json")),
+            Some(60),
+        );
+        assert_eq!(cfg.model, "gpt-overridden");
+        assert_eq!(cfg.auth_endpoint, "https://auth.example");
+        assert_eq!(cfg.api_base_url, "https://api.example");
+        assert_eq!(cfg.client_id, "client-z");
+        assert_eq!(cfg.session_path, PathBuf::from("/tmp/sess.json"));
+        assert_eq!(cfg.token_refresh_margin_secs, 60);
     }
 }

@@ -212,10 +212,11 @@ def _write_google_skill(skills_dir: str, mock_api_host: str) -> None:
             f"""---
 name: google_auth_matrix
 version: "1.0.0"
-keywords:
-  - google
-  - drive
-  - gmail
+activation:
+  keywords:
+    - google
+    - drive
+    - gmail
 credentials:
   - name: google_oauth_token
     provider: google
@@ -799,6 +800,18 @@ async def _read_repl_until_any(
         if re.search(pattern, output, re.IGNORECASE):
             return output, pattern
     raise AssertionError(f"Matched union {union!r} but no individual pattern matched")
+
+
+async def _try_read_repl_until_any(
+    repl: dict,
+    patterns: list[str],
+    *,
+    timeout: float = 30.0,
+) -> tuple[str, str] | None:
+    try:
+        return await _read_repl_until_any(repl, patterns, timeout=timeout)
+    except AssertionError:
+        return None
 
 
 async def _drain_repl_output(repl: dict, *, idle_secs: float = 0.4) -> str:
@@ -1455,18 +1468,14 @@ async def test_wasm_tool_oauth_roundtrip(auth_matrix_server):
 @pytest.mark.xfail(
     strict=False,
     reason=(
-        "Obsolete under the engine-v2 callable-only contract from #2868. "
-        "When the LLM emits a direct call to a not-yet-authed extension, "
-        "the engine now returns 'action <name> is not callable in this "
-        "execution context' instead of surfacing a gate_required "
-        "Authentication event with an auth URL. The new model-facing "
-        "enablement path is `tool_activate(name=...)`, exercised in "
-        "test_v2_tool_activate_surface.py. The mock LLM is canned to emit "
-        "tool calls directly, so it can't drive the new contract; until "
-        "the canned response is updated (or the engine restores a bridge-"
-        "level fallback) this scenario can't be reproduced from a "
-        "scripted LLM. test_settings_first_gmail_auth_then_chat_runs "
-        "covers the same auth flow through the settings UI path."
+        "Obsolete under the engine-v2 callable-only contract from #2868 "
+        "and the post-#3133 direct-callable contract. When the LLM emits "
+        "a direct call to a not-yet-authed extension, the engine raises "
+        "an Authentication gate via the auth preflight rather than the "
+        "older `gate_required` Authentication event with an auth URL. "
+        "The mock LLM's canned response shape doesn't match the new "
+        "contract; test_settings_first_gmail_auth_then_chat_runs covers "
+        "the same auth flow through the settings UI path."
     ),
 )
 async def test_wasm_tool_first_chat_auth_attempt_emits_auth_url(auth_matrix_server):
@@ -2022,16 +2031,29 @@ async def test_repl_http_auth_prompt_accepts_token_and_retries(auth_matrix_repl)
             "OAuth callback paths are covered by other auth-matrix tests."
         )
 
-    await _drain_repl_output(repl)
-    await _send_repl_line(repl, prompt)
-    output, matched = await _read_repl_until_any(
-        repl,
-        [
-            r"The http tool returned:|Budget Q1\.xlsx|Roadmap\.md",
-            r"requires approval|Reply .*yes.*approve",
-        ],
-        timeout=60.0,
-    )
+    result_patterns = [
+        r"The http tool returned:|Budget Q1\.xlsx|Roadmap\.md",
+        r"requires approval|Reply .*yes.*approve",
+    ]
+
+    # Token entry resolves the inline auth gate and the suspended CodeAct turn
+    # resumes asynchronously. Under coverage CI that resume can still be
+    # processing after the secret row appears; sending a duplicate prompt at
+    # that point races the active REPL turn and can leave the test waiting on
+    # the duplicate while the original turn owns the spinner. Prefer the
+    # resumed original output, and only fall back to a manual retry if no
+    # output appears.
+    resumed = await _try_read_repl_until_any(repl, result_patterns, timeout=60.0)
+    if resumed is None:
+        await _drain_repl_output(repl)
+        await _send_repl_line(repl, prompt)
+        output, matched = await _read_repl_until_any(
+            repl,
+            result_patterns,
+            timeout=60.0,
+        )
+    else:
+        output, matched = resumed
     if "requires approval" in matched.lower() or "reply" in matched.lower():
         output += await _drain_repl_output(repl)
         await _send_repl_line(repl, "yes")

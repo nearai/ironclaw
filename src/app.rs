@@ -548,14 +548,26 @@ impl AppBuilder {
             tools.register_secrets_tools(Arc::clone(ss));
         }
 
-        // Create embeddings provider using the unified method
+        // Create embeddings provider using the unified method.
+        // Translate the LLM-side `BedrockConfig` into the embeddings-side
+        // `BedrockEmbeddingSetup` at the boundary so the embeddings layer
+        // does not depend on `ironclaw_llm` config types.
+        let bedrock_setup =
+            self.config
+                .llm
+                .bedrock
+                .as_ref()
+                .map(|b| crate::workspace::BedrockEmbeddingSetup {
+                    region: b.region.clone(),
+                    profile: b.profile.clone(),
+                });
         let embeddings = self
             .config
             .embeddings
             .create_provider(
                 &self.config.llm.nearai.base_url,
                 self.session.clone(),
-                self.config.llm.bedrock.as_ref(),
+                bedrock_setup.as_ref(),
             )
             .await;
 
@@ -995,15 +1007,21 @@ impl AppBuilder {
             if let Some(ref ss) = settings_store_override {
                 em = em.with_settings_store(Arc::clone(ss));
             }
-            if let Some(ref db) = self.db {
+            let pairing_store = if let Some(ref db) = self.db {
                 let ps = Arc::new(crate::pairing::PairingStore::new(
                     Arc::clone(db),
                     Arc::clone(&ownership_cache),
                 ));
-                em = em.with_pairing_store(ps);
-            }
+                em = em.with_pairing_store(Arc::clone(&ps));
+                Some(ps)
+            } else {
+                None
+            };
             let manager = Arc::new(em);
             tools.register_extension_tools(Arc::clone(&manager));
+            if let Some(ps) = pairing_store {
+                tools.register_sync(Arc::new(crate::tools::builtin::PairingApproveTool::new(ps)));
+            }
 
             // Register permission management tool and upgrade tool_list with
             // builtin registry support. Prefer the workspace-backed adapter
@@ -1110,14 +1128,16 @@ impl AppBuilder {
         self.init_database().await?;
         self.init_secrets().await?;
 
-        // Post-init validation: backends with dedicated config (nearai, gemini_oauth,
-        // bedrock, openai_codex) handle their own credential resolution. For registry-based
-        // backends, fail early if no provider config was resolved.
-        if !matches!(
-            self.config.llm.backend.as_str(),
-            "nearai" | "gemini_oauth" | "bedrock" | "openai_codex"
-        ) && self.config.llm.provider.is_none()
-        {
+        // Post-init validation: backends with a dedicated config slot
+        // (nearai/gemini_oauth/bedrock/openai_codex) read from their own
+        // sub-struct and don't populate `LlmConfig.provider`. For
+        // OpenAI-shape registry backends, fail early if no provider
+        // config was resolved.
+        let registry = ironclaw_llm::ProviderRegistry::load();
+        let has_dedicated_config = registry
+            .find(self.config.llm.backend.as_str())
+            .is_some_and(|d| d.protocol.has_dedicated_config());
+        if !has_dedicated_config && self.config.llm.provider.is_none() {
             let backend = &self.config.llm.backend;
             anyhow::bail!(
                 "LLM_BACKEND={backend} is configured but no credentials were found. \
@@ -1691,11 +1711,6 @@ mod tests {
         registry.register_builtin_tools();
 
         let owner = "test-user";
-        assert_eq!(
-            crate::tools::permissions::seeded_default_permission("tool_activate"),
-            Some(PermissionState::AlwaysAllow),
-            "tool_activate should seed AlwaysAllow so subgates control auth/setup"
-        );
 
         // 1. Initial seed: creates defaults for all registered tools.
         super::seed_tool_permissions(&registry, Some(&db), owner).await;
