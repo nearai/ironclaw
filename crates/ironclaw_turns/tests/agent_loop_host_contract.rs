@@ -306,6 +306,58 @@ async fn loop_prompt_port_builds_text_only_bundle_from_context_refs() {
 }
 
 #[tokio::test]
+async fn loop_prompt_port_uses_current_surface_version_lookup_each_build() {
+    let host = Arc::new(RecordingAgentLoopHost::new(claimed_run_context().await));
+    let surface_v1 = CapabilitySurfaceVersion::new("surface:v1").unwrap();
+    let surface_v2 = CapabilitySurfaceVersion::new("surface:v2").unwrap();
+    let current_surface = Arc::new(Mutex::new(Some(surface_v1.clone())));
+    let current_surface_for_lookup = Arc::clone(&current_surface);
+    let port = HostManagedLoopPromptPort::new(
+        host.context.clone(),
+        host.clone(),
+        host.milestone_sink.clone(),
+    )
+    .with_current_surface_version_lookup(move || {
+        current_surface_for_lookup
+            .lock()
+            .map(|current| current.clone())
+            .map_err(|_| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Unavailable,
+                    "surface version lookup is unavailable",
+                )
+            })
+    });
+
+    let bundle = port
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: Some(surface_v1.clone()),
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+        })
+        .await
+        .unwrap();
+    assert_eq!(bundle.surface_version, Some(surface_v1.clone()));
+
+    *current_surface.lock().unwrap() = Some(surface_v2);
+
+    let error = port
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: Some(surface_v1),
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, AgentLoopHostErrorKind::StaleSurface);
+    assert_eq!(host.effects(), vec!["context"]);
+}
+
+#[tokio::test]
 async fn loop_prompt_port_materializes_instruction_snippets_as_system_refs() {
     let host = Arc::new(
         RecordingAgentLoopHost::new(claimed_run_context().await)

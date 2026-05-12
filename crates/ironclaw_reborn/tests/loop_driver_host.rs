@@ -287,7 +287,7 @@ async fn text_only_model_reply_driver_sanitizes_model_failures_and_skips_transcr
     assert_no_assistant_message(&fixture).await;
     assert_eq!(
         fixture.milestone_names(),
-        vec!["prompt_bundle_built", "model_started"]
+        vec!["prompt_bundle_built", "model_started", "model_failed"]
     );
     assert_public_milestones_hide_raw_payloads(&fixture.milestones());
 }
