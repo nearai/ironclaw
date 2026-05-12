@@ -20,22 +20,24 @@ struct DeliveryIdentity<'a> {
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn to_json<T: Serialize>(value: &T) -> Result<String, OutboundError> {
-    serde_json::to_string(value).map_err(|_| OutboundError::Serialization)
+    ironclaw_storage::encode_json(value).map_err(|_| OutboundError::Serialization)
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn from_json<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, OutboundError> {
-    serde_json::from_str(value).map_err(|_| OutboundError::Serialization)
+    ironclaw_storage::decode_json(value).map_err(|_| OutboundError::Serialization)
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn db_error(error: impl std::fmt::Display) -> OutboundError {
-    let _ = error;
+    tracing::debug!(error = %&error, "outbound storage backend error");
+    let redacted = ironclaw_storage::redacted_backend_error(error);
+    debug_assert_eq!(redacted, ironclaw_storage::StorageError::Backend);
     OutboundError::Backend
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-const ABSENT_SCOPE_ID: &str = "";
+const ABSENT_SCOPE_ID: &str = ironclaw_storage::ABSENT_SCOPE_COMPONENT;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn scope_agent_db_value(scope: &TurnScope) -> &str {

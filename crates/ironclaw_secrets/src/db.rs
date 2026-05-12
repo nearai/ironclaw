@@ -8,18 +8,24 @@
 
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use ironclaw_host_api::{
     CapabilityId, ExtensionId, InvocationId, ResourceScope, SecretHandle, Timestamp,
 };
+use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 const CREDENTIAL_ACCOUNTS_FOR_SCOPE_LIMIT: usize = 1000;
 const CREDENTIAL_ACCOUNTS_FOR_SCOPE_QUERY_LIMIT: i64 = 1001;
+const SECRET_STORE_KEY_CHECK_ID: &str = "active";
+const SECRET_STORE_KEY_CHECK_PLAINTEXT: &str = "reborn-secret-store-key-check-v1";
 
 use crate::{
-    CredentialAccount, CredentialAccountId, CredentialAccountStatus, CredentialAccountStore,
-    CredentialBrokerError, CredentialSession, CredentialSessionId, CredentialSessionStore,
-    SecretsCrypto,
+    CreateSecretParams, CredentialAccount, CredentialAccountId, CredentialAccountStatus,
+    CredentialAccountStore, CredentialBrokerError, CredentialSession, CredentialSessionId,
+    CredentialSessionStore, DecryptedSecret, Secret, SecretConsumeResult, SecretError, SecretRef,
+    SecretsCrypto, SecretsStore,
 };
 
 #[cfg(feature = "libsql")]
@@ -1067,6 +1073,834 @@ async fn postgres_has_unencrypted_rows(
         .await
         .map_err(db_error)?
         .is_some())
+}
+
+#[cfg(feature = "libsql")]
+const LIBSQL_SECRET_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS reborn_secret_records (
+    user_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    id TEXT NOT NULL,
+    encrypted_value BLOB NOT NULL,
+    key_salt BLOB NOT NULL,
+    provider TEXT,
+    expires_at TEXT,
+    last_used_at TEXT,
+    usage_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_reborn_secret_records_id
+    ON reborn_secret_records(id);
+CREATE TABLE IF NOT EXISTS reborn_secret_store_key_check (
+    id TEXT PRIMARY KEY,
+    encrypted_value BLOB NOT NULL,
+    key_salt BLOB NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"#;
+
+#[cfg(feature = "postgres")]
+const POSTGRES_SECRET_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS reborn_secret_records (
+    user_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    id TEXT NOT NULL,
+    encrypted_value BYTEA NOT NULL,
+    key_salt BYTEA NOT NULL,
+    provider TEXT,
+    expires_at TEXT,
+    last_used_at TEXT,
+    usage_count BIGINT NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_reborn_secret_records_id
+    ON reborn_secret_records(id);
+CREATE TABLE IF NOT EXISTS reborn_secret_store_key_check (
+    id TEXT PRIMARY KEY,
+    encrypted_value BYTEA NOT NULL,
+    key_salt BYTEA NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"#;
+
+#[cfg(feature = "libsql")]
+pub struct LibSqlSecretsStore {
+    db: Arc<libsql::Database>,
+    crypto: Arc<SecretsCrypto>,
+}
+
+#[cfg(feature = "libsql")]
+impl LibSqlSecretsStore {
+    pub fn new(db: Arc<libsql::Database>, crypto: Arc<SecretsCrypto>) -> Self {
+        Self { db, crypto }
+    }
+
+    pub async fn run_migrations(&self) -> Result<(), SecretError> {
+        let conn = libsql_secret_connect(&self.db).await?;
+        conn.execute_batch(LIBSQL_SECRET_SCHEMA)
+            .await
+            .map_err(secret_db_error)?;
+        Ok(())
+    }
+
+    async fn connect(&self) -> Result<libsql::Connection, SecretError> {
+        libsql_secret_connect(&self.db).await
+    }
+
+    /// Verifies the durable store key-check sentinel.
+    ///
+    /// Stores that predate the sentinel are bootstrapped by decrypting all
+    /// existing secret rows before installing the key-check record.
+    pub async fn verify_can_decrypt_existing_secrets(&self) -> Result<(), SecretError> {
+        let conn = self.connect().await?;
+        libsql_verify_or_bootstrap_secret_store_key_check(&conn, &self.crypto).await
+    }
+}
+
+#[cfg(feature = "libsql")]
+#[async_trait::async_trait]
+impl SecretsStore for LibSqlSecretsStore {
+    async fn create(
+        &self,
+        user_id: &str,
+        params: CreateSecretParams,
+    ) -> Result<Secret, SecretError> {
+        let conn = libsql_secret_begin_immediate(&self.db).await?;
+        let result = async {
+            let secret = build_encrypted_secret(user_id, params, &self.crypto)?;
+            libsql_upsert_secret(&conn, &secret).await
+        }
+        .await;
+        finish_libsql_secret_transaction(&conn, result).await
+    }
+
+    async fn get(&self, user_id: &str, name: &str) -> Result<Secret, SecretError> {
+        let conn = self.connect().await?;
+        let name = normalize_secret_name(name);
+        let secret = libsql_get_secret(&conn, user_id, &name)
+            .await?
+            .ok_or_else(|| SecretError::NotFound(name.clone()))?;
+        ensure_secret_not_expired(&secret)?;
+        Ok(secret)
+    }
+
+    async fn get_decrypted(
+        &self,
+        user_id: &str,
+        name: &str,
+    ) -> Result<DecryptedSecret, SecretError> {
+        let secret = self.get(user_id, name).await?;
+        self.crypto
+            .decrypt(&secret.encrypted_value, &secret.key_salt)
+    }
+
+    async fn consume_if_matches(
+        &self,
+        user_id: &str,
+        name: &str,
+        expected_value: &str,
+    ) -> Result<SecretConsumeResult, SecretError> {
+        let conn = libsql_secret_begin_immediate(&self.db).await?;
+        let result = async {
+            let name = normalize_secret_name(name);
+            let Some(secret) = libsql_get_secret(&conn, user_id, &name).await? else {
+                return Ok(SecretConsumeResult::NotFound);
+            };
+            ensure_secret_not_expired(&secret)?;
+            let decrypted = self
+                .crypto
+                .decrypt(&secret.encrypted_value, &secret.key_salt)?;
+            if decrypted.expose() != expected_value {
+                return Ok(SecretConsumeResult::Mismatched);
+            }
+            libsql_delete_secret(&conn, user_id, &name).await?;
+            Ok(SecretConsumeResult::Matched)
+        }
+        .await;
+        finish_libsql_secret_transaction(&conn, result).await
+    }
+
+    async fn exists(&self, user_id: &str, name: &str) -> Result<bool, SecretError> {
+        let conn = self.connect().await?;
+        let name = normalize_secret_name(name);
+        Ok(libsql_get_secret(&conn, user_id, &name).await?.is_some())
+    }
+
+    async fn any_exist(&self) -> Result<bool, SecretError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query("SELECT 1 FROM reborn_secret_records LIMIT 1", ())
+            .await
+            .map_err(secret_db_error)?;
+        Ok(rows.next().await.map_err(secret_db_error)?.is_some())
+    }
+
+    async fn list(&self, user_id: &str) -> Result<Vec<SecretRef>, SecretError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT name, provider FROM reborn_secret_records WHERE user_id = ?1 ORDER BY name",
+                libsql::params![user_id],
+            )
+            .await
+            .map_err(secret_db_error)?;
+        let mut refs = Vec::new();
+        while let Some(row) = rows.next().await.map_err(secret_db_error)? {
+            refs.push(SecretRef {
+                name: row.get(0).map_err(secret_db_error)?,
+                provider: row.get(1).map_err(secret_db_error)?,
+            });
+        }
+        Ok(refs)
+    }
+
+    async fn delete(&self, user_id: &str, name: &str) -> Result<bool, SecretError> {
+        let conn = self.connect().await?;
+        let name = normalize_secret_name(name);
+        libsql_delete_secret(&conn, user_id, &name).await
+    }
+
+    async fn record_usage(&self, secret_id: Uuid) -> Result<(), SecretError> {
+        let conn = self.connect().await?;
+        let changed = conn
+            .execute(
+                "UPDATE reborn_secret_records SET last_used_at = ?1, usage_count = usage_count + 1, updated_at = ?1 WHERE id = ?2",
+                libsql::params![Utc::now().to_rfc3339(), secret_id.to_string()],
+            )
+            .await
+            .map_err(secret_db_error)?;
+        if changed == 0 {
+            return Err(SecretError::NotFound(secret_id.to_string()));
+        }
+        Ok(())
+    }
+
+    async fn is_accessible(
+        &self,
+        user_id: &str,
+        secret_name: &str,
+        allowed_secrets: &[String],
+    ) -> Result<bool, SecretError> {
+        secret_accessible(self, user_id, secret_name, allowed_secrets).await
+    }
+}
+
+#[cfg(feature = "postgres")]
+pub struct PostgresSecretsStore {
+    pool: deadpool_postgres::Pool,
+    crypto: Arc<SecretsCrypto>,
+}
+
+#[cfg(feature = "postgres")]
+impl PostgresSecretsStore {
+    pub fn new(pool: deadpool_postgres::Pool, crypto: Arc<SecretsCrypto>) -> Self {
+        Self { pool, crypto }
+    }
+
+    pub async fn run_migrations(&self) -> Result<(), SecretError> {
+        let client = self.pool.get().await.map_err(secret_db_error)?;
+        client
+            .batch_execute(POSTGRES_SECRET_SCHEMA)
+            .await
+            .map_err(secret_db_error)
+    }
+
+    /// Verifies the durable store key-check sentinel.
+    ///
+    /// Stores that predate the sentinel are bootstrapped by decrypting all
+    /// existing secret rows before installing the key-check record.
+    pub async fn verify_can_decrypt_existing_secrets(&self) -> Result<(), SecretError> {
+        let client = self.pool.get().await.map_err(secret_db_error)?;
+        postgres_verify_or_bootstrap_secret_store_key_check(&client, &self.crypto).await
+    }
+}
+
+#[cfg(feature = "postgres")]
+#[async_trait::async_trait]
+impl SecretsStore for PostgresSecretsStore {
+    async fn create(
+        &self,
+        user_id: &str,
+        params: CreateSecretParams,
+    ) -> Result<Secret, SecretError> {
+        let client = self.pool.get().await.map_err(secret_db_error)?;
+        let secret = build_encrypted_secret(user_id, params, &self.crypto)?;
+        postgres_upsert_secret(&client, &secret).await
+    }
+
+    async fn get(&self, user_id: &str, name: &str) -> Result<Secret, SecretError> {
+        let client = self.pool.get().await.map_err(secret_db_error)?;
+        let name = normalize_secret_name(name);
+        let secret = postgres_get_secret(&client, user_id, &name)
+            .await?
+            .ok_or_else(|| SecretError::NotFound(name.clone()))?;
+        ensure_secret_not_expired(&secret)?;
+        Ok(secret)
+    }
+
+    async fn get_decrypted(
+        &self,
+        user_id: &str,
+        name: &str,
+    ) -> Result<DecryptedSecret, SecretError> {
+        let secret = self.get(user_id, name).await?;
+        self.crypto
+            .decrypt(&secret.encrypted_value, &secret.key_salt)
+    }
+
+    async fn consume_if_matches(
+        &self,
+        user_id: &str,
+        name: &str,
+        expected_value: &str,
+    ) -> Result<SecretConsumeResult, SecretError> {
+        let mut client = self.pool.get().await.map_err(secret_db_error)?;
+        let transaction = client.transaction().await.map_err(secret_db_error)?;
+        let result = async {
+            let name = normalize_secret_name(name);
+            let Some(secret) = postgres_get_secret_for_update(&transaction, user_id, &name).await?
+            else {
+                return Ok(SecretConsumeResult::NotFound);
+            };
+            ensure_secret_not_expired(&secret)?;
+            let decrypted = self
+                .crypto
+                .decrypt(&secret.encrypted_value, &secret.key_salt)?;
+            if decrypted.expose() != expected_value {
+                return Ok(SecretConsumeResult::Mismatched);
+            }
+            postgres_delete_secret(&transaction, user_id, &name).await?;
+            Ok(SecretConsumeResult::Matched)
+        }
+        .await;
+        match result {
+            Ok(value) => {
+                transaction.commit().await.map_err(secret_db_error)?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = transaction.rollback().await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn exists(&self, user_id: &str, name: &str) -> Result<bool, SecretError> {
+        let client = self.pool.get().await.map_err(secret_db_error)?;
+        let name = normalize_secret_name(name);
+        Ok(postgres_get_secret(&client, user_id, &name)
+            .await?
+            .is_some())
+    }
+
+    async fn any_exist(&self) -> Result<bool, SecretError> {
+        let client = self.pool.get().await.map_err(secret_db_error)?;
+        Ok(client
+            .query_opt("SELECT 1 FROM reborn_secret_records LIMIT 1", &[])
+            .await
+            .map_err(secret_db_error)?
+            .is_some())
+    }
+
+    async fn list(&self, user_id: &str) -> Result<Vec<SecretRef>, SecretError> {
+        let client = self.pool.get().await.map_err(secret_db_error)?;
+        let rows = client
+            .query(
+                "SELECT name, provider FROM reborn_secret_records WHERE user_id = $1 ORDER BY name",
+                &[&user_id],
+            )
+            .await
+            .map_err(secret_db_error)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| SecretRef {
+                name: row.get(0),
+                provider: row.get(1),
+            })
+            .collect())
+    }
+
+    async fn delete(&self, user_id: &str, name: &str) -> Result<bool, SecretError> {
+        let client = self.pool.get().await.map_err(secret_db_error)?;
+        let name = normalize_secret_name(name);
+        postgres_delete_secret(&client, user_id, &name).await
+    }
+
+    async fn record_usage(&self, secret_id: Uuid) -> Result<(), SecretError> {
+        let client = self.pool.get().await.map_err(secret_db_error)?;
+        let changed = client
+            .execute(
+                "UPDATE reborn_secret_records SET last_used_at = $1, usage_count = usage_count + 1, updated_at = $1 WHERE id = $2",
+                &[&Utc::now().to_rfc3339(), &secret_id.to_string()],
+            )
+            .await
+            .map_err(secret_db_error)?;
+        if changed == 0 {
+            return Err(SecretError::NotFound(secret_id.to_string()));
+        }
+        Ok(())
+    }
+
+    async fn is_accessible(
+        &self,
+        user_id: &str,
+        secret_name: &str,
+        allowed_secrets: &[String],
+    ) -> Result<bool, SecretError> {
+        secret_accessible(self, user_id, secret_name, allowed_secrets).await
+    }
+}
+
+#[cfg(feature = "libsql")]
+async fn libsql_secret_connect(db: &libsql::Database) -> Result<libsql::Connection, SecretError> {
+    let conn = db.connect().map_err(secret_db_error)?;
+    conn.query("PRAGMA busy_timeout = 5000", ())
+        .await
+        .map_err(secret_db_error)?;
+    Ok(conn)
+}
+
+#[cfg(feature = "libsql")]
+async fn libsql_secret_begin_immediate(
+    db: &libsql::Database,
+) -> Result<libsql::Connection, SecretError> {
+    let conn = libsql_secret_connect(db).await?;
+    conn.execute("BEGIN IMMEDIATE", ())
+        .await
+        .map_err(secret_db_error)?;
+    Ok(conn)
+}
+
+#[cfg(feature = "libsql")]
+async fn finish_libsql_secret_transaction<T>(
+    conn: &libsql::Connection,
+    result: Result<T, SecretError>,
+) -> Result<T, SecretError> {
+    match result {
+        Ok(value) => {
+            conn.execute("COMMIT", ()).await.map_err(secret_db_error)?;
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            Err(error)
+        }
+    }
+}
+
+#[cfg(feature = "libsql")]
+async fn libsql_verify_or_bootstrap_secret_store_key_check(
+    conn: &libsql::Connection,
+    crypto: &SecretsCrypto,
+) -> Result<(), SecretError> {
+    if let Some((encrypted_value, key_salt)) = libsql_secret_store_key_check(conn).await? {
+        return verify_secret_store_key_check(crypto, &encrypted_value, &key_salt);
+    }
+    // Legacy/bootstrap path for stores created before the key-check row existed:
+    // validate every existing row before installing the sentinel. This is a
+    // one-time migration/readiness cost; steady-state checks use the sentinel.
+    libsql_verify_all_secret_payloads(conn, crypto).await?;
+    libsql_insert_secret_store_key_check(conn, crypto).await?;
+    let Some((encrypted_value, key_salt)) = libsql_secret_store_key_check(conn).await? else {
+        return Err(SecretError::Database(
+            "secret store key check missing after bootstrap".to_string(),
+        ));
+    };
+    verify_secret_store_key_check(crypto, &encrypted_value, &key_salt)
+}
+
+#[cfg(feature = "libsql")]
+async fn libsql_secret_store_key_check(
+    conn: &libsql::Connection,
+) -> Result<Option<(Vec<u8>, Vec<u8>)>, SecretError> {
+    let mut rows = conn
+        .query(
+            "SELECT encrypted_value, key_salt FROM reborn_secret_store_key_check WHERE id = ?1",
+            libsql::params![SECRET_STORE_KEY_CHECK_ID],
+        )
+        .await
+        .map_err(secret_db_error)?;
+    let Some(row) = rows.next().await.map_err(secret_db_error)? else {
+        return Ok(None);
+    };
+    Ok(Some((
+        row.get(0).map_err(secret_db_error)?,
+        row.get(1).map_err(secret_db_error)?,
+    )))
+}
+
+#[cfg(feature = "libsql")]
+async fn libsql_verify_all_secret_payloads(
+    conn: &libsql::Connection,
+    crypto: &SecretsCrypto,
+) -> Result<(), SecretError> {
+    let mut rows = conn
+        .query(
+            "SELECT encrypted_value, key_salt FROM reborn_secret_records ORDER BY user_id, name",
+            (),
+        )
+        .await
+        .map_err(secret_db_error)?;
+    while let Some(row) = rows.next().await.map_err(secret_db_error)? {
+        let encrypted_value: Vec<u8> = row.get(0).map_err(secret_db_error)?;
+        let key_salt: Vec<u8> = row.get(1).map_err(secret_db_error)?;
+        crypto.decrypt(&encrypted_value, &key_salt)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "libsql")]
+async fn libsql_insert_secret_store_key_check(
+    conn: &libsql::Connection,
+    crypto: &SecretsCrypto,
+) -> Result<(), SecretError> {
+    let (encrypted_value, key_salt) =
+        crypto.encrypt(SECRET_STORE_KEY_CHECK_PLAINTEXT.as_bytes())?;
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT OR IGNORE INTO reborn_secret_store_key_check (id, encrypted_value, key_salt, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)",
+        libsql::params![SECRET_STORE_KEY_CHECK_ID, encrypted_value, key_salt, now],
+    )
+    .await
+    .map_err(secret_db_error)?;
+    Ok(())
+}
+
+#[cfg(feature = "libsql")]
+async fn libsql_upsert_secret(
+    conn: &libsql::Connection,
+    secret: &Secret,
+) -> Result<Secret, SecretError> {
+    conn.execute(
+        "INSERT INTO reborn_secret_records (user_id, name, id, encrypted_value, key_salt, provider, expires_at, last_used_at, usage_count, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) ON CONFLICT(user_id, name) DO UPDATE SET encrypted_value = EXCLUDED.encrypted_value, key_salt = EXCLUDED.key_salt, provider = EXCLUDED.provider, expires_at = EXCLUDED.expires_at, updated_at = EXCLUDED.updated_at",
+        libsql::params![
+            secret.user_id.clone(),
+            secret.name.clone(),
+            secret.id.to_string(),
+            secret.encrypted_value.clone(),
+            secret.key_salt.clone(),
+            secret.provider.clone(),
+            secret.expires_at.map(|value| value.to_rfc3339()),
+            secret.last_used_at.map(|value| value.to_rfc3339()),
+            secret.usage_count,
+            secret.created_at.to_rfc3339(),
+            secret.updated_at.to_rfc3339(),
+        ],
+    )
+    .await
+    .map_err(secret_db_error)?;
+    libsql_get_secret(conn, &secret.user_id, &secret.name)
+        .await?
+        .ok_or_else(|| {
+            SecretError::Database("secret upsert succeeded but row was not found".to_string())
+        })
+}
+
+#[cfg(feature = "libsql")]
+async fn libsql_get_secret(
+    conn: &libsql::Connection,
+    user_id: &str,
+    name: &str,
+) -> Result<Option<Secret>, SecretError> {
+    let mut rows = conn
+        .query(
+            "SELECT id, user_id, name, encrypted_value, key_salt, provider, expires_at, last_used_at, usage_count, created_at, updated_at FROM reborn_secret_records WHERE user_id = ?1 AND name = ?2",
+            libsql::params![user_id, name],
+        )
+        .await
+        .map_err(secret_db_error)?;
+    let Some(row) = rows.next().await.map_err(secret_db_error)? else {
+        return Ok(None);
+    };
+    libsql_secret_from_row(&row).map(Some)
+}
+
+#[cfg(feature = "libsql")]
+fn libsql_secret_from_row(row: &libsql::Row) -> Result<Secret, SecretError> {
+    let id: String = row.get(0).map_err(secret_db_error)?;
+    let expires_at: Option<String> = row.get(6).map_err(secret_db_error)?;
+    let last_used_at: Option<String> = row.get(7).map_err(secret_db_error)?;
+    Ok(Secret {
+        id: parse_secret_uuid(&id)?,
+        user_id: row.get(1).map_err(secret_db_error)?,
+        name: row.get(2).map_err(secret_db_error)?,
+        encrypted_value: row.get(3).map_err(secret_db_error)?,
+        key_salt: row.get(4).map_err(secret_db_error)?,
+        provider: row.get(5).map_err(secret_db_error)?,
+        expires_at: parse_optional_timestamp(expires_at.as_deref())?,
+        last_used_at: parse_optional_timestamp(last_used_at.as_deref())?,
+        usage_count: row.get(8).map_err(secret_db_error)?,
+        created_at: parse_timestamp(&row.get::<String>(9).map_err(secret_db_error)?)?,
+        updated_at: parse_timestamp(&row.get::<String>(10).map_err(secret_db_error)?)?,
+    })
+}
+
+#[cfg(feature = "libsql")]
+async fn libsql_delete_secret(
+    conn: &libsql::Connection,
+    user_id: &str,
+    name: &str,
+) -> Result<bool, SecretError> {
+    let changed = conn
+        .execute(
+            "DELETE FROM reborn_secret_records WHERE user_id = ?1 AND name = ?2",
+            libsql::params![user_id, name],
+        )
+        .await
+        .map_err(secret_db_error)?;
+    Ok(changed > 0)
+}
+
+#[cfg(feature = "postgres")]
+async fn postgres_verify_or_bootstrap_secret_store_key_check(
+    client: &impl deadpool_postgres::GenericClient,
+    crypto: &SecretsCrypto,
+) -> Result<(), SecretError> {
+    if let Some((encrypted_value, key_salt)) = postgres_secret_store_key_check(client).await? {
+        return verify_secret_store_key_check(crypto, &encrypted_value, &key_salt);
+    }
+    // Legacy/bootstrap path for stores created before the key-check row existed:
+    // validate every existing row before installing the sentinel. This is a
+    // one-time migration/readiness cost; steady-state checks use the sentinel.
+    postgres_verify_all_secret_payloads(client, crypto).await?;
+    postgres_insert_secret_store_key_check(client, crypto).await?;
+    let Some((encrypted_value, key_salt)) = postgres_secret_store_key_check(client).await? else {
+        return Err(SecretError::Database(
+            "secret store key check missing after bootstrap".to_string(),
+        ));
+    };
+    verify_secret_store_key_check(crypto, &encrypted_value, &key_salt)
+}
+
+#[cfg(feature = "postgres")]
+async fn postgres_secret_store_key_check(
+    client: &impl deadpool_postgres::GenericClient,
+) -> Result<Option<(Vec<u8>, Vec<u8>)>, SecretError> {
+    let row = client
+        .query_opt(
+            "SELECT encrypted_value, key_salt FROM reborn_secret_store_key_check WHERE id = $1",
+            &[&SECRET_STORE_KEY_CHECK_ID],
+        )
+        .await
+        .map_err(secret_db_error)?;
+    Ok(row.map(|row| (row.get(0), row.get(1))))
+}
+
+#[cfg(feature = "postgres")]
+async fn postgres_verify_all_secret_payloads(
+    client: &impl deadpool_postgres::GenericClient,
+    crypto: &SecretsCrypto,
+) -> Result<(), SecretError> {
+    let rows = client
+        .query(
+            "SELECT encrypted_value, key_salt FROM reborn_secret_records ORDER BY user_id, name",
+            &[],
+        )
+        .await
+        .map_err(secret_db_error)?;
+    for row in rows {
+        let encrypted_value: Vec<u8> = row.get(0);
+        let key_salt: Vec<u8> = row.get(1);
+        crypto.decrypt(&encrypted_value, &key_salt)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "postgres")]
+async fn postgres_insert_secret_store_key_check(
+    client: &impl deadpool_postgres::GenericClient,
+    crypto: &SecretsCrypto,
+) -> Result<(), SecretError> {
+    let (encrypted_value, key_salt) =
+        crypto.encrypt(SECRET_STORE_KEY_CHECK_PLAINTEXT.as_bytes())?;
+    let now = Utc::now().to_rfc3339();
+    client
+        .execute(
+            "INSERT INTO reborn_secret_store_key_check (id, encrypted_value, key_salt, created_at, updated_at) VALUES ($1, $2, $3, $4, $4) ON CONFLICT(id) DO NOTHING",
+            &[&SECRET_STORE_KEY_CHECK_ID, &encrypted_value, &key_salt, &now],
+        )
+        .await
+        .map_err(secret_db_error)?;
+    Ok(())
+}
+
+#[cfg(feature = "postgres")]
+async fn postgres_upsert_secret(
+    client: &impl deadpool_postgres::GenericClient,
+    secret: &Secret,
+) -> Result<Secret, SecretError> {
+    let row = client.query_one("INSERT INTO reborn_secret_records (user_id, name, id, encrypted_value, key_salt, provider, expires_at, last_used_at, usage_count, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ON CONFLICT(user_id, name) DO UPDATE SET encrypted_value = EXCLUDED.encrypted_value, key_salt = EXCLUDED.key_salt, provider = EXCLUDED.provider, expires_at = EXCLUDED.expires_at, updated_at = EXCLUDED.updated_at RETURNING id, user_id, name, encrypted_value, key_salt, provider, expires_at, last_used_at, usage_count, created_at, updated_at", &[&secret.user_id, &secret.name, &secret.id.to_string(), &secret.encrypted_value, &secret.key_salt, &secret.provider, &secret.expires_at.map(|value| value.to_rfc3339()), &secret.last_used_at.map(|value| value.to_rfc3339()), &secret.usage_count, &secret.created_at.to_rfc3339(), &secret.updated_at.to_rfc3339()]).await.map_err(secret_db_error)?;
+    postgres_secret_from_row(&row)
+}
+
+#[cfg(feature = "postgres")]
+async fn postgres_get_secret(
+    client: &impl deadpool_postgres::GenericClient,
+    user_id: &str,
+    name: &str,
+) -> Result<Option<Secret>, SecretError> {
+    postgres_get_secret_query(client, user_id, name, false).await
+}
+
+#[cfg(feature = "postgres")]
+async fn postgres_get_secret_for_update(
+    client: &impl deadpool_postgres::GenericClient,
+    user_id: &str,
+    name: &str,
+) -> Result<Option<Secret>, SecretError> {
+    postgres_get_secret_query(client, user_id, name, true).await
+}
+
+#[cfg(feature = "postgres")]
+async fn postgres_get_secret_query(
+    client: &impl deadpool_postgres::GenericClient,
+    user_id: &str,
+    name: &str,
+    for_update: bool,
+) -> Result<Option<Secret>, SecretError> {
+    let suffix = if for_update { " FOR UPDATE" } else { "" };
+    let query = format!(
+        "SELECT id, user_id, name, encrypted_value, key_salt, provider, expires_at, last_used_at, usage_count, created_at, updated_at FROM reborn_secret_records WHERE user_id = $1 AND name = $2{suffix}"
+    );
+    let row = client
+        .query_opt(&query, &[&user_id, &name])
+        .await
+        .map_err(secret_db_error)?;
+    row.map(|row| postgres_secret_from_row(&row)).transpose()
+}
+
+#[cfg(feature = "postgres")]
+fn postgres_secret_from_row(row: &tokio_postgres::Row) -> Result<Secret, SecretError> {
+    let id: String = row.get(0);
+    let expires_at: Option<String> = row.get(6);
+    let last_used_at: Option<String> = row.get(7);
+    Ok(Secret {
+        id: parse_secret_uuid(&id)?,
+        user_id: row.get(1),
+        name: row.get(2),
+        encrypted_value: row.get(3),
+        key_salt: row.get(4),
+        provider: row.get(5),
+        expires_at: parse_optional_timestamp(expires_at.as_deref())?,
+        last_used_at: parse_optional_timestamp(last_used_at.as_deref())?,
+        usage_count: row.get(8),
+        created_at: parse_timestamp(&row.get::<_, String>(9))?,
+        updated_at: parse_timestamp(&row.get::<_, String>(10))?,
+    })
+}
+
+#[cfg(feature = "postgres")]
+async fn postgres_delete_secret(
+    client: &impl deadpool_postgres::GenericClient,
+    user_id: &str,
+    name: &str,
+) -> Result<bool, SecretError> {
+    let changed = client
+        .execute(
+            "DELETE FROM reborn_secret_records WHERE user_id = $1 AND name = $2",
+            &[&user_id, &name],
+        )
+        .await
+        .map_err(secret_db_error)?;
+    Ok(changed > 0)
+}
+
+fn verify_secret_store_key_check(
+    crypto: &SecretsCrypto,
+    encrypted_value: &[u8],
+    key_salt: &[u8],
+) -> Result<(), SecretError> {
+    let decrypted = crypto.decrypt(encrypted_value, key_salt)?;
+    if decrypted.expose() != SECRET_STORE_KEY_CHECK_PLAINTEXT {
+        return Err(SecretError::DecryptionFailed(
+            "secret store key check mismatch".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn build_encrypted_secret(
+    user_id: &str,
+    params: CreateSecretParams,
+    crypto: &SecretsCrypto,
+) -> Result<Secret, SecretError> {
+    let plaintext = params.value.expose_secret().as_bytes();
+    let (encrypted_value, key_salt) = crypto.encrypt(plaintext)?;
+    let now = Utc::now();
+    Ok(Secret {
+        id: Uuid::new_v4(),
+        user_id: user_id.to_string(),
+        name: normalize_secret_name(&params.name),
+        encrypted_value,
+        key_salt,
+        provider: params.provider,
+        expires_at: params.expires_at,
+        last_used_at: None,
+        usage_count: 0,
+        created_at: now,
+        updated_at: now,
+    })
+}
+
+fn normalize_secret_name(name: &str) -> String {
+    name.to_lowercase()
+}
+
+fn ensure_secret_not_expired(secret: &Secret) -> Result<(), SecretError> {
+    if let Some(expires_at) = secret.expires_at
+        && expires_at < Utc::now()
+    {
+        return Err(SecretError::Expired);
+    }
+    Ok(())
+}
+
+async fn secret_accessible<S: SecretsStore + ?Sized>(
+    store: &S,
+    user_id: &str,
+    secret_name: &str,
+    allowed_secrets: &[String],
+) -> Result<bool, SecretError> {
+    let secret_name_lower = normalize_secret_name(secret_name);
+    if !store.exists(user_id, &secret_name_lower).await? {
+        return Ok(false);
+    }
+    for pattern in allowed_secrets {
+        let pattern_lower = pattern.to_lowercase();
+        if pattern_lower == secret_name_lower {
+            return Ok(true);
+        }
+        if let Some(prefix) = pattern_lower.strip_suffix('*')
+            && secret_name_lower.starts_with(prefix)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn parse_secret_uuid(value: &str) -> Result<Uuid, SecretError> {
+    Uuid::parse_str(value).map_err(secret_db_error)
+}
+
+fn parse_optional_timestamp(value: Option<&str>) -> Result<Option<DateTime<Utc>>, SecretError> {
+    value.map(parse_timestamp).transpose()
+}
+
+fn parse_timestamp(value: &str) -> Result<DateTime<Utc>, SecretError> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .map_err(secret_db_error)
+}
+
+fn secret_db_error(error: impl std::fmt::Display) -> SecretError {
+    SecretError::Database(error.to_string())
 }
 
 struct EncryptedPayload {

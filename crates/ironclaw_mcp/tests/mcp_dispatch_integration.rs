@@ -266,15 +266,17 @@ fn mounted_empty_extension_root() -> LocalFilesystem {
 
 fn governor_with_default_limit(account: ResourceAccount) -> InMemoryResourceGovernor {
     let governor = InMemoryResourceGovernor::new();
-    governor.set_limit(
-        account,
-        ResourceLimits {
-            max_concurrency_slots: Some(10),
-            max_process_count: Some(10),
-            max_output_bytes: Some(100_000),
-            ..ResourceLimits::default()
-        },
-    );
+    governor
+        .set_limit(
+            account,
+            ResourceLimits {
+                max_concurrency_slots: Some(10),
+                max_process_count: Some(10),
+                max_output_bytes: Some(100_000),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
     governor
 }
 

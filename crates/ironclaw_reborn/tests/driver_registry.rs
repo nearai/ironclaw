@@ -274,6 +274,7 @@ fn production_readiness_rejects_missing_required_host_component() {
             ))),
             DriverRequirements {
                 model: RequirementLevel::Required,
+                prompt: RequirementLevel::Optional,
                 transcript: RequirementLevel::Optional,
                 checkpoint: RequirementLevel::Optional,
                 input_polling: RequirementLevel::Optional,
@@ -303,6 +304,64 @@ fn production_readiness_rejects_missing_required_host_component() {
             .iter()
             .any(|diagnostic| diagnostic.code == "missing_required_driver_requirement")
     );
+}
+
+#[test]
+fn production_readiness_enforces_required_prompt_port_availability() {
+    let mut registry = DriverRegistry::new();
+    let driver_key = registry
+        .register_driver(
+            Arc::new(TestDriver::new(descriptor(
+                "lightweight_loop",
+                1,
+                "checkpoint_v1",
+                1,
+            ))),
+            DriverRequirements {
+                model: RequirementLevel::Optional,
+                prompt: RequirementLevel::Required,
+                transcript: RequirementLevel::Optional,
+                checkpoint: RequirementLevel::Optional,
+                input_polling: RequirementLevel::Optional,
+                capabilities: RequirementLevel::Optional,
+                progress_events: RequirementLevel::Optional,
+            },
+            DriverKind::Production,
+        )
+        .expect("registration should succeed");
+
+    let report = registry.validate_readiness(
+        DriverReadinessMode::Production,
+        DriverReadinessInputs {
+            host_graph: HostGraphReadiness::all_available().without_prompt(),
+            configured_profiles: vec![ConfiguredRunProfile::enabled(
+                "interactive_default",
+                driver_key.clone(),
+            )],
+            persisted_runs: Vec::new(),
+        },
+    );
+
+    assert_eq!(report.status, DriverReadinessStatus::NotReady);
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "missing_required_driver_requirement"
+            && diagnostic.message.contains("prompt bundle")
+    }));
+
+    let ready_report = registry.validate_readiness(
+        DriverReadinessMode::Production,
+        DriverReadinessInputs {
+            host_graph: HostGraphReadiness::all_available(),
+            configured_profiles: vec![ConfiguredRunProfile::enabled(
+                "interactive_default",
+                driver_key,
+            )],
+            persisted_runs: Vec::new(),
+        },
+    );
+
+    assert_eq!(ready_report.status, DriverReadinessStatus::ProductionReady);
+    assert!(ready_report.diagnostics.is_empty());
 }
 
 #[test]

@@ -28,14 +28,16 @@ async fn runtime_dispatcher_routes_already_authorized_request_through_public_tra
     )])
     .unwrap();
 
-    governor.set_limit(
-        account.clone(),
-        ResourceLimits {
-            max_concurrency_slots: Some(1),
-            max_output_bytes: Some(10_000),
-            ..ResourceLimits::default()
-        },
-    );
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_concurrency_slots: Some(1),
+                max_output_bytes: Some(10_000),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
 
     let dispatcher = RuntimeDispatcher::from_arcs(
         Arc::clone(&registry),

@@ -480,16 +480,21 @@ impl PostgresStore {
                 });
             }
         }
-        // Advance the cursor past records we scanned but filtered out, so the
-        // next call does not rescan them forever. When no entries matched at
-        // all, fall back to the stream head (`next_cursor` from the streams
-        // table is the cursor of the most recent append).
+        // SQL query shape is `cursor > after AND <filter> ORDER BY cursor LIMIT limit`:
+        // filter predicates are pushed into SQL before the limit. Therefore a
+        // short page means the filtered replay reached the stream head, even if
+        // trailing records were filtered out and never appeared in `last_scanned`.
         let last_matched = entries.last().map(|entry| entry.cursor);
-        let next_cursor = match (last_matched, last_scanned) {
-            (Some(matched), Some(scanned)) if scanned.as_u64() > matched.as_u64() => scanned,
-            (Some(matched), _) => matched,
-            (None, Some(scanned)) => scanned,
-            (None, None) => EventCursor::new(next_cursor),
+        let stream_head_cursor = next_cursor;
+        let next_cursor = if entries.len() < limit {
+            EventCursor::new(stream_head_cursor)
+        } else {
+            match (last_matched, last_scanned) {
+                (Some(matched), Some(scanned)) if scanned.as_u64() > matched.as_u64() => scanned,
+                (Some(matched), _) => matched,
+                (None, Some(scanned)) => scanned,
+                (None, None) => EventCursor::new(stream_head_cursor),
+            }
         };
         Ok(EventReplay {
             entries,

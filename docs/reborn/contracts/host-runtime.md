@@ -34,6 +34,26 @@ Supported built-in behavior:
 - Staged secrets must never be logged or exposed through debug output.
 - Handler errors must use stable categories and avoid raw provider/backend details.
 
+## Visible capability surface
+
+`HostRuntime::visible_capabilities(...)` is a visibility producer only. `DefaultHostRuntime` computes a deterministic, versioned surface from the extension registry, the caller `ExecutionContext`, caller/host-supplied `provider_trust`, the trust-aware authorizer, and the caller/profile supplied `CapabilitySurfacePolicy`. It does not evaluate the runtime host trust policy while computing visibility. Missing grants, missing provider trust, denied trust ceilings, authorizer denials, disallowed runtimes, and disallowed effects omit capabilities from the surface. Authorizer `RequireApproval` decisions may be represented as `VisibleCapabilityAccess::RequiresApproval`, but that status does not issue a grant or bypass approval storage.
+
+Surface versioning returns `sha256:<lower-hex>` over canonical JSON that includes the configured base version, `SurfaceKind`, visibility policy, visibility-affecting context fields, grants, relevant provider trust ceilings, visible capability ids/providers/runtimes/effects/schemas, selected resource estimates, and visible access status. Policy allow-lists and visible capability payloads are canonicalized before hashing, so semantically equivalent allow-list ordering or registry insertion ordering does not churn the version; returned capabilities still preserve filtered registry order for deterministic rendering. The hash is stable across process runs so upper loop services can checkpoint the visible tool surface. Direct invocation remains authoritative: a capability omitted from the visible surface must still fail closed through `CapabilityHost` authorization if a caller tries to invoke it directly.
+
+## FirstParty runtime adapter
+
+`HostRuntimeServices` can register host-owned first-party capability handlers through `FirstPartyCapabilityRegistry`. When a declared capability uses `RuntimeKind::FirstParty`, dispatch still follows the normal path:
+
+```text
+HostRuntime::invoke_capability
+  -> CapabilityHost authorization / approvals / obligations
+  -> RuntimeDispatcher
+  -> FirstPartyRuntimeAdapter
+  -> registered host-owned handler
+```
+
+First-party handlers are composition-owned and keyed by `CapabilityId`; user-installed manifests must not self-assign first-party/system authority. A missing handler fails closed as `UndeclaredCapability` before handler side effects. The adapter owns resource reservation/reconciliation, emits the same dispatcher runtime events as other runtime lanes, and surfaces only stable redacted dispatch categories. `RuntimeKind::System` remains deferred for a stricter host-only adapter.
+
 ## Runtime HTTP egress
 
 Runtime HTTP remains host-mediated through `RuntimeHttpEgress` and `HostHttpEgressService`. Runtime requests carry the full `ResourceScope` and `CapabilityId` so `HostHttpEgressService` can consume the matching one-shot policy from `NetworkObligationPolicyStore` immediately before outbound transport. The production constructor is fail-closed until a policy store is attached; request-embedded policy fallback is only available through an explicitly named test/legacy constructor. A missing scoped/capability policy fails before transport and any taken policy is not reusable after credential, request, network, or response failure. Runtime code must not perform ad-hoc DNS/private-IP checks or direct HTTP clients; `ironclaw_network` owns network policy enforcement and `ironclaw_secrets` owns secret lease/consume semantics.

@@ -9,6 +9,13 @@ use std::{
     sync::Arc,
 };
 
+mod skill_context;
+
+pub use skill_context::{
+    HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
+    build_skill_run_snapshot,
+};
+
 use tokio::sync::Mutex;
 
 use async_trait::async_trait;
@@ -19,16 +26,17 @@ use ironclaw_threads::{
     UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
-    LoopMessageRef,
+    LoopMessageRef, TurnId, TurnRunId,
     run_profile::ModelProfileId,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply, BeginAssistantDraft,
-        CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied, CapabilityInvocation,
-        CapabilityOutcome, CapabilitySurfaceVersion, FinalizeAssistantMessage, LoopContextBundle,
-        LoopContextMessage, LoopContextPort, LoopContextRequest, LoopHostMilestoneEmitter,
-        LoopHostMilestoneSink, LoopInputCursor, LoopModelMessage, LoopModelPort, LoopModelRequest,
-        LoopModelResponse, LoopRunContext, LoopRunInfoPort, LoopTranscriptPort, ModelStreamChunk,
-        ParentLoopOutput, UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
+        CapabilityDeniedReasonKind, CapabilityInvocation, CapabilityOutcome,
+        CapabilitySurfaceVersion, FinalizeAssistantMessage, LoopContextBundle, LoopContextMessage,
+        LoopContextPort, LoopContextRequest, LoopHostMilestoneEmitter, LoopHostMilestoneSink,
+        LoopInputCursor, LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse,
+        LoopRunContext, LoopRunInfoPort, LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput,
+        UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -45,6 +53,7 @@ where
     thread_scope: ThreadScope,
     run_context: LoopRunContext,
     max_messages: usize,
+    skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
 }
 
 impl<S> ThreadBackedLoopContextPort<S>
@@ -62,7 +71,13 @@ where
             thread_scope,
             run_context,
             max_messages,
+            skill_context_source: None,
         }
+    }
+
+    pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
+        self.skill_context_source = Some(source);
+        self
     }
 }
 
@@ -97,13 +112,21 @@ where
             .await
             .map_err(context_read_error)?;
 
+        let instruction_snippets = match self.skill_context_source.as_deref() {
+            Some(source) => {
+                skill_context::build_skill_instruction_snippets(source, &self.run_context).await?
+            }
+            None => Vec::new(),
+        };
+
         Ok(LoopContextBundle {
+            identity_messages: Vec::new(),
             messages: context
                 .messages
                 .into_iter()
                 .filter_map(context_message_to_loop_message)
                 .collect(),
-            instruction_snippets: Vec::new(),
+            instruction_snippets,
             memory_snippets: Vec::new(),
         })
     }
@@ -399,7 +422,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for EmptyLoopCapabilityPort
             .into_iter()
             .map(|_| {
                 CapabilityOutcome::Denied(CapabilityDenied {
-                    reason_kind: "empty_surface".to_string(),
+                    reason_kind: CapabilityDeniedReasonKind::EmptySurface,
                     safe_summary: "no capabilities are available to this loop".to_string(),
                 })
             })
@@ -425,6 +448,7 @@ where
     gateway: Arc<G>,
     max_messages: usize,
     milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
+    skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
 }
 
 impl<S, G> ThreadBackedLoopModelPort<S, G>
@@ -446,6 +470,7 @@ where
             gateway,
             max_messages,
             milestone_sink: None,
+            skill_context_source: None,
         }
     }
 
@@ -464,7 +489,13 @@ where
             gateway,
             max_messages,
             milestone_sink: Some(milestone_sink),
+            skill_context_source: None,
         }
+    }
+
+    pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
+        self.skill_context_source = Some(source);
+        self
     }
 }
 
@@ -504,8 +535,9 @@ where
                 model_profile_id: model_profile_id.clone(),
                 messages: resolved_messages,
                 surface_version: request.surface_version,
-                run_id: self.run_context.run_id.to_string(),
-                turn_id: self.run_context.turn_id.to_string(),
+                resolved_model_route: self.run_context.resolved_model_route.clone(),
+                run_id: self.run_context.run_id,
+                turn_id: self.run_context.turn_id,
             })
             .await
             .map_err(model_gateway_error)?;
@@ -589,6 +621,14 @@ where
         let needs_history_lookup = requested_messages
             .iter()
             .any(|message| !messages_by_ref.contains_key(message.content_ref.as_str()));
+        let snippet_messages_by_ref = if requested_messages
+            .iter()
+            .any(|message| skill_context::is_snippet_model_message_ref(&message.content_ref))
+        {
+            self.instruction_snippet_messages_by_ref().await?
+        } else {
+            HashMap::new()
+        };
         if needs_history_lookup {
             let history = self
                 .thread_service
@@ -603,6 +643,19 @@ where
         }
         let mut resolved = Vec::with_capacity(requested_messages.len());
         for message in requested_messages {
+            let requested_role = HostManagedModelMessageRole::from_loop_role(&message.role)?;
+            if let Some(snippet_message) = snippet_messages_by_ref.get(message.content_ref.as_str())
+            {
+                if requested_role != snippet_message.role {
+                    return Err(AgentLoopHostError::new(
+                        AgentLoopHostErrorKind::InvalidInvocation,
+                        "model message role does not match skill context snippet",
+                    ));
+                }
+                resolved.push(snippet_message.clone());
+                continue;
+            }
+
             let context_message = messages_by_ref
                 .get(message.content_ref.as_str())
                 .ok_or_else(|| {
@@ -611,7 +664,6 @@ where
                         "model message reference is unavailable",
                     )
                 })?;
-            let requested_role = HostManagedModelMessageRole::from_loop_role(&message.role)?;
             let durable_role = model_role_for_kind(context_message.kind);
             if requested_role != durable_role {
                 return Err(AgentLoopHostError::new(
@@ -626,6 +678,33 @@ where
             });
         }
         Ok(resolved)
+    }
+
+    async fn instruction_snippet_messages_by_ref(
+        &self,
+    ) -> Result<HashMap<String, HostManagedModelMessage>, AgentLoopHostError> {
+        let Some(source) = self.skill_context_source.as_deref() else {
+            return Ok(HashMap::new());
+        };
+        let snippets =
+            skill_context::build_skill_instruction_snippets(source, &self.run_context).await?;
+        let mut messages = HashMap::with_capacity(snippets.len());
+        for (ordinal, snippet) in snippets.into_iter().enumerate() {
+            let content_ref = skill_context::snippet_model_message_ref(
+                &snippet.snippet_ref,
+                &snippet.safe_summary,
+                ordinal,
+            )?;
+            messages.insert(
+                content_ref.as_str().to_string(),
+                HostManagedModelMessage {
+                    role: HostManagedModelMessageRole::System,
+                    content: snippet.safe_summary,
+                    content_ref,
+                },
+            );
+        }
+        Ok(messages)
     }
 }
 
@@ -644,9 +723,17 @@ pub struct HostManagedModelRequest {
     pub model_profile_id: ModelProfileId,
     pub messages: Vec<HostManagedModelMessage>,
     pub surface_version: Option<CapabilitySurfaceVersion>,
-    pub run_id: String,
-    pub turn_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_model_route: Option<HostManagedModelRouteSnapshot>,
+    pub run_id: TurnRunId,
+    pub turn_id: TurnId,
 }
+
+/// Boundary alias for the route snapshot carried from turn/run state into
+/// host-managed model requests. This intentionally preserves the turn-owned
+/// wire shape across the loop-support boundary instead of defining a duplicate
+/// snapshot DTO here.
+pub type HostManagedModelRouteSnapshot = ironclaw_turns::run_profile::LoopModelRouteSnapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostManagedModelMessage {
@@ -698,6 +785,7 @@ impl HostManagedModelResponse {
 pub enum HostManagedModelErrorKind {
     InvalidRequest,
     PolicyDenied,
+    ConfigurationError,
     BudgetExceeded,
     Unavailable,
     Cancelled,
@@ -940,6 +1028,7 @@ fn model_error_kind(kind: HostManagedModelErrorKind) -> AgentLoopHostErrorKind {
     match kind {
         HostManagedModelErrorKind::InvalidRequest => AgentLoopHostErrorKind::InvalidInvocation,
         HostManagedModelErrorKind::PolicyDenied => AgentLoopHostErrorKind::PolicyDenied,
+        HostManagedModelErrorKind::ConfigurationError => AgentLoopHostErrorKind::Unavailable,
         HostManagedModelErrorKind::BudgetExceeded => AgentLoopHostErrorKind::BudgetExceeded,
         HostManagedModelErrorKind::Unavailable => AgentLoopHostErrorKind::Unavailable,
         HostManagedModelErrorKind::Cancelled => AgentLoopHostErrorKind::Cancelled,
@@ -950,6 +1039,7 @@ fn safe_model_summary(kind: HostManagedModelErrorKind) -> &'static str {
     match kind {
         HostManagedModelErrorKind::InvalidRequest => "model request is invalid",
         HostManagedModelErrorKind::PolicyDenied => "model profile is not permitted",
+        HostManagedModelErrorKind::ConfigurationError => "model route configuration is invalid",
         HostManagedModelErrorKind::BudgetExceeded => "model request exceeded its budget",
         HostManagedModelErrorKind::Unavailable => "model service is unavailable",
         HostManagedModelErrorKind::Cancelled => "model request was cancelled",

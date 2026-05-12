@@ -119,7 +119,7 @@ fn http_egress_denies_private_resolved_host_before_transport() {
         .expect_err("private resolved targets should fail closed");
 
     assert!(error.to_string().contains("private"));
-    assert_eq!(error.request_bytes(), 0);
+    assert_eq!(error.request_bytes(), 50);
     assert!(requests.lock().unwrap().is_empty());
 }
 

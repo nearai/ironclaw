@@ -1,21 +1,25 @@
 use async_trait::async_trait;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
+use chrono::Utc;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use std::sync::Arc;
 
 use crate::{
-    AllowAllTurnAdmissionLimitProvider, CancelRunRequest, CancelRunResponse, GetRunStateRequest,
-    InMemoryTurnStateStore, InMemoryTurnStateStoreLimits, ResolvedRunProfile, ResumeTurnRequest,
-    ResumeTurnResponse, RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver,
-    SubmitTurnRequest, SubmitTurnResponse, TurnActiveLockRecord, TurnAdmissionLimitProvider,
-    TurnAdmissionPolicy, TurnAdmissionReservationRecord, TurnCheckpointRecord, TurnError,
-    TurnIdempotencyRecord, TurnLifecycleEvent, TurnPersistenceSnapshot, TurnRecord, TurnRunRecord,
-    TurnRunState, TurnScope, TurnStateStore,
+    AllowAllTurnAdmissionLimitProvider, CancelRunRequest, CancelRunResponse,
+    GetLoopCheckpointRequest, GetRunStateRequest, InMemoryTurnStateStore,
+    InMemoryTurnStateStoreLimits, LoopCheckpointRecord, LoopCheckpointStore,
+    PutLoopCheckpointRequest, ResolvedRunProfile, ResumeTurnRequest, ResumeTurnResponse,
+    RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver, SubmitTurnRequest,
+    SubmitTurnResponse, TurnActiveLockRecord, TurnAdmissionLimitProvider, TurnAdmissionPolicy,
+    TurnAdmissionReservationRecord, TurnCheckpointRecord, TurnError, TurnIdempotencyRecord,
+    TurnLifecycleEvent, TurnPersistenceSnapshot, TurnRecord, TurnRunRecord, TurnRunState,
+    TurnScope, TurnStateStore,
     events::{EventCursor, TurnEventPage, TurnEventProjectionSource, project_turn_events},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordRecoveryRequiredRequest, RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse,
-        TurnRunTransitionPort,
+        RecordModelRouteSnapshotRequest, RecordRecoveryRequiredRequest,
+        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, TurnRunTransitionPort,
     },
 };
 
@@ -83,9 +87,21 @@ CREATE TABLE IF NOT EXISTS turn_checkpoints (
     checkpoint_id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL,
     sequence INTEGER NOT NULL,
+    scope_key TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL DEFAULT 'before_block',
     payload TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_turn_checkpoints_run ON turn_checkpoints(run_id, sequence);
+
+CREATE TABLE IF NOT EXISTS turn_loop_checkpoints (
+    checkpoint_id TEXT PRIMARY KEY,
+    scope_key TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    payload TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_turn_loop_checkpoints_run ON turn_loop_checkpoints(scope_key, turn_id, run_id);
 
 CREATE TABLE IF NOT EXISTS turn_idempotency_records (
     record_key TEXT PRIMARY KEY,
@@ -153,9 +169,21 @@ CREATE TABLE IF NOT EXISTS turn_checkpoints (
     checkpoint_id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL,
     sequence BIGINT NOT NULL,
+    scope_key TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL DEFAULT 'before_block',
     payload JSONB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_turn_checkpoints_run ON turn_checkpoints(run_id, sequence);
+
+CREATE TABLE IF NOT EXISTS turn_loop_checkpoints (
+    checkpoint_id TEXT PRIMARY KEY,
+    scope_key TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    payload JSONB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_turn_loop_checkpoints_run ON turn_loop_checkpoints(scope_key, turn_id, run_id);
 
 CREATE TABLE IF NOT EXISTS turn_idempotency_records (
     record_key TEXT PRIMARY KEY,
@@ -226,6 +254,25 @@ impl LibSqlTurnStateStore {
         conn.execute_batch(LIBSQL_TURN_STATE_SCHEMA)
             .await
             .map_err(db_error)?;
+
+        // Migration: add metadata columns to existing turn_checkpoints tables.
+        // Legacy rows predate scoped checkpoint metadata, so they keep an empty
+        // scope_key sentinel and the serialized payload remains the migration
+        // source of truth until a scoped backfill can prove each row's owner.
+        for (column, alter) in [
+            (
+                "scope_key",
+                "ALTER TABLE turn_checkpoints ADD COLUMN scope_key TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "kind",
+                "ALTER TABLE turn_checkpoints ADD COLUMN kind TEXT NOT NULL DEFAULT 'before_block'",
+            ),
+        ] {
+            if !libsql_column_exists(&conn, "turn_checkpoints", column).await? {
+                conn.execute(alter, ()).await.map_err(db_error)?;
+            }
+        }
         Ok(())
     }
 
@@ -356,6 +403,59 @@ impl TurnEventProjectionSource for LibSqlTurnStateStore {
 
 #[cfg(feature = "libsql")]
 #[async_trait]
+impl LoopCheckpointStore for LibSqlTurnStateStore {
+    async fn put_loop_checkpoint(
+        &self,
+        request: PutLoopCheckpointRequest,
+    ) -> Result<LoopCheckpointRecord, TurnError> {
+        let conn = self.begin_immediate().await?;
+        let record = LoopCheckpointRecord {
+            checkpoint_id: crate::TurnCheckpointId::new(),
+            scope: request.scope,
+            turn_id: request.turn_id,
+            run_id: request.run_id,
+            state_ref: request.state_ref,
+            schema_id: request.schema_id,
+            schema_version: request.schema_version,
+            kind: request.kind,
+            created_at: Utc::now(),
+        };
+        let result = libsql_insert_loop_checkpoint_record(&conn, &record)
+            .await
+            .map(|()| record.clone());
+        finish_libsql_transaction(&conn, result).await
+    }
+
+    async fn get_loop_checkpoint(
+        &self,
+        request: GetLoopCheckpointRequest,
+    ) -> Result<Option<LoopCheckpointRecord>, TurnError> {
+        let conn = self.connect().await?;
+        let scope_key = scope_key(&request.scope)?;
+        let mut rows = conn
+            .query(
+                "SELECT payload FROM turn_loop_checkpoints WHERE checkpoint_id = ?1 AND scope_key = ?2 AND turn_id = ?3 AND run_id = ?4",
+                libsql::params![
+                    request.checkpoint_id.as_uuid().to_string(),
+                    scope_key,
+                    request.turn_id.to_string(),
+                    request.run_id.to_string(),
+                ],
+            )
+            .await
+            .map_err(db_error)?;
+        let Some(row) = rows.next().await.map_err(db_error)? else {
+            return Ok(None);
+        };
+        let payload: String = row.get(0).map_err(db_error)?;
+        let record = serde_json::from_str(&payload).map_err(db_error)?;
+        ensure_loop_checkpoint_record_matches_request(&record, &request)?;
+        Ok(Some(record))
+    }
+}
+
+#[cfg(feature = "libsql")]
+#[async_trait]
 impl TurnRunTransitionPort for LibSqlTurnStateStore {
     async fn claim_next_run(
         &self,
@@ -395,6 +495,21 @@ impl TurnRunTransitionPort for LibSqlTurnStateStore {
         let result = async {
             let store = self.load_store_from_conn(&conn).await?;
             let result = store.recover_expired_leases(request).await;
+            libsql_replace_snapshot(&conn, &store.persistence_snapshot()).await?;
+            Ok(result)
+        }
+        .await;
+        finish_libsql_transaction(&conn, result).await?
+    }
+
+    async fn record_model_route_snapshot(
+        &self,
+        request: RecordModelRouteSnapshotRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        let conn = self.begin_immediate().await?;
+        let result = async {
+            let store = self.load_store_from_conn(&conn).await?;
+            let result = store.record_model_route_snapshot(request).await;
             libsql_replace_snapshot(&conn, &store.persistence_snapshot()).await?;
             Ok(result)
         }
@@ -520,6 +635,16 @@ impl PostgresTurnStateStore {
             .batch_execute(POSTGRES_TURN_STATE_SCHEMA)
             .await
             .map_err(db_error)?;
+
+        // Migration: add new columns to existing turn_checkpoints tables.
+        // Postgres supports ADD COLUMN IF NOT EXISTS natively.
+        client
+            .batch_execute(
+                "ALTER TABLE turn_checkpoints ADD COLUMN IF NOT EXISTS scope_key TEXT NOT NULL DEFAULT '';
+                 ALTER TABLE turn_checkpoints ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'before_block';",
+            )
+            .await
+            .map_err(db_error)?;
         Ok(())
     }
 
@@ -637,6 +762,69 @@ impl TurnEventProjectionSource for PostgresTurnStateStore {
 
 #[cfg(feature = "postgres")]
 #[async_trait]
+impl LoopCheckpointStore for PostgresTurnStateStore {
+    async fn put_loop_checkpoint(
+        &self,
+        request: PutLoopCheckpointRequest,
+    ) -> Result<LoopCheckpointRecord, TurnError> {
+        let mut client = self.client().await?;
+        let txn = client.transaction().await.map_err(db_error)?;
+        let record = LoopCheckpointRecord {
+            checkpoint_id: crate::TurnCheckpointId::new(),
+            scope: request.scope,
+            turn_id: request.turn_id,
+            run_id: request.run_id,
+            state_ref: request.state_ref,
+            schema_id: request.schema_id,
+            schema_version: request.schema_version,
+            kind: request.kind,
+            created_at: Utc::now(),
+        };
+        let result = postgres_insert_loop_checkpoint_record(&txn, &record)
+            .await
+            .map(|()| record.clone());
+        match result {
+            Ok(record) => {
+                txn.commit().await.map_err(db_error)?;
+                Ok(record)
+            }
+            Err(error) => {
+                let _ = txn.rollback().await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn get_loop_checkpoint(
+        &self,
+        request: GetLoopCheckpointRequest,
+    ) -> Result<Option<LoopCheckpointRecord>, TurnError> {
+        let client = self.client().await?;
+        let scope_key = scope_key(&request.scope)?;
+        let row = client
+            .query_opt(
+                "SELECT payload::text FROM turn_loop_checkpoints WHERE checkpoint_id = $1 AND scope_key = $2 AND turn_id = $3 AND run_id = $4",
+                &[
+                    &request.checkpoint_id.as_uuid().to_string(),
+                    &scope_key,
+                    &request.turn_id.to_string(),
+                    &request.run_id.to_string(),
+                ],
+            )
+            .await
+            .map_err(db_error)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let payload: String = row.get(0);
+        let record = serde_json::from_str(&payload).map_err(db_error)?;
+        ensure_loop_checkpoint_record_matches_request(&record, &request)?;
+        Ok(Some(record))
+    }
+}
+
+#[cfg(feature = "postgres")]
+#[async_trait]
 impl TurnRunTransitionPort for PostgresTurnStateStore {
     async fn claim_next_run(
         &self,
@@ -675,6 +863,20 @@ impl TurnRunTransitionPort for PostgresTurnStateStore {
         lock_postgres_turn_tables(&txn, "SHARE ROW EXCLUSIVE MODE").await?;
         let store = self.load_store_from_txn(&txn).await?;
         let result = store.recover_expired_leases(request).await;
+        postgres_replace_snapshot(&txn, &store.persistence_snapshot()).await?;
+        txn.commit().await.map_err(db_error)?;
+        result
+    }
+
+    async fn record_model_route_snapshot(
+        &self,
+        request: RecordModelRouteSnapshotRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        let mut client = self.client().await?;
+        let txn = client.transaction().await.map_err(db_error)?;
+        lock_postgres_turn_tables(&txn, "SHARE ROW EXCLUSIVE MODE").await?;
+        let store = self.load_store_from_txn(&txn).await?;
+        let result = store.record_model_route_snapshot(request).await;
         postgres_replace_snapshot(&txn, &store.persistence_snapshot()).await?;
         txn.commit().await.map_err(db_error)?;
         result
@@ -757,6 +959,31 @@ impl TurnRunTransitionPort for PostgresTurnStateStore {
 }
 
 #[cfg(feature = "libsql")]
+async fn libsql_column_exists(
+    conn: &libsql::Connection,
+    table: &str,
+    column: &str,
+) -> Result<bool, TurnError> {
+    if !table
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || character == '_')
+    {
+        return Err(TurnError::Unavailable {
+            reason: "turn state persistence temporarily unavailable".to_string(),
+        });
+    }
+    let sql = format!("PRAGMA table_info({table})");
+    let mut rows = conn.query(sql.as_str(), ()).await.map_err(db_error)?;
+    while let Some(row) = rows.next().await.map_err(db_error)? {
+        let existing: String = row.get(1).map_err(db_error)?;
+        if existing == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(feature = "libsql")]
 async fn libsql_load_payloads<T>(conn: &libsql::Connection, sql: &str) -> Result<Vec<T>, TurnError>
 where
     T: serde::de::DeserializeOwned,
@@ -768,6 +995,39 @@ where
         payloads.push(serde_json::from_str(&payload).map_err(db_error)?);
     }
     Ok(payloads)
+}
+
+#[cfg(feature = "libsql")]
+async fn libsql_insert_loop_checkpoint_record(
+    conn: &libsql::Connection,
+    record: &LoopCheckpointRecord,
+) -> Result<(), TurnError> {
+    let payload = to_json(record)?;
+    let rows = conn
+        .execute(
+            "INSERT INTO turn_loop_checkpoints (checkpoint_id, scope_key, turn_id, run_id, created_at, payload)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(checkpoint_id) DO UPDATE
+             SET checkpoint_id = turn_loop_checkpoints.checkpoint_id
+             WHERE turn_loop_checkpoints.payload = excluded.payload",
+            libsql::params![
+                record.checkpoint_id.as_uuid().to_string(),
+                scope_key(&record.scope)?,
+                record.turn_id.to_string(),
+                record.run_id.to_string(),
+                record.created_at.to_rfc3339(),
+                payload,
+            ],
+        )
+        .await
+        .map_err(db_error)?;
+    if rows == 1 {
+        return Ok(());
+    }
+
+    Err(TurnError::Conflict {
+        reason: "loop checkpoint id already belongs to a different checkpoint mapping".to_string(),
+    })
 }
 
 #[cfg(feature = "libsql")]
@@ -812,6 +1072,11 @@ async fn libsql_load_snapshot(
         "SELECT payload FROM turn_checkpoints ORDER BY run_id, sequence",
     )
     .await?;
+    let loop_checkpoints = libsql_load_payloads::<LoopCheckpointRecord>(
+        conn,
+        "SELECT payload FROM turn_loop_checkpoints ORDER BY created_at, checkpoint_id",
+    )
+    .await?;
     let idempotency_records = libsql_load_payloads::<TurnIdempotencyRecord>(
         conn,
         "SELECT payload FROM turn_idempotency_records ORDER BY created_at, record_key",
@@ -833,6 +1098,7 @@ async fn libsql_load_snapshot(
         runs,
         active_locks,
         checkpoints,
+        loop_checkpoints,
         idempotency_records,
         events,
         event_retention_floor,
@@ -867,6 +1133,7 @@ async fn libsql_replace_snapshot(
         "turn_lifecycle_events",
         "turn_admission_reservations",
         "turn_idempotency_records",
+        "turn_loop_checkpoints",
         "turn_checkpoints",
         "turn_active_locks",
         "turn_run_records",
@@ -919,11 +1186,28 @@ async fn libsql_replace_snapshot(
     }
     for record in &snapshot.checkpoints {
         conn.execute(
-            "INSERT INTO turn_checkpoints (checkpoint_id, run_id, sequence, payload) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO turn_checkpoints (checkpoint_id, run_id, sequence, scope_key, kind, payload) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             libsql::params![
                 record.checkpoint_id.as_uuid().to_string(),
                 record.run_id.to_string(),
                 record.sequence as i64,
+                record.scope.as_ref().map(scope_key).transpose()?.unwrap_or_default(),
+                record.kind.as_str(),
+                to_json(record)?,
+            ],
+        )
+        .await
+        .map_err(db_error)?;
+    }
+    for record in &snapshot.loop_checkpoints {
+        conn.execute(
+            "INSERT INTO turn_loop_checkpoints (checkpoint_id, scope_key, turn_id, run_id, created_at, payload) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            libsql::params![
+                record.checkpoint_id.as_uuid().to_string(),
+                scope_key(&record.scope)?,
+                record.turn_id.to_string(),
+                record.run_id.to_string(),
+                record.created_at.to_rfc3339(),
                 to_json(record)?,
             ],
         )
@@ -988,7 +1272,7 @@ async fn lock_postgres_turn_tables(
     mode: &str,
 ) -> Result<(), TurnError> {
     let statement = format!(
-        "LOCK TABLE turn_records, turn_run_records, turn_active_locks, turn_checkpoints, turn_idempotency_records, turn_lifecycle_events, turn_store_metadata, turn_admission_reservations IN {mode}"
+        "LOCK TABLE turn_records, turn_run_records, turn_active_locks, turn_checkpoints, turn_loop_checkpoints, turn_idempotency_records, turn_lifecycle_events, turn_store_metadata, turn_admission_reservations IN {mode}"
     );
     client.batch_execute(&statement).await.map_err(db_error)
 }
@@ -1008,6 +1292,40 @@ where
             serde_json::from_str(&payload).map_err(db_error)
         })
         .collect()
+}
+
+#[cfg(feature = "postgres")]
+async fn postgres_insert_loop_checkpoint_record(
+    client: &impl deadpool_postgres::GenericClient,
+    record: &LoopCheckpointRecord,
+) -> Result<(), TurnError> {
+    let payload = to_json(record)?;
+    let rows = client
+        .query(
+            "INSERT INTO turn_loop_checkpoints (checkpoint_id, scope_key, turn_id, run_id, created_at, payload)
+             VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+             ON CONFLICT (checkpoint_id) DO UPDATE
+             SET checkpoint_id = turn_loop_checkpoints.checkpoint_id
+             WHERE turn_loop_checkpoints.payload = EXCLUDED.payload
+             RETURNING payload::text",
+            &[
+                &record.checkpoint_id.as_uuid().to_string(),
+                &scope_key(&record.scope)?,
+                &record.turn_id.to_string(),
+                &record.run_id.to_string(),
+                &record.created_at,
+                &payload,
+            ],
+        )
+        .await
+        .map_err(db_error)?;
+    if rows.len() == 1 {
+        return Ok(());
+    }
+
+    Err(TurnError::Conflict {
+        reason: "loop checkpoint id already belongs to a different checkpoint mapping".to_string(),
+    })
 }
 
 #[cfg(feature = "postgres")]
@@ -1052,6 +1370,11 @@ async fn postgres_load_snapshot(
         "SELECT payload::text FROM turn_checkpoints ORDER BY run_id, sequence",
     )
     .await?;
+    let loop_checkpoints = postgres_load_payloads::<LoopCheckpointRecord>(
+        client,
+        "SELECT payload::text FROM turn_loop_checkpoints ORDER BY created_at, checkpoint_id",
+    )
+    .await?;
     let idempotency_records = postgres_load_payloads::<TurnIdempotencyRecord>(
         client,
         "SELECT payload::text FROM turn_idempotency_records ORDER BY created_at, record_key",
@@ -1073,6 +1396,7 @@ async fn postgres_load_snapshot(
         runs,
         active_locks,
         checkpoints,
+        loop_checkpoints,
         idempotency_records,
         events,
         event_retention_floor,
@@ -1090,6 +1414,7 @@ async fn postgres_replace_snapshot(
         "turn_lifecycle_events",
         "turn_admission_reservations",
         "turn_idempotency_records",
+        "turn_loop_checkpoints",
         "turn_checkpoints",
         "turn_active_locks",
         "turn_run_records",
@@ -1145,12 +1470,36 @@ async fn postgres_replace_snapshot(
     }
     for record in &snapshot.checkpoints {
         let payload = to_json(record)?;
+        let checkpoint_scope_key = record
+            .scope
+            .as_ref()
+            .map(scope_key)
+            .transpose()?
+            .unwrap_or_default();
         txn.execute(
-            "INSERT INTO turn_checkpoints (checkpoint_id, run_id, sequence, payload) VALUES ($1, $2, $3, $4::jsonb)",
+            "INSERT INTO turn_checkpoints (checkpoint_id, run_id, sequence, scope_key, kind, payload) VALUES ($1, $2, $3, $4, $5, $6::jsonb)",
             &[
                 &record.checkpoint_id.as_uuid().to_string(),
                 &record.run_id.to_string(),
                 &(record.sequence as i64),
+                &checkpoint_scope_key,
+                &record.kind.as_str(),
+                &payload,
+            ],
+        )
+        .await
+        .map_err(db_error)?;
+    }
+    for record in &snapshot.loop_checkpoints {
+        let payload = to_json(record)?;
+        txn.execute(
+            "INSERT INTO turn_loop_checkpoints (checkpoint_id, scope_key, turn_id, run_id, created_at, payload) VALUES ($1, $2, $3, $4, $5, $6::jsonb)",
+            &[
+                &record.checkpoint_id.as_uuid().to_string(),
+                &scope_key(&record.scope)?,
+                &record.turn_id.to_string(),
+                &record.run_id.to_string(),
+                &record.created_at,
                 &payload,
             ],
         )
@@ -1160,14 +1509,14 @@ async fn postgres_replace_snapshot(
     for record in &snapshot.idempotency_records {
         let payload = to_json(record)?;
         txn.execute(
-            "INSERT INTO turn_idempotency_records (record_key, scope_key, operation, run_id, idempotency_key, created_at, payload) VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7::jsonb)",
+            "INSERT INTO turn_idempotency_records (record_key, scope_key, operation, run_id, idempotency_key, created_at, payload) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)",
             &[
                 &idempotency_record_key(record)?,
                 &scope_key(&record.scope)?,
                 &operation_key(record)?,
                 &record.run_id.map(|run_id| run_id.to_string()),
                 &record.key.as_str(),
-                &record.created_at.to_rfc3339(),
+                &record.created_at,
                 &payload,
             ],
         )
@@ -1265,9 +1614,218 @@ fn turn_event_kind_key(event: &TurnLifecycleEvent) -> Result<String, TurnError> 
     to_json(&event.kind)
 }
 
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn ensure_loop_checkpoint_record_matches_request(
+    record: &LoopCheckpointRecord,
+    request: &GetLoopCheckpointRequest,
+) -> Result<(), TurnError> {
+    if record.scope == request.scope
+        && record.turn_id == request.turn_id
+        && record.run_id == request.run_id
+        && record.checkpoint_id == request.checkpoint_id
+    {
+        Ok(())
+    } else {
+        Err(TurnError::Conflict {
+            reason: "loop checkpoint row metadata conflicts with persisted payload".to_string(),
+        })
+    }
+}
+
 fn db_error(error: impl std::fmt::Display) -> TurnError {
     tracing::debug!(%error, "turn state persistence operation failed");
     TurnError::Unavailable {
         reason: "turn state persistence temporarily unavailable".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+
+    fn test_scope(thread: &str) -> TurnScope {
+        TurnScope::new(
+            TenantId::new("tenant-db-checkpoint").unwrap(),
+            Some(AgentId::new("agent-db-checkpoint").unwrap()),
+            Some(ProjectId::new("project-db-checkpoint").unwrap()),
+            ThreadId::new(thread).unwrap(),
+        )
+    }
+
+    fn loop_checkpoint_record(thread: &str) -> LoopCheckpointRecord {
+        LoopCheckpointRecord {
+            checkpoint_id: crate::TurnCheckpointId::new(),
+            scope: test_scope(thread),
+            turn_id: crate::TurnId::new(),
+            run_id: crate::TurnRunId::new(),
+            state_ref: crate::LoopCheckpointStateRef::new("checkpoint:db-conflict").unwrap(),
+            schema_id: crate::CheckpointSchemaId::new("interactive_checkpoint_v1").unwrap(),
+            schema_version: crate::RunProfileVersion::new(1),
+            kind: crate::LoopCheckpointKind::BeforeBlock,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn libsql_loop_checkpoint_insert_conflicts_on_same_id_different_scope_or_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("turns.db");
+        let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+        let store = LibSqlTurnStateStore::new(Arc::clone(&db));
+        store.run_migrations().await.unwrap();
+        let conn = db.connect().unwrap();
+
+        let record = loop_checkpoint_record("libsql-conflict-a");
+        libsql_insert_loop_checkpoint_record(&conn, &record)
+            .await
+            .unwrap();
+        libsql_insert_loop_checkpoint_record(&conn, &record)
+            .await
+            .unwrap();
+
+        let mut conflicting = record.clone();
+        conflicting.scope = test_scope("libsql-conflict-b");
+        conflicting.run_id = crate::TurnRunId::new();
+        let error = libsql_insert_loop_checkpoint_record(&conn, &conflicting)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, TurnError::Conflict { .. }));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn libsql_loop_checkpoint_get_errors_when_payload_identity_drifts() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("turns.db");
+        let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+        let store = LibSqlTurnStateStore::new(Arc::clone(&db));
+        store.run_migrations().await.unwrap();
+        let conn = db.connect().unwrap();
+
+        let record = loop_checkpoint_record("libsql-drift");
+        libsql_insert_loop_checkpoint_record(&conn, &record)
+            .await
+            .unwrap();
+
+        let mut drifted = record.clone();
+        drifted.run_id = crate::TurnRunId::new();
+        conn.execute(
+            "UPDATE turn_loop_checkpoints SET payload = ?1 WHERE checkpoint_id = ?2",
+            libsql::params![
+                to_json(&drifted).unwrap(),
+                record.checkpoint_id.as_uuid().to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+
+        let error = store
+            .get_loop_checkpoint(GetLoopCheckpointRequest {
+                scope: record.scope.clone(),
+                turn_id: record.turn_id,
+                run_id: record.run_id,
+                checkpoint_id: record.checkpoint_id,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(error, TurnError::Conflict { .. }));
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn postgres_loop_checkpoint_insert_conflicts_on_same_id_different_scope_or_run() {
+        let Some(pool) = postgres_pool().await else {
+            return;
+        };
+        let store = PostgresTurnStateStore::new(pool.clone());
+        store.run_migrations().await.unwrap();
+        let client = pool.get().await.unwrap();
+
+        let record = loop_checkpoint_record("postgres-conflict-a");
+        postgres_insert_loop_checkpoint_record(&client, &record)
+            .await
+            .unwrap();
+        postgres_insert_loop_checkpoint_record(&client, &record)
+            .await
+            .unwrap();
+
+        let mut conflicting = record.clone();
+        conflicting.scope = test_scope("postgres-conflict-b");
+        conflicting.run_id = crate::TurnRunId::new();
+        let error = postgres_insert_loop_checkpoint_record(&client, &conflicting)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, TurnError::Conflict { .. }));
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn postgres_loop_checkpoint_get_errors_when_payload_identity_drifts() {
+        let Some(pool) = postgres_pool().await else {
+            return;
+        };
+        let store = PostgresTurnStateStore::new(pool.clone());
+        store.run_migrations().await.unwrap();
+        let client = pool.get().await.unwrap();
+
+        let record = loop_checkpoint_record("postgres-drift");
+        postgres_insert_loop_checkpoint_record(&client, &record)
+            .await
+            .unwrap();
+
+        let mut drifted = record.clone();
+        drifted.run_id = crate::TurnRunId::new();
+        client
+            .execute(
+                "UPDATE turn_loop_checkpoints SET payload = $1::jsonb WHERE checkpoint_id = $2",
+                &[
+                    &to_json(&drifted).unwrap(),
+                    &record.checkpoint_id.as_uuid().to_string(),
+                ],
+            )
+            .await
+            .unwrap();
+
+        let error = store
+            .get_loop_checkpoint(GetLoopCheckpointRequest {
+                scope: record.scope.clone(),
+                turn_id: record.turn_id,
+                run_id: record.run_id,
+                checkpoint_id: record.checkpoint_id,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(error, TurnError::Conflict { .. }));
+    }
+
+    #[cfg(feature = "postgres")]
+    async fn postgres_pool() -> Option<deadpool_postgres::Pool> {
+        let Ok(url) = std::env::var("IRONCLAW_TURNS_POSTGRES_URL") else {
+            eprintln!(
+                "skipping postgres loop checkpoint conflict test: IRONCLAW_TURNS_POSTGRES_URL not set"
+            );
+            return None;
+        };
+        let config: tokio_postgres::Config = match url.parse() {
+            Ok(config) => config,
+            Err(error) => {
+                eprintln!("skipping postgres loop checkpoint conflict test: invalid url ({error})");
+                return None;
+            }
+        };
+        let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
+        let pool = deadpool_postgres::Pool::builder(manager)
+            .max_size(4)
+            .build()
+            .unwrap();
+        if let Err(error) = pool.get().await {
+            eprintln!(
+                "skipping postgres loop checkpoint conflict test: database unavailable ({error})"
+            );
+            return None;
+        }
+        Some(pool)
     }
 }

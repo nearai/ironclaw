@@ -92,7 +92,8 @@ impl ConversationBindingService for FakeConversationBindingService {
                 },
             )?,
             thread_id: ThreadId::new(format!(
-                "thread:{}",
+                "thread:{}:{}",
+                request.installation_id.as_str(),
                 request.external_conversation_ref.conversation_fingerprint()
             ))
             .map_err(|e| ProductWorkflowError::BindingResolutionFailed {

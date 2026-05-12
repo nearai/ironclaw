@@ -42,7 +42,7 @@ use crate::{
     RuntimeBlockedReason, RuntimeCapabilityCompleted, RuntimeCapabilityFailure,
     RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
     RuntimeFailureKind, RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary,
-    VisibleCapabilityRequest, VisibleCapabilitySurface,
+    VisibleCapabilityRequest, VisibleCapabilitySurface, surface::CapabilityCatalog,
 };
 
 /// Default production wiring for [`HostRuntime`].
@@ -380,12 +380,13 @@ impl HostRuntime for DefaultHostRuntime {
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, HostRuntimeError> {
-        let _ = request;
-        let descriptors = self.registry.capabilities().cloned().collect();
-        Ok(VisibleCapabilitySurface {
-            version: self.surface_version.clone(),
-            descriptors,
-        })
+        CapabilityCatalog::new(
+            self.registry.as_ref(),
+            self.authorizer.as_ref(),
+            &self.surface_version,
+        )
+        .visible_capabilities(request)
+        .await
     }
 
     /// Best-effort cancellation fanout for active work in one scope.

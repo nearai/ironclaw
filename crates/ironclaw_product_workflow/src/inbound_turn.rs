@@ -117,7 +117,8 @@ where
                 kind: "non_user_message".into(),
             });
         };
-        let source_binding_id = envelope.source_binding_key();
+        let source_binding_id = product_source_binding_id(envelope);
+        let submit_idempotency_key = submit_idempotency_key(envelope);
 
         if let Some(replay) = self
             .thread_service
@@ -134,6 +135,7 @@ where
                 &self.thread_service,
                 &self.turn_coordinator,
                 replay,
+                submit_idempotency_key.clone(),
                 envelope.received_at(),
             )
             .await;
@@ -189,12 +191,7 @@ where
                 message_id: accepted.message_id,
                 source_binding_id,
                 reply_target_binding_id,
-                idempotency_key_raw: format!(
-                    "{}:{}:{}",
-                    envelope.adapter_id(),
-                    envelope.installation_id(),
-                    envelope.external_event_id()
-                ),
+                idempotency_key_raw: submit_idempotency_key,
                 received_at: envelope.received_at(),
             },
         )
@@ -206,6 +203,7 @@ async fn submit_or_replay_accepted_message<T, C>(
     thread_service: &T,
     turn_coordinator: &C,
     replay: AcceptedInboundMessageReplay,
+    submit_idempotency_key: String,
     received_at: DateTime<Utc>,
 ) -> Result<InboundTurnOutcome, ProductWorkflowError>
 where
@@ -264,7 +262,7 @@ where
             message_id: replay.message_id,
             source_binding_id,
             reply_target_binding_id,
-            idempotency_key_raw: format!("{}:retry:{}", replay.message_id, Uuid::new_v4()),
+            idempotency_key_raw: submit_idempotency_key,
             received_at,
         },
     )
@@ -431,6 +429,28 @@ impl RefFactory for IdempotencyKey {
     fn build(value: String) -> Result<Self, String> {
         Self::new(value)
     }
+}
+
+fn product_source_binding_id(envelope: &ProductInboundEnvelope) -> String {
+    format!(
+        "{}{}{}",
+        segment("adapter", envelope.adapter_id().as_str()),
+        segment("installation", envelope.installation_id().as_str()),
+        envelope.source_binding_key()
+    )
+}
+
+fn submit_idempotency_key(envelope: &ProductInboundEnvelope) -> String {
+    format!(
+        "{}{}{}",
+        segment("adapter", envelope.adapter_id().as_str()),
+        segment("installation", envelope.installation_id().as_str()),
+        segment("event", envelope.external_event_id().as_str())
+    )
+}
+
+fn segment(name: &str, value: &str) -> String {
+    format!("{name}:{}:{value};", value.len())
 }
 
 fn bounded_ref<T: RefFactory>(prefix: &str, raw: &str) -> Result<T, ProductWorkflowError> {

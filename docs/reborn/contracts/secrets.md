@@ -38,6 +38,8 @@ SecretLease
 SecretStoreError
 SecretStore
 InMemorySecretStore
+LibSqlSecretsStore     // durable backend when the libsql feature is enabled
+PostgresSecretsStore   // durable backend when the postgres feature is enabled
 ```
 
 `SecretMaterial` is backed by `secrecy::SecretString`, so access to raw values is explicit through `ExposeSecret`. Metadata, lease records, and errors never contain raw values.
@@ -87,6 +89,8 @@ let material = secrets.consume(&scope, lease.id).await?;
 
 `SecretStore::put(...)` is for trusted setup, composition, migration, or storage-code paths that are already allowed to manage secret material. It is not a runtime/plugin API, and it intentionally does not perform authorization itself.
 
+Durable libSQL/PostgreSQL stores persist only encrypted values and per-row salts in `reborn_secret_records`; names, providers, expiry, and usage metadata remain queryable. Store readiness must fail closed when the configured master key is missing, malformed, cannot decrypt existing rows, or loses a first-boot key-check race to another process with a different key. Bootstrap inserts of the `reborn_secret_store_key_check` sentinel must re-read and decrypt the committed row before reporting ready.
+
 The shared Reborn runtime HTTP egress service uses this surface to:
 
 - check metadata for required or optional credential handles
@@ -135,7 +139,6 @@ preferred when a credential is only valid for specific destinations.
 
 This slice does not implement:
 
-- durable encrypted secret persistence
 - platform keychain integration
 - secret rotation/versioning
 - secret audit emission
@@ -159,4 +162,6 @@ The crate tests cover:
 - consumed and revoked lease records drop retained secret material
 - revoked leases cannot be consumed
 - missing secrets fail without creating leases
+- durable libSQL/PostgreSQL stores keep raw material encrypted at rest
+- durable key-check readiness rejects wrong, malformed, or concurrently conflicting master keys
 - crate boundary remains low-level and does not depend on workflow/runtime/observability crates

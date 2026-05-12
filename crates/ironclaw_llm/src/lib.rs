@@ -53,8 +53,8 @@ pub mod vision_models;
 
 pub use circuit_breaker::{CircuitBreakerConfig, CircuitBreakerProvider};
 pub use config::{
-    BedrockConfig, CacheRetention, GeminiOauthConfig, LlmConfig, NearAiConfig, OAUTH_PLACEHOLDER,
-    OpenAiCodexConfig, RegistryProviderConfig,
+    BedrockConfig, CacheRetention, GeminiOauthConfig, LlmBackendKind, LlmConfig, NearAiConfig,
+    OAUTH_PLACEHOLDER, OpenAiCodexConfig, RegistryProviderConfig,
 };
 pub use error::LlmError;
 pub use failover::{CooldownConfig, FailoverProvider};

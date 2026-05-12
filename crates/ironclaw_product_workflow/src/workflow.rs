@@ -10,6 +10,7 @@ use ironclaw_product_adapters::{
     ProductAdapterError, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
     ProductRejection, ProductRejectionKind, ProductWorkflow, ProjectionSubscriptionRequest,
 };
+use ironclaw_turns::{AdmissionRejectionReason, TurnError, TurnErrorCategory};
 use tracing::debug;
 
 use crate::action::{ActionDispatchKind, ActionFingerprintKey, SourceBindingKey};
@@ -205,6 +206,32 @@ fn is_terminal_success_ack(ack: &ProductInboundAck) -> bool {
     !matches!(ack, ProductInboundAck::DeferredBusy { .. })
 }
 
+fn turn_error_is_retryable(error: &TurnError) -> bool {
+    matches!(error.adapter_status_code(), 429 | 503)
+}
+
+fn rejection_kind_for_turn_error(error: &TurnError) -> ProductRejectionKind {
+    match error.category() {
+        TurnErrorCategory::Unauthorized => ProductRejectionKind::AccessDenied,
+        TurnErrorCategory::ScopeNotFound => ProductRejectionKind::BindingRequired,
+        TurnErrorCategory::AdmissionRejected => match error {
+            TurnError::AdmissionRejected(rejection)
+                if matches!(
+                    rejection.reason,
+                    AdmissionRejectionReason::Policy | AdmissionRejectionReason::Unauthorized
+                ) =>
+            {
+                ProductRejectionKind::AccessDenied
+            }
+            _ => ProductRejectionKind::PolicyDenied,
+        },
+        TurnErrorCategory::ThreadBusy
+        | TurnErrorCategory::InvalidRequest
+        | TurnErrorCategory::Unavailable
+        | TurnErrorCategory::Conflict => ProductRejectionKind::PolicyDenied,
+    }
+}
+
 fn terminal_ack_for_error(error: &ProductWorkflowError) -> Option<ProductInboundAck> {
     match error {
         ProductWorkflowError::CommandRoutingUnavailable { command } => {
@@ -217,6 +244,12 @@ fn terminal_ack_for_error(error: &ProductWorkflowError) -> Option<ProductInbound
             Some(ProductInboundAck::Rejected(ProductRejection::permanent(
                 ProductRejectionKind::PolicyDenied,
                 format!("unsupported action kind: {kind}"),
+            )))
+        }
+        ProductWorkflowError::TurnSubmissionFailed { error } if !turn_error_is_retryable(error) => {
+            Some(ProductInboundAck::Rejected(ProductRejection::permanent(
+                rejection_kind_for_turn_error(error),
+                format!("turn submission rejected: {error}"),
             )))
         }
         ProductWorkflowError::BindingResolutionFailed { .. }

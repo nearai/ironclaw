@@ -63,6 +63,7 @@ pub enum RequirementLevel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DriverRequirements {
     pub model: RequirementLevel,
+    pub prompt: RequirementLevel,
     pub transcript: RequirementLevel,
     pub checkpoint: RequirementLevel,
     pub input_polling: RequirementLevel,
@@ -74,6 +75,7 @@ impl DriverRequirements {
     pub fn all_optional() -> Self {
         Self {
             model: RequirementLevel::Optional,
+            prompt: RequirementLevel::Optional,
             transcript: RequirementLevel::Optional,
             checkpoint: RequirementLevel::Optional,
             input_polling: RequirementLevel::Optional,
@@ -85,6 +87,7 @@ impl DriverRequirements {
     pub fn all_required() -> Self {
         Self {
             model: RequirementLevel::Required,
+            prompt: RequirementLevel::Required,
             transcript: RequirementLevel::Required,
             checkpoint: RequirementLevel::Required,
             input_polling: RequirementLevel::Required,
@@ -336,6 +339,7 @@ impl PersistedRunDriverIdentity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostGraphReadiness {
     pub model: bool,
+    pub prompt: bool,
     pub transcript: bool,
     pub checkpoint: bool,
     pub input_polling: bool,
@@ -347,6 +351,7 @@ impl HostGraphReadiness {
     pub fn all_available() -> Self {
         Self {
             model: true,
+            prompt: true,
             transcript: true,
             checkpoint: true,
             input_polling: true,
@@ -357,6 +362,11 @@ impl HostGraphReadiness {
 
     pub fn without_model(mut self) -> Self {
         self.model = false;
+        self
+    }
+
+    pub fn without_prompt(mut self) -> Self {
+        self.prompt = false;
         self
     }
 }
@@ -488,6 +498,12 @@ fn missing_requirements(
         requirements.model,
         host_graph.model,
         "driver requires a model gateway, but the host graph does not provide one",
+    );
+    push_missing(
+        &mut missing,
+        requirements.prompt,
+        host_graph.prompt,
+        "driver requires a prompt bundle port, but the host graph does not provide one",
     );
     push_missing(
         &mut missing,

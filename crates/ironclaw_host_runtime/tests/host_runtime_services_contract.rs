@@ -52,8 +52,11 @@ use ironclaw_processes::{
 use ironclaw_reborn_event_store::{
     RebornEventStoreConfig, RebornEventStoreError, RebornProfile, build_reborn_event_stores,
 };
+#[cfg(feature = "libsql")]
+use ironclaw_resources::ResourceTally;
 use ironclaw_resources::{
-    InMemoryResourceGovernor, ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits,
+    InMemoryResourceGovernor, JsonFileResourceGovernorStore, PersistentResourceGovernor,
+    ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits,
 };
 #[cfg(feature = "libsql")]
 use ironclaw_run_state::LibSqlRunStateApprovalStore;
@@ -196,6 +199,251 @@ fn production_wiring_validation_rejects_missing_components_and_local_only_defaul
 }
 
 #[test]
+fn production_wiring_validation_accepts_persistent_resource_governor_component() {
+    let dir = tempfile::tempdir().unwrap();
+    let governor = Arc::new(PersistentResourceGovernor::new(
+        JsonFileResourceGovernorStore::new(dir.path().join("resource-governor.json")),
+    ));
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        governor,
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    );
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]))
+        .expect_err("other local/test defaults still prevent production validation");
+
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::ResourceGovernor,
+            ProductionWiringIssueKind::LocalOnlyImplementation,
+        ),
+        "persistent resource governor should satisfy resource guardrail: {report:?}"
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn with_libsql_resource_governor_runs_migrations_before_first_reserve() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(
+        libsql::Builder::new_local(dir.path().join("resources.db"))
+            .build()
+            .await
+            .unwrap(),
+    );
+
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_libsql_resource_governor(Arc::clone(&db))
+    .await
+    .unwrap();
+
+    let governor = services.resource_governor();
+    let scope = sample_scope(InvocationId::new());
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_concurrency_slots: Some(1),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+    let reservation = governor
+        .reserve(
+            scope,
+            ResourceEstimate {
+                concurrency_slots: Some(1),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+    governor.release(reservation.id).unwrap();
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn with_libsql_resource_governor_closes_process_reservations_on_cancel() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(
+        libsql::Builder::new_local(dir.path().join("resources.db"))
+            .build()
+            .await
+            .unwrap(),
+    );
+    let process_services = ProcessServices::new(
+        Arc::new(InMemoryProcessStore::new()),
+        Arc::new(InMemoryProcessResultStore::new()),
+    );
+    let process_store = process_services.process_store();
+
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        process_services,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_libsql_resource_governor(Arc::clone(&db))
+    .await
+    .unwrap();
+    let governor = services.resource_governor();
+    let scope = sample_scope(InvocationId::new());
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    let reservation_id = ResourceReservationId::new();
+    let estimate = ResourceEstimate {
+        concurrency_slots: Some(1),
+        ..ResourceEstimate::default()
+    };
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_concurrency_slots: Some(1),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+    governor
+        .reserve_with_id(scope.clone(), estimate.clone(), reservation_id)
+        .unwrap();
+    let process_id = ProcessId::new();
+    let mut start = process_start(process_id, scope.invocation_id, scope.clone());
+    start.estimated_resources = estimate;
+    start.resource_reservation_id = Some(reservation_id);
+    process_store.start(start).await.unwrap();
+
+    let runtime = services.host_runtime_for_local_testing();
+    let outcome = runtime
+        .cancel_work(CancelRuntimeWorkRequest::new(
+            scope.clone(),
+            CorrelationId::new(),
+            CancelReason::UserRequested,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.cancelled, vec![RuntimeWorkId::Process(process_id)]);
+    assert_eq!(
+        governor.reserved_for(&account).unwrap(),
+        ResourceTally::default()
+    );
+    assert!(matches!(
+        governor.release(reservation_id).unwrap_err(),
+        ResourceError::ReservationClosed {
+            status: ReservationStatus::Released,
+            ..
+        }
+    ));
+}
+
+#[cfg(feature = "postgres")]
+const POSTGRES_SKIP_ENV: &str = "IRONCLAW_SKIP_POSTGRES_TESTS";
+
+#[cfg(feature = "postgres")]
+fn postgres_skip_requested() -> bool {
+    std::env::var(POSTGRES_SKIP_ENV).is_ok_and(|value| value == "1" || value == "true")
+}
+
+#[cfg(feature = "postgres")]
+async fn postgres_pool_or_skip() -> Option<deadpool_postgres::Pool> {
+    let database_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://localhost/ironclaw_test".to_string());
+    let config: tokio_postgres::Config = database_url
+        .parse()
+        .expect("DATABASE_URL must be a valid Postgres URL");
+    let mgr = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
+    let pool = deadpool_postgres::Pool::builder(mgr)
+        .max_size(2)
+        .build()
+        .expect("build deadpool");
+    match pool.get().await {
+        Ok(_) => Some(pool),
+        Err(error) => {
+            if postgres_skip_requested() {
+                eprintln!(
+                    "skipping host-runtime Postgres resource governor test ({POSTGRES_SKIP_ENV}=1): {error}"
+                );
+                None
+            } else {
+                panic!(
+                    "host-runtime Postgres resource governor test could not reach Postgres ({error}); \
+                     set DATABASE_URL to a reachable Postgres test database, or set \
+                     {POSTGRES_SKIP_ENV}=1 to explicitly skip."
+                );
+            }
+        }
+    }
+}
+
+#[cfg(feature = "postgres")]
+async fn drop_postgres_resource_governor_table(pool: &deadpool_postgres::Pool) {
+    let client = pool.get().await.expect("cleanup client");
+    client
+        .batch_execute("DROP TABLE IF EXISTS ironclaw_resource_governor_snapshots")
+        .await
+        .expect("drop resource governor snapshots table");
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn with_postgres_resource_governor_runs_migrations_before_first_reserve() {
+    let Some(pool) = postgres_pool_or_skip().await else {
+        return;
+    };
+    drop_postgres_resource_governor_table(&pool).await;
+
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_postgres_resource_governor(pool.clone())
+    .await
+    .unwrap();
+
+    let governor = services.resource_governor();
+    let scope = sample_scope(InvocationId::new());
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_concurrency_slots: Some(1),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+    let reservation = governor
+        .reserve(
+            scope,
+            ResourceEstimate {
+                concurrency_slots: Some(1),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+    governor.release(reservation.id).unwrap();
+    drop_postgres_resource_governor_table(&pool).await;
+}
+
+#[test]
 fn production_wiring_validation_classifies_combined_store_as_run_state_and_approvals() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -255,8 +503,8 @@ fn production_wiring_validation_rejects_unsupported_runtime_requirements() {
     );
 
     let report = services
-        .validate_production_wiring(&ProductionWiringConfig::new([RuntimeKind::FirstParty]))
-        .expect_err("first-party runtime requirements are not dispatcher backend requirements");
+        .validate_production_wiring(&ProductionWiringConfig::new([RuntimeKind::System]))
+        .expect_err("system runtime requirements are not dispatcher backend requirements");
 
     assert!(
         report.contains(
@@ -2943,14 +3191,16 @@ async fn host_runtime_services_enforces_output_limit_and_reconciles_resource_usa
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let scope = sample_scope(InvocationId::new());
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
-    governor.set_limit(
-        account.clone(),
-        ResourceLimits {
-            max_concurrency_slots: Some(1),
-            max_output_bytes: Some(10_000),
-            ..ResourceLimits::default()
-        },
-    );
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_concurrency_slots: Some(1),
+                max_output_bytes: Some(10_000),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let reservation_id = ResourceReservationId::new();
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
@@ -3015,13 +3265,15 @@ async fn host_runtime_services_releases_reservation_when_dispatch_preflight_fail
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let scope = sample_scope(InvocationId::new());
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
-    governor.set_limit(
-        account.clone(),
-        ResourceLimits {
-            max_concurrency_slots: Some(1),
-            ..ResourceLimits::default()
-        },
-    );
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_concurrency_slots: Some(1),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let reservation_id = ResourceReservationId::new();
     let services = HostRuntimeServices::new(
@@ -5119,7 +5371,13 @@ struct FailingProcessResultStore {
 struct FailingCleanupResourceGovernor;
 
 impl ResourceGovernor for FailingCleanupResourceGovernor {
-    fn set_limit(&self, _account: ResourceAccount, _limits: ResourceLimits) {}
+    fn set_limit(
+        &self,
+        _account: ResourceAccount,
+        _limits: ResourceLimits,
+    ) -> Result<(), ResourceError> {
+        Ok(())
+    }
 
     fn reserve(
         &self,
@@ -5873,15 +6131,17 @@ fn mounted_empty_extension_root() -> LocalFilesystem {
 
 fn governor_with_default_limit(account: ResourceAccount) -> InMemoryResourceGovernor {
     let governor = InMemoryResourceGovernor::new();
-    governor.set_limit(
-        account,
-        ResourceLimits {
-            max_concurrency_slots: Some(10),
-            max_network_egress_bytes: Some(10_000),
-            max_output_bytes: Some(100_000),
-            ..ResourceLimits::default()
-        },
-    );
+    governor
+        .set_limit(
+            account,
+            ResourceLimits {
+                max_concurrency_slots: Some(10),
+                max_network_egress_bytes: Some(10_000),
+                max_output_bytes: Some(100_000),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
     governor
 }
 

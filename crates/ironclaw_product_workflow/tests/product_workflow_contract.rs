@@ -9,8 +9,8 @@ use ironclaw_product_adapters::{
     AuthResolutionPayload, AuthResolutionResult, ExternalActorRef, ExternalConversationRef,
     ExternalEventId, InboundCommandPayload, LinkedThreadActionPayload, ParsedProductInbound,
     ProductAdapterError, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
-    ProductInboundPayload, ProductTriggerReason, ProductWorkflow, ProductWorkflowRejectionKind,
-    ProtocolAuthEvidence, TrustedInboundContext, UserMessagePayload,
+    ProductInboundPayload, ProductRejectionDisposition, ProductTriggerReason, ProductWorkflow,
+    ProductWorkflowRejectionKind, ProtocolAuthEvidence, TrustedInboundContext, UserMessagePayload,
 };
 use ironclaw_product_workflow::{
     ActionDispatchKind, ActionFingerprintKey, AuthRequestRef, DefaultProductWorkflow,
@@ -348,6 +348,63 @@ async fn fake_ledger_expiration_reclaims_in_flight_fingerprint() {
         .await
         .expect("expired fingerprint can be reclaimed");
     assert!(matches!(reclaimed, IdempotencyDecision::New(_)));
+}
+
+#[tokio::test]
+async fn permanent_turn_submission_failure_settles_terminal_rejection() {
+    let (workflow, inbound, ledger) = build_workflow();
+    inbound.force_failure(ProductWorkflowError::TurnSubmissionFailed {
+        error: TurnError::Unauthorized,
+    });
+
+    let envelope = sample_envelope("terminal-turn-error");
+    let err = workflow
+        .accept_inbound(envelope.clone())
+        .await
+        .expect_err("unauthorized turn rejection should surface error");
+    assert!(!err.is_retryable());
+    assert_eq!(ledger.settled_count(), 1);
+
+    let replay = workflow
+        .accept_inbound(envelope)
+        .await
+        .expect("terminal rejection should replay duplicate ack");
+    let ProductInboundAck::Duplicate { prior } = replay else {
+        panic!("expected duplicate replay")
+    };
+    let ProductInboundAck::Rejected(rejection) = *prior else {
+        panic!("expected rejected prior outcome")
+    };
+    assert_eq!(
+        rejection.disposition(),
+        ProductRejectionDisposition::Permanent
+    );
+}
+
+#[tokio::test]
+async fn retryable_turn_submission_failure_releases_for_retry() {
+    let (workflow, inbound, ledger) = build_workflow();
+    inbound.force_failure(ProductWorkflowError::TurnSubmissionFailed {
+        error: TurnError::Unavailable {
+            reason: "turn store unavailable".into(),
+        },
+    });
+
+    let envelope = sample_envelope("retryable-turn-error");
+    let first = workflow
+        .accept_inbound(envelope.clone())
+        .await
+        .expect_err("unavailable turn rejection should surface retryable error");
+    assert!(first.is_retryable());
+    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.in_flight_count(), 0);
+
+    let second = workflow
+        .accept_inbound(envelope)
+        .await
+        .expect_err("released retryable turn rejection should dispatch again");
+    assert!(second.is_retryable());
+    assert_eq!(inbound.attempt_count(), 2);
 }
 
 #[tokio::test]

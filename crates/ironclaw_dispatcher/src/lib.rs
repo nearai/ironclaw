@@ -369,6 +369,7 @@ fn dispatch_error_kind(error: &DispatchError) -> &'static str {
         DispatchError::UnsupportedRuntime { .. } => "unsupported_runtime",
         DispatchError::Mcp { kind }
         | DispatchError::Script { kind }
-        | DispatchError::Wasm { kind } => kind.event_kind(),
+        | DispatchError::Wasm { kind }
+        | DispatchError::FirstParty { kind } => kind.event_kind(),
     }
 }

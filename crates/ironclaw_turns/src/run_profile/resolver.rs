@@ -207,7 +207,7 @@ fn interactive_profile() -> RunProfileDefinition {
     let checkpoint_schema_id = CheckpointSchemaId::from_trusted_static("interactive_checkpoint_v1");
     let checkpoint_schema_version = RunProfileVersion::new(1);
     RunProfileDefinition {
-        profile_id: RunProfileId::from_trusted_static("interactive_default"),
+        profile_id: RunProfileId::interactive_default(),
         profile_version: RunProfileVersion::new(1),
         run_class_id: RunClassId::from_trusted_static("interactive_coding"),
         loop_driver: AgentLoopDriverDescriptor {
@@ -237,6 +237,8 @@ fn interactive_profile() -> RunProfileDefinition {
             require_before_side_effect: true,
             require_before_block: true,
             max_checkpoint_bytes: 64 * 1024,
+            require_final_checkpoint: false,
+            allow_no_reply_completion: false,
         },
         resource_budget_policy: ResourceBudgetPolicy {
             tier: ResourceBudgetTier::from_trusted_static("interactive_standard"),
@@ -258,7 +260,7 @@ fn long_running_mission_profile() -> RunProfileDefinition {
     let checkpoint_schema_id = CheckpointSchemaId::from_trusted_static("durable_mission_v1");
     let checkpoint_schema_version = RunProfileVersion::new(1);
     RunProfileDefinition {
-        profile_id: RunProfileId::from_trusted_static("long_running_mission"),
+        profile_id: RunProfileId::long_running_mission(),
         profile_version: RunProfileVersion::new(1),
         run_class_id: RunClassId::from_trusted_static("long_running_mission"),
         loop_driver: AgentLoopDriverDescriptor {
@@ -288,6 +290,8 @@ fn long_running_mission_profile() -> RunProfileDefinition {
             require_before_side_effect: true,
             require_before_block: true,
             max_checkpoint_bytes: 256 * 1024,
+            require_final_checkpoint: true,
+            allow_no_reply_completion: false,
         },
         resource_budget_policy: ResourceBudgetPolicy {
             tier: ResourceBudgetTier::from_trusted_static("mission_high"),
@@ -321,16 +325,20 @@ fn provenance_for(
     RedactedRunProfileProvenance {
         sources: vec![RedactedRunProfileSource {
             layer: RunProfileSourceLayer::from_trusted_static("system_default"),
-            source_ref: RunProfileSourceRef::from_trusted_static(
-                match definition.profile_id.as_str() {
-                    "interactive_default" => "builtin:interactive_default:v1",
-                    "long_running_mission" => "builtin:long_running_mission:v1",
-                    _ => "builtin:unknown:v1",
-                },
-            ),
+            source_ref: source_ref_for(definition),
             summary: summary.to_string(),
         }],
         effective_privileges: definition.required_privileges.clone(),
+    }
+}
+
+fn source_ref_for(definition: &RunProfileDefinition) -> RunProfileSourceRef {
+    if definition.profile_id == RunProfileId::interactive_default() {
+        RunProfileSourceRef::from_trusted_static("builtin:interactive_default:v1")
+    } else if definition.profile_id == RunProfileId::long_running_mission() {
+        RunProfileSourceRef::from_trusted_static("builtin:long_running_mission:v1")
+    } else {
+        RunProfileSourceRef::from_trusted_static("builtin:unknown:v1")
     }
 }
 
@@ -407,6 +415,14 @@ fn fingerprint_for(
             .max_checkpoint_bytes
             .to_string(),
     );
+    update_bool(
+        definition.checkpoint_policy.require_final_checkpoint,
+        &mut update,
+    );
+    update_bool(
+        definition.checkpoint_policy.allow_no_reply_completion,
+        &mut update,
+    );
     update(resource_budget_policy.tier.as_str());
     update(&resource_budget_policy.max_model_calls.to_string());
     update(
@@ -444,4 +460,41 @@ fn fingerprint_for(
         update(&source.summary);
     }
     RunProfileFingerprint::from_trusted_string(format!("fp:{hash:016x}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_running_mission_profile_requires_final_checkpoint() {
+        assert!(
+            long_running_mission_profile()
+                .checkpoint_policy
+                .require_final_checkpoint
+        );
+    }
+
+    #[test]
+    fn fingerprint_changes_when_final_checkpoint_requirement_changes() {
+        let relaxed = interactive_profile();
+        let mut strict = relaxed.clone();
+        strict.checkpoint_policy.require_final_checkpoint = true;
+
+        let relaxed_provenance = provenance_for(
+            &relaxed,
+            &RunProfileResolutionRequest::interactive_default(),
+        );
+        let strict_provenance =
+            provenance_for(&strict, &RunProfileResolutionRequest::interactive_default());
+
+        assert_ne!(
+            fingerprint_for(
+                &relaxed,
+                &relaxed.resource_budget_policy,
+                &relaxed_provenance
+            ),
+            fingerprint_for(&strict, &strict.resource_budget_policy, &strict_provenance),
+        );
+    }
 }

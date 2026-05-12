@@ -4,7 +4,7 @@ use thiserror::Error;
 use crate::{
     AcceptedMessageRef, GateRef, ReplyTargetBindingRef, ResolvedRunProfile, RunProfileId,
     RunProfileVersion, SourceBindingRef, TurnAdmissionClass, TurnCheckpointId, TurnId, TurnRunId,
-    TurnScope, events::EventCursor, request::TurnTimestamp,
+    TurnScope, events::EventCursor, request::TurnTimestamp, run_profile::LoopModelRouteSnapshot,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,7 +92,7 @@ impl<'de> Deserialize<'de> for TurnRunProfile {
 }
 
 fn compatibility_profile_id(resolved: &ResolvedRunProfile) -> RunProfileId {
-    if resolved.profile_id.as_str() == "interactive_default" {
+    if resolved.profile_id.is_interactive_default() {
         RunProfileId::default_profile()
     } else {
         resolved.profile_id.clone()
@@ -271,6 +271,8 @@ pub struct TurnRunState {
     pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub resolved_run_profile_id: RunProfileId,
     pub resolved_run_profile_version: RunProfileVersion,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_model_route: Option<LoopModelRouteSnapshot>,
     pub received_at: TurnTimestamp,
     pub checkpoint_id: Option<TurnCheckpointId>,
     pub gate_ref: Option<GateRef>,

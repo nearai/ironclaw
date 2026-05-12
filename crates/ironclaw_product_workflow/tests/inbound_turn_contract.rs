@@ -28,7 +28,7 @@ use ironclaw_turns::{
 };
 
 fn sample_user_message_envelope(event_suffix: &str) -> ProductInboundEnvelope {
-    sample_user_message_envelope_with_text(event_suffix, "hello world")
+    sample_user_message_envelope_with_install_and_text(event_suffix, "install_alpha", "hello world")
 }
 
 #[derive(Default)]
@@ -75,7 +75,7 @@ impl TurnCoordinator for CapturingTurnCoordinator {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct ScriptedTurnCoordinator {
     results: Arc<Mutex<VecDeque<Result<SubmitTurnResponse, TurnError>>>>,
     submissions: Arc<Mutex<Vec<SubmitTurnRequest>>>,
@@ -87,6 +87,13 @@ impl ScriptedTurnCoordinator {
             .lock()
             .expect("scripted coordinator lock poisoned")
             .push_back(result);
+    }
+
+    fn submissions(&self) -> Vec<SubmitTurnRequest> {
+        self.submissions
+            .lock()
+            .expect("scripted coordinator submissions lock poisoned")
+            .clone()
     }
 }
 
@@ -148,15 +155,23 @@ fn sample_user_message_envelope_with_text(
     event_suffix: &str,
     text: &str,
 ) -> ProductInboundEnvelope {
+    sample_user_message_envelope_with_install_and_text(event_suffix, "install_alpha", text)
+}
+
+fn sample_user_message_envelope_with_install_and_text(
+    event_suffix: &str,
+    installation_id: &str,
+    text: &str,
+) -> ProductInboundEnvelope {
     let evidence = ProtocolAuthEvidence::test_verified(
         AuthRequirement::SharedSecretHeader {
             header_name: "X-Secret".into(),
         },
-        "install_alpha",
+        installation_id,
     );
     let context = TrustedInboundContext::from_verified_evidence(
         ProductAdapterId::new("test_adapter").expect("valid"),
-        AdapterInstallationId::new("install_alpha").expect("valid"),
+        AdapterInstallationId::new(installation_id).expect("valid"),
         Utc::now(),
         &evidence,
     )
@@ -263,6 +278,7 @@ async fn retry_replays_accepted_message_before_live_binding_resolution() {
     coordinator.push_result(Err(TurnError::Unavailable {
         reason: "transient submit failure".into(),
     }));
+    let coordinator_handle = coordinator.clone();
     let service =
         DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator);
 
@@ -312,6 +328,68 @@ async fn retry_replays_accepted_message_before_live_binding_resolution() {
         .expect("history");
     assert_eq!(history.messages.len(), 1);
     assert_eq!(history.messages[0].status, MessageStatus::Submitted);
+    let submissions = coordinator_handle.submissions();
+    assert_eq!(submissions.len(), 2);
+    assert_eq!(
+        submissions[0].idempotency_key.as_str(),
+        submissions[1].idempotency_key.as_str(),
+        "retry after post-submit failure must reuse stable turn idempotency key"
+    );
+}
+
+#[tokio::test]
+async fn replay_lookup_is_namespaced_by_installation() {
+    let binding_service = FakeConversationBindingService::new();
+    let binding_handle = binding_service.clone();
+    let thread_service = InMemorySessionThreadService::default();
+    let coordinator = ScriptedTurnCoordinator::default();
+    coordinator.push_result(Err(TurnError::Unavailable {
+        reason: "transient submit failure".into(),
+    }));
+    let service =
+        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator);
+
+    let first = sample_user_message_envelope_with_install_and_text(
+        "shared-event",
+        "install_alpha",
+        "alpha",
+    );
+    service
+        .accept_user_message(&first)
+        .await
+        .expect_err("first submit fails after accepting alpha message");
+
+    let second =
+        sample_user_message_envelope_with_install_and_text("shared-event", "install_beta", "beta");
+    let outcome = service
+        .accept_user_message(&second)
+        .await
+        .expect("second install must not replay alpha message");
+    let InboundTurnOutcome::Submitted { binding, .. } = outcome else {
+        panic!("expected submitted beta message")
+    };
+    assert_eq!(binding.tenant_id.as_str(), "tenant:install_beta");
+    assert_eq!(
+        binding_handle.resolve_count(),
+        2,
+        "same conversation/event under another installation must resolve its own binding"
+    );
+
+    let history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: ThreadScope {
+                tenant_id: binding.tenant_id.clone(),
+                agent_id: binding.agent_id.clone().expect("agent id"),
+                project_id: binding.project_id.clone(),
+                owner_user_id: Some(binding.user_id.clone()),
+                mission_id: None,
+            },
+            thread_id: binding.thread_id.clone(),
+        })
+        .await
+        .expect("history");
+    assert_eq!(history.messages.len(), 1);
+    assert_eq!(history.messages[0].content.as_deref(), Some("beta"));
 }
 
 #[tokio::test]

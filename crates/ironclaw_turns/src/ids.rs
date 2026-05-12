@@ -205,7 +205,19 @@ loop_ref!(LoopDiagnosticRef, "loop_diagnostic_ref", "diag:");
 
 impl RunProfileId {
     pub fn default_profile() -> Self {
-        Self("default".to_string())
+        Self::from_trusted_static("default")
+    }
+
+    pub fn interactive_default() -> Self {
+        Self::from_trusted_static("interactive_default")
+    }
+
+    pub fn long_running_mission() -> Self {
+        Self::from_trusted_static("long_running_mission")
+    }
+
+    pub fn is_interactive_default(&self) -> bool {
+        self == &Self::interactive_default()
     }
 
     pub(crate) fn from_trusted_static(value: &'static str) -> Self {

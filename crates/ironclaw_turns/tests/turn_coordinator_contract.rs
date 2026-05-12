@@ -14,8 +14,7 @@ use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, AllowAllTurnAdmissionPolicy,
     BlockedReason, CancelRunRequest, DefaultTurnCoordinator, GateRef, GetRunStateRequest,
     IdempotencyKey, InMemoryRunProfileResolver, InMemoryTurnEventSink, InMemoryTurnStateStore,
-    InMemoryTurnStateStoreLimits, LoopCompleted, LoopCompletionKind, LoopExit,
-    LoopExitInvalidHandling, LoopExitValidationPolicy, LoopGateRef, LoopMessageRef,
+    InMemoryTurnStateStoreLimits, LoopCheckpointStateRef, LoopExitMapping, LoopGateRef,
     ReplyTargetBindingRef, ResolvedRunProfile, ResumeTurnRequest, RunProfileId, RunProfileRequest,
     RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
     SanitizedCancelReason, SanitizedFailure, SourceBindingRef, StaticTurnAdmissionLimitProvider,
@@ -29,13 +28,67 @@ use ironclaw_turns::{
     TurnRunProfile, TurnRunState, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
     TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
     events::EventCursor,
+    run_profile::LoopModelRouteSnapshot,
     runner::{
-        ApplyLoopExitRequest, ApplyValidatedLoopExitRequest, BlockRunRequest,
-        CancelRunCompletionRequest, ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest,
-        FailRunRequest, HeartbeatRequest, RecoverExpiredLeasesRequest,
-        RecoverExpiredLeasesResponse, TurnRunTransitionPort, apply_loop_exit,
+        ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
+        ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
+        RecordModelRouteSnapshotRequest, RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse,
+        TurnRunTransitionPort, TurnRunnerOutcome,
     },
 };
+
+async fn apply_test_loop_exit<P>(
+    port: &P,
+    run_id: TurnRunId,
+    runner_id: TurnRunnerId,
+    lease_token: TurnLeaseToken,
+    mapping: LoopExitMapping,
+) -> Result<TurnRunState, TurnError>
+where
+    P: TurnRunTransitionPort + ?Sized,
+{
+    port.apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+        run_id,
+        runner_id,
+        lease_token,
+        mapping,
+    })
+    .await
+}
+
+fn completed_mapping() -> LoopExitMapping {
+    LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Completed)
+}
+
+fn protocol_recovery_mapping() -> LoopExitMapping {
+    LoopExitMapping::RecoveryRequired {
+        failure: SanitizedFailure::new("driver_protocol_violation").unwrap(),
+    }
+}
+
+fn cancelled_mapping() -> LoopExitMapping {
+    LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Cancelled)
+}
+
+fn failed_mapping(category: &'static str) -> LoopExitMapping {
+    LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Failed {
+        failure: SanitizedFailure::new(category).unwrap(),
+    })
+}
+
+fn approval_blocked_mapping(
+    checkpoint_id: TurnCheckpointId,
+    state_ref: LoopCheckpointStateRef,
+    gate_ref: &LoopGateRef,
+) -> LoopExitMapping {
+    LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Blocked {
+        checkpoint_id,
+        state_ref,
+        reason: BlockedReason::Approval {
+            gate_ref: GateRef::new(gate_ref.as_str()).unwrap(),
+        },
+    })
+}
 
 struct BlockingRunProfileResolver {
     started: mpsc::Sender<()>,
@@ -100,6 +153,7 @@ async fn turn_lifecycle_projection_replays_submit_block_resume_complete_without_
             runner_id,
             lease_token,
             checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
             reason: BlockedReason::Approval {
                 gate_ref: gate_ref.clone(),
             },
@@ -192,20 +246,232 @@ async fn turn_lifecycle_projection_replays_submit_block_resume_complete_without_
     ));
 
     let serialized = serde_json::to_string(&snapshot).unwrap();
-    for forbidden in [
-        "TURN_RAW_INPUT_SENTINEL_3022",
-        "/tmp/turn-private-path",
-        "TURN_SOURCE_SENTINEL_3022",
-        "TURN_REPLY_SENTINEL_3022",
-        "TURN_GATE_SENTINEL_3022",
-        "TURN_RESUME_SOURCE_SENTINEL_3022",
-        "TURN_RESUME_REPLY_SENTINEL_3022",
-    ] {
-        assert!(
-            !serialized.contains(forbidden),
-            "turn lifecycle projection leaked {forbidden}: {serialized}"
-        );
-    }
+    assert_no_forbidden_turn_event_content(
+        "turn lifecycle projection",
+        &serialized,
+        &[
+            "TURN_RAW_INPUT_SENTINEL_3022",
+            "/tmp/turn-private-path",
+            "TURN_SOURCE_SENTINEL_3022",
+            "TURN_REPLY_SENTINEL_3022",
+            "TURN_GATE_SENTINEL_3022",
+            "TURN_RESUME_SOURCE_SENTINEL_3022",
+            "TURN_RESUME_REPLY_SENTINEL_3022",
+        ],
+    );
+}
+
+#[tokio::test]
+async fn turn_lifecycle_projection_replays_failed_terminal_with_sanitized_reason_without_raw_refs()
+{
+    let (coordinator, store) = coordinator();
+    let mut request = submit_request("thread-turn-failed-events", "idem-turn-failed-submit");
+    request.accepted_message_ref = AcceptedMessageRef::new(
+        "message-TURN_FAILED_ACCEPTED_SENTINEL_3022 /tmp/turn-failed-private",
+    )
+    .unwrap();
+    request.source_binding_ref =
+        SourceBindingRef::new("source-TURN_FAILED_SOURCE_SENTINEL_3022").unwrap();
+    request.reply_target_binding_ref =
+        ReplyTargetBindingRef::new("reply-TURN_FAILED_REPLY_SENTINEL_3022").unwrap();
+
+    let run_id = accepted_run_id(&coordinator.submit_turn(request.clone()).await.unwrap());
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(request.scope.clone()),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    let failed = apply_test_loop_exit(
+        store.as_ref(),
+        run_id,
+        runner_id,
+        lease_token,
+        failed_mapping("driver_bug"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(failed.status, TurnStatus::Failed);
+    assert_eq!(
+        failed.failure.as_ref().map(SanitizedFailure::category),
+        Some("driver_bug")
+    );
+
+    let projection = TurnEventProjectionService::new(store.clone());
+    let snapshot = projection
+        .snapshot(TurnEventProjectionRequest {
+            scope: request.scope.clone(),
+            after: None,
+            limit: 10,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        snapshot
+            .entries
+            .iter()
+            .map(|entry| entry.kind.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            TurnEventKind::Submitted,
+            TurnEventKind::RunnerClaimed,
+            TurnEventKind::Failed,
+        ]
+    );
+    assert!(
+        snapshot
+            .entries
+            .iter()
+            .all(|entry| entry.scope == request.scope)
+    );
+    assert!(snapshot.entries.iter().all(|entry| entry.run_id == run_id));
+    let failed_entry = snapshot.entries.last().unwrap();
+    assert_eq!(failed_entry.status, TurnStatus::Failed);
+    assert_eq!(failed_entry.sanitized_reason.as_deref(), Some("driver_bug"));
+
+    let projection_json = serde_json::to_string(&snapshot).unwrap();
+    assert!(projection_json.contains("driver_bug"));
+    let retained_events_json = serde_json::to_string(&store.persistence_snapshot().events).unwrap();
+    let forbidden = [
+        "TURN_FAILED_ACCEPTED_SENTINEL_3022",
+        "TURN_FAILED_SOURCE_SENTINEL_3022",
+        "TURN_FAILED_REPLY_SENTINEL_3022",
+        "TURN_FAILED_FAILURE_REASON_SENTINEL_3022",
+        "TURN_FAILED_USAGE_SENTINEL_3022",
+        "TURN_FAILED_EXIT_SENTINEL_3022",
+        "/tmp/turn-failed-private",
+    ];
+    assert_no_forbidden_turn_event_content(
+        "failed turn lifecycle projection",
+        &projection_json,
+        &forbidden,
+    );
+    assert_no_forbidden_turn_event_content(
+        "failed retained turn lifecycle events",
+        &retained_events_json,
+        &forbidden,
+    );
+}
+
+#[tokio::test]
+async fn turn_lifecycle_projection_replays_cancelled_terminal_without_raw_refs() {
+    let (coordinator, store) = coordinator();
+    let mut request = submit_request("thread-turn-cancelled-events", "idem-turn-cancel-submit");
+    request.accepted_message_ref = AcceptedMessageRef::new(
+        "message-TURN_CANCELLED_ACCEPTED_SENTINEL_3022 /tmp/turn-cancelled-private",
+    )
+    .unwrap();
+    request.source_binding_ref =
+        SourceBindingRef::new("source-TURN_CANCELLED_SOURCE_SENTINEL_3022").unwrap();
+    request.reply_target_binding_ref =
+        ReplyTargetBindingRef::new("reply-TURN_CANCELLED_REPLY_SENTINEL_3022").unwrap();
+
+    let run_id = accepted_run_id(&coordinator.submit_turn(request.clone()).await.unwrap());
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(request.scope.clone()),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let cancel_requested = coordinator
+        .cancel_run(CancelRunRequest {
+            scope: request.scope.clone(),
+            actor: actor(),
+            run_id,
+            reason: SanitizedCancelReason::OperatorRequested,
+            idempotency_key: IdempotencyKey::new("idem-turn-cancel-running").unwrap(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(cancel_requested.status, TurnStatus::CancelRequested);
+
+    let cancelled = apply_test_loop_exit(
+        store.as_ref(),
+        run_id,
+        runner_id,
+        lease_token,
+        cancelled_mapping(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(cancelled.status, TurnStatus::Cancelled);
+
+    let projection = TurnEventProjectionService::new(store.clone());
+    let snapshot = projection
+        .snapshot(TurnEventProjectionRequest {
+            scope: request.scope.clone(),
+            after: None,
+            limit: 10,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        snapshot
+            .entries
+            .iter()
+            .map(|entry| entry.kind.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            TurnEventKind::Submitted,
+            TurnEventKind::RunnerClaimed,
+            TurnEventKind::CancelRequested,
+            TurnEventKind::Cancelled,
+        ]
+    );
+    assert!(
+        snapshot
+            .entries
+            .iter()
+            .all(|entry| entry.scope == request.scope)
+    );
+    assert!(snapshot.entries.iter().all(|entry| entry.run_id == run_id));
+    let cancel_requested_entry = snapshot
+        .entries
+        .iter()
+        .find(|entry| entry.kind == TurnEventKind::CancelRequested)
+        .unwrap();
+    assert_eq!(
+        cancel_requested_entry.sanitized_reason.as_deref(),
+        Some("operator_requested")
+    );
+    let cancelled_entry = snapshot.entries.last().unwrap();
+    assert_eq!(cancelled_entry.status, TurnStatus::Cancelled);
+    assert_eq!(cancelled_entry.sanitized_reason.as_deref(), None);
+
+    let projection_json = serde_json::to_string(&snapshot).unwrap();
+    assert!(projection_json.contains("operator_requested"));
+    let retained_events_json = serde_json::to_string(&store.persistence_snapshot().events).unwrap();
+    let forbidden = [
+        "TURN_CANCELLED_ACCEPTED_SENTINEL_3022",
+        "TURN_CANCELLED_SOURCE_SENTINEL_3022",
+        "TURN_CANCELLED_REPLY_SENTINEL_3022",
+        "TURN_CANCELLED_REASON_SENTINEL_3022",
+        "TURN_CANCELLED_EXIT_SENTINEL_3022",
+        "/tmp/turn-cancelled-private",
+    ];
+    assert_no_forbidden_turn_event_content(
+        "cancelled turn lifecycle projection",
+        &projection_json,
+        &forbidden,
+    );
+    assert_no_forbidden_turn_event_content(
+        "cancelled retained turn lifecycle events",
+        &retained_events_json,
+        &forbidden,
+    );
 }
 
 #[tokio::test]
@@ -276,16 +542,13 @@ async fn turn_lifecycle_projection_requires_rebase_for_pruned_or_fabricated_curs
 
     let serialized_events = serde_json::to_string(&store.events()).unwrap();
     let debug_errors = format!("{pruned_origin:?} {fabricated:?}");
-    for forbidden in ["TURN_GAP_RAW_SENTINEL_3022", "/tmp/turn-gap-private"] {
-        assert!(
-            !serialized_events.contains(forbidden),
-            "retained turn events leaked {forbidden}: {serialized_events}"
-        );
-        assert!(
-            !debug_errors.contains(forbidden),
-            "turn projection rebase error leaked {forbidden}: {debug_errors}"
-        );
-    }
+    let forbidden = ["TURN_GAP_RAW_SENTINEL_3022", "/tmp/turn-gap-private"];
+    assert_no_forbidden_turn_event_content("retained turn events", &serialized_events, &forbidden);
+    assert_no_forbidden_turn_event_content(
+        "turn projection rebase error",
+        &debug_errors,
+        &forbidden,
+    );
 }
 
 #[tokio::test]
@@ -513,6 +776,7 @@ async fn resume_turn_wakes_runner_for_same_run_after_requeue() {
             runner_id,
             lease_token,
             checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
             reason: BlockedReason::Approval {
                 gate_ref: gate_ref.clone(),
             },
@@ -598,6 +862,7 @@ async fn resume_turn_ignores_wake_notification_panic_after_requeue() {
             runner_id,
             lease_token,
             checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
             reason: BlockedReason::Approval {
                 gate_ref: gate_ref.clone(),
             },
@@ -1128,6 +1393,208 @@ async fn snapshot_load_drops_released_reservations_without_retained_run_records(
 }
 
 #[tokio::test]
+async fn model_route_snapshot_persists_across_snapshot_restore_and_recovery() {
+    let source_store = Arc::new(InMemoryTurnStateStore::default());
+    let source_coordinator = DefaultTurnCoordinator::new(source_store.clone());
+    let run_id = accepted_run_id(
+        &source_coordinator
+            .submit_turn(submit_request("thread-route", "idem-route"))
+            .await
+            .unwrap(),
+    );
+    let first_runner = TurnRunnerId::new();
+    let first_lease = TurnLeaseToken::new();
+    source_store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: first_runner,
+            lease_token: first_lease,
+            scope_filter: Some(scope("thread-route")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let snapshot = LoopModelRouteSnapshot::new(
+        "openrouter",
+        "anthropic/claude-sonnet-4",
+        "config:v1",
+        "auth:v1",
+    );
+    source_store
+        .record_model_route_snapshot(RecordModelRouteSnapshotRequest {
+            run_id,
+            runner_id: first_runner,
+            lease_token: first_lease,
+            snapshot: snapshot.clone(),
+        })
+        .await
+        .unwrap();
+
+    let restored = Arc::new(
+        InMemoryTurnStateStore::from_persistence_snapshot(
+            source_store.persistence_snapshot(),
+            InMemoryTurnStateStoreLimits::default(),
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        restored
+            .get_run_state(GetRunStateRequest {
+                scope: scope("thread-route"),
+                run_id,
+            })
+            .await
+            .unwrap()
+            .resolved_model_route,
+        Some(snapshot.clone())
+    );
+
+    let recovered = restored
+        .recover_expired_leases(RecoverExpiredLeasesRequest {
+            now: Utc::now() + ChronoDuration::hours(1),
+            scope_filter: Some(scope("thread-route")),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(recovered.recovered[0].resolved_model_route, Some(snapshot));
+}
+
+#[tokio::test]
+async fn record_model_route_snapshot_rejects_secret_like_fields() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-route-secret", "idem-route-secret"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope("thread-route-secret")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    for snapshot in [
+        LoopModelRouteSnapshot::new("sk-secret-provider", "gpt-4", "config:v1", "auth:v1"),
+        LoopModelRouteSnapshot::new(
+            "openrouter",
+            "anthropic/secret-model",
+            "config:v1",
+            "auth:v1",
+        ),
+        LoopModelRouteSnapshot::new("openrouter", "gpt-4", "config:api_key", "auth:v1"),
+        LoopModelRouteSnapshot::new("openrouter", "gpt-4", "config:v1", "auth:bearer"),
+    ] {
+        let error = store
+            .record_model_route_snapshot(RecordModelRouteSnapshotRequest {
+                run_id,
+                runner_id,
+                lease_token,
+                snapshot,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(error, TurnError::InvalidRequest { .. }));
+    }
+
+    assert_eq!(
+        store
+            .get_run_state(GetRunStateRequest {
+                scope: scope("thread-route-secret"),
+                run_id,
+            })
+            .await
+            .unwrap()
+            .resolved_model_route,
+        None
+    );
+}
+
+#[tokio::test]
+async fn record_model_route_snapshot_is_idempotent_and_rejects_route_changes() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-route-idempotent",
+                "idem-route-idempotent",
+            ))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope("thread-route-idempotent")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    let initial = LoopModelRouteSnapshot::new(
+        "openrouter",
+        "anthropic/claude-sonnet-4",
+        "config:v1",
+        "auth:v1",
+    );
+    let first = store
+        .record_model_route_snapshot(RecordModelRouteSnapshotRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            snapshot: initial.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(first.resolved_model_route, Some(initial.clone()));
+
+    let replay = store
+        .record_model_route_snapshot(RecordModelRouteSnapshotRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            snapshot: initial.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(replay.resolved_model_route, Some(initial.clone()));
+
+    let replacement = LoopModelRouteSnapshot::new("nearai", "qwen3-coder", "config:v2", "auth:v2");
+    let error = store
+        .record_model_route_snapshot(RecordModelRouteSnapshotRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            snapshot: replacement,
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(error, TurnError::Conflict { .. }));
+    assert_eq!(
+        store
+            .get_run_state(GetRunStateRequest {
+                scope: scope("thread-route-idempotent"),
+                run_id,
+            })
+            .await
+            .unwrap()
+            .resolved_model_route,
+        Some(initial)
+    );
+}
+
+#[tokio::test]
 async fn terminal_record_pruning_bounds_released_admission_reservations() {
     let store = Arc::new(InMemoryTurnStateStore::with_limits(
         InMemoryTurnStateStoreLimits {
@@ -1422,6 +1889,7 @@ async fn blocked_resume_and_recovery_required_keep_existing_admission_reservatio
                 gate_ref: gate_ref.clone(),
             },
             checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
         })
         .await
         .unwrap();
@@ -1558,12 +2026,14 @@ async fn runner_claim_and_block_update_persistent_run_lock_and_checkpoint_record
 
     let checkpoint_id = TurnCheckpointId::new();
     let gate_ref = GateRef::new("approval-gate").unwrap();
+    let state_ref = LoopCheckpointStateRef::new("checkpoint:requested-block-state").unwrap();
     store
         .block_run(BlockRunRequest {
             run_id,
             runner_id,
             lease_token,
             checkpoint_id,
+            state_ref: state_ref.clone(),
             reason: BlockedReason::Approval {
                 gate_ref: gate_ref.clone(),
             },
@@ -1595,6 +2065,7 @@ async fn runner_claim_and_block_update_persistent_run_lock_and_checkpoint_record
     assert_eq!(checkpoint.run_id, run_id);
     assert_eq!(checkpoint.sequence, 1);
     assert_eq!(checkpoint.gate_ref, gate_ref);
+    assert_eq!(checkpoint.state_ref, state_ref);
 }
 
 #[tokio::test]
@@ -1624,6 +2095,7 @@ async fn resume_updates_persisted_run_binding_refs_and_replay_envelope() {
             runner_id,
             lease_token,
             checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
             reason: BlockedReason::Approval {
                 gate_ref: gate_ref.clone(),
             },
@@ -1941,6 +2413,7 @@ async fn idempotency_persistence_snapshot_retains_each_operation_kind_capacity()
             runner_id,
             lease_token,
             checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
             reason: BlockedReason::Approval {
                 gate_ref: gate_ref.clone(),
             },
@@ -2037,6 +2510,7 @@ async fn idempotency_replay_helpers_require_matching_operation_kind() {
             runner_id,
             lease_token,
             checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
             reason: BlockedReason::Approval {
                 gate_ref: gate_ref.clone(),
             },
@@ -2329,6 +2803,67 @@ async fn runner_claims_queued_run_with_lease_and_heartbeat_requires_matching_lea
         .await
         .unwrap();
     assert!(cursor.0 >= 3);
+}
+
+#[tokio::test]
+async fn cancel_requested_runner_heartbeat_does_not_extend_lease() {
+    let limits = InMemoryTurnStateStoreLimits {
+        runner_lease_ttl: ChronoDuration::milliseconds(40),
+        ..InMemoryTurnStateStoreLimits::default()
+    };
+    let store = Arc::new(InMemoryTurnStateStore::with_limits(limits));
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+    let request = submit_request("thread-cancel-heartbeat", "idem-submit-cancel-heartbeat");
+    let scope = request.scope.clone();
+    let run_id = accepted_run_id(&coordinator.submit_turn(request).await.unwrap());
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope.clone()),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    coordinator
+        .cancel_run(CancelRunRequest {
+            scope,
+            actor: TurnActor::new(UserId::new("user1").unwrap()),
+            run_id,
+            reason: SanitizedCancelReason::UserRequested,
+            idempotency_key: IdempotencyKey::new("idem-cancel-heartbeat").unwrap(),
+        })
+        .await
+        .unwrap();
+
+    let heartbeat = store
+        .heartbeat(HeartbeatRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        heartbeat,
+        TurnError::InvalidTransition {
+            from: TurnStatus::CancelRequested,
+            to: TurnStatus::Running,
+        }
+    );
+
+    std::thread::sleep(Duration::from_millis(60));
+    let recovered = store
+        .recover_expired_leases(RecoverExpiredLeasesRequest {
+            now: Utc::now(),
+            scope_filter: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(recovered.recovered.len(), 1);
+    assert_eq!(recovered.recovered[0].status, TurnStatus::RecoveryRequired);
 }
 
 #[tokio::test]
@@ -2809,6 +3344,7 @@ async fn blocked_run_persists_checkpoint_and_keeps_same_thread_lock_until_resume
             runner_id,
             lease_token,
             checkpoint_id,
+            state_ref: block_state_ref(),
             reason: BlockedReason::Approval {
                 gate_ref: gate_ref.clone(),
             },
@@ -2871,6 +3407,7 @@ async fn resume_turn_with_wrong_gate_resolution_ref_is_invalid_request() {
             runner_id,
             lease_token,
             checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
             reason: BlockedReason::Approval {
                 gate_ref: GateRef::new("approval-gate").unwrap(),
             },
@@ -3066,6 +3603,7 @@ async fn cancelled_running_run_cannot_be_reopened_as_blocked() {
             runner_id,
             lease_token,
             checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
             reason: BlockedReason::Approval {
                 gate_ref: GateRef::new("approval-gate").unwrap(),
             },
@@ -3200,6 +3738,15 @@ async fn terminal_runner_outcome_releases_lock_exactly_once() {
     assert_eq!(stale, TurnError::LeaseMismatch);
 }
 
+fn assert_no_forbidden_turn_event_content(label: &str, serialized: &str, forbidden: &[&str]) {
+    for value in forbidden {
+        assert!(
+            !serialized.contains(value),
+            "{label} leaked forbidden marker {value}"
+        );
+    }
+}
+
 fn coordinator() -> (
     DefaultTurnCoordinator<InMemoryTurnStateStore>,
     Arc<InMemoryTurnStateStore>,
@@ -3238,6 +3785,10 @@ fn cancel_request(thread: &str, run_id: TurnRunId, idempotency_key: &str) -> Can
 fn accepted_run_id(response: &SubmitTurnResponse) -> TurnRunId {
     let SubmitTurnResponse::Accepted { run_id, .. } = response;
     *run_id
+}
+
+fn block_state_ref() -> LoopCheckpointStateRef {
+    LoopCheckpointStateRef::new("checkpoint:block-state").unwrap()
 }
 
 fn scope(thread: &str) -> TurnScope {
@@ -3359,6 +3910,7 @@ impl TurnRunTransitionPort for AtomicLoopExitPort {
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
             resolved_run_profile_id: RunProfileId::new("default").unwrap(),
             resolved_run_profile_version: RunProfileVersion::new(1),
+            resolved_model_route: None,
             received_at: received_at(),
             checkpoint_id: None,
             gate_ref: None,
@@ -3474,22 +4026,12 @@ async fn loop_exit_application_completes_after_validation_and_releases_lock() {
         .unwrap()
         .unwrap();
 
-    let completed = apply_loop_exit(
+    let completed = apply_test_loop_exit(
         store.as_ref(),
-        ApplyLoopExitRequest {
-            run_id,
-            runner_id,
-            lease_token,
-            exit: completed_exit("exit:completed"),
-            validation_policy: LoopExitValidationPolicy {
-                require_final_checkpoint: false,
-                host_cancellation_observed: false,
-                invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
-                completion_refs_verified: true,
-                blocked_evidence_verified: false,
-                failure_evidence_verified: false,
-            },
-        },
+        run_id,
+        runner_id,
+        lease_token,
+        completed_mapping(),
     )
     .await
     .unwrap();
@@ -3524,28 +4066,14 @@ async fn loop_exit_application_blocks_with_checkpoint_and_keeps_lock() {
         .unwrap();
     let checkpoint_id = TurnCheckpointId::new();
     let gate_ref = LoopGateRef::new("gate:approval-gate").unwrap();
+    let state_ref = block_state_ref();
 
-    let blocked = apply_loop_exit(
+    let blocked = apply_test_loop_exit(
         store.as_ref(),
-        ApplyLoopExitRequest {
-            run_id,
-            runner_id,
-            lease_token,
-            exit: LoopExit::Blocked(ironclaw_turns::LoopBlocked {
-                kind: ironclaw_turns::LoopBlockedKind::Approval,
-                gate_ref: gate_ref.clone(),
-                checkpoint_id,
-                exit_id: ironclaw_turns::LoopExitId::new("exit:blocked").unwrap(),
-            }),
-            validation_policy: LoopExitValidationPolicy {
-                require_final_checkpoint: false,
-                host_cancellation_observed: false,
-                invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
-                completion_refs_verified: false,
-                blocked_evidence_verified: true,
-                failure_evidence_verified: false,
-            },
-        },
+        run_id,
+        runner_id,
+        lease_token,
+        approval_blocked_mapping(checkpoint_id, state_ref, &gate_ref),
     )
     .await
     .unwrap();
@@ -3586,22 +4114,12 @@ async fn invalid_loop_exit_application_records_recovery_required_and_keeps_lock(
         .unwrap()
         .unwrap();
 
-    let recovered = apply_loop_exit(
+    let recovered = apply_test_loop_exit(
         store.as_ref(),
-        ApplyLoopExitRequest {
-            run_id,
-            runner_id,
-            lease_token,
-            exit: completed_exit("exit:unverified-completed"),
-            validation_policy: LoopExitValidationPolicy {
-                require_final_checkpoint: false,
-                host_cancellation_observed: false,
-                invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
-                completion_refs_verified: false,
-                blocked_evidence_verified: false,
-                failure_evidence_verified: false,
-            },
-        },
+        run_id,
+        runner_id,
+        lease_token,
+        protocol_recovery_mapping(),
     )
     .await
     .unwrap();
@@ -3641,25 +4159,12 @@ async fn loop_exit_application_fails_after_validation_and_releases_lock() {
         .unwrap()
         .unwrap();
 
-    let failed = apply_loop_exit(
+    let failed = apply_test_loop_exit(
         store.as_ref(),
-        ApplyLoopExitRequest {
-            run_id,
-            runner_id,
-            lease_token,
-            exit: LoopExit::failed(
-                ironclaw_turns::LoopFailureKind::IterationLimit,
-                ironclaw_turns::LoopExitId::new("exit:failed").unwrap(),
-            ),
-            validation_policy: LoopExitValidationPolicy {
-                require_final_checkpoint: false,
-                host_cancellation_observed: false,
-                invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
-                completion_refs_verified: false,
-                blocked_evidence_verified: false,
-                failure_evidence_verified: true,
-            },
-        },
+        run_id,
+        runner_id,
+        lease_token,
+        failed_mapping("iteration_limit"),
     )
     .await
     .unwrap();
@@ -3682,22 +4187,12 @@ async fn loop_exit_application_uses_single_atomic_transition_port_call() {
         state: Mutex::new(TurnStatus::Cancelled),
     };
 
-    let state = apply_loop_exit(
+    let state = apply_test_loop_exit(
         &port,
-        ApplyLoopExitRequest {
-            run_id: TurnRunId::new(),
-            runner_id: TurnRunnerId::new(),
-            lease_token: TurnLeaseToken::new(),
-            exit: completed_exit("exit:completed-cancel-race"),
-            validation_policy: LoopExitValidationPolicy {
-                require_final_checkpoint: false,
-                host_cancellation_observed: false,
-                invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
-                completion_refs_verified: true,
-                blocked_evidence_verified: false,
-                failure_evidence_verified: false,
-            },
-        },
+        TurnRunId::new(),
+        TurnRunnerId::new(),
+        TurnLeaseToken::new(),
+        completed_mapping(),
     )
     .await
     .unwrap();
@@ -3730,22 +4225,12 @@ async fn non_cancelled_loop_exit_after_public_cancel_does_not_terminally_cancel(
         .await
         .unwrap();
 
-    let completed_after_cancel = apply_loop_exit(
+    let completed_after_cancel = apply_test_loop_exit(
         store.as_ref(),
-        ApplyLoopExitRequest {
-            run_id,
-            runner_id,
-            lease_token,
-            exit: completed_exit("exit:completed-after-cancel"),
-            validation_policy: LoopExitValidationPolicy {
-                require_final_checkpoint: false,
-                host_cancellation_observed: false,
-                invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
-                completion_refs_verified: true,
-                blocked_evidence_verified: false,
-                failure_evidence_verified: false,
-            },
-        },
+        run_id,
+        runner_id,
+        lease_token,
+        completed_mapping(),
     )
     .await
     .unwrap_err();
@@ -3757,22 +4242,12 @@ async fn non_cancelled_loop_exit_after_public_cancel_does_not_terminally_cancel(
         }
     );
 
-    let recovered_after_cancel = apply_loop_exit(
+    let recovered_after_cancel = apply_test_loop_exit(
         store.as_ref(),
-        ApplyLoopExitRequest {
-            run_id,
-            runner_id,
-            lease_token,
-            exit: completed_exit("exit:invalid-after-cancel"),
-            validation_policy: LoopExitValidationPolicy {
-                require_final_checkpoint: false,
-                host_cancellation_observed: false,
-                invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
-                completion_refs_verified: false,
-                blocked_evidence_verified: false,
-                failure_evidence_verified: false,
-            },
-        },
+        run_id,
+        runner_id,
+        lease_token,
+        protocol_recovery_mapping(),
     )
     .await
     .unwrap();
@@ -3814,24 +4289,12 @@ async fn observed_cancelled_loop_exit_without_recorded_cancel_enters_recovery_re
         .unwrap()
         .unwrap();
 
-    let recovered = apply_loop_exit(
+    let recovered = apply_test_loop_exit(
         store.as_ref(),
-        ApplyLoopExitRequest {
-            run_id,
-            runner_id,
-            lease_token,
-            exit: LoopExit::cancelled_for_observed_interrupt(
-                ironclaw_turns::LoopExitId::new("exit:cancelled-unrecorded").unwrap(),
-            ),
-            validation_policy: LoopExitValidationPolicy {
-                require_final_checkpoint: false,
-                host_cancellation_observed: true,
-                invalid_handling: LoopExitInvalidHandling::FailTerminal,
-                completion_refs_verified: false,
-                blocked_evidence_verified: false,
-                failure_evidence_verified: false,
-            },
-        },
+        run_id,
+        runner_id,
+        lease_token,
+        cancelled_mapping(),
     )
     .await
     .unwrap();
@@ -3894,24 +4357,12 @@ async fn loop_exit_application_cancels_only_after_public_cancel_request() {
         .await
         .unwrap();
 
-    let cancelled = apply_loop_exit(
+    let cancelled = apply_test_loop_exit(
         store.as_ref(),
-        ApplyLoopExitRequest {
-            run_id,
-            runner_id,
-            lease_token,
-            exit: LoopExit::cancelled_for_observed_interrupt(
-                ironclaw_turns::LoopExitId::new("exit:cancelled").unwrap(),
-            ),
-            validation_policy: LoopExitValidationPolicy {
-                require_final_checkpoint: false,
-                host_cancellation_observed: true,
-                invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
-                completion_refs_verified: false,
-                blocked_evidence_verified: false,
-                failure_evidence_verified: false,
-            },
-        },
+        run_id,
+        runner_id,
+        lease_token,
+        cancelled_mapping(),
     )
     .await
     .unwrap();
@@ -3922,15 +4373,4 @@ async fn loop_exit_application_cancels_only_after_public_cancel_request() {
         .await
         .unwrap();
     assert_ne!(accepted_run_id(&next), run_id);
-}
-
-fn completed_exit(exit_id: &str) -> LoopExit {
-    LoopExit::Completed(LoopCompleted {
-        completion_kind: LoopCompletionKind::FinalReply,
-        reply_message_refs: vec![LoopMessageRef::new("msg:assistant-final").unwrap()],
-        result_refs: vec![],
-        final_checkpoint_id: None,
-        usage_summary_ref: None,
-        exit_id: ironclaw_turns::LoopExitId::new(exit_id).unwrap(),
-    })
 }

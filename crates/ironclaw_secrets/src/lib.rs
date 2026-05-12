@@ -12,9 +12,9 @@ mod db;
 mod legacy_store;
 
 #[cfg(feature = "libsql")]
-pub use db::LibSqlCredentialStore;
+pub use db::{LibSqlCredentialStore, LibSqlSecretsStore};
 #[cfg(feature = "postgres")]
-pub use db::PostgresCredentialStore;
+pub use db::{PostgresCredentialStore, PostgresSecretsStore};
 
 use std::collections::HashMap;
 use std::fmt;
