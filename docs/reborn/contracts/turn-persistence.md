@@ -37,6 +37,8 @@ The `ironclaw_turns` contract models persistence with these record families:
 
 The initial PostgreSQL/libSQL adapter slice stores each logical record family in its own table with indexed metadata columns plus a serialized contract payload. Mutations hold a backend transaction/write lock across snapshot load, in-memory contract mutation, and snapshot replacement so active-lock and idempotency semantics remain atomic. Backends must preserve the same semantics as the in-memory contract tests while later slices add incremental row-level updates, targeted read paths, and service-graph wiring.
 
+Legacy `turn_checkpoints` rows created before scoped checkpoint metadata may carry empty indexed `scope_key` values after migration. Those rows remain readable through the serialized payload; any future targeted `turn_checkpoints` read path must first add a scoped backfill plan or explicitly reject unbackfilled legacy rows instead of treating empty scope as a real owner.
+
 ---
 
 ## 3. Active-lock rules

@@ -698,6 +698,27 @@ mod tests {
     use crate::embedding::EmbeddingError;
     use crate::repo::InMemoryMemoryDocumentRepository;
 
+    struct FailingEmbeddingProvider;
+
+    #[async_trait]
+    impl EmbeddingProvider for FailingEmbeddingProvider {
+        fn dimension(&self) -> usize {
+            3
+        }
+
+        fn model_name(&self) -> &str {
+            "failing"
+        }
+
+        async fn embed(&self, _text: &str) -> Result<Vec<f32>, EmbeddingError> {
+            Err(EmbeddingError::ProviderUnavailable {
+                reason:
+                    "provider exploded at /tmp/HOST_PATH_SENTINEL with token RAW_TOKEN_SENTINEL"
+                        .to_string(),
+            })
+        }
+    }
+
     struct UnitEmbeddingProvider;
 
     #[async_trait]
@@ -879,6 +900,32 @@ mod tests {
         let request = MemorySearchRequest::new("query").unwrap();
         let err = backend.search(&alpha_context(), request).await.unwrap_err();
         assert!(err.to_string().contains("embedding generation"));
+    }
+
+    #[tokio::test]
+    async fn embedding_provider_error_is_sanitized_at_backend_boundary() {
+        let repo = Arc::new(InMemoryMemoryDocumentRepository::new());
+        let backend = RepositoryMemoryBackend::new(repo)
+            .without_prompt_write_safety_policy()
+            .with_embedding_provider(Arc::new(FailingEmbeddingProvider))
+            .with_capabilities(MemoryBackendCapabilities {
+                full_text_search: true,
+                vector_search: true,
+                embeddings: true,
+                ..MemoryBackendCapabilities::default()
+            });
+
+        let request = MemorySearchRequest::new("query").unwrap();
+        let err = backend.search(&alpha_context(), request).await.unwrap_err();
+        let displayed = err.to_string();
+
+        assert!(displayed.contains("embedding provider unavailable"));
+        assert!(
+            !displayed.contains("HOST_PATH_SENTINEL")
+                && !displayed.contains("RAW_TOKEN_SENTINEL")
+                && !displayed.contains("/tmp/"),
+            "public memory error leaked backend/provider details: {displayed}"
+        );
     }
 
     #[tokio::test]

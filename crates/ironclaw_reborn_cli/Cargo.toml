@@ -10,14 +10,15 @@ homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
 publish = false
 
-# First PR establishes the binary boundary only. Release packaging is a
-# follow-up decision after `run`/docs land and `dist plan` is verified.
+# Keep disabled until #3483 resolves cargo-dist tag/versioning + Windows WiX
+# packaging for the standalone Reborn binary.
 [package.metadata.dist]
 dist = false
 
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4.5.0"
 ironclaw_reborn = { path = "../ironclaw_reborn", version = "0.1.0" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config", version = "0.1.0" }
 

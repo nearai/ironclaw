@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 
 use crate::commands::Command;
 
@@ -13,8 +13,10 @@ struct Cli {
     command: Command,
 }
 
+pub(crate) fn command() -> clap::Command {
+    Cli::command()
+}
+
 pub(crate) fn run() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-    let context = crate::context::RebornCliContext::resolve_from_env()?;
-    cli.command.execute(context)
+    Cli::parse().command.execute()
 }

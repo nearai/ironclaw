@@ -11,7 +11,7 @@ This crate owns the standalone `ironclaw-reborn` command surface. Keep it small,
 
 ## Boundaries
 
-- Use the provided RebornCliContext to access Reborn boot config instead of reading env in each command.
+- Commands that need Reborn boot config must receive `RebornCliContext` from dispatch instead of reading env directly. Pure commands that do not need boot config (for example, shell completion generation) must not force Reborn home resolution.
 - Keep commands side-effect free unless the command name and issue explicitly require mutation.
 - Use `IRONCLAW_REBORN_HOME` / `~/.ironclaw/reborn`; do not write current v1 state.
 - no v1 runtime imports: do not depend on root `ironclaw`, `src/agent`, channels, worker, DB, setup, service, sandbox, or `ironclaw_engine`.
@@ -19,11 +19,13 @@ This crate owns the standalone `ironclaw-reborn` command surface. Keep it small,
 
 ## Adding a command
 
-1. Add `src/commands/<name>.rs` with a clap `Args` type and `execute(self, context: RebornCliContext) -> anyhow::Result<()>`.
+1. Add `src/commands/<name>.rs` with a clap `Args` type and an `execute` method.
 2. Add a variant to `commands::Command`.
-3. Add a binary smoke test in `tests/smoke.rs` that invokes `env!("CARGO_BIN_EXE_ironclaw-reborn")`.
-4. If the command can touch state, assert it uses Reborn home only and does not create/read v1 DB/settings/secrets.
-5. Run:
+3. If the command needs boot config, resolve `RebornCliContext` in `commands::Command::execute` and pass it into the command handler.
+4. If the command is pure, do not resolve `RebornCliContext` just to run it.
+5. Add a binary smoke test in `tests/smoke.rs` that invokes `env!("CARGO_BIN_EXE_ironclaw-reborn")`.
+6. If the command can touch state, assert it uses Reborn home only and does not create/read v1 DB/settings/secrets.
+7. Run:
    - `cargo test -p ironclaw_reborn_cli`
    - `cargo test -p ironclaw_architecture reborn`
    - `cargo clippy -p ironclaw_reborn_cli --all-targets -- -D warnings`

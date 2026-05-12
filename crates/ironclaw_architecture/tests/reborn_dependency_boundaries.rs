@@ -99,6 +99,7 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
     let command_module_paths = [
         "crates/ironclaw_reborn_cli/AGENTS.md",
         "crates/ironclaw_reborn_cli/src/commands/mod.rs",
+        "crates/ironclaw_reborn_cli/src/commands/completion.rs",
         "crates/ironclaw_reborn_cli/src/commands/doctor.rs",
         "crates/ironclaw_reborn_cli/src/commands/run.rs",
         "crates/ironclaw_reborn_cli/src/context.rs",

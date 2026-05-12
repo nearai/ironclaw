@@ -427,6 +427,7 @@ fn turn_checkpoint_public_status_does_not_expose_checkpoint_payload() {
         reply_target_binding_ref: ReplyTargetBindingRef::new("reply-checkpoint-public").unwrap(),
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
+        resolved_model_route: None,
         received_at: fixed_time(),
         checkpoint_id: Some(checkpoint_id),
         gate_ref: Some(GateRef::new("gate-checkpoint-public").unwrap()),
@@ -435,7 +436,7 @@ fn turn_checkpoint_public_status_does_not_expose_checkpoint_payload() {
     };
     let event = TurnLifecycleEvent {
         cursor: EventCursor(2),
-        scope,
+        scope: scope.clone(),
         run_id,
         status: TurnStatus::BlockedApproval,
         kind: TurnEventKind::Blocked,
@@ -445,9 +446,12 @@ fn turn_checkpoint_public_status_does_not_expose_checkpoint_payload() {
         checkpoints: vec![TurnCheckpointRecord {
             checkpoint_id,
             run_id,
+            scope: Some(scope.clone()),
             sequence: 1,
             status: TurnStatus::BlockedApproval,
             gate_ref: GateRef::new("gate-checkpoint-public").unwrap(),
+            kind: LoopCheckpointKind::BeforeBlock,
+            state_ref: LoopCheckpointStateRef::new("checkpoint:public-status").unwrap(),
             created_at: fixed_time(),
         }],
         events: vec![event.clone()],

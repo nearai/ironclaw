@@ -4,10 +4,13 @@ use async_trait::async_trait;
 
 use super::host::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilitySurfaceVersion, LoopContextBundle,
-    LoopContextPort, LoopContextRequest, LoopModelMessage, LoopPromptBundle, LoopPromptBundleRef,
-    LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, PromptMode,
+    LoopContextMessage, LoopContextPort, LoopContextRequest, LoopModelMessage, LoopPromptBundle,
+    LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, PromptMode,
 };
-use super::milestones::{LoopHostMilestoneEmitter, LoopHostMilestoneSink};
+use super::milestones::{
+    LoopHostMilestoneEmitter, LoopHostMilestoneSink, PromptSkillContextMetadata,
+};
+use super::skill_context::skill_snippet_model_message_ref;
 
 const DEFAULT_TEXT_ONLY_MESSAGE_LIMIT: usize = 32;
 const MAX_TEXT_ONLY_MESSAGE_LIMIT: usize = 128;
@@ -19,8 +22,8 @@ const MAX_TEXT_ONLY_MESSAGE_LIMIT: usize = 128;
 /// [`LoopContextPort`], returns model-message references, and emits a
 /// `prompt_bundle_built` milestone containing only metadata. It currently
 /// supports [`PromptMode::TextOnly`] only; checkpoint-backed prompt state and
-/// instruction/memory snippet materialization fail closed until dedicated host
-/// stores are wired.
+/// memory snippet materialization fail closed until dedicated host stores are
+/// wired. Instruction snippets are surfaced as host-owned system message refs.
 #[derive(Clone)]
 pub struct HostManagedLoopPromptPort<C, S>
 where
@@ -140,10 +143,10 @@ where
     fn ensure_supported_context_shape(
         context: &LoopContextBundle,
     ) -> Result<(), AgentLoopHostError> {
-        if !context.instruction_snippets.is_empty() || !context.memory_snippets.is_empty() {
+        if !context.memory_snippets.is_empty() {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::PolicyDenied,
-                "text-only prompt port cannot materialize instruction or memory snippets",
+                "text-only prompt port cannot materialize memory snippets",
             ));
         }
         Ok(())
@@ -169,14 +172,50 @@ where
             })
             .await?;
         Self::ensure_supported_context_shape(&context)?;
-        let messages = context
-            .messages
-            .into_iter()
-            .map(|message| LoopModelMessage {
-                role: message.role,
-                content_ref: message.message_ref,
-            })
-            .collect::<Vec<_>>();
+        let mut messages = Vec::with_capacity(
+            context.identity_messages.len()
+                + context.instruction_snippets.len()
+                + context.messages.len(),
+        );
+        messages.extend(
+            context
+                .identity_messages
+                .into_iter()
+                .map(context_message_to_model_message),
+        );
+
+        let mut skill_context = Vec::with_capacity(context.instruction_snippets.len());
+        for (ordinal, snippet) in context.instruction_snippets.into_iter().enumerate() {
+            let content_ref = skill_snippet_model_message_ref(
+                &snippet.snippet_ref,
+                &snippet.safe_summary,
+                ordinal,
+            )?;
+            match snippet.metadata.as_ref() {
+                Some(metadata) => skill_context.push(PromptSkillContextMetadata {
+                    ordinal,
+                    source_name: metadata.source_name.clone(),
+                    trust_level: metadata.trust_level.clone(),
+                }),
+                None if snippet.snippet_ref.starts_with("skill:") => {
+                    return Err(AgentLoopHostError::new(
+                        AgentLoopHostErrorKind::Internal,
+                        "skill instruction snippet metadata is missing",
+                    ));
+                }
+                None => {}
+            }
+            messages.push(LoopModelMessage {
+                role: "system".to_string(),
+                content_ref,
+            });
+        }
+        messages.extend(
+            context
+                .messages
+                .into_iter()
+                .map(context_message_to_model_message),
+        );
         let bundle = LoopPromptBundle {
             bundle_ref: LoopPromptBundleRef::fresh_for_run(&self.context),
             messages,
@@ -188,8 +227,16 @@ where
                 request.mode,
                 bundle.surface_version.clone(),
                 bundle.messages.len(),
+                skill_context,
             )
             .await?;
         Ok(bundle)
+    }
+}
+
+fn context_message_to_model_message(message: LoopContextMessage) -> LoopModelMessage {
+    LoopModelMessage {
+        role: message.role,
+        content_ref: message.message_ref,
     }
 }
