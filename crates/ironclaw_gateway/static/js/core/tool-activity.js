@@ -17,10 +17,10 @@ function truncateToolActivityResult(text) {
 function buildToolFailureText(parameters, error) {
   let detail = '';
   if (parameters) {
-    detail += 'Input:\n' + parameters + '\n\n';
+    detail += 'Input:\n' + parameters;
   }
   if (error) {
-    detail += 'Error:\n' + error;
+    detail += (detail ? '\n\n' : '') + error;
   }
   return detail;
 }
@@ -514,4 +514,3 @@ function humanizeToolName(rawName) {
 function shouldShowChannelConnectedMessage(extensionName, success) {
   return false;
 }
-

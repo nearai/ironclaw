@@ -426,6 +426,49 @@ pub fn tool_result_for_display(result: &serde_json::Value) -> Option<String> {
     Some(truncate_preview(&content, MAX_TOOL_RESULT_DISPLAY_BYTES))
 }
 
+fn displayed_tool_result_is_error(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    trimmed.starts_with("[ACTION FAILED]")
+        || (trimmed.starts_with("Tool '") && trimmed.contains("' failed:"))
+}
+
+fn displayed_tool_result_error_text(text: &str) -> Option<String> {
+    let trimmed = text.trim_start();
+
+    if let Some(rest) = trimmed.strip_prefix("[ACTION FAILED]") {
+        let rest = rest.trim_start();
+        for marker in [r#"{'error': "#, r#"{"error": "#] {
+            if let Some(idx) = rest.find(marker) {
+                let value = rest[idx + marker.len()..]
+                    .trim()
+                    .trim_end_matches('}')
+                    .trim()
+                    .trim_end_matches(',')
+                    .trim();
+                if let Some(unquoted) = value
+                    .strip_prefix('"')
+                    .and_then(|s| s.strip_suffix('"'))
+                    .or_else(|| value.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+                {
+                    return Some(unquoted.to_string());
+                }
+                if !value.is_empty() {
+                    return Some(value.to_string());
+                }
+            }
+        }
+        if !rest.is_empty() {
+            return Some(rest.to_string());
+        }
+    }
+
+    if trimmed.starts_with("Tool '") && trimmed.contains("' failed:") {
+        return Some(trimmed.to_string());
+    }
+
+    None
+}
+
 /// Parse tool call summary JSON objects into `ToolCallInfo` structs.
 fn parse_tool_call_infos(calls: &[serde_json::Value]) -> Vec<ToolCallInfo> {
     calls
@@ -433,11 +476,27 @@ fn parse_tool_call_infos(calls: &[serde_json::Value]) -> Vec<ToolCallInfo> {
         .map(|c| {
             let result_preview = c.get("result_preview").and_then(tool_result_for_display);
             let result = c.get("result").and_then(tool_result_for_display);
+            let error = c["error"]
+                .as_str()
+                .map(tool_error_for_display)
+                .or_else(|| {
+                    result_preview
+                        .as_deref()
+                        .and_then(displayed_tool_result_error_text)
+                })
+                .or_else(|| result.as_deref().and_then(displayed_tool_result_error_text));
+            let has_error = c.get("error").is_some_and(|v| !v.is_null())
+                || result_preview
+                    .as_deref()
+                    .is_some_and(displayed_tool_result_is_error)
+                || result
+                    .as_deref()
+                    .is_some_and(displayed_tool_result_is_error);
             ToolCallInfo {
                 name: c["name"].as_str().unwrap_or("unknown").to_string(),
                 has_result: c.get("result").is_some_and(|v| !v.is_null())
                     || c.get("result_preview").is_some_and(|v| !v.is_null()),
-                has_error: c.get("error").is_some_and(|v| !v.is_null()),
+                has_error,
                 call_id: c
                     .get("tool_call_id")
                     .or_else(|| c.get("call_id"))
@@ -445,7 +504,7 @@ fn parse_tool_call_infos(calls: &[serde_json::Value]) -> Vec<ToolCallInfo> {
                     .map(String::from),
                 result,
                 result_preview,
-                error: c["error"].as_str().map(tool_error_for_display),
+                error,
                 rationale: c["rationale"].as_str().map(String::from),
             }
         })
@@ -707,6 +766,36 @@ mod tests {
         assert_eq!(turns[0].tool_calls[1].name, "http");
         assert!(turns[0].tool_calls[1].has_error);
         assert_eq!(turns[0].response.as_deref(), Some("Done"));
+    }
+
+    #[test]
+    fn test_build_turns_marks_action_failed_result_as_error() {
+        let tc_json = serde_json::json!([{
+            "name": "http",
+            "result_preview": "[ACTION FAILED] http: {'error': \"Tool 'http' failed: invalid URL\"}",
+            "result": "[ACTION FAILED] http: {'error': \"Tool 'http' failed: invalid URL\"}"
+        }]);
+        let messages = vec![
+            make_msg("user", "Fetch a relative URL", 0),
+            make_msg("tool_calls", &tc_json.to_string(), 500),
+            make_msg("assistant", "The URL is invalid.", 1000),
+        ];
+
+        let turns = build_turns_from_db_messages(&messages);
+
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].tool_calls.len(), 1);
+        assert_eq!(turns[0].tool_calls[0].name, "http");
+        assert!(turns[0].tool_calls[0].has_result);
+        assert!(
+            turns[0].tool_calls[0].has_error,
+            "history must render action-failed result payloads as failed tool cards"
+        );
+        assert_eq!(
+            turns[0].tool_calls[0].error.as_deref(),
+            Some("Tool 'http' failed: invalid URL")
+        );
+        assert_eq!(turns[0].response.as_deref(), Some("The URL is invalid."));
     }
 
     #[test]
