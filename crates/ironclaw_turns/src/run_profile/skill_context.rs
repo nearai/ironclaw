@@ -40,6 +40,8 @@ use crate::LoopMessageRef;
 
 use super::{
     AgentLoopHostError, AgentLoopHostErrorKind, LoopContextSnippet, LoopContextSnippetMetadata,
+    MAX_UNTRUSTED_CONTEXT_SUMMARY_BYTES, UntrustedContextKind,
+    untrusted_context::validate_untrusted_context_summary,
 };
 
 // ---------------------------------------------------------------------------
@@ -132,7 +134,6 @@ const DEFAULT_MAX_SKILL_SNIPPET_BYTES: usize = 8 * 1024;
 const DEFAULT_MAX_SKILL_CONTEXT_BYTES: usize = 32 * 1024;
 const FNV_OFFSET: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x00000100000001B3;
-const UNTRUSTED_SKILL_PREFIX: &str = "Untrusted skill content: ";
 
 /// Byte budgets for model-visible skill context produced by [`SkillContextService`].
 ///
@@ -345,10 +346,9 @@ impl SkillContextSource for SkillContextService {
                     }
                 }
                 SkillTrustLevel::Installed => {
+                    validate_installed_skill_summary(&entry.safe_description)?;
                     if let Some(ref content) = entry.prompt_content {
-                        if !content.starts_with(UNTRUSTED_SKILL_PREFIX) {
-                            return Err(SkillContextError::UnsafeModelVisibleContent);
-                        }
+                        validate_installed_skill_summary(content)?;
                         format!("{}\n\n{}", entry.safe_description, content)
                     } else {
                         entry.safe_description.clone()
@@ -528,6 +528,18 @@ const fn visibility_rank(visibility: SkillVisibility) -> u8 {
         SkillVisibility::Visible => 0,
         SkillVisibility::Hidden => 1,
         SkillVisibility::Denied => 2,
+    }
+}
+
+fn validate_installed_skill_summary(summary: &str) -> Result<(), SkillContextError> {
+    if validate_untrusted_context_summary(
+        UntrustedContextKind::Skill,
+        summary,
+        MAX_UNTRUSTED_CONTEXT_SUMMARY_BYTES,
+    ) {
+        Ok(())
+    } else {
+        Err(SkillContextError::UnsafeModelVisibleContent)
     }
 }
 

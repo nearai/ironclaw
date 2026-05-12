@@ -75,4 +75,6 @@ pub use skill_context::{
     skill_snippet_model_message_ref,
 };
 pub use snapshot::ResolvedRunProfile;
-pub use untrusted_context::{UntrustedContextKind, untrusted_context_summary};
+pub use untrusted_context::{
+    MAX_UNTRUSTED_CONTEXT_SUMMARY_BYTES, UntrustedContextKind, untrusted_context_summary,
+};

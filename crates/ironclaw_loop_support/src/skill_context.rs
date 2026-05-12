@@ -2,8 +2,9 @@ use async_trait::async_trait;
 use ironclaw_skills::{ParsedSkill, SkillTrust, parse_skill_md};
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, InstalledSkillSnapshot, LoopContextSnippet,
-    LoopRunContext, SkillContextError, SkillContextService, SkillContextSource, SkillRunSnapshot,
-    SkillTrustLevel, SkillVisibility, UntrustedContextKind, untrusted_context_summary,
+    LoopRunContext, MAX_UNTRUSTED_CONTEXT_SUMMARY_BYTES, SkillContextError, SkillContextService,
+    SkillContextSource, SkillRunSnapshot, SkillTrustLevel, SkillVisibility, UntrustedContextKind,
+    untrusted_context_summary,
 };
 pub(crate) use ironclaw_turns::run_profile::{
     is_skill_snippet_model_message_ref as is_snippet_model_message_ref,
@@ -168,11 +169,25 @@ fn parsed_skill_to_snapshot_entry(
 ) -> Result<InstalledSkillSnapshot, HostSkillContextBuildError> {
     let name = parsed.manifest.name;
     let trust = skill_trust_level(trust);
+    let safe_description = match trust {
+        SkillTrustLevel::Installed => untrusted_context_summary(
+            UntrustedContextKind::Skill,
+            &parsed.manifest.description,
+            MAX_UNTRUSTED_CONTEXT_SUMMARY_BYTES,
+        )
+        .ok_or(HostSkillContextBuildError::UnsafeModelVisibleContent)?
+        .as_str()
+        .to_string(),
+        SkillTrustLevel::Trusted => parsed.manifest.description,
+    };
     let prompt_content = match trust {
         SkillTrustLevel::Installed => {
-            let summary =
-                untrusted_context_summary(UntrustedContextKind::Skill, &parsed.prompt_content, 512)
-                    .ok_or(HostSkillContextBuildError::UnsafeModelVisibleContent)?;
+            let summary = untrusted_context_summary(
+                UntrustedContextKind::Skill,
+                &parsed.prompt_content,
+                MAX_UNTRUSTED_CONTEXT_SUMMARY_BYTES,
+            )
+            .ok_or(HostSkillContextBuildError::UnsafeModelVisibleContent)?;
             Some(summary.as_str().to_string())
         }
         SkillTrustLevel::Trusted => Some(parsed.prompt_content),
@@ -183,7 +198,7 @@ fn parsed_skill_to_snapshot_entry(
         trust,
         visibility,
         prompt_content,
-        safe_description: parsed.manifest.description,
+        safe_description,
     })
 }
 
