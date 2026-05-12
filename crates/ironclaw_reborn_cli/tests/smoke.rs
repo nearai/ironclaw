@@ -64,9 +64,37 @@ fn hooks_list_json_reports_empty_surface_without_reborn_home() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(
-        stdout.trim(),
-        r#"{"hooks":[],"status":"not-wired","v1_state":"not-used"}"#
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    assert_eq!(json["configured"], 0);
+    assert_eq!(json["hooks"].as_array().expect("hooks array").len(), 0);
+    assert_eq!(json["status"], "not-wired");
+    assert_eq!(json["v1_state"], "not-used");
+}
+
+#[test]
+fn hooks_list_json_verbose_includes_status_details() {
+    let output = Command::new(reborn_bin())
+        .arg("hooks")
+        .arg("list")
+        .arg("--json")
+        .arg("--verbose")
+        .env_clear()
+        .output()
+        .expect("ironclaw-reborn hooks list --json --verbose should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    let details = json["details"].as_array().expect("details array");
+    assert!(
+        details
+            .iter()
+            .any(|detail| detail == "Reborn hook registry is not wired yet"),
+        "json: {json}"
     );
 }
 

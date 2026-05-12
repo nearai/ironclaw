@@ -34,14 +34,19 @@ impl HooksCommand {
 impl HooksListCommand {
     fn execute(self) -> anyhow::Result<()> {
         if self.json {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "hooks": [],
-                    "status": "not-wired",
-                    "v1_state": "not-used",
-                })
-            );
+            let mut output = serde_json::json!({
+                "configured": 0,
+                "hooks": [],
+                "status": "not-wired",
+                "v1_state": "not-used",
+            });
+            if self.verbose {
+                output["details"] = serde_json::json!([
+                    "Reborn hook registry is not wired yet",
+                    "v1 hook configuration is intentionally not read"
+                ]);
+            }
+            println!("{}", output);
             return Ok(());
         }
 
