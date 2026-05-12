@@ -184,6 +184,65 @@ async def test_settings_subtab_drill_down(mobile_page):
     assert back_btn_visible, "back button must appear in drill-down view"
 
 
+async def test_drawer_traps_focus_while_open(mobile_page):
+    """Tab/Shift+Tab cannot move focus outside the drawer while it is open.
+
+    Regression for the `aria-modal="true"` advertisement: without
+    containment, keyboard users would tab into the now-hidden app
+    behind the modal navigation surface. The fix marks every other
+    `#app` child as `inert` while the drawer is open and restores them
+    on close — this test asserts both the attribute state and the
+    observable Tab behavior so a regression in either the attribute
+    bookkeeping or the focus path will fail loudly.
+    """
+    hamburger = mobile_page.locator("#hamburger-btn")
+    await hamburger.click()
+    await mobile_page.wait_for_function(
+        "() => document.getElementById('mobile-menu').classList.contains('open')",
+        timeout=2000,
+    )
+
+    # The tab-bar (and other #app children) must be inert while drawer is open.
+    tab_bar_inert = await mobile_page.evaluate(
+        "() => document.querySelector('.tab-bar').hasAttribute('inert')"
+    )
+    assert tab_bar_inert, ".tab-bar must be inert while the modal drawer is open"
+
+    # The drawer itself must not be inert.
+    menu_inert = await mobile_page.evaluate(
+        "() => document.getElementById('mobile-menu').hasAttribute('inert')"
+    )
+    assert not menu_inert, "#mobile-menu must not be inert while open"
+
+    # Press Tab enough times to cycle past every focusable item in the drawer;
+    # focus must never leave the drawer subtree.
+    for _ in range(25):
+        await mobile_page.keyboard.press("Tab")
+        active_inside_drawer = await mobile_page.evaluate(
+            "() => document.getElementById('mobile-menu').contains(document.activeElement)"
+        )
+        assert active_inside_drawer, "Tab must not move focus outside #mobile-menu"
+
+    # Shift+Tab cycles backwards — also stays inside.
+    for _ in range(25):
+        await mobile_page.keyboard.press("Shift+Tab")
+        active_inside_drawer = await mobile_page.evaluate(
+            "() => document.getElementById('mobile-menu').contains(document.activeElement)"
+        )
+        assert active_inside_drawer, "Shift+Tab must not move focus outside #mobile-menu"
+
+    # Closing the drawer must remove inert from previously-inerted siblings.
+    await mobile_page.keyboard.press("Escape")
+    await mobile_page.wait_for_function(
+        "() => !document.getElementById('mobile-menu').classList.contains('open')",
+        timeout=2000,
+    )
+    tab_bar_inert_after = await mobile_page.evaluate(
+        "() => document.querySelector('.tab-bar').hasAttribute('inert')"
+    )
+    assert not tab_bar_inert_after, ".tab-bar must no longer be inert once the drawer closes"
+
+
 async def test_desktop_viewport_unchanged(browser, ironclaw_server):
     """At >768px the mobile header is hidden and the desktop tab bar renders.
 

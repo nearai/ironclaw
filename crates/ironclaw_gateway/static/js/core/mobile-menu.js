@@ -38,11 +38,40 @@
   // a routed link) opened the drawer. `inert` on the closed drawer
   // prevents keyboard tab-into-invisible-controls; focus move/restore
   // gives the screen-reader and keyboard user a sensible landing spot.
+  //
+  // Focus containment: the drawer advertises `aria-modal="true"`, so
+  // Tab/Shift+Tab must not escape it. Rather than hand-roll a Tab
+  // listener (which would have to track focusable elements as the
+  // drawer rebuilds), mark every other `#app` child as `inert` while
+  // the drawer is open. `inert` removes the whole subtree from the
+  // sequential focus order, click targeting, and the accessibility
+  // tree — the browser does what we'd otherwise reimplement by hand.
+  // The backdrop is left non-inert so backdrop-click-to-close keeps
+  // working.
 
   let previousFocus = null;
+  const inertedSiblings = [];
+
+  function setSiblingsInert() {
+    const app = document.getElementById('app');
+    if (!app) return;
+    Array.from(app.children).forEach((child) => {
+      if (child === menu || child === backdrop) return;
+      if (child.hasAttribute('inert')) return; // preserve pre-existing inert state
+      child.setAttribute('inert', '');
+      inertedSiblings.push(child);
+    });
+  }
+
+  function restoreSiblingsInert() {
+    while (inertedSiblings.length > 0) {
+      inertedSiblings.pop().removeAttribute('inert');
+    }
+  }
 
   function openMenu() {
     previousFocus = document.activeElement;
+    setSiblingsInert();
     menu.classList.add('open');
     backdrop.classList.add('open');
     menu.setAttribute('aria-hidden', 'false');
@@ -64,6 +93,7 @@
     hamburger.setAttribute('aria-expanded', 'false');
     hamburger.setAttribute('aria-label', 'Open menu');
     document.body.classList.remove('mobile-menu-open');
+    restoreSiblingsInert();
     if (previousFocus && typeof previousFocus.focus === 'function'
       && document.contains(previousFocus)) {
       previousFocus.focus();
