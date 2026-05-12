@@ -76,11 +76,12 @@ use ironclaw_wasm::{
 
 use thiserror::Error;
 
+use crate::obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
 use crate::{
     BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime,
     FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, HostRuntimeError,
-    NetworkObligationPolicyStore, ProcessObligationLifecycleStore, RuntimeBackendHealth,
-    RuntimeSecretInjectionStore, TurnRunExecutor, TurnRunScheduler, TurnRunSchedulerConfig,
+    ProcessObligationLifecycleStore, RuntimeBackendHealth, TurnRunExecutor, TurnRunScheduler,
+    TurnRunSchedulerConfig,
 };
 
 type SharedRuntimeHttpEgress = Arc<Mutex<Option<Arc<dyn RuntimeHttpEgress>>>>;

@@ -58,9 +58,9 @@ pub use first_party::{
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 pub use obligations::{
-    BuiltinObligationHandler, BuiltinObligationServices, NetworkObligationPolicyStore,
-    ProcessObligationLifecycleStore, RuntimeSecretInjectionStore, RuntimeSecretInjectionStoreError,
+    BuiltinObligationHandler, BuiltinObligationServices, ProcessObligationLifecycleStore,
 };
+use obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
 pub use planner::{ExecutionPlan, PlannerError, plan_capability};
 pub use production::DefaultHostRuntime;
 pub use services::{
@@ -721,8 +721,8 @@ pub struct HostHttpEgressService<N, S> {
 impl<N, S> HostHttpEgressService<N, S> {
     /// Construct host HTTP egress in production fail-closed mode.
     ///
-    /// Callers must attach a [`NetworkObligationPolicyStore`] with
-    /// [`Self::with_network_policy_store`] before executing network requests.
+    /// Host-runtime composition must attach a staged network policy store
+    /// before executing network requests.
     /// Without that store, egress fails before transport rather than trusting a
     /// caller-supplied policy.
     pub fn new(network: N, secrets: S) -> Self {
@@ -739,7 +739,7 @@ impl<N, S> HostHttpEgressService<N, S> {
     ///
     /// This is intentionally named as a test/legacy seam: production Reborn
     /// runtime egress must consume staged `ApplyNetworkPolicy` handoffs from
-    /// [`NetworkObligationPolicyStore`] instead of trusting runtime/caller
+    /// the staged network-policy store instead of trusting runtime/caller
     /// request policy fields.
     pub fn new_with_request_policy_for_tests(network: N, secrets: S) -> Self {
         Self {
@@ -751,12 +751,18 @@ impl<N, S> HostHttpEgressService<N, S> {
         }
     }
 
-    pub fn with_secret_injection_store(mut self, store: Arc<RuntimeSecretInjectionStore>) -> Self {
+    pub(crate) fn with_secret_injection_store(
+        mut self,
+        store: Arc<RuntimeSecretInjectionStore>,
+    ) -> Self {
         self.secret_injections = Some(store);
         self
     }
 
-    pub fn with_network_policy_store(mut self, store: Arc<NetworkObligationPolicyStore>) -> Self {
+    pub(crate) fn with_network_policy_store(
+        mut self,
+        store: Arc<NetworkObligationPolicyStore>,
+    ) -> Self {
         self.network_policy_store = Some(store);
         self.network_policy_source = NetworkPolicySource::StagedObligation;
         self

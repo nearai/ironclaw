@@ -37,7 +37,7 @@ pub const DEFAULT_RUNTIME_SECRET_INJECTION_TTL: Duration = Duration::from_secs(3
 /// Entries also expire after a short TTL so abandoned handoffs from setup
 /// failures, cancellation, or adapter bugs cannot remain usable indefinitely.
 #[derive(Clone)]
-pub struct RuntimeSecretInjectionStore {
+pub(crate) struct RuntimeSecretInjectionStore {
     state: Arc<RuntimeSecretInjectionState>,
 }
 
@@ -52,11 +52,11 @@ struct RuntimeSecretInjectionEntry {
 }
 
 impl RuntimeSecretInjectionStore {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
-    pub fn with_ttl(ttl: Duration) -> Self {
+    pub(crate) fn with_ttl(ttl: Duration) -> Self {
         Self {
             state: Arc::new(RuntimeSecretInjectionState {
                 secrets: Mutex::new(HashMap::new()),
@@ -65,11 +65,7 @@ impl RuntimeSecretInjectionStore {
         }
     }
 
-    pub fn ttl(&self) -> Duration {
-        self.state.ttl
-    }
-
-    pub fn insert(
+    pub(crate) fn insert(
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
@@ -90,7 +86,7 @@ impl RuntimeSecretInjectionStore {
         Ok(())
     }
 
-    pub fn take(
+    pub(crate) fn take(
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
@@ -108,16 +104,11 @@ impl RuntimeSecretInjectionStore {
             .map(|entry| entry.material))
     }
 
-    pub fn prune_expired(&self) -> Result<usize, RuntimeSecretInjectionStoreError> {
-        let mut secrets = self.lock()?;
-        Ok(prune_expired_entries(&mut secrets, Instant::now()))
-    }
-
     /// Discard all staged secrets for a scoped capability before process ownership exists.
     ///
     /// Background process lifecycle cleanup is guarded by a single-active-handoff
     /// invariant for the scoped capability; this method remains the abort/inline cleanup seam.
-    pub fn discard_for_capability(
+    pub(crate) fn discard_for_capability(
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
@@ -138,6 +129,21 @@ impl RuntimeSecretInjectionStore {
         let mut secrets = self.lock()?;
         prune_expired_entries(&mut secrets, Instant::now());
         Ok(secrets.keys().any(|key| key.matches_scope(&scope_key)))
+    }
+
+    fn contains(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        handle: &SecretHandle,
+    ) -> Result<bool, RuntimeSecretInjectionStoreError> {
+        let mut secrets = self.lock()?;
+        prune_expired_entries(&mut secrets, Instant::now());
+        Ok(secrets.contains_key(&RuntimeSecretInjectionKey::new(
+            scope,
+            capability_id,
+            handle,
+        )))
     }
 
     fn lock(
@@ -179,7 +185,7 @@ fn prune_expired_entries(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RuntimeSecretInjectionStoreError {
+pub(crate) enum RuntimeSecretInjectionStoreError {
     Unavailable,
 }
 
@@ -267,16 +273,16 @@ impl RuntimeSecretInjectionScopeKey {
 /// every network operation in the invocation; obligation completion/abort or
 /// process lifecycle cleanup owns the final discard.
 #[derive(Debug, Clone, Default)]
-pub struct NetworkObligationPolicyStore {
+pub(crate) struct NetworkObligationPolicyStore {
     policies: Arc<Mutex<HashMap<NetworkPolicyKey, NetworkPolicy>>>,
 }
 
 impl NetworkObligationPolicyStore {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
-    pub fn insert(
+    pub(crate) fn insert(
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
@@ -288,7 +294,7 @@ impl NetworkObligationPolicyStore {
             .insert(NetworkPolicyKey::new(scope, capability_id), policy);
     }
 
-    pub fn get(
+    pub(crate) fn get(
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
@@ -300,7 +306,7 @@ impl NetworkObligationPolicyStore {
             .cloned()
     }
 
-    pub fn take(
+    pub(crate) fn take(
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
@@ -315,7 +321,11 @@ impl NetworkObligationPolicyStore {
     ///
     /// Background process lifecycle cleanup is guarded by a single-active-handoff
     /// invariant for the scoped capability; this method remains the abort/inline cleanup seam.
-    pub fn discard_for_capability(&self, scope: &ResourceScope, capability_id: &CapabilityId) {
+    pub(crate) fn discard_for_capability(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+    ) {
         let _ = self.take(scope, capability_id);
     }
 
@@ -384,7 +394,7 @@ impl BuiltinObligationServices {
         )
     }
 
-    pub fn with_handoff_stores(
+    pub(crate) fn with_handoff_stores(
         audit_sink: Arc<dyn AuditSink>,
         network_policies: Arc<NetworkObligationPolicyStore>,
         secret_store: Arc<dyn SecretStore>,
@@ -422,6 +432,54 @@ impl BuiltinObligationServices {
         crate::HostHttpEgressService::new(network, SharedSecretStore(self.secret_store.clone()))
             .with_network_policy_store(self.network_policies.clone())
             .with_secret_injection_store(self.secret_injections.clone())
+    }
+
+    pub fn process_obligation_lifecycle_store<S>(
+        &self,
+        inner: Arc<S>,
+    ) -> ProcessObligationLifecycleStore
+    where
+        S: ProcessStore + 'static,
+    {
+        ProcessObligationLifecycleStore::new(
+            inner,
+            self.network_policies.clone(),
+            self.secret_injections.clone(),
+            self.resource_governor.clone(),
+        )
+    }
+
+    pub fn process_obligation_lifecycle_store_dyn(
+        &self,
+        inner: Arc<dyn ProcessStore>,
+    ) -> ProcessObligationLifecycleStore {
+        ProcessObligationLifecycleStore::from_dyn(
+            inner,
+            self.network_policies.clone(),
+            self.secret_injections.clone(),
+            self.resource_governor.clone(),
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn staged_network_policy_present_for_diagnostics(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+    ) -> bool {
+        self.network_policies.contains(scope, capability_id)
+    }
+
+    #[doc(hidden)]
+    pub fn staged_secret_present_for_diagnostics(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        handle: &SecretHandle,
+    ) -> bool {
+        self.secret_injections
+            .contains(scope, capability_id, handle)
+            .unwrap_or(false)
     }
 
     pub fn obligation_handler(&self) -> BuiltinObligationHandler {
@@ -518,7 +576,7 @@ pub struct ProcessObligationLifecycleStore {
 }
 
 impl ProcessObligationLifecycleStore {
-    pub fn new<S>(
+    pub(crate) fn new<S>(
         inner: Arc<S>,
         network_policies: Arc<NetworkObligationPolicyStore>,
         secret_injections: Arc<RuntimeSecretInjectionStore>,
@@ -536,7 +594,7 @@ impl ProcessObligationLifecycleStore {
         )
     }
 
-    pub fn from_dyn(
+    pub(crate) fn from_dyn(
         inner: Arc<dyn ProcessStore>,
         network_policies: Arc<NetworkObligationPolicyStore>,
         secret_injections: Arc<RuntimeSecretInjectionStore>,
@@ -957,7 +1015,10 @@ impl BuiltinObligationHandler {
         self
     }
 
-    pub fn with_network_policy_store(mut self, store: Arc<NetworkObligationPolicyStore>) -> Self {
+    pub(crate) fn with_network_policy_store(
+        mut self,
+        store: Arc<NetworkObligationPolicyStore>,
+    ) -> Self {
         self.network_policies = Some(store);
         self
     }
@@ -976,7 +1037,10 @@ impl BuiltinObligationHandler {
         self
     }
 
-    pub fn with_secret_injection_store(mut self, store: Arc<RuntimeSecretInjectionStore>) -> Self {
+    pub(crate) fn with_secret_injection_store(
+        mut self,
+        store: Arc<RuntimeSecretInjectionStore>,
+    ) -> Self {
         self.secret_injections = Some(store);
         self
     }

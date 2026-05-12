@@ -163,7 +163,25 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
         );
     }
 
-    let forbidden_lib_accessors = ["pub fn network(&self) -> &N", "pub fn secrets(&self) -> &S"];
+    let obligations_pub_use = extract_pub_use_block(&lib, "pub use obligations::{");
+    let forbidden_obligation_exports = [
+        "NetworkObligationPolicyStore",
+        "RuntimeSecretInjectionStore",
+        "RuntimeSecretInjectionStoreError",
+    ];
+    for export in forbidden_obligation_exports {
+        assert!(
+            !obligations_pub_use.contains(export),
+            "ironclaw_host_runtime must not re-export lower substrate handoff store `{export}`; upper Reborn code should enter through HostRuntimeServices::host_runtime / Arc<dyn HostRuntime>"
+        );
+    }
+
+    let forbidden_lib_accessors = [
+        "pub fn with_secret_injection_store(",
+        "pub fn with_network_policy_store(",
+        "pub fn network(&self) -> &N",
+        "pub fn secrets(&self) -> &S",
+    ];
     for pattern in forbidden_lib_accessors {
         assert!(
             !lib.contains(pattern),
@@ -197,15 +215,35 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
     }
 
     let forbidden_obligation_accessors = [
+        "pub struct RuntimeSecretInjectionStore",
+        "pub enum RuntimeSecretInjectionStoreError",
+        "pub struct NetworkObligationPolicyStore",
+        "pub fn insert(",
+        "pub fn take(",
+        "pub fn discard_for_capability(",
+        "pub fn with_handoff_stores(",
+        "pub fn with_network_policy_store(",
+        "pub fn with_secret_injection_store(",
         "pub fn network_policy_store(&self)",
         "pub fn secret_injection_store(&self)",
     ];
     for pattern in forbidden_obligation_accessors {
         assert!(
             !obligations.contains(pattern),
-            "BuiltinObligationServices must not expose lower substrate escape hatch `{pattern}`; keep secret/network handoff stores private to host-runtime composition"
+            "BuiltinObligationServices and lower handoff stores must not expose lower substrate escape hatch `{pattern}`; keep secret/network handoff stores private to host-runtime composition"
         );
     }
+}
+
+fn extract_pub_use_block<'a>(contents: &'a str, start_marker: &str) -> &'a str {
+    let Some(start) = contents.find(start_marker) else {
+        return "";
+    };
+    let after_start = &contents[start..];
+    let Some(end) = after_start.find("};") else {
+        return after_start;
+    };
+    &after_start[..end]
 }
 
 #[test]

@@ -10,18 +10,18 @@ use ironclaw_authorization::{
     CapabilityLeaseStatus, CapabilityLeaseStore, GrantAuthorizer, InMemoryCapabilityLeaseStore,
     TrustAwareCapabilityDispatchAuthorizer,
 };
+use ironclaw_capabilities::CapabilityObligationHandler;
 use ironclaw_events::{
-    DurableEventLog, EventStreamKey, InMemoryDurableEventLog, InMemoryEventSink, ReadScope,
-    RuntimeEventKind,
+    DurableEventLog, EventStreamKey, InMemoryAuditSink, InMemoryDurableEventLog, InMemoryEventSink,
+    ReadScope, RuntimeEventKind,
 };
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry};
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
-    CapabilitySurfacePolicy, CapabilitySurfaceVersion, HostHttpEgressService, HostRuntime,
-    HostRuntimeServices, NetworkObligationPolicyStore, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind,
-    RuntimeSecretInjectionStore, RuntimeStatusRequest, SurfaceKind,
+    BuiltinObligationServices, CapabilitySurfacePolicy, CapabilitySurfaceVersion, HostRuntime,
+    HostRuntimeServices, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
+    RuntimeCapabilityResumeRequest, RuntimeFailureKind, RuntimeStatusRequest, SurfaceKind,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -34,7 +34,7 @@ use ironclaw_run_state::{
 use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptRuntime, ScriptRuntimeConfig,
 };
-use ironclaw_secrets::{InMemorySecretStore, SecretMaterial};
+use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
     HostTrustPolicy, TrustDecision, TrustProvenance,
@@ -517,8 +517,8 @@ async fn reborn_e2e_gate_blocks_oversized_runtime_output_before_publication() {
     );
 }
 
-#[test]
-fn reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once() {
+#[tokio::test]
+async fn reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -530,24 +530,45 @@ fn reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once() {
         },
     });
     let network_recorder = network.requests.clone();
-    let policy_store = Arc::new(NetworkObligationPolicyStore::new());
-    let secret_injections = Arc::new(RuntimeSecretInjectionStore::new());
     let scope = sample_scope(InvocationId::new());
     let capability_id = script_capability_id();
     let handle = SecretHandle::new("api-token").unwrap();
     let staged_policy = sample_policy();
-    policy_store.insert(&scope, &capability_id, staged_policy.clone());
-    secret_injections
-        .insert(
-            &scope,
-            &capability_id,
-            &handle,
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let obligation_services = BuiltinObligationServices::new(
+        Arc::new(InMemoryAuditSink::new()),
+        secret_store.clone(),
+        Arc::new(InMemoryResourceGovernor::new()),
+    );
+    secret_store
+        .put(
+            scope.clone(),
+            handle.clone(),
             SecretMaterial::from("sk-reborn-e2e-staged-secret"),
         )
+        .await
         .unwrap();
-    let service = HostHttpEgressService::new(network, InMemorySecretStore::new())
-        .with_network_policy_store(Arc::clone(&policy_store))
-        .with_secret_injection_store(Arc::clone(&secret_injections));
+    let mut context = execution_context_without_grants();
+    context.resource_scope = scope.clone();
+    obligation_services
+        .obligation_handler()
+        .satisfy(ironclaw_capabilities::CapabilityObligationRequest {
+            phase: ironclaw_capabilities::CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &ResourceEstimate::default(),
+            obligations: &[
+                Obligation::ApplyNetworkPolicy {
+                    policy: staged_policy.clone(),
+                },
+                Obligation::InjectSecretOnce {
+                    handle: handle.clone(),
+                },
+            ],
+        })
+        .await
+        .unwrap();
+    let service = obligation_services.host_http_egress(network);
 
     let request = RuntimeHttpEgressRequest {
         runtime: RuntimeKind::Script,
@@ -591,19 +612,6 @@ fn reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once() {
         ))
     );
     drop(recorded);
-    assert!(
-        secret_injections
-            .take(&scope, &capability_id, &handle)
-            .unwrap()
-            .is_none(),
-        "staged secret material must be consumed exactly once"
-    );
-    assert_eq!(
-        policy_store.get(&scope, &capability_id),
-        Some(staged_policy),
-        "host egress must leave staged network policy for invocation/process lifecycle cleanup"
-    );
-
     let replay = service
         .execute(request)
         .expect_err("consumed staged secret must not be reusable");

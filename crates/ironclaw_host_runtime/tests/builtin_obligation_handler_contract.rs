@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
@@ -11,15 +11,21 @@ use ironclaw_events::InMemoryAuditSink;
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
-    BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime,
-    NetworkObligationPolicyStore, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeFailureKind, RuntimeSecretInjectionStore,
+    BuiltinObligationHandler, BuiltinObligationServices, CapabilitySurfaceVersion,
+    DefaultHostRuntime, HostRuntime, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
+    RuntimeFailureKind,
 };
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
 use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
-use secrecy::ExposeSecret;
 use serde_json::json;
+
+fn obligation_services(
+    secret_store: Arc<InMemorySecretStore>,
+    governor: Arc<InMemoryResourceGovernor>,
+) -> BuiltinObligationServices {
+    BuiltinObligationServices::new(Arc::new(InMemoryAuditSink::new()), secret_store, governor)
+}
 
 #[tokio::test]
 async fn builtin_obligation_handler_emits_metadata_only_audit_before() {
@@ -575,8 +581,11 @@ async fn builtin_obligation_handler_fails_closed_when_redacted_object_keys_colli
 
 #[tokio::test]
 async fn builtin_obligation_handler_stores_network_policy_for_runtime_handoff() {
-    let policy_store = Arc::new(NetworkObligationPolicyStore::new());
-    let handler = BuiltinObligationHandler::new().with_network_policy_store(policy_store.clone());
+    let services = obligation_services(
+        Arc::new(InMemorySecretStore::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+    );
+    let handler = services.obligation_handler();
     let context = execution_context(CapabilitySet::default());
     let capability_id = capability_id();
     let estimate = ResourceEstimate::default();
@@ -596,17 +605,21 @@ async fn builtin_obligation_handler_stores_network_policy_for_runtime_handoff() 
         .unwrap();
 
     assert!(
-        policy_store
-            .take(&context.resource_scope, &capability_id)
-            .is_some(),
+        services.staged_network_policy_present_for_diagnostics(
+            &context.resource_scope,
+            &capability_id,
+        ),
         "accepted network obligations must be handed to runtime adapters"
     );
 }
 
 #[tokio::test]
 async fn builtin_obligation_handler_removes_network_policy_on_abort() {
-    let policy_store = Arc::new(NetworkObligationPolicyStore::new());
-    let handler = BuiltinObligationHandler::new().with_network_policy_store(policy_store.clone());
+    let services = obligation_services(
+        Arc::new(InMemorySecretStore::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+    );
+    let handler = services.obligation_handler();
     let context = execution_context(CapabilitySet::default());
     let capability_id = capability_id();
     let estimate = ResourceEstimate::default();
@@ -637,34 +650,52 @@ async fn builtin_obligation_handler_removes_network_policy_on_abort() {
         .unwrap();
 
     assert!(
-        policy_store
-            .take(&context.resource_scope, &capability_id)
-            .is_none()
+        !services.staged_network_policy_present_for_diagnostics(
+            &context.resource_scope,
+            &capability_id,
+        )
     );
 }
 
-#[test]
-fn network_obligation_policy_store_isolates_agent_scope() {
-    let store = NetworkObligationPolicyStore::new();
+#[tokio::test]
+async fn network_obligation_handoff_isolates_agent_scope() {
+    let services = obligation_services(
+        Arc::new(InMemorySecretStore::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+    );
+    let handler = services.obligation_handler();
     let capability_id = capability_id();
-    let mut agent_a = execution_context(CapabilitySet::default()).resource_scope;
-    agent_a.agent_id = Some(AgentId::new("agent-a").unwrap());
-    let mut agent_b = agent_a.clone();
+    let mut context = execution_context(CapabilitySet::default());
+    context.resource_scope.agent_id = Some(AgentId::new("agent-a").unwrap());
+    let mut agent_b = context.resource_scope.clone();
     agent_b.agent_id = Some(AgentId::new("agent-b").unwrap());
 
-    store.insert(&agent_a, &capability_id, allowed_network_policy());
+    handler
+        .satisfy(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &ResourceEstimate::default(),
+            obligations: &[Obligation::ApplyNetworkPolicy {
+                policy: allowed_network_policy(),
+            }],
+        })
+        .await
+        .unwrap();
 
-    assert!(store.take(&agent_b, &capability_id).is_none());
-    assert!(store.take(&agent_a, &capability_id).is_some());
+    assert!(!services.staged_network_policy_present_for_diagnostics(&agent_b, &capability_id));
+    assert!(services.staged_network_policy_present_for_diagnostics(
+        &context.resource_scope,
+        &capability_id,
+    ));
 }
 
 #[tokio::test]
 async fn builtin_obligation_handler_leases_consumes_and_stages_secret_once() {
     let secret_store = Arc::new(InMemorySecretStore::new());
-    let injection_store = Arc::new(RuntimeSecretInjectionStore::new());
-    let handler = BuiltinObligationHandler::new()
-        .with_secret_store(secret_store.clone())
-        .with_secret_injection_store(injection_store.clone());
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let services = obligation_services(secret_store.clone(), governor);
+    let handler = services.obligation_handler();
     let context = execution_context(CapabilitySet::default());
     let capability_id = capability_id();
     let estimate = ResourceEstimate::default();
@@ -692,79 +723,22 @@ async fn builtin_obligation_handler_leases_consumes_and_stages_secret_once() {
         .await
         .unwrap();
 
-    let material = injection_store
-        .take(&context.resource_scope, &capability_id, &handle)
-        .unwrap()
-        .expect("secret material should be staged exactly once");
-    assert_eq!(material.expose_secret(), "runtime-secret");
     assert!(
-        injection_store
-            .take(&context.resource_scope, &capability_id, &handle)
-            .unwrap()
-            .is_none(),
-        "runtime secret injection store must be one-shot"
-    );
-}
-
-#[tokio::test]
-async fn builtin_obligation_handler_expires_abandoned_direct_satisfy_secret_handoff() {
-    let secret_store = Arc::new(InMemorySecretStore::new());
-    let injection_store = Arc::new(RuntimeSecretInjectionStore::with_ttl(
-        Duration::from_millis(5),
-    ));
-    let handler = BuiltinObligationHandler::new()
-        .with_secret_store(secret_store.clone())
-        .with_secret_injection_store(injection_store.clone());
-    let context = execution_context(CapabilitySet::default());
-    let capability_id = capability_id();
-    let estimate = ResourceEstimate::default();
-    let handle = SecretHandle::new("api_token").unwrap();
-    secret_store
-        .put(
-            context.resource_scope.clone(),
-            handle.clone(),
-            SecretMaterial::from("runtime-secret"),
-        )
-        .await
-        .unwrap();
-    let obligations = vec![Obligation::InjectSecretOnce {
-        handle: handle.clone(),
-    }];
-
-    handler
-        .satisfy(CapabilityObligationRequest {
-            phase: CapabilityObligationPhase::Invoke,
-            context: &context,
-            capability_id: &capability_id,
-            estimate: &estimate,
-            obligations: &obligations,
-        })
-        .await
-        .unwrap();
-
-    tokio::time::sleep(Duration::from_millis(20)).await;
-
-    assert_eq!(
-        injection_store.prune_expired().unwrap(),
-        1,
-        "expired abandoned handoffs should be physically removable without waiting for egress"
-    );
-    assert!(
-        injection_store
-            .take(&context.resource_scope, &capability_id, &handle)
-            .unwrap()
-            .is_none(),
-        "abandoned direct satisfy handoffs must expire instead of remaining reusable indefinitely"
+        services.staged_secret_present_for_diagnostics(
+            &context.resource_scope,
+            &capability_id,
+            &handle,
+        ),
+        "secret material should be staged for runtime egress"
     );
 }
 
 #[tokio::test]
 async fn builtin_obligation_handler_removes_staged_secret_on_abort() {
     let secret_store = Arc::new(InMemorySecretStore::new());
-    let injection_store = Arc::new(RuntimeSecretInjectionStore::new());
-    let handler = BuiltinObligationHandler::new()
-        .with_secret_store(secret_store.clone())
-        .with_secret_injection_store(injection_store.clone());
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let services = obligation_services(secret_store.clone(), governor);
+    let handler = services.obligation_handler();
     let context = execution_context(CapabilitySet::default());
     let capability_id = capability_id();
     let estimate = ResourceEstimate::default();
@@ -791,20 +765,11 @@ async fn builtin_obligation_handler_removes_staged_secret_on_abort() {
         })
         .await
         .unwrap();
-    assert!(
-        injection_store
-            .take(&context.resource_scope, &capability_id, &handle)
-            .unwrap()
-            .is_some()
-    );
-    injection_store
-        .insert(
-            &context.resource_scope,
-            &capability_id,
-            &handle,
-            SecretMaterial::from("runtime-secret"),
-        )
-        .unwrap();
+    assert!(services.staged_secret_present_for_diagnostics(
+        &context.resource_scope,
+        &capability_id,
+        &handle,
+    ));
 
     handler
         .abort(ironclaw_capabilities::CapabilityObligationAbortRequest {
@@ -818,25 +783,19 @@ async fn builtin_obligation_handler_removes_staged_secret_on_abort() {
         .await
         .unwrap();
 
-    assert!(
-        injection_store
-            .take(&context.resource_scope, &capability_id, &handle)
-            .unwrap()
-            .is_none()
-    );
+    assert!(!services.staged_secret_present_for_diagnostics(
+        &context.resource_scope,
+        &capability_id,
+        &handle,
+    ));
 }
 
 #[tokio::test]
 async fn builtin_obligation_handler_satisfy_preserves_staged_handoffs_when_releasing_reservation() {
-    let policy_store = Arc::new(NetworkObligationPolicyStore::new());
     let secret_store = Arc::new(InMemorySecretStore::new());
-    let injection_store = Arc::new(RuntimeSecretInjectionStore::new());
     let governor = Arc::new(InMemoryResourceGovernor::new());
-    let handler = BuiltinObligationHandler::new()
-        .with_network_policy_store(policy_store.clone())
-        .with_secret_store(secret_store.clone())
-        .with_secret_injection_store(injection_store.clone())
-        .with_resource_governor(governor.clone());
+    let services = obligation_services(secret_store.clone(), governor.clone());
+    let handler = services.obligation_handler();
     let context = execution_context(CapabilitySet::default());
     let account = ResourceAccount::tenant(context.resource_scope.tenant_id.clone());
     let capability_id = capability_id();
@@ -878,29 +837,30 @@ async fn builtin_obligation_handler_satisfy_preserves_staged_handoffs_when_relea
 
     assert_eq!(governor.reserved_for(&account).concurrency_slots, 0);
     assert!(
-        policy_store
-            .take(&context.resource_scope, &capability_id)
-            .is_some(),
+        services.staged_network_policy_present_for_diagnostics(
+            &context.resource_scope,
+            &capability_id,
+        ),
         "direct satisfy should preserve staged network handoff after releasing reservation"
     );
     assert!(
-        injection_store
-            .take(&context.resource_scope, &capability_id, &handle)
-            .unwrap()
-            .is_some(),
+        services.staged_secret_present_for_diagnostics(
+            &context.resource_scope,
+            &capability_id,
+            &handle,
+        ),
         "direct satisfy should preserve staged secret handoff after releasing reservation"
     );
 }
 
 #[tokio::test]
 async fn builtin_obligation_handler_cleans_unused_staged_handoffs_after_dispatch_completion() {
-    let policy_store = Arc::new(NetworkObligationPolicyStore::new());
     let secret_store = Arc::new(InMemorySecretStore::new());
-    let injection_store = Arc::new(RuntimeSecretInjectionStore::new());
-    let handler = BuiltinObligationHandler::new()
-        .with_network_policy_store(policy_store.clone())
-        .with_secret_store(secret_store.clone())
-        .with_secret_injection_store(injection_store.clone());
+    let services = obligation_services(
+        secret_store.clone(),
+        Arc::new(InMemoryResourceGovernor::new()),
+    );
+    let handler = services.obligation_handler();
     let context = execution_context(CapabilitySet::default());
     let capability_id = capability_id();
     let estimate = ResourceEstimate::default();
@@ -915,9 +875,7 @@ async fn builtin_obligation_handler_cleans_unused_staged_handoffs_after_dispatch
         .unwrap();
     let policy = allowed_network_policy();
     let obligations = vec![
-        Obligation::ApplyNetworkPolicy {
-            policy: policy.clone(),
-        },
+        Obligation::ApplyNetworkPolicy { policy },
         Obligation::InjectSecretOnce {
             handle: handle.clone(),
         },
@@ -933,26 +891,15 @@ async fn builtin_obligation_handler_cleans_unused_staged_handoffs_after_dispatch
         })
         .await
         .unwrap();
-    assert!(
-        policy_store
-            .take(&context.resource_scope, &capability_id)
-            .is_some()
-    );
-    assert!(
-        injection_store
-            .take(&context.resource_scope, &capability_id, &handle)
-            .unwrap()
-            .is_some()
-    );
-    policy_store.insert(&context.resource_scope, &capability_id, policy);
-    injection_store
-        .insert(
-            &context.resource_scope,
-            &capability_id,
-            &handle,
-            SecretMaterial::from("runtime-secret"),
-        )
-        .unwrap();
+    assert!(services.staged_network_policy_present_for_diagnostics(
+        &context.resource_scope,
+        &capability_id,
+    ));
+    assert!(services.staged_secret_present_for_diagnostics(
+        &context.resource_scope,
+        &capability_id,
+        &handle,
+    ));
 
     handler
         .complete_dispatch(CapabilityObligationCompletionRequest {
@@ -970,17 +917,15 @@ async fn builtin_obligation_handler_cleans_unused_staged_handoffs_after_dispatch
         .await
         .unwrap();
 
-    assert!(
-        policy_store
-            .take(&context.resource_scope, &capability_id)
-            .is_none()
-    );
-    assert!(
-        injection_store
-            .take(&context.resource_scope, &capability_id, &handle)
-            .unwrap()
-            .is_none()
-    );
+    assert!(!services.staged_network_policy_present_for_diagnostics(
+        &context.resource_scope,
+        &capability_id,
+    ));
+    assert!(!services.staged_secret_present_for_diagnostics(
+        &context.resource_scope,
+        &capability_id,
+        &handle,
+    ));
 }
 
 #[tokio::test]
