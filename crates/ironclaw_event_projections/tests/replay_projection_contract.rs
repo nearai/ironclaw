@@ -1014,6 +1014,123 @@ async fn replay_projection_keeps_model_completed_running_until_reply_finalized()
 }
 
 #[tokio::test]
+async fn replay_projection_keeps_model_failed_non_terminal_until_loop_terminal_event() {
+    let log = Arc::new(InMemoryDurableEventLog::new());
+    let service = ReplayEventProjectionService::new(Arc::clone(&log));
+    let scope = scope_for_thread(ThreadId::new("thread-model-retry").unwrap());
+    let model_capability = CapabilityId::new("loop.model").unwrap();
+    let run_capability = CapabilityId::new("loop.run").unwrap();
+
+    log.append(RuntimeEvent::model_started(
+        scope.clone(),
+        model_capability.clone(),
+    ))
+    .await
+    .unwrap();
+    log.append(RuntimeEvent::model_failed(
+        scope.clone(),
+        model_capability.clone(),
+        "unavailable",
+    ))
+    .await
+    .unwrap();
+
+    let after_attempt_failure = service
+        .snapshot(ProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&scope),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+    assert_eq!(after_attempt_failure.runs.len(), 1);
+    assert_eq!(
+        after_attempt_failure.runs[0].status,
+        RunProjectionStatus::Running,
+        "model_failed is attempt-level progress; trusted loop terminal events own run failure"
+    );
+    assert_eq!(
+        after_attempt_failure.runs[0].error_kind.as_deref(),
+        Some("unavailable")
+    );
+
+    log.append(RuntimeEvent::model_started(
+        scope.clone(),
+        model_capability.clone(),
+    ))
+    .await
+    .unwrap();
+    log.append(RuntimeEvent::model_completed(
+        scope.clone(),
+        model_capability.clone(),
+    ))
+    .await
+    .unwrap();
+    log.append(RuntimeEvent::loop_completed(
+        scope.clone(),
+        run_capability.clone(),
+    ))
+    .await
+    .unwrap();
+
+    let after_terminal_completion = service
+        .snapshot(ProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&scope),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+    assert_eq!(after_terminal_completion.runs.len(), 1);
+    assert_eq!(
+        after_terminal_completion.runs[0].status,
+        RunProjectionStatus::Completed
+    );
+    assert_eq!(
+        after_terminal_completion.runs[0].capability_id, model_capability,
+        "trusted terminal loop events should not reclassify the primary run capability"
+    );
+    assert_eq!(
+        after_terminal_completion.runs[0].error_kind, None,
+        "successful terminal recovery must not expose stale attempt-level model errors"
+    );
+
+    let failed_scope = scope_for_thread(ThreadId::new("thread-loop-terminal-failed").unwrap());
+    log.append(RuntimeEvent::model_failed(
+        failed_scope.clone(),
+        CapabilityId::new("loop.model").unwrap(),
+        "unavailable",
+    ))
+    .await
+    .unwrap();
+    log.append(RuntimeEvent::loop_failed(
+        failed_scope.clone(),
+        run_capability,
+        "model_error",
+    ))
+    .await
+    .unwrap();
+
+    let after_terminal_failure = service
+        .snapshot(ProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&failed_scope),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+    assert_eq!(after_terminal_failure.runs.len(), 1);
+    assert_eq!(
+        after_terminal_failure.runs[0].status,
+        RunProjectionStatus::Failed
+    );
+    assert_eq!(
+        after_terminal_failure.runs[0].error_kind.as_deref(),
+        Some("model_error")
+    );
+}
+
+#[tokio::test]
 async fn replay_projection_updates_preserve_running_process_state_after_checkpoint() {
     let log = Arc::new(InMemoryDurableEventLog::new());
     let service = ReplayEventProjectionService::new(Arc::clone(&log));

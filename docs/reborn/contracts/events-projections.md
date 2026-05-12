@@ -264,9 +264,9 @@ Product-facing timeline, status, approval, auth, tool-call, process, resource, a
 
 Run status projections are projection-local read models. Model/reply milestone events use this status mapping:
 
-- `ModelStarted` and `ModelCompleted` keep the run `running`; model completion means the provider returned, not that the durable reply/transcript finalized.
-- `AssistantReplyFinalized` marks the run `completed` for metadata-only loop model/reply runs.
-- `ModelFailed` marks the run `failed` with sanitized `error_kind` only.
+- `ModelStarted`, `ModelCompleted`, and `ModelFailed` keep the run `running`; model completion means the provider returned, and model failure is attempt-level progress that may be retried/recovered.
+- `AssistantReplyFinalized` marks the run `completed` for metadata-only loop model/reply runs until richer terminal turn-run events are available.
+- `LoopCompleted` and `LoopFailed` are trusted terminal loop milestones; they mark the run `completed` or `failed` with sanitized `error_kind` only.
 
 ### Outbound egress and subscription state
 

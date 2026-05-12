@@ -179,6 +179,8 @@ pub enum TimelineEntryKind {
     ModelCompleted,
     ModelFailed,
     AssistantReplyFinalized,
+    LoopCompleted,
+    LoopFailed,
     ProcessStarted,
     ProcessCompleted,
     ProcessFailed,
@@ -196,6 +198,8 @@ impl From<RuntimeEventKind> for TimelineEntryKind {
             RuntimeEventKind::ModelCompleted => Self::ModelCompleted,
             RuntimeEventKind::ModelFailed => Self::ModelFailed,
             RuntimeEventKind::AssistantReplyFinalized => Self::AssistantReplyFinalized,
+            RuntimeEventKind::LoopCompleted => Self::LoopCompleted,
+            RuntimeEventKind::LoopFailed => Self::LoopFailed,
             RuntimeEventKind::ProcessStarted => Self::ProcessStarted,
             RuntimeEventKind::ProcessCompleted => Self::ProcessCompleted,
             RuntimeEventKind::ProcessFailed => Self::ProcessFailed,
@@ -1126,10 +1130,15 @@ fn apply_run_event(
         });
 
     run.status = status;
-    // Reply-finalized is a transcript milestone for the same loop run; keep the
-    // primary run capability (`loop.model`) instead of reclassifying the run as
-    // an assistant-reply event.
-    if event.kind != RuntimeEventKind::AssistantReplyFinalized {
+    // Reply-finalized and loop-terminal events are milestones for the same
+    // loop run; keep the primary run capability (`loop.model`) instead of
+    // reclassifying the run as assistant-reply or loop-run metadata.
+    if !matches!(
+        event.kind,
+        RuntimeEventKind::AssistantReplyFinalized
+            | RuntimeEventKind::LoopCompleted
+            | RuntimeEventKind::LoopFailed
+    ) {
         run.capability_id = event.capability_id.clone();
     }
     run.thread_id = event.scope.thread_id.clone();
@@ -1142,7 +1151,12 @@ fn apply_run_event(
     if event.process_id.is_some() {
         run.process_id = event.process_id;
     }
-    if sanitized_error_kind.is_some() {
+    if matches!(
+        event.kind,
+        RuntimeEventKind::AssistantReplyFinalized | RuntimeEventKind::LoopCompleted
+    ) {
+        run.error_kind = None;
+    } else if sanitized_error_kind.is_some() {
         run.error_kind = sanitized_error_kind;
     }
     run.last_cursor = entry.cursor;
@@ -1159,6 +1173,7 @@ fn run_status_for_event(
         | RuntimeEventKind::RuntimeSelected
         | RuntimeEventKind::ModelStarted
         | RuntimeEventKind::ModelCompleted
+        | RuntimeEventKind::ModelFailed
         | RuntimeEventKind::ProcessStarted => RunProjectionStatus::Running,
         RuntimeEventKind::DispatchSucceeded
             if has_active_process && current_status == Some(RunProjectionStatus::Running) =>
@@ -1181,9 +1196,10 @@ fn run_status_for_event(
         }
         RuntimeEventKind::DispatchSucceeded
         | RuntimeEventKind::AssistantReplyFinalized
+        | RuntimeEventKind::LoopCompleted
         | RuntimeEventKind::ProcessCompleted => RunProjectionStatus::Completed,
         RuntimeEventKind::DispatchFailed
-        | RuntimeEventKind::ModelFailed
+        | RuntimeEventKind::LoopFailed
         | RuntimeEventKind::ProcessFailed => RunProjectionStatus::Failed,
         RuntimeEventKind::ProcessKilled => RunProjectionStatus::Killed,
     }

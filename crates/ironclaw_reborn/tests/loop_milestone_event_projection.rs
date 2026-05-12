@@ -32,13 +32,14 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, EventCursor, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
-    InMemoryRunProfileResolver, ReplyTargetBindingRef, RunProfileId, RunProfileResolutionRequest,
-    RunProfileResolver, RunProfileVersion, SourceBindingRef, TurnId, TurnLeaseToken, TurnRunId,
-    TurnRunState, TurnRunnerId, TurnScope, TurnStatus,
+    InMemoryRunProfileResolver, LoopCompletionKind, LoopExitId, LoopFailureKind,
+    ReplyTargetBindingRef, RunProfileId, RunProfileResolutionRequest, RunProfileResolver,
+    RunProfileVersion, SourceBindingRef, TurnId, TurnLeaseToken, TurnRunId, TurnRunState,
+    TurnRunnerId, TurnScope, TurnStatus,
     run_profile::{
         AgentLoopHostErrorKind, FinalizeAssistantMessage, LoopDriverId, LoopHostMilestone,
-        LoopHostMilestoneKind, LoopHostMilestoneSink, LoopModelPort, LoopModelRequest,
-        LoopRunContext, LoopTranscriptPort, ParentLoopOutput,
+        LoopHostMilestoneEmitter, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopModelPort,
+        LoopModelRequest, LoopRunContext, LoopTranscriptPort, ParentLoopOutput,
     },
     runner::ClaimedTurnRun,
 };
@@ -261,6 +262,13 @@ async fn drive_model_reply_milestones_and_assert_projection(
         .finalize_assistant_message(FinalizeAssistantMessage { reply })
         .await
         .unwrap();
+    LoopHostMilestoneEmitter::new(success.context.clone(), Arc::clone(&success.milestone_sink))
+        .completed(
+            LoopCompletionKind::FinalReply,
+            LoopExitId::new("exit:loop-events-success").unwrap(),
+        )
+        .await
+        .unwrap();
 
     let failure = HostFixture::new(
         Arc::clone(&events),
@@ -282,6 +290,29 @@ async fn drive_model_reply_milestones_and_assert_projection(
         .await
         .unwrap_err();
     assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+
+    let attempt_failure_only = event_stream_manager(Arc::clone(&events), Arc::clone(&audit))
+        .runtime_snapshot(ProjectionRequest {
+            scope: projection_scope_for_thread(failure_thread_id.clone()),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+    assert_eq!(attempt_failure_only.runs.len(), 1);
+    assert_eq!(
+        attempt_failure_only.runs[0].status,
+        RunProjectionStatus::Running,
+        "model_failed is attempt-level progress until trusted loop terminal failure"
+    );
+
+    LoopHostMilestoneEmitter::new(failure.context.clone(), Arc::clone(&failure.milestone_sink))
+        .failed(
+            LoopFailureKind::ModelError,
+            LoopExitId::new("exit:loop-events-failure").unwrap(),
+        )
+        .await
+        .unwrap();
 
     let manager = event_stream_manager(events, audit);
     let snapshot = manager
@@ -305,8 +336,10 @@ async fn drive_model_reply_milestones_and_assert_projection(
             TimelineEntryKind::ModelStarted,
             TimelineEntryKind::ModelCompleted,
             TimelineEntryKind::AssistantReplyFinalized,
+            TimelineEntryKind::LoopCompleted,
             TimelineEntryKind::ModelStarted,
             TimelineEntryKind::ModelFailed,
+            TimelineEntryKind::LoopFailed,
         ]
     );
 
@@ -345,6 +378,7 @@ async fn drive_model_reply_milestones_and_assert_projection(
             TimelineEntryKind::ModelStarted,
             TimelineEntryKind::ModelCompleted,
             TimelineEntryKind::AssistantReplyFinalized,
+            TimelineEntryKind::LoopCompleted,
         ]
     );
     assert!(
@@ -364,6 +398,7 @@ async fn drive_model_reply_milestones_and_assert_projection(
         CapabilityId::new("loop.model").unwrap(),
         "assistant_reply_finalized must not reclassify the model run capability"
     );
+    assert_eq!(success_thread.runs[0].error_kind, None);
 
     let success_replay_scope = projection_scope_for_thread(success_thread_id.clone());
     let success_thread_replay = manager
@@ -384,6 +419,7 @@ async fn drive_model_reply_milestones_and_assert_projection(
             TimelineEntryKind::ModelStarted,
             TimelineEntryKind::ModelCompleted,
             TimelineEntryKind::AssistantReplyFinalized,
+            TimelineEntryKind::LoopCompleted,
         ]
     );
     assert!(
@@ -410,7 +446,8 @@ async fn drive_model_reply_milestones_and_assert_projection(
             .collect::<Vec<_>>(),
         vec![
             TimelineEntryKind::ModelStarted,
-            TimelineEntryKind::ModelFailed
+            TimelineEntryKind::ModelFailed,
+            TimelineEntryKind::LoopFailed
         ]
     );
     assert!(

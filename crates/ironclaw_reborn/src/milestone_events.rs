@@ -8,7 +8,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_threads::ThreadScope;
 use ironclaw_turns::{
-    TurnRunId,
+    LoopFailureKind, TurnRunId,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, LoopHostMilestone, LoopHostMilestoneKind,
         LoopHostMilestoneSink,
@@ -17,6 +17,7 @@ use ironclaw_turns::{
 
 const MODEL_CAPABILITY_ID: &str = "loop.model";
 const ASSISTANT_REPLY_CAPABILITY_ID: &str = "loop.assistant_reply";
+const LOOP_RUN_CAPABILITY_ID: &str = "loop.run";
 
 /// Scope authority bound into the sink at construction time.
 ///
@@ -186,15 +187,35 @@ impl DurableLoopHostMilestoneSink {
                     capability_id(ASSISTANT_REPLY_CAPABILITY_ID)?,
                 )
             }
+            LoopHostMilestoneKind::Completed { .. } => {
+                RuntimeEvent::loop_completed(scope, capability_id(LOOP_RUN_CAPABILITY_ID)?)
+            }
+            LoopHostMilestoneKind::Failed { reason_kind, .. } => RuntimeEvent::loop_failed(
+                scope,
+                capability_id(LOOP_RUN_CAPABILITY_ID)?,
+                loop_failure_kind(reason_kind),
+            ),
             LoopHostMilestoneKind::PromptBundleBuilt { .. }
             | LoopHostMilestoneKind::CapabilityInvoked { .. }
             | LoopHostMilestoneKind::CheckpointCreated { .. }
             | LoopHostMilestoneKind::Blocked { .. }
-            | LoopHostMilestoneKind::Completed { .. }
-            | LoopHostMilestoneKind::Failed { .. }
             | LoopHostMilestoneKind::DriverNote { .. } => return Ok(None),
         };
         Ok(Some(event))
+    }
+}
+
+fn loop_failure_kind(reason_kind: &LoopFailureKind) -> &'static str {
+    match reason_kind {
+        LoopFailureKind::ModelError => "model_error",
+        LoopFailureKind::ContextBuildFailed => "context_build_failed",
+        LoopFailureKind::CapabilityProtocolError => "capability_protocol_error",
+        LoopFailureKind::IterationLimit => "iteration_limit",
+        LoopFailureKind::InvalidModelOutput => "invalid_model_output",
+        LoopFailureKind::CheckpointRejected => "checkpoint_rejected",
+        LoopFailureKind::TranscriptWriteFailed => "transcript_write_failed",
+        LoopFailureKind::DriverBug => "driver_bug",
+        LoopFailureKind::InterruptedUnexpectedly => "interrupted_unexpectedly",
     }
 }
 

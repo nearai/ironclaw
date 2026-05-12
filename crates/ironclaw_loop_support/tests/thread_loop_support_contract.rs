@@ -262,9 +262,9 @@ async fn transcript_port_emits_assistant_reply_finalized_milestone_without_reply
     assert!(!wire.contains("tool_input"));
 }
 
+#[traced_test]
 #[tokio::test]
-async fn transcript_port_retries_assistant_reply_finalized_milestone_after_transient_sink_failure()
-{
+async fn transcript_port_keeps_finalized_reply_successful_after_milestone_sink_failure() {
     let fixture = ThreadFixture::new().await;
     let milestone_sink = Arc::new(FailOnceMilestoneSink::default());
     let adapter = ThreadBackedLoopTranscriptPort::with_milestone_sink(
@@ -279,13 +279,17 @@ async fn transcript_port_retries_assistant_reply_finalized_milestone_after_trans
         },
     };
 
-    let first_error = adapter
+    let first_ref = adapter
         .finalize_assistant_message(request.clone())
         .await
-        .unwrap_err();
-    assert_eq!(first_error.kind, AgentLoopHostErrorKind::Unavailable);
+        .unwrap();
+    assert!(milestone_sink.milestones().is_empty());
+    assert!(logs_contain(
+        "loop assistant_reply_finalized milestone failed after finalized transcript write"
+    ));
 
     let message_ref = adapter.finalize_assistant_message(request).await.unwrap();
+    assert_eq!(first_ref, message_ref);
 
     let milestones = milestone_sink.milestones();
     assert_eq!(milestones.len(), 1);

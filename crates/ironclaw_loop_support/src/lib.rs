@@ -120,8 +120,8 @@ where
     thread_scope: ThreadScope,
     run_context: LoopRunContext,
     milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
-    // Only successful milestone publications are recorded here: if publishing
-    // fails after the transcript write, an idempotent retry must try again.
+    // Only successful milestone publications are recorded here: if best-effort
+    // publishing fails after the transcript write, an idempotent retry can try again.
     emitted_assistant_reply_finalized_refs: Arc<Mutex<HashSet<String>>>,
 }
 
@@ -289,9 +289,17 @@ where
 
         let milestones =
             LoopHostMilestoneEmitter::new(self.run_context.clone(), Arc::clone(milestone_sink));
-        milestones
+        if let Err(error) = milestones
             .assistant_reply_finalized(message_ref.clone())
-            .await?;
+            .await
+        {
+            tracing::debug!(
+                kind = ?error.kind,
+                diagnostic_ref = ?error.diagnostic_ref,
+                "loop assistant_reply_finalized milestone failed after finalized transcript write"
+            );
+            return Ok(());
+        }
         emitted_refs.insert(message_ref.as_str().to_string());
         Ok(())
     }
