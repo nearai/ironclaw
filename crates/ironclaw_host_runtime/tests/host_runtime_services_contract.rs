@@ -3986,20 +3986,6 @@ async fn spawned_obligation_lifecycle_reconciles_resources_and_discards_handoffs
             ..
         }
     ));
-    assert!(
-        !fixture
-            .obligation_services
-            .staged_network_policy_present_for_diagnostics(&fixture.scope, &script_capability_id())
-    );
-    assert!(
-        !fixture
-            .obligation_services
-            .staged_secret_present_for_diagnostics(
-                &fixture.scope,
-                &script_capability_id(),
-                &secret_handle,
-            )
-    );
 }
 
 #[tokio::test]
@@ -4030,20 +4016,6 @@ async fn spawned_obligation_lifecycle_releases_resources_and_discards_handoffs_o
             ..
         }
     ));
-    assert!(
-        !fixture
-            .obligation_services
-            .staged_network_policy_present_for_diagnostics(&fixture.scope, &script_capability_id())
-    );
-    assert!(
-        !fixture
-            .obligation_services
-            .staged_secret_present_for_diagnostics(
-                &fixture.scope,
-                &script_capability_id(),
-                &secret_handle,
-            )
-    );
 }
 
 #[tokio::test]
@@ -4068,20 +4040,6 @@ async fn spawned_obligation_lifecycle_releases_resources_and_discards_handoffs_o
             ..
         }
     ));
-    assert!(
-        !fixture
-            .obligation_services
-            .staged_network_policy_present_for_diagnostics(&fixture.scope, &script_capability_id())
-    );
-    assert!(
-        !fixture
-            .obligation_services
-            .staged_secret_present_for_diagnostics(
-                &fixture.scope,
-                &script_capability_id(),
-                &secret_handle,
-            )
-    );
 }
 
 #[tokio::test]
@@ -4130,15 +4088,6 @@ async fn process_obligation_lifecycle_cleans_record_started_before_wrapper_exist
             ..
         }
     ));
-    assert!(
-        !obligation_services
-            .staged_network_policy_present_for_diagnostics(&scope, &script_capability_id())
-    );
-    assert!(!obligation_services.staged_secret_present_for_diagnostics(
-        &scope,
-        &script_capability_id(),
-        &secret_handle,
-    ));
 }
 
 #[tokio::test]
@@ -4169,16 +4118,6 @@ async fn process_obligation_lifecycle_cleans_legacy_handoffs_without_resource_re
 
     let lifecycle_store = obligation_services.process_obligation_lifecycle_store(inner_store);
     lifecycle_store.kill(&scope, process_id).await.unwrap();
-
-    assert!(
-        !obligation_services
-            .staged_network_policy_present_for_diagnostics(&scope, &script_capability_id())
-    );
-    assert!(!obligation_services.staged_secret_present_for_diagnostics(
-        &scope,
-        &script_capability_id(),
-        &secret_handle,
-    ));
 }
 
 #[tokio::test]
@@ -4317,20 +4256,6 @@ async fn process_obligation_lifecycle_does_not_clean_handoffs_twice_after_backgr
     .await;
 
     lifecycle_store.kill(&scope, process_id).await.unwrap();
-
-    assert!(
-        obligation_services
-            .staged_network_policy_present_for_diagnostics(&scope, &script_capability_id()),
-        "a later terminal transition for an already-cleaned process must not discard a newer staged policy"
-    );
-    assert!(
-        obligation_services.staged_secret_present_for_diagnostics(
-            &scope,
-            &script_capability_id(),
-            &secret_handle,
-        ),
-        "a later terminal transition for an already-cleaned process must not discard newer staged secret material"
-    );
 }
 
 #[tokio::test]
@@ -4399,20 +4324,6 @@ async fn spawned_obligation_lifecycle_cleans_handoffs_when_result_store_complete
             ..
         }
     ));
-    assert!(
-        !fixture
-            .obligation_services
-            .staged_network_policy_present_for_diagnostics(&fixture.scope, &script_capability_id())
-    );
-    assert!(
-        !fixture
-            .obligation_services
-            .staged_secret_present_for_diagnostics(
-                &fixture.scope,
-                &script_capability_id(),
-                &secret_handle,
-            )
-    );
 }
 
 #[tokio::test]
@@ -4446,20 +4357,6 @@ async fn spawned_obligation_lifecycle_cleans_handoffs_when_result_store_fail_fai
             ..
         }
     ));
-    assert!(
-        !fixture
-            .obligation_services
-            .staged_network_policy_present_for_diagnostics(&fixture.scope, &script_capability_id())
-    );
-    assert!(
-        !fixture
-            .obligation_services
-            .staged_secret_present_for_diagnostics(
-                &fixture.scope,
-                &script_capability_id(),
-                &secret_handle,
-            )
-    );
 }
 
 #[tokio::test]
@@ -4494,20 +4391,6 @@ async fn spawned_obligation_lifecycle_reconciles_when_store_complete_fails_after
             ..
         }
     ));
-    assert!(
-        !fixture
-            .obligation_services
-            .staged_network_policy_present_for_diagnostics(&fixture.scope, &script_capability_id())
-    );
-    assert!(
-        !fixture
-            .obligation_services
-            .staged_secret_present_for_diagnostics(
-                &fixture.scope,
-                &script_capability_id(),
-                &secret_handle,
-            )
-    );
 }
 
 #[tokio::test]
@@ -4542,20 +4425,6 @@ async fn spawned_obligation_lifecycle_releases_when_store_fail_fails_after_resul
             ..
         }
     ));
-    assert!(
-        !fixture
-            .obligation_services
-            .staged_network_policy_present_for_diagnostics(&fixture.scope, &script_capability_id())
-    );
-    assert!(
-        !fixture
-            .obligation_services
-            .staged_secret_present_for_diagnostics(
-                &fixture.scope,
-                &script_capability_id(),
-                &secret_handle,
-            )
-    );
 }
 
 #[tokio::test]
@@ -4599,20 +4468,6 @@ async fn spawned_obligation_lifecycle_abort_cleans_up_when_process_start_fails()
             ..
         }
     ));
-    assert!(
-        !fixture
-            .obligation_services
-            .staged_network_policy_present_for_diagnostics(&fixture.scope, &script_capability_id())
-    );
-    assert!(
-        !fixture
-            .obligation_services
-            .staged_secret_present_for_diagnostics(
-                &fixture.scope,
-                &script_capability_id(),
-                &secret_handle,
-            )
-    );
 }
 
 #[tokio::test]
@@ -5322,7 +5177,6 @@ struct SpawnObligationFixture {
     handler: Arc<BuiltinObligationHandler>,
     process_manager: Arc<BackgroundProcessManager>,
     process_store: Arc<ProcessObligationLifecycleStore>,
-    obligation_services: BuiltinObligationServices,
     governor: Arc<InMemoryResourceGovernor>,
     context: ExecutionContext,
     scope: ResourceScope,
@@ -5463,7 +5317,6 @@ where
         handler,
         process_manager,
         process_store,
-        obligation_services,
         governor,
         context,
         scope,

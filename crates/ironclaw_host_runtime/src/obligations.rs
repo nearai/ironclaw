@@ -131,21 +131,6 @@ impl RuntimeSecretInjectionStore {
         Ok(secrets.keys().any(|key| key.matches_scope(&scope_key)))
     }
 
-    fn contains(
-        &self,
-        scope: &ResourceScope,
-        capability_id: &CapabilityId,
-        handle: &SecretHandle,
-    ) -> Result<bool, RuntimeSecretInjectionStoreError> {
-        let mut secrets = self.lock()?;
-        prune_expired_entries(&mut secrets, Instant::now());
-        Ok(secrets.contains_key(&RuntimeSecretInjectionKey::new(
-            scope,
-            capability_id,
-            handle,
-        )))
-    }
-
     fn lock(
         &self,
     ) -> Result<
@@ -459,27 +444,6 @@ impl BuiltinObligationServices {
             self.secret_injections.clone(),
             self.resource_governor.clone(),
         )
-    }
-
-    #[doc(hidden)]
-    pub fn staged_network_policy_present_for_diagnostics(
-        &self,
-        scope: &ResourceScope,
-        capability_id: &CapabilityId,
-    ) -> bool {
-        self.network_policies.contains(scope, capability_id)
-    }
-
-    #[doc(hidden)]
-    pub fn staged_secret_present_for_diagnostics(
-        &self,
-        scope: &ResourceScope,
-        capability_id: &CapabilityId,
-        handle: &SecretHandle,
-    ) -> bool {
-        self.secret_injections
-            .contains(scope, capability_id, handle)
-            .unwrap_or(false)
     }
 
     pub fn obligation_handler(&self) -> BuiltinObligationHandler {

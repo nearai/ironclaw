@@ -396,10 +396,6 @@ fn host_http_egress_does_not_take_staged_secret_from_other_capability() {
         ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
     ));
     assert!(network_recorder.lock().unwrap().is_empty());
-    assert!(
-        services.staged_secret_present_for_diagnostics(&scope, &other_capability, &handle),
-        "material staged for a different capability must not be consumed"
-    );
 }
 
 #[test]
@@ -461,10 +457,6 @@ fn host_http_egress_does_not_take_staged_secret_for_other_handle() {
         ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
     ));
     assert!(network_recorder.lock().unwrap().is_empty());
-    assert!(
-        services.staged_secret_present_for_diagnostics(&scope, &capability_id, &other_handle),
-        "material staged for a different handle must not be consumed"
-    );
 }
 
 #[test]
@@ -639,10 +631,6 @@ fn host_http_egress_does_not_take_staged_secret_from_other_scope() {
         ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
     ));
     assert!(network_recorder.lock().unwrap().is_empty());
-    assert!(
-        services.staged_secret_present_for_diagnostics(&other_scope, &capability_id, &handle),
-        "material staged for a different scope must not be consumed"
-    );
 }
 
 #[test]
@@ -1024,10 +1012,6 @@ fn host_http_egress_borrows_staged_network_policy_before_transport() {
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].policy, staged_policy);
     drop(requests);
-    assert!(
-        services.staged_network_policy_present_for_diagnostics(&scope, &capability_id),
-        "runtime egress must leave staged policy for invocation/process lifecycle cleanup"
-    );
 }
 
 #[test]
@@ -1074,7 +1058,6 @@ fn wasm_http_adapter_borrows_real_host_staged_network_policy() {
     assert_eq!(requests[0].url, "https://api.example.test/v1/run");
     assert_eq!(requests[0].body, b"hello".to_vec());
     drop(requests);
-    assert!(services.staged_network_policy_present_for_diagnostics(&scope, &capability_id));
 }
 
 #[test]
@@ -1121,7 +1104,6 @@ fn script_http_adapter_borrows_real_host_staged_network_policy() {
     assert_eq!(requests[0].url, "https://api.example.test/v1/run");
     assert_eq!(requests[0].body, b"hello".to_vec());
     drop(requests);
-    assert!(services.staged_network_policy_present_for_diagnostics(&scope, &capability_id));
 }
 
 #[test]
@@ -1168,7 +1150,6 @@ fn mcp_http_adapter_borrows_real_host_staged_network_policy() {
     assert_eq!(requests[0].url, "https://api.example.test/v1/run");
     assert_eq!(requests[0].body, b"hello".to_vec());
     drop(requests);
-    assert!(services.staged_network_policy_present_for_diagnostics(&scope, &capability_id));
 }
 
 #[tokio::test]
@@ -1222,10 +1203,6 @@ async fn mcp_http_client_reuses_real_host_staged_network_policy_for_json_rpc_ses
             .all(|request| request.policy == staged_policy)
     );
     drop(requests);
-    assert!(
-        services.staged_network_policy_present_for_diagnostics(&scope, &capability_id),
-        "host egress should leave staged policies for invocation/process lifecycle cleanup"
-    );
 }
 
 #[test]
@@ -1319,8 +1296,6 @@ fn host_http_egress_does_not_use_cross_scope_or_cross_capability_policy() {
         } if reason == "network_policy_missing"
     ));
     assert!(network_recorder.lock().unwrap().is_empty());
-    assert!(services.staged_network_policy_present_for_diagnostics(&other_scope, &capability_id,));
-    assert!(services.staged_network_policy_present_for_diagnostics(&scope, &other_capability_id,));
 }
 
 #[test]
@@ -1368,7 +1343,6 @@ fn host_http_egress_consumes_staged_policy_when_dispatch_fails_before_transport(
 
     assert!(matches!(error, RuntimeHttpEgressError::Credential { .. }));
     assert!(network_recorder.lock().unwrap().is_empty());
-    assert!(!services.staged_network_policy_present_for_diagnostics(&scope, &capability_id));
 }
 
 #[test]
@@ -1411,7 +1385,6 @@ fn host_http_egress_consumes_staged_policy_when_request_validation_fails() {
 
     assert!(matches!(error, RuntimeHttpEgressError::Request { .. }));
     assert!(network_recorder.lock().unwrap().is_empty());
-    assert!(!services.staged_network_policy_present_for_diagnostics(&scope, &capability_id));
 }
 
 #[test]

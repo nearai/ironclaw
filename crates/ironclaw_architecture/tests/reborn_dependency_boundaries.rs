@@ -180,6 +180,10 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
     }
 
     let forbidden_lib_accessors = [
+        "pub use obligations::NetworkObligationPolicyStore",
+        "pub use obligations::RuntimeSecretInjectionStore",
+        "pub use obligations::RuntimeSecretInjectionStoreError",
+        "pub use obligations::*",
         "pub fn with_secret_injection_store(",
         "pub fn with_network_policy_store(",
         "pub fn network(&self) -> &N",
@@ -230,6 +234,8 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
         "pub fn with_secret_injection_store(",
         "pub fn network_policy_store(&self)",
         "pub fn secret_injection_store(&self)",
+        "pub fn staged_network_policy_present_for_diagnostics(",
+        "pub fn staged_secret_present_for_diagnostics(",
     ];
     for pattern in forbidden_obligation_accessors {
         assert!(

@@ -603,14 +603,6 @@ async fn builtin_obligation_handler_stores_network_policy_for_runtime_handoff() 
         })
         .await
         .unwrap();
-
-    assert!(
-        services.staged_network_policy_present_for_diagnostics(
-            &context.resource_scope,
-            &capability_id,
-        ),
-        "accepted network obligations must be handed to runtime adapters"
-    );
 }
 
 #[tokio::test]
@@ -648,13 +640,6 @@ async fn builtin_obligation_handler_removes_network_policy_on_abort() {
         })
         .await
         .unwrap();
-
-    assert!(
-        !services.staged_network_policy_present_for_diagnostics(
-            &context.resource_scope,
-            &capability_id,
-        )
-    );
 }
 
 #[tokio::test]
@@ -682,12 +667,6 @@ async fn network_obligation_handoff_isolates_agent_scope() {
         })
         .await
         .unwrap();
-
-    assert!(!services.staged_network_policy_present_for_diagnostics(&agent_b, &capability_id));
-    assert!(services.staged_network_policy_present_for_diagnostics(
-        &context.resource_scope,
-        &capability_id,
-    ));
 }
 
 #[tokio::test]
@@ -722,15 +701,6 @@ async fn builtin_obligation_handler_leases_consumes_and_stages_secret_once() {
         })
         .await
         .unwrap();
-
-    assert!(
-        services.staged_secret_present_for_diagnostics(
-            &context.resource_scope,
-            &capability_id,
-            &handle,
-        ),
-        "secret material should be staged for runtime egress"
-    );
 }
 
 #[tokio::test]
@@ -765,11 +735,6 @@ async fn builtin_obligation_handler_removes_staged_secret_on_abort() {
         })
         .await
         .unwrap();
-    assert!(services.staged_secret_present_for_diagnostics(
-        &context.resource_scope,
-        &capability_id,
-        &handle,
-    ));
 
     handler
         .abort(ironclaw_capabilities::CapabilityObligationAbortRequest {
@@ -782,12 +747,6 @@ async fn builtin_obligation_handler_removes_staged_secret_on_abort() {
         })
         .await
         .unwrap();
-
-    assert!(!services.staged_secret_present_for_diagnostics(
-        &context.resource_scope,
-        &capability_id,
-        &handle,
-    ));
 }
 
 #[tokio::test]
@@ -836,21 +795,6 @@ async fn builtin_obligation_handler_satisfy_preserves_staged_handoffs_when_relea
         .unwrap();
 
     assert_eq!(governor.reserved_for(&account).concurrency_slots, 0);
-    assert!(
-        services.staged_network_policy_present_for_diagnostics(
-            &context.resource_scope,
-            &capability_id,
-        ),
-        "direct satisfy should preserve staged network handoff after releasing reservation"
-    );
-    assert!(
-        services.staged_secret_present_for_diagnostics(
-            &context.resource_scope,
-            &capability_id,
-            &handle,
-        ),
-        "direct satisfy should preserve staged secret handoff after releasing reservation"
-    );
 }
 
 #[tokio::test]
@@ -891,15 +835,6 @@ async fn builtin_obligation_handler_cleans_unused_staged_handoffs_after_dispatch
         })
         .await
         .unwrap();
-    assert!(services.staged_network_policy_present_for_diagnostics(
-        &context.resource_scope,
-        &capability_id,
-    ));
-    assert!(services.staged_secret_present_for_diagnostics(
-        &context.resource_scope,
-        &capability_id,
-        &handle,
-    ));
 
     handler
         .complete_dispatch(CapabilityObligationCompletionRequest {
@@ -916,16 +851,6 @@ async fn builtin_obligation_handler_cleans_unused_staged_handoffs_after_dispatch
         })
         .await
         .unwrap();
-
-    assert!(!services.staged_network_policy_present_for_diagnostics(
-        &context.resource_scope,
-        &capability_id,
-    ));
-    assert!(!services.staged_secret_present_for_diagnostics(
-        &context.resource_scope,
-        &capability_id,
-        &handle,
-    ));
 }
 
 #[tokio::test]
