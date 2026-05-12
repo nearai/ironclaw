@@ -780,14 +780,6 @@ impl<N, S> HostHttpEgressService<N, S> {
                 .is_some_and(|store| Arc::ptr_eq(store, secret_injections))
     }
 
-    pub fn network(&self) -> &N {
-        &self.network
-    }
-
-    pub fn secrets(&self) -> &S {
-        &self.secrets
-    }
-
     fn network_policy_for_request(
         &self,
         request: &mut RuntimeHttpEgressRequest,

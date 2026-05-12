@@ -17,12 +17,15 @@ use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AuditEnvelope, AuditEventId, AuditStage,
     CapabilityDispatchResult, CapabilityId, DecisionSummary, EffectKind, MountView, NetworkPolicy,
     Obligation, ProcessId, ResourceCeiling, ResourceEstimate, ResourceReservation, ResourceScope,
-    ResourceUsage, SandboxQuota, SecretHandle,
+    ResourceUsage, RuntimeHttpEgress, SandboxQuota, SecretHandle,
 };
+use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::{ProcessError, ProcessRecord, ProcessStart, ProcessStore};
 use ironclaw_resources::{ResourceError, ResourceGovernor};
 use ironclaw_safety::LeakDetector;
-use ironclaw_secrets::{SecretMaterial, SecretStore};
+use ironclaw_secrets::{
+    SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore, SecretStoreError,
+};
 
 /// Default maximum lifetime for one-shot runtime secret material staged in memory.
 pub const DEFAULT_RUNTIME_SECRET_INJECTION_TTL: Duration = Duration::from_secs(300);
@@ -401,20 +404,24 @@ impl BuiltinObligationServices {
         self.audit_sink.clone()
     }
 
-    pub fn network_policy_store(&self) -> Arc<NetworkObligationPolicyStore> {
-        self.network_policies.clone()
-    }
-
     pub fn secret_store(&self) -> Arc<dyn SecretStore> {
         self.secret_store.clone()
     }
 
-    pub fn secret_injection_store(&self) -> Arc<RuntimeSecretInjectionStore> {
-        self.secret_injections.clone()
-    }
-
     pub fn resource_governor(&self) -> Arc<dyn ResourceGovernor> {
         self.resource_governor.clone()
+    }
+
+    /// Builds host HTTP egress over this service graph's private handoff stores.
+    /// Callers can supply concrete network transport without receiving mutable
+    /// access to staged policy or secret material.
+    pub fn host_http_egress<N>(&self, network: N) -> impl RuntimeHttpEgress + use<N>
+    where
+        N: NetworkHttpEgress + 'static,
+    {
+        crate::HostHttpEgressService::new(network, SharedSecretStore(self.secret_store.clone()))
+            .with_network_policy_store(self.network_policies.clone())
+            .with_secret_injection_store(self.secret_injections.clone())
     }
 
     pub fn obligation_handler(&self) -> BuiltinObligationHandler {
@@ -437,6 +444,59 @@ impl fmt::Debug for BuiltinObligationServices {
             .field("secret_injections", &self.secret_injections)
             .field("resource_governor", &"<resource_governor>")
             .finish()
+    }
+}
+
+struct SharedSecretStore(Arc<dyn SecretStore>);
+
+#[async_trait]
+impl SecretStore for SharedSecretStore {
+    async fn put(
+        &self,
+        scope: ResourceScope,
+        handle: SecretHandle,
+        material: SecretMaterial,
+    ) -> Result<SecretMetadata, SecretStoreError> {
+        self.0.put(scope, handle, material).await
+    }
+
+    async fn metadata(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<Option<SecretMetadata>, SecretStoreError> {
+        self.0.metadata(scope, handle).await
+    }
+
+    async fn lease_once(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<SecretLease, SecretStoreError> {
+        self.0.lease_once(scope, handle).await
+    }
+
+    async fn consume(
+        &self,
+        scope: &ResourceScope,
+        lease_id: SecretLeaseId,
+    ) -> Result<SecretMaterial, SecretStoreError> {
+        self.0.consume(scope, lease_id).await
+    }
+
+    async fn revoke(
+        &self,
+        scope: &ResourceScope,
+        lease_id: SecretLeaseId,
+    ) -> Result<SecretLease, SecretStoreError> {
+        self.0.revoke(scope, lease_id).await
+    }
+
+    async fn leases_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<SecretLease>, SecretStoreError> {
+        self.0.leases_for_scope(scope).await
     }
 }
 

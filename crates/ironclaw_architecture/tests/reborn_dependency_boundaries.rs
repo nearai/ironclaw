@@ -146,6 +146,9 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
     let services =
         std::fs::read_to_string(root.join("crates/ironclaw_host_runtime/src/services.rs"))
             .expect("host runtime services.rs must be readable");
+    let obligations =
+        std::fs::read_to_string(root.join("crates/ironclaw_host_runtime/src/obligations.rs"))
+            .expect("host runtime obligations.rs must be readable");
 
     let forbidden_lib_exports = [
         "RuntimeDispatchProcessExecutor",
@@ -160,6 +163,14 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
         );
     }
 
+    let forbidden_lib_accessors = ["pub fn network(&self) -> &N", "pub fn secrets(&self) -> &S"];
+    for pattern in forbidden_lib_accessors {
+        assert!(
+            !lib.contains(pattern),
+            "HostHttpEgressService must not expose lower substrate escape hatch `{pattern}`; keep raw network/secret/policy handoff wiring private to host-runtime composition"
+        );
+    }
+
     let forbidden_public_services = [
         "pub fn registry(",
         "pub fn filesystem(",
@@ -171,6 +182,8 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
         "pub fn runtime_dispatcher(",
         "pub fn runtime_dispatcher_arc(",
         "pub fn capability_host",
+        "pub fn secret_injection_store(",
+        "pub fn network_policy_store(",
         "pub struct RuntimeDispatchProcessExecutor",
         "pub struct ScriptRuntimeAdapter",
         "pub struct McpRuntimeAdapter",
@@ -180,6 +193,17 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
         assert!(
             !services.contains(pattern),
             "HostRuntimeServices must not expose lower substrate escape hatch `{pattern}`; keep dispatcher/capability/process handles private to the host-runtime crate"
+        );
+    }
+
+    let forbidden_obligation_accessors = [
+        "pub fn network_policy_store(&self)",
+        "pub fn secret_injection_store(&self)",
+    ];
+    for pattern in forbidden_obligation_accessors {
+        assert!(
+            !obligations.contains(pattern),
+            "BuiltinObligationServices must not expose lower substrate escape hatch `{pattern}`; keep secret/network handoff stores private to host-runtime composition"
         );
     }
 }

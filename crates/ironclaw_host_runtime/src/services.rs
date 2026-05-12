@@ -913,12 +913,21 @@ where
         self
     }
 
-    pub fn secret_injection_store(&self) -> Arc<RuntimeSecretInjectionStore> {
-        Arc::clone(&self.secret_injection_store)
-    }
-
-    pub fn network_policy_store(&self) -> Arc<NetworkObligationPolicyStore> {
-        Arc::clone(&self.network_policy_store)
+    /// Builds and attaches production-shaped host HTTP egress using this
+    /// service graph's private network-policy and secret-injection handoff
+    /// stores. Callers provide concrete network and secret adapters, but never
+    /// receive the mutable handoff stores themselves.
+    pub fn with_host_http_egress<N, SecretBackend>(self, network: N, secrets: SecretBackend) -> Self
+    where
+        N: NetworkHttpEgress + 'static,
+        SecretBackend: SecretStore + 'static,
+    {
+        let runtime_http_egress = Arc::new(
+            crate::HostHttpEgressService::new(network, secrets)
+                .with_network_policy_store(Arc::clone(&self.network_policy_store))
+                .with_secret_injection_store(Arc::clone(&self.secret_injection_store)),
+        );
+        self.with_host_http_egress_service(runtime_http_egress)
     }
 
     pub fn with_script_runtime<T>(mut self, runtime: Arc<T>) -> Self

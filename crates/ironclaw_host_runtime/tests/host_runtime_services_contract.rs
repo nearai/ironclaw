@@ -1072,15 +1072,10 @@ fn production_wiring_validation_accepts_verified_host_http_egress_shape() {
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     );
-    let runtime_http = Arc::new(
-        HostHttpEgressService::new(
-            RecordingNetworkHttpEgress::new(),
-            InMemorySecretStore::new(),
-        )
-        .with_secret_injection_store(services.secret_injection_store())
-        .with_network_policy_store(services.network_policy_store()),
+    let services = services.with_host_http_egress(
+        RecordingNetworkHttpEgress::new(),
+        InMemorySecretStore::new(),
     );
-    let services = services.with_host_http_egress_service(runtime_http);
 
     let report = services
         .validate_production_wiring(&ProductionWiringConfig::new([]).require_runtime_http_egress());
@@ -1109,7 +1104,7 @@ fn production_wiring_validation_rejects_host_http_egress_with_unrelated_handoff_
             RecordingNetworkHttpEgress::new(),
             InMemorySecretStore::new(),
         )
-        .with_secret_injection_store(services.secret_injection_store())
+        .with_secret_injection_store(Arc::new(RuntimeSecretInjectionStore::new()))
         .with_network_policy_store(Arc::new(NetworkObligationPolicyStore::new())),
     );
     let services = services.with_host_http_egress_service(runtime_http);
@@ -3545,13 +3540,8 @@ async fn host_runtime_services_wasm_http_uses_production_staged_network_and_secr
             "https://example.test/api".to_string(),
         ),
     ])));
-    let runtime_http = Arc::new(
-        HostHttpEgressService::new(network.clone(), InMemorySecretStore::new())
-            .with_network_policy_store(services.network_policy_store())
-            .with_secret_injection_store(services.secret_injection_store()),
-    );
     let services = services
-        .with_runtime_http_egress(runtime_http)
+        .with_host_http_egress(network.clone(), InMemorySecretStore::new())
         .try_with_wasm_runtime(WitToolRuntimeConfig::for_testing(), WitToolHost::deny_all())
         .unwrap();
     let capability_id = CapabilityId::new("wasm-http.success").unwrap();
@@ -3589,21 +3579,6 @@ async fn host_runtime_services_wasm_http_uses_production_staged_network_and_secr
             "authorization".to_string(),
             "Bearer sk-vertical-secret".to_string(),
         ))
-    );
-    assert!(
-        services
-            .network_policy_store()
-            .take(&scope, &capability_id)
-            .is_none(),
-        "completed invoke must discard staged network policy after shared egress uses it"
-    );
-    assert!(
-        services
-            .secret_injection_store()
-            .take(&scope, &capability_id, &secret_handle)
-            .unwrap()
-            .is_none(),
-        "completed invoke must consume staged secret material once"
     );
 }
 
@@ -3646,15 +3621,8 @@ async fn host_runtime_services_wasm_http_missing_staged_secret_stays_before_tran
             "https://example.test/api".to_string(),
         ),
     ])));
-    let runtime_http = Arc::new(
-        HostHttpEgressService::new_with_request_policy_for_tests(
-            network.clone(),
-            InMemorySecretStore::new(),
-        )
-        .with_secret_injection_store(services.secret_injection_store()),
-    );
     let services = services
-        .with_runtime_http_egress(runtime_http)
+        .with_host_http_egress(network.clone(), InMemorySecretStore::new())
         .try_with_wasm_runtime(WitToolRuntimeConfig::for_testing(), WitToolHost::deny_all())
         .unwrap();
     let capability_id = CapabilityId::new("wasm-http.success").unwrap();
