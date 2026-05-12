@@ -8,8 +8,8 @@
 //! Every installed skill in a run has two dimensions that gate what the model sees:
 //!
 //! - **Trust level** ([`SkillTrustLevel`]): determines how much content the model receives.
-//!   `Trusted` skills include their full prompt content; `Installed` skills expose only
-//!   a safe description.
+//!   `Trusted` skills include their full prompt content; `Installed` skills expose
+//!   description and prompt content only inside an explicit untrusted envelope.
 //!
 //! - **Visibility** ([`SkillVisibility`]): determines whether the model sees the skill at all.
 //!   `Visible` skills appear in the context; `Hidden` and `Denied` skills are omitted entirely
@@ -103,7 +103,7 @@ pub enum SkillVisibility {
 /// Mirrors the upstream `SkillTrust` enum without creating a production dependency
 /// on `ironclaw_skills`.
 ///
-/// - `Installed`: read-only context; the model sees only the safe description.
+/// - `Installed`: read-only context; the model sees description and prompt content only in an untrusted envelope.
 /// - `Trusted`: full context; the model sees description and prompt content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -132,6 +132,10 @@ const DEFAULT_MAX_SKILL_SNIPPET_BYTES: usize = 8 * 1024;
 const DEFAULT_MAX_SKILL_CONTEXT_BYTES: usize = 32 * 1024;
 const FNV_OFFSET: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x00000100000001B3;
+
+/// Prefix for installed-skill content that is model-visible but not trusted
+/// host-control-plane instruction.
+pub const UNTRUSTED_SKILL_CONTENT_PREFIX: &str = "Untrusted skill content:";
 
 /// Byte budgets for model-visible skill context produced by [`SkillContextService`].
 ///
@@ -177,8 +181,7 @@ pub struct InstalledSkillSnapshot {
     pub trust: SkillTrustLevel,
     /// Visibility — determines whether the model sees this skill at all.
     pub visibility: SkillVisibility,
-    /// Full prompt content. Only included in model context when
-    /// `trust == Trusted` and `visibility == Visible`.
+    /// Full trusted prompt content, or installed prompt content wrapped in an untrusted envelope.
     pub prompt_content: Option<String>,
     /// Sanitized description safe for model consumption.
     pub safe_description: String,
@@ -344,7 +347,9 @@ impl SkillContextSource for SkillContextService {
                         entry.safe_description.clone()
                     }
                 }
-                SkillTrustLevel::Installed => entry.safe_description.clone(),
+                SkillTrustLevel::Installed => {
+                    installed_skill_safe_summary(entry, self.budget.max_snippet_bytes)?
+                }
             };
 
             if safe_summary.len() > self.budget.max_snippet_bytes {
@@ -520,6 +525,43 @@ const fn visibility_rank(visibility: SkillVisibility) -> u8 {
         SkillVisibility::Hidden => 1,
         SkillVisibility::Denied => 2,
     }
+}
+
+pub fn envelope_untrusted_skill_content(raw: &str) -> Option<String> {
+    let cleaned: String = raw
+        .chars()
+        .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\r' | '\t'))
+        .collect();
+    let cleaned = cleaned.trim();
+    if cleaned.is_empty() {
+        return None;
+    }
+    Some(format!("{UNTRUSTED_SKILL_CONTENT_PREFIX}\n{cleaned}"))
+}
+
+fn validate_untrusted_skill_content(text: &str) -> Result<(), SkillContextError> {
+    let Some(payload) = text.strip_prefix(UNTRUSTED_SKILL_CONTENT_PREFIX) else {
+        return Err(SkillContextError::UnsafeModelVisibleContent);
+    };
+    if payload.trim().is_empty() {
+        return Err(SkillContextError::UnsafeModelVisibleContent);
+    }
+    validate_model_visible_text(text)
+}
+
+fn installed_skill_safe_summary(
+    entry: &InstalledSkillSnapshot,
+    max_snippet_bytes: usize,
+) -> Result<String, SkillContextError> {
+    validate_untrusted_skill_content(&entry.safe_description)?;
+    if let Some(ref content) = entry.prompt_content {
+        validate_untrusted_skill_content(content)?;
+        let combined = format!("{}\n\n{}", entry.safe_description, content);
+        if combined.len() <= max_snippet_bytes {
+            return Ok(combined);
+        }
+    }
+    Ok(entry.safe_description.clone())
 }
 
 fn validate_model_visible_skill_name(name: &str) -> Result<(), SkillContextError> {

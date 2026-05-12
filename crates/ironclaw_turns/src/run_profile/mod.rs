@@ -70,7 +70,8 @@ pub use resolver::{
 pub use skill_context::{
     InstalledSkillSnapshot, NoopSkillContextSource, SkillContextBudget, SkillContextError,
     SkillContextService, SkillContextSnippet, SkillContextSource, SkillRunSnapshot,
-    SkillTrustLevel, SkillVisibility, is_skill_snippet_model_message_ref,
+    SkillTrustLevel, SkillVisibility, UNTRUSTED_SKILL_CONTENT_PREFIX,
+    envelope_untrusted_skill_content, is_skill_snippet_model_message_ref,
     skill_snippet_model_message_ref,
 };
 pub use snapshot::ResolvedRunProfile;
