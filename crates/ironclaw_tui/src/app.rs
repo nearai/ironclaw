@@ -72,6 +72,13 @@ pub struct TuiAppConfig {
     pub memory_count: usize,
     /// Identity files loaded at startup (e.g. "AGENTS.md", "SOUL.md").
     pub identity_files: Vec<String>,
+    /// Optional TUI entry prompt shown before the TUI takes over the
+    /// terminal. When set, `run_tui()` prints it and blocks on a single
+    /// keypress before entering raw mode / the alternate screen. Acts as
+    /// a gate so the user can choose between an alternate chat surface
+    /// (e.g. the web gateway URL printed above) and pressing any key to
+    /// drop into the TUI.
+    pub tui_entry_prompt: Option<String>,
     /// Best-effort model list for the `/model` picker.
     pub available_models: Vec<String>,
 }
@@ -121,6 +128,15 @@ async fn run_tui(
     input_event_tx: mpsc::Sender<TuiEvent>,
     msg_tx: mpsc::Sender<TuiUserMessage>,
 ) -> io::Result<()> {
+    // TUI entry gate: when the host supplied a prompt, print it and wait
+    // for any keypress before claiming the terminal. Lets the user click
+    // a surfaced URL (e.g. the web gateway) and chat in a browser instead.
+    // Runs *before* enable_raw_mode so the prompt stays in scrollback
+    // and the user's keypress doesn't get swallowed by raw-mode echo.
+    if let Some(ref prompt) = config.tui_entry_prompt {
+        wait_for_any_key_with_prompt(prompt)?;
+    }
+
     // Terminal setup
     enable_raw_mode()?;
     let mut restore_guard = TerminalRestoreGuard::new();
@@ -1652,6 +1668,71 @@ fn terminal_area() -> Rect {
     ratatui::crossterm::terminal::size()
         .map(|(width, height)| Rect::new(0, 0, width, height))
         .unwrap_or_else(|_| Rect::new(0, 0, 80, 24))
+}
+
+/// RAII guard for crossterm raw mode.
+///
+/// Pairs `enable_raw_mode` / `disable_raw_mode` so the terminal is always
+/// restored — including on panic, early return, or `?` propagation. The
+/// closure-then-restore pattern would leak raw mode on panic.
+#[cfg(not(test))]
+struct RawModeGuard;
+
+#[cfg(not(test))]
+impl RawModeGuard {
+    fn enable() -> io::Result<Self> {
+        enable_raw_mode()?;
+        Ok(Self)
+    }
+}
+
+#[cfg(not(test))]
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        // Best effort: Drop cannot propagate errors. If this fails, the
+        // user's terminal will look weird; `stty sane` recovers.
+        let _ = disable_raw_mode();
+    }
+}
+
+/// Print `prompt` and block until the user presses any key.
+///
+/// Briefly enables raw mode (via `RawModeGuard`) so we can detect a
+/// single keypress without requiring Enter. Raw mode is restored on
+/// every exit path, including panics.
+///
+/// Skips the wait when stdin isn't a terminal — piped or
+/// headless-CI invocations would otherwise block forever. The prompt
+/// still prints so logs capture any surfaced URL.
+#[cfg(not(test))]
+fn wait_for_any_key_with_prompt(prompt: &str) -> io::Result<()> {
+    use ratatui::crossterm::event::{Event, KeyEventKind, poll, read};
+    use std::io::IsTerminal;
+
+    println!("{prompt}");
+    io::Write::flush(&mut io::stdout())?;
+
+    if !io::stdin().is_terminal() {
+        return Ok(());
+    }
+
+    let _guard = RawModeGuard::enable()?;
+    loop {
+        if poll(std::time::Duration::from_secs(3600))?
+            && let Ok(Event::Key(key)) = read()
+            && key.kind == KeyEventKind::Press
+        {
+            return Ok(());
+        }
+    }
+}
+
+#[cfg(test)]
+fn wait_for_any_key_with_prompt(_prompt: &str) -> io::Result<()> {
+    // Tests must never block on a real terminal — this stub returns
+    // immediately. The behaviour under `cargo run` lives in the
+    // production `#[cfg(not(test))]` variant above.
+    Ok(())
 }
 
 #[cfg(test)]

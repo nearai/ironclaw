@@ -42,8 +42,9 @@ use crate::setup::prompts::{
 
 // unused const, keep commented for clarity / future use
 // const CHANNEL_INDEX_CLI: usize = 0;
-const CHANNEL_INDEX_HTTP: usize = 1;
-const CHANNEL_INDEX_SIGNAL: usize = 2;
+const CHANNEL_INDEX_GATEWAY: usize = 1;
+const CHANNEL_INDEX_HTTP: usize = 2;
+const CHANNEL_INDEX_SIGNAL: usize = 3;
 const QUICK_PROFILE_LOCAL: &str = "local";
 const QUICK_PROFILE_LOCAL_SANDBOX: &str = "local-sandbox";
 
@@ -1206,6 +1207,14 @@ impl SetupWizard {
         crate::config::set_runtime_env("IRONCLAW_PROFILE", profile);
         crate::config::profile::apply_profile(&mut self.settings)
             .map_err(|e| SetupError::Config(e.to_string()))?;
+
+        // Quick-mode override: the `local` profile sets
+        // `gateway_enabled = false`, which makes the web UI undiscoverable
+        // for first-run users. Re-enable it here so quick onboarding
+        // produces a working browser-or-TUI experience by default. Users
+        // who want a headless terminal-only install can disable the gateway
+        // via the full wizard's Step 6 or `GATEWAY_ENABLED=false`.
+        self.settings.channels.gateway_enabled = true;
 
         self.selected_deployment_profile = Some(profile.to_string());
         Ok(())
@@ -2623,9 +2632,14 @@ impl SetupWizard {
         // Build channel list from registry (if available) + bundled + discovered
         let wasm_channel_names = build_channel_options(&discovered_channels);
 
-        // Build options list dynamically
+        // Build options list dynamically.
+        // Index order is fixed and tracked by CHANNEL_INDEX_* constants.
         let mut options: Vec<(String, bool)> = vec![
             ("CLI/TUI (always enabled)".to_string(), true),
+            (
+                "Web Gateway (browser UI)".to_string(),
+                self.settings.channels.gateway_enabled,
+            ),
             (
                 "HTTP webhook".to_string(),
                 self.settings.channels.http_enabled,
@@ -2718,6 +2732,19 @@ impl SetupWizard {
         } else {
             None
         };
+
+        // Web Gateway (browser UI).
+        // Port, host, and auth token use config defaults (3000, 127.0.0.1,
+        // auto-generated at startup) — only the enable flag is wizard-driven.
+        if selected.contains(&CHANNEL_INDEX_GATEWAY) {
+            self.settings.channels.gateway_enabled = true;
+            let port = self.settings.channels.gateway_port.unwrap_or(3000);
+            print_info(&format!(
+                "Web Gateway enabled on port {port} (auth token auto-generated at startup)"
+            ));
+        } else {
+            self.settings.channels.gateway_enabled = false;
+        }
 
         // HTTP channel
         if selected.contains(&CHANNEL_INDEX_HTTP) {
@@ -3986,6 +4013,19 @@ mod tests {
     }
 
     #[test]
+    fn test_channel_index_positions_match_option_order() {
+        // The channel multi-select uses fixed indices for the non-WASM options.
+        // If the option order in step_channels() changes, these indices must
+        // change too. This test pins the contract so a silent index drift
+        // (e.g. inserting a new option without updating constants) fails CI
+        // instead of silently turning the wrong setting on/off.
+        let labels = ["CLI/TUI", "Web Gateway", "HTTP webhook", "Signal"];
+        assert_eq!(labels[CHANNEL_INDEX_GATEWAY], "Web Gateway");
+        assert_eq!(labels[CHANNEL_INDEX_HTTP], "HTTP webhook");
+        assert_eq!(labels[CHANNEL_INDEX_SIGNAL], "Signal");
+    }
+
+    #[test]
     fn test_wizard_with_config() {
         let config = SetupConfig {
             skip_auth: true,
@@ -4084,6 +4124,16 @@ mod tests {
         wizard
             .apply_quick_local_profile(QUICK_PROFILE_LOCAL)
             .expect("apply_quick_local_profile should succeed");
+
+        // Quick-mode override: even though the `local` profile sets
+        // `gateway_enabled = false`, quick onboarding must re-enable the
+        // web UI so it's discoverable on first run (issue #3500).
+        // Regression guard — removing the override line in
+        // `apply_quick_local_profile` would silently revert the fix.
+        assert!(
+            wizard.settings.channels.gateway_enabled,
+            "quick-mode override must leave gateway_enabled=true after applying the local profile"
+        );
 
         // Profile applies its own database_backend (libsql) which overwrites
         // the wizard-chosen value.

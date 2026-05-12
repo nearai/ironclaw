@@ -209,6 +209,7 @@ pub struct TuiChannel {
     workspace_path: String,
     memory_count: usize,
     identity_files: Vec<String>,
+    tui_entry_prompt: Option<String>,
     available_models: Vec<String>,
 }
 
@@ -234,6 +235,7 @@ impl TuiChannel {
             workspace_path: String::new(),
             memory_count: 0,
             identity_files: Vec::new(),
+            tui_entry_prompt: None,
             available_models: Vec::new(),
         }
     }
@@ -286,6 +288,21 @@ impl TuiChannel {
         self
     }
 
+    /// Set a TUI entry prompt to print and pause on before the TUI takes
+    /// over the terminal.
+    ///
+    /// When set, [`Channel::start`] prints `prompt` to stdout (before any
+    /// alternate-screen / raw-mode switch), then blocks until the user
+    /// presses any key. Acts as a gate so the user can choose a parallel
+    /// chat surface (e.g. open the web gateway URL in a browser) rather
+    /// than dropping straight into the TUI.
+    ///
+    /// `None` (default) skips the gate and starts the TUI immediately.
+    pub fn with_tui_entry_prompt(mut self, prompt: Option<String>) -> Self {
+        self.tui_entry_prompt = prompt;
+        self
+    }
+
     /// Set the available models for the `/model` picker.
     pub fn with_available_models(mut self, models: Vec<String>) -> Self {
         self.available_models = models;
@@ -317,6 +334,7 @@ impl Channel for TuiChannel {
             workspace_path: self.workspace_path.clone(),
             memory_count: self.memory_count,
             identity_files: self.identity_files.clone(),
+            tui_entry_prompt: self.tui_entry_prompt.clone(),
             available_models: self.available_models.clone(),
         };
 
