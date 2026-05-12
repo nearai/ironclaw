@@ -23,7 +23,73 @@ fn help_mentions_reborn_commands() {
     );
     assert!(stdout.contains("completion"), "stdout: {stdout}");
     assert!(stdout.contains("doctor"), "stdout: {stdout}");
+    assert!(stdout.contains("hooks"), "stdout: {stdout}");
     assert!(stdout.contains("run"), "stdout: {stdout}");
+}
+
+#[test]
+fn hooks_list_reports_unwired_empty_surface_without_reborn_home() {
+    let output = Command::new(reborn_bin())
+        .arg("hooks")
+        .arg("list")
+        .env_clear()
+        .output()
+        .expect("ironclaw-reborn hooks list should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("IronClaw Reborn hooks"), "stdout: {stdout}");
+    assert!(stdout.contains("configured: 0"), "stdout: {stdout}");
+    assert!(stdout.contains("status: not-wired"), "stdout: {stdout}");
+    assert!(stdout.contains("v1_state: not-used"), "stdout: {stdout}");
+}
+
+#[test]
+fn hooks_list_json_reports_empty_surface_without_reborn_home() {
+    let output = Command::new(reborn_bin())
+        .arg("hooks")
+        .arg("list")
+        .arg("--json")
+        .env_clear()
+        .output()
+        .expect("ironclaw-reborn hooks list --json should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.trim(),
+        r#"{"hooks":[],"status":"not-wired","v1_state":"not-used"}"#
+    );
+}
+
+#[test]
+fn hooks_list_verbose_explains_missing_reborn_registry() {
+    let output = Command::new(reborn_bin())
+        .arg("hooks")
+        .arg("list")
+        .arg("--verbose")
+        .env_clear()
+        .output()
+        .expect("ironclaw-reborn hooks list --verbose should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Reborn hook registry is not wired yet"),
+        "stdout: {stdout}"
+    );
 }
 
 #[test]
