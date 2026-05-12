@@ -75,4 +75,4 @@ pub use skill_context::{
     skill_snippet_model_message_ref,
 };
 pub use snapshot::ResolvedRunProfile;
-pub use snippet_ref::{stable_skill_snippet_display_hash, stable_snippet_display_hash};
+pub use snippet_ref::memory_snippet_display_ref;

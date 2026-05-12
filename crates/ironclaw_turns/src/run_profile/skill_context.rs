@@ -38,9 +38,9 @@ use thiserror::Error;
 
 use crate::LoopMessageRef;
 
+use super::snippet_ref::stable_skill_snippet_display_hash;
 use super::{
     AgentLoopHostError, AgentLoopHostErrorKind, LoopContextSnippet, LoopContextSnippetMetadata,
-    stable_skill_snippet_display_hash,
 };
 
 // ---------------------------------------------------------------------------

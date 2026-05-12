@@ -16,7 +16,7 @@ use ironclaw_memory::{
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, ContextProfileId, LoopContextSnippet,
     LoopSafeSummary, MemoryPromptContextRequest, MemoryPromptContextService,
-    stable_snippet_display_hash,
+    memory_snippet_display_ref,
 };
 
 /// Maximum byte length for a snippet safe summary, matching `LoopSafeSummary`
@@ -252,14 +252,13 @@ fn map_search_result_to_snippet(result: MemorySearchResult) -> Option<LoopContex
 }
 
 fn snippet_ref_for_path(path: &MemoryDocumentPath) -> String {
-    let hash = stable_snippet_display_hash([
+    memory_snippet_display_ref([
         path.tenant_id(),
         path.user_id(),
         path.agent_id().unwrap_or(""),
         path.project_id().unwrap_or(""),
         path.relative_path(),
-    ]);
-    format!("memory-snippet:{hash:016x}")
+    ])
 }
 
 /// Sanitize a raw snippet string into a model-safe summary.
