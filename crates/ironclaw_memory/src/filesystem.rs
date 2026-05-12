@@ -10,6 +10,10 @@ use ironclaw_host_api::VirtualPath;
 
 use crate::backend::{MemoryBackend, MemoryContext};
 use crate::chunking::{content_bytes_sha256, content_sha256};
+use crate::events::{
+    MemorySignificantEvent, MemorySignificantEventSink, MemorySignificantEventSource,
+    record_memory_significant_event,
+};
 use crate::indexer::MemoryDocumentIndexer;
 use crate::metadata::{MemoryWriteOptions, resolve_document_metadata};
 use crate::path::{
@@ -257,6 +261,7 @@ impl RootFilesystem for MemoryBackendFilesystemAdapter {
                     content,
                     previous_content_hash: previous_hash.as_deref(),
                     allowance: context.prompt_write_safety_allowance(),
+                    audit_context: context.audit_context(),
                     filesystem_operation: FilesystemOperation::WriteFile,
                 },
             )
@@ -337,6 +342,7 @@ impl RootFilesystem for MemoryBackendFilesystemAdapter {
                         content,
                         previous_content_hash: previous_prompt_hash.as_deref(),
                         allowance: context.prompt_write_safety_allowance(),
+                        audit_context: context.audit_context(),
                         filesystem_operation: FilesystemOperation::AppendFile,
                     },
                 )
@@ -433,6 +439,7 @@ pub struct MemoryDocumentFilesystem {
     indexer: Option<Arc<dyn MemoryDocumentIndexer>>,
     prompt_safety_policy: Option<Arc<dyn PromptWriteSafetyPolicy>>,
     prompt_safety_event_sink: Option<Arc<dyn PromptWriteSafetyEventSink>>,
+    memory_event_sink: Option<Arc<dyn MemorySignificantEventSink>>,
     prompt_protected_path_registry: PromptProtectedPathRegistry,
     one_shot_prompt_safety_allowance: Mutex<Option<PromptSafetyAllowanceId>>,
 }
@@ -455,6 +462,7 @@ impl MemoryDocumentFilesystem {
                 registry.clone(),
             ))),
             prompt_safety_event_sink: None,
+            memory_event_sink: None,
             prompt_protected_path_registry: registry,
             one_shot_prompt_safety_allowance: Mutex::new(None),
         }
@@ -488,6 +496,15 @@ impl MemoryDocumentFilesystem {
     {
         let event_sink: Arc<dyn PromptWriteSafetyEventSink> = event_sink;
         self.prompt_safety_event_sink = Some(event_sink);
+        self
+    }
+
+    pub fn with_memory_event_sink<S>(mut self, event_sink: Arc<S>) -> Self
+    where
+        S: MemorySignificantEventSink + 'static,
+    {
+        let event_sink: Arc<dyn MemorySignificantEventSink> = event_sink;
+        self.memory_event_sink = Some(event_sink);
         self
     }
 
@@ -600,6 +617,7 @@ impl RootFilesystem for MemoryDocumentFilesystem {
                     content,
                     previous_content_hash: previous_hash.as_deref(),
                     allowance: prompt_safety_allowance.as_ref(),
+                    audit_context: None,
                     filesystem_operation: FilesystemOperation::WriteFile,
                 },
             )
@@ -625,6 +643,15 @@ impl RootFilesystem for MemoryDocumentFilesystem {
         self.repository
             .write_document_with_options(&document_path, bytes, &options)
             .await?;
+        record_memory_significant_event(
+            self.memory_event_sink.as_ref(),
+            MemorySignificantEvent::document_written(
+                &document_path,
+                MemorySignificantEventSource::MemoryDocumentFilesystem,
+                bytes.len() as u64,
+            ),
+        )
+        .await;
         if let Some(indexer) = &self.indexer {
             let _ = indexer.reindex_document(&document_path).await;
         }
@@ -692,6 +719,7 @@ impl RootFilesystem for MemoryDocumentFilesystem {
                         content,
                         previous_content_hash: previous_prompt_hash.as_deref(),
                         allowance: prompt_safety_allowance.as_ref(),
+                        audit_context: None,
                         filesystem_operation: FilesystemOperation::AppendFile,
                     },
                 )
@@ -721,6 +749,15 @@ impl RootFilesystem for MemoryDocumentFilesystem {
                 .await?
             {
                 MemoryAppendOutcome::Appended => {
+                    record_memory_significant_event(
+                        self.memory_event_sink.as_ref(),
+                        MemorySignificantEvent::document_written(
+                            &document_path,
+                            MemorySignificantEventSource::MemoryDocumentFilesystem,
+                            bytes.len() as u64,
+                        ),
+                    )
+                    .await;
                     if let Some(indexer) = &self.indexer {
                         let _ = indexer.reindex_document(&document_path).await;
                     }

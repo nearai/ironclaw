@@ -5,7 +5,7 @@ use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
 use ironclaw_host_api::VirtualPath;
 
 use crate::chunking::{MemoryChunkWrite, content_bytes_sha256, content_sha256};
-use crate::indexer::MemoryDocumentIndexRepository;
+use crate::indexer::{MemoryChunkReplaceOutcome, MemoryDocumentIndexRepository};
 use crate::metadata::MemoryWriteOptions;
 use crate::path::{MemoryDocumentPath, MemoryDocumentScope, memory_error, valid_memory_path};
 use crate::search::{
@@ -664,7 +664,7 @@ impl MemoryDocumentIndexRepository for PostgresMemoryDocumentRepository {
         path: &MemoryDocumentPath,
         expected_content_hash: &str,
         chunks: &[MemoryChunkWrite],
-    ) -> Result<(), FilesystemError> {
+    ) -> Result<MemoryChunkReplaceOutcome, FilesystemError> {
         let virtual_path = path.virtual_path().unwrap_or_else(|_| valid_memory_path());
         let mut client = self
             .client(virtual_path.clone(), FilesystemOperation::WriteFile)
@@ -688,12 +688,12 @@ impl MemoryDocumentIndexRepository for PostgresMemoryDocumentRepository {
             .await
             .map_err(|error| memory_error(virtual_path.clone(), FilesystemOperation::WriteFile, error.to_string()))?
         else {
-            return Ok(());
+            return Ok(MemoryChunkReplaceOutcome::SkippedMissingDocument);
         };
         let document_id: uuid::Uuid = row.get("id");
         let content: String = row.get("content");
         if content_sha256(&content) != expected_content_hash {
-            return Ok(());
+            return Ok(MemoryChunkReplaceOutcome::SkippedStaleContentHash);
         }
         tx.execute(
             "DELETE FROM memory_chunks WHERE document_id = $1",
@@ -743,7 +743,7 @@ impl MemoryDocumentIndexRepository for PostgresMemoryDocumentRepository {
                 error.to_string(),
             )
         })?;
-        Ok(())
+        Ok(MemoryChunkReplaceOutcome::Replaced)
     }
 }
 

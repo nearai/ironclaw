@@ -19,23 +19,34 @@ libsql-secrets = ["dep:ironclaw_secrets", "ironclaw_secrets/libsql", "dep:libsql
 async-trait = "0.1"
 chrono = "0.4"
 futures-util = { version = "0.3", default-features = false }
-ironclaw_llm = { path = "../ironclaw_llm", version = "0.1.0", optional = true, default-features = false }
 ironclaw_events = { path = "../ironclaw_events", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+ironclaw_host_runtime = { path = "../ironclaw_host_runtime", version = "0.1.0" }
+ironclaw_llm = { path = "../ironclaw_llm", version = "0.1.0", optional = true, default-features = false }
 ironclaw_loop_support = { path = "../ironclaw_loop_support", version = "0.1.0" }
 ironclaw_secrets = { path = "../ironclaw_secrets", version = "0.1.0", optional = true }
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 secrecy = { version = "0.10", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 
 [dev-dependencies]
 chrono = "0.4"
+ironclaw_authorization = { path = "../ironclaw_authorization", version = "0.1.0" }
 ironclaw_event_projections = { path = "../ironclaw_event_projections", version = "0.1.0" }
+ironclaw_extensions = { path = "../ironclaw_extensions", version = "0.1.0" }
+ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
+ironclaw_processes = { path = "../ironclaw_processes", version = "0.1.0" }
 ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store", version = "0.1.0" }
+ironclaw_resources = { path = "../ironclaw_resources", version = "0.1.0" }
+ironclaw_scripts = { path = "../ironclaw_scripts", version = "0.1.0" }
+ironclaw_skills = { path = "../ironclaw_skills", version = "0.3.0", default-features = false }
+ironclaw_trust = { path = "../ironclaw_trust", version = "0.1.0" }
 rust_decimal = "1"
 serde_json = "1"
 tempfile = "3"

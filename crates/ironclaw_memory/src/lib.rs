@@ -7,6 +7,7 @@
 mod backend;
 mod chunking;
 mod embedding;
+mod events;
 mod filesystem;
 mod indexer;
 mod metadata;
@@ -21,9 +22,14 @@ pub use backend::{
 };
 pub use chunking::{ChunkConfig, MemoryChunkWrite, chunk_document, content_sha256};
 pub use embedding::{EmbeddingError, EmbeddingProvider};
+pub use events::{
+    MemoryAuditContext, MemoryEventSinkError, MemorySignificantEvent, MemorySignificantEventKind,
+    MemorySignificantEventSink, MemorySignificantEventSource, MemorySignificantEventStatus,
+};
 pub use filesystem::{MemoryBackendFilesystemAdapter, MemoryDocumentFilesystem};
 pub use indexer::{
-    ChunkingMemoryDocumentIndexer, MemoryDocumentIndexRepository, MemoryDocumentIndexer,
+    ChunkingMemoryDocumentIndexer, MemoryChunkReplaceOutcome, MemoryDocumentIndexRepository,
+    MemoryDocumentIndexer,
 };
 pub use metadata::{CONFIG_FILE_NAME, DocumentMetadata, HygieneMetadata, MemoryWriteOptions};
 pub use path::{MemoryDocumentPath, MemoryDocumentScope};

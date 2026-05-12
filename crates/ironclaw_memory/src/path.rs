@@ -354,10 +354,42 @@ pub(crate) fn memory_error(
     operation: FilesystemOperation,
     reason: impl Into<String>,
 ) -> FilesystemError {
+    let reason = sanitize_memory_backend_reason(reason.into());
     FilesystemError::Backend {
         path,
         operation,
-        reason: reason.into(),
+        reason,
+    }
+}
+
+const MEMORY_BACKEND_DETAIL_MARKERS: &[&str] = &[
+    "no such table",
+    "drop table",
+    "sql",
+    "sqlite",
+    "libsql",
+    "postgres error",
+    "database error",
+    "connection refused",
+    "timeout",
+    "host=",
+    "port=",
+    "reborn_memory_",
+    "/tmp/",
+    "/var/folders/",
+    "/private/",
+    "\\appdata\\",
+];
+
+fn sanitize_memory_backend_reason(reason: String) -> String {
+    let lower = reason.to_ascii_lowercase();
+    if MEMORY_BACKEND_DETAIL_MARKERS
+        .iter()
+        .any(|marker| lower.as_str().contains(marker))
+    {
+        "memory backend operation failed".to_string()
+    } else {
+        reason
     }
 }
 

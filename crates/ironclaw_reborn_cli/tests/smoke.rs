@@ -21,8 +21,36 @@ fn help_mentions_reborn_commands() {
         stdout.contains("Standalone IronClaw Reborn runtime"),
         "stdout: {stdout}"
     );
+    assert!(stdout.contains("completion"), "stdout: {stdout}");
     assert!(stdout.contains("doctor"), "stdout: {stdout}");
     assert!(stdout.contains("run"), "stdout: {stdout}");
+}
+
+#[test]
+fn completion_generates_zsh_script_without_reborn_home() {
+    let output = Command::new(reborn_bin())
+        .arg("completion")
+        .arg("--shell")
+        .arg("zsh")
+        .env_clear()
+        .output()
+        .expect("ironclaw-reborn completion should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("#compdef ironclaw-reborn"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("_ironclaw-reborn"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("$+functions[compdef]"),
+        "zsh completion should guard compdef: {stdout}"
+    );
 }
 
 #[test]

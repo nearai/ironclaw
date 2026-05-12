@@ -609,6 +609,7 @@ impl HostFixture {
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
+            resolved_model_route: None,
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
@@ -661,7 +662,10 @@ impl HostFixture {
             self.checkpoint_state_store.clone(),
             self.loop_checkpoint_store.clone(),
             Arc::clone(&self.milestone_sink),
-            TextOnlyLoopHostConfig { max_messages: 8 },
+            TextOnlyLoopHostConfig {
+                max_messages: 8,
+                ..TextOnlyLoopHostConfig::default()
+            },
         )
         .build_text_only_host(RebornLoopDriverHostRequest {
             claimed_run: self.claimed.clone(),

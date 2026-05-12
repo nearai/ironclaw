@@ -200,7 +200,48 @@ pub struct LlmConfig {
     pub response_cache_max_entries: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LlmBackendKind {
+    NearAi,
+    Bedrock,
+    GeminiOauth,
+    OpenAiCodex,
+    Registry(String),
+}
+
+impl LlmBackendKind {
+    pub fn from_backend_id(backend: &str) -> Self {
+        match backend {
+            "nearai" | "near_ai" | "near" => Self::NearAi,
+            "bedrock" | "aws_bedrock" | "aws" => Self::Bedrock,
+            "gemini_oauth" | "gemini-oauth" => Self::GeminiOauth,
+            "openai_codex" | "openai-codex" | "codex" => Self::OpenAiCodex,
+            other => Self::Registry(other.to_string()),
+        }
+    }
+
+    pub fn provider_id(&self, registry_provider: Option<&RegistryProviderConfig>) -> String {
+        match self {
+            Self::NearAi => "nearai".to_string(),
+            Self::Bedrock => "bedrock".to_string(),
+            Self::GeminiOauth => "gemini_oauth".to_string(),
+            Self::OpenAiCodex => "openai_codex".to_string(),
+            Self::Registry(backend) => registry_provider
+                .map(|provider| provider.provider_id.clone())
+                .unwrap_or_else(|| backend.clone()),
+        }
+    }
+}
+
 impl LlmConfig {
+    pub fn backend_kind(&self) -> LlmBackendKind {
+        LlmBackendKind::from_backend_id(&self.backend)
+    }
+
+    pub fn active_provider_id(&self) -> String {
+        self.backend_kind().provider_id(self.provider.as_ref())
+    }
+
     /// Resolve the effective cheap model name.
     ///
     /// Resolution order:

@@ -855,6 +855,19 @@ async fn replay_jsonl_with_zero_limit_is_rejected() {
 }
 
 #[tokio::test]
+async fn replay_jsonl_rejects_malformed_line_rather_than_silently_skipping() {
+    let scope = local_scope("alice", Some("default"));
+    let event = RuntimeEvent::dispatch_requested(scope, capability_id());
+    let mut bytes = serde_json::to_vec(&event).expect("serialize event");
+    bytes.push(b'\n');
+    bytes.extend_from_slice(b"something not even json\n");
+
+    let result: Result<ironclaw_events::EventReplay<RuntimeEvent>, _> =
+        replay_jsonl(&bytes, None, 1);
+    assert!(matches!(result, Err(EventError::Serialize { .. })));
+}
+
+#[tokio::test]
 async fn replay_jsonl_with_future_cursor_returns_replay_gap() {
     // Symmetric to the in-memory log: a JSONL-backed durable log must not
     // silently echo a cursor beyond the file head. Without this, a future

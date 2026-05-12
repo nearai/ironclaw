@@ -15,6 +15,8 @@ use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
 use ironclaw_host_api::{HostApiError, VirtualPath};
 use ironclaw_safety::{Sanitizer, Severity};
 
+use crate::chunking::content_sha256;
+use crate::events::{MemoryAuditContext, MemoryEventSinkError};
 use crate::path::{
     MemoryDocumentPath, MemoryDocumentScope, memory_error, valid_memory_path,
     validated_memory_relative_path,
@@ -402,10 +404,13 @@ pub struct PromptWriteSafetyEvent {
     pub source: PromptWriteSource,
     pub policy_version: PromptSafetyPolicyVersion,
     pub protected_path_class: Option<PromptProtectedPathClass>,
+    /// SHA-256 of the memory-relative protected path, when known.
+    pub relative_path_hash: Option<String>,
     pub reason_code: Option<PromptSafetyReasonCode>,
     pub severity: Option<PromptSafetySeverity>,
     pub finding_count: usize,
     pub allowance: Option<PromptSafetyAllowanceId>,
+    pub audit_context: Option<MemoryAuditContext>,
 }
 
 /// Host-composed sink for durable redacted prompt-write safety events.
@@ -414,7 +419,7 @@ pub trait PromptWriteSafetyEventSink: Send + Sync {
     async fn record_prompt_write_safety_event(
         &self,
         event: PromptWriteSafetyEvent,
-    ) -> Result<(), FilesystemError>;
+    ) -> Result<(), MemoryEventSinkError>;
 }
 
 /// Sanitized policy evaluation failure.
@@ -578,6 +583,7 @@ pub(crate) struct PromptWriteSafetyCheck<'a> {
     pub content: &'a str,
     pub previous_content_hash: Option<&'a str>,
     pub allowance: Option<&'a PromptSafetyAllowanceId>,
+    pub audit_context: Option<&'a MemoryAuditContext>,
     pub filesystem_operation: FilesystemOperation,
 }
 
@@ -794,6 +800,7 @@ async fn emit_prompt_write_safety_event(
         source: check.source,
         policy_version: parts.policy_version.clone(),
         protected_path_class: Some(parts.protected_path_class.clone()),
+        relative_path_hash: Some(content_sha256(check.path.relative_path())),
         reason_code: parts.reason.map(|reason| reason.code),
         severity: parts
             .reason
@@ -805,6 +812,7 @@ async fn emit_prompt_write_safety_event(
             .or_else(|| parts.findings.map(|findings| findings.finding_count))
             .unwrap_or(0),
         allowance: parts.allowance.cloned(),
+        audit_context: check.audit_context.cloned(),
     };
     if let Err(error) = event_sink.record_prompt_write_safety_event(event).await {
         tracing::debug!(

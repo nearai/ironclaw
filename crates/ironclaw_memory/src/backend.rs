@@ -4,9 +4,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
+use ironclaw_host_api::{CorrelationId, ResourceScope};
 
 use crate::chunking::{content_bytes_sha256, content_sha256};
 use crate::embedding::{EmbeddingProvider, embed_text};
+use crate::events::{
+    MemoryAuditContext, MemorySignificantEvent, MemorySignificantEventSink,
+    MemorySignificantEventSource, record_memory_significant_event,
+};
 use crate::indexer::MemoryDocumentIndexer;
 use crate::metadata::{MemoryWriteOptions, resolve_document_metadata};
 use crate::path::{
@@ -49,6 +54,7 @@ pub struct MemoryBackendCapabilities {
 pub struct MemoryContext {
     scope: MemoryDocumentScope,
     invocation_id: Option<String>,
+    audit_context: Option<MemoryAuditContext>,
     prompt_write_safety_allowance: Option<PromptSafetyAllowanceId>,
     prompt_write_safety_enforced: bool,
 }
@@ -58,6 +64,7 @@ impl MemoryContext {
         Self {
             scope,
             invocation_id: None,
+            audit_context: None,
             prompt_write_safety_allowance: None,
             prompt_write_safety_enforced: false,
         }
@@ -65,6 +72,16 @@ impl MemoryContext {
 
     pub fn with_invocation_id(mut self, invocation_id: impl Into<String>) -> Self {
         self.invocation_id = Some(invocation_id.into());
+        self
+    }
+
+    pub fn with_audit_context(
+        mut self,
+        resource_scope: ResourceScope,
+        correlation_id: CorrelationId,
+    ) -> Self {
+        self.invocation_id = Some(resource_scope.invocation_id.to_string());
+        self.audit_context = Some(MemoryAuditContext::new(resource_scope, correlation_id));
         self
     }
 
@@ -101,6 +118,10 @@ impl MemoryContext {
 
     pub fn invocation_id(&self) -> Option<&str> {
         self.invocation_id.as_deref()
+    }
+
+    pub fn audit_context(&self) -> Option<&MemoryAuditContext> {
+        self.audit_context.as_ref()
     }
 
     pub fn prompt_write_safety_allowance(&self) -> Option<&PromptSafetyAllowanceId> {
@@ -202,6 +223,7 @@ pub struct RepositoryMemoryBackend<R> {
     capabilities: MemoryBackendCapabilities,
     prompt_safety_policy: Option<Arc<dyn PromptWriteSafetyPolicy>>,
     prompt_safety_event_sink: Option<Arc<dyn PromptWriteSafetyEventSink>>,
+    memory_event_sink: Option<Arc<dyn MemorySignificantEventSink>>,
     prompt_protected_path_registry: PromptProtectedPathRegistry,
 }
 
@@ -226,6 +248,7 @@ where
                 registry.clone(),
             ))),
             prompt_safety_event_sink: None,
+            memory_event_sink: None,
             prompt_protected_path_registry: registry,
         }
     }
@@ -271,6 +294,15 @@ where
     {
         let event_sink: Arc<dyn PromptWriteSafetyEventSink> = event_sink;
         self.prompt_safety_event_sink = Some(event_sink);
+        self
+    }
+
+    pub fn with_memory_event_sink<S>(mut self, event_sink: Arc<S>) -> Self
+    where
+        S: MemorySignificantEventSink + 'static,
+    {
+        let event_sink: Arc<dyn MemorySignificantEventSink> = event_sink;
+        self.memory_event_sink = Some(event_sink);
         self
     }
 
@@ -415,6 +447,7 @@ where
                     content,
                     previous_content_hash: previous_hash.as_deref(),
                     allowance: context.prompt_write_safety_allowance(),
+                    audit_context: context.audit_context(),
                     filesystem_operation: FilesystemOperation::WriteFile,
                 },
             )
@@ -431,8 +464,20 @@ where
         self.repository
             .write_document_with_options(path, bytes, &options)
             .await?;
+        record_memory_significant_event(
+            self.memory_event_sink.as_ref(),
+            MemorySignificantEvent::document_written(
+                path,
+                MemorySignificantEventSource::RepositoryMemoryBackend,
+                bytes.len() as u64,
+            )
+            .with_audit_context(context.audit_context()),
+        )
+        .await;
         if let Some(indexer) = &self.indexer {
-            let _ = indexer.reindex_document(path).await;
+            let _ = indexer
+                .reindex_document_with_audit_context(path, context.audit_context())
+                .await;
         }
         Ok(())
     }
@@ -492,6 +537,7 @@ where
                     content,
                     previous_content_hash: previous_hash.as_deref(),
                     allowance: context.prompt_write_safety_allowance(),
+                    audit_context: context.audit_context(),
                     filesystem_operation: FilesystemOperation::AppendFile,
                 },
             )
@@ -509,10 +555,22 @@ where
             .repository
             .compare_and_append_document_with_options(path, expected_previous_hash, bytes, &options)
             .await?;
-        if outcome == MemoryAppendOutcome::Appended
-            && let Some(indexer) = &self.indexer
-        {
-            let _ = indexer.reindex_document(path).await;
+        if outcome == MemoryAppendOutcome::Appended {
+            record_memory_significant_event(
+                self.memory_event_sink.as_ref(),
+                MemorySignificantEvent::document_written(
+                    path,
+                    MemorySignificantEventSource::RepositoryMemoryBackend,
+                    bytes.len() as u64,
+                )
+                .with_audit_context(context.audit_context()),
+            )
+            .await;
+            if let Some(indexer) = &self.indexer {
+                let _ = indexer
+                    .reindex_document_with_audit_context(path, context.audit_context())
+                    .await;
+            }
         }
         Ok(outcome)
     }
@@ -615,9 +673,22 @@ where
             }
         }
 
-        self.repository
+        let results = self
+            .repository
             .search_documents(context.scope(), &request)
-            .await
+            .await?;
+        record_memory_significant_event(
+            self.memory_event_sink.as_ref(),
+            MemorySignificantEvent::search_performed(
+                context.scope(),
+                MemorySignificantEventSource::RepositoryMemoryBackend,
+                &request,
+                results.len() as u64,
+            )
+            .with_audit_context(context.audit_context()),
+        )
+        .await;
+        Ok(results)
     }
 }
 
@@ -626,6 +697,27 @@ mod tests {
     use super::*;
     use crate::embedding::EmbeddingError;
     use crate::repo::InMemoryMemoryDocumentRepository;
+
+    struct FailingEmbeddingProvider;
+
+    #[async_trait]
+    impl EmbeddingProvider for FailingEmbeddingProvider {
+        fn dimension(&self) -> usize {
+            3
+        }
+
+        fn model_name(&self) -> &str {
+            "failing"
+        }
+
+        async fn embed(&self, _text: &str) -> Result<Vec<f32>, EmbeddingError> {
+            Err(EmbeddingError::ProviderUnavailable {
+                reason:
+                    "provider exploded at /tmp/HOST_PATH_SENTINEL with token RAW_TOKEN_SENTINEL"
+                        .to_string(),
+            })
+        }
+    }
 
     struct UnitEmbeddingProvider;
 
@@ -808,6 +900,32 @@ mod tests {
         let request = MemorySearchRequest::new("query").unwrap();
         let err = backend.search(&alpha_context(), request).await.unwrap_err();
         assert!(err.to_string().contains("embedding generation"));
+    }
+
+    #[tokio::test]
+    async fn embedding_provider_error_is_sanitized_at_backend_boundary() {
+        let repo = Arc::new(InMemoryMemoryDocumentRepository::new());
+        let backend = RepositoryMemoryBackend::new(repo)
+            .without_prompt_write_safety_policy()
+            .with_embedding_provider(Arc::new(FailingEmbeddingProvider))
+            .with_capabilities(MemoryBackendCapabilities {
+                full_text_search: true,
+                vector_search: true,
+                embeddings: true,
+                ..MemoryBackendCapabilities::default()
+            });
+
+        let request = MemorySearchRequest::new("query").unwrap();
+        let err = backend.search(&alpha_context(), request).await.unwrap_err();
+        let displayed = err.to_string();
+
+        assert!(displayed.contains("embedding provider unavailable"));
+        assert!(
+            !displayed.contains("HOST_PATH_SENTINEL")
+                && !displayed.contains("RAW_TOKEN_SENTINEL")
+                && !displayed.contains("/tmp/"),
+            "public memory error leaked backend/provider details: {displayed}"
+        );
     }
 
     #[tokio::test]

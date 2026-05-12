@@ -36,6 +36,13 @@ impl LoopHostMilestone {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptSkillContextMetadata {
+    pub ordinal: usize,
+    pub source_name: String,
+    pub trust_level: String,
+}
+
 /// Public wire shape for host-loop milestones.
 ///
 /// Milestones may be serialized into traces or delivered across process
@@ -43,8 +50,8 @@ impl LoopHostMilestone {
 /// [`LoopHostMilestoneKind::kind_name`] plus a catch-all branch rather than
 /// assuming the historical closed set. `PromptBundleBuilt` was added as an
 /// additive wire-format variant for prompt-bundle construction; it carries only
-/// refs, mode, optional surface version, and counts, never raw prompt/model
-/// content.
+/// refs, mode, optional surface version, counts, and active-skill metadata,
+/// never raw prompt/model content.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LoopHostMilestoneKind {
@@ -53,6 +60,8 @@ pub enum LoopHostMilestoneKind {
         mode: PromptMode,
         surface_version: Option<CapabilitySurfaceVersion>,
         message_count: usize,
+        #[serde(default)]
+        skill_context: Vec<PromptSkillContextMetadata>,
     },
     ModelStarted {
         requested_model_profile_id: Option<ModelProfileId>,
@@ -171,12 +180,14 @@ where
         mode: PromptMode,
         surface_version: Option<CapabilitySurfaceVersion>,
         message_count: usize,
+        skill_context: Vec<PromptSkillContextMetadata>,
     ) -> Result<(), AgentLoopHostError> {
         self.publish(LoopHostMilestoneKind::PromptBundleBuilt {
             bundle_ref,
             mode,
             surface_version,
             message_count,
+            skill_context,
         })
         .await
     }

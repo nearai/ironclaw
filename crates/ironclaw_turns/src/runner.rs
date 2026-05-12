@@ -2,9 +2,10 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BlockedReason, LoopExit, LoopExitMapping, LoopExitValidationPolicy, ResolvedRunProfile,
-    SanitizedFailure, TurnCheckpointId, TurnError, TurnLeaseToken, TurnRunId, TurnRunState,
-    TurnRunnerId, TurnScope, TurnTimestamp, events::EventCursor,
+    BlockedReason, LoopExitMapping, ResolvedRunProfile, SanitizedFailure, TurnCheckpointId,
+    TurnError, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope, TurnTimestamp,
+    events::EventCursor,
+    run_profile::{LoopCheckpointStateRef, LoopModelRouteSnapshot},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,11 +42,20 @@ pub struct RecoverExpiredLeasesResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordModelRouteSnapshotRequest {
+    pub run_id: TurnRunId,
+    pub runner_id: TurnRunnerId,
+    pub lease_token: TurnLeaseToken,
+    pub snapshot: LoopModelRouteSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockRunRequest {
     pub run_id: TurnRunId,
     pub runner_id: TurnRunnerId,
     pub lease_token: TurnLeaseToken,
     pub checkpoint_id: TurnCheckpointId,
+    pub state_ref: LoopCheckpointStateRef,
     pub reason: BlockedReason,
 }
 
@@ -88,20 +98,12 @@ pub struct ApplyValidatedLoopExitRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ApplyLoopExitRequest {
-    pub run_id: TurnRunId,
-    pub runner_id: TurnRunnerId,
-    pub lease_token: TurnLeaseToken,
-    pub exit: LoopExit,
-    pub validation_policy: LoopExitValidationPolicy,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TurnRunnerOutcome {
     Completed,
     Cancelled,
     Blocked {
         checkpoint_id: TurnCheckpointId,
+        state_ref: LoopCheckpointStateRef,
         reason: BlockedReason,
     },
     Failed {
@@ -123,6 +125,15 @@ pub trait TurnRunTransitionPort: Send + Sync {
         request: RecoverExpiredLeasesRequest,
     ) -> Result<RecoverExpiredLeasesResponse, TurnError>;
 
+    async fn record_model_route_snapshot(
+        &self,
+        _request: RecordModelRouteSnapshotRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "model route snapshot persistence is unsupported".to_string(),
+        })
+    }
+
     async fn block_run(&self, request: BlockRunRequest) -> Result<TurnRunState, TurnError>;
 
     async fn complete_run(&self, request: CompleteRunRequest) -> Result<TurnRunState, TurnError>;
@@ -143,21 +154,4 @@ pub trait TurnRunTransitionPort: Send + Sync {
         &self,
         request: ApplyValidatedLoopExitRequest,
     ) -> Result<TurnRunState, TurnError>;
-}
-
-pub async fn apply_loop_exit<P>(
-    port: &P,
-    request: ApplyLoopExitRequest,
-) -> Result<TurnRunState, TurnError>
-where
-    P: TurnRunTransitionPort + ?Sized,
-{
-    let decision = request.exit.validate(request.validation_policy);
-    port.apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
-        run_id: request.run_id,
-        runner_id: request.runner_id,
-        lease_token: request.lease_token,
-        mapping: decision.mapping,
-    })
-    .await
 }
