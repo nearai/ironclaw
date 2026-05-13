@@ -18,16 +18,23 @@ pub(crate) mod model;
 pub(crate) mod recovery;
 pub(crate) mod stop;
 
-pub(crate) use batch::{BatchPolicy, BatchPolicyStrategy, CapabilityCallSummary};
-pub(crate) use budget::BudgetStrategy;
-pub(crate) use capability::{CapabilityFilter, CapabilityStrategy};
-pub(crate) use context::ContextStrategy;
-pub(crate) use drain::InputDrainStrategy;
-pub(crate) use gate::{GateHandlingStrategy, GateKind, GateOutcome, GateSummary};
-pub(crate) use ironclaw_turns::run_profile::ConcurrencyHint;
-pub(crate) use model::{ModelPreference, ModelStrategy};
-pub(crate) use recovery::{
-    CapabilityErrorClass, CapabilityErrorSummary, ModelErrorClass, ModelErrorSummary,
-    RecoveryOutcome, RecoveryStrategy, RetryAlteration,
+pub(crate) use batch::{
+    BatchPolicy, BatchPolicyStrategy, CapabilityCallSummary, DefaultBatchPolicyStrategy,
 };
-pub(crate) use stop::{StopConditionStrategy, StopKind, StopOutcome, TurnEndKind, TurnSummary};
+pub(crate) use budget::{BudgetStrategy, DefaultBudgetStrategy};
+pub(crate) use capability::{CapabilityFilter, CapabilityStrategy, DefaultCapabilityStrategy};
+pub(crate) use context::{ContextStrategy, DefaultContextStrategy};
+pub(crate) use drain::{DefaultInputDrainStrategy, InputDrainStrategy};
+pub(crate) use gate::{
+    DefaultGateHandlingStrategy, GateHandlingStrategy, GateKind, GateOutcome, GateSummary,
+};
+pub(crate) use ironclaw_turns::run_profile::ConcurrencyHint;
+pub(crate) use model::{DefaultModelStrategy, ModelPreference, ModelStrategy};
+pub(crate) use recovery::{
+    CapabilityErrorClass, CapabilityErrorSummary, DefaultRecoveryStrategy, ModelErrorClass,
+    ModelErrorSummary, RecoveryOutcome, RecoveryStrategy, RetryAlteration,
+};
+pub(crate) use stop::{
+    DefaultStopConditionStrategy, StopConditionStrategy, StopKind, StopOutcome, TurnEndKind,
+    TurnSummary,
+};
