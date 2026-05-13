@@ -1184,8 +1184,18 @@ pub struct LoopCheckpointRequest {
 /// The two-step write keeps byte-storage and metadata-write responsibilities
 /// cleanly split. See `docs/reborn/agent-loop-briefs/state-and-checkpoints.md`
 /// §2 for the rationale and WS-10 for the read-side counterpart.
+///
+/// `kind` is required so adapters that bridge to
+/// `CheckpointStateStore::put_checkpoint_state` can persist the correct kind
+/// without having to guess. The subsequent `checkpoint(kind, state_ref)` call
+/// must use the same `kind`; the read-side `get_checkpoint_state` validates
+/// the staged kind against the metadata write's kind.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StageCheckpointPayloadRequest {
+    /// Checkpoint boundary the staged payload belongs to. Must match the
+    /// `kind` passed to the subsequent `LoopCheckpointPort::checkpoint(...)`
+    /// call.
+    pub kind: LoopCheckpointKind,
     /// Schema id of the payload — usually the framework's
     /// `CHECKPOINT_SCHEMA_ID` constant. Stored alongside the bytes so the
     /// read-side can authenticate the boundary on resume.

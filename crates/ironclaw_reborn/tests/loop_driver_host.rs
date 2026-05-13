@@ -83,7 +83,7 @@ use ironclaw_turns::{
         LoopModelGatewayError, LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot,
         LoopProgressEvent, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
         LoopSafeSummary, ModelCallOutcome, ParentLoopOutput, PromptMode, SkillVisibility,
-        VisibleCapabilityRequest,
+        StageCheckpointPayloadRequest, VisibleCapabilityRequest,
     },
     runner::ClaimedTurnRun,
 };
@@ -2396,6 +2396,96 @@ async fn text_only_host_checkpoint_port_maps_store_failures_to_unavailable() {
         .unwrap_err();
 
     assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+}
+
+#[tokio::test]
+async fn text_only_host_stage_checkpoint_payload_returns_ref_usable_by_checkpoint() {
+    let fixture = HostFixture::new("thread-host-stage-payload", "hello").await;
+    let host = fixture.build_host().await;
+    let host_dyn: &(dyn AgentLoopDriverHost + Send + Sync) = &host;
+
+    // Two-step write: stage payload bytes, then write metadata referencing
+    // the returned state ref. The kind must round-trip through both calls or
+    // the read-side will reject the staged payload on resume.
+    let state_ref = host_dyn
+        .stage_checkpoint_payload(StageCheckpointPayloadRequest {
+            kind: LoopCheckpointKind::BeforeSideEffect,
+            schema_id: fixture.context.checkpoint_schema_id.as_str().to_string(),
+            payload: b"durable resume bytes".to_vec(),
+        })
+        .await
+        .expect("stage_checkpoint_payload should succeed for matching schema_id");
+
+    let checkpoint_id = host_dyn
+        .checkpoint(LoopCheckpointRequest {
+            kind: LoopCheckpointKind::BeforeSideEffect,
+            state_ref: state_ref.clone(),
+        })
+        .await
+        .expect("checkpoint should accept the staged state_ref");
+
+    let stored = fixture
+        .loop_checkpoint_store
+        .get_loop_checkpoint(GetLoopCheckpointRequest {
+            scope: fixture.context.scope.clone(),
+            turn_id: fixture.context.turn_id,
+            run_id: fixture.context.run_id,
+            checkpoint_id,
+        })
+        .await
+        .unwrap()
+        .expect("checkpoint id should resolve to the staged state ref");
+    assert_eq!(stored.state_ref, state_ref);
+    assert_eq!(stored.kind, LoopCheckpointKind::BeforeSideEffect);
+
+    // The read-side `get_checkpoint_state` authenticates `(state_ref, kind)`
+    // together, so a kind mismatch must reject the staged payload.
+    let with_correct_kind = fixture
+        .checkpoint_state_store
+        .get_checkpoint_state(GetCheckpointStateRequest {
+            scope: fixture.context.scope.clone(),
+            turn_id: fixture.context.turn_id,
+            run_id: fixture.context.run_id,
+            state_ref: state_ref.clone(),
+            schema_id: fixture.context.checkpoint_schema_id.clone(),
+            schema_version: fixture.context.checkpoint_schema_version,
+            kind: LoopCheckpointKind::BeforeSideEffect,
+        })
+        .await
+        .unwrap();
+    assert!(with_correct_kind.is_some());
+
+    let with_wrong_kind = fixture
+        .checkpoint_state_store
+        .get_checkpoint_state(GetCheckpointStateRequest {
+            scope: fixture.context.scope.clone(),
+            turn_id: fixture.context.turn_id,
+            run_id: fixture.context.run_id,
+            state_ref,
+            schema_id: fixture.context.checkpoint_schema_id.clone(),
+            schema_version: fixture.context.checkpoint_schema_version,
+            kind: LoopCheckpointKind::BeforeModel,
+        })
+        .await
+        .unwrap();
+    assert!(with_wrong_kind.is_none());
+}
+
+#[tokio::test]
+async fn text_only_host_stage_checkpoint_payload_rejects_foreign_schema_id() {
+    let fixture = HostFixture::new("thread-host-stage-foreign-schema", "hello").await;
+    let host = fixture.build_host().await;
+    let host_dyn: &(dyn AgentLoopDriverHost + Send + Sync) = &host;
+
+    let error = host_dyn
+        .stage_checkpoint_payload(StageCheckpointPayloadRequest {
+            kind: LoopCheckpointKind::BeforeModel,
+            schema_id: "some_other_schema_v1".to_string(),
+            payload: b"payload bytes".to_vec(),
+        })
+        .await
+        .expect_err("staging with a foreign schema_id must be rejected");
+    assert_eq!(error.kind, AgentLoopHostErrorKind::CheckpointRejected);
 }
 
 #[tokio::test]

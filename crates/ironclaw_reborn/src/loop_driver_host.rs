@@ -23,8 +23,9 @@ use ironclaw_threads::{SessionThreadService, ThreadScope};
 use crate::model_routes::{ModelRouteError, ModelRouteResolver, ModelSlot};
 
 use ironclaw_turns::{
-    CheckpointStateStore, GetCheckpointStateRequest, LoopCheckpointStore, LoopGateRef,
-    LoopResultRef, PutLoopCheckpointRequest, RunProfileId, TurnCheckpointId, TurnError, TurnStatus,
+    CheckpointStateStore, GetCheckpointStateRequest, LoopCheckpointStateRef, LoopCheckpointStore,
+    LoopGateRef, LoopResultRef, PutCheckpointStateRequest, PutLoopCheckpointRequest, RunProfileId,
+    TurnCheckpointId, TurnError, TurnStatus,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
         CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, CapabilitySurfaceVersion,
@@ -38,8 +39,8 @@ use ironclaw_turns::{
         LoopModelRequest, LoopModelResponse, LoopProcessRef, LoopProgressEvent, LoopProgressPort,
         LoopPromptBundle, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
         LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, NoOpBudgetAccountant,
-        NoOpPolicyGuard, ProcessHandleSummary, UpdateAssistantDraft, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        NoOpPolicyGuard, ProcessHandleSummary, StageCheckpointPayloadRequest, UpdateAssistantDraft,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::ClaimedTurnRun,
 };
@@ -1364,6 +1365,13 @@ impl LoopCheckpointPort for RebornLoopDriverHost {
     ) -> Result<TurnCheckpointId, AgentLoopHostError> {
         self.checkpoint.checkpoint(request).await
     }
+
+    async fn stage_checkpoint_payload(
+        &self,
+        request: StageCheckpointPayloadRequest,
+    ) -> Result<LoopCheckpointStateRef, AgentLoopHostError> {
+        self.checkpoint.stage_checkpoint_payload(request).await
+    }
 }
 
 #[async_trait]
@@ -1493,6 +1501,37 @@ impl LoopCheckpointPort for HostManagedLoopCheckpointPort {
             .checkpoint_created(checkpoint.checkpoint_id, request.kind)
             .await?;
         Ok(checkpoint.checkpoint_id)
+    }
+
+    async fn stage_checkpoint_payload(
+        &self,
+        request: StageCheckpointPayloadRequest,
+    ) -> Result<LoopCheckpointStateRef, AgentLoopHostError> {
+        // Reject staged payloads whose schema_id disagrees with the run
+        // profile's resolved checkpoint schema — the read-side
+        // `get_checkpoint_state` checks `(state_ref, schema_id, kind)` as a
+        // unit, so mismatches here would lead to phantom resume rejections.
+        if request.schema_id != self.run_context.checkpoint_schema_id.as_str() {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::CheckpointRejected,
+                "staged checkpoint payload schema_id does not match the run profile's checkpoint schema",
+            ));
+        }
+
+        let record = self
+            .checkpoint_state_store
+            .put_checkpoint_state(PutCheckpointStateRequest::new(
+                self.run_context.scope.clone(),
+                self.run_context.turn_id,
+                self.run_context.run_id,
+                self.run_context.checkpoint_schema_id.clone(),
+                self.run_context.checkpoint_schema_version,
+                request.kind,
+                request.payload,
+            ))
+            .await
+            .map_err(turn_error_to_host_error)?;
+        Ok(record.state_ref)
     }
 }
 
