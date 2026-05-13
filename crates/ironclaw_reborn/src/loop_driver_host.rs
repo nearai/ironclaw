@@ -15,8 +15,9 @@ use ironclaw_host_runtime::{
     RuntimeCapabilityRequest, RuntimeFailureKind,
 };
 use ironclaw_loop_support::{
-    EmptyLoopCapabilityPort, HostManagedModelGateway, HostSkillContextSource,
-    ThreadBackedLoopContextPort, ThreadBackedLoopModelPort, ThreadBackedLoopTranscriptPort,
+    EmptyLoopCapabilityPort, HostInputQueue, HostManagedModelGateway, HostQueueLoopInputPort,
+    HostSkillContextSource, ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
+    ThreadBackedLoopTranscriptPort,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 
@@ -942,6 +943,7 @@ where
     config: TextOnlyLoopHostConfig,
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     safety_context: Option<InstructionSafetyContext>,
+    input_queue: Option<Arc<dyn HostInputQueue>>,
 }
 
 impl<S, G> RebornLoopDriverHostFactory<S, G>
@@ -971,6 +973,7 @@ where
             config,
             skill_context_source: None,
             safety_context: None,
+            input_queue: None,
         }
     }
 
@@ -981,6 +984,11 @@ where
 
     pub fn with_safety_context(mut self, safety_context: InstructionSafetyContext) -> Self {
         self.safety_context = Some(safety_context);
+        self
+    }
+
+    pub fn with_input_queue(mut self, queue: Arc<dyn HostInputQueue>) -> Self {
+        self.input_queue = Some(queue);
         self
     }
 
@@ -1061,8 +1069,13 @@ where
             prompt_port = prompt_port.with_safety_context(safety_context);
         }
         let prompt: Arc<dyn LoopPromptPort> = Arc::new(prompt_port);
-        let input: Arc<dyn LoopInputPort> =
-            Arc::new(NoExtraLoopInputPort::new(run_context.clone()));
+        let input: Arc<dyn LoopInputPort> = match self.input_queue.as_ref() {
+            Some(queue) => Arc::new(HostQueueLoopInputPort::new(
+                queue.clone(),
+                run_context.clone(),
+            )),
+            None => Arc::new(NoExtraLoopInputPort::new(run_context.clone())),
+        };
         let model_gateway = Arc::new(ThreadResolvingLoopModelGateway::new(
             Arc::clone(&self.thread_service),
             self.thread_scope.clone(),

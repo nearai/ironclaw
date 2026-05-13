@@ -9,8 +9,12 @@ use std::{
     sync::Arc,
 };
 
+mod input_port;
+mod input_queue;
 mod skill_context;
 
+pub use input_port::HostQueueLoopInputPort;
+pub use input_queue::{HostInputBatch, HostInputQueue, HostInputQueueError};
 pub use skill_context::{
     HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
     build_skill_run_snapshot,
