@@ -1086,7 +1086,7 @@ fn markdown_to_mrkdwn(input: &str) -> String {
 
     // Convert **bold** -> *bold* and ~~strike~~ -> ~strike~.
     // This is intentionally minimal and does not attempt full Markdown parsing.
-    let out = link_out.replace("**", "*").replace("~~", "~");
+    let out = link_out.replace("~~", "~").replace("**", "*");
 
     // Restore protected <...> spans.
     let mut restored = String::with_capacity(out.len());
