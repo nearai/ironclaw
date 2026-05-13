@@ -7,7 +7,8 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_loop_support::{
     CapabilitySurfaceProfileFilter, CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort,
-    HostInputQueue, HostManagedModelGateway, HostQueueLoopInputPort, HostSkillContextSource,
+    HostIdentityContextSource, HostInputQueue, HostManagedModelGateway, HostQueueLoopInputPort,
+    HostSkillContextSource,
     ThreadBackedLoopContextPort, ThreadBackedLoopModelPort, ThreadBackedLoopTranscriptPort,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
@@ -167,6 +168,7 @@ where
     config: TextOnlyLoopHostConfig,
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     safety_context: Option<InstructionSafetyContext>,
+    identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
     input_queue: Option<Arc<dyn HostInputQueue>>,
 }
 
@@ -197,6 +199,7 @@ where
             config,
             skill_context_source: None,
             safety_context: None,
+            identity_context_source: None,
             input_queue: None,
         }
     }
@@ -217,6 +220,14 @@ where
     // input port construction. This deviation is intentional; update the brief if keeping.
     pub fn with_input_queue(mut self, queue: Arc<dyn HostInputQueue>) -> Self {
         self.input_queue = Some(queue);
+        self
+    }
+
+    pub fn with_identity_context_source(
+        mut self,
+        source: Arc<dyn HostIdentityContextSource>,
+    ) -> Self {
+        self.identity_context_source = Some(source);
         self
     }
 
@@ -291,6 +302,9 @@ where
         if let Some(source) = self.skill_context_source.as_ref() {
             context_adapter = context_adapter.with_skill_context_source(source.clone());
         }
+        if let Some(source) = self.identity_context_source.as_ref() {
+            context_adapter = context_adapter.with_identity_context_source(source.clone());
+        }
         let context: Arc<dyn LoopContextPort> = Arc::new(context_adapter);
         let instruction_materialization_store: Arc<dyn InstructionMaterializationStore> =
             Arc::new(InMemoryInstructionMaterializationStore::default());
@@ -327,13 +341,18 @@ where
             None => Arc::new(NoExtraLoopInputPort::new(run_context.clone())),
         };
         let model_gateway = Arc::new(ThreadResolvingLoopModelGateway::new(
-            Arc::clone(&self.thread_service),
-            self.thread_scope.clone(),
-            Arc::clone(&self.model_gateway),
-            max_messages,
-            self.skill_context_source.clone(),
-            Some(Arc::clone(&instruction_materialization_store)),
-            prompt_authority,
+            ThreadResolvingLoopModelGatewayConfig {
+                thread_service: Arc::clone(&self.thread_service),
+                thread_scope: self.thread_scope.clone(),
+                host_gateway: Arc::clone(&self.model_gateway),
+                max_messages,
+                skill_context_source: self.skill_context_source.clone(),
+                identity_context_source: self.identity_context_source.clone(),
+                instruction_materialization_store: Some(Arc::clone(
+                    &instruction_materialization_store,
+                )),
+                prompt_authority,
+            },
         ));
         let model: Arc<dyn LoopModelPort> = Arc::new(HostManagedLoopModelPort::with_guards(
             run_context.clone(),
@@ -423,6 +442,22 @@ where
     host_gateway: Arc<G>,
     max_messages: usize,
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
+    identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
+    instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
+    prompt_authority: LoopPromptBundleAuthority,
+}
+
+struct ThreadResolvingLoopModelGatewayConfig<S, G>
+where
+    S: SessionThreadService + ?Sized,
+    G: HostManagedModelGateway + ?Sized,
+{
+    thread_service: Arc<S>,
+    thread_scope: ThreadScope,
+    host_gateway: Arc<G>,
+    max_messages: usize,
+    skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
+    identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
     instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
     prompt_authority: LoopPromptBundleAuthority,
 }
@@ -432,23 +467,16 @@ where
     S: SessionThreadService + ?Sized,
     G: HostManagedModelGateway + ?Sized,
 {
-    fn new(
-        thread_service: Arc<S>,
-        thread_scope: ThreadScope,
-        host_gateway: Arc<G>,
-        max_messages: usize,
-        skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
-        instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
-        prompt_authority: LoopPromptBundleAuthority,
-    ) -> Self {
+    fn new(config: ThreadResolvingLoopModelGatewayConfig<S, G>) -> Self {
         Self {
-            thread_service,
-            thread_scope,
-            host_gateway,
-            max_messages,
-            skill_context_source,
-            instruction_materialization_store,
-            prompt_authority,
+            thread_service: config.thread_service,
+            thread_scope: config.thread_scope,
+            host_gateway: config.host_gateway,
+            max_messages: config.max_messages,
+            skill_context_source: config.skill_context_source,
+            identity_context_source: config.identity_context_source,
+            instruction_materialization_store: config.instruction_materialization_store,
+            prompt_authority: config.prompt_authority,
         }
     }
 }
@@ -473,6 +501,9 @@ where
         .with_prompt_bundle_authority(self.prompt_authority.clone());
         if let Some(source) = self.skill_context_source.as_ref() {
             model_port = model_port.with_skill_context_source(source.clone());
+        }
+        if let Some(source) = self.identity_context_source.as_ref() {
+            model_port = model_port.with_identity_context_source(source.clone());
         }
         if let Some(store) = self.instruction_materialization_store.as_ref() {
             model_port = model_port.with_instruction_materialization_store(Arc::clone(store));

@@ -13,6 +13,7 @@ use std::{
 mod capability_allow_set;
 mod capability_port;
 mod capability_surface_filter;
+pub mod identity_context;
 mod input_port;
 mod input_queue;
 mod skill_context;
@@ -25,6 +26,11 @@ pub use capability_port::{
     LoopCapabilityInputResolver, LoopCapabilityResultWriter, concurrency_hint_from_effects,
 };
 pub use capability_surface_filter::CapabilitySurfaceProfileFilter;
+pub use identity_context::{
+    HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
+    HostIdentityMessageContent, IdentityApplicability, IdentityBudget, IdentityFileName,
+    IdentityTrustLevel, build_identity_messages, identity_message_ref,
+};
 pub use input_port::HostQueueLoopInputPort;
 pub use input_queue::{HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError};
 pub use skill_context::{
@@ -32,7 +38,7 @@ pub use skill_context::{
     build_skill_run_snapshot,
 };
 
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OnceCell};
 
 use async_trait::async_trait;
 use ironclaw_threads::{
@@ -53,13 +59,14 @@ use ironclaw_turns::{
         LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputCursor, LoopModelMessage,
         LoopModelPort, LoopModelRequest, LoopModelResponse, LoopPromptBundleAuthority,
         LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, ModelStreamChunk,
-        ParentLoopOutput, UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
-        sanitize_model_visible_text,
+        ParentLoopOutput, PromptMode, UpdateAssistantDraft, VisibleCapabilityRequest,
+        VisibleCapabilitySurface, sanitize_model_visible_text,
     },
 };
 use serde::{Deserialize, Serialize};
 
 const EMPTY_SURFACE_VERSION: &str = "empty:v1";
+const LOOP_SYSTEM_ROLE: &str = "system";
 
 /// Thread-backed context adapter for text-only Reborn loops.
 #[derive(Clone)]
@@ -72,6 +79,30 @@ where
     run_context: LoopRunContext,
     max_messages: usize,
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
+    identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
+    identity_budget: IdentityBudget,
+    identity_candidates: Arc<IdentityCandidateCache>,
+}
+
+struct IdentityCandidateCache {
+    text_only: OnceCell<Vec<HostIdentityContextCandidate>>,
+    codeact: OnceCell<Vec<HostIdentityContextCandidate>>,
+}
+
+impl IdentityCandidateCache {
+    fn new() -> Self {
+        Self {
+            text_only: OnceCell::new(),
+            codeact: OnceCell::new(),
+        }
+    }
+
+    fn cell_for_mode(&self, mode: PromptMode) -> &OnceCell<Vec<HostIdentityContextCandidate>> {
+        match mode {
+            PromptMode::TextOnly => &self.text_only,
+            PromptMode::CodeAct => &self.codeact,
+        }
+    }
 }
 
 impl<S> ThreadBackedLoopContextPort<S>
@@ -90,11 +121,27 @@ where
             run_context,
             max_messages,
             skill_context_source: None,
+            identity_context_source: None,
+            identity_budget: IdentityBudget::default(),
+            identity_candidates: Arc::new(IdentityCandidateCache::new()),
         }
     }
 
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
         self.skill_context_source = Some(source);
+        self
+    }
+
+    pub fn with_identity_context_source(
+        mut self,
+        source: Arc<dyn HostIdentityContextSource>,
+    ) -> Self {
+        self.identity_context_source = Some(source);
+        self
+    }
+
+    pub fn with_identity_budget(mut self, budget: IdentityBudget) -> Self {
+        self.identity_budget = budget;
         self
     }
 }
@@ -136,9 +183,30 @@ where
             }
             None => Vec::new(),
         };
+        let identity_messages = match self.identity_context_source.as_deref() {
+            Some(source) => {
+                let mode = request.mode;
+                let candidates = self
+                    .identity_candidates
+                    .cell_for_mode(mode)
+                    .get_or_try_init(|| async {
+                        source
+                            .load_identity_candidates(&self.run_context, mode)
+                            .await
+                            .map_err(HostIdentityContextBuildError::into_host_error)
+                    })
+                    .await?;
+                identity_context::build_identity_messages_from_candidates(
+                    candidates,
+                    mode,
+                    self.identity_budget,
+                )?
+            }
+            None => Vec::new(),
+        };
 
         Ok(LoopContextBundle {
-            identity_messages: Vec::new(),
+            identity_messages,
             messages: context
                 .messages
                 .into_iter()
@@ -477,6 +545,7 @@ where
     milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
+    identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
 }
 
 impl<S, G> ThreadBackedLoopModelPort<S, G>
@@ -501,6 +570,7 @@ where
             milestone_sink: None,
             skill_context_source: None,
             instruction_materialization_store: None,
+            identity_context_source: None,
         }
     }
 
@@ -522,6 +592,7 @@ where
             milestone_sink: Some(milestone_sink),
             skill_context_source: None,
             instruction_materialization_store: None,
+            identity_context_source: None,
         }
     }
 
@@ -543,6 +614,14 @@ where
         store: Arc<dyn InstructionMaterializationStore>,
     ) -> Self {
         self.instruction_materialization_store = Some(store);
+        self
+    }
+
+    pub fn with_identity_context_source(
+        mut self,
+        source: Arc<dyn HostIdentityContextSource>,
+    ) -> Self {
+        self.identity_context_source = Some(source);
         self
     }
 }
@@ -708,6 +787,9 @@ where
             {
                 continue;
             }
+            if identity_context::is_identity_model_message_ref(&message.content_ref) {
+                continue;
+            }
             needs_history_lookup = true;
             break;
         }
@@ -734,6 +816,38 @@ where
         let mut resolved = Vec::with_capacity(requested_messages.len());
         for message in requested_messages {
             let requested_role = HostManagedModelMessageRole::from_loop_role(&message.role)?;
+            // Priority 1: trusted identity files resolved by the configured host source.
+            if identity_context::is_identity_model_message_ref(&message.content_ref) {
+                let Some(source) = self.identity_context_source.as_deref() else {
+                    return Err(AgentLoopHostError::new(
+                        AgentLoopHostErrorKind::InvalidInvocation,
+                        "identity message ref is unavailable",
+                    ));
+                };
+                if requested_role != HostManagedModelMessageRole::System {
+                    return Err(AgentLoopHostError::new(
+                        AgentLoopHostErrorKind::InvalidInvocation,
+                        "model message role does not match identity context",
+                    ));
+                }
+                let content = source
+                    .resolve_identity_message_content(&self.run_context, &message.content_ref)
+                    .await
+                    .map_err(HostIdentityContextBuildError::into_host_error)?
+                    .ok_or_else(|| {
+                        AgentLoopHostError::new(
+                            AgentLoopHostErrorKind::InvalidInvocation,
+                            "identity message reference is unavailable",
+                        )
+                    })?;
+                resolved.push(HostManagedModelMessage {
+                    role: HostManagedModelMessageRole::System,
+                    content: content.content,
+                    content_ref: message.content_ref,
+                });
+                continue;
+            }
+
             if let Some(materialization_store) = self.instruction_materialization_store.as_ref()
                 && let Some(materialized) = materialization_store
                     .get_materialized_message(&self.run_context, &message.content_ref)?
@@ -766,6 +880,7 @@ where
                 continue;
             }
 
+            // Priority 3: durable transcript messages (context window + history).
             let context_message = messages_by_ref
                 .get(message.content_ref.as_str())
                 .ok_or_else(|| {
@@ -1078,7 +1193,9 @@ fn role_for_kind(kind: MessageKind) -> &'static str {
     match kind {
         MessageKind::User => "user",
         MessageKind::Assistant => "assistant",
-        MessageKind::System | MessageKind::Summary | MessageKind::CheckpointReference => "system",
+        MessageKind::System | MessageKind::Summary | MessageKind::CheckpointReference => {
+            LOOP_SYSTEM_ROLE
+        }
         MessageKind::ToolResultReference => "tool_result_reference",
     }
 }

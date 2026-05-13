@@ -48,6 +48,7 @@ pub mod extension_state;
 pub mod hygiene;
 pub mod layer;
 pub mod privacy;
+mod reborn_identity_context;
 #[cfg(feature = "postgres")]
 mod repository;
 pub mod schema;
@@ -69,6 +70,7 @@ pub use embeddings::BedrockEmbeddings;
 pub use embeddings::{
     EmbeddingProvider, MockEmbeddings, NearAiEmbeddings, OllamaEmbeddings, OpenAiEmbeddings,
 };
+pub use reborn_identity_context::WorkspaceIdentityContextSource;
 #[cfg(feature = "postgres")]
 pub use repository::Repository;
 pub use search::{
