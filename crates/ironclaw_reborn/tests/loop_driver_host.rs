@@ -31,6 +31,7 @@ use ironclaw_loop_support::{
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_reborn::{
+    CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
     HostRuntimeLoopCapabilityPort, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
     ModelRoute, ModelRoutePolicy, ModelSelectionMode, ModelSlot, RebornLoopDriverHostFactory,
     RebornLoopDriverHostRequest, StaticModelRouteResolver, TextOnlyLoopHostConfig,
@@ -2703,6 +2704,64 @@ async fn text_only_host_routes_capability_invocation_through_host_runtime() {
 }
 
 #[tokio::test]
+async fn text_only_host_profiled_capabilities_filter_surface_and_invocation() {
+    let fixture = HostFixture::new("thread-host-runtime-capability-profile", "hello").await;
+    let allowed_id = CapabilityId::new("demo.allowed").unwrap();
+    let denied_id = CapabilityId::new("demo.denied").unwrap();
+    let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
+        capability_descriptor(allowed_id.as_str()),
+        capability_descriptor(denied_id.as_str()),
+    ])));
+    let io = Arc::new(InMemoryCapabilityIo::default());
+    let capability_port = HostRuntimeLoopCapabilityPort::new(
+        runtime.clone(),
+        fixture.context.clone(),
+        host_runtime_visible_request(&fixture, ["demo"]),
+        io.clone(),
+        io,
+    );
+    let resolver = Arc::new(StaticCapabilitySurfaceProfileResolver::new(
+        CapabilityAllowSet::allowlist([allowed_id.clone()]),
+    ));
+
+    let host = fixture
+        .factory()
+        .build_text_only_host_with_profiled_capabilities(
+            RebornLoopDriverHostRequest {
+                claimed_run: fixture.claimed.clone(),
+                loop_run_context: fixture.context.clone(),
+            },
+            Arc::new(capability_port),
+            resolver,
+        )
+        .await
+        .unwrap();
+
+    let surface = host
+        .visible_capabilities(VisibleCapabilityRequest)
+        .await
+        .unwrap();
+    assert_eq!(surface.descriptors.len(), 1);
+    assert_eq!(surface.descriptors[0].capability_id, allowed_id);
+
+    let outcome = host
+        .invoke_capability(CapabilityInvocation {
+            surface_version: surface.version,
+            capability_id: denied_id,
+            input_ref: CapabilityInputRef::new("input:denied-profile").unwrap(),
+        })
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        outcome,
+        CapabilityOutcome::Denied(denied)
+            if denied.reason_kind.as_str() == "surface_profile_denied"
+    ));
+    assert!(runtime.invocations().is_empty());
+}
+
+#[tokio::test]
 async fn text_only_host_uses_fresh_execution_context_per_capability_invocation() {
     let fixture = HostFixture::new("thread-host-runtime-capability-context", "hello").await;
     let capability_id = CapabilityId::new("demo.echo").unwrap();
@@ -3967,6 +4026,26 @@ impl HostSkillContextSource for StaticSkillContextSource {
         _run_context: &LoopRunContext,
     ) -> Result<Vec<HostSkillContextCandidate>, HostSkillContextBuildError> {
         Ok(self.candidates.clone())
+    }
+}
+
+struct StaticCapabilitySurfaceProfileResolver {
+    allow_set: CapabilityAllowSet,
+}
+
+impl StaticCapabilitySurfaceProfileResolver {
+    fn new(allow_set: CapabilityAllowSet) -> Self {
+        Self { allow_set }
+    }
+}
+
+#[async_trait]
+impl CapabilitySurfaceProfileResolver for StaticCapabilitySurfaceProfileResolver {
+    async fn resolve(
+        &self,
+        _run_context: &LoopRunContext,
+    ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
+        Ok(self.allow_set.clone())
     }
 }
 

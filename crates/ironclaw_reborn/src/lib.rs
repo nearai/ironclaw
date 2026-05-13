@@ -21,9 +21,13 @@ pub mod model_gateway;
 pub mod secrets;
 
 pub use app_loop_family::build_loop_family_registry;
+pub use ironclaw_loop_support::{
+    CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileFilter,
+    CapabilitySurfaceProfileResolver, HostRuntimeLoopCapabilityPort, LoopCapabilityInputResolver,
+    LoopCapabilityResultWriter,
+};
 pub use loop_driver_host::{
-    HostManagedLoopCheckpointPort, HostManagedLoopProgressPort, HostRuntimeLoopCapabilityPort,
-    LoopCapabilityInputResolver, LoopCapabilityResultWriter, NoExtraLoopInputPort,
+    HostManagedLoopCheckpointPort, HostManagedLoopProgressPort, NoExtraLoopInputPort,
     RebornLoopDriverHost, RebornLoopDriverHostError, RebornLoopDriverHostFactory,
     RebornLoopDriverHostRequest, TextOnlyLoopHostConfig,
 };

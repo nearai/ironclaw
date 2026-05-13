@@ -9,8 +9,19 @@ use std::{
     sync::Arc,
 };
 
+mod capability_allow_set;
+mod capability_port;
+mod capability_surface_filter;
 mod skill_context;
 
+pub use capability_allow_set::{
+    CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
+};
+pub use capability_port::{
+    HostRuntimeLoopCapabilityPort, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
+    concurrency_hint_from_effects,
+};
+pub use capability_surface_filter::CapabilitySurfaceProfileFilter;
 pub use skill_context::{
     HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
     build_skill_run_snapshot,
