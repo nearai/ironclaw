@@ -1447,6 +1447,12 @@ async fn replay_projection_re_sanitizes_unsanitized_runtime_events_from_custom_b
         process_id: Some(ProcessId::new()),
         output_bytes: None,
         error_kind: Some(raw.to_string()),
+        hook_id: None,
+        hook_point: None,
+        hook_trust_class: None,
+        hook_decision: None,
+        hook_failure_category: None,
+        hook_failure_disposition: None,
     };
     let backend = Arc::new(StaticDurableEventLog {
         entries: vec![EventLogEntry {
