@@ -1127,6 +1127,11 @@ impl CapabilityOutcome {
 pub struct CapabilityResultMessage {
     pub result_ref: LoopResultRef,
     pub safe_summary: String,
+    /// Host hint that this completed capability result should end the loop
+    /// naturally after the current batch. Defaults to false for compatibility
+    /// with pre-WS-6 hosts.
+    #[serde(default)]
+    pub terminate_hint: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

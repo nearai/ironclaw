@@ -793,6 +793,7 @@ async fn runtime_outcome_to_loop(
             CapabilityOutcome::Completed(CapabilityResultMessage {
                 result_ref,
                 safe_summary: "capability completed".to_string(),
+                terminate_hint: false,
             })
         }
         RuntimeCapabilityOutcome::ApprovalRequired(gate) => CapabilityOutcome::ApprovalRequired {
