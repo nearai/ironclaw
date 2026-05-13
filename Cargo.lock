@@ -4081,6 +4081,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "blake3",
+ "chrono",
+ "futures",
  "ironclaw_agent_loop",
  "ironclaw_host_api",
  "ironclaw_turns",
@@ -4415,12 +4417,14 @@ name = "ironclaw_loop_support"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "ironclaw_host_api",
  "ironclaw_host_runtime",
  "ironclaw_memory",
  "ironclaw_skills",
  "ironclaw_threads",
  "ironclaw_turns",
+ "parking_lot",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

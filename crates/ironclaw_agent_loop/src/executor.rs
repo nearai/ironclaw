@@ -150,6 +150,12 @@ struct DrainedInputs {
     cancelled_reason_kind: Option<LoopCancelledReasonKind>,
 }
 
+#[derive(Debug)]
+enum CancelCheck {
+    Continue(LoopExecutionState),
+    Exit(LoopExit),
+}
+
 impl CanonicalAgentLoopExecutor {
     async fn execute_canonical(
         &self,
@@ -161,6 +167,11 @@ impl CanonicalAgentLoopExecutor {
         let mut pending_input_ack = PendingInputAck::default();
 
         loop {
+            state = match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+                CancelCheck::Continue(state) => state,
+                CancelCheck::Exit(exit) => return Ok(exit),
+            };
+
             if state.iteration >= planner.budget().iteration_limit(&state) {
                 let checked = self.checkpoint(host, state, CheckpointKind::Final).await?;
                 pending_input_ack.ack(host).await?;
@@ -181,6 +192,10 @@ impl CanonicalAgentLoopExecutor {
             .await;
 
             if pending_input_ack.is_empty() && planner.drain().drain_steering(&state).await {
+                state = match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+                    CancelCheck::Continue(state) => state,
+                    CancelCheck::Exit(exit) => return Ok(exit),
+                };
                 let drained = self.drain_user_inputs(host, state).await?;
                 state = drained.state;
                 pending_input_ack.replace(drained.ack_tokens)?;
@@ -195,9 +210,17 @@ impl CanonicalAgentLoopExecutor {
                     );
                 }
             }
+            state = match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+                CancelCheck::Continue(state) => state,
+                CancelCheck::Exit(exit) => return Ok(exit),
+            };
 
             let context_request = planner.context().plan_context_request(&state).await;
             let prompt_mode = context_request.mode;
+            state = match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+                CancelCheck::Continue(state) => state,
+                CancelCheck::Exit(exit) => return Ok(exit),
+            };
             let prompt_bundle = host
                 .build_prompt_bundle(context_request)
                 .await
@@ -217,8 +240,16 @@ impl CanonicalAgentLoopExecutor {
                 },
             )
             .await;
+            state = match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+                CancelCheck::Continue(state) => state,
+                CancelCheck::Exit(exit) => return Ok(exit),
+            };
 
             let surface_filter = planner.capability().filter(&state).await;
+            state = match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+                CancelCheck::Continue(state) => state,
+                CancelCheck::Exit(exit) => return Ok(exit),
+            };
             let mut surface = host
                 .visible_capabilities(VisibleCapabilityRequest)
                 .await
@@ -227,15 +258,27 @@ impl CanonicalAgentLoopExecutor {
                 })?;
             apply_capability_filter(&mut surface, &surface_filter);
             state.surface_version = Some(surface.version.clone());
+            state = match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+                CancelCheck::Continue(state) => state,
+                CancelCheck::Exit(exit) => return Ok(exit),
+            };
 
             state = self
                 .checkpoint(host, state, CheckpointKind::BeforeModel)
                 .await?
                 .state;
             pending_input_ack.ack(host).await?;
+            state = match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+                CancelCheck::Continue(state) => state,
+                CancelCheck::Exit(exit) => return Ok(exit),
+            };
 
             let model_preference =
                 model_preference_to_host(planner.model().preference(&state).await)?;
+            state = match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+                CancelCheck::Continue(state) => state,
+                CancelCheck::Exit(exit) => return Ok(exit),
+            };
             let model_response = match self
                 .stream_model_with_recovery(
                     planner,
@@ -255,6 +298,10 @@ impl CanonicalAgentLoopExecutor {
                 }
                 ModelStep::Exit(exit) => return Ok(exit),
             };
+            state = match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+                CancelCheck::Continue(state) => state,
+                CancelCheck::Exit(exit) => return Ok(exit),
+            };
 
             match model_response.output {
                 ParentLoopOutput::AssistantReply(reply) => {
@@ -265,6 +312,10 @@ impl CanonicalAgentLoopExecutor {
                             stage: HostStage::Transcript,
                         })?;
                     state.assistant_refs.push(reply_ref.clone());
+                    state = match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+                        CancelCheck::Continue(state) => state,
+                        CancelCheck::Exit(exit) => return Ok(exit),
+                    };
 
                     let summary = TurnSummary {
                         kind: TurnEndKind::ReplyOnly,
@@ -278,13 +329,29 @@ impl CanonicalAgentLoopExecutor {
                     {
                         StopOutcome::Stop { stop, kind } => {
                             state.stop_state = stop;
+                            state = match self.checkpoint_and_exit_if_cancelled(host, state).await?
+                            {
+                                CancelCheck::Continue(state) => state,
+                                CancelCheck::Exit(exit) => return Ok(exit),
+                            };
                             let exit = self.exit_for_stop(host, state, kind).await?;
                             pending_input_ack.ack(host).await?;
                             return Ok(exit);
                         }
                         StopOutcome::Continue { stop } => {
                             state.stop_state = stop;
+                            state = match self.checkpoint_and_exit_if_cancelled(host, state).await?
+                            {
+                                CancelCheck::Continue(state) => state,
+                                CancelCheck::Exit(exit) => return Ok(exit),
+                            };
                             if planner.drain().drain_followup(&state).await {
+                                state =
+                                    match self.checkpoint_and_exit_if_cancelled(host, state).await?
+                                    {
+                                        CancelCheck::Continue(state) => state,
+                                        CancelCheck::Exit(exit) => return Ok(exit),
+                                    };
                                 let drained_inputs = self.drain_followup(host, state).await?;
                                 state = drained_inputs.state;
                                 pending_input_ack.replace(drained_inputs.ack_tokens)?;
@@ -299,6 +366,12 @@ impl CanonicalAgentLoopExecutor {
                                         Some(checked.checkpoint_id),
                                     );
                                 }
+                                state =
+                                    match self.checkpoint_and_exit_if_cancelled(host, state).await?
+                                    {
+                                        CancelCheck::Continue(state) => state,
+                                        CancelCheck::Exit(exit) => return Ok(exit),
+                                    };
                                 if drained_inputs.drained {
                                     state.iteration = state.iteration.saturating_add(1);
                                     continue;
@@ -324,6 +397,10 @@ impl CanonicalAgentLoopExecutor {
                         BatchStep::Continue(next) => state = *next,
                         BatchStep::Exit(exit) => return Ok(exit),
                     }
+                    state = match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+                        CancelCheck::Continue(state) => state,
+                        CancelCheck::Exit(exit) => return Ok(exit),
+                    };
 
                     let summary = TurnSummary {
                         kind: TurnEndKind::AfterCapabilityBatch,
@@ -337,12 +414,22 @@ impl CanonicalAgentLoopExecutor {
                     {
                         StopOutcome::Stop { stop, kind } => {
                             state.stop_state = stop;
+                            state = match self.checkpoint_and_exit_if_cancelled(host, state).await?
+                            {
+                                CancelCheck::Continue(state) => state,
+                                CancelCheck::Exit(exit) => return Ok(exit),
+                            };
                             let exit = self.exit_for_stop(host, state, kind).await?;
                             pending_input_ack.ack(host).await?;
                             return Ok(exit);
                         }
                         StopOutcome::Continue { stop } => {
                             state.stop_state = stop;
+                            state = match self.checkpoint_and_exit_if_cancelled(host, state).await?
+                            {
+                                CancelCheck::Continue(state) => state,
+                                CancelCheck::Exit(exit) => return Ok(exit),
+                            };
                             state.iteration = state.iteration.saturating_add(1);
                         }
                     }
@@ -388,6 +475,10 @@ impl CanonicalAgentLoopExecutor {
                             recovery, alter, ..
                         } => {
                             state.recovery_state = recovery;
+                            match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+                                CancelCheck::Continue(next) => state = next,
+                                CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
+                            }
                             honor_retry_alteration(alter.as_ref())?;
                             self.emit_progress(
                                 host,
@@ -413,6 +504,10 @@ impl CanonicalAgentLoopExecutor {
                             failure_kind,
                         } => {
                             state.recovery_state = recovery;
+                            match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+                                CancelCheck::Continue(next) => state = next,
+                                CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
+                            }
                             let checked =
                                 self.checkpoint(host, state, CheckpointKind::Final).await?;
                             return Ok(ModelStep::Exit(failed_exit(
@@ -464,6 +559,10 @@ impl CanonicalAgentLoopExecutor {
             .collect::<Vec<_>>();
         let policy = planner.batch().policy(&state, &summaries);
         let stop_on_first_suspension = matches!(policy, BatchPolicy::Sequential);
+        match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+            CancelCheck::Continue(next) => state = next,
+            CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
+        }
 
         state = self
             .checkpoint(host, state, CheckpointKind::BeforeSideEffect)
@@ -518,6 +617,10 @@ impl CanonicalAgentLoopExecutor {
             })
             .await
             .map_err(capability_host_error)?;
+        match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+            CancelCheck::Continue(next) => state = next,
+            CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
+        }
 
         if batch.outcomes.len() > visible_calls.len()
             || (!batch.stopped_on_suspension && batch.outcomes.len() != visible_calls.len())
@@ -547,7 +650,12 @@ impl CanonicalAgentLoopExecutor {
                 .handle_capability_outcome(planner, host, state, call, outcome)
                 .await?
             {
-                BatchStep::Continue(next) => state = *next,
+                BatchStep::Continue(next) => {
+                    state = match self.checkpoint_and_exit_if_cancelled(host, *next).await? {
+                        CancelCheck::Continue(next) => next,
+                        CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
+                    };
+                }
                 BatchStep::Exit(exit) => return Ok(BatchStep::Exit(exit)),
             }
         }
@@ -630,6 +738,10 @@ impl CanonicalAgentLoopExecutor {
             {
                 RecoveryOutcome::SkipResult { recovery } => {
                     state.recovery_state = recovery;
+                    match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+                        CancelCheck::Continue(next) => state = next,
+                        CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
+                    }
                     return Ok(BatchStep::Continue(Box::new(state)));
                 }
                 RecoveryOutcome::Abort {
@@ -637,6 +749,10 @@ impl CanonicalAgentLoopExecutor {
                     failure_kind,
                 } => {
                     state.recovery_state = recovery;
+                    match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+                        CancelCheck::Continue(next) => state = next,
+                        CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
+                    }
                     let checked = self.checkpoint(host, state, CheckpointKind::Final).await?;
                     return Ok(BatchStep::Exit(failed_exit(
                         host,
@@ -650,9 +766,17 @@ impl CanonicalAgentLoopExecutor {
                 } => {
                     if matches!(summary.class, CapabilityErrorClass::PolicyDenied) {
                         state.recovery_state = recovery;
+                        match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+                            CancelCheck::Continue(next) => state = next,
+                            CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
+                        }
                         return Ok(BatchStep::Continue(Box::new(state)));
                     }
                     state.recovery_state = recovery;
+                    match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+                        CancelCheck::Continue(next) => state = next,
+                        CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
+                    }
                     honor_retry_alteration(alter.as_ref())?;
                     self.emit_progress(
                         host,
@@ -671,6 +795,10 @@ impl CanonicalAgentLoopExecutor {
                         .invoke_capability(capability_invocation_from_candidate(call.clone()))
                         .await
                         .map_err(capability_host_error)?;
+                    match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+                        CancelCheck::Continue(next) => state = next,
+                        CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
+                    }
                     match retry {
                         CapabilityOutcome::Failed(failure) => {
                             if failure.error_kind == CapabilityFailureKind::Cancelled {
@@ -754,6 +882,10 @@ impl CanonicalAgentLoopExecutor {
         match planner.gate().handle(&state, &summary).await {
             GateOutcome::Block { gate } => {
                 state.gate_state = gate;
+                match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+                    CancelCheck::Continue(next) => state = next,
+                    CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
+                }
                 state.last_gate = Some(gate_ref.clone());
                 self.emit_progress(
                     host,
@@ -776,10 +908,18 @@ impl CanonicalAgentLoopExecutor {
             }
             GateOutcome::SkipAndContinue { gate } => {
                 state.gate_state = gate;
+                match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+                    CancelCheck::Continue(next) => state = next,
+                    CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
+                }
                 Ok(BatchStep::Continue(Box::new(state)))
             }
             GateOutcome::Abort { gate, failure_kind } => {
                 state.gate_state = gate;
+                match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+                    CancelCheck::Continue(next) => state = next,
+                    CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
+                }
                 let checked = self.checkpoint(host, state, CheckpointKind::Final).await?;
                 Ok(BatchStep::Exit(failed_exit(
                     host,
@@ -900,6 +1040,38 @@ impl CanonicalAgentLoopExecutor {
         event: LoopProgressEvent,
     ) {
         let _ = host.emit_loop_progress(event).await;
+    }
+
+    async fn checkpoint_and_exit_if_cancelled(
+        &self,
+        host: &(dyn AgentLoopDriverHost + Send + Sync),
+        state: LoopExecutionState,
+    ) -> Result<CancelCheck, AgentLoopExecutorError> {
+        let Some(_signal) = host.observe_cancellation() else {
+            return Ok(CancelCheck::Continue(state));
+        };
+
+        let fallback_state = state.clone();
+        match self.checkpoint(host, state, CheckpointKind::Final).await {
+            Ok(checked) => Ok(CancelCheck::Exit(cancelled_exit(
+                host,
+                checked.state,
+                Some(checked.checkpoint_id),
+            )?)),
+            Err(_)
+                if !host
+                    .run_context()
+                    .resolved_run_profile
+                    .checkpoint_policy
+                    .require_final_checkpoint =>
+            {
+                Ok(CancelCheck::Exit(cancelled_exit(host, fallback_state, None)?))
+            }
+            Err(_) => Ok(CancelCheck::Exit(LoopExit::failed(
+                LoopFailureKind::CheckpointRejected,
+                exit_id(host, "failed")?,
+            ))),
+        }
     }
 
     async fn drain_user_inputs(
@@ -1350,15 +1522,16 @@ mod tests {
             AgentLoopHostError, AgentLoopHostErrorKind, CancellationPolicy,
             CapabilityDescriptorView, CapabilityInputRef, CapabilitySurfaceProfileId,
             CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass,
-            ContextProfileId, LoopCancelReasonKind, LoopCheckpointRequest, LoopCheckpointStateRef,
-            LoopContextBundle, LoopContextRequest, LoopDriverId, LoopInputAck, LoopInputAckToken,
-            LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopInterruptKind,
-            LoopModelMessage, LoopModelResponse, LoopProcessRef, LoopPromptBundle,
-            LoopPromptBundleRef, LoopPromptBundleRequest, LoopRunContext, LoopRunInfoPort,
-            ModelProfileId, ModelStreamChunk, ProcessHandleSummary, RedactedRunProfileProvenance,
-            ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier, RunClassId,
-            RunProfileFingerprint, RuntimeProfileConstraints, SchedulingClass,
-            StageCheckpointPayloadRequest, SteeringPolicy,
+            ContextProfileId, LoopCancelReasonKind, LoopCancellationPort, LoopCancellationSignal,
+            LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle, LoopContextRequest,
+            LoopDriverId, LoopInputAck, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
+            LoopInputCursorToken, LoopInterruptKind, LoopModelMessage, LoopModelResponse,
+            LoopProcessRef, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest,
+            LoopRunContext, LoopRunInfoPort, ModelProfileId, ModelStreamChunk,
+            ProcessHandleSummary, RedactedRunProfileProvenance, ResolvedRunProfile,
+            ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
+            RuntimeProfileConstraints, SchedulingClass, StageCheckpointPayloadRequest,
+            SteeringPolicy,
         },
     };
 
@@ -1390,6 +1563,9 @@ mod tests {
         visible_surface_version: CapabilitySurfaceVersion,
         progress_events: Arc<Mutex<Vec<ironclaw_turns::run_profile::LoopProgressEvent>>>,
         fail_progress_port: bool,
+        cancellation: Arc<Mutex<Option<LoopCancellationSignal>>>,
+        cancel_after_checkpoint: Arc<Mutex<Option<LoopCheckpointKind>>>,
+        fail_checkpoint: Arc<Mutex<Option<LoopCheckpointKind>>>,
     }
 
     impl MockHost {
@@ -1412,6 +1588,9 @@ mod tests {
                 visible_surface_version: surface_version(),
                 progress_events: Arc::new(Mutex::new(Vec::new())),
                 fail_progress_port: false,
+                cancellation: Arc::new(Mutex::new(None)),
+                cancel_after_checkpoint: Arc::new(Mutex::new(None)),
+                fail_checkpoint: Arc::new(Mutex::new(None)),
             }
         }
 
@@ -1488,6 +1667,31 @@ mod tests {
                 .iter()
                 .map(|event| event.kind_name())
                 .collect()
+        }
+
+        fn request_cancellation(&self, reason_kind: LoopCancelReasonKind) {
+            *self.cancellation.lock().expect("lock") = Some(LoopCancellationSignal {
+                reason_kind,
+                requested_at: chrono::Utc::now(),
+            });
+        }
+
+        fn cancel_after_checkpoint(self, kind: LoopCheckpointKind) -> Self {
+            *self.cancel_after_checkpoint.lock().expect("lock") = Some(kind);
+            self
+        }
+
+        fn fail_checkpoint(self, kind: LoopCheckpointKind) -> Self {
+            *self.fail_checkpoint.lock().expect("lock") = Some(kind);
+            self
+        }
+
+        fn with_require_final_checkpoint(mut self, require_final_checkpoint: bool) -> Self {
+            self.context
+                .resolved_run_profile
+                .checkpoint_policy
+                .require_final_checkpoint = require_final_checkpoint;
+            self
         }
     }
 
@@ -1672,6 +1876,25 @@ mod tests {
                 .expect("lock")
                 .push(format!("checkpoint:{}", request.kind.as_str()));
             self.checkpoints.lock().expect("lock").push(request.kind);
+            if self
+                .fail_checkpoint
+                .lock()
+                .expect("lock")
+                .is_some_and(|kind| kind == request.kind)
+            {
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::CheckpointRejected,
+                    "scripted checkpoint failure",
+                ));
+            }
+            if self
+                .cancel_after_checkpoint
+                .lock()
+                .expect("lock")
+                .is_some_and(|kind| kind == request.kind)
+            {
+                self.request_cancellation(LoopCancelReasonKind::UserRequested);
+            }
             Ok(TurnCheckpointId::new())
         }
 
@@ -1699,6 +1922,12 @@ mod tests {
             }
             self.progress_events.lock().expect("lock").push(event);
             Ok(())
+        }
+    }
+
+    impl LoopCancellationPort for MockHost {
+        fn observe_cancellation(&self) -> Option<LoopCancellationSignal> {
+            self.cancellation.lock().expect("lock").clone()
         }
     }
 
@@ -2483,6 +2712,93 @@ mod tests {
                 LoopCheckpointKind::Final,
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_first_iteration_exits_with_final_checkpoint() {
+        let host = MockHost::new(vec![reply_response()]);
+        host.request_cancellation(LoopCancelReasonKind::UserRequested);
+        let executor = CanonicalAgentLoopExecutor;
+        let state = LoopExecutionState::initial_for_run(host.run_context());
+
+        let exit = executor
+            .execute_family(&crate::families::default(), &host, state)
+            .await
+            .expect("execute");
+
+        match exit {
+            LoopExit::Cancelled(cancelled) => {
+                assert_eq!(
+                    cancelled.reason_kind,
+                    LoopCancelledReasonKind::HostCancellation
+                );
+                assert!(cancelled.checkpoint_id.is_some());
+            }
+            other => panic!("expected cancelled, got {other:?}"),
+        }
+        assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_boundary_skips_next_model_call() {
+        let host = MockHost::new(vec![reply_response()])
+            .cancel_after_checkpoint(LoopCheckpointKind::BeforeModel);
+        let executor = CanonicalAgentLoopExecutor;
+        let state = LoopExecutionState::initial_for_run(host.run_context());
+
+        let exit = executor
+            .execute_family(&crate::families::default(), &host, state)
+            .await
+            .expect("execute");
+
+        assert!(matches!(exit, LoopExit::Cancelled(_)));
+        assert_eq!(
+            host.checkpoint_kinds(),
+            vec![LoopCheckpointKind::BeforeModel, LoopCheckpointKind::Final]
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_checkpoint_failure_still_cancels_for_permissive_profile() {
+        let host = MockHost::new(vec![reply_response()]).fail_checkpoint(LoopCheckpointKind::Final);
+        host.request_cancellation(LoopCancelReasonKind::UserRequested);
+        let executor = CanonicalAgentLoopExecutor;
+        let state = LoopExecutionState::initial_for_run(host.run_context());
+
+        let exit = executor
+            .execute_family(&crate::families::default(), &host, state)
+            .await
+            .expect("execute");
+
+        match exit {
+            LoopExit::Cancelled(cancelled) => assert!(cancelled.checkpoint_id.is_none()),
+            other => panic!("expected cancelled, got {other:?}"),
+        }
+        assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
+    }
+
+    #[tokio::test]
+    async fn cancellation_checkpoint_failure_maps_to_failed_for_strict_profile() {
+        let host = MockHost::new(vec![reply_response()])
+            .with_require_final_checkpoint(true)
+            .fail_checkpoint(LoopCheckpointKind::Final);
+        host.request_cancellation(LoopCancelReasonKind::UserRequested);
+        let executor = CanonicalAgentLoopExecutor;
+        let state = LoopExecutionState::initial_for_run(host.run_context());
+
+        let exit = executor
+            .execute_family(&crate::families::default(), &host, state)
+            .await
+            .expect("execute");
+
+        match exit {
+            LoopExit::Failed(failed) => {
+                assert_eq!(failed.reason_kind, LoopFailureKind::CheckpointRejected);
+                assert!(failed.checkpoint_id.is_none());
+            }
+            other => panic!("expected failed, got {other:?}"),
+        }
+        assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
     }
 
     fn reply_response() -> LoopModelResponse {

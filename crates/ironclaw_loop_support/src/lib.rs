@@ -10,6 +10,7 @@ use std::{
     sync::Arc,
 };
 
+mod cancellation_port;
 mod capability_allow_set;
 mod capability_port;
 mod capability_surface_filter;
@@ -18,6 +19,10 @@ mod input_port;
 mod input_queue;
 mod skill_context;
 
+pub use cancellation_port::{
+    AlwaysAliveLoopCancellationPort, AlwaysAliveRunCancellationFactory, RunCancellationFactory,
+    RunCancellationHandle, RunStateLoopCancellationPort,
+};
 pub use capability_allow_set::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
 };

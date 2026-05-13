@@ -21,14 +21,15 @@ use ironclaw_turns::{
         CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage,
         CapabilitySurfaceProfileId, CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId,
         ConcurrencyClass, ConcurrencyHint, ContextProfileId, FinalizeAssistantMessage,
-        LoopCheckpointKind, LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle,
-        LoopContextRequest, LoopDriverId, LoopInput, LoopInputAck, LoopInputAckToken,
-        LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelRequest,
-        LoopModelResponse, LoopProgressEvent, LoopPromptBundle, LoopPromptBundleRef,
-        LoopPromptBundleRequest, LoopRunContext, LoopRunInfoPort, ModelProfileId, ModelStreamChunk,
-        ParentLoopOutput, RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy,
-        ResourceBudgetTier, RunClassId, RunProfileFingerprint, RuntimeProfileConstraints,
-        SchedulingClass, StageCheckpointPayloadRequest, SteeringPolicy, VisibleCapabilityRequest,
+        LoopCancellationPort, LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest,
+        LoopCheckpointStateRef, LoopContextBundle, LoopContextRequest, LoopDriverId, LoopInput,
+        LoopInputAck, LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputCursorToken,
+        LoopModelMessage, LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopPromptBundle,
+        LoopPromptBundleRef, LoopPromptBundleRequest, LoopRunContext, LoopRunInfoPort,
+        ModelProfileId, ModelStreamChunk, ParentLoopOutput, RedactedRunProfileProvenance,
+        ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier, RunClassId,
+        RunProfileFingerprint, RuntimeProfileConstraints, SchedulingClass,
+        StageCheckpointPayloadRequest, SteeringPolicy, VisibleCapabilityRequest,
         VisibleCapabilitySurface,
     },
 };
@@ -715,6 +716,12 @@ impl ironclaw_turns::run_profile::LoopProgressPort for MockAgentLoopDriverHost {
         _event: LoopProgressEvent,
     ) -> Result<(), AgentLoopHostError> {
         Ok(())
+    }
+}
+
+impl LoopCancellationPort for MockAgentLoopDriverHost {
+    fn observe_cancellation(&self) -> Option<LoopCancellationSignal> {
+        None
     }
 }
 
