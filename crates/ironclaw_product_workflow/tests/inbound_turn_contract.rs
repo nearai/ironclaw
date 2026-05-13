@@ -13,8 +13,8 @@ use ironclaw_product_adapters::{
     UserMessagePayload,
 };
 use ironclaw_product_workflow::{
-    DefaultInboundTurnService, FakeConversationBindingService, InboundTurnOutcome,
-    InboundTurnService, ProductWorkflowError,
+    DefaultInboundTurnService, FakeBeforeInboundPolicy, FakeConversationBindingService,
+    InboundTurnOutcome, InboundTurnService, ProductWorkflowError,
 };
 use ironclaw_threads::{
     InMemorySessionThreadService, MessageStatus, SessionThreadService, ThreadHistoryRequest,
@@ -530,4 +530,158 @@ async fn binding_failure_surfaces_workflow_error() {
         err,
         ProductWorkflowError::BindingResolutionFailed { .. }
     ));
+}
+
+#[tokio::test]
+async fn before_inbound_rewrite_stages_rewritten_content_as_accepted_message() {
+    let binding_service = FakeConversationBindingService::new();
+    let thread_service = InMemorySessionThreadService::default();
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let coordinator = DefaultTurnCoordinator::new(store);
+    let policy = Arc::new(FakeBeforeInboundPolicy::new());
+    policy.program_continue(Some("rewritten text".to_string()));
+    let policy_handle = policy.clone();
+    let service =
+        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator)
+            .with_before_inbound_policy(policy);
+
+    let envelope = sample_user_message_envelope_with_text("rewrite-evt", "original text");
+    let outcome = service
+        .accept_user_message(&envelope)
+        .await
+        .expect("submit");
+
+    let binding = match &outcome {
+        InboundTurnOutcome::Submitted { binding, .. } => binding,
+        _ => panic!("expected Submitted, got {outcome:?}"),
+    };
+
+    let history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: ThreadScope {
+                tenant_id: binding.tenant_id.clone(),
+                agent_id: binding.agent_id.clone().expect("agent id"),
+                project_id: binding.project_id.clone(),
+                owner_user_id: Some(binding.user_id.clone()),
+                mission_id: None,
+            },
+            thread_id: binding.thread_id.clone(),
+        })
+        .await
+        .expect("history");
+    assert_eq!(history.messages.len(), 1);
+    assert_eq!(
+        history.messages[0].content.as_deref(),
+        Some("rewritten text"),
+        "BeforeInbound rewrite must replace original text before staging"
+    );
+    assert_eq!(history.messages[0].status, MessageStatus::Submitted);
+    assert!(
+        history.messages[0].turn_run_id.is_some(),
+        "rewritten message must still have been submitted to the coordinator"
+    );
+    assert_eq!(
+        policy_handle.evaluate_count(),
+        1,
+        "BeforeInbound policy must be called exactly once on the new-message path"
+    );
+}
+
+#[tokio::test]
+async fn before_inbound_rejection_creates_no_accepted_message_and_no_run() {
+    let binding_service = FakeConversationBindingService::new();
+    let binding_handle = binding_service.clone();
+    let thread_service = InMemorySessionThreadService::default();
+    let coordinator = ScriptedTurnCoordinator::default();
+    let coordinator_handle = coordinator.clone();
+    let policy = Arc::new(FakeBeforeInboundPolicy::new());
+    policy.program_reject("test policy denied");
+    let policy_handle = policy.clone();
+    let service =
+        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator)
+            .with_before_inbound_policy(policy);
+
+    let envelope = sample_user_message_envelope_with_text("reject-evt", "blocked content");
+    let err = service
+        .accept_user_message(&envelope)
+        .await
+        .expect_err("rejection must surface as an error");
+
+    let ProductWorkflowError::TurnSubmissionRejected { reason } = &err else {
+        panic!("expected TurnSubmissionRejected, got {err:?}");
+    };
+    // `RedactedString` redacts via `Display`; the workflow boundary re-wraps
+    // this string into a fresh `RedactedString` for the adapter-facing ack, so
+    // the placeholder is what the workflow surfaces.
+    assert_eq!(
+        reason, "<redacted>",
+        "rejection reason must be redacted by the time it reaches the workflow error"
+    );
+
+    assert_eq!(
+        binding_handle.resolve_count(),
+        0,
+        "rejection must short-circuit before binding resolution"
+    );
+    assert_eq!(
+        coordinator_handle.submissions().len(),
+        0,
+        "rejection must not call submit_turn"
+    );
+    assert_eq!(
+        policy_handle.evaluate_count(),
+        1,
+        "BeforeInbound policy must be evaluated exactly once before rejection"
+    );
+}
+
+#[tokio::test]
+async fn before_inbound_continue_without_rewrite_passes_text_through() {
+    let binding_service = FakeConversationBindingService::new();
+    let thread_service = InMemorySessionThreadService::default();
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let coordinator = DefaultTurnCoordinator::new(store);
+    // Default fake (no programming) → Continue { rewritten_text: None }.
+    let policy = Arc::new(FakeBeforeInboundPolicy::new());
+    let policy_handle = policy.clone();
+    let service =
+        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator)
+            .with_before_inbound_policy(policy);
+
+    let envelope = sample_user_message_envelope_with_text("passthrough-evt", "verbatim");
+    let outcome = service
+        .accept_user_message(&envelope)
+        .await
+        .expect("submit");
+
+    let binding = match &outcome {
+        InboundTurnOutcome::Submitted { binding, .. } => binding,
+        _ => panic!("expected Submitted, got {outcome:?}"),
+    };
+
+    let history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: ThreadScope {
+                tenant_id: binding.tenant_id.clone(),
+                agent_id: binding.agent_id.clone().expect("agent id"),
+                project_id: binding.project_id.clone(),
+                owner_user_id: Some(binding.user_id.clone()),
+                mission_id: None,
+            },
+            thread_id: binding.thread_id.clone(),
+        })
+        .await
+        .expect("history");
+    assert_eq!(history.messages.len(), 1);
+    assert_eq!(
+        history.messages[0].content.as_deref(),
+        Some("verbatim"),
+        "Continue with no rewrite must pass original text through unchanged"
+    );
+    assert_eq!(history.messages[0].status, MessageStatus::Submitted);
+    assert_eq!(
+        policy_handle.evaluate_count(),
+        1,
+        "BeforeInbound policy must still be evaluated when it returns Continue"
+    );
 }

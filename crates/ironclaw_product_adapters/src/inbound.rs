@@ -21,6 +21,10 @@ const ACTION_ID_MAX_BYTES: usize = 512;
 const ACTION_DATA_MAX_BYTES: usize = 16 * 1024;
 const INTERACTION_REF_MAX_BYTES: usize = 512;
 const CREDENTIAL_REF_MAX_BYTES: usize = 512;
+const MISSION_INTENT_MAX_BYTES: usize = 128;
+const SYSTEM_ACTOR_REF_MAX_BYTES: usize = 256;
+const SYSTEM_ACTION_KIND_MAX_BYTES: usize = 128;
+const PRODUCT_COMMAND_NAME_MAX_BYTES: usize = 256;
 
 fn malformed(reason: impl Into<String>) -> ProductAdapterError {
     ProductAdapterError::MalformedInboundPayload {
@@ -354,6 +358,126 @@ impl<'de> Deserialize<'de> for LinkedThreadActionPayload {
     }
 }
 
+/// Typed mission-action inbound payload. Carries an explicit intent (e.g.
+/// `"fire"`, `"cancel"`, `"status"`), an optional explicit mission id hint,
+/// and optional per-intent data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MissionActionPayload {
+    pub mission_intent: String,
+    pub mission_id_hint: Option<String>,
+    pub data: Option<String>,
+}
+
+impl MissionActionPayload {
+    pub fn new(
+        mission_intent: impl Into<String>,
+        mission_id_hint: Option<String>,
+        data: Option<String>,
+    ) -> Result<Self, ProductAdapterError> {
+        let mission_intent = mission_intent.into();
+        validate_token_string("mission intent", &mission_intent, MISSION_INTENT_MAX_BYTES)?;
+        if let Some(hint) = &mission_id_hint {
+            validate_token_string("mission id hint", hint, INTERACTION_REF_MAX_BYTES)?;
+        }
+        if let Some(data) = &data {
+            validate_payload_string("mission action data", data, ACTION_DATA_MAX_BYTES)?;
+        }
+        Ok(Self {
+            mission_intent,
+            mission_id_hint,
+            data,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct MissionActionPayloadWire {
+    mission_intent: String,
+    mission_id_hint: Option<String>,
+    data: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for MissionActionPayload {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = MissionActionPayloadWire::deserialize(deserializer)?;
+        Self::new(wire.mission_intent, wire.mission_id_hint, wire.data)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// Typed system-action inbound payload. Requires an accountable system actor
+/// identity and a typed action kind. **Intentionally has no `is_internal`
+/// or boolean bypass flag**: every system action must name an actor and a
+/// scope so it can be audited downstream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SystemActionPayload {
+    pub system_actor_ref: String,
+    pub kind: String,
+    pub scope_thread_id: Option<String>,
+    pub data: Option<String>,
+}
+
+impl SystemActionPayload {
+    pub fn new(
+        system_actor_ref: impl Into<String>,
+        kind: impl Into<String>,
+        scope_thread_id: Option<String>,
+        data: Option<String>,
+    ) -> Result<Self, ProductAdapterError> {
+        let system_actor_ref = system_actor_ref.into();
+        let kind = kind.into();
+        validate_token_string(
+            "system actor ref",
+            &system_actor_ref,
+            SYSTEM_ACTOR_REF_MAX_BYTES,
+        )?;
+        validate_token_string("system action kind", &kind, SYSTEM_ACTION_KIND_MAX_BYTES)?;
+        if let Some(scope) = &scope_thread_id {
+            validate_token_string(
+                "system action scope thread",
+                scope,
+                INTERACTION_REF_MAX_BYTES,
+            )?;
+        }
+        if let Some(data) = &data {
+            validate_payload_string("system action data", data, ACTION_DATA_MAX_BYTES)?;
+        }
+        Ok(Self {
+            system_actor_ref,
+            kind,
+            scope_thread_id,
+            data,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct SystemActionPayloadWire {
+    system_actor_ref: String,
+    kind: String,
+    scope_thread_id: Option<String>,
+    data: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for SystemActionPayload {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = SystemActionPayloadWire::deserialize(deserializer)?;
+        Self::new(
+            wire.system_actor_ref,
+            wire.kind,
+            wire.scope_thread_id,
+            wire.data,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProductInboundPayload {
@@ -363,6 +487,8 @@ pub enum ProductInboundPayload {
     AuthResolution(AuthResolutionPayload),
     SubscriptionRequest(ProjectionSubscriptionPayload),
     LinkedThreadAction(LinkedThreadActionPayload),
+    MissionAction(MissionActionPayload),
+    SystemAction(SystemActionPayload),
     NoOp,
 }
 
@@ -543,6 +669,104 @@ pub enum InboundRetryDisposition {
     ReplayPrior,
 }
 
+/// Stable handle to a durable mission-fire record.
+///
+/// `ironclaw_product_adapters` is below `ironclaw_product_workflow` in the
+/// dependency graph, so the workflow crate cannot be imported here. The
+/// workflow crate uses its own richer type and converts to/from this
+/// wire-stable wrapper when staging acks across the boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct MissionFireRef(uuid::Uuid);
+
+impl MissionFireRef {
+    pub fn new() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+
+    pub fn from_uuid(uuid: uuid::Uuid) -> Self {
+        Self(uuid)
+    }
+
+    pub fn as_uuid(&self) -> uuid::Uuid {
+        self.0
+    }
+}
+
+impl Default for MissionFireRef {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Reason a mission fire was suppressed pre-submit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MissionFireSuppressionReason {
+    Cadence,
+    Cooldown,
+    Deduplicated,
+    BusyThread,
+}
+
+/// Typed gate ref used by [`ProductInboundAck::GateHandled`]. Wire-stable
+/// wrapper over a bounded string; adapters do not need to dereference it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LoopGateRef(String);
+
+impl LoopGateRef {
+    pub fn new(value: impl Into<String>) -> Result<Self, ProductAdapterError> {
+        let value = value.into();
+        validate_token_string("loop gate ref", &value, INTERACTION_REF_MAX_BYTES)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Typed command name. Wire-stable wrapper. The product_workflow crate has a
+/// stricter token type; this one only validates that the name passes the same
+/// bounded-token rules so acks can serialize.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ProductCommandName(String);
+
+impl ProductCommandName {
+    pub fn new(value: impl Into<String>) -> Result<Self, ProductAdapterError> {
+        let value = value.into();
+        validate_token_string(
+            "product command name",
+            &value,
+            PRODUCT_COMMAND_NAME_MAX_BYTES,
+        )?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Typed linked thread action id. Wire-stable wrapper.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LinkedThreadActionId(String);
+
+impl LinkedThreadActionId {
+    pub fn new(value: impl Into<String>) -> Result<Self, ProductAdapterError> {
+        let value = value.into();
+        validate_token_string("linked thread action id", &value, INTERACTION_REF_MAX_BYTES)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProductInboundAck {
@@ -553,6 +777,23 @@ pub enum ProductInboundAck {
     DeferredBusy {
         accepted_message_ref: AcceptedMessageRef,
         active_run_id: TurnRunId,
+    },
+    CommandRouted {
+        command: ProductCommandName,
+    },
+    GateHandled {
+        gate_ref: LoopGateRef,
+    },
+    LinkedThreadActionRouted {
+        action_id: LinkedThreadActionId,
+    },
+    MissionSubmitted {
+        mission_fire_ref: MissionFireRef,
+        submitted_run_id: TurnRunId,
+    },
+    MissionSuppressed {
+        mission_fire_ref: MissionFireRef,
+        reason: MissionFireSuppressionReason,
     },
     Rejected(ProductRejection),
     Duplicate {
@@ -567,7 +808,12 @@ impl ProductInboundAck {
             Self::Accepted { .. }
             | Self::DeferredBusy { .. }
             | Self::Duplicate { .. }
-            | Self::NoOp => true,
+            | Self::NoOp
+            | Self::CommandRouted { .. }
+            | Self::GateHandled { .. }
+            | Self::LinkedThreadActionRouted { .. }
+            | Self::MissionSubmitted { .. }
+            | Self::MissionSuppressed { .. } => true,
             Self::Rejected(rejection) => {
                 rejection.disposition == ProductRejectionDisposition::Permanent
             }
@@ -702,5 +948,271 @@ mod tests {
             .retry_disposition(),
             InboundRetryDisposition::ReplayPrior
         );
+    }
+
+    #[test]
+    fn new_ack_variants_are_durable_and_do_not_retry() {
+        let command_routed = ProductInboundAck::CommandRouted {
+            command: ProductCommandName::new("ping").expect("valid"),
+        };
+        assert!(command_routed.is_durable_outcome());
+        assert_eq!(
+            command_routed.retry_disposition(),
+            InboundRetryDisposition::DoNotRetry
+        );
+
+        let gate_handled = ProductInboundAck::GateHandled {
+            gate_ref: LoopGateRef::new("gate-1").expect("valid"),
+        };
+        assert!(gate_handled.is_durable_outcome());
+        assert_eq!(
+            gate_handled.retry_disposition(),
+            InboundRetryDisposition::DoNotRetry
+        );
+
+        let linked_routed = ProductInboundAck::LinkedThreadActionRouted {
+            action_id: LinkedThreadActionId::new("act-1").expect("valid"),
+        };
+        assert!(linked_routed.is_durable_outcome());
+        assert_eq!(
+            linked_routed.retry_disposition(),
+            InboundRetryDisposition::DoNotRetry
+        );
+
+        let mission_submitted = ProductInboundAck::MissionSubmitted {
+            mission_fire_ref: MissionFireRef::new(),
+            submitted_run_id: TurnRunId::new(),
+        };
+        assert!(mission_submitted.is_durable_outcome());
+        assert_eq!(
+            mission_submitted.retry_disposition(),
+            InboundRetryDisposition::DoNotRetry
+        );
+
+        let mission_suppressed = ProductInboundAck::MissionSuppressed {
+            mission_fire_ref: MissionFireRef::new(),
+            reason: MissionFireSuppressionReason::Cadence,
+        };
+        assert!(mission_suppressed.is_durable_outcome());
+        assert_eq!(
+            mission_suppressed.retry_disposition(),
+            InboundRetryDisposition::DoNotRetry
+        );
+    }
+
+    // ---------- MissionActionPayload ----------
+
+    #[test]
+    fn mission_action_payload_accepts_valid_input() {
+        let payload = MissionActionPayload::new(
+            "fire",
+            Some("mission-42".to_string()),
+            Some("{\"reason\":\"manual\"}".to_string()),
+        )
+        .expect("valid");
+        assert_eq!(payload.mission_intent, "fire");
+        assert_eq!(payload.mission_id_hint.as_deref(), Some("mission-42"));
+        assert_eq!(payload.data.as_deref(), Some("{\"reason\":\"manual\"}"));
+    }
+
+    #[test]
+    fn mission_action_payload_rejects_empty_intent() {
+        assert!(MissionActionPayload::new("", None, None).is_err());
+    }
+
+    #[test]
+    fn mission_action_payload_rejects_oversized_intent() {
+        let oversize = "a".repeat(MISSION_INTENT_MAX_BYTES + 1);
+        assert!(MissionActionPayload::new(oversize, None, None).is_err());
+    }
+
+    #[test]
+    fn mission_action_payload_rejects_oversized_hint() {
+        let oversize = "h".repeat(INTERACTION_REF_MAX_BYTES + 1);
+        assert!(MissionActionPayload::new("fire", Some(oversize), None).is_err());
+    }
+
+    #[test]
+    fn mission_action_payload_rejects_oversized_data() {
+        let oversize = "d".repeat(ACTION_DATA_MAX_BYTES + 1);
+        assert!(MissionActionPayload::new("fire", None, Some(oversize)).is_err());
+    }
+
+    #[test]
+    fn mission_action_payload_rejects_control_chars() {
+        assert!(MissionActionPayload::new("fire\u{0007}", None, None).is_err());
+        assert!(MissionActionPayload::new("fire", Some("hint\u{0001}".to_string()), None).is_err());
+    }
+
+    #[test]
+    fn mission_action_payload_bounds_are_enforced_through_serde() {
+        let forged = serde_json::json!({
+            "mission_intent": "a".repeat(MISSION_INTENT_MAX_BYTES + 1),
+            "mission_id_hint": null,
+            "data": null,
+        });
+        assert!(serde_json::from_value::<MissionActionPayload>(forged).is_err());
+
+        let empty = serde_json::json!({
+            "mission_intent": "",
+            "mission_id_hint": null,
+            "data": null,
+        });
+        assert!(serde_json::from_value::<MissionActionPayload>(empty).is_err());
+
+        let ok = serde_json::json!({
+            "mission_intent": "fire",
+            "mission_id_hint": "m-1",
+            "data": "{}",
+        });
+        let parsed: MissionActionPayload = serde_json::from_value(ok).expect("valid");
+        assert_eq!(parsed.mission_intent, "fire");
+    }
+
+    // ---------- SystemActionPayload ----------
+
+    #[test]
+    fn system_action_payload_accepts_valid_input() {
+        let payload = SystemActionPayload::new(
+            "system:heartbeat",
+            "heartbeat_tick",
+            Some("thread-1".to_string()),
+            Some("{}".to_string()),
+        )
+        .expect("valid");
+        assert_eq!(payload.system_actor_ref, "system:heartbeat");
+        assert_eq!(payload.kind, "heartbeat_tick");
+        assert_eq!(payload.scope_thread_id.as_deref(), Some("thread-1"));
+        assert_eq!(payload.data.as_deref(), Some("{}"));
+    }
+
+    #[test]
+    fn system_action_payload_rejects_empty_actor() {
+        assert!(SystemActionPayload::new("", "heartbeat_tick", None, None).is_err());
+    }
+
+    #[test]
+    fn system_action_payload_rejects_empty_kind() {
+        assert!(SystemActionPayload::new("system:heartbeat", "", None, None).is_err());
+    }
+
+    #[test]
+    fn system_action_payload_rejects_oversized_actor() {
+        let oversize = "a".repeat(SYSTEM_ACTOR_REF_MAX_BYTES + 1);
+        assert!(SystemActionPayload::new(oversize, "heartbeat_tick", None, None).is_err());
+    }
+
+    #[test]
+    fn system_action_payload_rejects_oversized_kind() {
+        let oversize = "k".repeat(SYSTEM_ACTION_KIND_MAX_BYTES + 1);
+        assert!(SystemActionPayload::new("system:heartbeat", oversize, None, None).is_err());
+    }
+
+    #[test]
+    fn system_action_payload_rejects_oversized_scope() {
+        let oversize = "s".repeat(INTERACTION_REF_MAX_BYTES + 1);
+        assert!(
+            SystemActionPayload::new("system:heartbeat", "heartbeat_tick", Some(oversize), None,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn system_action_payload_rejects_oversized_data() {
+        let oversize = "d".repeat(ACTION_DATA_MAX_BYTES + 1);
+        assert!(
+            SystemActionPayload::new("system:heartbeat", "heartbeat_tick", None, Some(oversize),)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn system_action_payload_rejects_control_chars() {
+        assert!(SystemActionPayload::new("system\u{0007}", "heartbeat_tick", None, None).is_err());
+        assert!(SystemActionPayload::new("system:heartbeat", "kind\u{0001}", None, None).is_err());
+    }
+
+    #[test]
+    fn system_action_payload_bounds_are_enforced_through_serde() {
+        let forged = serde_json::json!({
+            "system_actor_ref": "a".repeat(SYSTEM_ACTOR_REF_MAX_BYTES + 1),
+            "kind": "heartbeat_tick",
+            "scope_thread_id": null,
+            "data": null,
+        });
+        assert!(serde_json::from_value::<SystemActionPayload>(forged).is_err());
+
+        let empty_actor = serde_json::json!({
+            "system_actor_ref": "",
+            "kind": "heartbeat_tick",
+            "scope_thread_id": null,
+            "data": null,
+        });
+        assert!(serde_json::from_value::<SystemActionPayload>(empty_actor).is_err());
+
+        let ok = serde_json::json!({
+            "system_actor_ref": "system:heartbeat",
+            "kind": "heartbeat_tick",
+            "scope_thread_id": "thread-1",
+            "data": "{}",
+        });
+        let parsed: SystemActionPayload = serde_json::from_value(ok).expect("valid");
+        assert_eq!(parsed.kind, "heartbeat_tick");
+    }
+
+    // ---------- Wire-stable typed wrappers ----------
+
+    #[test]
+    fn mission_fire_ref_round_trips_through_serde() {
+        let id = uuid::Uuid::new_v4();
+        let mission = MissionFireRef::from_uuid(id);
+        assert_eq!(mission.as_uuid(), id);
+        let json = serde_json::to_value(&mission).expect("serialize");
+        let round: MissionFireRef = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(round, mission);
+        // Default constructs a fresh uuid.
+        let _fresh = MissionFireRef::default();
+    }
+
+    #[test]
+    fn mission_fire_suppression_reason_serializes_snake_case() {
+        let v = serde_json::to_value(MissionFireSuppressionReason::BusyThread).expect("ok");
+        assert_eq!(v, serde_json::json!("busy_thread"));
+        let parsed: MissionFireSuppressionReason =
+            serde_json::from_value(serde_json::json!("deduplicated")).expect("ok");
+        assert_eq!(parsed, MissionFireSuppressionReason::Deduplicated);
+    }
+
+    #[test]
+    fn loop_gate_ref_validates_and_round_trips() {
+        let gate = LoopGateRef::new("gate-abc").expect("valid");
+        assert_eq!(gate.as_str(), "gate-abc");
+        let json = serde_json::to_value(&gate).expect("ok");
+        let round: LoopGateRef = serde_json::from_value(json).expect("ok");
+        assert_eq!(round, gate);
+        assert!(LoopGateRef::new("").is_err());
+        assert!(LoopGateRef::new("a".repeat(INTERACTION_REF_MAX_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn product_command_name_validates_and_round_trips() {
+        let cmd = ProductCommandName::new("ping").expect("valid");
+        assert_eq!(cmd.as_str(), "ping");
+        let json = serde_json::to_value(&cmd).expect("ok");
+        let round: ProductCommandName = serde_json::from_value(json).expect("ok");
+        assert_eq!(round, cmd);
+        assert!(ProductCommandName::new("").is_err());
+        assert!(ProductCommandName::new("a".repeat(PRODUCT_COMMAND_NAME_MAX_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn linked_thread_action_id_validates_and_round_trips() {
+        let id = LinkedThreadActionId::new("act-1").expect("valid");
+        assert_eq!(id.as_str(), "act-1");
+        let json = serde_json::to_value(&id).expect("ok");
+        let round: LinkedThreadActionId = serde_json::from_value(json).expect("ok");
+        assert_eq!(round, id);
+        assert!(LinkedThreadActionId::new("").is_err());
+        assert!(LinkedThreadActionId::new("a".repeat(INTERACTION_REF_MAX_BYTES + 1)).is_err());
     }
 }

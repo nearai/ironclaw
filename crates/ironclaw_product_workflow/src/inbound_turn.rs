@@ -4,6 +4,8 @@
 //! resolves the conversation binding, accepts the inbound message into the
 //! session thread, and submits the turn to the coordinator.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::UserId;
@@ -22,6 +24,7 @@ use uuid::Uuid;
 
 use crate::binding::{ConversationBindingService, ResolveBindingRequest, ResolvedBinding};
 use crate::error::ProductWorkflowError;
+use crate::services::{BeforeInboundOutcome, BeforeInboundPolicy, BeforeInboundRequest};
 
 /// Result of the inbound turn submission flow.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +87,7 @@ pub struct DefaultInboundTurnService<B, T, C> {
     binding_service: B,
     thread_service: T,
     turn_coordinator: C,
+    before_inbound_policy: Option<Arc<dyn BeforeInboundPolicy>>,
 }
 
 impl<B, T, C> DefaultInboundTurnService<B, T, C>
@@ -97,7 +101,17 @@ where
             binding_service,
             thread_service,
             turn_coordinator,
+            before_inbound_policy: None,
         }
+    }
+
+    /// Attach a [`BeforeInboundPolicy`] that evaluates each new inbound user
+    /// message before it is staged into the session thread service. The hook
+    /// only runs on the genuine new-message path; replay paths bypass it
+    /// because the rewrite/reject decision was recorded on the first run.
+    pub fn with_before_inbound_policy(mut self, policy: Arc<dyn BeforeInboundPolicy>) -> Self {
+        self.before_inbound_policy = Some(policy);
+        self
     }
 }
 
@@ -141,6 +155,43 @@ where
             .await;
         }
 
+        // BeforeInbound hook fires only on the genuine new-message path. The
+        // replay branch above bypasses it because rewrite/reject decisions are
+        // recorded on the first run; replays must produce the same outcome
+        // without re-evaluating the policy.
+        let payload_text = if let Some(policy) = self.before_inbound_policy.as_ref() {
+            let request = BeforeInboundRequest {
+                adapter_id: envelope.adapter_id().clone(),
+                installation_id: envelope.installation_id().clone(),
+                external_event_id: envelope.external_event_id().clone(),
+                external_actor_ref: envelope.external_actor_ref().clone(),
+                external_conversation_ref: envelope.external_conversation_ref().clone(),
+                received_at: envelope.received_at(),
+                original_text: payload.text.clone(),
+                trigger: payload.trigger,
+            };
+            match policy.evaluate_inbound(request).await? {
+                BeforeInboundOutcome::Continue {
+                    rewritten_text: Some(new),
+                } => new,
+                BeforeInboundOutcome::Continue {
+                    rewritten_text: None,
+                } => payload.text.clone(),
+                BeforeInboundOutcome::Reject { reason } => {
+                    // `RedactedString` only exposes its inner value through
+                    // `Display`, which emits the redaction placeholder; the
+                    // workflow boundary re-wraps `TurnSubmissionRejected` into
+                    // a redacted permanent `Rejected` ack anyway, so the
+                    // placeholder text is what reaches the adapter.
+                    return Err(ProductWorkflowError::TurnSubmissionRejected {
+                        reason: reason.to_string(),
+                    });
+                }
+            }
+        } else {
+            payload.text.clone()
+        };
+
         let binding = self
             .binding_service
             .resolve_binding(ResolveBindingRequest {
@@ -176,7 +227,7 @@ where
                 source_binding_id: Some(source_binding_id.clone()),
                 reply_target_binding_id: Some(reply_target_binding_id.clone()),
                 external_event_id: Some(envelope.external_event_id().as_str().to_string()),
-                content: MessageContent::text(payload.text.clone()),
+                content: MessageContent::text(payload_text),
             })
             .await
             .map_err(|e| ProductWorkflowError::Transient {
