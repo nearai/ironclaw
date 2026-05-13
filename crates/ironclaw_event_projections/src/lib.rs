@@ -197,6 +197,9 @@ pub enum TimelineEntryKind {
     ProcessCompleted,
     ProcessFailed,
     ProcessKilled,
+    HookDispatched,
+    HookDecisionEmitted,
+    HookFailed,
 }
 
 impl From<RuntimeEventKind> for TimelineEntryKind {
@@ -216,6 +219,9 @@ impl From<RuntimeEventKind> for TimelineEntryKind {
             RuntimeEventKind::ProcessCompleted => Self::ProcessCompleted,
             RuntimeEventKind::ProcessFailed => Self::ProcessFailed,
             RuntimeEventKind::ProcessKilled => Self::ProcessKilled,
+            RuntimeEventKind::HookDispatched => Self::HookDispatched,
+            RuntimeEventKind::HookDecisionEmitted => Self::HookDecisionEmitted,
+            RuntimeEventKind::HookFailed => Self::HookFailed,
         }
     }
 }
@@ -1657,6 +1663,15 @@ fn run_status_for_event(
         | RuntimeEventKind::LoopFailed
         | RuntimeEventKind::ProcessFailed => RunProjectionStatus::Failed,
         RuntimeEventKind::ProcessKilled => RunProjectionStatus::Killed,
+        // Hook events are pure observability telemetry. They never change the
+        // run's lifecycle status — a hook firing or even failing inside the
+        // dispatcher does not by itself end the run (capability/model/process
+        // events do). Preserve the current status, defaulting to `Running` for
+        // the boundary case where the first event seen for a run is a hook
+        // milestone.
+        RuntimeEventKind::HookDispatched
+        | RuntimeEventKind::HookDecisionEmitted
+        | RuntimeEventKind::HookFailed => current_status.unwrap_or(RunProjectionStatus::Running),
     }
 }
 
