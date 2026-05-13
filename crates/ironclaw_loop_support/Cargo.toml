@@ -12,6 +12,8 @@ publish = false
 
 [dependencies]
 async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+parking_lot = "0.12"
 tracing = "0.1"
 tokio = { version = "1", features = ["sync"] }
 ironclaw_skills = { path = "../ironclaw_skills", version = "0.3.0", default-features = false }

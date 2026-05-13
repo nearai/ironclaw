@@ -548,6 +548,12 @@ impl ironclaw_turns::run_profile::LoopProgressPort for StubHost {
     }
 }
 
+impl ironclaw_turns::run_profile::LoopCancellationPort for StubHost {
+    fn observe_cancellation(&self) -> Option<ironclaw_turns::run_profile::LoopCancellationSignal> {
+        None
+    }
+}
+
 // ─── Mock host factory ──────────────────────────────────────────────────────
 
 struct MockHostFactory;

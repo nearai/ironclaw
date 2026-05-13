@@ -25,5 +25,6 @@ serde_jcs = "0.2"
 thiserror = "2"
 
 [dev-dependencies]
+chrono = "0.4"
 futures = "0.3"
 tokio = { version = "1", features = ["macros", "rt"] }

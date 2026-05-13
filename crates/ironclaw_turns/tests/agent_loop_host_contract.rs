@@ -22,17 +22,18 @@ use ironclaw_turns::{
         FinalizeAssistantMessage, HostManagedLoopModelPort, HostManagedLoopPromptPort,
         InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
         InstructionBundleBuilder, InstructionBundleFingerprint, InstructionBundleRequest,
-        InstructionSafetyContext, LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort,
-        LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle, LoopContextMessage,
-        LoopContextPort, LoopContextRequest, LoopContextSnippet, LoopContextSnippetMetadata,
-        LoopDriverId, LoopDriverNoteKind, LoopHostMilestone, LoopHostMilestoneEmitter,
-        LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputBatch, LoopInputCursor,
-        LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant, LoopModelGateway,
-        LoopModelGatewayError, LoopModelGatewayRequest, LoopModelMessage, LoopModelPolicyGuard,
-        LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort,
-        LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort,
-        LoopRunContext, LoopRunInfoPort, LoopTranscriptPort, ModelCallOutcome, ParentLoopOutput,
-        PromptMode, PromptSkillContextMetadata, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        InstructionSafetyContext, LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort,
+        LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef,
+        LoopContextBundle, LoopContextMessage, LoopContextPort, LoopContextRequest,
+        LoopContextSnippet, LoopContextSnippetMetadata, LoopDriverId, LoopDriverNoteKind,
+        LoopHostMilestone, LoopHostMilestoneEmitter, LoopHostMilestoneKind, LoopHostMilestoneSink,
+        LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopInputPort,
+        LoopModelBudgetAccountant, LoopModelGateway, LoopModelGatewayError,
+        LoopModelGatewayRequest, LoopModelMessage, LoopModelPolicyGuard, LoopModelPort,
+        LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
+        LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
+        LoopRunInfoPort, LoopTranscriptPort, ModelCallOutcome, ParentLoopOutput, PromptMode,
+        PromptSkillContextMetadata, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::{ClaimRunRequest, TurnRunTransitionPort},
 };
@@ -2077,6 +2078,12 @@ impl LoopProgressPort for RecordingAgentLoopHost {
     async fn emit_loop_progress(&self, event: LoopProgressEvent) -> Result<(), AgentLoopHostError> {
         self.record(format!("progress:{}", event.kind_name()));
         Ok(())
+    }
+}
+
+impl LoopCancellationPort for RecordingAgentLoopHost {
+    fn observe_cancellation(&self) -> Option<LoopCancellationSignal> {
+        None
     }
 }
 

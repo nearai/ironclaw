@@ -9,8 +9,13 @@ use std::{
     sync::Arc,
 };
 
+mod cancellation_port;
 mod skill_context;
 
+pub use cancellation_port::{
+    AlwaysAliveLoopCancellationPort, AlwaysAliveRunCancellationFactory, RunCancellationFactory,
+    RunCancellationHandle, RunStateLoopCancellationPort,
+};
 pub use skill_context::{
     HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
     build_skill_run_snapshot,
