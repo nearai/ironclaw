@@ -1,50 +1,33 @@
 use std::sync::{Arc, Mutex};
 
-use ironclaw_dispatcher::{RuntimeAdapter, RuntimeDispatcher};
-use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage};
-use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::*;
 use ironclaw_resources::*;
-use ironclaw_scripts::ScriptRuntimeAdapter as LaneScriptRuntimeAdapter;
 use ironclaw_scripts::*;
 use serde_json::json;
 
 #[test]
-fn script_lane_exports_dispatch_adapter() {
-    let backend = RecordingScriptBackend::success(ScriptBackendOutput {
-        exit_code: 0,
-        stdout: br#"{\"message\":\"script ok\"}"#.to_vec(),
-        stderr: Vec::new(),
-        wall_clock_ms: 11,
-    });
-    let runtime = ScriptRuntime::new(ScriptRuntimeConfig::for_testing(), backend);
-    let _adapter = LaneScriptRuntimeAdapter::from_executor(Arc::new(runtime));
-}
-
-#[tokio::test]
-async fn script_lane_dispatches_manifest_command_and_reconciles_through_dispatcher() {
+fn script_lane_executes_manifest_command_and_reconciles_resources() {
     let backend = RecordingScriptBackend::success(ScriptBackendOutput {
         exit_code: 0,
         stdout: br#"{"message":"script ok"}"#.to_vec(),
         stderr: Vec::new(),
         wall_clock_ms: 11,
     });
-    let adapter = script_runtime_adapter(backend.clone());
-    let (dispatcher, governor, events, account) = dispatcher_with_script_adapter(adapter);
+    let runtime = ScriptRuntime::new(ScriptRuntimeConfig::for_testing(), backend.clone());
+    let (governor, account) = script_governor();
 
-    let result = dispatcher
-        .dispatch_json(dispatch_request(
-            json!({"message":"hello", "command":"ignored"}),
-        ))
-        .await
+    let result = runtime
+        .execute_extension_json(
+            &governor,
+            script_request(json!({"message":"hello", "command":"ignored"})),
+        )
         .unwrap();
 
-    assert_eq!(result.runtime, RuntimeKind::Script);
-    assert_eq!(result.output, json!({"message":"script ok"}));
+    assert_eq!(result.result.output, json!({"message":"script ok"}));
     assert_eq!(result.receipt.status, ReservationStatus::Reconciled);
-    assert_eq!(result.usage.process_count, 1);
-    assert_eq!(result.usage.wall_clock_ms, 11);
+    assert_eq!(result.result.usage.process_count, 1);
+    assert_eq!(result.result.usage.wall_clock_ms, 11);
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
     assert!(governor.usage_for(&account).output_bytes > 0);
 
@@ -56,96 +39,46 @@ async fn script_lane_dispatches_manifest_command_and_reconciles_through_dispatch
     assert_eq!(requests[0].args, vec!["--json".to_string()]);
     let stdin_json: serde_json::Value = serde_json::from_str(&requests[0].stdin_json).unwrap();
     assert_eq!(stdin_json, json!({"message":"hello", "command":"ignored"}));
-
-    assert_event_kinds(
-        &events,
-        &[
-            RuntimeEventKind::DispatchRequested,
-            RuntimeEventKind::RuntimeSelected,
-            RuntimeEventKind::DispatchSucceeded,
-        ],
-    );
 }
 
-#[tokio::test]
-async fn script_lane_nonzero_exit_releases_reservation_and_emits_sanitized_failure() {
+#[test]
+fn script_lane_nonzero_exit_releases_reservation() {
     let backend = RecordingScriptBackend::success(ScriptBackendOutput {
         exit_code: 2,
         stdout: Vec::new(),
         stderr: b"raw backend detail".to_vec(),
         wall_clock_ms: 3,
     });
-    let adapter = script_runtime_adapter(backend);
-    let (dispatcher, governor, events, account) = dispatcher_with_script_adapter(adapter);
+    let runtime = ScriptRuntime::new(ScriptRuntimeConfig::for_testing(), backend);
+    let (governor, account) = script_governor();
 
-    let err = dispatcher
-        .dispatch_json(dispatch_request(json!({"message":"fail"})))
-        .await
+    let err = runtime
+        .execute_extension_json(&governor, script_request(json!({"message":"fail"})))
         .unwrap_err();
 
-    assert!(matches!(
-        err,
-        DispatchError::Script {
-            kind: RuntimeDispatchErrorKind::ExitFailure
-        }
-    ));
+    assert!(matches!(err, ScriptError::ExitFailure { code: 2, .. }));
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
     assert_eq!(governor.usage_for(&account), ResourceTally::default());
-    assert_event_kinds(
-        &events,
-        &[
-            RuntimeEventKind::DispatchRequested,
-            RuntimeEventKind::RuntimeSelected,
-            RuntimeEventKind::DispatchFailed,
-        ],
-    );
-    let recorded = events.events();
-    assert_eq!(recorded[2].error_kind.as_deref(), Some("exit_failure"));
 }
 
-#[tokio::test]
-async fn script_lane_invalid_json_releases_reservation_and_emits_output_decode_failure() {
+#[test]
+fn script_lane_invalid_json_releases_reservation() {
     let backend = RecordingScriptBackend::success(ScriptBackendOutput {
         exit_code: 0,
         stdout: b"not-json".to_vec(),
         stderr: Vec::new(),
         wall_clock_ms: 3,
     });
-    let adapter = script_runtime_adapter(backend);
-    let (dispatcher, governor, events, account) = dispatcher_with_script_adapter(adapter);
+    let runtime = ScriptRuntime::new(ScriptRuntimeConfig::for_testing(), backend);
+    let (governor, account) = script_governor();
 
-    let err = dispatcher
-        .dispatch_json(dispatch_request(json!({"message":"bad-json"})))
-        .await
+    let err = runtime
+        .execute_extension_json(&governor, script_request(json!({"message":"bad-json"})))
         .unwrap_err();
 
-    assert!(matches!(
-        err,
-        DispatchError::Script {
-            kind: RuntimeDispatchErrorKind::OutputDecode
-        }
-    ));
+    assert!(matches!(err, ScriptError::InvalidOutput { .. }));
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
     assert_eq!(governor.usage_for(&account), ResourceTally::default());
-    assert_event_kinds(
-        &events,
-        &[
-            RuntimeEventKind::DispatchRequested,
-            RuntimeEventKind::RuntimeSelected,
-            RuntimeEventKind::DispatchFailed,
-        ],
-    );
-    let recorded = events.events();
-    assert_eq!(recorded[2].error_kind.as_deref(), Some("output_decode"));
-}
-
-fn script_runtime_adapter<B>(backend: B) -> Arc<LaneScriptRuntimeAdapter>
-where
-    B: ScriptBackend + 'static,
-{
-    Arc::new(LaneScriptRuntimeAdapter::from_executor(Arc::new(
-        ScriptRuntime::new(ScriptRuntimeConfig::for_testing(), backend),
-    )))
 }
 
 #[derive(Clone)]
@@ -174,49 +107,16 @@ impl ScriptBackend for RecordingScriptBackend {
     }
 }
 
-fn dispatcher_with_script_adapter<T>(
-    adapter: Arc<T>,
-) -> (
-    RuntimeDispatcher<'static, LocalFilesystem, InMemoryResourceGovernor>,
-    Arc<InMemoryResourceGovernor>,
-    InMemoryEventSink,
-    ResourceAccount,
-)
-where
-    T: RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> + 'static,
-{
+fn script_governor() -> (InMemoryResourceGovernor, ResourceAccount) {
     let account = sample_account();
-    let registry = Arc::new(registry_with_package(SCRIPT_MANIFEST));
-    let filesystem = Arc::new(mounted_empty_extension_root());
-    let governor = Arc::new(governor_with_default_limit(account.clone()));
-    let events = InMemoryEventSink::new();
-    let dispatcher = RuntimeDispatcher::from_arcs(registry, filesystem, Arc::clone(&governor))
-        .with_runtime_adapter_arc(RuntimeKind::Script, adapter)
-        .with_event_sink_arc(Arc::new(events.clone()));
-    (dispatcher, governor, events, account)
-}
-
-fn registry_with_package(manifest: &str) -> ironclaw_extensions::ExtensionRegistry {
-    let mut registry = ironclaw_extensions::ExtensionRegistry::new();
-    registry.insert(package_from_manifest(manifest)).unwrap();
-    registry
+    let governor = governor_with_default_limit(account.clone());
+    (governor, account)
 }
 
 fn package_from_manifest(manifest: &str) -> ExtensionPackage {
     let manifest = ExtensionManifest::parse(manifest).unwrap();
     let root = VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
     ExtensionPackage::from_manifest(manifest, root).unwrap()
-}
-
-fn mounted_empty_extension_root() -> LocalFilesystem {
-    let storage = tempfile::tempdir().unwrap().keep();
-    let mut fs = LocalFilesystem::new();
-    fs.mount_local(
-        VirtualPath::new("/system/extensions").unwrap(),
-        HostPath::from_path_buf(storage),
-    )
-    .unwrap();
-    fs
 }
 
 fn governor_with_default_limit(account: ResourceAccount) -> InMemoryResourceGovernor {
@@ -235,9 +135,12 @@ fn governor_with_default_limit(account: ResourceAccount) -> InMemoryResourceGove
     governor
 }
 
-fn dispatch_request(input: serde_json::Value) -> CapabilityDispatchRequest {
-    CapabilityDispatchRequest {
-        capability_id: CapabilityId::new("script.echo").unwrap(),
+fn script_request(input: serde_json::Value) -> ScriptExecutionRequest<'static> {
+    let package = Box::leak(Box::new(package_from_manifest(SCRIPT_MANIFEST)));
+    let capability_id = Box::leak(Box::new(CapabilityId::new("script.echo").unwrap()));
+    ScriptExecutionRequest {
+        package,
+        capability_id,
         scope: sample_scope(),
         estimate: ResourceEstimate {
             concurrency_slots: Some(1),
@@ -247,7 +150,7 @@ fn dispatch_request(input: serde_json::Value) -> CapabilityDispatchRequest {
         },
         mounts: None,
         resource_reservation: None,
-        input,
+        invocation: ScriptInvocation { input },
     }
 }
 
@@ -265,15 +168,6 @@ fn sample_scope() -> ResourceScope {
 
 fn sample_account() -> ResourceAccount {
     ResourceAccount::tenant(TenantId::new("tenant-a").unwrap())
-}
-
-fn assert_event_kinds(events: &InMemoryEventSink, expected: &[RuntimeEventKind]) {
-    let actual = events
-        .events()
-        .into_iter()
-        .map(|event| event.kind)
-        .collect::<Vec<_>>();
-    assert_eq!(actual, expected);
 }
 
 const SCRIPT_MANIFEST: &str = r#"

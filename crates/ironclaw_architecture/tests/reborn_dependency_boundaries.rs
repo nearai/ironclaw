@@ -146,6 +146,14 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
     let services =
         std::fs::read_to_string(root.join("crates/ironclaw_host_runtime/src/services.rs"))
             .expect("host runtime services.rs must be readable");
+    let scripts = std::fs::read_to_string(root.join("crates/ironclaw_scripts/src/lib.rs"))
+        .expect("script runtime lib.rs must be readable");
+    let scripts_manifest = std::fs::read_to_string(root.join("crates/ironclaw_scripts/Cargo.toml"))
+        .expect("script runtime Cargo.toml must be readable");
+    let mcp = std::fs::read_to_string(root.join("crates/ironclaw_mcp/src/lib.rs"))
+        .expect("MCP runtime lib.rs must be readable");
+    let mcp_manifest = std::fs::read_to_string(root.join("crates/ironclaw_mcp/Cargo.toml"))
+        .expect("MCP runtime Cargo.toml must be readable");
 
     let forbidden_lib_exports = [
         "RuntimeDispatchProcessExecutor",
@@ -182,6 +190,39 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
             "HostRuntimeServices must not expose lower substrate escape hatch `{pattern}`; keep dispatcher/capability/process handles private to the host-runtime crate"
         );
     }
+
+    let forbidden_script_lane_surface = [
+        "RuntimeAdapter",
+        "pub struct ScriptRuntimeAdapter",
+        "pub fn script_error_kind",
+    ];
+    for pattern in forbidden_script_lane_surface {
+        assert!(
+            !scripts.contains(pattern),
+            "ironclaw_scripts must not expose host-runtime dispatcher composition surface `{pattern}`; compose script dispatch adapters inside ironclaw_host_runtime"
+        );
+    }
+
+    assert!(
+        !scripts_manifest.contains("ironclaw_dispatcher"),
+        "ironclaw_scripts must not depend on ironclaw_dispatcher; script dispatcher adapters are host-runtime-private composition"
+    );
+
+    let forbidden_mcp_lane_surface = [
+        "RuntimeAdapter",
+        "pub struct McpRuntimeAdapter",
+        "pub fn mcp_error_kind",
+    ];
+    for pattern in forbidden_mcp_lane_surface {
+        assert!(
+            !mcp.contains(pattern),
+            "ironclaw_mcp must not expose host-runtime dispatcher composition surface `{pattern}`; compose MCP dispatch adapters inside ironclaw_host_runtime"
+        );
+    }
+    assert!(
+        !mcp_manifest.contains("ironclaw_dispatcher"),
+        "ironclaw_mcp must not depend on ironclaw_dispatcher; MCP dispatcher adapters are host-runtime-private composition"
+    );
 }
 
 #[test]

@@ -4409,10 +4409,7 @@ name = "ironclaw_mcp"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "ironclaw_dispatcher",
- "ironclaw_events",
  "ironclaw_extensions",
- "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_resources",
  "serde_json",
@@ -4680,11 +4677,7 @@ dependencies = [
 name = "ironclaw_scripts"
 version = "0.1.0"
 dependencies = [
- "async-trait",
- "ironclaw_dispatcher",
- "ironclaw_events",
  "ironclaw_extensions",
- "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_resources",
  "rust_decimal_macros",
