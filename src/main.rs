@@ -431,7 +431,7 @@ async fn async_main() -> anyhow::Result<()> {
 
     // ── Tunnel setup ───────────────────────────────────────────────────
 
-    let (config, active_tunnel) = if enable_non_cli {
+    let (mut config, active_tunnel) = if enable_non_cli {
         ironclaw::tunnel::start_managed_tunnel(config).await
     } else {
         (config, None)
@@ -597,6 +597,25 @@ async fn async_main() -> anyhow::Result<()> {
             }
         };
 
+        // Build a TUI entry prompt when the web gateway is also going to
+        // run. The boot screen prints the gateway URL with auth token; this
+        // prompt lets the user choose between opening that URL or dropping
+        // into the TUI. Only shown when both `enable_non_cli` (gateway
+        // start-gate) and a gateway is configured — otherwise the "Web UI
+        // link above" the prompt references wouldn't exist.
+        let tui_entry_prompt: Option<String> =
+            (enable_non_cli && config.channels.gateway.is_some()).then(|| {
+                use ironclaw::cli::fmt;
+                format!(
+                    "\n  {}\u{25B6}{} Press any key to chat in this terminal{}, or open the {}Web UI link{} above.\n",
+                    fmt::accent(),
+                    fmt::reset(),
+                    fmt::dim(),
+                    fmt::bold_accent(),
+                    fmt::reset(),
+                )
+            });
+
         let tui_channel = ironclaw::channels::TuiChannel::new(
             config.owner_id.clone(),
             env!("CARGO_PKG_VERSION"),
@@ -610,6 +629,7 @@ async fn async_main() -> anyhow::Result<()> {
         .with_workspace_path(workspace_path)
         .with_memory_count(memory_count)
         .with_identity_files(identity_files)
+        .with_tui_entry_prompt(tui_entry_prompt)
         .with_available_models(available_models);
 
         channels.add(Box::new(tui_channel)).await;
@@ -829,6 +849,54 @@ async fn async_main() -> anyhow::Result<()> {
 
     // ── Gateway channel ────────────────────────────────────────────────
 
+    // Pre-resolve the gateway auth token before constructing the channel.
+    // Done here (rather than inside `GatewayChannel::new`) so the boot
+    // screen and any TUI prompt can show a clickable URL that
+    // auto-authenticates. Runs for every gateway start — TUI, REPL, or
+    // headless — so a restart never invalidates a previously-issued URL.
+    // Persists to `~/.ironclaw/.env` and opportunistically clears any
+    // legacy DB-stored token (env-only since #3217).
+    if enable_non_cli
+        && let Some(gw_cfg) = config.channels.gateway.as_mut()
+        && gw_cfg.auth_token.is_none()
+    {
+        use rand::RngCore;
+        use rand::rngs::OsRng;
+        let mut bytes = [0u8; 32];
+        OsRng.fill_bytes(&mut bytes);
+        let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        gw_cfg.auth_token = Some(token.clone());
+
+        let to_persist = token.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                ironclaw::bootstrap::upsert_bootstrap_var("GATEWAY_AUTH_TOKEN", &to_persist)
+            {
+                tracing::warn!("Failed to persist auto-generated gateway auth token: {e}");
+            } else {
+                tracing::debug!("Persisted auto-generated gateway auth token to bootstrap env");
+            }
+        });
+
+        if let Some(ref db) = components.db {
+            let db = db.clone();
+            tokio::spawn(async move {
+                match db
+                    .delete_setting("default", "channels.gateway_auth_token")
+                    .await
+                {
+                    Ok(true) => {
+                        tracing::debug!("Removed legacy gateway auth token from DB settings")
+                    }
+                    Ok(false) => {}
+                    Err(e) => tracing::warn!(
+                        "Failed to remove legacy gateway auth token from DB settings: {e}"
+                    ),
+                }
+            });
+        }
+    }
+
     let mut gateway_url: Option<String> = None;
     let mut sse_manager: Option<std::sync::Arc<ironclaw::channels::web::sse::SseManager>> = None;
     if enable_non_cli && let Some(ref gw_config) = config.channels.gateway {
@@ -978,43 +1046,6 @@ async fn async_main() -> anyhow::Result<()> {
                             gw_state.sse.broadcast(event);
                         } else {
                             gw_state.sse.broadcast_for_user(&user_id, event);
-                        }
-                    }
-                });
-            }
-        }
-
-        // Persist auto-generated auth token so it survives restarts.
-        // Gateway auth is env-only, so write to bootstrap `.env` rather than DB
-        // settings and opportunistically remove any legacy DB copy.
-        if gw_config.auth_token.is_none() {
-            let token_to_persist = gw.auth_token().to_string();
-            tokio::spawn(async move {
-                if let Err(e) = ironclaw::bootstrap::upsert_bootstrap_var(
-                    "GATEWAY_AUTH_TOKEN",
-                    &token_to_persist,
-                ) {
-                    tracing::warn!("Failed to persist auto-generated gateway auth token: {e}");
-                } else {
-                    tracing::debug!("Persisted auto-generated gateway auth token to bootstrap env");
-                }
-            });
-
-            if let Some(ref db) = components.db {
-                let db = db.clone();
-                tokio::spawn(async move {
-                    match db
-                        .delete_setting("default", "channels.gateway_auth_token")
-                        .await
-                    {
-                        Ok(true) => {
-                            tracing::debug!("Removed legacy gateway auth token from DB settings");
-                        }
-                        Ok(false) => {}
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to remove legacy gateway auth token from DB settings: {e}"
-                            );
                         }
                     }
                 });

@@ -335,13 +335,24 @@ key first, then falls back to the standard env var.
 6a. Tunnel setup (if webhook channels needed)
 6b. Discover WASM channels from ~/.ironclaw/channels/
 6c. Build channel options: discovered + bundled + registry catalog
-6d. Multi-select: CLI/TUI, HTTP, all available channels
+6d. Multi-select: CLI/TUI, Web Gateway, HTTP, Signal, all available WASM channels
 6e. Install missing bundled channels (copy WASM binaries)
 6f. Install missing registry channels (download artifacts, fallback to source build)
 6g. Initialize SecretsContext (for token storage)
-6h. Setup HTTP webhook (if selected)
-6i. Setup each WASM channel (secrets, owner binding)
+6h. Setup Web Gateway flag (if selected — port/token use config defaults)
+6i. Setup HTTP webhook (if selected)
+6j. Setup each WASM channel (secrets, owner binding)
 ```
+
+**Channel index constants** (`wizard.rs`): the non-WASM options are at fixed
+positions `0..=3` — `CLI/TUI`, `Web Gateway`, `HTTP webhook`, `Signal` — tracked
+by `CHANNEL_INDEX_CLI`, `CHANNEL_INDEX_GATEWAY`, `CHANNEL_INDEX_HTTP`,
+`CHANNEL_INDEX_SIGNAL`. The labels live in `NON_WASM_CHANNEL_LABELS` and the
+multi-select options are built by `non_wasm_channel_options()`. If you reorder
+options, update the constants, label array, and helper together — two
+regression tests guard the contract: `test_channel_index_constants_pinned`
+(numeric values) and `test_non_wasm_channel_options_positions` (drives the
+helper and asserts each position's label + enabled-bit wiring).
 
 **Channel sources** (priority order for installation):
 1. Already installed in `~/.ironclaw/channels/`
