@@ -8,8 +8,8 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_hooks::dispatch::HookDispatcher;
 use ironclaw_hooks::middleware::{
-    HookedLoopCapabilityPort, HookedLoopCheckpointPort, HookedLoopModelPort, HookedLoopPromptPort,
-    HookedLoopTranscriptPort,
+    CapabilityInputResolver as HookCapabilityInputResolver, HookedLoopCapabilityPort,
+    HookedLoopCheckpointPort, HookedLoopModelPort, HookedLoopPromptPort, HookedLoopTranscriptPort,
 };
 use ironclaw_host_api::{
     CapabilityId, CorrelationId, ExecutionContext, ExtensionId, InvocationId, ResourceEstimate,
@@ -167,6 +167,116 @@ pub trait LoopCapabilityInputResolver: Send + Sync {
         run_context: &LoopRunContext,
         input_ref: &ironclaw_turns::run_profile::CapabilityInputRef,
     ) -> Result<serde_json::Value, AgentLoopHostError>;
+}
+
+/// Default upper bound (in bytes of UTF-8 JSON-serialized form) above which
+/// [`HookCapabilityInputResolverAdapter`] refuses to forward resolved input to
+/// `before_capability` hook predicates. The hook crate's
+/// [`crate::ironclaw_hooks::points::SanitizedArguments`] already caps per-string
+/// length and nesting depth, but does not bound total byte size; the adapter
+/// rejects oversized payloads up front so an unexpectedly large blob doesn't
+/// reach predicate evaluation. The default is intentionally generous (64 KiB)
+/// to cover normal capability inputs; callers can tighten it via
+/// [`HookCapabilityInputResolverAdapter::with_max_input_bytes`].
+pub const DEFAULT_HOOK_CAPABILITY_INPUT_MAX_BYTES: usize = 64 * 1024;
+
+/// Adapter that exposes a [`LoopCapabilityInputResolver`] to the
+/// `ironclaw_hooks` middleware as a
+/// [`ironclaw_hooks::middleware::CapabilityInputResolver`].
+///
+/// Production capability dispatch already requires a
+/// [`LoopCapabilityInputResolver`] (used by [`HostRuntimeLoopCapabilityPort`]
+/// to convert opaque `CapabilityInputRef`s into JSON inputs for the host
+/// runtime). This adapter reuses that same resolver — and the same
+/// `LoopRunContext` it was built for — to feed sanitized arguments to hook
+/// predicate evaluators. Sharing the resolver guarantees that the hook
+/// framework and the dispatch path see the same logical input for a given
+/// `(run, input_ref)` pair.
+///
+/// Fail-closed semantics:
+///
+/// - If the inner resolver returns an error, the adapter returns `None`. The
+///   hook framework treats `None` as "unresolved" and `NumericSum`-style
+///   predicates fail closed (deny / pause) per the evaluator's existing
+///   semantics.
+/// - If the resolved JSON value exceeds the configured byte budget once
+///   serialized, the adapter returns `None`. The framework's per-string
+///   truncation and depth cap (in
+///   [`ironclaw_hooks::points::SanitizedArguments`]) apply to predicate
+///   evaluation, but the total payload size guard lives here so an oversized
+///   body cannot reach the sanitizer at all.
+pub struct HookCapabilityInputResolverAdapter {
+    inner: Arc<dyn LoopCapabilityInputResolver>,
+    run_context: LoopRunContext,
+    max_input_bytes: usize,
+}
+
+impl HookCapabilityInputResolverAdapter {
+    pub fn new(inner: Arc<dyn LoopCapabilityInputResolver>, run_context: LoopRunContext) -> Self {
+        Self {
+            inner,
+            run_context,
+            max_input_bytes: DEFAULT_HOOK_CAPABILITY_INPUT_MAX_BYTES,
+        }
+    }
+
+    /// Override the maximum serialized-byte budget. Inputs whose serialized
+    /// JSON exceeds this size resolve to `None` (predicate evaluators that
+    /// depend on argument contents fail closed).
+    #[must_use]
+    pub fn with_max_input_bytes(mut self, max_input_bytes: usize) -> Self {
+        self.max_input_bytes = max_input_bytes;
+        self
+    }
+}
+
+#[async_trait]
+impl HookCapabilityInputResolver for HookCapabilityInputResolverAdapter {
+    async fn resolve(
+        &self,
+        invocation: &ironclaw_turns::run_profile::CapabilityInvocation,
+    ) -> Option<serde_json::Value> {
+        let value = match self
+            .inner
+            .resolve_capability_input(&self.run_context, &invocation.input_ref)
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::debug!(
+                    capability = %invocation.capability_id,
+                    input_ref = %invocation.input_ref,
+                    kind = ?error.kind,
+                    safe_summary = %error.safe_summary,
+                    "hook capability input resolution failed; treating as unresolved"
+                );
+                return None;
+            }
+        };
+        let serialized_len = match serde_json::to_vec(&value) {
+            Ok(bytes) => bytes.len(),
+            Err(error) => {
+                tracing::debug!(
+                    capability = %invocation.capability_id,
+                    input_ref = %invocation.input_ref,
+                    error = %error,
+                    "hook capability input could not be re-serialized; treating as unresolved"
+                );
+                return None;
+            }
+        };
+        if serialized_len > self.max_input_bytes {
+            tracing::debug!(
+                capability = %invocation.capability_id,
+                input_ref = %invocation.input_ref,
+                serialized_len,
+                max_input_bytes = self.max_input_bytes,
+                "hook capability input exceeded byte budget; treating as unresolved"
+            );
+            return None;
+        }
+        Some(value)
+    }
 }
 
 #[async_trait]
@@ -937,6 +1047,13 @@ where
     /// every invocation runs hook dispatch ahead of the inner port. Default
     /// behavior (no dispatcher) is unchanged from the pre-hooks shape.
     hook_dispatcher: Option<Arc<HookDispatcher>>,
+    /// Optional capability-input resolver. When the `hook_dispatcher` is set
+    /// and a resolver is configured, the factory wraps it in a
+    /// [`HookCapabilityInputResolverAdapter`] (bound to the current
+    /// `LoopRunContext`) and threads it into `HookedLoopCapabilityPort` so
+    /// argument-dependent predicates (e.g., `NumericSum`) evaluate against
+    /// real capability arguments instead of failing closed.
+    capability_input_resolver: Option<Arc<dyn LoopCapabilityInputResolver>>,
 }
 
 impl<S, G> RebornLoopDriverHostFactory<S, G>
@@ -964,6 +1081,7 @@ where
             config,
             skill_context_source: None,
             hook_dispatcher: None,
+            capability_input_resolver: None,
         }
     }
 
@@ -989,6 +1107,24 @@ where
     /// sink is attached.
     pub fn with_hook_dispatcher(mut self, dispatcher: Arc<HookDispatcher>) -> Self {
         self.hook_dispatcher = Some(dispatcher);
+        self
+    }
+
+    /// Install a capability-input resolver for hook predicate evaluation.
+    /// When set alongside [`Self::with_hook_dispatcher`], hook predicates that
+    /// depend on argument contents (`ValueOrRateBound::NumericSum`, etc.) see
+    /// real, sanitized input values; otherwise they fail closed because the
+    /// hooks middleware defaults to the framework's `NullCapabilityInputResolver`.
+    ///
+    /// The resolver is the same trait used by [`HostRuntimeLoopCapabilityPort`]
+    /// to convert opaque capability input refs into JSON arguments; production
+    /// callers typically share a single implementation between dispatch and
+    /// hook evaluation so both observe the same logical input.
+    pub fn with_capability_input_resolver(
+        mut self,
+        resolver: Arc<dyn LoopCapabilityInputResolver>,
+    ) -> Self {
+        self.capability_input_resolver = Some(resolver);
         self
     }
 
@@ -1034,11 +1170,20 @@ where
             SurfaceTrackingLoopCapabilityPort::new(capabilities, Arc::clone(&surface_state)),
         );
         if let Some(dispatcher) = self.hook_dispatcher.as_ref() {
-            capabilities = Arc::new(HookedLoopCapabilityPort::new(
+            let mut hooked = HookedLoopCapabilityPort::new(
                 Arc::clone(&capabilities),
                 Arc::clone(dispatcher),
                 run_context.scope.tenant_id.clone(),
-            ));
+            );
+            if let Some(input_resolver) = self.capability_input_resolver.as_ref() {
+                let adapter: Arc<dyn HookCapabilityInputResolver> =
+                    Arc::new(HookCapabilityInputResolverAdapter::new(
+                        Arc::clone(input_resolver),
+                        run_context.clone(),
+                    ));
+                hooked = hooked.with_resolver(adapter);
+            }
+            capabilities = Arc::new(hooked);
         }
         capabilities
             .visible_capabilities(VisibleCapabilityRequest)
@@ -1669,5 +1814,150 @@ fn turn_error_to_host_error(error: TurnError) -> AgentLoopHostError {
             AgentLoopHostErrorKind::Unavailable,
             "checkpoint state store returned unsupported turn admission status",
         ),
+    }
+}
+
+#[cfg(test)]
+mod hook_resolver_adapter_tests {
+    //! Unit coverage for [`HookCapabilityInputResolverAdapter`]. These tests
+    //! drive the adapter directly (not through the factory) so they can
+    //! exercise every error branch without standing up a full Reborn host.
+
+    use super::*;
+    use ironclaw_host_api::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId};
+    use ironclaw_turns::run_profile::{
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, CapabilityInvocation,
+        CapabilitySurfaceVersion,
+    };
+    use ironclaw_turns::{
+        InMemoryRunProfileResolver, RunProfileResolutionRequest, RunProfileResolver, TurnId,
+        TurnRunId, TurnScope,
+    };
+    use std::sync::Mutex;
+
+    fn tenant() -> TenantId {
+        TenantId::new("hook-resolver-tests").expect("tenant id literal valid")
+    }
+
+    async fn run_context() -> LoopRunContext {
+        let tenant_id = tenant();
+        let agent_id = AgentId::new("agent-hook-resolver").expect("agent id literal valid");
+        let project_id = ProjectId::new("project-hook-resolver").expect("project id literal valid");
+        let thread_id = ThreadId::new("thread-hook-resolver").expect("thread id literal valid");
+        let scope = TurnScope::new(tenant_id, Some(agent_id), Some(project_id), thread_id);
+        let resolved = InMemoryRunProfileResolver::default()
+            .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+            .await
+            .expect("interactive default run profile resolves");
+        LoopRunContext::new(scope, TurnId::new(), TurnRunId::new(), resolved)
+    }
+
+    fn invocation(input_ref: &str) -> CapabilityInvocation {
+        CapabilityInvocation {
+            surface_version: CapabilitySurfaceVersion::new("v1")
+                .expect("surface version literal valid"),
+            capability_id: CapabilityId::new("cap.test").expect("capability id literal valid"),
+            input_ref: CapabilityInputRef::new(input_ref).expect("input ref literal valid"),
+        }
+    }
+
+    /// Test double for [`LoopCapabilityInputResolver`] that returns a queued
+    /// `Result` per call; lets us cover both Ok and Err branches.
+    struct StubInputResolver {
+        responses: Mutex<Vec<Result<serde_json::Value, AgentLoopHostError>>>,
+    }
+
+    impl StubInputResolver {
+        fn new(responses: Vec<Result<serde_json::Value, AgentLoopHostError>>) -> Self {
+            Self {
+                responses: Mutex::new(responses),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LoopCapabilityInputResolver for StubInputResolver {
+        async fn resolve_capability_input(
+            &self,
+            _run_context: &LoopRunContext,
+            _input_ref: &CapabilityInputRef,
+        ) -> Result<serde_json::Value, AgentLoopHostError> {
+            self.responses
+                .lock()
+                .expect("stub responses mutex not poisoned")
+                .remove(0)
+        }
+    }
+
+    #[tokio::test]
+    async fn adapter_extracts_json_body_when_inner_resolves() {
+        let inner = Arc::new(StubInputResolver::new(vec![Ok(serde_json::json!({
+            "amount": "50"
+        }))]));
+        let adapter = HookCapabilityInputResolverAdapter::new(inner, run_context().await);
+
+        let resolved = adapter.resolve(&invocation("input:cap.test")).await;
+        let value = resolved.expect("adapter returns Some when inner resolves");
+        assert_eq!(value, serde_json::json!({"amount": "50"}));
+    }
+
+    #[tokio::test]
+    async fn adapter_returns_none_when_inner_errors() {
+        let inner = Arc::new(StubInputResolver::new(vec![Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "input ref is unknown",
+        ))]));
+        let adapter = HookCapabilityInputResolverAdapter::new(inner, run_context().await);
+
+        let resolved = adapter.resolve(&invocation("input:missing")).await;
+        assert!(
+            resolved.is_none(),
+            "adapter must fail closed when inner resolver returns an error"
+        );
+    }
+
+    #[tokio::test]
+    async fn adapter_passes_through_non_object_json_unchanged() {
+        // The trait already returns `serde_json::Value`, so "non-JSON-shaped"
+        // input cannot reach the adapter — anything the inner returns is
+        // already typed JSON. The fail-closed case for non-JSON bodies lives
+        // in the inner resolver's implementation (it surfaces an
+        // `AgentLoopHostError` on decode failure, covered by the
+        // `returns_none_when_inner_errors` test above). This test pins down
+        // the adapter's contract for non-object inputs: it must forward them
+        // verbatim so predicate evaluators see the raw shape and decide for
+        // themselves whether to fail closed.
+        let inner = Arc::new(StubInputResolver::new(vec![Ok(serde_json::Value::String(
+            "not-an-object".to_string(),
+        ))]));
+        let adapter = HookCapabilityInputResolverAdapter::new(inner, run_context().await);
+
+        let resolved = adapter.resolve(&invocation("input:non-object")).await;
+        assert_eq!(
+            resolved,
+            Some(serde_json::Value::String("not-an-object".to_string())),
+            "adapter forwards non-object JSON verbatim"
+        );
+    }
+
+    #[tokio::test]
+    async fn adapter_returns_none_when_body_exceeds_byte_budget() {
+        // Build a value whose serialized form deliberately exceeds the
+        // adapter's configured budget. The hooks crate's
+        // `SanitizedArguments::from_json` caps individual string lengths and
+        // nesting depth, but does not bound total payload bytes — this guard
+        // is the adapter's defense in depth.
+        let oversized_string = "x".repeat(2048);
+        let inner = Arc::new(StubInputResolver::new(vec![Ok(serde_json::json!({
+            "blob": oversized_string,
+        }))]));
+        let adapter = HookCapabilityInputResolverAdapter::new(inner, run_context().await)
+            .with_max_input_bytes(512);
+
+        let resolved = adapter.resolve(&invocation("input:oversized")).await;
+        assert!(
+            resolved.is_none(),
+            "adapter must refuse payloads above the configured byte budget"
+        );
     }
 }

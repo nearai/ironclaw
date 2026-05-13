@@ -18,6 +18,7 @@ pub mod model_gateway;
 pub mod secrets;
 
 pub use loop_driver_host::{
+    DEFAULT_HOOK_CAPABILITY_INPUT_MAX_BYTES, HookCapabilityInputResolverAdapter,
     HostManagedLoopCheckpointPort, HostManagedLoopProgressPort, HostRuntimeLoopCapabilityPort,
     LoopCapabilityInputResolver, LoopCapabilityResultWriter, NoExtraLoopInputPort,
     RebornLoopDriverHost, RebornLoopDriverHostError, RebornLoopDriverHostFactory,

@@ -38,7 +38,9 @@ use ironclaw_hooks::installed_hook::PredicateBackedBeforeCapabilityHook;
 use ironclaw_hooks::kinds::observer::NoteCategory;
 use ironclaw_hooks::ordering::HookPhase;
 use ironclaw_hooks::points::{BeforeCapabilityHookContext, ObserverHookContext};
-use ironclaw_hooks::predicate::{CapabilityPredicate, HookPredicateSpec};
+use ironclaw_hooks::predicate::{
+    CapabilityPredicate, HookPredicateSpec, OnExceededAction, ValueOrRateBound,
+};
 use ironclaw_hooks::registry::{HookPointSpec, HookRegistry};
 use ironclaw_hooks::sink::{
     ObserverHook, ObserverSink, PrivilegedBeforeCapabilityHook, PrivilegedGateSink,
@@ -50,7 +52,8 @@ use ironclaw_loop_support::{
     HostManagedModelResponse,
 };
 use ironclaw_reborn::{
-    RebornLoopDriverHostFactory, RebornLoopDriverHostRequest, TextOnlyLoopHostConfig,
+    LoopCapabilityInputResolver, RebornLoopDriverHostFactory, RebornLoopDriverHostRequest,
+    TextOnlyLoopHostConfig,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
@@ -879,4 +882,113 @@ async fn observer_panic_does_not_fail_model_call() {
         "expected a HookFailed milestone after observer panic; milestones = {:?}",
         fixture.milestone_sink.milestones()
     );
+}
+
+// ─── NumericSum predicate against real inputs ──────────────────────────────
+
+/// Stub `LoopCapabilityInputResolver` that always returns the same JSON body
+/// for every input ref. The NumericSum predicate test wires this resolver
+/// through `RebornLoopDriverHostFactory::with_capability_input_resolver` so
+/// the hook framework sees real numeric input and the predicate can
+/// accumulate across invocations.
+struct ConstantJsonInputResolver {
+    payload: serde_json::Value,
+}
+
+#[async_trait]
+impl LoopCapabilityInputResolver for ConstantJsonInputResolver {
+    async fn resolve_capability_input(
+        &self,
+        _run_context: &LoopRunContext,
+        _input_ref: &CapabilityInputRef,
+    ) -> Result<serde_json::Value, AgentLoopHostError> {
+        Ok(self.payload.clone())
+    }
+}
+
+fn numeric_sum_dispatcher() -> Arc<HookDispatcher> {
+    // RateOrValueCap with NumericSum over a "amount" field. Two consecutive
+    // invocations each carrying amount=50 will sum to 100, which is strictly
+    // greater than the configured max of 99 — so the second invocation must
+    // be denied. The first invocation (sum = 50) is below the cap and is
+    // expected to pass through to the inner port.
+    let hook_id = HookId::derive(
+        &ExtensionId("integration-tests".to_string()),
+        "0.0.1",
+        &HookLocalId("numeric-sum-amount".to_string()),
+        HookVersion::ONE,
+    );
+    let spec = HookPredicateSpec::RateOrValueCap {
+        when: CapabilityPredicate::NameEquals {
+            name: "cap.allowed".to_string(),
+        },
+        bound: ValueOrRateBound::NumericSum {
+            max: "99".to_string(),
+            field: "amount".to_string(),
+            window: "24h".to_string(),
+        },
+        on_exceeded: OnExceededAction::Deny {
+            reason: "numeric_sum_cap_exceeded".to_string(),
+        },
+    };
+    let evaluator = Arc::new(PredicateEvaluator::new());
+    let hook = PredicateBackedBeforeCapabilityHook::new(hook_id, spec, evaluator);
+
+    let mut dispatcher = HookDispatcher::new(HookRegistry::new());
+    dispatcher
+        .install_installed_before_capability(hook_id, HookPhase::Policy, Box::new(hook))
+        .expect("Installed-tier predicate hook installs at policy phase");
+    Arc::new(dispatcher)
+}
+
+#[tokio::test]
+async fn numeric_sum_predicate_caps_total_value_against_real_inputs() {
+    // Proves the production wiring: with both a `HookDispatcher` AND a
+    // capability input resolver installed on the factory, NumericSum
+    // predicates evaluate against real, sanitized capability arguments.
+    // Without the resolver, the predicate would have failed closed on the
+    // first call (the framework's default NullCapabilityInputResolver
+    // returns None, which the evaluator treats as "unresolved" and denies).
+    let fixture = Fixture::new().await;
+    let inner = Arc::new(RecordingCapabilityPort::new());
+    let surface_version = fixture.surface_version.clone();
+
+    let resolver: Arc<dyn LoopCapabilityInputResolver> = Arc::new(ConstantJsonInputResolver {
+        payload: serde_json::json!({"amount": "50"}),
+    });
+
+    let host = fixture
+        .factory()
+        .with_hook_dispatcher(numeric_sum_dispatcher())
+        .with_capability_input_resolver(resolver)
+        .build_text_only_host_with_capabilities(fixture.request(), inner.clone())
+        .await
+        .expect("host builds with hook dispatcher + capability input resolver installed");
+
+    // First invocation: cumulative sum = 50, below the cap of 99 → allowed.
+    let first = host
+        .invoke_capability(invocation(&surface_version, "cap.allowed"))
+        .await
+        .expect("first invocation completes successfully");
+    assert!(
+        matches!(first, CapabilityOutcome::Completed(_)),
+        "first invocation must pass through to inner port; got {first:?}"
+    );
+
+    // Second invocation: cumulative sum = 100 (> 99) → denied by hook.
+    let second = host
+        .invoke_capability(invocation(&surface_version, "cap.allowed"))
+        .await
+        .expect("second invocation returns an outcome, not an error");
+    expect_denied_with(second, "hook_denied");
+
+    // Inner port was reached exactly once (the first call); the second call
+    // was short-circuited at the hook seam.
+    let invocations = inner.invocations();
+    assert_eq!(
+        invocations.len(),
+        1,
+        "inner port must have been invoked only for the first (under-cap) call; got {invocations:?}"
+    );
+    assert_eq!(invocations[0].as_str(), "cap.allowed");
 }
