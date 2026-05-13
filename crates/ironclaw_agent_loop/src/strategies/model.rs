@@ -14,7 +14,7 @@ use crate::state::LoopExecutionState;
 ///
 /// See `docs/reborn/agent-loop-skeleton.md` section 6.
 #[async_trait]
-pub trait ModelStrategy: Send + Sync {
+pub(crate) trait ModelStrategy: Send + Sync {
     async fn preference(&self, state: &LoopExecutionState) -> ModelPreference;
 }
 
@@ -24,7 +24,7 @@ pub trait ModelStrategy: Send + Sync {
 /// through for the future `ModelRouteChain` follow-up.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ModelPreference {
+pub(crate) enum ModelPreference {
     #[default]
     Primary,
     Fallback {

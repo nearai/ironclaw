@@ -14,7 +14,7 @@ use crate::state::LoopExecutionState;
 ///
 /// See `docs/reborn/agent-loop-skeleton.md` section 6.
 #[async_trait]
-pub trait CapabilityStrategy: Send + Sync {
+pub(crate) trait CapabilityStrategy: Send + Sync {
     async fn filter(&self, state: &LoopExecutionState) -> CapabilityFilter;
 }
 
@@ -24,7 +24,7 @@ pub trait CapabilityStrategy: Send + Sync {
 /// scope/grant/auth filters on top; this filter only narrows.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CapabilityFilter {
+pub(crate) enum CapabilityFilter {
     /// Allow everything the host would otherwise expose.
     #[default]
     All,

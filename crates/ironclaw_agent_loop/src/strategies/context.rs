@@ -15,7 +15,7 @@ use crate::state::LoopExecutionState;
 ///
 /// See `docs/reborn/agent-loop-skeleton.md` section 6.
 #[async_trait]
-pub trait ContextStrategy: Send + Sync {
+pub(crate) trait ContextStrategy: Send + Sync {
     async fn plan_context_request(&self, state: &LoopExecutionState) -> LoopPromptBundleRequest;
 }
 

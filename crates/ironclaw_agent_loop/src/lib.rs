@@ -5,8 +5,4 @@
 //! under `docs/reborn/agent-loop-briefs/`.
 
 pub mod state;
-pub mod strategies;
-
-pub use strategies::{
-    CapabilityFilter, CapabilityStrategy, ContextStrategy, ModelPreference, ModelStrategy,
-};
+pub(crate) mod strategies;
