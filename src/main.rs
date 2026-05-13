@@ -757,6 +757,48 @@ async fn async_main() -> anyhow::Result<()> {
         }
     }
 
+    // Reborn Telegram v2 wiring. Default-off; opts in via
+    // REBORN_TELEGRAM_V2_ENABLED. Coexists with the v1 WASM Telegram
+    // channel — the exclusivity guard at src/config/channels.rs:517
+    // prevents both paths from running for the same installation.
+    if enable_non_cli && config.channels.reborn_telegram_v2_enabled {
+        let installation_id_str = std::env::var("REBORN_TELEGRAM_V2_INSTALLATION_ID")
+            .unwrap_or_else(|_| "default".to_string());
+        let handles = components.database_handles.as_ref();
+        let secrets_store = components.secrets_store.as_ref();
+        if let (Some(handles), Some(secrets_store)) = (handles, secrets_store) {
+            match ironclaw::channels::reborn::bootstrap_telegram_v2(
+                handles,
+                secrets_store,
+                &config.owner_id,
+                &installation_id_str,
+            )
+            .await
+            {
+                Ok(Some(bootstrap)) => {
+                    webhook_routes.push(bootstrap.routes);
+                    channel_names
+                        .push(ironclaw::channels::reborn::TELEGRAM_V2_CHANNEL_NAME.to_string());
+                    channels.add(bootstrap.channel).await;
+                }
+                Ok(None) => {
+                    tracing::warn!(
+                        "REBORN_TELEGRAM_V2_ENABLED=true but required secrets are missing; \
+                         skipping v2 wiring"
+                    );
+                }
+                Err(err) => {
+                    tracing::error!(error = %err, "Reborn Telegram v2 bootstrap failed");
+                }
+            }
+        } else {
+            tracing::warn!(
+                "REBORN_TELEGRAM_V2_ENABLED=true requires a database backend and secrets \
+                 store; skipping v2 wiring"
+            );
+        }
+    }
+
     // Add Signal channel if configured and not CLI-only mode.
     if enable_non_cli && let Some(ref signal_config) = config.channels.signal {
         let signal_channel = SignalChannel::new(

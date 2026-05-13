@@ -78,6 +78,10 @@ pub struct AppComponents {
     /// Populated by the pairing flow (Task 8). Pre-allocated here so all
     /// subsystems can hold an `Arc` to the same cache instance.
     pub ownership_cache: Arc<crate::ownership::OwnershipCache>,
+    /// Backend-specific handles (libsql::Database / Pg pool). Needed by
+    /// late-stage wiring like Reborn Telegram v2 that must instantiate
+    /// storage outside the `Database` trait surface.
+    pub database_handles: Option<crate::db::DatabaseHandles>,
 }
 
 /// Options that control optional init phases.
@@ -1358,6 +1362,7 @@ impl AppBuilder {
             dev_loaded_tool_names,
             builder,
             ownership_cache,
+            database_handles: self.handles.take(),
         })
     }
 }
