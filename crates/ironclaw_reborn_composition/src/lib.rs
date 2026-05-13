@@ -123,6 +123,11 @@ pub enum RebornCompositionError {
 ///
 /// This is deliberately substrate-only: no app/web setup, no runtime adapter
 /// registration, and no product loop construction.
+///
+/// Initialization runs substrate migrations and secret decryptability checks
+/// sequentially against the shared database. Earlier successful migrations are
+/// not rolled back if a later substrate fails; each migration is expected to be
+/// idempotent so callers can fix the underlying failure and retry composition.
 #[cfg(feature = "libsql")]
 pub async fn build_libsql_production_host_runtime_services<TPolicy, TWake>(
     config: LibSqlProductionSubstrateConfig<TPolicy, TWake>,
@@ -181,6 +186,11 @@ where
 }
 
 /// Build production-wired host-runtime services over PostgreSQL-backed substrates.
+///
+/// Initialization runs substrate migrations and secret decryptability checks
+/// sequentially against the shared database. Earlier successful migrations are
+/// not rolled back if a later substrate fails; each migration is expected to be
+/// idempotent so callers can fix the underlying failure and retry composition.
 #[cfg(feature = "postgres")]
 pub async fn build_postgres_production_host_runtime_services<TPolicy, TWake>(
     config: PostgresProductionSubstrateConfig<TPolicy, TWake>,
@@ -272,6 +282,7 @@ fn secrets_crypto(
     Ok(Arc::new(SecretsCrypto::new(master_key)?))
 }
 
+// TODO(#3571): remove this adapter when HostHttpEgressService accepts Arc<dyn SecretStore>.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 #[derive(Clone)]
 struct SharedSecretStore {
