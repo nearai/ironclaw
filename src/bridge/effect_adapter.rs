@@ -2873,7 +2873,10 @@ mod tests {
         );
         assert_eq!(result.output["event_id"], event_id);
         let path = result.output["path"].as_str().expect("artifact path");
-        assert_eq!(tokio::fs::read(path).await.expect("read image"), b"png");
+        let resolved =
+            crate::image_artifacts::resolve_image_artifact_path_at(Some(dir.path()), path)
+                .expect("resolve image artifact");
+        assert_eq!(tokio::fs::read(resolved).await.expect("read image"), b"png");
     }
 
     #[tokio::test]

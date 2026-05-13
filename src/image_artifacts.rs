@@ -82,6 +82,13 @@ fn image_attachment_artifact_id(message_id: Uuid, attachment_id: &str, index: us
     }
 }
 
+fn artifact_display_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn max_base64_encoded_len(decoded_limit: usize) -> usize {
     decoded_limit.div_ceil(3) * 4
 }
@@ -182,8 +189,7 @@ pub(crate) async fn persist_image_artifact(
             return Err(format!("failed to flush image artifact: {err}"));
         }
 
-        let display_path = tokio::fs::canonicalize(&path).await.unwrap_or(path);
-        return Ok(display_path.to_string_lossy().into_owned());
+        return Ok(artifact_display_path(root, &path));
     }
 
     Err("failed to allocate unique image artifact path".to_string())
@@ -217,10 +223,10 @@ pub(crate) async fn load_image_artifact_data_url(path: &str) -> Result<String, S
     load_image_artifact_data_url_at(None, path).await
 }
 
-pub(crate) async fn load_image_artifact_data_url_at(
+pub(crate) fn resolve_image_artifact_path_at(
     root: Option<&Path>,
     path: &str,
-) -> Result<String, String> {
+) -> Result<PathBuf, String> {
     let default_root;
     let root = match root {
         Some(root) => root,
@@ -229,8 +235,14 @@ pub(crate) async fn load_image_artifact_data_url_at(
             default_root.as_path()
         }
     };
-    let resolved = crate::tools::builtin::path_utils::validate_path(path, Some(root))
-        .map_err(|e| e.to_string())?;
+    crate::tools::builtin::path_utils::validate_path(path, Some(root)).map_err(|e| e.to_string())
+}
+
+pub(crate) async fn load_image_artifact_data_url_at(
+    root: Option<&Path>,
+    path: &str,
+) -> Result<String, String> {
+    let resolved = resolve_image_artifact_path_at(root, path)?;
     let bytes = tokio::fs::read(&resolved)
         .await
         .map_err(|e| format!("failed to read image artifact: {e}"))?;
@@ -251,6 +263,23 @@ pub(crate) async fn load_image_artifact_data_url_at(
         "data:{media_type};base64,{}",
         BASE64_STANDARD.encode(bytes)
     ))
+}
+
+pub(crate) async fn remove_image_artifact_at(
+    root: Option<&Path>,
+    path: &str,
+) -> Result<(), String> {
+    let resolved = resolve_image_artifact_path_at(root, path)?;
+    tokio::fs::remove_file(&resolved)
+        .await
+        .or_else(|e| {
+            if e.kind() == ErrorKind::NotFound {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        })
+        .map_err(|e| format!("failed to remove image artifact: {e}"))
 }
 
 pub(crate) fn decode_image_data_url(data_url: &str) -> Result<(String, Vec<u8>), String> {
@@ -325,7 +354,15 @@ mod tests {
         assert!(path.ends_with(".png"));
         assert!(path.contains("alice_example.com"));
         assert!(path.contains("call_img_0.png"));
-        assert_eq!(tokio::fs::read(path).await.expect("read"), b"image-bytes");
+        assert!(
+            !std::path::Path::new(&path).is_absolute(),
+            "artifact paths exposed to callers should stay relative to the artifact root"
+        );
+        let resolved = resolve_image_artifact_path_at(Some(dir.path()), &path).expect("resolve");
+        assert_eq!(
+            tokio::fs::read(resolved).await.expect("read"),
+            b"image-bytes"
+        );
     }
 
     #[tokio::test]
@@ -357,9 +394,16 @@ mod tests {
         assert_ne!(first, second);
         assert!(first.ends_with("call_img_0.png"));
         assert!(second.ends_with("call_img_0-1.png"));
-        assert_eq!(tokio::fs::read(first).await.expect("read first"), b"first");
+        let first_resolved =
+            resolve_image_artifact_path_at(Some(dir.path()), &first).expect("resolve first");
+        let second_resolved =
+            resolve_image_artifact_path_at(Some(dir.path()), &second).expect("resolve second");
         assert_eq!(
-            tokio::fs::read(second).await.expect("read second"),
+            tokio::fs::read(first_resolved).await.expect("read first"),
+            b"first"
+        );
+        assert_eq!(
+            tokio::fs::read(second_resolved).await.expect("read second"),
             b"second"
         );
     }
@@ -387,7 +431,12 @@ mod tests {
         assert!(path.ends_with(".png"));
         assert!(path.contains(&message_id.to_string()));
         assert!(path.contains("channel_file_1"));
-        assert_eq!(tokio::fs::read(path).await.expect("read"), b"png");
+        assert!(
+            !std::path::Path::new(&path).is_absolute(),
+            "attachment artifact paths exposed to callers should stay relative"
+        );
+        let resolved = resolve_image_artifact_path_at(Some(dir.path()), &path).expect("resolve");
+        assert_eq!(tokio::fs::read(resolved).await.expect("read"), b"png");
     }
 
     #[tokio::test]
@@ -448,5 +497,29 @@ mod tests {
         let err = decode_image_data_url(&data_url).expect_err("rejected");
 
         assert!(err.contains("unsupported image media type"));
+    }
+
+    #[test]
+    fn rejects_data_url_without_comma_separator() {
+        let err = decode_image_data_url("data:image/png;base64").expect_err("rejected");
+
+        assert!(err.contains("missing comma separator"));
+    }
+
+    #[test]
+    fn rejects_data_url_without_base64_marker() {
+        let err = decode_image_data_url("data:image/png,abc123").expect_err("rejected");
+
+        assert!(err.contains("must be base64 encoded"));
+    }
+
+    #[test]
+    fn rejects_oversized_data_url_before_decode() {
+        let oversized = "A".repeat(max_base64_encoded_len(MAX_IMAGE_ARTIFACT_BYTES) + 4);
+        let data_url = format!("data:image/png;base64,{oversized}");
+
+        let err = decode_image_data_url(&data_url).expect_err("rejected");
+
+        assert!(err.contains("byte limit"));
     }
 }

@@ -529,7 +529,10 @@ mod tests {
 
         let path = persisted.path().expect("path");
         assert!(path.ends_with(".png"));
-        assert_eq!(tokio::fs::read(path).await.expect("read"), b"png-bytes");
+        let resolved =
+            crate::image_artifacts::resolve_image_artifact_path_at(Some(dir.path()), path)
+                .expect("resolve");
+        assert_eq!(tokio::fs::read(resolved).await.expect("read"), b"png-bytes");
         assert!(persisted.data_url().is_some());
     }
 }

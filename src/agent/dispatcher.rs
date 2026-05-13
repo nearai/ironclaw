@@ -4219,7 +4219,14 @@ mod tests {
         .expect("sentinel");
 
         let path = sentinel.path().expect("path");
-        assert_eq!(tokio::fs::read(path).await.expect("read"), b"png-bytes");
+        assert!(
+            !std::path::Path::new(path).is_absolute(),
+            "generated image paths broadcast to callers should stay relative to the artifact root"
+        );
+        let resolved =
+            crate::image_artifacts::resolve_image_artifact_path_at(Some(dir.path()), path)
+                .expect("resolve");
+        assert_eq!(tokio::fs::read(resolved).await.expect("read"), b"png-bytes");
         assert!(tool_result.expect("tool result").contains("\"path\""));
         let expected_thread_id = thread_id.to_string();
         let statuses = statuses.lock().expect("statuses mutex");

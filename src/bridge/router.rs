@@ -242,6 +242,12 @@ struct AttachmentIndexNote {
     tags: Vec<String>,
 }
 
+struct PersistedProjectAttachments {
+    notes: Vec<AttachmentIndexNote>,
+    project_paths: Vec<PathBuf>,
+    image_artifact_paths: Vec<String>,
+}
+
 fn sanitize_attachment_segment(raw: &str) -> String {
     let sanitized: String = raw
         .chars()
@@ -422,8 +428,10 @@ async fn persist_project_attachments(
     message: &IncomingMessage,
     project_id: ironclaw_engine::ProjectId,
     attachments: &mut [crate::channels::IncomingAttachment],
-) -> Vec<AttachmentIndexNote> {
+) -> PersistedProjectAttachments {
     let mut notes = Vec::new();
+    let mut project_paths = Vec::new();
+    let mut image_artifact_paths = Vec::new();
 
     for (index, attachment) in attachments.iter_mut().enumerate() {
         if attachment.data.is_empty() || attachment.local_path.is_some() {
@@ -451,11 +459,15 @@ async fn persist_project_attachments(
         let editable_image_path =
             persist_editable_image_attachment(image_artifact_root, message, attachment, index)
                 .await;
+        if let Some(path) = editable_image_path.as_ref() {
+            image_artifact_paths.push(path.clone());
+        }
         attachment.local_path = Some(editable_image_path.unwrap_or_else(|| relative_path.clone()));
         // Build the index note while `data` is still populated so the
         // fallback to `data.len()` in `attachment_index_note` reports the
         // real payload size when `size_bytes` wasn't pre-filled.
         notes.push(attachment_index_note(message, attachment, &relative_path));
+        project_paths.push(absolute_path);
         // Intentionally *don't* clear `attachment.data` here. The caller
         // (`handle_with_engine_inner` in this file) immediately feeds the
         // same slice to `augment_with_attachments`, which only emits
@@ -467,7 +479,42 @@ async fn persist_project_attachments(
         // returns, so "storage hygiene" is a no-op anyway.
     }
 
-    notes
+    PersistedProjectAttachments {
+        notes,
+        project_paths,
+        image_artifact_paths,
+    }
+}
+
+async fn cleanup_persisted_project_attachments(
+    image_artifact_root: Option<&Path>,
+    persisted: &PersistedProjectAttachments,
+) {
+    for path in &persisted.project_paths {
+        match tokio::fs::remove_file(path).await {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "engine v2: failed to remove rejected project attachment"
+                );
+            }
+        }
+    }
+
+    for path in &persisted.image_artifact_paths {
+        if let Err(err) =
+            crate::image_artifacts::remove_image_artifact_at(image_artifact_root, path).await
+        {
+            tracing::warn!(
+                path = %path,
+                error = %err,
+                "engine v2: failed to remove rejected editable image artifact"
+            );
+        }
+    }
 }
 
 fn resolve_project_root() -> PathBuf {
@@ -4482,7 +4529,7 @@ async fn handle_with_engine_inner(
 
     let mut persisted_attachments = message.attachments.clone();
     let image_artifact_root = crate::image_artifacts::default_image_artifact_root();
-    let attachment_notes = persist_project_attachments(
+    let persisted_attachment_files = persist_project_attachments(
         &state.project_root,
         Some(image_artifact_root.as_path()),
         message,
@@ -4501,6 +4548,18 @@ async fn handle_with_engine_inner(
         .as_ref()
         .map(|result| result.text.as_str())
         .unwrap_or(content);
+    if let Some(rejection) = crate::agent::inbound_user_message_rejection_text(
+        agent.safety(),
+        message,
+        effective_content,
+    ) {
+        cleanup_persisted_project_attachments(
+            Some(image_artifact_root.as_path()),
+            &persisted_attachment_files,
+        )
+        .await;
+        return Ok(BridgeOutcome::Respond(rejection));
+    }
     let scope = message.conversation_scope();
     let engine_content = if let Some(ref db) = state.db {
         let v1_conv_id = if let Some(tid) = scope {
@@ -4624,6 +4683,11 @@ async fn handle_with_engine_inner(
     {
         Ok(tid) => tid,
         Err(e) => {
+            cleanup_persisted_project_attachments(
+                Some(image_artifact_root.as_path()),
+                &persisted_attachment_files,
+            )
+            .await;
             state
                 .gate_controller
                 .clear_pre_execution_context(&message.user_id, conv_id)
@@ -4641,13 +4705,13 @@ async fn handle_with_engine_inner(
         .set_execution_context(message.user_id.clone(), thread_id, per_exec_context)
         .await;
 
-    if !attachment_notes.is_empty() {
+    if !persisted_attachment_files.notes.is_empty() {
         save_attachment_index_notes(
             &state.store,
             project_id,
             &message.user_id,
             thread_id,
-            attachment_notes,
+            persisted_attachment_files.notes,
         )
         .await;
     }
@@ -6083,7 +6147,7 @@ async fn emit_generated_images_for_completed_v2_thread(
                     path: image.path.clone(),
                     thread_id: Some(thread_id.to_string()),
                 },
-            );
+            ); // projection-exempt: bridge dispatcher, persisted generated-image replay for live gateway thread
         }
         return;
     }
@@ -8209,7 +8273,7 @@ mod tests {
                     "type": "image_generated",
                     "data_omitted": true,
                     "media_type": "image/png",
-                    "path": "/Users/sakura/.ironclaw/image-artifacts/default/thread/cat.png"
+                    "path": "default/thread/cat.png"
                 }).to_string()
             }]
         })
@@ -8220,7 +8284,7 @@ mod tests {
         assert_eq!(
             hints,
             vec![ImageArtifactContextHint {
-                path: "/Users/sakura/.ironclaw/image-artifacts/default/thread/cat.png".into(),
+                path: "default/thread/cat.png".into(),
                 media_type: Some("image/png".into()),
             }]
         );
@@ -8231,16 +8295,14 @@ mod tests {
         let content = append_image_artifact_context_for_engine(
             "make it black and white",
             &[ImageArtifactContextHint {
-                path: "/Users/sakura/.ironclaw/image-artifacts/default/thread/cat.png".into(),
+                path: "default/thread/cat.png".into(),
                 media_type: Some("image/png".into()),
             }],
         );
 
         assert!(content.starts_with("make it black and white\n\n"));
         assert!(content.contains("<available_image_artifacts>"));
-        assert!(content.contains(
-            "image_path=\"/Users/sakura/.ironclaw/image-artifacts/default/thread/cat.png\""
-        ));
+        assert!(content.contains("image_path=\"default/thread/cat.png\""));
         assert!(content.contains("Do not reveal"));
         assert!(content.contains("call image_edit"));
     }
@@ -10867,7 +10929,7 @@ mod tests {
             duration_secs: None,
         }];
 
-        let notes = persist_project_attachments(
+        let persisted = persist_project_attachments(
             &project_root,
             Some(image_root.as_path()),
             &message,
@@ -10876,20 +10938,24 @@ mod tests {
         )
         .await;
 
-        assert_eq!(notes.len(), 1);
+        assert_eq!(persisted.notes.len(), 1);
         let editable_path = attachments[0].local_path.as_deref().expect("local path");
-        let image_root = tokio::fs::canonicalize(&image_root)
-            .await
-            .expect("canonical image root");
         assert!(
-            Path::new(editable_path).starts_with(&image_root),
-            "expected editable artifact path, got {editable_path}"
+            !Path::new(editable_path).is_absolute(),
+            "expected editable artifact path to stay relative, got {editable_path}"
         );
+        let resolved_editable = crate::image_artifacts::resolve_image_artifact_path_at(
+            Some(image_root.as_path()),
+            editable_path,
+        )
+        .expect("resolve editable artifact");
         assert_eq!(
-            tokio::fs::read(editable_path).await.expect("read artifact"),
+            tokio::fs::read(resolved_editable)
+                .await
+                .expect("read artifact"),
             b"png"
         );
-        let project_path = notes[0]
+        let project_path = persisted.notes[0]
             .metadata
             .get("project_path")
             .and_then(|value| value.as_str())
@@ -12048,6 +12114,77 @@ mod tests {
         outcome.expect("engine v2 secret scan regression test");
     }
 
+    #[tokio::test]
+    async fn handle_with_engine_rejects_attachment_derived_secret_and_cleans_up_files() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let outcome = async {
+            let store = Arc::new(TestStore::new());
+            let temp_dir = tempfile::tempdir().expect("temp dir");
+            let mut state = make_expected_test_state(store.clone());
+            state.project_root = temp_dir.path().join("projects");
+            *lock.write().await = Some(state);
+
+            let (agent, _statuses) = make_test_agent_with_status_channel("web").await;
+            let message = IncomingMessage::new("web", "alice", "Please review the upload.")
+                .with_attachments(vec![crate::channels::IncomingAttachment {
+                    id: "att-secret".to_string(),
+                    kind: crate::channels::AttachmentKind::Document,
+                    mime_type: "text/plain".to_string(),
+                    filename: Some("notes.txt".to_string()),
+                    size_bytes: Some(34),
+                    source_url: None,
+                    storage_key: None,
+                    local_path: None,
+                    extracted_text: Some("API key: sk-abc123def456ghi789jk".to_string()),
+                    data: b"API key: sk-abc123def456ghi789jk\n".to_vec(),
+                    duration_secs: None,
+                }]);
+
+            let result = handle_with_engine_inner(&agent, &message, &message.content, 0)
+                .await
+                .expect("should not error");
+            let warning = match result {
+                BridgeOutcome::Respond(text) => text,
+                other => panic!(
+                    "expected Respond with warning for attachment-derived secret, got: {other:?}"
+                ),
+            };
+            assert!(
+                warning.contains("secret") || warning.contains("credential"),
+                "expected secret-detection warning, got: {warning}"
+            );
+            assert!(
+                store.threads.read().await.is_empty(),
+                "rejected attachment content must not spawn an engine thread"
+            );
+            assert!(
+                store.docs.read().await.is_empty(),
+                "rejected attachment content must not save attachment index notes"
+            );
+
+            let projects = store.projects.read().await;
+            let project = projects.first().cloned().expect("project created");
+            drop(projects);
+            let expected_relative =
+                attachment_project_relative_path(&message, project.id, &message.attachments[0], 0);
+            let expected_absolute = temp_dir.path().join("projects").join(expected_relative);
+            assert!(
+                tokio::fs::metadata(&expected_absolute).await.is_err(),
+                "rejected attachment file should be cleaned up: {}",
+                expected_absolute.display()
+            );
+
+            Ok::<(), crate::error::Error>(())
+        }
+        .await;
+
+        *lock.write().await = None;
+        outcome.expect("engine v2 attachment secret regression test");
+    }
+
     /// Regression test for issue #2084 upgrade path.
     ///
     /// Simulates the scenario where pre-PR on-disk docs are loaded with
@@ -13124,6 +13261,97 @@ mod tests {
         assert!(metadata_output.get("data").is_none());
         assert_eq!(metadata_output["data_omitted"], true);
         assert_eq!(metadata_output["path"], "workspace/code.png");
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn persist_v2_tool_calls_compacts_oversized_codeact_image_results_from_thread_metadata() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(TestStore::new());
+        let db: Arc<dyn crate::db::Database> = Arc::new(
+            crate::db::libsql::LibSqlBackend::new_local(&tmp.path().join("test.db"))
+                .await
+                .expect("local libsql"),
+        );
+        db.run_migrations().await.expect("migrations");
+
+        let oversized = "A".repeat(600_000);
+        let data_url = format!("data:image/png;base64,{oversized}");
+
+        let mut thread = ironclaw_engine::Thread::new(
+            "goal",
+            ironclaw_engine::ThreadType::Foreground,
+            ironclaw_engine::ProjectId::new(),
+            "test-user",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread.metadata = serde_json::json!({
+            (ironclaw_engine::PERSISTED_ACTION_RESULTS_METADATA_KEY): [{
+                "call_id": "code_call_oversized",
+                "action_name": "image_generate",
+                "output": {
+                    "type": "image_generated",
+                    "media_type": "image/png",
+                    "path": "workspace/oversized.png",
+                    "event_id": "turn-9-code_call_oversized",
+                    "data": data_url
+                },
+                "is_error": false,
+                "duration": 10
+            }]
+        });
+        let thread_id = thread.id;
+        store.save_thread(&thread).await.unwrap();
+
+        let conv_id = db
+            .create_conversation("web", "test-user", None)
+            .await
+            .expect("create conversation");
+        let message =
+            IncomingMessage::new("web", "test-user", "draw").with_thread(conv_id.to_string());
+
+        let store_arc: Arc<dyn Store> = store;
+        let generated_images = persist_v2_tool_calls(&store_arc, &db, thread_id, &message).await;
+        assert_eq!(generated_images.len(), 1);
+        assert_eq!(generated_images[0].event_id, "turn-9-code_call_oversized");
+        assert!(
+            generated_images[0]
+                .data_url
+                .as_deref()
+                .is_some_and(|value| value.starts_with("data:image/png;base64,")),
+            "live replay should still retain the generated image payload"
+        );
+
+        let messages = db
+            .list_conversation_messages(conv_id)
+            .await
+            .expect("list messages");
+        let tool_calls_msg = messages
+            .iter()
+            .find(|m| m.role == "tool_calls")
+            .expect("tool_calls row must be written");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&tool_calls_msg.content).expect("valid JSON");
+        let calls = parsed["calls"].as_array().expect("calls array");
+        let persisted_result = calls[0]["result"]
+            .as_str()
+            .expect("image result should be persisted");
+        assert!(persisted_result.contains("\"type\":\"image_generated\""));
+        assert!(persisted_result.contains("\"path\":\"workspace/oversized.png\""));
+        assert!(persisted_result.contains("\"data_omitted\":true"));
+        assert!(!persisted_result.contains("data:image/png;base64,"));
+
+        let compacted_thread = store_arc
+            .load_thread(thread_id)
+            .await
+            .expect("load compacted thread")
+            .expect("thread still exists");
+        let metadata_output = &compacted_thread.metadata
+            [ironclaw_engine::PERSISTED_ACTION_RESULTS_METADATA_KEY][0]["output"];
+        assert!(metadata_output.get("data").is_none());
+        assert_eq!(metadata_output["data_omitted"], true);
+        assert_eq!(metadata_output["path"], "workspace/oversized.png");
+        assert_eq!(metadata_output["event_id"], "turn-9-code_call_oversized");
     }
 
     #[cfg(feature = "libsql")]

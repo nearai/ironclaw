@@ -141,10 +141,13 @@ async fn persist_inline_image_attachments_at(
 }
 
 async fn cleanup_created_image_artifacts(paths: &[String]) {
+    cleanup_created_image_artifacts_at(None, paths).await;
+}
+
+async fn cleanup_created_image_artifacts_at(root: Option<&std::path::Path>, paths: &[String]) {
     for path in paths {
-        match tokio::fs::remove_file(path).await {
+        match crate::image_artifacts::remove_image_artifact_at(root, path).await {
             Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
             Err(err) => {
                 tracing::warn!(
                     path = %path,
@@ -165,6 +168,42 @@ fn requires_preexisting_uuid_thread(channel: &str) -> bool {
 
 fn validate_inbound_text_for_message(safety: &SafetyLayer, content: &str) -> ValidationResult {
     safety.validate_input(content)
+}
+
+pub(crate) fn inbound_user_message_rejection_text(
+    safety: &SafetyLayer,
+    message: &IncomingMessage,
+    effective_content: &str,
+) -> Option<String> {
+    let validation = validate_inbound_text_for_message(safety, effective_content);
+    if !validation.is_valid {
+        let details = validation
+            .errors
+            .iter()
+            .map(|e| format!("{}: {}", e.field, e.message))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Some(format!("Input rejected by safety validation: {details}"));
+    }
+
+    let violations = safety.check_policy(effective_content);
+    if violations
+        .iter()
+        .any(|rule| rule.action == PolicyAction::Block)
+    {
+        return Some("Input rejected by safety policy.".to_string());
+    }
+
+    if let Some(warning) = safety.scan_inbound_for_secrets(effective_content) {
+        tracing::warn!(
+            user = %message.user_id,
+            channel = %message.channel,
+            "Inbound message blocked: contains leaked secret"
+        );
+        return Some(warning);
+    }
+
+    None
 }
 
 fn auth_retry_message_for_error(error: &crate::extensions::ExtensionError) -> Option<String> {
@@ -294,37 +333,8 @@ impl Agent {
         message: &IncomingMessage,
         effective_content: &str,
     ) -> Option<SubmissionResult> {
-        let validation = validate_inbound_text_for_message(self.safety(), effective_content);
-        if !validation.is_valid {
-            let details = validation
-                .errors
-                .iter()
-                .map(|e| format!("{}: {}", e.field, e.message))
-                .collect::<Vec<_>>()
-                .join("; ");
-            return Some(SubmissionResult::error(format!(
-                "Input rejected by safety validation: {details}",
-            )));
-        }
-
-        let violations = self.safety().check_policy(effective_content);
-        if violations
-            .iter()
-            .any(|rule| rule.action == PolicyAction::Block)
-        {
-            return Some(SubmissionResult::error("Input rejected by safety policy."));
-        }
-
-        if let Some(warning) = self.safety().scan_inbound_for_secrets(effective_content) {
-            tracing::warn!(
-                user = %message.user_id,
-                channel = %message.channel,
-                "Inbound message blocked: contains leaked secret"
-            );
-            return Some(SubmissionResult::error(warning));
-        }
-
-        None
+        inbound_user_message_rejection_text(self.safety(), message, effective_content)
+            .map(SubmissionResult::error)
     }
 
     /// Hydrate a historical thread from DB into memory if not already present.
@@ -3993,8 +4003,11 @@ mod tests {
         let path = persisted.local_paths[0].as_deref().expect("local path");
         assert!(path.ends_with(".png"));
         assert_eq!(persisted.created_paths, vec![path.to_string()]);
+        let resolved =
+            crate::image_artifacts::resolve_image_artifact_path_at(Some(dir.path()), path)
+                .expect("resolve");
         assert_eq!(
-            tokio::fs::read(path).await.expect("read"),
+            tokio::fs::read(resolved).await.expect("read"),
             vec![0x89, 0x50, 0x4E, 0x47]
         );
         assert_eq!(message.attachments[0].data, vec![0x89, 0x50, 0x4E, 0x47]);
@@ -4003,13 +4016,24 @@ mod tests {
     #[tokio::test]
     async fn test_cleanup_created_image_artifacts_removes_paths() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("rejected.png");
-        tokio::fs::write(&path, b"rejected").await.expect("write");
-        let path = path.to_string_lossy().into_owned();
+        let path = crate::image_artifacts::persist_image_artifact(
+            Some(dir.path()),
+            b"rejected",
+            "image/png",
+            "alice",
+            Uuid::new_v4(),
+            "rejected",
+        )
+        .await
+        .expect("persist artifact");
+        let resolved =
+            crate::image_artifacts::resolve_image_artifact_path_at(Some(dir.path()), &path)
+                .expect("resolve");
 
-        super::cleanup_created_image_artifacts(std::slice::from_ref(&path)).await;
+        super::cleanup_created_image_artifacts_at(Some(dir.path()), std::slice::from_ref(&path))
+            .await;
 
-        assert!(!std::path::Path::new(&path).exists());
+        assert!(!resolved.exists());
     }
 
     #[tokio::test]
