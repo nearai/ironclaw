@@ -217,6 +217,7 @@ I18n.register('zh-CN', {
   'logs.clientLevel': '客户端日志级别',
   'logs.pause': '暂停',
   'logs.resume': '继续',
+  'logs.download': '下载',
   'logs.clear': '清空',
   'logs.autoScroll': '自动滚动',
   'logs.filter': '筛选日志...',

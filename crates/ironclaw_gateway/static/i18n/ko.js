@@ -215,6 +215,7 @@ I18n.register('ko', {
   'logs.clientLevel': '클라이언트 로그 레벨',
   'logs.pause': '일시정지',
   'logs.resume': '재개',
+  'logs.download': '다운로드',
   'logs.clear': '지우기',
   'logs.autoScroll': '자동 스크롤',
   'logs.filter': '로그 필터링...',
