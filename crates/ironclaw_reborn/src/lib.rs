@@ -4,6 +4,7 @@
 //! to existing root IronClaw services while keeping the normal `/src` app graph
 //! free of Reborn loop-support wiring.
 
+pub mod app_loop_family;
 pub mod driver_registry;
 pub mod loop_driver_host;
 pub mod loop_exit_applier;
@@ -18,6 +19,7 @@ pub mod model_gateway;
 #[cfg(feature = "libsql-secrets")]
 pub mod secrets;
 
+pub use app_loop_family::build_loop_family_registry;
 pub use loop_driver_host::{
     HostManagedLoopCheckpointPort, HostManagedLoopProgressPort, HostRuntimeLoopCapabilityPort,
     LoopCapabilityInputResolver, LoopCapabilityResultWriter, NoExtraLoopInputPort,
