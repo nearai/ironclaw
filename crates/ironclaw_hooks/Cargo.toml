@@ -5,6 +5,15 @@ edition = "2024"
 publish = false
 description = "Reborn loop hook framework: trust-tiered points/kinds/decisions, sealed witness types, dispatcher contract."
 
+[features]
+default = []
+# Exposes test-only constructors (e.g., `SanitizedArguments::for_tests`) that
+# bypass the resolver wiring. Production builds MUST NOT enable this; the
+# constructors it exposes would let untrusted code bypass the sanitizer-only-
+# on-trusted-path invariant. Intended exclusively as a `dev-dependency` feature
+# for hook authors writing predicate tests outside `ironclaw_reborn`.
+test-support = []
+
 [dependencies]
 async-trait = "0.1"
 blake3 = "1"

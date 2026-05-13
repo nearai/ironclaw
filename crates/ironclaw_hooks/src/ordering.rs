@@ -46,12 +46,49 @@ impl HookPhase {
 }
 
 /// Author-chosen priority within a phase. Lower numbers run first.
+///
+/// # When to deviate from [`Self::DEFAULT`]
+///
+/// Most hook authors should ship at `DEFAULT` and let phase ordering carry
+/// the load. Reach for a non-default priority **only** when:
+///
+/// - **Multiple hooks of yours must run in a known order** at the same
+///   phase. The stable tiebreaker (sort by `hook_id`) is *deterministic*
+///   but author-opaque — your readers can't infer it. Choose explicit
+///   priorities so your intent is visible in the manifest.
+/// - **You're explicitly composing with another extension's hook**. If
+///   your audit hook must run after another extension's policy hook at
+///   the same Policy phase, declare it: pick `priority = 200` (or
+///   higher) so the order is intentional, not accidental.
+///
+/// What you should **not** use priority for:
+///
+/// - Modeling a phase relationship (e.g., "this hook authorizes, that
+///   one logs"). Use phases for those — that's what they exist for.
+/// - Working around an ordering bug in someone else's hook. File an
+///   issue against the other extension.
+///
+/// # Stable tiebreaker
+///
+/// Two hooks at the same `(phase, priority)` are ordered by `hook_id`
+/// (blake3 of the manifest fields). This is *stable* across runs but
+/// *opaque* to authors; you cannot predict the order without running
+/// the dispatcher. Treat same-priority same-phase pairs as
+/// "concurrent" for design purposes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct HookPriority(pub i32);
 
 impl HookPriority {
+    /// The priority every hook should ship with unless there's an explicit
+    /// reason to deviate. Value (`100`) leaves room on both sides for
+    /// composed extensions to slot in front or behind.
     pub const DEFAULT: Self = Self(100);
+    /// Run before any `DEFAULT`-priority hook in the same phase. Reserved
+    /// for Builtin hooks that must guarantee placement (e.g., a Validation-
+    /// phase well-formedness check).
     pub const FIRST: Self = Self(0);
+    /// Run after every other hook in the same phase. Useful for Telemetry-
+    /// phase audit hooks that record what other hooks decided.
     pub const LAST: Self = Self(i32::MAX);
 }
 

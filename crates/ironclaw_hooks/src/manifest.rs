@@ -28,7 +28,14 @@ use crate::predicate::{HookPredicateSpec, ValueOrRateBound};
 
 /// A single hook declaration in an extension manifest. Use [`Self::validate`]
 /// at install time to surface format violations as structured errors.
+///
+/// Marked `#[non_exhaustive]` so future optional fields (versioning,
+/// attribution, additional scopes) can be added without breaking
+/// downstream construction sites. External callers must use the
+/// [`Self::new`] constructor + the `with_*` builder methods; struct
+/// literals from outside the crate will not compile.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct HookManifestEntry {
     pub id: HookLocalId,
     pub kind: HookManifestKind,
@@ -47,6 +54,55 @@ pub struct HookManifestEntry {
     pub requires_grant: Option<String>,
     /// Hook body — either declarative predicate or programmatic WASM.
     pub body: HookManifestBody,
+}
+
+impl HookManifestEntry {
+    /// Construct an entry with the three required fields; everything else
+    /// uses the schema defaults. Chain `with_*` builder methods to set
+    /// optional fields.
+    ///
+    /// ```ignore
+    /// HookManifestEntry::new(local_id, HookManifestKind::BeforeCapability, body)
+    ///     .with_scope(HookManifestScope::OwnCapabilities)
+    ///     .with_description("Cap polymarket orders at 10/day")
+    /// ```
+    pub fn new(id: HookLocalId, kind: HookManifestKind, body: HookManifestBody) -> Self {
+        Self {
+            id,
+            kind,
+            scope: HookManifestScope::default(),
+            phase: default_phase(),
+            priority: default_priority(),
+            description: None,
+            requires_grant: None,
+            body,
+        }
+    }
+
+    pub fn with_scope(mut self, scope: HookManifestScope) -> Self {
+        self.scope = scope;
+        self
+    }
+
+    pub fn with_phase(mut self, phase: HookPhase) -> Self {
+        self.phase = phase;
+        self
+    }
+
+    pub fn with_priority(mut self, priority: HookPriority) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    pub fn with_requires_grant(mut self, grant: impl Into<String>) -> Self {
+        self.requires_grant = Some(grant.into());
+        self
+    }
 }
 
 /// What kind of hook this is (which point it registers at).

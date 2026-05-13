@@ -95,7 +95,7 @@ Ranked by blast radius of compromise:
 | # | Vector | Adversary | Mitigation | Test/invariant | Residual |
 |---|---|---|---|---|---|
 | I1 | Cross-tenant inference via shared predicate counter | A4 | Tenant-keyed `HistoryKey { tenant_id, capability, ... }`; per-build dispatcher (FU8) means counters don't survive across runs | `evaluator::tests::tenant_keyed_history`; per-build test in `hooks_integration.rs` | Low (in-process); High if a persistent counter ships without per-tenant partitioning |
-| I2 | Hook reads `BeforeCapabilityHookContext` args to leak sensitive capability inputs | A1 | `SanitizedArguments { Unresolved, Resolved }`; unresolved is the default; `Resolved(serde_json::Value)` only populated when a `CapabilityInputResolver` runs and only for declared fields | **Partial.** Current resolvers don't redact; an Installed hook with broad scope can read full resolved args. **TODO** — add field-level redaction or restrict resolver to declared `field_path` extraction only | Med |
+| I2 | Hook reads `BeforeCapabilityHookContext` args to leak sensitive capability inputs | A1 | `SanitizedArguments` exposes **only** `is_resolved()` and `extract_numeric(field_path)` — no `as_json`, no iteration, no key listing. A hook can ask for a named numeric path one-at-a-time but cannot enumerate args. The current predicate path enforces this by construction because the predicate spec itself declares the field. Future WASM hooks must thread the manifest-declared field allowlist through the resolver. | Documented in `SanitizedArguments` rustdoc | Low (current path); reassess when Installed-WASM lands |
 | I3 | Hook leaks state via milestone summary (e.g., embeds user data in decision reason) | A2 | `HookDecisionSummary` is closed-vocabulary enum, not free-text — Trusted hook can't smuggle data in reason | `run_profile::tests::decision_summary_is_closed_vocab` | Low |
 | I4 | Hook timing side-channel to infer capability invocation patterns of other tenants | A4 | Per-build dispatcher; timing-based inference of in-process state requires high precision; rate-limit predicates aren't published cross-tenant | None (acknowledged residual) | Low-Med |
 | I5 | Prompt envelope leaks instruction-marker bypass via clever encoding | A1 | `INSTRUCTION_LIKE_MARKERS` denylist in `wrap_untrusted`; envelope wraps with `Untrusted hook content: <body>` prefix | `prompt_envelope::tests::instruction_markers_denied` | Med (denylists are inherently incomplete vs determined attacker; mitigated by the fact that the LLM is also trained to be skeptical of `Untrusted hook content:` markers) |
@@ -109,7 +109,7 @@ Ranked by blast radius of compromise:
 | D2 | Panicking hook re-panics every call, exhausting log substrate | A1 | Poison sticks on first panic; subsequent calls short-circuit without invoking hook body | `registry::tests::poisoned_slot_skips`; same-dispatch poison re-check | Low |
 | D3 | Extension installs N hooks to flood the dispatcher | A1 | Pre-flight cap at registrar boundary: `MAX_HOOKS_PER_EXTENSION = 32` total per install batch; rejection is whole-batch so no partial install can slip past | `install_rejects_when_total_exceeds_per_extension_cap`; cap value pinned in `registrar.rs` const | Low |
 | D4 | Extension registers hooks at every attach point to slow every dispatch | A1 | Pre-flight cap: `MAX_HOOKS_PER_EXTENSION_PER_KIND = 8` per attach-point per extension; tighter than the total cap because fan-out at one dispatch point is the actual blast radius | `install_rejects_when_per_kind_cap_exceeded`; `install_accepts_at_per_extension_cap` pins the at-cap boundary | Low |
-| D5 | Predicate evaluator unbounded memory growth (window state per tenant × capability × hook) | A1/A4 | Sliding-window eviction trims expired entries; **but** unbounded distinct tenants × hooks × capabilities is possible | **TODO** — add a hard ceiling per evaluator and a metric for eviction pressure | Med |
+| D5 | Predicate evaluator unbounded memory growth (window state per tenant × capability × hook) | A1/A4 | Sliding-window eviction trims expired entries within a key; `MAX_HISTORY_KEYS = 8192` caps the *number of keys* per map; on overflow the LRU key is evicted and `evictions_observed()` advances for operator visibility | `lru_eviction_increments_counter_and_drops_oldest_key`; operator runbook §2 | Low |
 | D6 | Approval gate-ref accumulation (PauseApproval emitted but never resolved) | A1 | Approval gateway has its own TTL on outstanding refs (separate subsystem); hook side just mints | Out of scope (depends on approval gateway) | Defer |
 | D7 | Audit-log flood from chatty observer hook | A1/A2 | Observer-failure-isolated means runaway observer doesn't fail the run; emission rate is bounded by dispatch rate | Low (bounded by user activity) | Low |
 
@@ -141,9 +141,9 @@ These properties should hold across the framework. Each maps to one or more test
 | Patches always carry the untrusted envelope | ✓ | E5 |
 | Gate-refs are unguessable (factory side) | ✓ | S1 — `gate_refs_are_v4_uuids` + 20k no-collision test |
 | Gate-refs are one-shot at consumption | Deferred | Approval gateway's threat model, not the factory's |
-| Resolver can't leak undeclared fields | **Partial** | I2 — partial mitigation only |
+| Resolver can't leak undeclared fields | ✓ (current path) | I2 — narrow `SanitizedArguments` public API; reassess when Installed-WASM lands |
 | Per-extension hook count is bounded | ✓ | D3 + D4 — `MAX_HOOKS_PER_EXTENSION` / `_PER_KIND` consts in `registrar.rs` |
-| Per-evaluator counter state is bounded | **Gap** | D5 — no ceiling |
+| Per-evaluator counter state is bounded | ✓ | D5 — `MAX_HISTORY_KEYS` cap + LRU eviction + `evictions_observed()` |
 
 ## Open follow-ups (threat-model-driven)
 
@@ -151,9 +151,9 @@ Ranked by severity:
 
 1. ~~**(High)** Per-extension cap on hook registrations (D3/D4).~~ **DONE** — `MAX_HOOKS_PER_EXTENSION` (32) + `_PER_KIND` (8) consts in `registrar.rs`, enforced pre-flight in `enforce_registration_caps`.
 2. ~~**(High)** Gate-ref unguessability test (S1).~~ **DONE** — `gate_refs_are_v4_uuids` pins the v4 entropy source; 20k-draw no-collision test as statistical proxy. One-shot consumption deferred to the approval gateway's threat model.
-3. **(Med)** Resolver field-level scope (I2). `CapabilityInputResolver` should resolve *only* the `field_path` declared in the hook manifest, not arbitrary fields.
-4. **(Med)** Per-evaluator state ceiling (D5). Hard cap on distinct (tenant × capability × hook) entries; metric for eviction pressure.
-5. **(Med)** Document poison-stickiness operator runbook. Explicitly: how does an operator recover when a hook poisons? Process restart? Reinstall? Spec the path.
+3. ~~**(Med)** Resolver field-level scope (I2).~~ **DONE** — `SanitizedArguments` narrow public API (only `extract_numeric(field_path)`) makes the current predicate path field-scoped by construction. Documented in rustdoc; reassess when Installed-WASM lands.
+4. ~~**(Med)** Per-evaluator state ceiling (D5).~~ **DONE** — `MAX_HISTORY_KEYS = 8192` per map, LRU eviction, `evictions_observed()` metric.
+5. ~~**(Med)** Document poison-stickiness operator runbook.~~ **DONE** — see [`operator-runbook.md`](./operator-runbook.md) §1.
 6. **(Low)** Acknowledge timing side-channel residual (I4) in CLAUDE.md; defer mitigation unless a use case forces it.
 7. **(Low)** Strengthen instruction-marker denylist (I5) with a periodic review against published prompt-injection corpora.
 

@@ -11,8 +11,7 @@ use async_trait::async_trait;
 use ironclaw_hooks::{
     dispatch::HookDispatcherBuilder,
     identity::{ExtensionId, HookId, HookLocalId, HookVersion},
-    manifest::{HookManifestBody, HookManifestEntry, HookManifestKind, HookManifestScope},
-    ordering::{HookPhase, HookPriority},
+    manifest::{HookManifestBody, HookManifestEntry, HookManifestKind},
     points::BeforeCapabilityHookContext,
     predicate::{CapabilityPredicate, HookPredicateSpec, OnExceededAction, ValueOrRateBound},
     registry::{HookBindingScope, HookRegistry},
@@ -43,15 +42,10 @@ impl RestrictedBeforeCapabilityHook for DenyEverythingFromManifest {
 #[tokio::test]
 async fn manifest_to_dispatch_pipeline() {
     // 1. Author publishes a manifest entry.
-    let manifest_entry = HookManifestEntry {
-        id: HookLocalId("daily-order-cap".to_string()),
-        kind: HookManifestKind::BeforeCapability,
-        scope: HookManifestScope::OwnCapabilities,
-        phase: HookPhase::Policy,
-        priority: HookPriority::DEFAULT,
-        description: Some("Cap at 10 orders/day".to_string()),
-        requires_grant: None,
-        body: HookManifestBody::Predicate {
+    let manifest_entry = HookManifestEntry::new(
+        HookLocalId("daily-order-cap".to_string()),
+        HookManifestKind::BeforeCapability,
+        HookManifestBody::Predicate {
             spec: HookPredicateSpec::RateOrValueCap {
                 when: CapabilityPredicate::NameEquals {
                     name: "polymarket.place_order".to_string(),
@@ -65,7 +59,8 @@ async fn manifest_to_dispatch_pipeline() {
                 },
             },
         },
-    };
+    )
+    .with_description("Cap at 10 orders/day");
     manifest_entry.validate().expect("manifest validates");
 
     // 2. Registry installer pins a content-addressed hook id. (In production

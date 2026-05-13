@@ -38,10 +38,8 @@ use ironclaw_hooks::evaluator::PredicateEvaluator;
 use ironclaw_hooks::identity::HookLocalId;
 use ironclaw_hooks::kinds::gate::GateDecisionView;
 use ironclaw_hooks::kinds::mutator::{HookPatchView, PatchOrdinalHint, SnippetBodyView};
-use ironclaw_hooks::manifest::{
-    HookManifestBody, HookManifestEntry, HookManifestKind, HookManifestScope,
-};
-use ironclaw_hooks::ordering::{HookPhase, HookPriority};
+use ironclaw_hooks::manifest::{HookManifestBody, HookManifestEntry, HookManifestKind};
+use ironclaw_hooks::ordering::HookPhase;
 use ironclaw_hooks::points::{BeforeCapabilityHookContext, BeforePromptHookContext};
 use ironclaw_hooks::predicate::{
     CapabilityPredicate, HookPredicateSpec, OnExceededAction, ValueOrRateBound,
@@ -59,15 +57,10 @@ use ironclaw_host_api::{ExtensionId, TenantId};
 /// section. A hand-written extension would put this in TOML; the
 /// registrar consumes the same struct either way.
 fn polymarket_daily_cap_manifest() -> HookManifestEntry {
-    HookManifestEntry {
-        id: HookLocalId("polymarket-daily-cap".to_string()),
-        kind: HookManifestKind::BeforeCapability,
-        scope: HookManifestScope::OwnCapabilities,
-        phase: HookPhase::Policy,
-        priority: HookPriority::DEFAULT,
-        description: Some("Cap polymarket.place_order at 10 calls per 24h".to_string()),
-        requires_grant: None,
-        body: HookManifestBody::Predicate {
+    HookManifestEntry::new(
+        HookLocalId("polymarket-daily-cap".to_string()),
+        HookManifestKind::BeforeCapability,
+        HookManifestBody::Predicate {
             spec: HookPredicateSpec::RateOrValueCap {
                 when: CapabilityPredicate::NameEquals {
                     name: "polymarket.place_order".to_string(),
@@ -81,7 +74,8 @@ fn polymarket_daily_cap_manifest() -> HookManifestEntry {
                 },
             },
         },
-    }
+    )
+    .with_description("Cap polymarket.place_order at 10 calls per 24h")
 }
 
 #[tokio::test]
@@ -184,17 +178,10 @@ async fn polymarket_daily_cap_does_not_fire_for_other_capabilities() {
 /// accepts it. The dispatch-time fire-or-not test is in
 /// `crates/ironclaw_reborn/tests/hooks_integration.rs::numeric_sum_predicate_caps_total_value_against_real_inputs`.
 fn large_stake_approval_manifest() -> HookManifestEntry {
-    HookManifestEntry {
-        id: HookLocalId("large-stake-approval-gate".to_string()),
-        kind: HookManifestKind::BeforeCapability,
-        scope: HookManifestScope::OwnCapabilities,
-        phase: HookPhase::Policy,
-        priority: HookPriority::DEFAULT,
-        description: Some(
-            "Require user approval when cumulative stake exceeds $1000/24h".to_string(),
-        ),
-        requires_grant: None,
-        body: HookManifestBody::Predicate {
+    HookManifestEntry::new(
+        HookLocalId("large-stake-approval-gate".to_string()),
+        HookManifestKind::BeforeCapability,
+        HookManifestBody::Predicate {
             spec: HookPredicateSpec::RateOrValueCap {
                 when: CapabilityPredicate::NameEquals {
                     name: "polymarket.place_order".to_string(),
@@ -209,7 +196,8 @@ fn large_stake_approval_manifest() -> HookManifestEntry {
                 },
             },
         },
-    }
+    )
+    .with_description("Require user approval when cumulative stake exceeds $1000/24h")
 }
 
 #[tokio::test]

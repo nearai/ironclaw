@@ -83,11 +83,24 @@ impl BeforeCapabilityHookContext {
 /// `before_capability` hooks.
 ///
 /// The inner representation is sealed: only this crate can construct it. The
-/// only public surface is querying for resolved/unresolved state and
-/// extracting a numeric value at a JSON-pointer-like path. Hook authors must
-/// not get back raw [`serde_json::Value`] handles, and they must treat the
-/// "unresolved" state as a hard failure for any predicate that depends on
-/// argument contents.
+/// only public extraction surface is [`Self::is_resolved`] and
+/// [`Self::extract_numeric`] — a hook can ask "what's the numeric value at
+/// this named path?", and **nothing else**. There is no `as_json`, no
+/// iteration, no key listing, no string accessor. Hook authors who want a
+/// path's value must (a) know its name and (b) accept it as a numeric.
+///
+/// # Field-level scope (threat-model finding I2)
+///
+/// The narrow surface is the mitigation: even an Installed-tier hook with
+/// broad scope cannot enumerate or exfiltrate full capability arguments,
+/// because the API only resolves one named numeric at a time. A hook
+/// querying many paths is observable in the audit log (each
+/// `extract_numeric` call goes through this crate, not the inner JSON).
+///
+/// A future programmatic-hook surface (WASM) that wants richer arg access
+/// must thread the *manifest-declared* `field_path` allowlist through the
+/// resolver, not bypass it; the current predicate path enforces this by
+/// construction because the predicate spec itself names the field.
 #[derive(Debug, Clone)]
 pub struct SanitizedArguments {
     inner: SanitizedArgumentsInner,
@@ -142,6 +155,21 @@ impl SanitizedArguments {
         Self {
             inner: SanitizedArgumentsInner::Unresolved,
         }
+    }
+
+    /// Construct a resolved view from a serde_json value **for tests
+    /// only**, applying the same sanitization (depth + size bounds) as
+    /// the production path. Exposed under the `test-support` feature so
+    /// hook authors can TDD `NumericSum`-style predicates without
+    /// standing up the full Reborn resolver wiring.
+    ///
+    /// Production builds must NOT enable `test-support`; the constructor
+    /// it exposes lets callers bypass the path that the production
+    /// resolver would otherwise own, breaking the "resolved args came
+    /// from a trusted resolver" invariant.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_tests(value: serde_json::Value) -> Self {
+        Self::from_json(value)
     }
 
     /// Construct a resolved view, applying sanitization (string truncation,

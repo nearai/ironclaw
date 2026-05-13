@@ -104,12 +104,37 @@ impl fmt::Display for HookVersion {
 
 /// Identifier of the extension that supplied a hook (for `Installed`-tier
 /// hooks). Builtin hooks do not carry an `ExtensionId`.
+///
+/// **Two `ExtensionId` types coexist in the system, by design**:
+///
+/// - [`ironclaw_host_api::ExtensionId`] is the *authority-bearing* identifier:
+///   validated at construction, compared and trusted across the host.
+/// - `ironclaw_hooks::identity::ExtensionId` (this type) is a transparent
+///   string newtype consumed by [`HookId::derive`] as input to the blake3
+///   content-addressing hash.
+///
+/// The framework's [`crate::HookRegistrar`] already mirrors the host-api
+/// type into this one when installing manifest entries. Authors building
+/// hook IDs by hand (typically Trusted in-process hooks installed
+/// outside the registrar) can use the [`From`] impl to convert:
+///
+/// ```ignore
+/// let host_ext: ironclaw_host_api::ExtensionId = /* ... */;
+/// let identity_ext: ironclaw_hooks::identity::ExtensionId = (&host_ext).into();
+/// let id = HookId::derive(&identity_ext, "1.0.0", &local, HookVersion::ONE);
+/// ```
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct ExtensionId(pub String);
 
 impl fmt::Display for ExtensionId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+impl From<&ironclaw_host_api::ExtensionId> for ExtensionId {
+    fn from(host: &ironclaw_host_api::ExtensionId) -> Self {
+        ExtensionId(host.as_str().to_string())
     }
 }
 

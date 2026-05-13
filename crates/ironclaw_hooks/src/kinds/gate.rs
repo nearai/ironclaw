@@ -79,6 +79,25 @@ impl BeforeCapabilityHookDecision {
 
 /// Read-only public projection of a gate decision. Carries borrowed references
 /// to the underlying reason payloads so consumers don't need to clone.
+///
+/// # The `reason` carried here is a *closed-vocabulary* label
+///
+/// For Installed-tier predicate hooks, the `reason` field is a static
+/// label like `"hook_predicate_denied"` or `"hook_predicate_pause_requested"`
+/// — **not** the manifest-supplied text. The dispatcher intentionally
+/// collapses dynamic reasons at the model-visible boundary so a malicious
+/// extension cannot smuggle prompt-injection content through a deny
+/// reason. See [`crate::predicate::OnExceededAction`] for the full
+/// rationale.
+///
+/// Trusted-tier hooks (Rust code installed via
+/// `install_trusted_before_capability`) can emit richer reasons because
+/// they're already running trusted code; the sealing here is at the
+/// *Installed* trust class.
+///
+/// Audit consumers (SSE / event substrate) receive the rich manifest
+/// `reason` via `HookDecisionEmitted` milestones; the projection here
+/// is only the model-visible label.
 #[derive(Debug)]
 pub enum GateDecisionView<'a> {
     Allow,

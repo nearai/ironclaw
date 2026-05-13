@@ -72,6 +72,28 @@ pub enum ValueOrRateBound {
 }
 
 /// What to do when the bound is exceeded.
+///
+/// # The `reason` field is for *audit*, not for the model
+///
+/// Hook authors regularly assume their `reason` text surfaces to the
+/// agent loop and to the model. **It does not.** At dispatch time, the
+/// model-visible decision carries a closed-vocabulary label
+/// (`"hook_predicate_denied"` for `Deny`, `"hook_predicate_pause_requested"`
+/// for `PauseApproval`) — the manifest-supplied `reason` is preserved in
+/// audit milestones (`HookDecisionEmitted`) but is *never* passed to the
+/// model.
+///
+/// This is intentional. Manifest-supplied strings are author-controlled
+/// dynamic input; surfacing them to the model would open a prompt-injection
+/// channel (a malicious extension could put instructions in the deny
+/// reason). Closed vocabulary at the model boundary closes that channel.
+///
+/// What `reason` is good for: operator audit, runbook diagnostics,
+/// per-decision reporting in the SSE event substrate. Write it for a
+/// human reader of the audit log, not for the model.
+///
+/// See [`crate::kinds::gate::GateDecisionView`] for the closed-vocabulary
+/// projection the dispatcher emits.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "decision", rename_all = "snake_case")]
 pub enum OnExceededAction {

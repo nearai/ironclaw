@@ -242,13 +242,13 @@ deviate from `DEFAULT`. Optionally add named constants (`EARLY`,
 
 | ID | Severity | Status |
 |---|---|---|
-| F1 — Sealed `unresolved()` blocks external dispatch tests | High | Fixed in this PR |
-| F2 — Closed-vocabulary deny reason is undocumented | Med | Recommendation: rustdoc + `DenyReasonCode` |
-| F3 — NumericSum can't be TDD'd outside Reborn | Med | Recommendation: feature-gated test constructor |
+| F1 — Sealed `unresolved()` blocks external dispatch tests | High | **Fixed** — `pub fn unresolved()` |
+| F2 — Closed-vocabulary deny reason is undocumented | Med | **Fixed** — rustdoc on `OnExceededAction` and `GateDecisionView`. The `DenyReasonCode` enum is deferred (still worth doing but not blocking) |
+| F3 — NumericSum can't be TDD'd outside Reborn | Med | **Fixed** — `SanitizedArguments::for_tests(value)` under `test-support` feature flag |
 | F4 — Trusted Rust before_prompt hooks (no friction) | — | — |
-| F5 — Two `ExtensionId` types are confusing | Low | Recommendation: `From` impl + doc |
-| F6 — `HookManifestEntry` struct literal is fragile | Low | Recommendation: `#[non_exhaustive]` + builder |
-| F7 — Priority guidance is missing | Low | Recommendation: rustdoc |
+| F5 — Two `ExtensionId` types are confusing | Low | **Fixed** — `From<&ironclaw_host_api::ExtensionId>` impl + cross-link rustdoc |
+| F6 — `HookManifestEntry` struct literal is fragile | Low | **Fixed** — `#[non_exhaustive]` + `new(id, kind, body)` + `with_*` builder methods |
+| F7 — Priority guidance is missing | Low | **Fixed** — rustdoc on `HookPriority` with explicit guidance and named constants |
 
 **Big-picture observation:** Hook 3 (Trusted Rust hook) was easier to
 write than Hook 1 (declarative predicate). That's surprising — the

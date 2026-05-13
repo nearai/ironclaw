@@ -20,6 +20,22 @@
 //! process counters and durable persistence are a separate slice.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+/// Maximum number of distinct keys retained in either sliding-window history
+/// map (`invocation_history` or `value_history`). Bounds the evaluator's
+/// memory footprint against threat-model finding **D5** (unbounded growth
+/// across `tenant × capability × hook × field` permutations). The cap is
+/// per-map; the two maps together can hold up to `2 × MAX_HISTORY_KEYS`
+/// entries.
+///
+/// When the cap is reached and a new key arrives, the LRU entry (the key
+/// whose oldest retained timestamp is earliest) is evicted and the
+/// `evictions_observed` counter is incremented so operators can detect
+/// pressure. The cap is intentionally generous — typical deployments
+/// hold dozens of keys; reaching 8192 indicates either pathological hook
+/// density or an active attack on counter state.
+pub const MAX_HISTORY_KEYS: usize = 8_192;
 use std::str::FromStr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -57,6 +73,10 @@ pub struct PredicateEvaluator {
     /// Tenant-keyed so that one tenant's spend cannot affect another's
     /// rolling cap.
     value_history: Mutex<HashMap<ValueHistoryKey, VecDeque<(Instant, Decimal)>>>,
+    /// Count of LRU evictions observed across both history maps. Exposed
+    /// via [`Self::evictions_observed`] for operators monitoring D5
+    /// pressure.
+    evictions: AtomicU64,
 }
 
 impl PredicateEvaluator {
@@ -64,7 +84,16 @@ impl PredicateEvaluator {
         Self {
             invocation_history: Mutex::new(HashMap::new()),
             value_history: Mutex::new(HashMap::new()),
+            evictions: AtomicU64::new(0),
         }
+    }
+
+    /// Total LRU evictions observed since construction across both
+    /// history maps. Operators should alert when this counter advances —
+    /// it means the evaluator hit its cap (`MAX_HISTORY_KEYS`) and
+    /// started dropping the oldest tracked window. Threat-model finding D5.
+    pub fn evictions_observed(&self) -> u64 {
+        self.evictions.load(AtomicOrdering::Relaxed)
     }
 
     /// Evaluate `spec` against the given context. Mutates internal counters
@@ -132,6 +161,9 @@ impl PredicateEvaluator {
                             .invocation_history
                             .lock()
                             .expect("predicate history mutex poisoned");
+                        if !history.contains_key(&key) && history.len() >= MAX_HISTORY_KEYS {
+                            evict_lru_invocation(&mut history, &self.evictions);
+                        }
                         let entries = history.entry(key).or_default();
                         // Trim entries outside the window.
                         let cutoff = now.checked_sub(window_dur).unwrap_or(now);
@@ -197,6 +229,9 @@ impl PredicateEvaluator {
                             .value_history
                             .lock()
                             .expect("predicate value history mutex poisoned");
+                        if !history.contains_key(&key) && history.len() >= MAX_HISTORY_KEYS {
+                            evict_lru_value(&mut history, &self.evictions);
+                        }
                         let entries = history.entry(key).or_default();
                         let cutoff = now.checked_sub(window_dur).unwrap_or(now);
                         while let Some((ts, _)) = entries.front() {
@@ -252,6 +287,42 @@ fn predicate_matches(predicate: &CapabilityPredicate, ctx: &BeforeCapabilityHook
         CapabilityPredicate::Any { predicates } => {
             predicates.iter().any(|p| predicate_matches(p, ctx))
         }
+    }
+}
+
+/// Evict the entry with the earliest "front" timestamp — that is, the key
+/// whose oldest retained sample is older than any other key's oldest sample.
+/// This is a conservative LRU approximation: it preferentially drops keys
+/// that have been idle the longest. The full O(N) scan is acceptable here
+/// because this path runs only at-cap and the cap is sized so reaching it
+/// is rare.
+fn evict_lru_invocation(
+    history: &mut HashMap<HistoryKey, VecDeque<Instant>>,
+    evictions: &AtomicU64,
+) {
+    let victim = history
+        .iter()
+        .filter_map(|(k, v)| v.front().map(|ts| (k.clone(), *ts)))
+        .min_by_key(|(_, ts)| *ts)
+        .map(|(k, _)| k);
+    if let Some(k) = victim {
+        history.remove(&k);
+        evictions.fetch_add(1, AtomicOrdering::Relaxed);
+    }
+}
+
+fn evict_lru_value(
+    history: &mut HashMap<ValueHistoryKey, VecDeque<(Instant, Decimal)>>,
+    evictions: &AtomicU64,
+) {
+    let victim = history
+        .iter()
+        .filter_map(|(k, v)| v.front().map(|(ts, _)| (k.clone(), *ts)))
+        .min_by_key(|(_, ts)| *ts)
+        .map(|(k, _)| k);
+    if let Some(k) = victim {
+        history.remove(&k);
+        evictions.fetch_add(1, AtomicOrdering::Relaxed);
     }
 }
 
@@ -764,6 +835,51 @@ mod tests {
             EvaluatorDecision::Allow,
             "tenants must not share rate-cap counters"
         );
+    }
+
+    /// Threat-model finding D5: when the invocation_history map hits its
+    /// cap, the oldest tracked key must be evicted and the eviction
+    /// counter must advance. Synthesized by injecting a private
+    /// constant-shrunk test (we can't actually fill a map with
+    /// MAX_HISTORY_KEYS=8192 distinct hooks in a unit test cheaply, so
+    /// we exercise the path with a smaller cap analog by triggering the
+    /// same LRU helper directly).
+    #[test]
+    fn lru_eviction_increments_counter_and_drops_oldest_key() {
+        // Build an evaluator and call the LRU helper directly with a
+        // crafted map. This bypasses the threshold check (we'd need an
+        // 8192-key map otherwise) but exercises the exact helper used
+        // when the threshold fires.
+        let evaluator = PredicateEvaluator::new();
+        assert_eq!(evaluator.evictions_observed(), 0);
+
+        let mut map: HashMap<HistoryKey, VecDeque<Instant>> = HashMap::new();
+        let now = Instant::now();
+        let oldest_key = HistoryKey {
+            hook_id: hook_id(),
+            tenant_id: tenant(),
+            capability: "cap.oldest".to_string(),
+        };
+        let newer_key = HistoryKey {
+            hook_id: hook_id(),
+            tenant_id: tenant(),
+            capability: "cap.newer".to_string(),
+        };
+        let mut oldest_entries = VecDeque::new();
+        oldest_entries.push_back(now.checked_sub(Duration::from_secs(60)).unwrap_or(now));
+        let mut newer_entries = VecDeque::new();
+        newer_entries.push_back(now);
+        map.insert(oldest_key.clone(), oldest_entries);
+        map.insert(newer_key.clone(), newer_entries);
+
+        evict_lru_invocation(&mut map, &evaluator.evictions);
+
+        assert_eq!(evaluator.evictions_observed(), 1);
+        assert!(
+            !map.contains_key(&oldest_key),
+            "LRU key should have been evicted"
+        );
+        assert!(map.contains_key(&newer_key), "newer key should be retained");
     }
 
     #[test]
