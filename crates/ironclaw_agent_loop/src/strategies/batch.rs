@@ -44,6 +44,22 @@ pub(crate) struct CapabilityCallSummary {
     pub(crate) concurrency_hint: ConcurrencyHint,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct DefaultBatchPolicyStrategy;
+
+impl BatchPolicyStrategy for DefaultBatchPolicyStrategy {
+    fn policy(&self, _state: &LoopExecutionState, calls: &[CapabilityCallSummary]) -> BatchPolicy {
+        if calls
+            .iter()
+            .any(|call| call.concurrency_hint == ConcurrencyHint::Exclusive)
+        {
+            BatchPolicy::Sequential
+        } else {
+            BatchPolicy::Parallel
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;

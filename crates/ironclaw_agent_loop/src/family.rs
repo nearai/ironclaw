@@ -2,6 +2,8 @@ use std::{borrow::Cow, collections::HashMap, fmt, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 
+use crate::planner::AgentLoopPlannerInternal;
+
 /// Identity for a Builtin loop family.
 ///
 /// Profile JSON serializes as a flat string. The registry is the authority on
@@ -53,8 +55,6 @@ impl ComponentIdentity {
     }
 }
 
-pub(crate) trait LoopFamilyPlanner: Send + Sync {}
-
 /// A Builtin loop family, opaque outside `ironclaw_agent_loop`.
 ///
 /// Family factories are the only production constructors. Downstream crates can
@@ -62,19 +62,20 @@ pub(crate) trait LoopFamilyPlanner: Send + Sync {}
 pub struct LoopFamily {
     id: LoopFamilyId,
     version: ComponentIdentity,
-    _planner: Arc<dyn LoopFamilyPlanner>,
+    #[allow(dead_code)]
+    planner: Arc<dyn AgentLoopPlannerInternal>,
 }
 
 impl LoopFamily {
     pub(crate) fn new(
         id: LoopFamilyId,
         version: ComponentIdentity,
-        planner: Arc<dyn LoopFamilyPlanner>,
+        planner: Arc<dyn AgentLoopPlannerInternal>,
     ) -> Self {
         Self {
             id,
             version,
-            _planner: planner,
+            planner,
         }
     }
 
@@ -84,6 +85,11 @@ impl LoopFamily {
 
     pub fn version(&self) -> &ComponentIdentity {
         &self.version
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn planner(&self) -> &dyn AgentLoopPlannerInternal {
+        self.planner.as_ref()
     }
 }
 
@@ -114,11 +120,9 @@ impl LoopFamilyRegistry {
 mod tests {
     use std::sync::Arc;
 
+    use crate::default_planner::DefaultPlanner;
+
     use super::*;
-
-    struct TestPlanner;
-
-    impl LoopFamilyPlanner for TestPlanner {}
 
     #[test]
     fn loop_family_id_default_is_flat_string() {
@@ -142,7 +146,7 @@ mod tests {
         let family = Arc::new(LoopFamily::new(
             LoopFamilyId::DEFAULT,
             ComponentIdentity::from_static("default", ComponentDigest([0; 32])),
-            Arc::new(TestPlanner),
+            Arc::new(DefaultPlanner::compose_default()),
         ));
         let registry = LoopFamilyRegistry::with_families(vec![family]);
 

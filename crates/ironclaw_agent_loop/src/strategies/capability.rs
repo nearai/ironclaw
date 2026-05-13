@@ -34,6 +34,16 @@ pub(crate) enum CapabilityFilter {
     Deny(Vec<CapabilityId>),
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct DefaultCapabilityStrategy;
+
+#[async_trait]
+impl CapabilityStrategy for DefaultCapabilityStrategy {
+    async fn filter(&self, _state: &LoopExecutionState) -> CapabilityFilter {
+        CapabilityFilter::All
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use ironclaw_host_api::CapabilityId;

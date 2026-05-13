@@ -17,6 +17,20 @@ pub(crate) trait InputDrainStrategy: Send + Sync {
     async fn drain_followup(&self, state: &LoopExecutionState) -> bool;
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct DefaultInputDrainStrategy;
+
+#[async_trait]
+impl InputDrainStrategy for DefaultInputDrainStrategy {
+    async fn drain_steering(&self, _state: &LoopExecutionState) -> bool {
+        true
+    }
+
+    async fn drain_followup(&self, _state: &LoopExecutionState) -> bool {
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;

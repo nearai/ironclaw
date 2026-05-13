@@ -32,6 +32,16 @@ pub(crate) enum ModelPreference {
     },
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct DefaultModelStrategy;
+
+#[async_trait]
+impl ModelStrategy for DefaultModelStrategy {
+    async fn preference(&self, _state: &LoopExecutionState) -> ModelPreference {
+        ModelPreference::Primary
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ModelPreference, ModelStrategy};

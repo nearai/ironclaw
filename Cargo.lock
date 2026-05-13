@@ -4078,6 +4078,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "blake3",
+ "futures",
  "ironclaw_host_api",
  "ironclaw_turns",
  "serde",

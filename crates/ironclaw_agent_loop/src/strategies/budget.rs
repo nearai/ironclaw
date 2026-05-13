@@ -15,6 +15,19 @@ pub(crate) trait BudgetStrategy: Send + Sync {
     fn wall_clock_limit(&self, state: &LoopExecutionState) -> Option<Duration>;
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct DefaultBudgetStrategy;
+
+impl BudgetStrategy for DefaultBudgetStrategy {
+    fn iteration_limit(&self, _state: &LoopExecutionState) -> u32 {
+        32
+    }
+
+    fn wall_clock_limit(&self, _state: &LoopExecutionState) -> Option<Duration> {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use ironclaw_host_api::{TenantId, ThreadId};

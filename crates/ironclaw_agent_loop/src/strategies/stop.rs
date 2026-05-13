@@ -64,6 +64,25 @@ pub(crate) enum StopKind {
     Aborted(LoopFailureKind),
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct DefaultStopConditionStrategy;
+
+#[async_trait]
+impl StopConditionStrategy for DefaultStopConditionStrategy {
+    async fn should_stop_after_turn(
+        &self,
+        state: &LoopExecutionState,
+        _just_completed: &TurnSummary,
+    ) -> StopOutcome {
+        let mut stop = state.stop_state.clone();
+        stop.turns_completed += 1;
+        StopOutcome::Stop {
+            stop,
+            kind: StopKind::GracefulStop,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
