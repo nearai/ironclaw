@@ -308,11 +308,15 @@ async def _set_tool_permission(
 ) -> None:
     """Override a tool's permission state via the settings API.
 
-    The seeder writes the seeded default (AskEachTime for `tool_install`) to
-    DB at startup, which the auto-approve check in `effect_adapter` treats
-    as a user-explicit override and refuses to bypass even with
-    `AGENT_AUTO_APPROVE_TOOLS=true`. Test fixtures that need a tool to
-    auto-approve must explicitly set its permission to `always_allow`.
+    Post-#3559 (security-review follow-up to #3533): no DB row exists
+    for tools the user hasn't explicitly customized — the seeder was
+    removed and a one-shot startup migration deletes ghost-seeded rows.
+    Any value written through this helper is therefore a true user
+    override and `AGENT_AUTO_APPROVE_TOOLS=true` will NOT bypass it.
+    Use this helper to: (a) pre-approve a tool with no seeded default
+    so a post-install retry doesn't gate, or (b) force a specific
+    permission for tests that intentionally exercise the gate path
+    (typically combined with `AGENT_AUTO_APPROVE_TOOLS=false`).
     """
     headers = {"Authorization": f"Bearer {AUTH_TOKEN}"}
     async with httpx.AsyncClient() as client:
@@ -1693,13 +1697,16 @@ async def test_chat_first_gmail_installs_prompts_and_retries(
     server = auth_matrix_server
     page = auth_matrix_page
     await _remove_extension_if_present(server["base_url"], "gmail")
-    # The fixture sets `AGENT_AUTO_APPROVE_TOOLS=true`. Before the
-    # tool-permissions seeded-vs-explicit fix, the seeder's boot-time
-    # write of `tool_install = AskEachTime` was treated as a user-explicit
-    # override that neutered the env knob — this test had to call
-    # `_set_tool_permission(... "always_allow")` to drive the chat-first
-    # install path. Post-fix, a DB value that matches the seeded default
-    # is treated as implicit and `auto_approve_tools` properly bypasses it.
+    # The fixture sets `AGENT_AUTO_APPROVE_TOOLS=true`. Post-#3559
+    # (security-review follow-up to #3533), the boot-time seeder that
+    # wrote ghost `tool_install = AskEachTime` rows has been removed
+    # and a startup migration cleans up any pre-existing ghosts. With
+    # no DB row, `effective_permission` falls back to the code-level
+    # `AskEachTime` baseline, which is implicit — so the env knob
+    # bypasses the gate without `_set_tool_permission` having to force
+    # `always_allow`. A user who deliberately picks `AskEachTime`
+    # through the settings UI WOULD have it respected (regression
+    # covered by `bridge::tool_permissions::tests`).
 
     chat_input = page.locator(SEL["chat_input"])
     await chat_input.fill("check gmail unread")
@@ -1761,9 +1768,9 @@ async def test_chat_install_approval_then_auth_card(
     await _remove_extension_if_present(server["base_url"], "gmail")
     # Note: deliberately NOT pre-approving `tool_install` here so the
     # approval gate fires and the approval card surfaces in the UI.
-    # The dedicated `_no_auto_approve` fixture also passes
+    # The dedicated `_no_auto_approve` fixture passes
     # `AGENT_AUTO_APPROVE_TOOLS=false` so the env knob doesn't bypass
-    # the gate after the tool-permissions seeded-vs-explicit fix.
+    # the code-level `AskEachTime` baseline for `tool_install`.
     # Pre-approve `gmail` so the post-install retry doesn't *also* gate
     # — this test isolates the explicit-approval path for `tool_install`
     # specifically. (Gmail has no seeded permission default, so without

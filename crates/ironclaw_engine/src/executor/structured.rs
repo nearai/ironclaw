@@ -727,8 +727,18 @@ async fn execute_with_inline_gate_retry(
         });
 
         // Refund the lease use this attempt consumed; we'll re-consume
-        // on retry if the user approves.
-        let _ = leases.refund_use(current_lease.id).await;
+        // on retry if the user approves. EXCEPTION: when `resume_output`
+        // is set, the action has already executed successfully (the
+        // gate is a post-execution Authentication gate carrying cached
+        // output) — the cached-output branch below will return without
+        // re-consuming. Refunding now would net the successful action
+        // to zero lease uses, letting a side-effecting tool drain
+        // `max_uses=∞` for free. See `drive_inline_gate` in scripting.rs
+        // and `execute_action_with_inline_gate` in orchestrator.rs for
+        // the matching guards. Tracked by the #3559 security review.
+        if resume_output.is_none() {
+            let _ = leases.refund_use(current_lease.id).await;
+        }
 
         let resolution = exec_ctx
             .gate_controller

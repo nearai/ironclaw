@@ -2349,7 +2349,13 @@ async fn drive_inline_gate(
             {
                 // Refund the use we just consumed — the next loop
                 // iteration will pause and re-consume on resolution.
-                let _ = leases.refund_use(lease.id).await;
+                // EXCEPTION: when the retry's gate carries a cached
+                // `resume_output`, the next iteration will return that
+                // cached output without re-consuming; refunding here
+                // would zero out the lease use the retry already spent.
+                if resume_output.is_none() {
+                    let _ = leases.refund_use(lease.id).await;
+                }
                 events.push(EventKind::ApprovalRequested {
                     action_name: action_name.clone(),
                     call_id: call_id.clone(),
@@ -2484,7 +2490,17 @@ async fn resolve_tool_future(
             }),
             _,
         )) => {
-            let _ = leases.refund_use(lease_id).await;
+            // Skip the refund when the gate carries cached `resume_output`:
+            // the action has already executed (post-execution Authentication
+            // gate), and `drive_inline_gate` will return the cached output
+            // on approval without re-consuming a lease. Refunding here would
+            // let a successful side-effecting action consume zero uses.
+            // Matching guards live in `structured::execute_with_inline_gate_retry`
+            // and `orchestrator::execute_action_with_inline_gate`. Tracked by
+            // the #3559 security review.
+            if resume_output.is_none() {
+                let _ = leases.refund_use(lease_id).await;
+            }
             events.push(EventKind::ApprovalRequested {
                 action_name: gate_action_name.clone(),
                 call_id: gate_call_id.clone(),

@@ -2059,8 +2059,20 @@ async fn execute_single_action_with_inline_retry(
         accumulated_events.push(event);
 
         // Refund the lease use this attempt consumed; we'll re-consume
-        // on retry if the user approves.
-        let _ = leases.refund_use(current_lease.id).await;
+        // on retry if the user approves. EXCEPTION: when the gate carries
+        // cached `resume_output`, the action has already executed (post-
+        // execution Authentication gate) and the cached-output branch
+        // below will return without re-consuming. Refunding now would
+        // let a successful side-effecting action consume zero lease
+        // uses. See matching guards in `scripting::resolve_tool_future`
+        // and `structured::execute_with_inline_gate_retry`. Tracked by
+        // the #3559 security review.
+        let gate_carries_resume_output = result_json
+            .get("resume_output")
+            .is_some_and(|v| !v.is_null());
+        if !gate_carries_resume_output {
+            let _ = leases.refund_use(current_lease.id).await;
+        }
 
         // Use the gate-provided parameters from the GatePaused payload,
         // not the original caller `params`: the safety layer may have

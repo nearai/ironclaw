@@ -130,8 +130,8 @@ machinery parks the VM, and the OAuth callback delivers the resolved
 credential to retry the action. Integrations that need user-driven setup
 (`NeedsSetup`, `Inactive`, `AvailableNotInstalled`) are listed under
 `Activatable Integrations` and the model installs them by calling
-`tool_install(name="<name>")` directly (issue #3533 / PR — the hidden gate
-on `tool_install` from #2868 was removed; the tool's
+`tool_install(name="<name>")` directly (issue #3533 / PR #3559 — the
+hidden gate on `tool_install` from #2868 was removed; the tool's
 `requires_approval = UnlessAutoApproved` mediates user consent).
 
 **Context as variables** (not attention input):

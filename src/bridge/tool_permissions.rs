@@ -41,27 +41,22 @@ impl ToolPermissionSnapshot {
         let hyphenated = canonical.replace('_', "-");
         let raw_explicit = self.explicit_permission_with_names(tool_name, &canonical, &hyphenated);
         let seeded_default = seeded_default_permission(&canonical);
-        // #3533: the boot-time seeder writes the seeded default
-        // (e.g. `tool_install` → `AskEachTime`) into the DB so the
-        // permissions panel can display it. The DB value is then
-        // indistinguishable from a user-explicit override, which means
-        // `enforce_tool_permission` treats every seeded default as
-        // explicit and refuses to honor `AGENT_AUTO_APPROVE_TOOLS=true`.
-        // Treat a DB value that matches the seeded default as implicit:
-        // a user who genuinely wants to keep the default behaves the
-        // same as someone who never touched the setting, and a real
-        // explicit override (`AlwaysAllow` or `Disabled`) still surfaces
-        // as `explicit = Some(...)`.
-        let explicit = match (raw_explicit, seeded_default) {
-            (Some(value), Some(default)) if value == default => None,
-            (value, _) => value,
-        };
+        // Any DB row is a user-explicit choice. The original #3533 fix
+        // here collapsed value-equal-to-seed rows to `explicit = None`
+        // so `AGENT_AUTO_APPROVE_TOOLS=true` could bypass them, but
+        // value-equality is not provenance — a user who genuinely picks
+        // `AskEachTime` for `tool_install` (the seeded default) would
+        // see their explicit choice silently bypassed. Provenance is
+        // now handled at write time: pre-#3559 `seed_tool_permissions`
+        // wrote ghost rows that `cleanup_ghost_seeded_tool_permissions`
+        // deletes on first startup, and no new seeded rows are written.
+        // See `src/app.rs::cleanup_ghost_seeded_tool_permissions`.
         let effective = raw_explicit
             .or(seeded_default)
             .unwrap_or(PermissionState::AskEachTime);
         ToolPermissionResolution {
             effective,
-            explicit,
+            explicit: raw_explicit,
         }
     }
 
@@ -128,13 +123,18 @@ mod tests {
         );
     }
 
-    /// Issue #3533 regression: when the boot-time seeder writes the seeded
-    /// default for `tool_install` (`AskEachTime`) into the DB, the resolver
-    /// must NOT treat that as a user-explicit override — otherwise
-    /// `effect_adapter::enforce_tool_permission`'s `is_explicit_ask` check
-    /// fires and `AGENT_AUTO_APPROVE_TOOLS=true` is silently neutered.
+    /// #3559 security review: a DB row is always a user-explicit choice.
+    /// A user who genuinely picks `AskEachTime` for `tool_install` (which
+    /// happens to match the code-level seeded default) must surface as
+    /// `explicit = Some(...)` so `effect_adapter::enforce_tool_permission`'s
+    /// `is_explicit_ask` check fires and `AGENT_AUTO_APPROVE_TOOLS=true`
+    /// does NOT bypass the gate. The pre-#3559 collapse-to-implicit logic
+    /// silently dropped this choice; the cleanup migration in
+    /// `app::cleanup_ghost_seeded_tool_permissions` now removes the
+    /// historical ghost-seeded rows at boot so any surviving DB row is
+    /// user-explicit by construction.
     #[test]
-    fn seeded_default_matching_db_value_is_implicit() {
+    fn user_explicit_value_matching_seeded_default_stays_explicit() {
         let snapshot = ToolPermissionSnapshot {
             overrides: HashMap::from([("tool_install".to_string(), PermissionState::AskEachTime)]),
         };
@@ -143,17 +143,17 @@ mod tests {
             snapshot.resolve_permission("tool_install"),
             ToolPermissionResolution {
                 effective: PermissionState::AskEachTime,
-                // Matches the seeded default → treated as implicit so
-                // auto_approve_tools env var can still bypass it.
-                explicit: None,
+                explicit: Some(PermissionState::AskEachTime),
             }
         );
     }
 
     /// A user who explicitly opts out of the seeded default (here:
     /// `tool_install` set to `AlwaysAllow` instead of the seeded
-    /// `AskEachTime`) keeps their explicit choice. Only DB values that
-    /// match the seeded default are collapsed to implicit.
+    /// `AskEachTime`) keeps their explicit choice. Same semantics as
+    /// `user_explicit_value_matching_seeded_default_stays_explicit`,
+    /// but with a value that diverges from the seeded default — the
+    /// resolver treats all DB values identically.
     #[test]
     fn user_override_diverging_from_seeded_default_stays_explicit() {
         let snapshot = ToolPermissionSnapshot {

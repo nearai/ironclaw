@@ -1243,10 +1243,12 @@ def match_tool_call(messages: list[dict], has_tools: bool) -> list[dict] | None:
     #
     # Turn 1: user says "check gmail unread" → match_tool_call below dispatches
     #         a direct `gmail` call. Engine rejects with either "Extension not
-    #         installed:" (pre-#3533, latent path with bridge-side auto-install
-    #         implemented) or "is not callable in this execution context"
-    #         (post-#3533, engine-side preflight rejection, tool_install
-    #         re-enabled on the agent surface).
+    #         installed:" (pre-#3533 wording, from the bridge-side
+    #         not-installed reject — the chat-driven install path was wired up
+    #         here in mock_llm but non-functional because `tool_install` was
+    #         hidden from the agent surface) or "is not callable in this
+    #         execution context" (post-#3533, engine-side preflight rejection,
+    #         tool_install restored on the agent surface).
     # Turn 2: this branch fires — call `tool_install("gmail")`.
     # Turn 3: install succeeded → call `gmail` again, this time the engine's
     #         auth preflight raises an Authentication gate.
