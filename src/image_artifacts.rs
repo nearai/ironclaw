@@ -213,6 +213,46 @@ pub(crate) async fn persist_incoming_image_attachment_artifact(
     .map(Some)
 }
 
+pub(crate) async fn load_image_artifact_data_url(path: &str) -> Result<String, String> {
+    load_image_artifact_data_url_at(None, path).await
+}
+
+pub(crate) async fn load_image_artifact_data_url_at(
+    root: Option<&Path>,
+    path: &str,
+) -> Result<String, String> {
+    let default_root;
+    let root = match root {
+        Some(root) => root,
+        None => {
+            default_root = default_image_artifact_root();
+            default_root.as_path()
+        }
+    };
+    let resolved = crate::tools::builtin::path_utils::validate_path(path, Some(root))
+        .map_err(|e| e.to_string())?;
+    let bytes = tokio::fs::read(&resolved)
+        .await
+        .map_err(|e| format!("failed to read image artifact: {e}"))?;
+    if bytes.is_empty() {
+        return Err("image artifact is empty".to_string());
+    }
+    if bytes.len() > MAX_IMAGE_ARTIFACT_BYTES {
+        return Err(format!(
+            "image artifact exceeds {} byte limit",
+            MAX_IMAGE_ARTIFACT_BYTES
+        ));
+    }
+    let guessed = mime_guess::from_path(&resolved)
+        .first_raw()
+        .ok_or_else(|| "failed to determine image artifact media type".to_string())?;
+    let media_type = normalize_image_media_type(guessed)?;
+    Ok(format!(
+        "data:{media_type};base64,{}",
+        BASE64_STANDARD.encode(bytes)
+    ))
+}
+
 pub(crate) fn decode_image_data_url(data_url: &str) -> Result<(String, Vec<u8>), String> {
     let Some(rest) = data_url.strip_prefix("data:") else {
         return Err("image data URL must start with data:".to_string());

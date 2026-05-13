@@ -12891,7 +12891,9 @@ mod tests {
             .expect("image result should be persisted");
         assert!(persisted_result.contains("\"type\":\"image_generated\""));
         assert!(persisted_result.contains(&format!("v2-{}-call-img", thread_id.0)));
-        assert!(persisted_result.contains("data:image/png;base64,abc123"));
+        assert!(persisted_result.contains("\"path\":\"workspace/out.png\""));
+        assert!(persisted_result.contains("\"data_omitted\":true"));
+        assert!(!persisted_result.contains("data:image/png;base64,abc123"));
     }
 
     #[cfg(feature = "libsql")]
@@ -12956,7 +12958,8 @@ mod tests {
             .as_str()
             .expect("image result should be persisted");
         assert!(persisted_result.contains("\"type\":\"image_generated\""));
-        assert!(persisted_result.contains("data:image/png;base64,abc123"));
+        assert!(persisted_result.contains("\"data_omitted\":true"));
+        assert!(!persisted_result.contains("data:image/png;base64,abc123"));
     }
 
     #[cfg(feature = "libsql")]
@@ -13026,7 +13029,9 @@ mod tests {
             .as_str()
             .expect("image_edit result should be persisted");
         assert!(persisted_result.contains("\"type\":\"image_generated\""));
-        assert!(persisted_result.contains("data:image/jpeg;base64,edited123"));
+        assert!(persisted_result.contains("\"path\":\"workspace/edited.jpg\""));
+        assert!(persisted_result.contains("\"data_omitted\":true"));
+        assert!(!persisted_result.contains("data:image/jpeg;base64,edited123"));
     }
 
     #[cfg(feature = "libsql")]
@@ -13054,9 +13059,10 @@ mod tests {
                 "action_name": "image_generate",
                 "output": {
                     "type": "image_generated",
-                    "data": "data:image/png;base64,code123",
                     "media_type": "image/png",
-                    "path": "workspace/code.png"
+                    "path": "workspace/code.png",
+                    "data_omitted": true,
+                    "omitted_reason": "omitted from engine thread state after image artifact persistence"
                 },
                 "is_error": false,
                 "duration": 10
@@ -13079,9 +13085,10 @@ mod tests {
             generated_images[0].event_id,
             format!("v2-{}-code_call_1", thread_id.0)
         );
+        assert!(generated_images[0].data_url.is_none());
         assert_eq!(
-            generated_images[0].data_url.as_deref(),
-            Some("data:image/png;base64,code123")
+            generated_images[0].path.as_deref(),
+            Some("workspace/code.png")
         );
 
         let messages = db
@@ -13103,7 +13110,9 @@ mod tests {
             .as_str()
             .expect("image result should be persisted");
         assert!(persisted_result.contains("\"type\":\"image_generated\""));
-        assert!(persisted_result.contains("data:image/png;base64,code123"));
+        assert!(persisted_result.contains("\"path\":\"workspace/code.png\""));
+        assert!(persisted_result.contains("\"data_omitted\":true"));
+        assert!(!persisted_result.contains("data:image/png;base64,code123"));
 
         let compacted_thread = store_arc
             .load_thread(thread_id)
@@ -13258,7 +13267,9 @@ mod tests {
             .as_str()
             .expect("image result should be persisted");
         assert!(persisted_result.contains("\"type\":\"image_generated\""));
-        assert!(persisted_result.contains("data:image/png;base64,codepy123"));
+        assert!(persisted_result.contains("\"path\":\"workspace/codepy.png\""));
+        assert!(persisted_result.contains("\"data_omitted\":true"));
+        assert!(!persisted_result.contains("data:image/png;base64,codepy123"));
     }
 
     #[test]

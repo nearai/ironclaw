@@ -5466,7 +5466,8 @@ FINAL(batch_error_count)
                     "action_name": "image_generate",
                     "output": {
                         "type": "image_generated",
-                        "data": "data:image/png;base64,abc123"
+                        "data_omitted": true,
+                        "omitted_reason": "omitted from engine thread state after image artifact persistence"
                     },
                     "is_error": false,
                     "duration": 12
@@ -5484,9 +5485,11 @@ FINAL(batch_error_count)
         assert_eq!(persisted.len(), 1);
         assert_eq!(persisted[0]["call_id"], "code_call_1");
         assert_eq!(persisted[0]["action_name"], "image_generate");
-        assert_eq!(
-            persisted[0]["output"]["data"],
-            "data:image/png;base64,abc123"
+        assert_eq!(persisted[0]["output"]["type"], "image_generated");
+        assert_eq!(persisted[0]["output"]["data_omitted"], true);
+        assert!(
+            persisted[0]["output"].get("data").is_none(),
+            "runtime state metadata must omit raw base64 image payloads"
         );
     }
 

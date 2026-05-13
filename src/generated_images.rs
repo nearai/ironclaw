@@ -5,22 +5,13 @@ use std::path::Path;
 
 use uuid::Uuid;
 
+#[cfg(test)]
 pub(crate) const MAX_RECORDED_IMAGE_SENTINEL_BYTES: usize = 512 * 1024;
 const MAX_EMBEDDED_JSON_STRING_LAYERS: usize = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GeneratedImageSentinel {
     pub(crate) value: serde_json::Value,
-}
-
-pub(crate) fn recorded_image_sentinel_cap_label() -> String {
-    if MAX_RECORDED_IMAGE_SENTINEL_BYTES.is_multiple_of(1024 * 1024) {
-        return format!("{} MiB", MAX_RECORDED_IMAGE_SENTINEL_BYTES / (1024 * 1024));
-    }
-    if MAX_RECORDED_IMAGE_SENTINEL_BYTES.is_multiple_of(1024) {
-        return format!("{} KiB", MAX_RECORDED_IMAGE_SENTINEL_BYTES / 1024);
-    }
-    format!("{} bytes", MAX_RECORDED_IMAGE_SENTINEL_BYTES)
 }
 
 pub(crate) fn image_tool_event_id(turn_number: usize, tool_call_id: &str) -> String {
@@ -175,27 +166,21 @@ impl GeneratedImageSentinel {
         serde_json::Value::Object(summary)
     }
 
-    pub(crate) fn compact_value_without_data_url(&self) -> serde_json::Value {
-        self.compact_value_without_data_url_with_reason(format!(
-            "exceeded the {} cap",
-            recorded_image_sentinel_cap_label()
-        ))
-    }
-
-    fn content_with_omitted_data_url_when_oversized(&self) -> String {
-        let normalized = self.value.to_string();
-        if normalized.len() <= MAX_RECORDED_IMAGE_SENTINEL_BYTES {
-            return normalized;
-        }
-        self.compact_value_without_data_url().to_string()
+    fn compact_record_content(&self, omitted_reason: &str) -> String {
+        self.compact_value_without_data_url_with_reason(omitted_reason)
+            .to_string()
     }
 
     pub(crate) fn record_content_for_persistence(&self) -> String {
-        self.content_with_omitted_data_url_when_oversized()
+        self.compact_record_content(
+            "omitted from persisted tool-call history after image artifact persistence",
+        )
     }
 
     pub(crate) fn record_content_for_thread_state(&self) -> String {
-        self.content_with_omitted_data_url_when_oversized()
+        self.compact_record_content(
+            "omitted from engine thread state after image artifact persistence",
+        )
     }
 }
 
@@ -465,7 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn record_content_for_thread_state_omits_large_data_url() {
+    fn record_content_for_thread_state_omits_data_url() {
         let oversized = "a".repeat(MAX_RECORDED_IMAGE_SENTINEL_BYTES);
         let sentinel = GeneratedImageSentinel::from_value(&serde_json::json!({
             "type": "image_generated",
@@ -481,18 +466,19 @@ mod tests {
         assert!(recorded.contains("\"type\":\"image_generated\""));
         assert!(recorded.contains("\"data_omitted\":true"));
         assert!(recorded.contains("\"path\":\"workspace/out.png\""));
+        assert!(recorded.contains("engine thread state"));
     }
 
     #[test]
-    fn record_content_for_thread_state_preserves_double_stringified_sentinel_under_cap() {
-        let (normalized, wrapped) = double_stringified_sentinel_under_normalized_cap();
+    fn record_content_for_thread_state_compacts_double_stringified_sentinel_under_cap() {
+        let (_normalized, wrapped) = double_stringified_sentinel_under_normalized_cap();
         let sentinel = GeneratedImageSentinel::from_output(&wrapped).expect("sentinel");
 
         let recorded = sentinel.record_content_for_thread_state();
 
-        assert_eq!(recorded, normalized);
-        assert!(recorded.contains("data:image/png;base64"));
-        assert!(!recorded.contains("\"data_omitted\":true"));
+        assert!(!recorded.contains("data:image/png;base64"));
+        assert!(recorded.contains("\"data_omitted\":true"));
+        assert!(recorded.contains("engine thread state"));
     }
 
     #[test]

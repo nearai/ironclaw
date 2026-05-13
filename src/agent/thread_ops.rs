@@ -54,9 +54,9 @@ fn tool_result_preview_for_persistence(result: &serde_json::Value) -> String {
 
 fn tool_result_content_for_persistence(result: &serde_json::Value) -> String {
     if let Some(sentinel) = GeneratedImageSentinel::from_value(result) {
-        // Persist the full image sentinel so web history can reconstruct the
-        // generated image on refresh without any schema changes. Keep a hard
-        // cap so unexpectedly large data URLs do not grow DB rows without bound.
+        // Persist a compact image sentinel; the artifact path is enough to
+        // rebuild history cards and follow-up edits without storing raw base64
+        // image payloads in conversation rows.
         return sentinel.record_content_for_persistence();
     }
     match result {
@@ -1288,9 +1288,8 @@ impl Agent {
                 if let Some(ref result) = tc.result {
                     let preview = tool_result_preview_for_persistence(result);
                     obj["result_preview"] = serde_json::Value::String(preview);
-                    // Persist full image sentinel payloads so the web history can
-                    // reconstruct generated image cards after refresh. Other tool
-                    // results remain truncated to keep DB rows bounded.
+                    // Persist compact image sentinels so history rows stay small
+                    // while the artifact path still supports refresh/edit flows.
                     let full_result = tool_result_content_for_persistence(result);
                     obj["result"] = serde_json::Value::String(full_result);
                 }
@@ -3568,21 +3567,24 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_result_content_for_persistence_preserves_image_sentinel_under_cap() {
+    fn test_tool_result_content_for_persistence_compacts_image_sentinel_under_cap() {
         let result = serde_json::json!({
             "type": "image_generated",
             "data": "data:image/jpeg;base64,abc123",
-            "media_type": "image/jpeg"
+            "media_type": "image/jpeg",
+            "path": "workspace/out.jpg"
         });
 
         let persisted = tool_result_content_for_persistence(&result);
 
         assert!(persisted.contains("\"type\":\"image_generated\""));
-        assert!(persisted.contains("data:image/jpeg;base64,abc123"));
+        assert!(persisted.contains("\"path\":\"workspace/out.jpg\""));
+        assert!(persisted.contains("\"data_omitted\":true"));
+        assert!(!persisted.contains("data:image/jpeg;base64,abc123"));
     }
 
     #[test]
-    fn test_tool_result_content_for_persistence_caps_oversized_image_sentinel() {
+    fn test_tool_result_content_for_persistence_compacts_oversized_image_sentinel() {
         let oversized = "a".repeat(MAX_RECORDED_IMAGE_SENTINEL_BYTES);
         let result = serde_json::json!({
             "type": "image_generated",
@@ -3603,13 +3605,13 @@ mod tests {
         assert!(
             persisted_json["omitted_reason"]
                 .as_str()
-                .is_some_and(|reason| reason.contains("512 KiB cap"))
+                .is_some_and(|reason| reason.contains("persisted tool-call history"))
         );
         assert!(!persisted.contains("data:image/jpeg;base64"));
     }
 
     #[test]
-    fn test_tool_result_content_for_persistence_preserves_double_stringified_sentinel_under_cap() {
+    fn test_tool_result_content_for_persistence_compacts_double_stringified_sentinel_under_cap() {
         let base = serde_json::json!({
             "type": "image_generated",
             "data": "data:image/png;base64,",
@@ -3633,10 +3635,10 @@ mod tests {
         let persisted = tool_result_content_for_persistence(&double_stringified);
         let parsed = GeneratedImageSentinel::from_output(&persisted).expect("persisted sentinel");
 
-        assert_eq!(persisted, normalized);
-        assert!(parsed.data_url().is_some());
+        assert_ne!(persisted, normalized);
+        assert!(parsed.data_url().is_none());
         assert_eq!(parsed.path(), Some("workspace/out.png"));
-        assert!(!persisted.contains("\"data_omitted\":true"));
+        assert!(persisted.contains("\"data_omitted\":true"));
     }
 
     #[test]

@@ -272,7 +272,20 @@ def _persistable_action_result(r, max_output_chars=1000):
     action_name = r.get("action_name", "unknown")
     output = r.get("output")
     if _is_generated_image_output(output):
-        persisted_output = output
+        persisted_output = {
+            "type": "image_generated",
+            "data_omitted": True,
+            "omitted_reason": "omitted from engine thread state after image artifact persistence",
+        }
+        media_type = output.get("media_type") or output.get("mime_type")
+        if media_type:
+            persisted_output["media_type"] = media_type
+        event_id = output.get("event_id")
+        if event_id:
+            persisted_output["event_id"] = event_id
+        path = output.get("path")
+        if path:
+            persisted_output["path"] = path
     else:
         persisted_output = str(output) if output is not None else "[no output]"
         if len(persisted_output) > max_output_chars:
