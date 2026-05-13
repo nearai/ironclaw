@@ -110,6 +110,11 @@ impl AppBackgroundTasks {
             }
         }
     }
+
+    #[cfg(test)]
+    fn startup_mcp_auth_retry_count(&self) -> usize {
+        self.startup_mcp_auth_retries.len()
+    }
 }
 
 impl Drop for AppBackgroundTasks {
@@ -142,6 +147,8 @@ fn build_ephemeral_secrets_store()
     Ok(Arc::new(InMemorySecretsStore::new(Arc::new(crypto))))
 }
 
+// Two minutes covers the expected private-chat key binding race without
+// leaving startup repair work alive for an open-ended amount of time.
 const MCP_STARTUP_AUTH_RETRY_ATTEMPTS: usize = 24;
 const MCP_STARTUP_AUTH_RETRY_DELAY: Duration = Duration::from_secs(5);
 
@@ -175,8 +182,14 @@ impl StartupMcpLoadResult {
     }
 }
 
+fn is_configured_authorization_header_rejection(error_message: &str) -> bool {
+    error_message.contains("rejected its configured Authorization header")
+}
+
 fn should_retry_startup_mcp_auth_error(server: &McpServerConfig, error_message: &str) -> bool {
-    server.has_custom_auth_header() && crate::tools::mcp::is_auth_error_message(error_message)
+    server.has_custom_auth_header()
+        && (crate::tools::mcp::is_auth_error_message(error_message)
+            || is_configured_authorization_header_rejection(error_message))
 }
 
 fn spawn_startup_mcp_auth_retries(
@@ -258,7 +271,7 @@ async fn retry_startup_mcp_auth_activation(
         // user-facing activation error after each failed attempt.
         match manager.activate_mcp(&server_name, &user_id).await {
             Ok(result) => {
-                tracing::info!(
+                tracing::debug!(
                     server = %result.name,
                     registered_count = result.tools_loaded.len(),
                     attempt,
@@ -1914,6 +1927,10 @@ mod tests {
             &api_key_server,
             "[nearai] MCP server returned status: 401 Unauthorized"
         ));
+        assert!(super::should_retry_startup_mcp_auth_error(
+            &api_key_server,
+            "MCP server 'nearai' rejected its configured Authorization header. Update the configured credential and try again."
+        ));
 
         let oauth_server =
             crate::tools::mcp::McpServerConfig::new("notion", "https://mcp.notion.com/mcp");
@@ -1930,6 +1947,103 @@ mod tests {
             &api_key_server,
             "MCP error: Unauthorized (code -32001)"
         ));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn init_extensions_schedules_retry_for_rewritten_custom_header_auth_rejection() {
+        use std::collections::HashMap;
+
+        use axum::Json;
+        use axum::Router;
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock MCP server");
+        let addr = listener.local_addr().expect("mock MCP addr");
+        let mock = Router::new().route(
+            "/mcp",
+            post(|Json(req): Json<serde_json::Value>| async move {
+                match req.get("method").and_then(|value| value.as_str()) {
+                    Some("initialize") => Json(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": req.get("id").cloned().unwrap_or(serde_json::Value::Null),
+                        "result": {
+                            "protocolVersion": "2024-11-05",
+                            "serverInfo": {
+                                "name": "auth-retry-test",
+                                "version": "1.0.0"
+                            },
+                            "capabilities": {
+                                "tools": {}
+                            }
+                        }
+                    }))
+                    .into_response(),
+                    Some("notifications/initialized") => StatusCode::ACCEPTED.into_response(),
+                    Some("tools/list") => StatusCode::UNAUTHORIZED.into_response(),
+                    _ => StatusCode::BAD_REQUEST.into_response(),
+                }
+            }),
+        );
+        let mock_handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, mock).await;
+        });
+
+        let (db, _db_dir) = crate::testing::test_db().await;
+        let mut servers = crate::tools::mcp::config::McpServersFile::default();
+        servers.upsert(
+            crate::tools::mcp::McpServerConfig::new("nearai", format!("http://{addr}/mcp"))
+                .with_headers(HashMap::from([(
+                    "Authorization".to_string(),
+                    "Bearer unbound-key".to_string(),
+                )])),
+        );
+        crate::tools::mcp::config::save_mcp_servers_to_db(db.as_ref(), "default", &servers)
+            .await
+            .expect("persist test MCP config");
+
+        let dirs = tempfile::tempdir().expect("test dirs");
+        let config = crate::config::Config::for_testing(
+            dirs.path().join("test.db"),
+            dirs.path().join("skills"),
+            dirs.path().join("installed-skills"),
+        );
+        let mut builder = super::AppBuilder::new(
+            config,
+            super::AppBuilderFlags::default(),
+            None,
+            Arc::new(ironclaw_llm::SessionManager::new(
+                ironclaw_llm::SessionConfig {
+                    auth_base_url: "http://127.0.0.1".to_string(),
+                    session_path: dirs.path().join("session.json"),
+                },
+            )),
+            Arc::new(super::LogBroadcaster::new()),
+        );
+        builder.with_database(db);
+        builder.secrets_store =
+            Some(super::build_ephemeral_secrets_store().expect("ephemeral secrets store"));
+
+        let tools = Arc::new(crate::tools::ToolRegistry::new());
+        let hooks = Arc::new(HookRegistry::new());
+        let ownership_cache = Arc::new(crate::ownership::OwnershipCache::new());
+        let (_, _, _, _, _, _, background_tasks) = builder
+            .init_extensions(&tools, &hooks, None, ownership_cache)
+            .await
+            .expect("init extensions");
+
+        assert_eq!(
+            background_tasks.startup_mcp_auth_retry_count(),
+            1,
+            "the startup MCP loading path should schedule a retry after McpClient rewrites a 401 into the configured Authorization header rejection message"
+        );
+
+        drop(background_tasks);
+        mock_handle.abort();
     }
 
     /// Verify that `seed_tool_permissions` is idempotent: an existing user
