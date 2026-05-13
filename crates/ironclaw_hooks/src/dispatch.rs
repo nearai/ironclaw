@@ -1385,6 +1385,119 @@ mod tests {
         );
     }
 
+    // ── Loader contract regression guard ────────────────────────────────────
+
+    /// The tier-specific installers
+    /// (`install_builtin_*` / `install_trusted_*` / `install_installed_*`)
+    /// are the *only* public path through which a hook implementation enters
+    /// the dispatcher. The `BeforeCapabilityHookImpl::{Privileged, Restricted}`
+    /// variants are sealed `pub(crate)`, so no caller outside this crate can
+    /// pair a wrong-tier impl with a binding.
+    ///
+    /// What the type system **does not** enforce is *origin*: if a loader in
+    /// `ironclaw_reborn` reads a registry-sourced extension hook and
+    /// accidentally routes it through `install_builtin_before_capability`,
+    /// the dispatcher will install it as a Builtin. That trust-class ↔ source
+    /// pairing is the loader's contractual responsibility — see the
+    /// "Loader responsibility" section in `crates/ironclaw_hooks/CLAUDE.md`.
+    ///
+    /// This test is a regression guard, not a runtime check: it touches each
+    /// public tier-specific installer for both `before_capability` and
+    /// `before_prompt` so that *any* change to those signatures (rename,
+    /// new parameter, removed method) forces this test — and the loader
+    /// contract attached to it — to be re-evaluated.
+    #[tokio::test]
+    async fn tier_specific_installers_are_documented_as_loader_contract() {
+        let mut dispatcher = HookDispatcher::new(HookRegistry::new());
+
+        // ── before_capability: all three tier-specific installers ──────────
+        let builtin_cap = HookId::for_builtin("loader::builtin::cap", HookVersion::ONE);
+        dispatcher
+            .install_builtin_before_capability(
+                builtin_cap,
+                HookPhase::Policy,
+                Box::new(AllowingBuiltinHook),
+            )
+            .expect("install_builtin_before_capability signature stable");
+
+        let trusted_cap = HookId::for_builtin("loader::trusted::cap", HookVersion::ONE);
+        dispatcher
+            .install_trusted_before_capability(
+                trusted_cap,
+                HookPhase::Policy,
+                Box::new(AllowingBuiltinHook),
+            )
+            .expect("install_trusted_before_capability signature stable");
+
+        let installed_cap = ext_hook_id("loader-installed-cap");
+        dispatcher
+            .install_installed_before_capability(
+                installed_cap,
+                HookPhase::Policy,
+                Box::new(PassingInstalledHook),
+            )
+            .expect("install_installed_before_capability signature stable");
+
+        // ── before_prompt: all three tier-specific installers ──────────────
+        struct NoopPrivilegedPrompt;
+        #[async_trait]
+        impl crate::sink::PrivilegedBeforePromptHook for NoopPrivilegedPrompt {
+            async fn evaluate(
+                &self,
+                _ctx: &BeforePromptHookContext,
+                _sink: &mut dyn crate::sink::PrivilegedMutatorSink,
+            ) {
+            }
+        }
+
+        let builtin_prompt = HookId::for_builtin("loader::builtin::prompt", HookVersion::ONE);
+        dispatcher
+            .install_builtin_before_prompt(
+                builtin_prompt,
+                HookPhase::Policy,
+                Box::new(NoopPrivilegedPrompt),
+            )
+            .expect("install_builtin_before_prompt signature stable");
+
+        let trusted_prompt = HookId::for_builtin("loader::trusted::prompt", HookVersion::ONE);
+        dispatcher
+            .install_trusted_before_prompt(
+                trusted_prompt,
+                HookPhase::Policy,
+                Box::new(NoopPrivilegedPrompt),
+            )
+            .expect("install_trusted_before_prompt signature stable");
+
+        let installed_prompt = ext_hook_id("loader-installed-prompt");
+        dispatcher
+            .install_installed_before_prompt(
+                installed_prompt,
+                HookPhase::Policy,
+                Box::new(EnvelopePatchHook),
+            )
+            .expect("install_installed_before_prompt signature stable");
+
+        // Verify each binding carries the trust class matching its installer.
+        // The loader's responsibility is to pick the installer that matches
+        // the *source* of the hook; this test confirms that, given a correct
+        // loader choice, the dispatcher records the matching trust class.
+        let registry = dispatcher.registry.lock().expect("registry lock");
+        let by_id: std::collections::HashMap<HookId, HookTrustClass> = registry
+            .active_at(HookPointSpec::BeforeCapability)
+            .chain(registry.active_at(HookPointSpec::BeforePrompt))
+            .map(|b| (b.hook_id, b.trust_class))
+            .collect();
+        assert_eq!(by_id.get(&builtin_cap), Some(&HookTrustClass::Builtin));
+        assert_eq!(by_id.get(&trusted_cap), Some(&HookTrustClass::Trusted));
+        assert_eq!(by_id.get(&installed_cap), Some(&HookTrustClass::Installed));
+        assert_eq!(by_id.get(&builtin_prompt), Some(&HookTrustClass::Builtin));
+        assert_eq!(by_id.get(&trusted_prompt), Some(&HookTrustClass::Trusted));
+        assert_eq!(
+            by_id.get(&installed_prompt),
+            Some(&HookTrustClass::Installed)
+        );
+    }
+
     // ── C5 regression: dedupe + mid-dispatch poison re-check ────────────────
 
     /// A hook that always panics; used to drive the dispatcher into poisoning

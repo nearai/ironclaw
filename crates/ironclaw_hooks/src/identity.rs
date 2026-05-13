@@ -5,6 +5,20 @@
 //! extension_version)` so that replay across version drift refuses silently:
 //! a checkpoint persisted under one `HookId` will not collide with the same
 //! `(extension_id, hook_local_id)` shipped under a different version.
+//!
+//! # Cross-crate wire format
+//!
+//! `HookId::to_hex()` produces a 64-character lowercase ASCII hex string and
+//! that exact format is part of the **cross-crate contract**. It is what the
+//! dispatcher emits into `LoopHostMilestoneKind::HookDispatched { hook_id, .. }`
+//! and `HookDecisionEmitted { hook_id, .. }` / `HookFailed { hook_id, .. }` in
+//! `ironclaw_turns`, and what downstream SSE / audit / replay consumers parse
+//! and key on. Changing the encoding (e.g. switching to base32, adding a
+//! prefix, uppercasing) is a wire-format break and **requires bumping a
+//! contract version** so consumers can migrate. The pinning tests
+//! `hook_id_hex_format_is_stable_64_lowercase_chars` (in this module) and
+//! `hook_id_string_serialization_matches_to_hex` (in `telemetry::tests`) are
+//! the regression guards for that invariant.
 
 use std::fmt;
 
@@ -199,6 +213,38 @@ mod tests {
         );
         let builtin = HookId::for_builtin("path::module", HookVersion::ONE);
         assert_ne!(installed, builtin);
+    }
+
+    /// The hex format produced by `HookId::to_hex()` is part of the
+    /// cross-crate contract: it is what the dispatcher serializes into
+    /// `LoopHostMilestoneKind::Hook*` variants in `ironclaw_turns`, and what
+    /// downstream SSE / audit / replay consumers key on. This test pins the
+    /// format — any change here is a wire-format break and must be
+    /// accompanied by a contract version bump and consumer migration.
+    #[test]
+    fn hook_id_hex_format_is_stable_64_lowercase_chars() {
+        let id = HookId::for_builtin("crate::safety::policy", HookVersion::ONE);
+        let hex = id.to_hex();
+        assert_eq!(hex.len(), 64, "blake3 hex must be exactly 64 chars");
+        assert!(
+            hex.chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "hex must be ASCII lowercase 0-9a-f, got {hex}"
+        );
+        // Also exercise the derive path to ensure no per-constructor drift.
+        let derived = HookId::derive(
+            &ExtensionId("ext".to_string()),
+            "1.0",
+            &HookLocalId("h".to_string()),
+            HookVersion::ONE,
+        );
+        let derived_hex = derived.to_hex();
+        assert_eq!(derived_hex.len(), 64);
+        assert!(
+            derived_hex
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+        );
     }
 
     #[test]

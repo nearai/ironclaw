@@ -44,6 +44,44 @@ Trust class is *fixed by source*, never declarable. The extension manifest's
 than `Installed`. The registry installer is the only thing that decides
 classification, and it does so based on where the hook came from.
 
+## Loader responsibility
+
+The tier-specific installers on `HookDispatcher`
+(`install_builtin_*` / `install_trusted_*` / `install_installed_*`) are the
+*only* public path through which a hook implementation enters the dispatcher.
+The `BeforeCapabilityHookImpl::{Privileged, Restricted}` variants are sealed
+`pub(crate)`, so no external caller can mint a wrong-tier impl: it is a
+type-level fact that an `Installed`-tier installer cannot accept a
+`PrivilegedBeforeCapabilityHook`.
+
+What the type system **does not** enforce is *origin*. If loader code inside
+`ironclaw_reborn` (or any other internal crate) reads a hook from the
+extension registry and accidentally routes it through
+`install_builtin_before_capability`, the trust-class ↔ impl-tier pairing at
+the registry-binding boundary breaks — the dispatcher will happily install
+a registry-sourced hook as a Builtin. The tier-specific installers prevent
+*minting* a wrong-tier impl, but they cannot enforce that the loader picked
+the right installer for the hook's actual source.
+
+That responsibility lives with the **loader** — the code that constructs the
+dispatcher and calls `install_*`. The contract is:
+
+- A loader **must** match the installer to the hook's *source*, not just to
+  its declared capability.
+- A loader **must not** select an installer based on manifest claims; the
+  trust class is fixed by where the hook came from (built-in code path /
+  user filesystem / extension registry).
+- Registry-loaded extension hooks **should** be type-tagged at the loader
+  level — e.g., a `LoadedHook::Installed(Box<dyn RestrictedBeforeCapabilityHook>)`
+  enum produced by the registry loader — so that a loader can never call
+  `install_builtin_*` with installed-sourced code. The compiler then enforces
+  the origin → installer mapping at the loader's own seams.
+
+If the dispatcher's install API changes in the future (new installer, renamed
+method, additional trust tier), the loader contract must be re-evaluated:
+the `tier_specific_installers_are_documented_as_loader_contract` test in
+`dispatch.rs` is the regression guard that flags such changes.
+
 ## Non-negotiable invariants
 
 - Hooks cannot grant authority.
