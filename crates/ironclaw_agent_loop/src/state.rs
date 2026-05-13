@@ -13,7 +13,7 @@ pub use ironclaw_turns::LoopFailureKind;
 pub use signature::{ArgsHash, CapabilityCallSignature, CapabilityCallSignatureError};
 pub use slots::{
     CapabilityStrategyState, ContextStrategyState, GateStrategyState, ModelStrategyState,
-    RecoveryStrategyState, StopStrategyState,
+    RecoveryAttemptClass, RecoveryStrategyState, StopStrategyState,
 };
 
 use ironclaw_turns::{

@@ -22,6 +22,42 @@ pub(crate) trait BudgetStrategy: Send + Sync {
 #[allow(dead_code)]
 fn assert_budget_strategy_object_safe(_: &dyn BudgetStrategy) {}
 
+/// Reference baseline `BudgetStrategy`: 32-iteration cap with no wall-clock
+/// limit.
+///
+/// Per master spec §10 ("Production-safe escape" — iteration cap), the
+/// 32-iteration ceiling is the first safety net. Loop families that need
+/// shorter or longer budgets construct this struct directly.
+///
+/// See `docs/reborn/agent-loop-skeleton.md` §6 ("The nine strategies" →
+/// `BudgetStrategy`) and §10 ("Production-safe escape").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DefaultBudgetStrategy {
+    /// Hard ceiling on iteration count. Default `32`.
+    pub iteration_limit: u32,
+    /// Optional wall-clock cap. Default `None` (no limit).
+    pub wall_clock_limit: Option<Duration>,
+}
+
+impl Default for DefaultBudgetStrategy {
+    fn default() -> Self {
+        Self {
+            iteration_limit: 32,
+            wall_clock_limit: None,
+        }
+    }
+}
+
+impl BudgetStrategy for DefaultBudgetStrategy {
+    fn iteration_limit(&self, _: &LoopExecutionState) -> u32 {
+        self.iteration_limit
+    }
+
+    fn wall_clock_limit(&self, _: &LoopExecutionState) -> Option<Duration> {
+        self.wall_clock_limit
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use ironclaw_host_api::{TenantId, ThreadId};
@@ -40,13 +76,13 @@ mod tests {
 
     #[test]
     fn budget_strategy_is_object_safe() {
-        assert_budget_strategy_object_safe(&FixedBudget);
+        assert_budget_strategy_object_safe(&DefaultBudgetStrategy::default());
     }
 
     #[test]
     fn fixed_budget_exercises_trait_surface() {
         let state = LoopExecutionState::initial_for_run(&test_run_context());
-        let strategy: &dyn BudgetStrategy = &FixedBudget;
+        let strategy: &dyn BudgetStrategy = &DefaultBudgetStrategy::default();
 
         assert_eq!(
             (
@@ -57,16 +93,13 @@ mod tests {
         );
     }
 
-    struct FixedBudget;
+    #[test]
+    fn default_budget_strategy_returns_32_iterations_no_wall_clock() {
+        let strategy = DefaultBudgetStrategy::default();
+        let state = LoopExecutionState::initial_for_run(&test_run_context());
 
-    impl BudgetStrategy for FixedBudget {
-        fn iteration_limit(&self, _: &LoopExecutionState) -> u32 {
-            32
-        }
-
-        fn wall_clock_limit(&self, _: &LoopExecutionState) -> Option<Duration> {
-            None
-        }
+        assert_eq!(strategy.iteration_limit(&state), 32);
+        assert_eq!(strategy.wall_clock_limit(&state), None);
     }
 
     fn test_run_context() -> LoopRunContext {
