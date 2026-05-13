@@ -9,7 +9,7 @@
 # The image includes common development tools so workers can build software,
 # run tests, and execute shell commands.
 
-FROM rust:1.92-bookworm AS builder
+FROM rust:1.92-trixie@sha256:f58923369ba295ae1f60bc49d03f2c955a5c93a0b7d49acfb2b2a65bebaf350d AS builder
 
 WORKDIR /build
 COPY . .
@@ -19,7 +19,7 @@ RUN cargo build --release --bin ironclaw
 
 # ---
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim@sha256:109e2c65005bf160609e4ba6acf7783752f8502ad218e298253428690b9eaa4b
 
 # Install curl first (needed to fetch the GitHub CLI GPG key), then add the
 # gh CLI apt repository, then install all remaining dev tools in one layer.

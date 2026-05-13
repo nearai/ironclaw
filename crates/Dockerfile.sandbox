@@ -30,7 +30,7 @@
 # minor version keeps build-cache hit rates stable across reproducible
 # builds. Override at build time with `--build-arg RUST_VERSION=<v>`.
 ARG RUST_VERSION=1.92
-FROM rust:${RUST_VERSION}-slim-bookworm AS builder
+FROM rust:${RUST_VERSION}-slim-trixie AS builder
 
 WORKDIR /build
 
@@ -57,7 +57,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && cp target/release/sandbox_daemon /sandbox_daemon
 
 # ── Stage 2: minimal runtime ─────────────────────────────────────────
-FROM debian:bookworm-slim AS runtime
+FROM debian:trixie-slim@sha256:109e2c65005bf160609e4ba6acf7783752f8502ad218e298253428690b9eaa4b AS runtime
 
 # tini reaps zombies (cargo/python often spawn helpers); the rest are the
 # common build/test toolchain that the LLM is likely to want for any

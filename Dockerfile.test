@@ -9,7 +9,7 @@
 #   docker run --rm -p 3005:3003 ironclaw-test
 
 # Stage 1: Build (libsql only — no PostgreSQL dependency)
-FROM rust:1.92-slim-bookworm AS builder
+FROM rust:1.92-slim-trixie@sha256:bf3368a992915f128293ac76917ab6e561e4dda883273c8f5c9f6f8ea37a378e AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev cmake gcc g++ \
@@ -32,7 +32,7 @@ COPY wit/ wit/
 RUN cargo build --release --no-default-features --features libsql --bin ironclaw
 
 # Stage 2: Runtime
-FROM debian:bookworm-slim
+FROM debian:trixie-slim@sha256:109e2c65005bf160609e4ba6acf7783752f8502ad218e298253428690b9eaa4b
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates libssl3 \

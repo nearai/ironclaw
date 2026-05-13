@@ -37,6 +37,26 @@ updates:
           - "wasm-*"
           - "cargo-component*"
 
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      docker:
+        patterns:
+          - "*"
+
+  - package-ecosystem: docker
+    directory: "/cargo"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      docker:
+        patterns:
+          - "*"
+
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
