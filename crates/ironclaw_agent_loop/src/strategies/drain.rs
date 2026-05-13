@@ -9,7 +9,7 @@ use crate::state::LoopExecutionState;
 /// This is pure policy: implementations do not mutate strategy state. Async
 /// leaves room for future host-backed queue hints or priority checks.
 #[async_trait]
-pub trait InputDrainStrategy: Send + Sync {
+pub(crate) trait InputDrainStrategy: Send + Sync {
     /// Called at the start of each tick before prompt construction.
     async fn drain_steering(&self, state: &LoopExecutionState) -> bool;
 
@@ -21,7 +21,7 @@ pub trait InputDrainStrategy: Send + Sync {
 mod tests {
     use async_trait::async_trait;
 
-    use crate::strategies::stop::{TurnEndKind, TurnSummary};
+    use crate::strategies::{TurnEndKind, TurnSummary};
     use ironclaw_turns::{LoopMessageRef, LoopResultRef};
 
     use super::*;

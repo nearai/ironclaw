@@ -7,26 +7,12 @@ use crate::state::LoopExecutionState;
 /// Hard caps on loop execution.
 ///
 /// This is sync, read-only policy. The executor owns enforcement.
-pub trait BudgetStrategy: Send + Sync {
+pub(crate) trait BudgetStrategy: Send + Sync {
     /// Maximum number of iterations before the loop is forcibly failed.
     fn iteration_limit(&self, state: &LoopExecutionState) -> u32;
 
     /// Optional wall-clock cap. `None` means no time limit.
     fn wall_clock_limit(&self, state: &LoopExecutionState) -> Option<Duration>;
-}
-
-/// No wall-clock cap and a 32-iteration limit.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct UnlimitedBudget;
-
-impl BudgetStrategy for UnlimitedBudget {
-    fn iteration_limit(&self, _: &LoopExecutionState) -> u32 {
-        32
-    }
-
-    fn wall_clock_limit(&self, _: &LoopExecutionState) -> Option<Duration> {
-        None
-    }
 }
 
 #[cfg(test)]
@@ -49,13 +35,13 @@ mod tests {
     fn budget_strategy_is_object_safe() {
         fn _check(_: &dyn BudgetStrategy) {}
 
-        _check(&UnlimitedBudget);
+        _check(&FixedBudget);
     }
 
     #[test]
-    fn unlimited_budget_exercises_trait_surface() {
+    fn fixed_budget_exercises_trait_surface() {
         let state = LoopExecutionState::initial_for_run(&test_run_context());
-        let strategy: &dyn BudgetStrategy = &UnlimitedBudget;
+        let strategy: &dyn BudgetStrategy = &FixedBudget;
 
         assert_eq!(
             (
@@ -64,6 +50,18 @@ mod tests {
             ),
             (32, None)
         );
+    }
+
+    struct FixedBudget;
+
+    impl BudgetStrategy for FixedBudget {
+        fn iteration_limit(&self, _: &LoopExecutionState) -> u32 {
+            32
+        }
+
+        fn wall_clock_limit(&self, _: &LoopExecutionState) -> Option<Duration> {
+            None
+        }
     }
 
     fn test_run_context() -> LoopRunContext {

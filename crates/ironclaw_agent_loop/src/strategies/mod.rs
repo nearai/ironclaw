@@ -1,9 +1,13 @@
 //! Strategy contracts for the Reborn agent-loop framework.
 
-pub mod budget;
-pub mod drain;
-pub mod stop;
+// WS-1/2/3 land crate-private strategy contracts before WS-4/5/6 compose and
+// execute them. Keep the unused lint local to these forward-declared contracts.
+#![allow(dead_code, unused_imports)]
 
-pub use budget::{BudgetStrategy, UnlimitedBudget};
-pub use drain::InputDrainStrategy;
-pub use stop::{StopConditionStrategy, StopKind, StopOutcome, TurnEndKind, TurnSummary};
+mod budget;
+mod drain;
+mod stop;
+
+pub(crate) use budget::BudgetStrategy;
+pub(crate) use drain::InputDrainStrategy;
+pub(crate) use stop::{StopConditionStrategy, StopKind, StopOutcome, TurnEndKind, TurnSummary};
