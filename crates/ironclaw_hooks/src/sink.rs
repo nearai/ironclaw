@@ -163,13 +163,12 @@ pub trait PrivilegedMutatorSink: Send {
         ordinal_hint: PatchOrdinalHint,
     ) -> Result<(), SanitizedReason>;
 
-    /// Append an envelope-wrapped untrusted snippet. The wrapping is the
-    /// caller's responsibility; the dispatcher validates the envelope marker
-    /// at a higher layer (follow-up: tie this to the shared `prompt_envelope`
-    /// helper).
+    /// Append an envelope-wrapped untrusted snippet. The caller passes the
+    /// raw body; `ironclaw_prompt_envelope::wrap_untrusted` performs the
+    /// wrapping, hijack-marker checks, and byte-budget enforcement.
     fn add_envelope_snippet(
         &mut self,
-        wrapped: String,
+        body: String,
         ordinal_hint: PatchOrdinalHint,
     ) -> Result<(), SanitizedReason>;
 
@@ -180,9 +179,12 @@ pub trait PrivilegedMutatorSink: Send {
 /// Mutator sink for Installed hooks. Only accepts envelope-wrapped snippets;
 /// the raw-text path is not exposed.
 pub trait RestrictedMutatorSink: Send {
+    /// Append an envelope-wrapped untrusted snippet. The caller passes the
+    /// raw body; `ironclaw_prompt_envelope::wrap_untrusted` performs the
+    /// wrapping, hijack-marker checks, and byte-budget enforcement.
     fn add_envelope_snippet(
         &mut self,
-        wrapped: String,
+        body: String,
         ordinal_hint: PatchOrdinalHint,
     ) -> Result<(), SanitizedReason>;
 
@@ -216,10 +218,10 @@ impl PrivilegedMutatorSink for RecordingMutatorSink {
 
     fn add_envelope_snippet(
         &mut self,
-        wrapped: String,
+        body: String,
         ordinal_hint: PatchOrdinalHint,
     ) -> Result<(), SanitizedReason> {
-        let patch = HookPatch::add_enveloped_snippet(wrapped, self.trust_class, ordinal_hint)?;
+        let patch = HookPatch::add_enveloped_snippet(body, self.trust_class, ordinal_hint)?;
         self.patches.push(patch);
         Ok(())
     }
@@ -236,10 +238,10 @@ impl PrivilegedMutatorSink for RecordingMutatorSink {
 impl RestrictedMutatorSink for RecordingMutatorSink {
     fn add_envelope_snippet(
         &mut self,
-        wrapped: String,
+        body: String,
         ordinal_hint: PatchOrdinalHint,
     ) -> Result<(), SanitizedReason> {
-        let patch = HookPatch::add_enveloped_snippet(wrapped, self.trust_class, ordinal_hint)?;
+        let patch = HookPatch::add_enveloped_snippet(body, self.trust_class, ordinal_hint)?;
         self.patches.push(patch);
         Ok(())
     }
@@ -425,11 +427,8 @@ mod tests {
                 _ctx: &BeforePromptHookContext,
                 sink: &mut dyn RestrictedMutatorSink,
             ) {
-                sink.add_envelope_snippet(
-                    "Untrusted hook content: hi".to_string(),
-                    PatchOrdinalHint::Last,
-                )
-                .expect("ok");
+                sink.add_envelope_snippet("hi".to_string(), PatchOrdinalHint::Last)
+                    .expect("ok");
             }
         }
 

@@ -4294,6 +4294,7 @@ dependencies = [
  "chrono",
  "futures",
  "ironclaw_host_api",
+ "ironclaw_prompt_envelope",
  "ironclaw_turns",
  "serde",
  "serde_json",
@@ -4342,6 +4343,7 @@ dependencies = [
  "ironclaw_memory",
  "ironclaw_network",
  "ironclaw_processes",
+ "ironclaw_prompt_envelope",
  "ironclaw_reborn_event_store",
  "ironclaw_resources",
  "ironclaw_run_state",
@@ -4546,6 +4548,13 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "ironclaw_prompt_envelope"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.18",
 ]
 
 [[package]]

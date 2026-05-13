@@ -12,6 +12,8 @@
 //! different sink method, but the dispatcher converts both to a uniform
 //! `HookPatch` shape before delivery.
 
+use ironclaw_prompt_envelope::{EnvelopeError, EnvelopeSource, EnvelopeTrust, wrap_untrusted};
+
 use crate::error::SanitizedReason;
 use crate::trust::HookTrustClass;
 
@@ -84,11 +86,38 @@ impl MetadataKey {
 }
 
 impl HookPatch {
+    /// Wrap `body` with the shared prompt envelope and record it as an
+    /// `Enveloped` snippet patch. The envelope crate is the single primitive
+    /// that produces this variant — wrapping in any other path is a bug.
+    ///
+    /// `trust_class` selects the `EnvelopeTrust` label: `Installed` hooks
+    /// always produce `Untrusted` envelopes; `Builtin` and `Trusted` hooks
+    /// that route through this constructor produce `Trusted` envelopes so
+    /// downstream readers can distinguish them.
     pub(crate) fn add_enveloped_snippet(
-        wrapped: String,
+        body: String,
         trust_class: HookTrustClass,
         ordinal_hint: PatchOrdinalHint,
     ) -> Result<Self, SanitizedReason> {
+        let trust = match trust_class {
+            HookTrustClass::Installed => EnvelopeTrust::Untrusted,
+            HookTrustClass::Builtin | HookTrustClass::Trusted | HookTrustClass::SelfAuthored => {
+                EnvelopeTrust::Trusted
+            }
+        };
+        let envelope =
+            wrap_untrusted(EnvelopeSource::Hook, trust, &body).map_err(|err| match err {
+                EnvelopeError::EmptyBody => {
+                    SanitizedReason::from_static("hook snippet body is empty after sanitization")
+                }
+                EnvelopeError::HijackMarker { .. } => SanitizedReason::from_static(
+                    "hook snippet contains instruction-hijack marker; refusing to wrap",
+                ),
+                EnvelopeError::OverBudget { .. } => SanitizedReason::from_static(
+                    "hook snippet exceeds the prompt envelope byte budget",
+                ),
+            })?;
+        let wrapped = envelope.into_string();
         let byte_count = u32::try_from(wrapped.len()).map_err(|_| {
             SanitizedReason::from_static("hook snippet exceeds 4 GiB; refusing to construct")
         })?;
@@ -201,7 +230,7 @@ mod tests {
     #[test]
     fn enveloped_snippet_records_byte_count() {
         let patch = HookPatch::add_enveloped_snippet(
-            "Untrusted hook content: hi".to_string(),
+            "hi".to_string(),
             HookTrustClass::Installed,
             PatchOrdinalHint::Last,
         )
