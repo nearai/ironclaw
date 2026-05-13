@@ -107,6 +107,33 @@ mod tests {
         assert_eq!(hex, id.to_hex());
     }
 
+    /// Cross-crate contract: the conversion path used at the milestone
+    /// boundary (`telemetry::hook_id_string`) must produce byte-for-byte the
+    /// same output as `HookId::to_hex()`. Downstream `ironclaw_turns`
+    /// consumers (SSE, audit, replay) key on this exact string. If
+    /// `hook_id_string` ever diverges from `to_hex` (e.g. someone tries to
+    /// add a prefix at the seam), this test catches it.
+    #[test]
+    fn hook_id_string_serialization_matches_to_hex() {
+        let ids = [
+            HookId::for_builtin("crate::a::b", HookVersion::ONE),
+            HookId::for_builtin("crate::a::b", HookVersion(2)),
+            HookId::derive(
+                &crate::identity::ExtensionId("ext".to_string()),
+                "1.0",
+                &crate::identity::HookLocalId("h".to_string()),
+                HookVersion::ONE,
+            ),
+        ];
+        for id in ids {
+            assert_eq!(
+                hook_id_string(id),
+                id.to_hex(),
+                "telemetry::hook_id_string must match HookId::to_hex byte-for-byte"
+            );
+        }
+    }
+
     #[test]
     fn allow_decision_summary() {
         let allow = BeforeCapabilityHookDecision::allow();
