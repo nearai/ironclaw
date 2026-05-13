@@ -22,7 +22,7 @@ use crate::state::{LoopExecutionState, RecoveryStrategyState};
 /// slot value is carried in the returned [`RecoveryOutcome`]; the executor
 /// swaps it into the next whole state.
 #[async_trait]
-pub trait RecoveryStrategy: Send + Sync {
+pub(crate) trait RecoveryStrategy: Send + Sync {
     async fn on_capability_error(
         &self,
         state: &LoopExecutionState,
@@ -41,17 +41,17 @@ pub trait RecoveryStrategy: Send + Sync {
 /// or secrets (sanitization happens at the host port boundary, per master
 /// doc §9).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct CapabilityErrorSummary {
-    pub class: CapabilityErrorClass,
-    pub safe_summary: String,
-    pub diagnostic_ref: Option<LoopDiagnosticRef>,
+pub(crate) struct CapabilityErrorSummary {
+    pub(crate) class: CapabilityErrorClass,
+    pub(crate) safe_summary: String,
+    pub(crate) diagnostic_ref: Option<LoopDiagnosticRef>,
 }
 
 /// Wire-stable capability error classification. Snake_case names appear in
 /// checkpoints and observability events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CapabilityErrorClass {
+pub(crate) enum CapabilityErrorClass {
     Transient,
     Permanent,
     InputInvalid,
@@ -62,16 +62,16 @@ pub enum CapabilityErrorClass {
 
 /// Sanitized model error — class + safe summary + opaque diagnostic ref.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ModelErrorSummary {
-    pub class: ModelErrorClass,
-    pub safe_summary: String,
-    pub diagnostic_ref: Option<LoopDiagnosticRef>,
+pub(crate) struct ModelErrorSummary {
+    pub(crate) class: ModelErrorClass,
+    pub(crate) safe_summary: String,
+    pub(crate) diagnostic_ref: Option<LoopDiagnosticRef>,
 }
 
 /// Wire-stable model error classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ModelErrorClass {
+pub(crate) enum ModelErrorClass {
     Transient,
     ContextOverflow,
     ContentFiltered,
@@ -88,7 +88,7 @@ pub enum ModelErrorClass {
 /// - `Abort` — return `LoopExit::Failed { reason_kind: failure_kind }`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "outcome")]
-pub enum RecoveryOutcome {
+pub(crate) enum RecoveryOutcome {
     Retry {
         recovery: RecoveryStrategyState,
         alter: Option<RetryAlteration>,
@@ -107,7 +107,7 @@ pub enum RecoveryOutcome {
 /// `ModelRouteChain` follow-up (master doc §9).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "alteration")]
-pub enum RetryAlteration {
+pub(crate) enum RetryAlteration {
     /// Shrink context for the next attempt (e.g. on context-overflow).
     ShrinkContext { drop_messages: u32 },
     /// Backoff before retry (executor honors as a sleep).

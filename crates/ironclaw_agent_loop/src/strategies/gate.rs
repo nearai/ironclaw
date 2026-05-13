@@ -1,7 +1,7 @@
 //! `GateHandlingStrategy` — decides what to do when a capability invocation
 //! returns a gate (Approval, Auth, or Resource).
 //!
-//! Mutates `control_state` (e.g. record gate fingerprints for resume).
+//! Mutates `gate_state` (e.g. record gate fingerprints for resume).
 //! Async because future strategies may consult host state for grant-history
 //! or auth-flow lookups.
 //!
@@ -14,15 +14,15 @@
 use async_trait::async_trait;
 use ironclaw_turns::{LoopFailureKind, LoopGateRef};
 
-use crate::state::{ControlStrategyState, LoopExecutionState};
+use crate::state::{GateStrategyState, LoopExecutionState};
 
 /// Decides what to do when a capability invocation comes back with a gate.
 ///
-/// `&self` only — strategies are value-immutable. The new `control_state`
+/// `&self` only — strategies are value-immutable. The new `gate_state`
 /// slot value is carried in the returned [`GateOutcome`]; the executor
 /// swaps it into the next whole state.
 #[async_trait]
-pub trait GateHandlingStrategy: Send + Sync {
+pub(crate) trait GateHandlingStrategy: Send + Sync {
     async fn handle(&self, state: &LoopExecutionState, gate: &GateSummary) -> GateOutcome;
 }
 
@@ -31,22 +31,22 @@ pub trait GateHandlingStrategy: Send + Sync {
 /// `contracts/turns-agent-loop.md` §6 + `contracts/lightweight-agent-loop.md`
 /// §8).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct GateSummary {
-    pub kind: GateKind,
-    pub gate_ref: LoopGateRef,
+pub(crate) struct GateSummary {
+    pub(crate) kind: GateKind,
+    pub(crate) gate_ref: LoopGateRef,
 }
 
 /// Wire-stable gate classification. Snake_case names are part of the public
 /// contract — they appear in checkpoints and observability events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum GateKind {
+pub(crate) enum GateKind {
     Approval,
     Auth,
     Resource,
 }
 
-/// Strategy decision for a gate, plus the new `control_state` slot value.
+/// Strategy decision for a gate, plus the new `gate_state` slot value.
 ///
 /// Variants:
 /// - `Block` — the executor checkpoints (`BeforeBlock`) and returns
@@ -57,15 +57,15 @@ pub enum GateKind {
 /// - `Abort` — return `LoopExit::Failed { reason_kind: failure_kind }`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "outcome")]
-pub enum GateOutcome {
+pub(crate) enum GateOutcome {
     Block {
-        control: ControlStrategyState,
+        gate: GateStrategyState,
     },
     SkipAndContinue {
-        control: ControlStrategyState,
+        gate: GateStrategyState,
     },
     Abort {
-        control: ControlStrategyState,
+        gate: GateStrategyState,
         failure_kind: LoopFailureKind,
     },
 }
@@ -78,12 +78,8 @@ mod tests {
     #[allow(dead_code)]
     fn _check(_: &dyn GateHandlingStrategy) {}
 
-    fn sample_control() -> ControlStrategyState {
-        ControlStrategyState {
-            turns_completed: 3,
-            terminate_hints_in_last_batch: 1,
-            last_batch_total: 4,
-        }
+    fn sample_gate() -> GateStrategyState {
+        GateStrategyState::default()
     }
 
     #[test]
@@ -112,52 +108,50 @@ mod tests {
     }
 
     #[test]
-    fn gate_outcome_block_carries_control_slot() {
+    fn gate_outcome_block_carries_gate_slot() {
         let outcome = GateOutcome::Block {
-            control: sample_control(),
+            gate: sample_gate(),
         };
         let value = serde_json::to_value(&outcome).expect("serialize");
+        assert_eq!(value["gate"], serde_json::json!({}));
         let restored: GateOutcome = serde_json::from_value(value).expect("deserialize");
         assert_eq!(restored, outcome);
-        // Field is named `control` and is the strategy slot type.
+        // Field is named `gate` and is the strategy slot type.
         match restored {
-            GateOutcome::Block { control } => assert_eq!(control, sample_control()),
+            GateOutcome::Block { gate } => assert_eq!(gate, sample_gate()),
             other => panic!("unexpected variant: {other:?}"),
         }
     }
 
     #[test]
-    fn gate_outcome_skip_and_continue_carries_control_slot() {
+    fn gate_outcome_skip_and_continue_carries_gate_slot() {
         let outcome = GateOutcome::SkipAndContinue {
-            control: sample_control(),
+            gate: sample_gate(),
         };
         let value = serde_json::to_value(&outcome).expect("serialize");
+        assert_eq!(value["gate"], serde_json::json!({}));
         let restored: GateOutcome = serde_json::from_value(value).expect("deserialize");
         assert_eq!(restored, outcome);
         match restored {
-            GateOutcome::SkipAndContinue { control } => {
-                assert_eq!(control, sample_control())
-            }
+            GateOutcome::SkipAndContinue { gate } => assert_eq!(gate, sample_gate()),
             other => panic!("unexpected variant: {other:?}"),
         }
     }
 
     #[test]
-    fn gate_outcome_abort_carries_control_slot_and_failure_kind() {
+    fn gate_outcome_abort_carries_gate_slot_and_failure_kind() {
         let outcome = GateOutcome::Abort {
-            control: sample_control(),
-            failure_kind: LoopFailureKind::DriverBug,
+            gate: sample_gate(),
+            failure_kind: LoopFailureKind::PolicyDenied,
         };
         let value = serde_json::to_value(&outcome).expect("serialize");
+        assert_eq!(value["gate"], serde_json::json!({}));
         let restored: GateOutcome = serde_json::from_value(value).expect("deserialize");
         assert_eq!(restored, outcome);
         match restored {
-            GateOutcome::Abort {
-                control,
-                failure_kind,
-            } => {
-                assert_eq!(control, sample_control());
-                assert_eq!(failure_kind, LoopFailureKind::DriverBug);
+            GateOutcome::Abort { gate, failure_kind } => {
+                assert_eq!(gate, sample_gate());
+                assert_eq!(failure_kind, LoopFailureKind::PolicyDenied);
             }
             other => panic!("unexpected variant: {other:?}"),
         }

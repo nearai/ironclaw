@@ -20,12 +20,13 @@ pub(crate) mod gate;
 mod model;
 pub(crate) mod recovery;
 
-pub use batch::{BatchPolicy, BatchPolicyStrategy, CapabilityCallSummary, ConcurrencyHint};
+pub(crate) use batch::{BatchPolicy, BatchPolicyStrategy, CapabilityCallSummary};
 pub(crate) use capability::{CapabilityFilter, CapabilityStrategy};
 pub(crate) use context::ContextStrategy;
-pub use gate::{GateHandlingStrategy, GateKind, GateOutcome, GateSummary};
+pub(crate) use gate::{GateHandlingStrategy, GateKind, GateOutcome, GateSummary};
+pub(crate) use ironclaw_turns::run_profile::ConcurrencyHint;
 pub(crate) use model::{ModelPreference, ModelStrategy};
-pub use recovery::{
+pub(crate) use recovery::{
     CapabilityErrorClass, CapabilityErrorSummary, ModelErrorClass, ModelErrorSummary,
     RecoveryOutcome, RecoveryStrategy, RetryAlteration,
 };
