@@ -4,7 +4,11 @@
 //! architecture is `docs/reborn/agent-loop-skeleton.md`; workstream briefs live
 //! under `docs/reborn/agent-loop-briefs/`.
 
+mod default_planner;
 pub mod families;
 pub mod family;
+pub mod planner;
 pub mod state;
 pub(crate) mod strategies;
+
+pub use planner::AgentLoopPlanner;
